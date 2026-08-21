@@ -8,10 +8,20 @@
 //! and `refresh_claude_tail` extends the saved accumulator over newly
 //! appended complete records from a bounded tail window.
 //!
-//! Append validation is parent-pointer continuity: an appended chain record
-//! parented to the saved leaf folds incrementally; anything that changes the
-//! canonical chain's shape (a rewind to an earlier uuid, a fresh mid-file
-//! root, a re-emission of the leaf, a foreign `sessionId`) is
+//! Append validation is parent-pointer continuity over the canonical
+//! *projection* (`docs/PLAN_CLAUDE_DESKTOP_IMPORT_TOLERANCE.md`): an
+//! appended chain record parented to the saved leaf — or to a thinking-only
+//! record the projection dropped since the leaf (the skipped-set) — folds
+//! incrementally with its parent normalized to the leaf, exactly as the full
+//! walk stitches. A thinking-only append is `Pending`: projected out, so the
+//! consumed watermark must not advance past it until a chain record lands
+//! beyond it. That invariant keeps the skipped-set purely in memory — a
+//! refresh that resumes in front of a pending run re-parses the run and
+//! rebuilds the set, the way a torn tail re-parses its partial record — so
+//! no checkpoint schema changes and warm appends stay O(append) even when a
+//! review lands between a thinking record and its continuation. Anything
+//! that changes the canonical chain's shape (a rewind to an earlier uuid, a
+//! fresh mid-file root, a re-emission of the leaf, a foreign `sessionId`) is
 //! `NeedsFullResolve`, and the caller degrades to the full path whose result
 //! is whatever a from-scratch analysis concludes. The cursor retains only the
 //! leaf identity, so a re-emission of an *earlier* on-chain uuid — which a
@@ -19,12 +29,14 @@
 //! like Codex's resumed builder; full-parse verification points (push review
 //! capture, apply re-proofs) re-prove the projection and block on divergence.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::conversation_codec::CodecLineage;
 use crate::jsonl_tail_io::{hex_sha256, safe_record_end, TailWindow};
 use crate::providers::claude::codec::{
-    classify_claude_record, semantic_record_fingerprint, ClaudeRecordClass, MAX_CLAUDE_RECORDS,
+    classify_claude_record, is_thinking_only_record, project_claude_record,
+    semantic_record_fingerprint, ClaudeRecordClass, MAX_CLAUDE_RECORDS,
 };
 use crate::providers::traits::SessionAnalysis;
 use mallard_domain::{
@@ -74,10 +86,15 @@ pub enum ClaudeTailInvalidReason {
 /// The outcome of feeding one appended record to the resumable chain feeder.
 #[derive(Clone, Debug)]
 pub enum ClaudeFeedOutcome {
-    /// A chain record parented to the saved leaf: fold it.
+    /// A chain record parented to the saved leaf (or stitched to it through
+    /// the skipped-set): fold it.
     Appended(CanonicalConversationMessage),
     /// Metadata, sidechain, or uuid-less record: advance cursors only.
     Ignored,
+    /// A thinking-only record the projection drops: its uuid joins the
+    /// skipped-set, and the consumed watermark must not advance past it
+    /// until a chain record lands beyond it.
+    Pending,
     /// The canonical chain changed shape (rewind, mid-file root, leaf
     /// re-emission, or foreign session identity).
     NeedsFullResolve,
@@ -86,14 +103,21 @@ pub enum ClaudeFeedOutcome {
 }
 
 /// The resumable analogue of the one-shot walk-back: `analyze` derives the
-/// chain from the whole file, the feeder extends it across appends that keep
-/// the leaf lineage linear. Both apply the same record classification and
-/// semantic fingerprint (`classify_claude_record`,
+/// chain from the whole file's projection, the feeder extends it across
+/// appends that keep the leaf lineage linear. Both apply the same
+/// projection, record classification, and semantic fingerprint
+/// (`project_claude_record`, `classify_claude_record`,
 /// `semantic_record_fingerprint`), so a linear append folds to the identical
-/// canonical message the next full parse would derive.
+/// canonical message the next full parse would derive: a chain record
+/// parented to a skipped thinking-only record stitches to the leaf — the
+/// nearest preceding chain record — exactly as the full walk does.
 pub struct ClaudeChainFeeder {
     last_message_id: MessageId,
     provider_session_id: String,
+    /// Uuids of thinking-only records fed since the last chain append. The
+    /// set lives only in memory: the consumed-watermark invariant guarantees
+    /// a resumed refresh re-parses any pending run and rebuilds it.
+    skipped: BTreeSet<String>,
 }
 
 impl ClaudeChainFeeder {
@@ -101,6 +125,7 @@ impl ClaudeChainFeeder {
         Self {
             last_message_id,
             provider_session_id,
+            skipped: BTreeSet::new(),
         }
     }
 
@@ -108,6 +133,14 @@ impl ClaudeChainFeeder {
         let Some(object) = value.as_object() else {
             return ClaudeFeedOutcome::Malformed;
         };
+        // Projected-out rows come first: the full analyzer drops them before
+        // identity, session, or classification checks ever see them.
+        if is_thinking_only_record(object) {
+            if let Some(uuid) = object.get("uuid").and_then(Value::as_str) {
+                self.skipped.insert(uuid.to_string());
+            }
+            return ClaudeFeedOutcome::Pending;
+        }
         let (message_id, parent) = match classify_claude_record(object) {
             Ok(ClaudeRecordClass::NotChain) => return ClaudeFeedOutcome::Ignored,
             Ok(ClaudeRecordClass::Chain { message_id, parent }) => (message_id, parent),
@@ -122,18 +155,28 @@ impl ClaudeChainFeeder {
             // A re-emission of the leaf re-parents the resume point.
             return ClaudeFeedOutcome::NeedsFullResolve;
         }
-        match parent {
-            Some(parent) if parent == self.last_message_id => {
-                let message = CanonicalConversationMessage {
-                    message_id: message_id.clone(),
-                    parent_message_id: Some(parent),
-                    semantic_fingerprint: semantic_record_fingerprint(value.clone()),
-                };
-                self.last_message_id = message_id;
-                ClaudeFeedOutcome::Appended(message)
-            }
+        let continues_leaf = parent.as_ref().is_some_and(|parent| {
+            *parent == self.last_message_id || self.skipped.contains(parent.as_str())
+        });
+        if continues_leaf {
+            let Some(projected) = project_claude_record(value.clone()) else {
+                // Unreachable: thinking-only rows returned Pending above.
+                return ClaudeFeedOutcome::Malformed;
+            };
+            let message = CanonicalConversationMessage {
+                message_id: message_id.clone(),
+                // Normalized parent = the leaf: a parent in the skipped-set
+                // stitches to the nearest preceding chain record, which is
+                // exactly the leaf.
+                parent_message_id: Some(self.last_message_id.clone()),
+                semantic_fingerprint: semantic_record_fingerprint(projected),
+            };
+            self.last_message_id = message_id;
+            self.skipped.clear();
+            ClaudeFeedOutcome::Appended(message)
+        } else {
             // A rewind to an earlier uuid or a fresh mid-file root.
-            _ => ClaudeFeedOutcome::NeedsFullResolve,
+            ClaudeFeedOutcome::NeedsFullResolve
         }
     }
 
@@ -142,11 +185,67 @@ impl ClaudeChainFeeder {
     }
 }
 
+/// The consumed-watermark boundary over one record-aligned byte slice: the
+/// end offset (and projected record ordinal) of the last record that may be
+/// consumed under the pending invariant — the watermark never passes a
+/// thinking-only record until a chain record lands beyond it, so a trailing
+/// pending run stays unconsumed and is re-parsed by the next refresh, which
+/// rebuilds the in-memory skipped-set from it. Thinking-only records never
+/// count toward the ordinal: it is the projected record count at the
+/// boundary, matching what a full analysis of the consumed prefix reports.
+fn pending_watermark(bytes: &[u8]) -> Result<(u64, u64), String> {
+    let mut consumed_end = 0_u64;
+    let mut consumed_ordinal = 0_u64;
+    let mut candidate_ordinal = 0_u64;
+    let mut holding = false;
+    let mut piece_start = 0_usize;
+    for raw in bytes.split(|byte| *byte == b'\n') {
+        let piece_offset = piece_start;
+        piece_start += raw.len() + 1;
+        if piece_offset >= bytes.len() {
+            break;
+        }
+        let record_end = piece_start.min(bytes.len()) as u64;
+        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+        if raw.is_empty() {
+            if !holding {
+                consumed_end = record_end;
+            }
+            continue;
+        }
+        let value: Value = serde_json::from_slice(raw)
+            .map_err(|_| "Claude watermark scan found malformed JSON".to_string())?;
+        let Some(object) = value.as_object() else {
+            return Err("Claude watermark scan found a non-object record".to_string());
+        };
+        if is_thinking_only_record(object) {
+            holding = true;
+            continue;
+        }
+        candidate_ordinal += 1;
+        let is_chain = matches!(
+            classify_claude_record(object),
+            Ok(ClaudeRecordClass::Chain { .. })
+        );
+        if is_chain {
+            holding = false;
+        }
+        if !holding {
+            consumed_end = record_end;
+            consumed_ordinal = candidate_ordinal;
+        }
+    }
+    Ok((consumed_end, consumed_ordinal))
+}
+
 /// Derive the layout, observed tail, physical mapping, and raw-range pin
 /// from one already-run analysis over `bytes`. Returns `Ok(None)` when the
 /// file does not end at a record boundary (a torn tail): the analysis covers
 /// bytes the byte cursor could not, so no checkpoint is written and the next
-/// review retries. Observation-class work: nothing here touches cloud state.
+/// review retries. The consumed watermark stops before a trailing
+/// thinking-only run (`pending_watermark`) — those records are projected out
+/// of the analysis, so leaving them unconsumed changes nothing the tail
+/// observed. Observation-class work: nothing here touches cloud state.
 pub fn seed_claude_root(
     root_path: &Path,
     bytes: &[u8],
@@ -164,10 +263,10 @@ pub fn seed_claude_root(
         .source_provider_session_id
         .clone()
         .ok_or_else(|| "Claude seeding requires a session identity".to_string())?;
-    let consumed = safe_record_end(bytes);
-    if consumed != bytes.len() as u64 {
+    if safe_record_end(bytes) != bytes.len() as u64 {
         return Ok(None);
     }
+    let (consumed, consumed_ordinal) = pending_watermark(bytes)?;
     let leaf = chain
         .last()
         .ok_or_else(|| "complete Claude analysis has an empty chain".to_string())?;
@@ -187,7 +286,7 @@ pub fn seed_claude_root(
             .to_string(),
         source_file_size: bytes.len() as u64,
         consumed_byte_offset: consumed,
-        consumed_record_ordinal: analysis.record_count as u64,
+        consumed_record_ordinal: consumed_ordinal,
         probe_window_len,
         probe_window_sha256: hex_sha256(&bytes[window_start..consumed as usize]),
         last_canonical_message_id: Some(leaf.message_id.as_str().to_string()),
@@ -266,20 +365,30 @@ pub fn refresh_claude_tail(
         &observed_tail.accepted_tail_state,
     )?;
     let relative = |absolute: u64| (absolute - tail.window_offset) as usize;
+    let batch = &tail.bytes[window..relative(safe_end)];
     let mut appended_records = 0_u64;
-    let mut next_record_ordinal = mapping.consumed_record_ordinal;
-    for raw in tail.bytes[window..relative(safe_end)].split(|byte| *byte == b'\n') {
+    // The incremental twin of `pending_watermark`: consumption commits only
+    // while no thinking-only record is pending, and a chain append consumes
+    // through the whole pending run. Thinking-only records never count
+    // toward the ordinal — it is the projected record count.
+    let mut consumed_end = mapping.consumed_byte_offset;
+    let mut consumed_ordinal = mapping.consumed_record_ordinal;
+    let mut candidate_ordinal = mapping.consumed_record_ordinal;
+    let mut holding = false;
+    let mut piece_start = 0_usize;
+    for raw in batch.split(|byte| *byte == b'\n') {
+        let piece_offset = piece_start;
+        piece_start += raw.len() + 1;
+        if piece_offset >= batch.len() {
+            break;
+        }
+        let record_end = mapping.consumed_byte_offset + piece_start.min(batch.len()) as u64;
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
         if raw.is_empty() {
+            if !holding {
+                consumed_end = record_end;
+            }
             continue;
-        }
-        next_record_ordinal = next_record_ordinal.saturating_add(1);
-        if next_record_ordinal > MAX_CLAUDE_RECORDS as u64 {
-            // The full parse would fail closed on the record cap; so does
-            // the cursor, and the full path decides.
-            return Ok(ClaudeTailRefresh::Invalid {
-                reason: ClaudeTailInvalidReason::MalformedAppend,
-            });
         }
         let Ok(value) = serde_json::from_slice::<Value>(raw) else {
             return Ok(ClaudeTailRefresh::Invalid {
@@ -287,11 +396,12 @@ pub fn refresh_claude_tail(
             });
         };
         appended_records += 1;
-        match feeder.feed(&value) {
-            ClaudeFeedOutcome::Appended(message) => {
-                accumulator.fold_message(&message)?;
+        let outcome = feeder.feed(&value);
+        match outcome {
+            ClaudeFeedOutcome::Pending => {
+                holding = true;
+                continue;
             }
-            ClaudeFeedOutcome::Ignored => {}
             ClaudeFeedOutcome::NeedsFullResolve => {
                 return Ok(ClaudeTailRefresh::NeedsFullResolve);
             }
@@ -300,20 +410,44 @@ pub fn refresh_claude_tail(
                     reason: ClaudeTailInvalidReason::MalformedAppend,
                 });
             }
+            ClaudeFeedOutcome::Appended(_) | ClaudeFeedOutcome::Ignored => {}
+        }
+        candidate_ordinal = candidate_ordinal.saturating_add(1);
+        if candidate_ordinal > MAX_CLAUDE_RECORDS as u64 {
+            // The full parse would fail closed on the record cap; so does
+            // the cursor, and the full path decides.
+            return Ok(ClaudeTailRefresh::Invalid {
+                reason: ClaudeTailInvalidReason::MalformedAppend,
+            });
+        }
+        if let ClaudeFeedOutcome::Appended(message) = &outcome {
+            accumulator.fold_message(message)?;
+            holding = false;
+        }
+        if !holding {
+            consumed_end = record_end;
+            consumed_ordinal = candidate_ordinal;
         }
     }
 
     crate::sync_metrics::record_records_parsed(Path::new(&mapping.root_path), appended_records);
-    let probe_window_len = safe_end.min(crate::jsonl_tail_io::PROBE_WINDOW_BYTES);
-    let window_start = safe_end - probe_window_len;
+    if consumed_end == mapping.consumed_byte_offset {
+        // Everything appended is still pending — a trailing thinking run is
+        // the torn-tail analogue: unconsumed, re-parsed next refresh.
+        return Ok(ClaudeTailRefresh::Unchanged);
+    }
+    let probe_window_len = consumed_end.min(crate::jsonl_tail_io::PROBE_WINDOW_BYTES);
+    let window_start = consumed_end - probe_window_len;
     let new_mapping = RootPhysicalMapping {
         provider_thread_id: mapping.provider_thread_id.clone(),
         root_path: mapping.root_path.clone(),
         source_file_size: current_len,
-        consumed_byte_offset: safe_end,
-        consumed_record_ordinal: next_record_ordinal,
+        consumed_byte_offset: consumed_end,
+        consumed_record_ordinal: consumed_ordinal,
         probe_window_len,
-        probe_window_sha256: hex_sha256(&tail.bytes[relative(window_start)..relative(safe_end)]),
+        probe_window_sha256: hex_sha256(
+            &tail.bytes[relative(window_start)..relative(consumed_end)],
+        ),
         last_canonical_message_id: Some(feeder.last_message_id().as_str().to_string()),
         last_synthetic_turn_id: None,
         next_synthetic_turn_ordinal: 0,
@@ -374,6 +508,39 @@ mod tests {
             "sessionId": SESSION,
             "cwd": CWD,
             "message": {"role": "user", "content": "subagent prompt"}
+        }))
+        .unwrap()
+    }
+
+    fn thinking_line(uuid: &str, parent: Option<&str>) -> String {
+        serde_json::to_string(&json!({
+            "type": "assistant",
+            "uuid": uuid,
+            "parentUuid": parent.map(str::to_string),
+            "sessionId": SESSION,
+            "cwd": CWD,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "hidden", "signature": "sig"}]
+            }
+        }))
+        .unwrap()
+    }
+
+    fn mixed_thinking_line(uuid: &str, parent: Option<&str>, text: &str) -> String {
+        serde_json::to_string(&json!({
+            "type": "assistant",
+            "uuid": uuid,
+            "parentUuid": parent.map(str::to_string),
+            "sessionId": SESSION,
+            "cwd": CWD,
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "hidden", "signature": "sig"},
+                    {"type": "text", "text": text}
+                ]
+            }
         }))
         .unwrap()
     }
@@ -493,6 +660,205 @@ mod tests {
             .unwrap(),
             ClaudeTailRefresh::Unchanged
         ));
+    }
+
+    /// The projection twin of the split property: with thinking-only rows,
+    /// mixed rows, and stitched links in the stream, every record-boundary
+    /// split — including splits inside a pending run — still reproduces the
+    /// one-shot fold, cursors, and projected ordinal.
+    #[test]
+    fn refresh_from_any_split_matches_the_one_shot_fold_with_thinking_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.jsonl");
+        let lines = vec![
+            record("u-1", None, "user", "one"),
+            thinking_line("t-1", Some("u-1")),
+            mixed_thinking_line("a-1", Some("t-1"), "two"),
+            metadata_line(),
+            thinking_line("t-2", Some("a-1")),
+            record("u-2", Some("t-2"), "user", "three"),
+            record("a-2", Some("u-2"), "assistant", "four"),
+        ];
+        let full = encode(&lines);
+        let expected = one_shot_tail(&full);
+        let full_analysis = analyze_claude_transcript(&full);
+        assert_eq!(full_analysis.record_count, 5, "the projected count");
+
+        let mut covered_splits = 0;
+        for split in 1..lines.len() {
+            let prefix = encode(&lines[..split]);
+            let analysis = analyze_claude_transcript(&prefix);
+            if !analysis.is_resumable() {
+                continue;
+            }
+            covered_splits += 1;
+            let seeded = seed_claude_root(&path, &prefix, &analysis)
+                .unwrap()
+                .unwrap();
+            assert!(
+                seeded.mapping.consumed_byte_offset <= prefix.len() as u64,
+                "split {split} watermark never overshoots"
+            );
+            match refresh_claude_tail(
+                &seeded.layout,
+                &seeded.observed_tail,
+                &seeded.mapping,
+                &tail_window_from(&seeded.mapping, &full),
+            )
+            .unwrap()
+            {
+                ClaudeTailRefresh::Extended {
+                    observed_tail,
+                    mapping,
+                } => {
+                    assert_eq!(observed_tail, expected, "split {split}");
+                    assert_eq!(mapping.consumed_byte_offset, full.len() as u64);
+                    assert_eq!(
+                        mapping.consumed_record_ordinal,
+                        full_analysis.record_count as u64
+                    );
+                    assert_eq!(mapping.last_canonical_message_id.as_deref(), Some("a-2"));
+                }
+                other => panic!("split {split} expected extension, got {other:?}"),
+            }
+        }
+        assert!(covered_splits >= 6, "fixture must exercise several splits");
+    }
+
+    /// The consumed watermark stops before a trailing thinking run: seeding
+    /// holds it back, a refresh over the same bytes is Unchanged, and the
+    /// next chain record consumes through the run with the stitched fold.
+    #[test]
+    fn seeding_and_refresh_hold_the_watermark_before_a_trailing_thinking_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.jsonl");
+        let consumable = vec![
+            record("u-1", None, "user", "one"),
+            record("a-1", Some("u-1"), "assistant", "two"),
+        ];
+        let consumable_len = encode(&consumable).len() as u64;
+        let mut lines = consumable;
+        lines.push(thinking_line("t-1", Some("a-1")));
+        let full = encode(&lines);
+        let seeded = seed(&path, &full);
+        assert_eq!(seeded.mapping.consumed_byte_offset, consumable_len);
+        assert_eq!(seeded.mapping.consumed_record_ordinal, 2);
+        assert_eq!(seeded.mapping.source_file_size, full.len() as u64);
+        assert_eq!(seeded.raw_range_pin.end_byte_offset, consumable_len);
+        assert_eq!(
+            seeded.mapping.last_canonical_message_id.as_deref(),
+            Some("a-1")
+        );
+        assert_eq!(seeded.observed_tail, one_shot_tail(&full));
+
+        // The trailing run is the torn-tail analogue: re-parsed, unconsumed.
+        assert!(matches!(
+            refresh_claude_tail(
+                &seeded.layout,
+                &seeded.observed_tail,
+                &seeded.mapping,
+                &tail_window_from(&seeded.mapping, &full),
+            )
+            .unwrap(),
+            ClaudeTailRefresh::Unchanged
+        ));
+
+        // A chain record beyond the run consumes through it, stitched to the
+        // saved leaf, and the ordinal counts only projected records.
+        let mut appended_lines = lines.clone();
+        appended_lines.push(record("u-2", Some("t-1"), "user", "three"));
+        let appended = encode(&appended_lines);
+        let ClaudeTailRefresh::Extended {
+            observed_tail,
+            mapping,
+        } = refresh_claude_tail(
+            &seeded.layout,
+            &seeded.observed_tail,
+            &seeded.mapping,
+            &tail_window_from(&seeded.mapping, &appended),
+        )
+        .unwrap()
+        else {
+            panic!("a chain record lands beyond the pending run");
+        };
+        assert_eq!(observed_tail, one_shot_tail(&appended));
+        assert_eq!(mapping.consumed_byte_offset, appended.len() as u64);
+        assert_eq!(mapping.consumed_record_ordinal, 3);
+        assert_eq!(mapping.last_canonical_message_id.as_deref(), Some("u-2"));
+    }
+
+    /// Batch shapes over a settled cursor: a lone thinking append stays
+    /// pending (Unchanged); thinking plus its continuation folds in one
+    /// Extended; a chain record referencing an unseen absent uuid defers to
+    /// the full path, which stitches to the same conclusion.
+    #[test]
+    fn pending_appends_fold_once_a_chain_record_lands() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.jsonl");
+        let full = encode(&fixture_lines());
+        let seeded = seed(&path, &full);
+
+        // T alone: pending, nothing consumed, nothing folded.
+        let mut with_thinking = full.clone();
+        with_thinking.extend_from_slice(thinking_line("t-9", Some("a-2")).as_bytes());
+        with_thinking.push(b'\n');
+        assert!(matches!(
+            refresh_claude_tail(
+                &seeded.layout,
+                &seeded.observed_tail,
+                &seeded.mapping,
+                &tail_window_from(&seeded.mapping, &with_thinking),
+            )
+            .unwrap(),
+            ClaudeTailRefresh::Unchanged
+        ));
+
+        // T then C in one batch: a single Extended, C stitched to the leaf.
+        let mut continued = with_thinking.clone();
+        continued.extend_from_slice(record("u-3", Some("t-9"), "user", "five").as_bytes());
+        continued.push(b'\n');
+        let ClaudeTailRefresh::Extended {
+            observed_tail,
+            mapping,
+        } = refresh_claude_tail(
+            &seeded.layout,
+            &seeded.observed_tail,
+            &seeded.mapping,
+            &tail_window_from(&seeded.mapping, &continued),
+        )
+        .unwrap()
+        else {
+            panic!("the continuation folds through the pending run");
+        };
+        assert_eq!(observed_tail, one_shot_tail(&continued));
+        assert_eq!(
+            observed_tail.accepted_end_record_count,
+            seeded.observed_tail.accepted_end_record_count + 1
+        );
+        assert_eq!(mapping.consumed_byte_offset, continued.len() as u64);
+        assert_eq!(
+            mapping.consumed_record_ordinal,
+            seeded.mapping.consumed_record_ordinal + 1,
+            "the thinking record never counts"
+        );
+        assert_eq!(mapping.last_canonical_message_id.as_deref(), Some("u-3"));
+
+        // C referencing an absent uuid the feeder never saw: the cursor
+        // defers, and the full path stitches to the identical chain.
+        let mut unseen = full.clone();
+        unseen.extend_from_slice(record("u-3", Some("never-seen"), "user", "five").as_bytes());
+        unseen.push(b'\n');
+        assert!(matches!(
+            refresh_claude_tail(
+                &seeded.layout,
+                &seeded.observed_tail,
+                &seeded.mapping,
+                &tail_window_from(&seeded.mapping, &unseen),
+            )
+            .unwrap(),
+            ClaudeTailRefresh::NeedsFullResolve
+        ));
+        assert_eq!(one_shot_tail(&unseen), one_shot_tail(&continued));
     }
 
     #[test]

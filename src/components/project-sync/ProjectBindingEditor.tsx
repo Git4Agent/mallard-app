@@ -9,6 +9,7 @@ import Icon from "../Icons";
 import { compactProjectPath } from "./model";
 import {
   expandHomePath,
+  isAbsoluteProfilePath,
   profilePathHint,
   useHomePath,
   useProfilePathProbes,
@@ -98,7 +99,7 @@ export default function ProjectBindingEditor({
       const selection = selections[descriptor.key];
       if (selection?.kind !== "pending") return [];
       const path = expandHomePath(selection.path, homePath);
-      return path.startsWith("/") ? [{ provider: descriptor.key, path }] : [];
+      return isAbsoluteProfilePath(path) ? [{ provider: descriptor.key, path }] : [];
     })
   ), [providers, selections, homePath]);
   const pathProbes = useProfilePathProbes(probeTargets);

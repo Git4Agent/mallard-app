@@ -71,7 +71,6 @@ test("recommended Push selection includes only locally changed sessions", () => 
   const localAhead = conversation("codex:session:local-ahead");
   const synced = conversation("codex:session:synced");
   const storageAhead = conversation("codex:session:storage-ahead");
-  const sessionIndex = conversation("codex:session-index");
   const memory = memoryResource("frontend-memory");
   const comparison: ThreadSyncComparison = {
     project_id: "project-a",
@@ -115,20 +114,20 @@ test("recommended Push selection includes only locally changed sessions", () => 
   };
 
   const recommended = recommendedPushSelection(
-    new Set([synced.resource_id, storageAhead.resource_id, sessionIndex.resource_id, memory.resource_id]),
-    [localAhead, synced, storageAhead, sessionIndex, memory],
+    new Set([synced.resource_id, storageAhead.resource_id, memory.resource_id]),
+    [localAhead, synced, storageAhead, memory],
     comparison,
   );
 
   assert.deepEqual(
     [...recommended].sort(),
-    [localAhead.resource_id, sessionIndex.resource_id, memory.resource_id].sort(),
+    [localAhead.resource_id, memory.resource_id].sort(),
   );
 
   const sourceRecipe: BundleRecipe = {
     schema_version: 1,
     revision: 3,
-    entries: Object.fromEntries([synced, sessionIndex, memory].map((resource) => [resource.resource_id, {
+    entries: Object.fromEntries([synced, memory].map((resource) => [resource.resource_id, {
       resource_id: resource.resource_id,
       apply_policy: resource.apply_policy,
       required: false,
@@ -141,7 +140,7 @@ test("recommended Push selection includes only locally changed sessions", () => 
   const publishedRecipe = preserveSyncedPushRecipeEntries(selectedRecipe, sourceRecipe, comparison);
   assert.deepEqual(
     Object.keys(publishedRecipe.entries).sort(),
-    [synced.resource_id, sessionIndex.resource_id, memory.resource_id].sort(),
+    [synced.resource_id, memory.resource_id].sort(),
     "unchecked synced sessions stay stored without appearing in the recommended action set",
   );
 });
@@ -344,9 +343,9 @@ test("a resource named by its own id states that id once, and says why once", ()
   const inventory = readFileSync("src/components/project-sync/ResourceInventory.tsx", "utf8");
   assert.match(
     inventory,
-    /\{resource\.resource_id !== resource\.display_name && \(\s*<><span>Resource ID<\/span><code>\{resource\.resource_id\}<\/code><\/>\s*\)\}/,
+    /\{resource\.resource_id !== resource\.display_name && \(\s*<><dt>Resource ID<\/dt><dd><code>\{resource\.resource_id\}<\/code><\/dd><\/>\s*\)\}/,
   );
-  assert.match(inventory, /<span>Kind<\/span><span>\{kindLabel\(resource\.kind\)\}<\/span>/);
+  assert.match(inventory, /<dt>Kind<\/dt><dd>\{kindLabel\(resource\.kind\)\}<\/dd>/);
   assert.doesNotMatch(inventory, /providerLabel/);
 });
 

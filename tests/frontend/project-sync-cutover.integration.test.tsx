@@ -146,8 +146,14 @@ test("the desktop shell supports a persistent sidebar toggle and keyboard shortc
   // The bar holds a 3.25rem floor (52px at the default root) and grows with
   // its text instead of clipping it — height stays unpinned deliberately.
   assert.match(css, /\.sync-titlebar \{[^}]*min-height: 3\.25rem;[^}]*flex: 0 0 auto;/);
-  assert.match(css, /\.sync-sidebar-drag \{[^}]*height: 38px;/);
-  assert.match(css, /\.sync-sidebar-brand \{[^}]*height: 52px;/);
+  // Read what the cascade actually delivers, not what App.css happens to say.
+  // These two assertions passed for 38px/52px while RetroTheme.css — which
+  // loads second and ties on specificity — rendered 42px/56px, so the gate
+  // that exists to keep the macOS traffic lights centred in the brand row was
+  // measuring a value that never reaches the screen. 56 / 2 = 28, which is
+  // where trafficLightPosition.y sits.
+  assert.equal(effectiveDeclaration(".sync-sidebar-drag", "height"), "42px");
+  assert.equal(effectiveDeclaration(".sync-sidebar-brand", "height"), "56px");
   assert.deepEqual(tauriConfig.app.windows[0].trafficLightPosition, { x: 20, y: 29 });
 });
 
@@ -654,6 +660,31 @@ test("the startup screen communicates minimal, staged loading progress", () => {
   assert.match(css, /@keyframes sync-startup-progress-glint/);
 });
 
+/**
+ * The value a selector's property actually resolves to across both
+ * stylesheets. App.css loads first and RetroTheme.css second (src/App.tsx), so
+ * on a specificity tie the later file wins — and asserting against App.css
+ * alone silently pins a dead declaration.
+ */
+function effectiveDeclaration(selector: string, property: string): string | null {
+  const strip = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, "");
+  let value: string | null = null;
+  for (const file of ["src/App.css", "src/RetroTheme.css"]) {
+    for (const block of strip(readFileSync(file, "utf8")).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const prelude = block[1].replace(/\s+/g, " ").trim();
+      if (prelude.startsWith("@")) continue;
+      if (!prelude.split(",").some((s) => s.trim() === selector)) continue;
+      for (const decl of block[2].split(";")) {
+        const colon = decl.indexOf(":");
+        if (colon < 0) continue;
+        if (decl.slice(0, colon).trim() !== property) continue;
+        value = decl.slice(colon + 1).trim();
+      }
+    }
+  }
+  return value;
+}
+
 test("host-scoped workflows keep their originating epoch across async continuations", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
@@ -701,7 +732,9 @@ test("host-scoped workflows keep their originating epoch across async continuati
 
   const renameProject = section(workspace, "renameProject", "planRestore");
   capturesBefore(renameProject, "await projectSyncApi.renameProject");
-  assert.match(renameProject, /hostWorkflowEpoch\.current !== workflowEpoch\) return false;/);
+  // The guard still bails on a superseded workflow; it now reports that
+  // distinctly from a real failure so the rename form stays quiet.
+  assert.match(renameProject, /hostWorkflowEpoch\.current !== workflowEpoch\) return \{ ok: false, message: null \};/);
 
   const keepBundle = section(workspace, "keepPendingBundle", "removeProject");
   capturesBefore(keepBundle, "await saveStorageLink");
@@ -755,10 +788,12 @@ test("path bar menus keep one home per scope", () => {
   assert.doesNotMatch(workspace, /checked: storage\.id === workspaceStorage\.id/);
   assert.doesNotMatch(workspace, /label: "Unlink storage"/);
 
-  // The workspace ⋯ holds app scope alone; the theme item is a checked item
-  // with a stable label, not a verb that rewrites itself.
+  // The workspace ⋯ holds app scope alone: the way into Settings and the full
+  // reload. The theme checked-item moved onto the Settings page's Appearance
+  // row — the menu holds commands, not state.
   assert.match(workspace, /const pathOverflow: PathBarMenuGroup\[\] = workspaceProject \? appActions : \[\];/);
-  assert.match(sync, /label: "Dark theme",\s*icon: "moon" as const,\s*checked: theme === "dark",/);
+  assert.match(sync, /label: "Settings",\s*icon: "settings" as const,\s*onSelect: openSettings,/);
+  assert.doesNotMatch(sync, /label: "Dark theme"/);
 
   // The bar renders no radio items anywhere, and inert rows stay focusable.
   assert.doesNotMatch(bar, /menuitemradio/);
@@ -998,4 +1033,35 @@ test("checkboxes and radios take the app's accent, not the OS default", () => {
     /\.log-type-filter-option input \{[^}]*accent-color/s,
     "the global rule replaced the one-off",
   );
+});
+
+test("only the log folder is opened with openPath; everything else reveals", () => {
+  // `opener:allow-open-path` is scoped to $HOME/.mallard/logs in
+  // src-tauri/capabilities/default.json, so open_path on any other path is
+  // refused by the capability layer. That refusal is a rejected promise, which
+  // is invisible unless it is caught — a menu item that silently does nothing.
+  // `reveal_item_in_dir` carries no scope check and is what the menus use.
+  const files = [
+    "src/components/project-sync/ProjectLinksWorkspace.tsx",
+    "src/components/project-sync/ProjectSync.tsx",
+    "src/components/storage-catalog/StorageCatalogPage.tsx",
+    "src/components/project-sync/ProjectSetupWorkspace.tsx",
+  ];
+  for (const file of files) {
+    assert.doesNotMatch(
+      readFileSync(file, "utf8"),
+      /\bopenPath\b/,
+      `${file} must reveal rather than open: openPath is out of capability scope here`,
+    );
+  }
+
+  // The one in-scope caller keeps it, and still handles the rejection.
+  const settings = readFileSync("src/components/project-sync/SettingsPage.tsx", "utf8");
+  assert.match(settings, /await openPath\(await projectSyncApi\.getActivityLogFolder\(\)\)/);
+  assert.match(settings, /catch \(reason\) \{\s*setLogsError\(errorMessage\(reason\)\)/);
+
+  // Every reveal reports its failure instead of dropping it.
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /void revealItemInDir\(path\)\.catch\(/);
+  assert.doesNotMatch(workspace, /void revealItemInDir\([^)]*\);(?!\s*\/\/)/);
 });

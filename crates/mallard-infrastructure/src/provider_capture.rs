@@ -448,6 +448,36 @@ fn capture_resource(
             &source.physical_path,
             bytes.len() as u64,
         );
+        // Sidecar and provider-state bytes are captured in wire form: the
+        // credential scrub runs here, once, so review diffing, retention
+        // dedup, and publish all see one consistent redacted byte stream.
+        // Conversation transcripts stay local-form — review seeding and the
+        // pull-time local target expectations read them — and are redacted
+        // by their own wire builders at publish instead.
+        let is_transcript = item
+            .discovered
+            .conversation
+            .as_ref()
+            .is_some_and(|meta| meta.transcript_logical_path == source.logical_path);
+        let scrub = match item.discovered.descriptor.kind {
+            CaptureResourceKind::ProviderState => true,
+            CaptureResourceKind::Conversation => !is_transcript,
+            CaptureResourceKind::ProjectContentFile
+            | CaptureResourceKind::ProjectContentDirectory => false,
+        };
+        let bytes = if scrub {
+            crate::credential_redaction::shared()
+                .redact_document(&bytes)
+                .map_err(|error| {
+                    format!(
+                        "resource '{}' failed credential redaction in '{}': {}",
+                        resource_id, source.logical_path, error
+                    )
+                })?
+                .0
+        } else {
+            bytes
+        };
         if let Some(secret) = detect_secret_material(&bytes) {
             if source.opaque_content {
                 warnings.push(format!(

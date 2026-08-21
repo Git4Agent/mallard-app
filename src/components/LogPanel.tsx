@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useRef } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 import type { ActivityLogLevel, ActivityLogType, LogLine } from "../types";
+import { clockOptions } from "../clock";
+import { usePreference } from "../preferences";
 import { userFacingRepoTerms } from "../terminology";
 import Icon from "./Icons";
 
@@ -68,13 +70,6 @@ export function nextFollowTail(following: boolean, metrics: TailMetrics): boolea
   return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= TAIL_SLACK_PX;
 }
 
-function formatTs(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
 
 function typeSelectionLabel(selected: ActivityLogType[]): string {
   if (selected.length === LOG_TYPES.length) return "All";
@@ -84,6 +79,25 @@ function typeSelectionLabel(selected: ActivityLogType[]): string {
   }
   return `${selected.length} selected`;
 }
+
+/* Memoized so an incoming line reconciles one new row instead of every
+   retained one. Both props are stable: the formatter is memoized on the clock
+   preference, and each line object is immutable once emitted. */
+const LogRow = memo(function LogRow({
+  line,
+  formatter,
+}: {
+  line: LogLine;
+  formatter: Intl.DateTimeFormat;
+}) {
+  return (
+    <div className={`log-line log-${line.level}`}>
+      <span className="log-ts">{formatter.format(line.ts)}</span>
+      <span className={`log-type log-type-${line.type ?? "system"}`}>{line.type ?? "system"}</span>
+      <span className="log-msg">{userFacingRepoTerms(line.message)}</span>
+    </div>
+  );
+});
 
 export default function LogPanel({
   lines,
@@ -108,6 +122,19 @@ export default function LogPanel({
   const pinnedScrollTopRef = useRef(-1);
   const typeFilterRef = useRef<HTMLDetailsElement>(null);
 
+  // Subscribed, not just read: the drawer can be open while the Settings page
+  // flips the clock preference, and the stamps must follow without waiting
+  // for the next log event.
+  const clock24 = usePreference("clock24");
+  // One formatter for the whole list, not one per line per render.
+  // `toLocaleTimeString` builds and throws away an Intl.DateTimeFormat on every
+  // call, and this list re-renders on every incoming log event — including
+  // while the drawer is closed, where none of it is visible.
+  const formatter = useMemo(() => {
+    void clock24;
+    return new Intl.DateTimeFormat(undefined, clockOptions(true));
+  }, [clock24]);
+
   const pinToTail = useCallback(() => {
     const body = bodyRef.current;
     if (!body) return;
@@ -127,6 +154,10 @@ export default function LogPanel({
       const filter = typeFilterRef.current;
       if (event.key !== "Escape" || !filter?.open) return;
       event.preventDefault();
+      /* This layer consumed Escape; the Push/Pull review listens on window
+         and must not also close and discard the whole review. */
+      event.stopPropagation();
+
       filter.open = false;
       filter.querySelector("summary")?.focus();
     };
@@ -243,6 +274,15 @@ export default function LogPanel({
                 placeholder="Search logs"
                 aria-label="Search log"
                 onChange={(event) => onSearchChange(event.target.value)}
+                /* The drawer can sit over an open Push/Pull review, whose own
+                   Escape listener would discard it. Clearing the field is what
+                   Escape means here. */
+                onKeyDown={(event) => {
+                  if (event.key !== "Escape" || !search) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onSearchChange("");
+                }}
               />
             </label>
           )}
@@ -284,11 +324,7 @@ export default function LogPanel({
           <div className="log-empty">No entries match these filters.</div>
         ) : (
           lines.map((line, i) => (
-            <div key={line.id ?? `${line.ts}:${i}`} className={`log-line log-${line.level}`}>
-              <span className="log-ts">{formatTs(line.ts)}</span>
-              <span className={`log-type log-type-${line.type ?? "system"}`}>{line.type ?? "system"}</span>
-              <span className="log-msg">{userFacingRepoTerms(line.message)}</span>
-            </div>
+            <LogRow key={line.id ?? `${line.ts}:${i}`} line={line} formatter={formatter} />
           ))
         )}
       </div>

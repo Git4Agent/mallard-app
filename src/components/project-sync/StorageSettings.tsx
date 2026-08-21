@@ -102,7 +102,14 @@ export function parseR2S3ApiUrl(value: string): {
   };
 }
 
-export function storageConfigReady(storage: StorageConfig): boolean {
+/**
+ * `secretStored` says whether the backend already holds a secret for this
+ * storage. It has to be passed in: the config the backend serves redacts the
+ * secret, so an already-saved storage always reads as blank here even though
+ * saving it again preserves the stored value. There is deliberately no default
+ * — every caller states which case it is in.
+ */
+export function storageConfigReady(storage: StorageConfig, secretStored: boolean): boolean {
   if (!storage.name?.trim()) return false;
   if (storage.kind === "local") return !!storage.local_dir?.trim();
   const accountId = storage.account_id?.trim().toLowerCase() ?? "";
@@ -111,7 +118,7 @@ export function storageConfigReady(storage: StorageConfig): boolean {
     && isCloudflareR2AccountId(accountId)
     && endpoint?.accountId === accountId
     && !!storage.access_key_id?.trim()
-    && !!storage.secret_access_key?.trim();
+    && (secretStored || !!storage.secret_access_key?.trim());
 }
 
 export function newStorage(kind: "s3" | "local", index: number): StorageConfig {
@@ -141,13 +148,13 @@ export function storageNameForKind(name: string, kind: "s3" | "local"): string {
  * counter by three — which is the coupling, stated honestly. Exported because
  * the storage setup page shows the tally in its own commit bar.
  */
-export function r2FieldsSet(storage: StorageConfig): number {
+export function r2FieldsSet(storage: StorageConfig, secretStored: boolean): number {
   return [
     r2S3ApiUrl(storage.account_id ?? "", storage.bucket ?? "", storage.s3_endpoint ?? ""),
     storage.bucket,
     storage.account_id,
     storage.access_key_id,
-    storage.secret_access_key,
+    secretStored ? "stored" : storage.secret_access_key,
   ].filter((value) => !!value?.trim()).length;
 }
 
@@ -157,6 +164,7 @@ export function StorageEditor({
   onChange,
   onRemove,
   primaryAction,
+  secretStored,
   showNameField = true,
   showProgress = true,
 }: {
@@ -165,6 +173,10 @@ export function StorageEditor({
   onChange: (storage: StorageConfig) => void;
   onRemove?: () => void;
   primaryAction?: ReactNode;
+  /** True once the backend holds this storage's secret. The config it serves
+   *  redacts the value, so the field renders empty and the tally would
+   *  otherwise report a complete storage as one field short. */
+  secretStored: boolean;
   showNameField?: boolean;
   /** False when the page hoists the R2 tally into its own commit bar, so the
    *  card does not end in a band holding a lone readout. */
@@ -388,9 +400,9 @@ export function StorageEditor({
                   type={secretVisible ? "text" : "password"}
                   value={storage.secret_access_key ?? ""}
                   onChange={(event) => set({ secret_access_key: event.target.value })}
-                  placeholder="Example: a1B2…x9Y0"
+                  placeholder={secretStored ? "Stored — type to replace" : "Example: a1B2…x9Y0"}
                   disabled={disabled}
-                  required
+                  required={!secretStored}
                   autoComplete="new-password"
                 />
                 <button
@@ -411,7 +423,7 @@ export function StorageEditor({
         <footer className="sync-storage-editor-footer">
           {storage.kind !== "local" && showProgress && (
             <span className="sync-storage-editor-progress" aria-live="polite">
-              {r2FieldsSet(storage)} of 5 set
+              {r2FieldsSet(storage, secretStored)} of 5 set
             </span>
           )}
           {primaryAction}

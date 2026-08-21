@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import Icon, { type IconName } from "../Icons";
+import { menuOptions, moveMenuFocus } from "./menuKeyboard";
 
 /**
  * The workspace header is one row: a trail that says where you are, and the
@@ -108,14 +109,9 @@ interface Props {
 
 // Inert rows stay in the roving order on purpose: their reason line is part
 // of what the menu has to say, and a keyboard user has to be able to reach it.
-const MENU_OPTION_SELECTOR = '[role="menuitem"], [role="menuitemcheckbox"]';
 
 function hasItems(groups: PathBarMenuGroup[] | undefined): groups is PathBarMenuGroup[] {
   return !!groups?.some((group) => group.items.length > 0);
-}
-
-function menuOptions(root: HTMLElement): HTMLButtonElement[] {
-  return Array.from(root.querySelectorAll<HTMLButtonElement>(MENU_OPTION_SELECTOR));
 }
 
 function PathBarMenu({
@@ -162,36 +158,32 @@ function PathBarMenu({
         const options = menuOptions(event.currentTarget);
         if (options.length === 0) return;
         const index = options.indexOf(document.activeElement as HTMLButtonElement);
-        let next: number | null = null;
-        if (event.key === "ArrowDown") next = index < 0 ? 0 : (index + 1) % options.length;
-        if (event.key === "ArrowUp") next = index < 0 ? options.length - 1 : (index - 1 + options.length) % options.length;
-        if (event.key === "Home") next = 0;
-        if (event.key === "End") next = options.length - 1;
-        if (next === null) {
-          // Space is activation, not a prefix; modifiers mean a shortcut.
-          if (event.key.length !== 1 || event.key === " " || event.metaKey || event.ctrlKey || event.altKey) return;
-          const now = Date.now();
-          const stale = now - typeahead.current.at > 500;
-          const buffer = (stale ? "" : typeahead.current.buffer) + event.key.toLowerCase();
-          typeahead.current = { buffer, at: now };
-          // A repeated first letter cycles matches; a longer prefix narrows
-          // from the focused row, so typing "te" stays on "Team bucket".
-          const from = buffer.length === 1 ? index + 1 : Math.max(index, 0);
-          const labels = options.map((option) => (
-            option.querySelector(".sync-path-menu-copy > span")?.textContent?.toLowerCase() ?? ""
-          ));
-          for (let step = 0; step < options.length; step += 1) {
-            const candidate = (from + step) % options.length;
-            if (labels[candidate].startsWith(buffer)) {
-              event.preventDefault();
-              options[candidate]?.focus();
-              return;
-            }
-          }
+        // Arrows, Home and End are the shared menu contract.
+        if (moveMenuFocus(event.currentTarget, event.key)) {
+          event.preventDefault();
           return;
         }
-        event.preventDefault();
-        options[next]?.focus();
+        // Typeahead is this bar's own addition; its buffer lives here.
+        // Space is activation, not a prefix; modifiers mean a shortcut.
+        if (event.key.length !== 1 || event.key === " " || event.metaKey || event.ctrlKey || event.altKey) return;
+        const now = Date.now();
+        const stale = now - typeahead.current.at > 500;
+        const buffer = (stale ? "" : typeahead.current.buffer) + event.key.toLowerCase();
+        typeahead.current = { buffer, at: now };
+        // A repeated first letter cycles matches; a longer prefix narrows
+        // from the focused row, so typing "te" stays on "Team bucket".
+        const from = buffer.length === 1 ? index + 1 : Math.max(index, 0);
+        const labels = options.map((option) => (
+          option.querySelector(".sync-path-menu-copy > span")?.textContent?.toLowerCase() ?? ""
+        ));
+        for (let step = 0; step < options.length; step += 1) {
+          const candidate = (from + step) % options.length;
+          if (labels[candidate].startsWith(buffer)) {
+            event.preventDefault();
+            options[candidate]?.focus();
+            return;
+          }
+        }
       }}
     >
       {banner && (
@@ -294,6 +286,9 @@ export default function SyncPathBar({
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      /* This layer consumed Escape; the Push/Pull review listens on window
+         and must not also close and discard the whole review. */
+      event.stopPropagation();
       const opener = openerRefs.current.get(openMenu);
       setOpenMenu(null);
       opener?.focus();

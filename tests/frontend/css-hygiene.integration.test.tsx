@@ -78,15 +78,24 @@ test("every class App.css styles is rendered by some component", () => {
   const isLive = (cls: string): boolean =>
     words.has(cls) || prefixes.some((p) => cls.startsWith(p));
 
+  // Per selector, and a selector is dead when ANY class in its chain is: a
+  // descendant like `.gone .live` can never match, however live `.live` is.
+  // Judging the whole prelude by "every class is dead" passed 80 such rules —
+  // whole removed features still carrying their styling.
+  const selectorDead = (selector: string): boolean => {
+    const withoutNot = selector.replace(/:not\([^)]*\)/g, "");
+    const classes = [...withoutNot.matchAll(/\.([A-Za-z_][A-Za-z0-9_-]*)/g)].map((m) => m[1]);
+    return classes.length > 0 && classes.some((cls) => !isLive(cls));
+  };
+
   const css = stripComments(appCss);
   const orphanRules: string[] = [];
   for (const match of css.matchAll(/([^{}]+)\{[^{}]*\}/g)) {
     const prelude = match[1].replace(/\s+/g, " ").trim();
     if (prelude.startsWith("@")) continue;
-    // :not(...) contents are exclusions, not existence requirements.
-    const withoutNot = prelude.replace(/:not\([^)]*\)/g, "");
-    const classes = [...withoutNot.matchAll(/\.([A-Za-z_][A-Za-z0-9_-]*)/g)].map((m) => m[1]);
-    if (classes.length > 0 && classes.every((cls) => !isLive(cls))) {
+    const selectors = prelude.split(",").map((s) => s.trim()).filter(Boolean);
+    // A grouped rule survives while any one of its selectors can still match.
+    if (selectors.length > 0 && selectors.every(selectorDead)) {
       orphanRules.push(prelude);
     }
   }
@@ -98,6 +107,7 @@ test("cross-file selector collisions can only fall", () => {
   // tie the later file wins and the earlier declaration is dead weight. 435
   // (selector, property) pairs were declared in both files when this gate
   // landed; resolving them is incremental work — adding new ones is not.
+  // Removing 80 orphan rules took it to 423, and the ratchet moved with it.
   const pairs = (css: string): Set<string> => {
     const out = new Set<string>();
     for (const match of stripComments(css).matchAll(/([^{}@]+)\{([^{}]*)\}/g)) {
@@ -117,8 +127,8 @@ test("cross-file selector collisions can only fall", () => {
   const appPairs = pairs(appCss);
   const shared = [...pairs(retroCss)].filter((pair) => appPairs.has(pair));
   assert.ok(
-    shared.length <= 435,
-    `${shared.length} selector/property pairs are declared in both stylesheets (ratchet: 435)`,
+    shared.length <= 423,
+    `${shared.length} selector/property pairs are declared in both stylesheets (ratchet: 423)`,
   );
 });
 

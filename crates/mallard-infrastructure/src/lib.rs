@@ -21,6 +21,7 @@ pub mod codex_thread_allocator;
 pub mod conversation_codec;
 pub mod conversation_materialization;
 pub mod conversation_sync;
+pub mod credential_redaction;
 pub mod jsonl_tail_io;
 pub mod persistence;
 pub mod project_activity;

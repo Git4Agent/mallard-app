@@ -26,6 +26,7 @@ pub use mallard_infrastructure::codex_thread_allocator;
 pub use mallard_infrastructure::conversation_codec;
 pub use mallard_infrastructure::conversation_materialization;
 pub use mallard_infrastructure::conversation_sync;
+pub use mallard_infrastructure::credential_redaction;
 pub use mallard_infrastructure::jsonl_tail_io;
 pub use mallard_infrastructure::persistence;
 pub use mallard_infrastructure::project_activity;

@@ -18,7 +18,6 @@ const commandNames = [
   "apply_catalog_resource_fork",
   "apply_catalog_resource_pull",
   "create_catalog_scope",
-  "delete_catalog_resource_profile",
   "delete_catalog_scope",
   "get_catalog_resource",
   "get_catalog_resource_status",
@@ -208,8 +207,11 @@ test("Push and Pull are page verbs with one review each, and link on the way", (
   assert.match(page, /sync-inline-push-review sync-sync-review-workspace/);
   assert.match(page, /sync-inline-pull-review sync-sync-review-workspace/);
   // A local action is a readout plus the app's own popover, never a select.
-  assert.match(page, /sync-path-menu end" role="menu"/);
+  assert.match(page, /className="sync-path-menu end"\s*\n\s*role="menu"/);
   assert.doesNotMatch(page, /<select/);
+  // And the popover keeps the keyboard contract that role implies.
+  assert.match(page, /moveMenuFocus\(event\.currentTarget, event\.key\)/);
+  assert.match(page, /focusMenuEdge\(node, "first"\)/);
 });
 
 test("Add is Kind then agent profile, and never picks a storage or resource", () => {
@@ -243,7 +245,7 @@ test("Add is Kind then agent profile, and never picks a storage or resource", ()
   assert.match(add, /aria-label="Provider"[\s\S]*?disabled=\{working\}/);
   assert.doesNotMatch(add, /disabled=\{working \|\| !kind\}/);
   assert.doesNotMatch(add, /Add profile|className="catalog-inline-form"/);
-  assert.doesNotMatch(add, /Manage saved homes|removeProfile|api\.deleteProfile/);
+  assert.doesNotMatch(add, /Manage saved homes|removeProfile/);
   assert.doesNotMatch(add, /probe_catalog_resource_profile|probeProviderProfile/);
   assert.doesNotMatch(readFileSync("src/App.css", "utf8"), /catalog-setup-(grid|card|step)/);
 });

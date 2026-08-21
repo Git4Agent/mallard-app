@@ -106,8 +106,10 @@ test("Push and Pull open the activity log at its live tail", () => {
     syncSource.indexOf("const refreshRestore = async"),
   );
 
-  assert.match(pushHandler, /openActivity\(\)/);
-  assert.match(pullHandler, /openActivity\(\)/);
+  // Gated, defaulting on: the preference suppresses the auto-open, and the
+  // unread badge keeps counting either way.
+  assert.match(pushHandler, /if \(getPreference\("openLogsOnSync"\)\) openActivity\(\);/);
+  assert.match(pullHandler, /if \(getPreference\("openLogsOnSync"\)\) openActivity\(\);/);
   assert.match(syncSource, /scrollToBottomEpoch=\{logScrollToBottomEpoch\}/);
   assert.match(logSource, /followTailRef\.current = true/);
   assert.match(logSource, /body\.scrollTop = body\.scrollHeight/);

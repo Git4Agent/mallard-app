@@ -2998,6 +2998,26 @@ impl SessionPresentation {
     }
 }
 
+/// The redaction ruleset stamp a conversation thread's wire bytes were
+/// produced under: the compiled-in codec name plus the content fingerprint
+/// of its rule table. Stamped at every push beside `portable_tail`; push
+/// and pull both require an exact match with the running binary's ruleset —
+/// a mismatch is the typed `redaction_ruleset_mismatch` blocker, never a
+/// silent re-encode under different rules.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationWireRedaction {
+    pub codec: String,
+    pub fingerprint: String,
+}
+
+impl ConversationWireRedaction {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_display_text("conversation redaction codec", &self.codec, false)?;
+        validate_sha256("conversation redaction fingerprint", &self.fingerprint)
+    }
+}
+
 /// One cloud conversation row. Keyed entirely in the cloud id space
 /// (`cloudthread-…`): the id is minted at push apply, independent of any
 /// machine's local thread id, and stays the thread's one portable identity
@@ -3031,6 +3051,12 @@ pub struct ConversationThread {
     /// have not adopted the codec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portable_tail: Option<PortableConversationTail>,
+    /// The redaction ruleset that produced the stored wire bytes. Required
+    /// whenever the provider publishes a wire-form transcript (codex and
+    /// claude); the encoder lives in the infrastructure crate's
+    /// `credential_redaction` module.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_redaction: Option<ConversationWireRedaction>,
     /// Provenance of a fork only. Never consulted by the resolver, and the
     /// referenced thread may have been tombstoned or pruned since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3145,6 +3171,20 @@ impl ConversationThread {
         }
         validate_sha256("conversation lineage", &self.lineage_digest)?;
         validate_sha256("conversation semantic", &self.semantic_digest)?;
+        // Wire-form transcripts carry their redaction ruleset stamp; a row
+        // without one is unreadable by design (there is no unredacted era —
+        // the cutover was wipe-based).
+        match &self.wire_redaction {
+            Some(stamp) => stamp.validate()?,
+            None => {
+                if matches!(self.provider.as_str(), "codex" | "claude") {
+                    return Err(format!(
+                        "conversation thread '{}' lacks its wire redaction stamp",
+                        self.thread_id
+                    ));
+                }
+            }
+        }
         match &self.portable_tail {
             Some(tail) => {
                 if self.provider.as_str() == "codex" {
@@ -3282,6 +3322,10 @@ pub enum ConversationBlocker {
     AmbiguousBinding,
     MissingBinding,
     Busy,
+    /// The cloud row's `wire_redaction` stamp names a ruleset this binary
+    /// does not carry: neither push nor pull may touch the thread until the
+    /// binaries align (or the standing wipe resolves it).
+    RedactionRulesetMismatch,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -4791,6 +4835,21 @@ impl BundleManifest {
         Ok(())
     }
 
+    /// A registration-only manifest: a bundle made discoverable at link time
+    /// with no published content — no scopes at all, or only scopes with
+    /// nothing in them. Abandoning such a bundle loses nothing, which is what
+    /// lets a split-brain twin connect away from it.
+    pub fn is_registration_only(&self) -> bool {
+        self.scopes.values().all(|scope| {
+            scope.recipe.entries.is_empty()
+                && scope.conversations.is_empty()
+                && scope.resources.is_empty()
+                && scope.files.is_empty()
+                && scope.directories.is_empty()
+                && scope.tombstones.is_empty()
+        })
+    }
+
     pub fn scope(&self, key: &SyncScopeKey) -> Option<&BundleScope> {
         self.scopes.get(key)
     }
@@ -5454,8 +5513,9 @@ mod conversation_tail;
 mod conversation_tail_relation;
 
 pub use conversation_reconciliation::{
-    default_conversation_decision, BindingResolution, ClassifiedThread, ConversationCapabilities,
-    ConversationDecision, ConversationOperationState, ReviewPurpose,
+    blocked_conversation_decision, default_conversation_decision, BindingResolution,
+    ClassifiedThread, ConversationCapabilities, ConversationDecision, ConversationOperationState,
+    ReviewPurpose,
 };
 pub use conversation_tail::{
     compute_conversation_tail_state, compute_portable_conversation_tail,

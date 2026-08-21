@@ -35,10 +35,16 @@ export default function SyncReviewTabs({
     event: ReactKeyboardEvent<HTMLButtonElement>,
     id: string,
   ) => {
+    // Capture the strip synchronously. React nulls `currentTarget` as soon as
+    // the handler returns (react-dom's executeDispatch), so reading it inside
+    // the frame threw a TypeError: the tab changed but focus never moved, and
+    // the next arrow press re-derived the same index from the still-focused
+    // button — the strip could not advance past the second tab.
+    const strip = event.currentTarget.parentElement;
     event.preventDefault();
     onChange(id);
     window.requestAnimationFrame(() => {
-      event.currentTarget.parentElement
+      strip
         ?.querySelector<HTMLButtonElement>(`[data-sync-review-tab="${id}"]`)
         ?.focus();
     });

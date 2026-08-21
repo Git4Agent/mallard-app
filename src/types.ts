@@ -144,8 +144,8 @@ export interface ProjectResourceDescriptor {
   category?: ProjectResourceCategory | string;
   description?: string | null;
   logical_paths?: string[];
-  default_selected?: boolean;
-  selected_by_default?: boolean;
+  /** Always emitted (`InventoryResource.default_selected`, no serde skip). */
+  default_selected: boolean;
   blocked_reason?: string | null;
 }
 
@@ -164,8 +164,7 @@ export interface BundleRecipe {
 export interface ResourceInventory {
   project: string;
   bundle_id?: string | null;
-  resources?: ProjectResourceDescriptor[];
-  candidates?: ProjectResourceDescriptor[];
+  resources: ProjectResourceDescriptor[];
   recipe: BundleRecipe;
   generated_at?: number;
   warnings?: string[];
@@ -220,6 +219,11 @@ export interface ProjectStorageLink {
   scope_bases?: Record<string, ScopeBase>;
   /** Destination-local exclusions recorded only after a successful Push. */
   project_content_preferences: ProjectContentPreferences;
+  /** Per-scope accepted conversation checkpoints. Machine-local and never
+   *  rendered, so the payload stays opaque here — but it is required and
+   *  deliberately non-defaulted in Rust, so any code rebuilding a link must
+   *  pass it through untouched or the document fails to load. */
+  conversation_checkpoints: Record<string, Record<string, unknown>>;
   pinned: boolean;
   created_at: number;
 }
@@ -312,7 +316,6 @@ export interface LocalProjectSummary {
   resource_count?: number;
   selected_resource_count?: number;
   linked_storage_ids?: string[];
-  readiness_state?: "ready" | "needs_setup" | "blocked" | string;
   is_git_repository?: boolean;
 }
 
@@ -489,12 +492,6 @@ export interface ProviderProfileProbe {
   existing_profile_id?: string | null;
 }
 
-export interface RegisterLocalProjectRequest {
-  display_name: string;
-  repository_fingerprint?: string | null;
-  bundle_id?: string | null;
-}
-
 export interface SaveProjectLinkRequest {
   local_project_id: string;
   storage_id: string;
@@ -523,45 +520,6 @@ export interface HostIdentityStatus {
   local_display_name?: string | null;
   created_at: number;
   updated_at: number;
-}
-
-export interface UpdateHostDisplayNameRequest {
-  expected_host_id: string;
-  expected_revision: number;
-  local_display_name?: string | null;
-}
-
-export interface RegisterNewHostRequest {
-  expected_host_id: string;
-  expected_revision: number;
-  local_display_name?: string | null;
-}
-
-export interface OriginHostAlias {
-  bundle_id: string;
-  origin_host_token: string;
-  display_name: string;
-  revision: number;
-  updated_at: number;
-}
-
-export interface SaveOriginHostAliasRequest {
-  bundle_id: string;
-  origin_host_token: string;
-  display_name: string;
-  expected_revision?: number | null;
-}
-
-export interface OriginHostLabel {
-  origin_host_token: string;
-  display_name: string;
-  is_this_host: boolean;
-}
-
-export interface ProjectOriginTokens {
-  bundle_id: string;
-  origin_host_token: string;
-  origin_replica_token: string;
 }
 
 /** Schema of `~/.mallard/sync_config.json`; must match the backend's LOCAL_SCHEMA. */
@@ -608,23 +566,6 @@ export interface StorageConfig {
   region: string;
   local_dir: string;
   supports_conditional_writes?: boolean | null;
-}
-
-export interface BundleResourceStatus {
-  resource_id: string;
-  state: ProjectResourceState | string;
-  message?: string | null;
-  local_digest?: string | null;
-  remote_digest?: string | null;
-}
-
-export interface ResourceStatusReport {
-  project: string;
-  storage: string;
-  bundle_id?: string | null;
-  revision?: number;
-  statuses: Record<string, ProjectResourceState | string> | BundleResourceStatus[];
-  warnings?: string[];
 }
 
 export type ResourceSyncState =
@@ -712,18 +653,21 @@ export interface RemoteBundleSummary {
   repository_fingerprint?: string | null;
 }
 
-export interface BundlePage {
-  bundles: RemoteBundleSummary[];
-  next_cursor?: string | null;
-}
-
 export interface BundleSnapshotSummary extends RemoteBundleSummary {
   storage_id: string;
+  /** A registration-only repo: linked but never pushed — nothing to pull yet. */
+  registration_only?: boolean;
   resources?: ProjectResourceDescriptor[];
   recipe?: BundleRecipe;
   fetched_at?: number;
   warnings?: string[];
 }
+
+/** Post-setup convergence detection for one project × storage link. */
+export type SiblingBundleStatus =
+  | { state: "none" }
+  | { state: "sibling_found"; matches: BundleSnapshotSummary[] }
+  | { state: "registration_twin"; survivor: BundleSnapshotSummary };
 
 export type PushDestinationStatus =
   | {
@@ -1086,11 +1030,6 @@ export interface SessionDetailCapabilities {
   event_detail: boolean;
 }
 
-export interface SessionCheckpointJump {
-  event_id: string;
-  checkpoint: SessionCheckpoint;
-}
-
 export interface SessionCheckpoint {
   sha: string;
   short_sha: string;
@@ -1115,7 +1054,7 @@ export interface ProjectSessionDetail {
   event_counts: SessionEventCounts;
   capabilities: SessionDetailCapabilities;
   actions: SessionActionDescriptor[];
-  checkpoint_jumps: SessionCheckpointJump[];
+  github_repository_url?: string | null;
   snapshot_id: string;
   warnings: SessionDetailWarning[];
 }
@@ -1178,7 +1117,6 @@ export interface ProjectMarkdownImage {
 export interface ProjectSessionTimelineQuery {
   snapshot_id: string;
   cursor?: string | null;
-  anchor_event_id?: string | null;
   limit: number;
   included_event_kinds: SessionTimelineEventKind[];
   included_tool_categories: SessionToolCategory[];
@@ -1202,17 +1140,6 @@ export type ThreadSyncState =
   | "unavailable"
   | "unknown";
 
-export type SyncCurrency = "current" | "advanced";
-
-export type TailClassification =
-  | { sync: SyncCurrency }
-  | "local_outstanding"
-  | "cloud_outstanding"
-  | "diverged"
-  | "missing_cloud"
-  | "missing_local"
-  | "missing_both"
-  | "unknown";
 
 export type ConversationPlanActionType =
   | "publish"
@@ -1244,7 +1171,8 @@ export type ConversationBlocker =
   | "codec_unsupported"
   | "ambiguous_binding"
   | "missing_binding"
-  | "busy";
+  | "busy"
+  | "redaction_ruleset_mismatch";
 
 export interface ThreadSyncDecision {
   action: ConversationReviewAction;
@@ -1280,7 +1208,6 @@ export interface ThreadSyncEntry {
   provider_thread_id?: string | null;
   push_decision: ThreadSyncDecision;
   pull_decision: ThreadSyncDecision;
-  origin_label?: string | null;
 }
 
 export interface ThreadSyncCounts {

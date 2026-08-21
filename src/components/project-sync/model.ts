@@ -5,11 +5,30 @@ import type {
   ProjectResourceKind,
   ProviderKey,
   ResourceInventory,
-  StorageConfig,
 } from "../../types";
-import { userFacingRepoTerms } from "../../terminology";
+
+/** A rename either landed, or failed with something to say, or was superseded
+ *  by a host-identity change (`message: null`) and has nothing to report. */
+export type RenameResult = { ok: true } | { ok: false; message: string | null };
 
 /** Machine-local alias wins over the shared repo name wherever a project is labelled. */
+/**
+ * Thread states where the storage holds work this machine does not, so a Push
+ * would have to be preceded by a Pull.
+ *
+ * `unknown` is deliberately absent. Two divergent copies of this set used to
+ * exist and they disagreed on exactly that value: the project-files review
+ * counted it as blocking and so refused to let the row be ticked or unticked,
+ * while the push review — which is what actually decides whether a push is
+ * blocked — did not. An unresolvable row was therefore stuck on screen with no
+ * way to take it out of the push. The push review's reading is the authority.
+ */
+export const STORAGE_BLOCKING_STATES: ReadonlySet<string> = new Set([
+  "storage_only",
+  "storage_ahead",
+  "diverged",
+]);
+
 export function projectLabel(project: { display_name: string; local_alias?: string | null }): string {
   return project.local_alias?.trim() || project.display_name;
 }
@@ -77,7 +96,7 @@ export function categoryFor(resource: ProjectResourceDescriptor): ProjectResourc
 }
 
 export function inventoryResources(inventory: ResourceInventory | null): ProjectResourceDescriptor[] {
-  return inventory?.resources ?? inventory?.candidates ?? [];
+  return inventory?.resources ?? [];
 }
 
 export function recipeSelection(recipe: BundleRecipe): Set<string> {
@@ -130,17 +149,6 @@ export function formatRelativeTime(epoch?: number): string {
   return new Date(milliseconds).toLocaleDateString();
 }
 
-export function errorMessage(error: unknown): string {
-  return userFacingRepoTerms(error instanceof Error ? error.message : String(error));
-}
-
-export function storageAccessErrorMessage(
-  storage: Pick<StorageConfig, "kind"> | null | undefined,
-  error: unknown,
-): string {
-  const message = errorMessage(error);
-  const looksLikeR2ConnectionFailure = /^S3 (?:get|body|conditional put)/i.test(message)
-    && /dispatch failure|service error|timed out|access denied|credentials?|invalid access key|signature|no such bucket/i.test(message);
-  if (storage?.kind !== "s3" || !looksLikeR2ConnectionFailure) return message;
-  return "Couldn’t connect to Cloudflare R2. Check the S3 API URL, bucket name, Account ID, and credentials, then try again.";
-}
+// Both now live in src/storageError.ts so storage-catalog can use the same
+// translation without importing from this module.
+export { errorMessage, storageAccessErrorMessage } from "../../storageError";

@@ -9,19 +9,21 @@ import {
   type ReactNode,
 } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type {
   BundleFetchProgress,
-  BundlePage,
+  BundleSnapshotSummary,
   CodexConversationPathAudit,
   LocalProjectSummary,
   ProjectBinding,
   ProjectStorageLink,
   ProviderProfileSummary,
   RemoteBundleSummary,
+  SiblingBundleStatus,
   StorageConfig,
 } from "../../types";
 import Icon from "../Icons";
+import { clockOptions } from "../../clock";
 import ProjectActivityPage, { BranchPicker, type ActivityHeaderModel } from "./ProjectActivityPage";
 import type {
   ActiveProjectSubview,
@@ -35,6 +37,8 @@ import ProviderMark from "../sync-review/ProviderMark";
 import type { SessionHeaderModel } from "./session-detail/SessionDetailPage";
 import type { PullRequiredCopy } from "./PushResourceWorkspace";
 import SyncOutcomeNotice from "../sync-review/SyncOutcomeNotice";
+import { writeClipboardText } from "../sync-review/clipboard";
+import SiblingRepoNotice from "./SiblingRepoNotice";
 import { syncOutcomeView } from "./syncOutcome";
 import { isIrrecoverableSyncError } from "./syncError";
 import type { SyncOutcome } from "./syncOutcome";
@@ -43,9 +47,11 @@ import { projectSyncApi } from "./api";
 import {
   compactProjectPath,
   formatRelativeTime,
+  errorMessage,
   projectLabel,
   providerLabel,
   storageAccessErrorMessage,
+  type RenameResult,
 } from "./model";
 
 type LinkKey = { projectId: string; storageId: string };
@@ -106,9 +112,21 @@ interface Props {
   onUnlinkStorage: (projectId: string, storageId: string) => Promise<void> | void;
   onPush: (projectId: string, storageId: string) => Promise<void> | void;
   onPull: (projectId: string, storageId: string) => Promise<void> | void;
+  /** Sibling detection for the active pair: another repo in this storage
+      carries the same repository (`docs/PLAN_REPO_BUNDLE_CONVERGENCE.md`). */
+  siblingNotice?: {
+    projectId: string;
+    storageId: string;
+    status: SiblingBundleStatus;
+  } | null;
+  onConnectSibling?: (
+    projectId: string,
+    storageId: string,
+    matches: BundleSnapshotSummary[],
+  ) => void;
   onConfigureBinding: (projectId: string) => Promise<void> | void;
   onRepairConversationPaths: (projectId: string) => Promise<void> | void;
-  onRenameProject: (projectId: string, alias: string | null) => Promise<boolean> | boolean;
+  onRenameProject: (projectId: string, alias: string | null) => Promise<RenameResult> | RenameResult;
   onResetProjectMetadata: (projectId: string) => Promise<void> | void;
   onRefresh: () => void;
   onAddProject: () => void;
@@ -137,6 +155,10 @@ interface Props {
   onStorageIssueChange?: (storageId: string, issue: string | null) => void;
   newProjectSetup?: ReactNode;
   historyRefreshEpoch?: number;
+  /** Bumped when a storage's contents changed underneath the open page —
+   *  clearing its data, for one — so the repository list reloads instead of
+   *  showing objects that no longer exist. */
+  storageRefreshEpoch?: number;
   inlineStorageReview?: InlineStorageReview | null;
   storageNotice?: StorageNotice | null;
   onStorageNoticeAction?: (outcome: SyncOutcome) => void;
@@ -300,29 +322,6 @@ export function buildR2AgentSetupInstruction({
   ].join("\n");
 }
 
-async function writeClipboardText(value: string): Promise<void> {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(value);
-      return;
-    } catch {
-      // Some desktop WebViews expose Clipboard but reject it. Continue under
-      // the same user gesture with a document-local copy operation.
-    }
-  }
-  if (typeof document === "undefined") throw new Error("Clipboard access is unavailable");
-  const field = document.createElement("textarea");
-  field.value = value;
-  field.readOnly = true;
-  field.style.position = "fixed";
-  field.style.opacity = "0";
-  document.body.append(field);
-  field.select();
-  const copied = document.execCommand("copy");
-  field.remove();
-  if (!copied) throw new Error("Clipboard access is unavailable");
-}
-
 function absoluteTime(epoch: number): string {
   // Same second/millisecond tolerance as formatRelativeTime, since the fold's
   // absolute stamp expands the very value the chip shows relatively.
@@ -331,8 +330,7 @@ function absoluteTime(epoch: number): string {
     month: "short",
     day: "numeric",
     year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
+    ...clockOptions(),
   });
 }
 
@@ -473,6 +471,8 @@ export default function ProjectLinksWorkspace({
   onUnlinkStorage,
   onPush,
   onPull,
+  siblingNotice,
+  onConnectSibling,
   onConfigureBinding,
   onRepairConversationPaths,
   onRenameProject,
@@ -493,6 +493,7 @@ export default function ProjectLinksWorkspace({
   onStorageIssueChange,
   newProjectSetup,
   historyRefreshEpoch = 0,
+  storageRefreshEpoch = 0,
   inlineStorageReview,
   storageNotice,
   onStorageNoticeAction,
@@ -508,9 +509,26 @@ export default function ProjectLinksWorkspace({
   const [storageDetailsExpanded, setStorageDetailsExpanded] = useState(false);
   const [renamingStorageId, setRenamingStorageId] = useState<string | null>(null);
   const [storageNameDraft, setStorageNameDraft] = useState("");
-  const [bundlePage, setBundlePage] = useState<BundlePage | null>(null);
+  const [remoteBundles, setRemoteBundles] = useState<BundleSnapshotSummary[] | null>(null);
   const [bundleLoading, setBundleLoading] = useState(false);
   const [bundleError, setBundleError] = useState<string | null>(null);
+  /* Revealing is `reveal_item_in_dir`, not `open_path`: the capability grants
+     open_path only for the log folder, so a project root or a storage folder
+     is refused there. The rejection is surfaced, never dropped — a folder that
+     was moved or deleted since the config was written is the ordinary case. */
+  /* Derived once per outcome, not once per render. SyncOutcomeNotice re-arms
+     its fold whenever this object's identity changes, so rebuilding it inline
+     snapped the expanded rows shut on every unrelated re-render. */
+  const outcomeView = useMemo(
+    () => (storageNotice?.kind === "outcome" ? syncOutcomeView(storageNotice.outcome) : null),
+    [storageNotice],
+  );
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [revealError, setRevealError] = useState<string | null>(null);
+  const revealPath = (path: string) => {
+    setRevealError(null);
+    void revealItemInDir(path).catch((reason) => setRevealError(errorMessage(reason)));
+  };
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [projectAliasDraft, setProjectAliasDraft] = useState("");
   // The activity list speaks through the path bar: it owns the branches and the
@@ -557,8 +575,14 @@ export default function ProjectLinksWorkspace({
     return () => window.cancelAnimationFrame(frame);
   }, [editingStorage]);
 
+  /* Symmetric: unmounting is leaving the storage page, so the report has to be
+     withdrawn too. Without the cleanup the sidebar kept the storage row lit
+     after the user navigated to Settings, showing three active items at once
+     and never letting "Projects" render as inactive. Mirrors the pattern
+     ProjectActivityPage uses for onHeaderModelChange. */
   useEffect(() => {
     onStorageEditorChange?.(editingStorage?.storageId ?? null);
+    return () => onStorageEditorChange?.(null);
   }, [editingStorage?.storageId, onStorageEditorChange]);
 
   useEffect(() => {
@@ -605,7 +629,7 @@ export default function ProjectLinksWorkspace({
   const editedStorageConfig = savedEditedStorage
     ?? (storageDraft?.id === editingStorage?.storageId ? storageDraft : null);
   const creatingStorage = !!editingStorage && storageBaseline === null;
-  const orderedRemoteBundles = [...(bundlePage?.bundles ?? [])].sort((left, right) => {
+  const orderedRemoteBundles = [...(remoteBundles ?? [])].sort((left, right) => {
     return (right.updated_at ?? 0) - (left.updated_at ?? 0);
   });
   const run = async (key: string, action: () => Promise<void> | void) => {
@@ -620,13 +644,13 @@ export default function ProjectLinksWorkspace({
   const loadStorageBundles = async (storage: StorageConfig) => {
     const storageId = storage.id;
     const requestId = ++bundleRequestRef.current;
-    setBundlePage(null);
+    setRemoteBundles(null);
     setBundleError(null);
     setBundleLoading(true);
     try {
       const bundles = await projectSyncApi.listRemoteBundleSnapshots(storageId);
       if (bundleRequestRef.current === requestId) {
-        setBundlePage({ bundles });
+        setRemoteBundles(bundles);
         onStorageIssueChange?.(storageId, null);
       }
     } catch (reason) {
@@ -641,6 +665,12 @@ export default function ProjectLinksWorkspace({
   };
 
   useEffect(() => {
+    if (!storageRefreshEpoch || !editedStorageConfig) return;
+    void loadStorageBundles(editedStorageConfig);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageRefreshEpoch]);
+
+  useEffect(() => {
     if (!storageEditorRequest) return;
     agentSetupMarkerRef.current = null;
     if (storageEditorRequest.mode === "close") {
@@ -651,7 +681,7 @@ export default function ProjectLinksWorkspace({
       setStorageConflict(null);
       setAgentCopyStatus(null);
       setStorageDetailsExpanded(false);
-      setBundlePage(null);
+      setRemoteBundles(null);
       setBundleError(null);
       setBundleLoading(false);
       onStorageEditorRequestHandled?.();
@@ -666,7 +696,7 @@ export default function ProjectLinksWorkspace({
       setStorageConflict(null);
       setAgentCopyStatus(null);
       setStorageDetailsExpanded(true);
-      setBundlePage(null);
+      setRemoteBundles(null);
       setBundleError(null);
       setBundleLoading(false);
       onStorageEditorRequestHandled?.();
@@ -728,7 +758,7 @@ export default function ProjectLinksWorkspace({
     setStorageBaseline(adoption.storageBaseline);
     setStorageConflict(null);
     setStorageDetailsExpanded(adoption.storageDetailsExpanded);
-    setBundlePage(null);
+    setRemoteBundles(null);
     setBundleError(null);
     setAgentCopyStatus(adoption.status);
     void loadStorageBundles(reconciliation.storage);
@@ -933,14 +963,19 @@ export default function ProjectLinksWorkspace({
 
   const saveProjectName = async () => {
     if (!workspaceProject || !projectNameChanged) return;
-    let saved = false;
+    let result: RenameResult = { ok: false, message: null };
+    setRenameError(null);
     await run(
       `rename:${workspaceProject.local_project_id}`,
       async () => {
-        saved = await onRenameProject(workspaceProject.local_project_id, proposedProjectAlias);
+        result = await onRenameProject(workspaceProject.local_project_id, proposedProjectAlias);
       },
     );
-    if (saved) setRenamingProjectId(null);
+    if (result.ok) {
+      setRenamingProjectId(null);
+      return;
+    }
+    setRenameError(result.message);
   };
 
   const saveStorageName = async () => {
@@ -959,7 +994,10 @@ export default function ProjectLinksWorkspace({
   };
 
   if (editingStorage && storageDraft && editedStorageConfig) {
-    const storageReady = storageConfigReady(storageDraft);
+    // A storage that is not a fresh draft is already saved, so the backend
+    // holds its secret even though the redacted config renders the field blank.
+    const secretStored = !creatingStorage;
+    const storageReady = storageConfigReady(storageDraft, secretStored);
     const showStorageDetails = creatingStorage || storageDetailsExpanded;
     const storageDetailsId = `storage-${storageDraft.id}-settings`;
     const storageNameChanged = !!storageNameDraft.trim() && storageNameDraft.trim() !== storageDraft.name;
@@ -1062,7 +1100,7 @@ export default function ProjectLinksWorkspace({
             label: "Reveal in Finder",
             detail: compactProjectPath(editedStorageConfig.local_dir),
             icon: "folder" as const,
-            onSelect: () => { void openPath(editedStorageConfig.local_dir as string); },
+            onSelect: () => revealPath(editedStorageConfig.local_dir as string),
           }] : []),
           {
             id: "storage-settings",
@@ -1225,12 +1263,19 @@ export default function ProjectLinksWorkspace({
                     </div>
                   )}
                   <StorageEditor
+                    /* Identity, so every per-storage ref inside the editor —
+                       the R2 jurisdiction, the S3 API URL draft and its
+                       editing flag — resets when the storage does. Without it
+                       a new R2 draft inherited the previous storage's
+                       jurisdiction until the endpoint happened to parse. */
+                    key={storageDraft.id}
                     storage={storageDraft}
                     disabled={busy || !!storageConflict}
                     onChange={(nextDraft) => {
                       agentSetupMarkerRef.current = null;
                       setStorageDraft(nextDraft);
                     }}
+                    secretStored={secretStored}
                     showNameField={creatingStorage}
                     showProgress={!creatingStorage}
                     // A draft's create is the page's verb and lives in the
@@ -1278,6 +1323,12 @@ export default function ProjectLinksWorkspace({
               </section>
             )}
 
+            {revealError && (
+              <div className="sync-callout error" role="alert">
+                <Icon name="alert-triangle" size={15} />
+                <span>{revealError}</span>
+              </div>
+            )}
             {error && !renamingStorage && (
               <div className="sync-callout error"><Icon name="alert-triangle" size={15} /> {error}</div>
             )}
@@ -1289,7 +1340,7 @@ export default function ProjectLinksWorkspace({
               <footer className="sync-storage-setup-footer">
                 {storageDraft.kind !== "local" && (
                   <span className="sync-storage-editor-progress" aria-live="polite">
-                    {r2FieldsSet(storageDraft)} of 5 set
+                    {r2FieldsSet(storageDraft, secretStored)} of 5 set
                   </span>
                 )}
                 <div>
@@ -1488,7 +1539,7 @@ export default function ProjectLinksWorkspace({
               id: "reveal",
               label: "Reveal in Finder",
               icon: "folder" as const,
-              onSelect: () => { void openPath(workspaceProject.project_root as string); },
+              onSelect: () => revealPath(workspaceProject.project_root as string),
             }] : []),
             {
               id: "agent",
@@ -1847,8 +1898,12 @@ export default function ProjectLinksWorkspace({
                 onClick={() => void run(
                   `rename:${workspaceProject.local_project_id}`,
                   async () => {
-                    const saved = await onRenameProject(workspaceProject.local_project_id, null);
-                    if (!saved) return;
+                    setRenameError(null);
+                    const result = await onRenameProject(workspaceProject.local_project_id, null);
+                    if (!result.ok) {
+                      setRenameError(result.message);
+                      return;
+                    }
                     setProjectAliasDraft(workspaceProject.display_name);
                     setRenamingProjectId(null);
                   },
@@ -1857,12 +1912,19 @@ export default function ProjectLinksWorkspace({
                 Use repo name
               </button>
             )}
-            {error && (
+            {renameError && (
               <div className="sync-path-rename-error" role="alert">
-                <Icon name="alert-triangle" size={13} /> {error}
+                <Icon name="alert-triangle" size={13} /> {renameError}
               </div>
             )}
           </form>
+        )}
+
+        {revealError && (
+          <div className="sync-callout error" role="alert">
+            <Icon name="alert-triangle" size={15} />
+            <span>{revealError}</span>
+          </div>
         )}
 
         {agentCopyStatus && (
@@ -2001,6 +2063,10 @@ export default function ProjectLinksWorkspace({
                 && (!!(storageNotice
                   && storageNotice.projectId === project.local_project_id
                   && storageNotice.storageId === selectedStorage.id)
+                  || !!(siblingNotice
+                    && siblingNotice.projectId === project.local_project_id
+                    && siblingNotice.storageId === selectedStorage.id
+                    && siblingNotice.status.state !== "none")
                   || (inlineStorageReview?.projectId === project.local_project_id
                     && inlineStorageReview.storageId === selectedStorage.id));
               const storageGroupEmpty = !storageGroupNotice
@@ -2044,12 +2110,18 @@ export default function ProjectLinksWorkspace({
                         ? storageNotice
                         : null;
                       const noticeActionsDisabled = busy || !!runningAction;
+                      const activeSibling = siblingNotice
+                        && siblingNotice.projectId === project.local_project_id
+                        && siblingNotice.storageId === storage.id
+                        && siblingNotice.status.state !== "none"
+                        ? siblingNotice.status
+                        : null;
                       // The card used to be the storage's identity and its two
                       // buttons; both live in the path bar now, so what is left
                       // is a container for banners and the open review. With
                       // neither it has nothing to frame, and an empty frame
                       // reads as a gap above the history.
-                      if (!activeNotice && !reviewOpen) return null;
+                      if (!activeNotice && !reviewOpen && !activeSibling) return null;
 
                       return (
                         <div
@@ -2057,9 +2129,20 @@ export default function ProjectLinksWorkspace({
                           className={`storage-link-block selected${reviewOpen ? " sync-review-open" : ""}`}
                           aria-busy={reviewOpen && busy}
                         >
+                          {activeSibling && (
+                            <SiblingRepoNotice
+                              status={activeSibling}
+                              busy={noticeActionsDisabled}
+                              onConnect={(matches) => onConnectSibling?.(
+                                project.local_project_id,
+                                storage.id,
+                                matches,
+                              )}
+                            />
+                          )}
                           {activeNotice && activeNotice.kind === "outcome" && (
                             <SyncOutcomeNotice
-                              view={syncOutcomeView(activeNotice.outcome)}
+                              view={outcomeView ?? syncOutcomeView(activeNotice.outcome)}
                               busy={noticeActionsDisabled}
                               onAction={() => onStorageNoticeAction?.(activeNotice.outcome)}
                               onDismiss={() => onDismissStorageNotice?.()}
@@ -2263,7 +2346,6 @@ export default function ProjectLinksWorkspace({
               ?? ""}
             resourceId={sessionDetailSubview.resourceId}
             occurrenceKey={sessionDetailSubview.occurrenceKey}
-            initialCheckpointId={sessionDetailSubview.initialCheckpointId}
             onHeaderChange={handleSessionHeaderChange}
           />
         </Suspense>

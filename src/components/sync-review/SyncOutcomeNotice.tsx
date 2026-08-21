@@ -1,5 +1,6 @@
 import { useId, useRef, useState } from "react";
 import Icon, { type IconName } from "../Icons";
+import { clockOptions } from "../../clock";
 
 /** Per-row status treatment supplied by the owning feature's view model. */
 export interface SyncOutcomeRowPresentation {
@@ -47,8 +48,7 @@ function formatTime(seconds: number): string {
   return new Date(seconds * 1_000).toLocaleString(undefined, {
     month: "short",
     day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
+    ...clockOptions(),
   });
 }
 

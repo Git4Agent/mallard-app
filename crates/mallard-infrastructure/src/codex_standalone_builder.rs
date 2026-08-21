@@ -8,16 +8,20 @@
 //! published or installed.
 //!
 //! `Encode` builds the machine-neutral **wire form** Push publishes: every
-//! in-root path occurrence becomes the `/__mallard_root__` token, the
-//! authoritative head carries the `__mallard_path_map__` codec marker, and
-//! the artifact's tail and digests are wire-form values. `Decode` builds the
-//! **local form** Pull installs: tokens expand to the pulling machine's
-//! project root, the marker is stripped, and the artifact's tail, digests,
-//! and prefix witness are local-form values. The two §4.4 round-trip gates —
-//! the span-bounded structural diff at encode and the `encode∘decode = id`
-//! wire self-check — run inside the matching build; the identity layer
-//! (fresh root id, head fold, `item_completed` thread stamps, ordinals) is
-//! proven by the structural checks, never by byte comparison across it.
+//! in-root path occurrence becomes the `/__mallard_root__` token, detected
+//! credentials become typed placeholders (`credential_redaction`, composed
+//! after the path layer so the fixpoint certificate covers the final
+//! bytes), the authoritative head carries the `__mallard_path_map__` codec
+//! marker, and the artifact's tail and digests are wire-form values.
+//! `Decode` builds the **local form** Pull installs: tokens expand to the
+//! pulling machine's project root, the marker is stripped, redaction is
+//! one-way (placeholders materialize verbatim), and the artifact's tail,
+//! digests, and prefix witness are local-form values. The round-trip gates
+//! — the span-bounded structural diffs at encode and the
+//! `encode∘decode = id` path self-check plus the `redact(w) == w` leak
+//! certificate — run inside the matching build; the identity layer (fresh
+//! root id, head fold, `item_completed` thread stamps, ordinals) is proven
+//! by the structural checks, never by byte comparison across it.
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -31,6 +35,7 @@ use crate::codex_path_map::{
 };
 use crate::codex_rollout::{session_meta_id, structural_record_type};
 use crate::conversation_codec::{analyze_codex_transcript, CodecLineage};
+use crate::credential_redaction;
 use crate::jsonl_tail_io::read_bounded;
 use mallard_domain::{
     compute_portable_conversation_tail_with_codec, conversation_prefix_witness,
@@ -156,9 +161,13 @@ pub fn build_standalone_codex_root(
     // before the identity stage; each direction's §4.4 gate runs strictly
     // within the path layer.
     let folded_head = effective_authoritative_meta(resolved)?;
+    let redactor = credential_redaction::shared();
     let authoritative = if encode_mode {
         let mut head = mapper
             .encode_record_gated(&folded_head)
+            .map_err(|error| format!("authoritative session metadata: {error}"))?;
+        head = redactor
+            .redact_record_gated(&head)
             .map_err(|error| format!("authoritative session metadata: {error}"))?;
         rewrite_meta_record(&mut head, &output_root_id)?;
         head_payload_mut(&mut head)?.insert(PATH_MAP_FIELD.to_string(), path_map_marker());
@@ -171,6 +180,9 @@ pub fn build_standalone_codex_root(
         validate_path_map_marker(&marker)?;
         mapper
             .verify_wire_record(&head)
+            .map_err(|error| format!("authoritative session metadata: {error}"))?;
+        redactor
+            .verify_wire_value(&head)
             .map_err(|error| format!("authoritative session metadata: {error}"))?;
         let mut head = mapper.decode_record(&head)?;
         rewrite_meta_record(&mut head, &output_root_id)?;
@@ -189,9 +201,15 @@ pub fn build_standalone_codex_root(
         mapper
             .verify_wire_record(&normalized_head)
             .map_err(|error| format!("authoritative session metadata: {error}"))?;
+        redactor
+            .verify_wire_value(&normalized_head)
+            .map_err(|error| format!("authoritative session metadata: {error}"))?;
         for (index, record) in projected.iter().enumerate() {
             mapper
                 .verify_wire_record(record)
+                .map_err(|error| format!("emitted record {}: {error}", index + 1))?;
+            redactor
+                .verify_wire_value(record)
                 .map_err(|error| format!("emitted record {}: {error}", index + 1))?;
         }
     }
@@ -322,12 +340,20 @@ fn collect_flattened_non_metadata_records(
                 continue;
             }
             value = if encode_mode {
-                mapper.encode_record_gated(&value).map_err(|error| {
+                let encoded = mapper.encode_record_gated(&value).map_err(|error| {
                     format!(
                         "Codex segment '{}' record {}: {error}",
                         segment.provider_thread_id, record_number
                     )
-                })?
+                })?;
+                credential_redaction::shared()
+                    .redact_record_gated(&encoded)
+                    .map_err(|error| {
+                        format!(
+                            "Codex segment '{}' record {}: {error}",
+                            segment.provider_thread_id, record_number
+                        )
+                    })?
             } else {
                 mapper.verify_wire_record(&value).map_err(|error| {
                     format!(
@@ -335,6 +361,14 @@ fn collect_flattened_non_metadata_records(
                         segment.provider_thread_id, record_number
                     )
                 })?;
+                credential_redaction::shared()
+                    .verify_wire_value(&value)
+                    .map_err(|error| {
+                        format!(
+                            "Codex segment '{}' record {}: {error}",
+                            segment.provider_thread_id, record_number
+                        )
+                    })?;
                 mapper.decode_record(&value)?
             };
             if let Some(record) = value.as_object_mut() {

@@ -1,4 +1,3 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type {
   GitBranchSummary,
@@ -12,9 +11,13 @@ import type {
   ThreadSyncEntry,
 } from "../../types";
 import Icon, { type IconName } from "../Icons";
+import { clockOptions, formatDuration } from "../../clock";
+import { getPreference } from "../../preferences";
 import { projectSyncApi } from "./api";
+import { githubCommitUrl, openExternalUrl } from "./externalLink";
 import { compactProjectPath, errorMessage, projectLabel } from "./model";
 import ProviderMark from "../sync-review/ProviderMark";
+import { writeClipboardText } from "../sync-review/clipboard";
 import { formatCompactNumber, formatSessionDetailTimestamp, type OpenSessionDetailRequest } from "./session-detail/sessionDetailModel";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 
@@ -162,6 +165,9 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
+      /* This layer consumed Escape; the Push/Pull review listens on window
+         and must not also close and discard the whole review. */
+      event.stopPropagation();
       closeMenu(true);
     };
     document.addEventListener("pointerdown", handlePointerDown);
@@ -279,39 +285,34 @@ function formatDate(value?: number | null): string {
   return formatSessionDetailTimestamp(value);
 }
 
+/* Constructing an Intl.DateTimeFormat is the expensive part of formatting, and
+   one session row asks for six of them — three full stamps, each a date plus a
+   time. Build each formatter once. The clock one is rebuilt only when the
+   24-hour preference actually flips, so a Settings change still takes effect
+   without making every row pay for the possibility. */
+let calendarFormatter: Intl.DateTimeFormat | null = null;
+
 function formatCalendarDate(value: number): string {
-  return new Intl.DateTimeFormat(undefined, {
+  calendarFormatter ??= new Intl.DateTimeFormat(undefined, {
     month: "short", day: "numeric", year: "numeric",
-  }).format(new Date(value * 1_000));
+  });
+  return calendarFormatter.format(new Date(value * 1_000));
 }
 
+let clockFormatter: Intl.DateTimeFormat | null = null;
+let clockFormatterIs24Hour: boolean | null = null;
+
 function formatClockTime(value: number): string {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric", minute: "2-digit",
-  }).format(new Date(value * 1_000));
+  const clock24 = getPreference("clock24");
+  if (clockFormatter === null || clockFormatterIs24Hour !== clock24) {
+    clockFormatter = new Intl.DateTimeFormat(undefined, clockOptions());
+    clockFormatterIs24Hour = clock24;
+  }
+  return clockFormatter.format(new Date(value * 1_000));
 }
 
 function formatFullDateTime(value: number): string {
   return `${formatCalendarDate(value)} at ${formatClockTime(value)}`;
-}
-
-/**
- * How long the session ran, at one significant unit. The absolute start stamp
- * plus this covers the same ground the old start→end pair did, in far less
- * room. Returns null when the session has no measurable duration.
- */
-function formatDuration(startedAt: number, endedAt: number): string | null {
-  const seconds = Math.max(0, Math.round(endedAt - startedAt));
-  if (seconds === 0) return null;
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  const restMinutes = minutes % 60;
-  if (hours < 24) return restMinutes ? `${hours}h ${restMinutes}m` : `${hours}h`;
-  const days = Math.floor(hours / 24);
-  const restHours = hours % 24;
-  return restHours ? `${days}d ${restHours}h` : `${days}d`;
 }
 
 function formatCount(value?: number | null): string {
@@ -324,19 +325,6 @@ export function compactThreadTitle(value: string): string {
     /\s*·\s*\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?Z?)?\s*$/,
     "",
   );
-}
-
-async function openExternalUrl(url: string) {
-  try {
-    await openUrl(url);
-  } catch {
-    if (typeof window !== "undefined") window.open(url, "_blank", "noopener,noreferrer");
-  }
-}
-
-function githubCommitUrl(repositoryUrl: string | null | undefined, sha: string): string | null {
-  if (!repositoryUrl) return null;
-  return `${repositoryUrl.replace(/\/+$/, "")}/commit/${sha}`;
 }
 
 type SessionSyncPresentation = {
@@ -616,10 +604,15 @@ export function SessionMetrics({
     : "";
 
   return <div id={id} className="sync-history-thread-meta" aria-label="Session details">
-    <span className="sync-history-thread-metric" data-tooltip={`User turns · ${session.user_round_count}`} aria-label={`User turns: ${session.user_round_count}`} tabIndex={0}><Icon name="user" size={12} /><b>{session.user_round_count}</b></span>
-    <span className="sync-history-thread-metric" data-tooltip={`Total tokens · ${formatCount(session.total_tokens)}`} aria-label={`Total tokens: ${formatCount(session.total_tokens)}`} tabIndex={0}><Icon name="token" size={12} /><b>{formatCount(session.total_tokens)}</b></span>
-    <span className="sync-history-thread-metric" data-tooltip={`Agent messages · ${session.agent_message_count}`} aria-label={`Agent messages: ${session.agent_message_count}`} tabIndex={0}><Icon name="message" size={12} /><b>{session.agent_message_count}</b></span>
+    {/* Ordered by what the row is about: the exchange first, then the work it
+        did, then what it cost, then how long it took. */}
+    {/* One conversation, one number: user turns and agent messages summed
+        behind the message glyph, where they used to be two readouts whose
+        relationship nothing stated. The face answers "how much was said";
+        the split lives in the tooltip, each half on its own line. */}
+    <span className="sync-history-thread-metric" data-tooltip={`User turns · ${session.user_round_count}\nAgent messages · ${session.agent_message_count}`} aria-label={`Messages: ${session.user_round_count + session.agent_message_count}. User turns: ${session.user_round_count}. Agent messages: ${session.agent_message_count}`} tabIndex={0}><Icon name="message" size={12} /><b>{session.user_round_count + session.agent_message_count}</b></span>
     {session.tool_call_count > 0 && <span className="sync-history-thread-metric" data-tooltip={`Tool calls · ${session.tool_call_count}`} aria-label={`Tool calls: ${session.tool_call_count}`} tabIndex={0}><Icon name="tool" size={12} /><b>{session.tool_call_count}</b></span>}
+    <span className="sync-history-thread-metric" data-tooltip={`Total tokens · ${formatCount(session.total_tokens)}`} aria-label={`Total tokens: ${formatCount(session.total_tokens)}`} tabIndex={0}><Icon name="token" size={12} /><b>{formatCount(session.total_tokens)}</b></span>
     {!session.metrics_complete && <span className="sync-history-thread-metric sync-history-partial" data-tooltip="Some session metrics are unavailable" aria-label="Some session metrics are unavailable" tabIndex={0}><Icon name="alert-triangle" size={12} /></span>}
     {durationText && (
       <span className="sync-history-thread-metric sync-history-thread-duration" data-tooltip={durationLabel} aria-label={durationLabel} tabIndex={0}>
@@ -673,7 +666,6 @@ interface SessionCardProps {
   busy?: boolean;
   busyActionId?: string | null;
   onSessionAction: (session: ProjectSessionSummary, action: SessionActionDescriptor) => void;
-  initialCheckpointId?: string;
   onOpenSessionDetail?: (
     request: OpenSessionDetailRequest,
     trigger: HTMLButtonElement,
@@ -711,38 +703,6 @@ export function sessionDebugCopyText(
     `Provider session ID: ${providerSessionId ?? "Not recorded"}`,
     `Working directory: ${workingDirectory}`,
   ].join("\n");
-}
-
-async function writeClipboardText(value: string, fallbackRoot: HTMLElement | null): Promise<void> {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(value);
-      return;
-    } catch {
-      // Some WebViews expose Clipboard but still reject it. Use the local
-      // document fallback while this user gesture is active.
-    }
-  }
-  if (typeof document === "undefined") throw new Error("Clipboard access is unavailable");
-  const field = document.createElement("textarea");
-  field.value = value;
-  field.readOnly = true;
-  field.style.position = "fixed";
-  field.style.opacity = "0";
-  field.style.pointerEvents = "none";
-  const previousFocus = document.activeElement instanceof HTMLElement
-    ? document.activeElement
-    : null;
-  (fallbackRoot ?? document.body).append(field);
-  let copied = false;
-  try {
-    field.select();
-    copied = document.execCommand("copy");
-  } finally {
-    field.remove();
-    previousFocus?.focus();
-  }
-  if (!copied) throw new Error("Clipboard access is unavailable");
 }
 
 /** Roughly the panel's rendered height; only used to pick which way it opens. */
@@ -824,6 +784,9 @@ function SessionDebugMenu({ resourceId, providerSessionId, workingDirectory }: S
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
+      /* This layer consumed Escape; the Push/Pull review listens on window
+         and must not also close and discard the whole review. */
+      event.stopPropagation();
       closeMenu(true);
     };
     document.addEventListener("pointerdown", handlePointerDown);
@@ -1051,7 +1014,7 @@ function actionTitle(action: SessionActionDescriptor, busy = false): string {
 
 function SessionCard({
   session, occurrenceKey, workingDirectory, busy = false, busyActionId = null,
-  onSessionAction, initialCheckpointId, onOpenSessionDetail,
+  onSessionAction, onOpenSessionDetail,
   syncEntry, reviewResourceId, storageName, syncFallback, selectionMode, selected = false, selectable = false,
   selectionDisabled = false, onToggleResource, onReviewPull,
 }: SessionCardProps) {
@@ -1078,7 +1041,6 @@ function SessionCard({
     onOpenSessionDetail?.({
       resourceId: session.resource_id,
       occurrenceKey,
-      initialCheckpointId,
     }, trigger);
   };
   return (
@@ -1468,11 +1430,7 @@ export function ProjectChatHistoryContent({
     : loading
       ? "Refreshing project activity"
       : null;
-  const renderSession = (
-    session: ProjectSessionSummary,
-    key: string,
-    initialCheckpointId?: string,
-  ) => {
+  const renderSession = (session: ProjectSessionSummary, key: string) => {
     const entry = syncBySessionResource.get(session.resource_id);
     const reviewResourceId = entry?.resource_id ?? session.resource_id;
     const workingDirectory = session.working_directory
@@ -1486,8 +1444,7 @@ export function ProjectChatHistoryContent({
     return (
     <SessionCard key={key} session={session} occurrenceKey={key} workingDirectory={workingDirectory}
       busy={actionBusyResourceId === session.resource_id} busyActionId={actionBusyActionId}
-      onSessionAction={onSessionAction}
-      initialCheckpointId={initialCheckpointId} onOpenSessionDetail={onOpenSessionDetail}
+      onSessionAction={onSessionAction} onOpenSessionDetail={onOpenSessionDetail}
       syncEntry={entry} reviewResourceId={reviewResourceId}
       storageName={comparison ? comparisonStorageName : activeStorageName} syncFallback={syncFallback}
       selectionMode={selectionMode} selected={selectedResourceIds.has(reviewResourceId)}
@@ -1716,7 +1673,7 @@ export function ProjectChatHistoryContent({
                               {references.map((reference) => {
                                 const session = sessionsByResource.get(reference.resource_id);
                                 return session
-                                  ? renderSession(session, `${commit.sha}:${session.resource_id}`, commit.sha)
+                                  ? renderSession(session, `${commit.sha}:${session.resource_id}`)
                                   : null;
                               })}
                             </div>
@@ -1921,7 +1878,13 @@ export default function ProjectActivityPage({
   };
 
   useEffect(() => {
+    // The whole per-project slate resets, not just the data. Leaving the error
+    // and loading flags set carried the previous project's failure banner onto
+    // the next one, and a switch made mid-flight stranded the spinners on
+    // because their owning request had already been superseded.
     setActivity(null); setBranch(null); setComparison(null);
+    setLoadError(null); setComparisonError(null); setActionError(null);
+    setLoading(false); setComparisonLoading(false); setLoadingMore(false);
     void loadWorkspace(null);
     return () => { requestRef.current += 1; comparisonRequestRef.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps

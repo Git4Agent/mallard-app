@@ -8,6 +8,17 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react()],
 
+  // The only consumer is the Tauri webview, so the browser baseline is the one
+  // Tauri 2 guarantees — WKWebView on macOS 10.15+, WebView2 on Windows,
+  // WebKitGTK 2.24+ — not Vite's default browser matrix. Pinning it stops the
+  // build from shipping transpiled fallbacks for engines that never run this.
+  build: {
+    target: ["es2022", "safari15", "chrome105"],
+    // The bundle is packaged into a signed application; sourcemaps would ship
+    // the whole frontend inside it and are recoverable from the repo anyway.
+    sourcemap: false,
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

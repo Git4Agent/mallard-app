@@ -233,6 +233,13 @@ fn decision(action: ConversationReviewAction) -> ConversationDecision {
     }
 }
 
+/// A blocked decision with the blocker's standard reason text, for
+/// review-stage overrides computed outside the relation matrix (e.g. the
+/// redaction ruleset gate, which needs the cloud row's stamp).
+pub fn blocked_conversation_decision(blocker: ConversationBlocker) -> ConversationDecision {
+    blocked(blocker)
+}
+
 fn blocked(blocker: ConversationBlocker) -> ConversationDecision {
     ConversationDecision {
         action: ConversationReviewAction::Blocked,
@@ -261,6 +268,10 @@ fn blocked_reason(blocker: ConversationBlocker) -> &'static str {
         }
         ConversationBlocker::UnknownEvidence => {
             "This conversation's local and stored state could not be proven safely."
+        }
+        ConversationBlocker::RedactionRulesetMismatch => {
+            "This conversation's stored redaction ruleset does not match this app version. \
+             Update Mallard everywhere before syncing it."
         }
     }
 }

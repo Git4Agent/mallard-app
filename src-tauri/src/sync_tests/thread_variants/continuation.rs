@@ -654,7 +654,6 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
         ConversationReviewAction::CreateLocal
     );
     assert!(origin_thread.provider_thread_id.is_none());
-    assert!(origin_thread.origin_label.is_some());
     assert!(origin_thread.pull_decision.selectable);
 
     // A bound thread with no accepted pin whose reviewed cloud tail refolds

@@ -8,7 +8,6 @@ import {
   formatSessionDuration,
   formatSessionLengthDetail,
   formatSessionStart,
-  formatSessionStartDetail,
   sessionDetailDateTime,
 } from "./sessionDetailModel";
 
@@ -80,9 +79,10 @@ export default function SessionDetailHeader({
               fact; the stamp was the only one carrying three — a start, an end
               and a length, where any two of them give the third. What is left
               is when it began and how long it took, each in its own box. The
-              end time moves to the length chip's tooltip. */}
+              end time moves to the length chip's tooltip. The start states
+              itself in full, year included, so it needs no tooltip of its own. */}
           {start && (
-            <FactChip title={formatSessionStartDetail(detail.started_at) ?? undefined}>
+            <FactChip>
               <time dateTime={sessionDetailDateTime(detail.started_at)}>{start}</time>
             </FactChip>
           )}

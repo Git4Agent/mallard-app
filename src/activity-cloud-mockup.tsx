@@ -199,7 +199,6 @@ function entry(row: ProjectSessionSummary, state: ThreadSyncEntry["state"]): Thr
     provider_thread_id: threadId,
     push_decision: { action: state === "storage_only" ? "not_pushable" : "publish", selectable: state !== "storage_only" },
     pull_decision: { action: state === "storage_only" ? "materialize_cloud" : "no_changes", selectable: state === "storage_only" },
-    origin_label: null,
   } as ThreadSyncEntry;
 }
 

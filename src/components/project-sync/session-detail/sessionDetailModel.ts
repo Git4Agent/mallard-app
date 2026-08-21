@@ -1,6 +1,5 @@
 import type {
   ProjectSessionTimelinePage,
-  SessionCheckpointJump,
   SessionCount,
   SessionEventCounts,
   SessionTimelineEvent,
@@ -8,6 +7,7 @@ import type {
   SessionToolCallPreview,
   SessionToolCategory,
 } from "../../../types";
+import { clockOptions, formatDuration, toEpochMilliseconds } from "../../../clock";
 
 export type ActiveProjectSubview =
   | { kind: "overview" }
@@ -16,13 +16,11 @@ export type ActiveProjectSubview =
     localProjectId: string;
     resourceId: string;
     occurrenceKey: string;
-    initialCheckpointId?: string;
   };
 
 export interface OpenSessionDetailRequest {
   resourceId: string;
   occurrenceKey: string;
-  initialCheckpointId?: string;
 }
 
 export interface SessionDetailFilters {
@@ -234,22 +232,8 @@ export function eventAnchorId(eventId: string): string {
   return `session-event-${eventId.replace(/[^a-z0-9_-]/gi, "-")}`;
 }
 
-export function findCheckpointJump(
-  checkpoints: SessionCheckpointJump[],
-  identifier: string,
-): SessionCheckpointJump | null {
-  return checkpoints.find((checkpoint) => (
-    checkpoint.event_id === identifier
-    || checkpoint.checkpoint.sha === identifier
-    || checkpoint.checkpoint.short_sha === identifier
-    || checkpoint.checkpoint.sha.startsWith(identifier)
-  )) ?? null;
-}
-
 /** Providers record either seconds or milliseconds; both reach this page. */
-function toMilliseconds(value: number): number {
-  return value > 10_000_000_000 ? value : value * 1_000;
-}
+const toMilliseconds = toEpochMilliseconds;
 
 export function formatSessionDetailTimestamp(value?: number | null): string {
   if (value == null) return "Time unavailable";
@@ -257,8 +241,7 @@ export function formatSessionDetailTimestamp(value?: number | null): string {
     month: "short",
     day: "numeric",
     year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
+    ...clockOptions(),
   });
 }
 
@@ -269,20 +252,14 @@ export function sessionDetailDateTime(value?: number | null): string | undefined
 
 /**
  * Clock time alone; the day it belongs to is stated once, by the divider.
- * 24-hour deliberately: this is a fixed-width column read down the page, and a
+ * 24-hour by default — this is a fixed-width column read down the page, and a
  * locale AM/PM adds three characters of chrome to every row for a distinction
- * the column already makes by sorting.
+ * the column already makes by sorting. The cycle itself now comes from the
+ * global clock preference, shared with every other timestamp in the app.
  */
 export function formatSessionDetailClock(value?: number | null): string {
   if (value == null) return "--:--";
-  return new Date(toMilliseconds(value)).toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    // `hourCycle`, not `hour12: false`. The two are not synonyms: under en-US
-    // the flag selects the h24 cycle on some ICU builds, which renders midnight
-    // as `24:06`. h23 names the cycle outright and reads the same everywhere.
-    hourCycle: "h23",
-  });
+  return new Date(toMilliseconds(value)).toLocaleTimeString(undefined, clockOptions());
 }
 
 function sessionDetailDayKey(value?: number | null): string | null {
@@ -300,6 +277,8 @@ function formatSessionDetailDay(value?: number | null): string {
   });
 }
 
+/** Gaps have their own thresholds and prefix, so they keep their own shape —
+ *  only the unit normalisation is shared. */
 function elapsedSeconds(from: number, to: number): number {
   return Math.max(0, Math.round((toMilliseconds(to) - toMilliseconds(from)) / 1_000));
 }
@@ -309,13 +288,7 @@ export function formatSessionDuration(
   ended?: number | null,
 ): string | null {
   if (started == null || ended == null) return null;
-  const seconds = elapsedSeconds(started, ended);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  const rest = minutes % 60;
-  return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
+  return formatDuration(started, ended);
 }
 
 export interface SessionTurnSpan {
@@ -355,24 +328,19 @@ export function sessionTurnDurationLabel(span: SessionTurnSpan | undefined): str
  * — the length is the chip beside this one, and the end is the two of them
  * added, which is arithmetic nobody asked the header to show.
  *
- * The year is a fact, not decoration: it prints exactly when it is not the
- * current one. The range this replaced stripped it unconditionally, so a 2024
- * session and a 2026 session came out as the very same string. `now` is a
- * parameter so a test can pin the comparison instead of racing the calendar.
+ * The year always prints. It costs six characters on a chip that is read once,
+ * deliberately, on a page you opened on purpose — and the alternative is a
+ * stamp whose shape depends on the calendar, where `Aug 18` silently means a
+ * different thing in January. The range this replaced went the other way and
+ * stripped the year unconditionally, so a 2024 session and a 2026 session came
+ * out as the very same string.
+ *
+ * Nothing is abbreviated here, so this chip carries no tooltip: there is no
+ * fuller value to put in one.
  */
-export function formatSessionStart(value?: number | null, now: number = Date.now()): string | null {
+export function formatSessionStart(value?: number | null): string | null {
   if (value == null) return null;
-  const when = new Date(toMilliseconds(value));
-  const day = when.getFullYear() === new Date(now).getFullYear()
-    ? when.toLocaleDateString(undefined, { month: "short", day: "numeric" })
-    : formatSessionDetailDay(value);
-  return `${day} · ${formatSessionDetailClock(value)}`;
-}
-
-/** The start chip hovered: the same moment with the year always spelled out. */
-export function formatSessionStartDetail(value?: number | null): string | null {
-  if (value == null) return null;
-  return `Started ${formatSessionDetailDay(value)} · ${formatSessionDetailClock(value)}`;
+  return `${formatSessionDetailDay(value)} · ${formatSessionDetailClock(value)}`;
 }
 
 /**

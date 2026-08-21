@@ -9,7 +9,6 @@ description = "Mallard persistence, object stores, provider adapters, and platfo
 mallard-domain = { path = "../mallard-domain" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.9"
 dirs = "5"
 walkdir = "2"
 tokio = { version = "1", features = ["full"] }
@@ -22,11 +21,12 @@ sha2 = "0.10"
 hmac = "0.12"
 # Leftmost-longest in-cwd path matcher (already in the tree transitively).
 aho-corasick = "1"
+# Credential redaction detector layers (already in the tree transitively).
+regex = "1"
 libc = "0.2"
 tempfile = "3"
 getrandom = "0.3"
 chrono = "0.4"
-rusqlite = { version = "0.32", features = ["bundled"] }
 notify = "8.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]

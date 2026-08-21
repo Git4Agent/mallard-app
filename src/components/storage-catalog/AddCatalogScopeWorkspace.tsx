@@ -25,17 +25,27 @@ function providerLabel(provider: CatalogProviderKey): string {
   return provider === "codex" ? "Codex" : "Claude";
 }
 
+// The two path helpers below are deliberately duplicated rather than imported
+// from project-sync: this module may not depend on that one, and a dozen lines
+// are the price of that boundary. Keep them in step with the originals in
+// ProjectSetupWorkspace.tsx.
 function expandHomePath(value: string, home: string | null): string {
   const trimmed = value.trim();
   if (!home || !trimmed.startsWith("~")) return trimmed;
   if (trimmed === "~") return home;
-  if (trimmed.startsWith("~/")) return `${home.replace(/\/+$/, "")}${trimmed.slice(1)}`;
+  if (trimmed.startsWith("~/")) {
+    const separator = home.includes("\\") ? "\\" : "/";
+    return `${home.replace(/[\\/]+$/, "")}${separator}${trimmed.slice(2)}`;
+  }
   return trimmed;
 }
 
-// Deliberately duplicated rather than imported from project-sync: this module
-// may not depend on that one, and the six lines are the price of that
-// boundary.
+function isAbsoluteProfilePath(value: string): boolean {
+  return value.startsWith("/")
+    || /^[A-Za-z]:[\\/]/.test(value)
+    || value.startsWith("\\\\");
+}
+
 function attentionBadge(show: boolean) {
   if (!show) return null;
   return (
@@ -200,7 +210,7 @@ export default function AddCatalogScopeWorkspace({
 
   const working = busy || submitting;
   const expandedProfilePath = expandHomePath(profileEditor?.path ?? "", homePath);
-  const customPathReady = profileEditor !== null && expandedProfilePath.startsWith("/");
+  const customPathReady = profileEditor !== null && isAbsoluteProfilePath(expandedProfilePath);
   const canSaveProfile = profileEditor !== null
     && profileEditor.displayName.trim().length > 0
     && customPathReady
@@ -209,8 +219,8 @@ export default function AddCatalogScopeWorkspace({
   const customPathHint = profileEditor
     ? !expandedProfilePath
       ? "Type or paste a path, or Browse. ~ means your home folder."
-      : !expandedProfilePath.startsWith("/")
-        ? "Paths must be absolute — start with / or ~/."
+      : !isAbsoluteProfilePath(expandedProfilePath)
+        ? "Paths must be absolute — start with ~/, / or a drive letter."
         : `${provider ? providerLabel(provider) : "Agent"} profile ·`
     : null;
 

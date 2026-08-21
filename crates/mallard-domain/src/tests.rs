@@ -700,6 +700,16 @@ struct ProviderScopeParts {
     scope: BundleScope,
 }
 
+/// A syntactically valid redaction stamp for validation tests. The domain
+/// checks shape only; fingerprint equality with a binary ruleset is an
+/// application-boundary concern.
+fn test_wire_redaction() -> Option<ConversationWireRedaction> {
+    Some(ConversationWireRedaction {
+        codec: "mallard.redact.v1".to_string(),
+        fingerprint: "ab".repeat(32),
+    })
+}
+
 fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderScopeParts {
     let key = provider(provider_key);
     let thread_id = CloudThreadId::parse(format!("cloudthread-{}", thread_suffix)).unwrap();
@@ -763,6 +773,7 @@ fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderSco
             ),
             _ => None,
         },
+        wire_redaction: test_wire_redaction(),
         forked_from: None,
         preserved: None,
         source_thread_id: Some("provider-native-thread".to_string()),
@@ -967,6 +978,7 @@ fn duplicate_threads_across_scopes_are_rejected() {
             )
             .unwrap(),
         ),
+        wire_redaction: test_wire_redaction(),
         forked_from: None,
         preserved: None,
         source_thread_id: None,

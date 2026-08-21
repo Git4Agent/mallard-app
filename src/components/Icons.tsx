@@ -427,11 +427,19 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
         />
       )}
       {name === "tool" && (
+        /* A cog: teeth at the cardinals, hollow hub. The crossed hammer-and-
+           wrench it replaced filled 22×22 cells across 236 path commands — at
+           the 12px this mark ships at, that rendered as a smudge. This one
+           matches its row neighbours' 20×20 optical weight and is the only
+           round silhouette on the strip, so it is found by shape before it is
+           read. Drawn in-house on the 12-cell coarse grid and doubled, so
+           every stem is two cells wide; the sibling marks come from downloaded
+           sets, hence the distinct provenance class. */
         <path
-          className="icon-pixel-fill icon-hackernoon-pixel"
+          className="icon-pixel-fill icon-mallard-pixel"
           fill="currentColor"
           stroke="none"
-          d="M19 11v-1h1V9h1V8h1V7h1V4h-1V3h-1V2h-1V1h-3v1h-1v1h-1v1h-1v1h-1v1h-2V5h-1V4H9V3H8V2H7V1H5v1H4v1H3v1H2v1H1v2h1v1h1v1h1v1h1v1h1v2H5v1H4v1H3v1H2v1H1v6h6v-1h1v-1h1v-1h1v-1h1v-1h2v1h1v1h1v1h1v1h1v1h2v-1h1v-1h1v-1h1v-1h1v-2h-1v-1h-1v-1h-1v-1h-1v-1h-1v-2h1ZM7 10V9H6V8H5V7H4V5h1V4h2v1h1v1H7v1h1v1h1V7h1v2H9v1H7Zm6 3v1h-1v1h-1v1h-1v1H9v1H8v1H7v1H6v1H3v-3h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1V9h1V8h1V7h1v1h1v1h1v1h-1v1h-1v1h-1v1h-1Zm6 3v1h1v2h-1v1h-2v-1h-1v-1h-1v-1h-1v-2h1v-1h2v1h-1v1h1v1h1v-1h1Zm-2-9V6h-1V5h1V4h1V3h1v1h1v1h1v1h-1v1h-1v1h-1V7h-1Z"
+          d="M10 2h4v8h-4ZM6 6h4v12H6ZM14 6h4v12h-4ZM2 10h4v4H2ZM18 10h4v4h-4ZM10 14h4v8h-4Z"
         />
       )}
       {name === "trash" && (

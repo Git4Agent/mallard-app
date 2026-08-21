@@ -7,7 +7,7 @@
 
 use crate::path_text_boundary::replace_sensitive_path_occurrences;
 use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
-use crate::project_activity::resolve_activity_project;
+use crate::project_activity::{discover_github_repository_url, resolve_activity_project};
 use crate::provider_capture::LocalSessionView;
 use crate::providers::traits::TIMELINE_TOOL_PREVIEW_BYTES;
 use crate::providers::{
@@ -92,12 +92,6 @@ pub struct SessionDetailCapabilities {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct SessionCheckpointJump {
-    pub event_id: String,
-    pub checkpoint: SessionCheckpoint,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ProjectSessionDetail {
     pub resource_id: String,
     pub provider: ProviderKey,
@@ -120,8 +114,10 @@ pub struct ProjectSessionDetail {
     pub capabilities: SessionDetailCapabilities,
     #[serde(default)]
     pub actions: Vec<SessionActionDescriptor>,
-    #[serde(default)]
-    pub checkpoint_jumps: Vec<SessionCheckpointJump>,
+    /// Where this project's commits can be read on GitHub, when a GitHub remote
+    /// is configured. The checkpoint marker links its sha through this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repository_url: Option<String>,
     pub snapshot_id: String,
     #[serde(default)]
     pub warnings: Vec<SessionDetailWarning>,
@@ -1076,13 +1072,6 @@ fn checkpoint_event_id(checkpoint: &SessionCheckpoint) -> String {
     format!("checkpoint:{}", checkpoint.sha)
 }
 
-fn checkpoint_jump(checkpoint: SessionCheckpoint) -> SessionCheckpointJump {
-    SessionCheckpointJump {
-        event_id: checkpoint_event_id(&checkpoint),
-        checkpoint,
-    }
-}
-
 fn checkpoint_event(
     index: &SessionTimelineIndex,
     checkpoint: SessionCheckpoint,
@@ -1563,12 +1552,6 @@ pub fn get_project_session_detail(
         })
         .unwrap_or_default();
     sanitize_actions(&mut actions, &session)?;
-    let checkpoint_jumps = match &checkpoint {
-        CheckpointSupport::Supported(Some(checkpoint)) => {
-            vec![checkpoint_jump(checkpoint.clone())]
-        }
-        _ => Vec::new(),
-    };
     let mut warnings = timeline_warnings(&index, cache_warnings);
     sanitize_warnings(&mut warnings, &session);
     // The provider index title leads: keep-both preservation markers are
@@ -1611,7 +1594,9 @@ pub fn get_project_session_detail(
         },
         event_counts,
         actions,
-        checkpoint_jumps,
+        github_repository_url: matches!(checkpoint, CheckpointSupport::Supported(_))
+            .then(|| discover_github_repository_url(&session.project_root))
+            .flatten(),
         snapshot_id,
         warnings,
     };
@@ -1673,19 +1658,14 @@ pub fn get_project_session_timeline_page(
         CheckpointSupport::Supported(checkpoint) => checkpoint,
         CheckpointSupport::Unsupported => None,
     };
-    let checkpoint_id = checkpoint.as_ref().map(checkpoint_event_id);
     if let Some(anchor) = &request.anchor_event_id {
-        start_index = if checkpoint_id.as_deref() == Some(anchor.as_str()) {
-            Some(index.events.len())
-        } else {
-            Some(
-                index
-                    .events
-                    .iter()
-                    .position(|event| event.event_id == *anchor)
-                    .ok_or_else(|| invalid_request("The timeline anchor does not exist."))?,
-            )
-        };
+        start_index = Some(
+            index
+                .events
+                .iter()
+                .position(|event| event.event_id == *anchor)
+                .ok_or_else(|| invalid_request("The timeline anchor does not exist."))?,
+        );
     }
     let start_index = start_index.unwrap_or(0);
     if start_index > index.events.len() {
@@ -1703,10 +1683,7 @@ pub fn get_project_session_timeline_page(
     })?;
     let query = SessionTimelineQuery {
         start_index: Some(start_index),
-        anchor_event_id: request
-            .anchor_event_id
-            .clone()
-            .filter(|anchor| checkpoint_id.as_deref() != Some(anchor.as_str())),
+        anchor_event_id: request.anchor_event_id.clone(),
         limit,
         included_event_kinds: request.included_event_kinds.clone(),
         included_tool_categories: request.included_tool_categories.clone(),

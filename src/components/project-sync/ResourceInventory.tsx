@@ -97,16 +97,20 @@ function ResourceRow({
               <code>{resource.logical_paths.join("\n")}</code>
             </div>
           )}
-          <div className="sync-resource-detail-grid">
+          {/* A description list, which is what this is. As a <div> of bare
+              spans it was also matched by the flex label rule above, so every
+              *value* got the label's 85px box and caption colour — the exact
+              distinction this grid exists to draw. */}
+          <dl className="sync-resource-detail-grid">
             {/* A resource the backend could not name is titled by its own id
                 — a recipe entry that no longer resolves locally is the case.
                 Printing the id again under a caption said it twice. */}
             {resource.resource_id !== resource.display_name && (
-              <><span>Resource ID</span><code>{resource.resource_id}</code></>
+              <><dt>Resource ID</dt><dd><code>{resource.resource_id}</code></dd></>
             )}
-            <span>Kind</span><span>{kindLabel(resource.kind)}</span>
-            {resource.apply_policy && <><span>Apply</span><span>{applyPolicyLabel(resource.apply_policy)}</span></>}
-          </div>
+            <dt>Kind</dt><dd>{kindLabel(resource.kind)}</dd>
+            {resource.apply_policy && <><dt>Apply</dt><dd>{applyPolicyLabel(resource.apply_policy)}</dd></>}
+          </dl>
           {resource.blocked_reason && (
             <div className="sync-resource-blocker"><Icon name="alert-triangle" size={14} /> {resource.blocked_reason}</div>
           )}
@@ -152,35 +156,36 @@ function ResourceGroup({
 
   return (
     <section className={`sync-resource-group category-${group.id}`}>
-      <div
-        className="sync-resource-group-header"
-        role="button"
-        tabIndex={0}
-        aria-expanded={!collapsed}
-        title={group.description}
-        onClick={toggleCollapsed}
-        onKeyDown={(event) => {
-          if (event.key !== "Enter" && event.key !== " ") return;
-          event.preventDefault();
-          toggleCollapsed();
-        }}
-      >
-        <span className="sync-resource-group-icon"><Icon name={CATEGORY_ICON[group.id]} size={16} /></span>
-        <span className="sync-resource-group-copy">
-          <strong>{group.label}</strong>
-          <span>{group.description}</span>
-        </span>
-        {unavailableCount > 0 && (
-          <span
-            className="sync-resource-group-unavailable"
-            title={`${unavailableCount} of ${items.length} unavailable on this machine`}
-          >
-            <Icon name="alert-triangle" size={12} />
-            {unavailableCount} unavailable
+      {/* Two real controls side by side, not one fake button wrapping another.
+          The wrapper used to be role="button" with its own Enter/Space handler,
+          which swallowed both keys before the nested "Include all" could see
+          them — so that control was reachable by Tab and impossible to
+          activate, and pressing Enter on it folded the group instead. */}
+      <div className="sync-resource-group-header">
+        <button
+          type="button"
+          className="sync-resource-group-fold"
+          aria-expanded={!collapsed}
+          title={group.description}
+          onClick={toggleCollapsed}
+        >
+          <span className="sync-resource-group-icon"><Icon name={CATEGORY_ICON[group.id]} size={16} /></span>
+          <span className="sync-resource-group-copy">
+            <strong>{group.label}</strong>
+            <span>{group.description}</span>
           </span>
-        )}
-        <span className="sync-resource-group-count">{selectedCount}/{items.length}</span>
-        <span className="sync-resource-group-actions" onClick={(event) => event.stopPropagation()}>
+          {unavailableCount > 0 && (
+            <span
+              className="sync-resource-group-unavailable"
+              title={`${unavailableCount} of ${items.length} unavailable on this machine`}
+            >
+              <Icon name="alert-triangle" size={12} />
+              {unavailableCount} unavailable
+            </span>
+          )}
+          <span className="sync-resource-group-count">{selectedCount}/{items.length}</span>
+        </button>
+        <span className="sync-resource-group-actions">
           <button
             type="button"
             className="btn-link sync-resource-group-all"

@@ -74,7 +74,7 @@ export function useHomePath(): string | null {
   useEffect(() => {
     let cancelled = false;
     void homeDir()
-      .then((resolved) => { if (!cancelled) setHomePath(resolved.replace(/\/+$/, "")); })
+      .then((resolved) => { if (!cancelled) setHomePath(resolved.replace(/[\\/]+$/, "")); })
       .catch(() => { if (!cancelled) setHomePath(null); });
     return () => { cancelled = true; };
   }, []);
@@ -134,14 +134,30 @@ export function useProfilePathProbes(
 
 /**
  * The backend takes absolute clean paths only, so a typed `~` has to be
- * resolved here before it can be probed at all.
+ * resolved here before it can be probed at all. The home path arrives from the
+ * OS, so it carries that OS's separator: strip and rejoin with whichever one
+ * it uses rather than assuming `/`.
  */
 export function expandHomePath(value: string, home: string | null): string {
   const trimmed = value.trim();
   if (!home || !trimmed.startsWith("~")) return trimmed;
   if (trimmed === "~") return home;
-  if (trimmed.startsWith("~/")) return `${home.replace(/\/+$/, "")}${trimmed.slice(1)}`;
+  if (trimmed.startsWith("~/")) {
+    const separator = home.includes("\\") ? "\\" : "/";
+    return `${home.replace(/[\\/]+$/, "")}${separator}${trimmed.slice(2)}`;
+  }
   return trimmed;
+}
+
+/**
+ * Absolute in the sense every supported host means it: a POSIX root, a Windows
+ * drive letter, or a UNC share. A bare `startsWith("/")` disables every custom
+ * profile path on Windows, which ships an installer of its own.
+ */
+export function isAbsoluteProfilePath(value: string): boolean {
+  return value.startsWith("/")
+    || /^[A-Za-z]:[\\/]/.test(value)
+    || value.startsWith("\\\\");
 }
 
 /**
@@ -169,8 +185,8 @@ export function profilePathHint(
   if (!expanded) {
     return { tone: "mute", message: "Type or paste a path, or Browse. ~ means your home folder." };
   }
-  if (!expanded.startsWith("/")) {
-    return { tone: "mute", message: "Paths must be absolute — start with / or ~/." };
+  if (!isAbsoluteProfilePath(expanded)) {
+    return { tone: "mute", message: "Paths must be absolute — start with ~/, / or a drive letter." };
   }
   if (!state || state.status === "checking") {
     return { tone: "mute", message: "Checking", path: expanded };
@@ -360,14 +376,21 @@ export default function ProjectSetupWorkspace({
   }, [draft?.storage, storages]);
   const storageIsPending = draft?.storage?.kind === "pending";
 
-  // Remote repositories for the selected existing storage. Pending storage
-  // is not in the saved config yet, so its repos cannot be listed; the
-  // repository choice stays "new repo" until setup finishes.
+  // Remote repositories for the selected storage. A pending storage is not
+  // in the saved config yet, but its repos still matter — re-adding a
+  // populated folder must offer the repos already inside it — so those are
+  // listed read-only from the draft configuration itself.
   const listableStorageId = draft?.storage?.kind === "existing" ? draft.storage.storage_id : null;
+  const pendingStorage = draft?.storage?.kind === "pending" ? draft.storage.storage : null;
+  const pendingStorageListable = !!pendingStorage
+    && (pendingStorage.kind === "local"
+      ? pendingStorage.local_dir.trim().length > 0
+      : pendingStorage.bucket.trim().length > 0);
+  const chosenStorageId = listableStorageId ?? (pendingStorage ? pendingStorage.id : null);
   useEffect(() => {
     let cancelled = false;
     if (!workflowIsActive()) return () => { cancelled = true; };
-    if (!listableStorageId) {
+    if (!listableStorageId && !pendingStorageListable) {
       setRemoteBundles([]);
       setBundlesError(null);
       setBundlesLoading(false);
@@ -375,7 +398,10 @@ export default function ProjectSetupWorkspace({
     }
     setBundlesLoading(true);
     setBundlesError(null);
-    void projectSyncApi.listRemoteBundleSnapshots(listableStorageId)
+    const listing = listableStorageId
+      ? projectSyncApi.listRemoteBundleSnapshots(listableStorageId)
+      : projectSyncApi.listPendingStorageBundleSnapshots(pendingStorage as StorageConfig);
+    void listing
       .then((bundles) => {
         if (cancelled || !workflowIsActive()) return;
         setRemoteBundles(bundles);
@@ -389,7 +415,14 @@ export default function ProjectSetupWorkspace({
         if (!cancelled && workflowIsActive()) setBundlesLoading(false);
       });
     return () => { cancelled = true; };
-  }, [listableStorageId]);
+  }, [
+    listableStorageId,
+    pendingStorageListable,
+    pendingStorage?.id,
+    pendingStorage?.kind,
+    pendingStorage?.local_dir,
+    pendingStorage?.bucket,
+  ]);
 
   const repositoryFingerprint = inspection?.draft.repository_fingerprint
     ?? draft?.repository_fingerprint
@@ -406,13 +439,13 @@ export default function ProjectSetupWorkspace({
         repositoryFingerprint,
       )
     ));
-    if (matches.length === 1 && listableStorageId) {
+    if (matches.length === 1 && chosenStorageId) {
       repoAutoSelected.current = true;
       edit((current) => ({
         ...current,
         repository: {
           kind: "existing",
-          storage_id: listableStorageId,
+          storage_id: chosenStorageId,
           bundle_id: matches[0].bundle_id,
           display_name: matches[0].display_name,
           repository_fingerprint: matches[0].repository_fingerprint ?? null,
@@ -423,7 +456,7 @@ export default function ProjectSetupWorkspace({
   }, [
     bundlesLoading,
     draft,
-    listableStorageId,
+    chosenStorageId,
     remoteBundles,
     repositoryFingerprint,
   ]);
@@ -433,7 +466,7 @@ export default function ProjectSetupWorkspace({
       const selection = draft?.profiles[descriptor.key];
       if (selection?.kind !== "pending") return [];
       const path = expandHomePath(selection.path, homePath);
-      return path.startsWith("/") ? [{ provider: descriptor.key, path }] : [];
+      return isAbsoluteProfilePath(path) ? [{ provider: descriptor.key, path }] : [];
     })
   ), [draft?.profiles, homePath, providers]);
   const pathProbes = useProfilePathProbes(probeTargets, workflowIsActive);
@@ -566,7 +599,11 @@ export default function ProjectSetupWorkspace({
     && !bundlesLoading
     && saveState !== "saving"
     && saveState !== "error";
-  const showRepositoryChoice = usesExistingRepo
+  // The repository decision is always explicit once a storage is chosen:
+  // either the user picks from the repos already in the storage, or they see
+  // the statement that Finish creates a new one. No silent default.
+  const showRepositoryChoice = Boolean(chosenStorageId)
+    || usesExistingRepo
     || Boolean(bundlesError)
     || remoteBundles.length > 0
     || repositorySection?.state === "blocked";
@@ -861,7 +898,10 @@ export default function ProjectSetupWorkspace({
               /* No radiogroup renders alongside this failure, so there is no
                  field to describe — announce it instead. */
               <div className="sync-setup-field-error" role="alert"><Icon name="alert-triangle" size={13} /> {bundlesError}</div>
-            ) : !listableStorageId ? null : (
+            ) : !chosenStorageId || bundlesLoading ? null : (
+              /* An empty storage renders the same option card, alone and
+                 selected: the user sees the claim Finish is about to make in
+                 the section's own language, never a silent default. */
               <div className="sync-bundle-match-options" role="radiogroup" aria-label="Repo identity for this project" aria-describedby={repositoryErrorId}>
                 <button
                   type="button"
@@ -874,7 +914,11 @@ export default function ProjectSetupWorkspace({
                   <span className="sync-bundle-radio"><span /></span>
                   <span className="sync-bundle-match-copy">
                     <strong>New repository</strong>
-                    <span>Keep this project separate</span>
+                    <span>
+                      {remoteBundles.length === 0
+                        ? `Creates “${draft.display_name}” in ${selectedStorage?.name ?? "the selected storage"} — machines joining this repository later will find it there`
+                        : "Keep this project separate"}
+                    </span>
                   </span>
                 </button>
                 {remoteBundles.map((bundle) => {

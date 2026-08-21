@@ -480,31 +480,6 @@ impl LocalStateRepository {
         ))
     }
 
-    /// Resolve the active replica and derive both tokens while holding the
-    /// same persistence lock. Rotation therefore cannot pair a new host key
-    /// with a stale replica loaded by an earlier command step.
-    pub fn derive_project_origin_tokens(
-        &self,
-        local_project_id: &LocalProjectId,
-    ) -> Result<(BundleId, OriginHostToken, OriginReplicaToken), String> {
-        let _guard = persistence_guard(&self.root)?;
-        let identity = self.load_or_create_host_identity_unlocked()?;
-        let config = self.load_config_unlocked()?;
-        let machine = self.load_bindings_unlocked(&config, &identity)?;
-        let binding = machine
-            .active_for(local_project_id)
-            .ok_or_else(|| format!("project '{}' has no active binding", local_project_id))?;
-        Ok((
-            binding.bundle_id.clone(),
-            derive_origin_host_token(&identity.host_id, &binding.bundle_id)?,
-            derive_origin_replica_token(
-                &identity.host_id,
-                &binding.bundle_id,
-                &binding.replica_id,
-            )?,
-        ))
-    }
-
     #[cfg(test)]
     pub fn derive_origin_host_token(
         &self,
@@ -638,14 +613,6 @@ impl LocalStateRepository {
             MAX_CONVERSATION_JOURNAL_BYTES,
         )?;
         Ok(result)
-    }
-
-    pub fn load_origin_aliases(&self) -> Result<Vec<mallard_domain::OriginHostAlias>, String> {
-        let _guard = persistence_guard(&self.root)?;
-        let identity = self.load_or_create_host_identity_unlocked()?;
-        Ok(self
-            .load_conversation_bindings_for_aliases_unlocked(&identity)?
-            .origin_aliases)
     }
 
     pub fn mutate_origin_aliases<T>(

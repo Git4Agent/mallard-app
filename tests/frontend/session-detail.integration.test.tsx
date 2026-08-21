@@ -23,7 +23,6 @@ import {
   formatSessionGap,
   formatSessionLengthDetail,
   formatSessionStart,
-  formatSessionStartDetail,
   groupSessionEventsByDay,
   includedSessionEventKinds,
   mergeSessionTimelinePages,
@@ -81,7 +80,6 @@ const detail: ProjectSessionDetail = {
     label: "Open in Codex",
     enabled: true,
   }],
-  checkpoint_jumps: [],
   snapshot_id: "snapshot-1",
   warnings: [],
 };
@@ -166,7 +164,7 @@ const checkpointEvent: SessionTimelineEvent = {
 
 function renderTimeline(
   timelineEvents: SessionTimelineEvent[],
-  overrides?: { provider?: string; providerDisplayName?: string },
+  overrides?: { provider?: string; providerDisplayName?: string; repositoryUrl?: string | null },
 ): string {
   return renderToStaticMarkup(
     <SessionDetailTimeline
@@ -184,6 +182,7 @@ function renderTimeline(
       onToolExpandedChange={() => undefined}
       onOpenProjectPath={() => undefined}
       projectRoot="/Users/example/HorrorGame"
+      repositoryUrl={overrides?.repositoryUrl ?? null}
     />,
   );
 }
@@ -282,7 +281,7 @@ test("the header is one strip: hidden h1, facts as chips, verbs on the right", (
 
   // The stamp is two chips: when it began, and how long it took. Neither the
   // end time nor the arrow that pointed at it appears on the strip.
-  assert.match(html, /<time [^>]*="2026-08-06T[\d:.]+Z">\w+ \d+ · \d{2}:\d{2}<\/time><\/span>/);
+  assert.match(html, /<span class="session-detail-chip"><time [^>]*="2026-08-06T[\d:.]+Z">\w+ \d+, 2026 · \d{2}:\d{2}<\/time><\/span>/);
   assert.match(html, /class="session-detail-chip" title="Ran 11m, ending \d{2}:\d{2}"><svg[^>]*data-icon="clock"[\s\S]*?<b>11m<\/b>/);
   assert.doesNotMatch(html, /→/);
 
@@ -375,17 +374,14 @@ test("the wait between turns is a chip on the rail, and ticks never carry one", 
   assert.equal(formatSessionDuration(START, START + 45), "45s");
   assert.equal(formatSessionDuration(START, START + 3_900), "1h 5m");
   assert.equal(formatSessionDuration(START, null), null);
-  // The stamp is a start, and only a start — no end, no arrow. The year shows
-  // itself exactly when it is not the current one; the old range stripped it
-  // unconditionally, so these two sessions printed the same string.
-  const thisYear = Date.UTC(2026, 7, 20);
-  assert.equal(formatSessionStart(null, thisYear), null);
-  assert.doesNotMatch(formatSessionStart(START, thisYear) ?? "", /→|2026/);
-  assert.match(formatSessionStart(START, thisYear) ?? "", /^\w+ \d+ · \d{2}:\d{2}$/);
-  assert.match(formatSessionStart(START, Date.UTC(2028, 0, 1)) ?? "", /2026 · \d{2}:\d{2}$/);
+  // The stamp is a start, and only a start — no end, no arrow. The year is
+  // always spelled out, so the chip's shape never depends on today's date.
+  assert.equal(formatSessionStart(null), null);
+  assert.doesNotMatch(formatSessionStart(START) ?? "", /→/);
+  assert.match(formatSessionStart(START) ?? "", /^\w+ \d+, 2026 · \d{2}:\d{2}$/);
 
-  // The end time is off the chip faces, so the tooltips are where it survives.
-  assert.match(formatSessionStartDetail(START) ?? "", /^Started \w+ \d+, 2026 · \d{2}:\d{2}$/);
+  // The end time is off the chip faces, so the length tooltip is where it
+  // survives — the start needs none, having nothing left to abbreviate.
   assert.match(formatSessionLengthDetail(START, START + 660) ?? "", /^Ran 11m, ending \d{2}:\d{2}$/);
   // A day boundary in the middle makes the end's own date load-bearing.
   assert.match(formatSessionLengthDetail(START, START + 86_400) ?? "", /ending \w+ \d+, 2026 · \d{2}:\d{2}$/);
@@ -444,6 +440,41 @@ test("a checkpoint is a card of recorded fields — sha, subject, branch, clock"
   assert.match(html, /aria-label="Checkpoint · \d{2}:\d{2}"/);
   // No fabricated diff stats: the provider does not record them.
   assert.doesNotMatch(html, /\+\d+ \/ -\d+/);
+});
+
+test("a checkpoint sha opens the commit only where a remote can resolve it", () => {
+  const linked = renderTimeline([checkpointEvent], {
+    repositoryUrl: "https://github.com/Git4Agent/mallard",
+  });
+  // Same shape the activity list's commit heading uses: glyph first, then the
+  // chip, and the anchor holds the full sha in its title.
+  assert.match(
+    linked,
+    /<a class="session-detail-checkpoint-link" href="https:\/\/github\.com\/Git4Agent\/mallard\/commit\/7350274b+"[^>]*title="Open 7350274b+ on GitHub"[^>]*><svg[^>]*data-icon="external-link"[\s\S]*?<code class="session-detail-checkpoint-sha">7350274<\/code><\/a>/,
+  );
+  assert.match(linked, /rel="noopener noreferrer"/);
+
+  // No remote, no link: the chip stays exactly as it was, full sha on hover.
+  const bare = renderTimeline([checkpointEvent]);
+  assert.doesNotMatch(bare, /session-detail-checkpoint-link/);
+  assert.match(bare, /<code class="session-detail-checkpoint-sha" title="7350274b+">7350274<\/code>/);
+});
+
+test("a matched checkpoint flags itself on the row, not on a line above it", () => {
+  // Every checkpoint is matched from Git rather than read out of a transcript,
+  // so this flag is the one that always shows. Stacked above the card it made
+  // the row 62px where a plain commit reads in 36px.
+  const html = renderTimeline([{ ...checkpointEvent, quality: "inferred" }]);
+  assert.doesNotMatch(html, /session-detail-event-flags/);
+  assert.match(
+    html,
+    /class="session-detail-checkpoint-end"><span class="session-detail-quality quality-inferred" title="Matched from Git[^"]*">Inferred<\/span><span class="session-detail-checkpoint-branch">main</,
+  );
+
+  // Every other kind still flags above its body: their rows have nowhere to
+  // put one.
+  const response = renderTimeline([{ ...events[2], quality: "inferred" }]);
+  assert.match(response, /class="session-detail-event-flags"><span class="session-detail-quality quality-inferred">Inferred</);
 });
 
 test("events split into day groups, carrying undated rows with the group they arrive in", () => {
@@ -898,6 +929,33 @@ test("timeline page merging is chronological, de-duplicated, and counts keep the
   assert.equal(formatCompactCount({ value: 1_063_252, quality: "exact" }), "1.06M");
   assert.equal(formatCompactCount({ value: 18_200, quality: "lower_bound" }), "18K+");
   assert.equal(formatCompactCount({ value: 940, quality: "exact" }), "940");
+});
+
+test("a session opened from its commit row starts at the first event", () => {
+  const pageSource = readFileSync(
+    "src/components/project-sync/session-detail/SessionDetailPage.tsx",
+    "utf8",
+  );
+  const modelSource = readFileSync(
+    "src/components/project-sync/session-detail/sessionDetailModel.ts",
+    "utf8",
+  );
+  const activitySource = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
+  const syncSource = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const workspaceSource = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  const types = readFileSync("src/types.ts", "utf8");
+
+  // The checkpoint is synthesized as the timeline's terminal event and a
+  // session holds exactly one, so anchoring the first page at it always
+  // started one past the last indexed event: the reader landed on the commit
+  // marker alone, with no cursor to page forward from. Opening a session now
+  // means opening it at the beginning, whichever row was clicked.
+  for (const source of [pageSource, modelSource, activitySource, syncSource, workspaceSource]) {
+    assert.doesNotMatch(source, /initialCheckpointId|findCheckpointJump|checkpoint_jumps/);
+  }
+  assert.doesNotMatch(pageSource, /anchor_event_id|anchorEventId|pendingAnchorRef/);
+  assert.doesNotMatch(activitySource, /renderSession\([^)]*commit\.sha\)/);
+  assert.doesNotMatch(types, /checkpoint_jumps|SessionCheckpointJump/);
 });
 
 test("workspace navigation lazy-loads detail and preserves the mounted Activity controller", () => {

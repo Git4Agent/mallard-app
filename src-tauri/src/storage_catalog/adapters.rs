@@ -213,13 +213,6 @@ impl ProviderInventory {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PluginVerification {
-    pub verified: bool,
-    pub detail: String,
-    pub observation: Option<PluginObservation>,
-}
-
 /// The compiled adapter contract. Tauri-free; the registry keys
 /// dispatch by [`ProviderKey`], so the adapter carries no self-描述 key.
 pub trait CatalogProviderAdapter: Send + Sync {
@@ -246,15 +239,6 @@ pub trait CatalogProviderAdapter: Send + Sync {
         currently_registered_marketplace: bool,
         mode: PluginApplyMode,
     ) -> Result<NativePluginPlan, CatalogBlocker>;
-
-    /// Post-operation verification through fresh native inventory. A zero
-    /// exit code with failed verification is `partial`, never success.
-    fn verify_plugin_apply(
-        &self,
-        intent: &PluginInstallIntentDescriptor,
-        home: &Path,
-        runner: &dyn PluginProcessRunner,
-    ) -> Result<PluginVerification, CatalogBlocker>;
 }
 
 /// The compiled registry: exactly `codex` and `claude`.
@@ -549,31 +533,6 @@ impl CatalogProviderAdapter for CodexCatalogAdapter {
             mode,
         })
     }
-
-    fn verify_plugin_apply(
-        &self,
-        intent: &PluginInstallIntentDescriptor,
-        home: &Path,
-        runner: &dyn PluginProcessRunner,
-    ) -> Result<PluginVerification, CatalogBlocker> {
-        let inventory = self.discover_plugins(home, runner)?;
-        let observation = inventory.observation(&intent.plugin_id).cloned();
-        let verified = observation
-            .as_ref()
-            .is_some_and(|observation| observation.installed);
-        Ok(PluginVerification {
-            verified,
-            detail: if verified {
-                format!("codex reports '{}' installed", intent.plugin_id)
-            } else {
-                format!(
-                    "codex does not report '{}' installed after the operation",
-                    intent.plugin_id
-                )
-            },
-            observation,
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -769,31 +728,6 @@ impl CatalogProviderAdapter for ClaudeCatalogAdapter {
             ],
             marketplace_argv,
             mode,
-        })
-    }
-
-    fn verify_plugin_apply(
-        &self,
-        intent: &PluginInstallIntentDescriptor,
-        home: &Path,
-        runner: &dyn PluginProcessRunner,
-    ) -> Result<PluginVerification, CatalogBlocker> {
-        let inventory = self.discover_plugins(home, runner)?;
-        let observation = inventory.observation(&intent.plugin_id).cloned();
-        let verified = observation
-            .as_ref()
-            .is_some_and(|observation| observation.installed);
-        Ok(PluginVerification {
-            verified,
-            detail: if verified {
-                format!("claude reports '{}' installed", intent.plugin_id)
-            } else {
-                format!(
-                    "claude does not report '{}' installed after the operation",
-                    intent.plugin_id
-                )
-            },
-            observation,
         })
     }
 }

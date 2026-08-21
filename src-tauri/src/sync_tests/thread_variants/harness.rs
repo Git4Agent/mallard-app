@@ -273,6 +273,9 @@ pub fn publish_request(
                 )
                 .expect("harness chains fold to a portable tail"),
             ),
+            // The real binary stamp: harness rows flow through the real
+            // pull gates, which require fingerprint equality.
+            wire_redaction: Some(crate::project_sync::credential_redaction::shared().stamp()),
             forked_from: spec.forked_from.clone(),
             preserved: spec.preserved.clone(),
             source_thread_id: Some(spec.source_thread_id.clone()),

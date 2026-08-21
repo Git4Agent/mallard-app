@@ -6,7 +6,6 @@ import type {
   ActivityLogPolicy,
   ActivityLogQuery,
   ActivityLogStats,
-  BundlePage,
   BundleReadiness,
   BundleRecipe,
   BundleSnapshotSummary,
@@ -19,15 +18,12 @@ import type {
   CreateSetupDraftResult,
   HostIdentityStatus,
   LocalProjectRegistration,
-  OriginHostAlias,
-  OriginHostLabel,
   ProjectActivity,
   ProjectActivityWorkspace,
   ProjectBinding,
   ProjectDetail,
   ProjectContentInventory,
   ProjectOperationResult,
-  ProjectOriginTokens,
   ProjectMarkdownImage,
   ProjectSessionDetail,
   ProjectSessionTimelinePage,
@@ -42,20 +38,18 @@ import type {
   ProviderProfileSummary,
   PushDestinationStatus,
   PushReviewContext,
-  RegisterLocalProjectRequest,
-  RegisterNewHostRequest,
   ResourceInventory,
   RestorePlan,
   RestoreResult,
   SaveProjectBindingRequest,
-  SaveOriginHostAliasRequest,
   SaveProjectLinkRequest,
   SetupDraftInspection,
   SetupDraftList,
   SessionEventDetail,
+  SiblingBundleStatus,
+  StorageConfig,
   StorageDataClearResult,
   SyncConfig,
-  UpdateHostDisplayNameRequest,
 } from "../../types";
 
 export function createSingleFlight() {
@@ -109,12 +103,6 @@ export const projectSyncApi = {
   createProviderProfile: (provider: ProviderKey, displayName: string, path: string) =>
     invoke<ProviderProfile>("create_provider_profile", { provider, displayName, path }),
 
-  renameProviderProfile: (profileId: string, displayName: string, expectedRevision: number) =>
-    invoke<ProviderProfile>("rename_provider_profile", { profileId, displayName, expectedRevision }),
-
-  removeProviderProfile: (profileId: string, expectedRevision: number) =>
-    invoke<boolean>("remove_provider_profile", { profileId, expectedRevision }),
-
   listProjects: () =>
     invoke<LocalProjectRegistration[]>("list_local_projects"),
 
@@ -127,9 +115,6 @@ export const projectSyncApi = {
 
   getProject: (localProjectId: string) =>
     invoke<ProjectDetail | null>("get_project", { localProjectId }),
-
-  registerProject: (request: RegisterLocalProjectRequest) =>
-    invoke<LocalProjectRegistration>("register_local_project", { request }),
 
   removeProject: (localProjectId: string) =>
     invoke<boolean>("remove_local_project", { localProjectId }),
@@ -164,32 +149,14 @@ export const projectSyncApi = {
   getHostIdentityStatus: () =>
     invoke<HostIdentityStatus>("get_host_identity_status"),
 
-  updateHostDisplayName: (request: UpdateHostDisplayNameRequest) =>
-    invoke<HostIdentityStatus>("update_host_display_name", { request }),
-
-  rotateHostIdentity: (request: RegisterNewHostRequest) =>
-    invoke<HostIdentityStatus>("rotate_host_identity", { request }),
-
-  getProjectOriginTokens: (localProjectId: string) =>
-    invoke<ProjectOriginTokens>("get_project_origin_tokens", { localProjectId }),
-
-  listOriginHostAliases: (bundleId?: string | null) =>
-    invoke<OriginHostAlias[]>("list_origin_host_aliases", { bundleId: bundleId ?? null }),
-
-  saveOriginHostAlias: (request: SaveOriginHostAliasRequest) =>
-    invoke<OriginHostAlias>("save_origin_host_alias", { request }),
-
-  resolveOriginHostLabel: (bundleId: string, originHostToken: string) =>
-    invoke<OriginHostLabel>("resolve_origin_host_label", { bundleId, originHostToken }),
-
-  listRemoteBundles: (storageId: string, cursor?: string | null) =>
-    invoke<BundlePage>("list_remote_bundles", { storageId, cursor: cursor ?? null }),
-
   listRemoteBundleSnapshots: (storageId: string) =>
     invoke<BundleSnapshotSummary[]>("list_remote_bundle_snapshots", { storageId }),
 
-  findRemoteBundleMatches: (storageId: string, repositoryFingerprint: string) =>
-    invoke<BundleSnapshotSummary[]>("find_remote_bundle_matches", { storageId, repositoryFingerprint }),
+  listPendingStorageBundleSnapshots: (storage: StorageConfig) =>
+    invoke<BundleSnapshotSummary[]>("list_pending_storage_bundle_snapshots", { storage }),
+
+  getSiblingBundleStatus: (localProjectId: string, storageId: string) =>
+    invoke<SiblingBundleStatus>("get_sibling_bundle_status", { localProjectId, storageId }),
 
   saveLink: (request: SaveProjectLinkRequest) =>
     invoke<ProjectStorageLink>("save_project_link", { request }),
@@ -232,9 +199,6 @@ export const projectSyncApi = {
     approvedConversationActionIds,
   }),
 
-  getBinding: (localProjectId: string) =>
-    invoke<ProjectBinding | null>("get_project_binding", { localProjectId }),
-
   auditCodexConversationPaths: (localProjectId: string) =>
     invoke<CodexConversationPathAudit>("audit_codex_conversation_paths", { localProjectId }),
 
@@ -269,9 +233,6 @@ export const projectSyncApi = {
       active_chats_complete: activeChatsComplete,
     },
   }),
-
-  getReadiness: (storageId: string, bundleId: string, binding: ProjectBinding) =>
-    invoke<BundleReadiness>("get_bundle_readiness", { storageId, bundleId, binding }),
 
   getRestoreReadiness: (restorePlanId: string) =>
     invoke<BundleReadiness>("get_restore_readiness", { restorePlanId }),
@@ -359,7 +320,10 @@ export const projectSyncApi = {
       resourceId,
       snapshotId: query.snapshot_id,
       cursor: query.cursor ?? null,
-      anchorEventId: query.anchor_event_id ?? null,
+      // Checkpoint-jump was removed; the query type no longer carries an
+      // anchor, so the frontend cannot reach this. The key stays on the wire
+      // until the Rust parameter goes with it, in one deliberate change.
+      anchorEventId: null,
       limit: query.limit,
       includedEventKinds: query.included_event_kinds,
       includedToolCategories: query.included_tool_categories,

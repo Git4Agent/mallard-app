@@ -249,7 +249,6 @@ function stubApi(storageId: string | null): StorageCatalogApi {
     listScopes: async () => [scope],
     createScope: async () => scope,
     deleteScope: async () => true,
-    deleteProfile: async () => true,
   };
 }
 

@@ -275,7 +275,6 @@ const DETAIL: ProjectSessionDetail = {
     { action_id: "claude.open_in_app", kind: "open_in_app", label: "Open in Claude Code", enabled: true },
     { action_id: "claude.open_in_terminal", kind: "open_in_terminal", label: "Open in terminal", enabled: true },
   ],
-  checkpoint_jumps: [],
   snapshot_id: "snapshot-1",
   warnings: [],
 };

@@ -22,8 +22,8 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 pub use codec::{
-    analyze_claude_transcript, rewrite_claude_transcript, CLAUDE_CODEC_VERSION,
-    CLAUDE_LINEAGE_CODEC_KEY,
+    analyze_claude_transcript, project_claude_record, rewrite_claude_transcript,
+    CLAUDE_CODEC_VERSION, CLAUDE_LINEAGE_CODEC_KEY,
 };
 pub use materialization::encode_claude_project_path;
 
@@ -90,7 +90,7 @@ impl AgentProviderAdapter for ClaudeAdapter {
             display_name: "Claude".to_string(),
             profile_label: ".claude profile".to_string(),
             default_profile_directory: Some(".claude".to_string()),
-            setup_default: false,
+            setup_default: true,
             capabilities: ProviderCapabilityLevel::ResumableWithConflictPreservation,
             adapter_version: 1,
         }

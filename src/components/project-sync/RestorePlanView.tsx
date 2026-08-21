@@ -211,6 +211,7 @@ function ItemList({
 export default function RestorePlanView({
   projectName,
   project,
+  profileLabel,
   storageName = "storage",
   plan,
   binding,
@@ -435,6 +436,10 @@ export default function RestorePlanView({
             {!embedded && (
                 <p className="sync-pull-review-meta">
                   <span>{`Choose changes from ${storageName || "storage"} to apply to this machine.`}</span>
+                  {/* Naming the write destination belongs on the screen that
+                      approves the write. The prop was already required and
+                      passed; only the line that read it was removed. */}
+                  {profileLabel && <span>{`Installs into ${profileLabel}.`}</span>}
                 </p>
               )}
           </div>

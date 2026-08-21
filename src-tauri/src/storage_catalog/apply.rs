@@ -956,23 +956,19 @@ fn execute_plugin_action(
 
     // Post-exit re-inventory: the plugin must be present AND the resulting
     // semantic intent must match what was approved. A clean exit that leaves
-    // a different intent installed is partial, never success.
-    let verification = adapter
-        .verify_plugin_apply(intent, home, runner)
+    // a different intent installed is partial, never success. Presence and
+    // intent are read from one snapshot — resolving an observation against a
+    // later inventory can report a matching install as partial.
+    let after = adapter
+        .discover_plugins(home, runner)
         .map_err(|blocker| blocker.to_string())?;
-    let resulting_intent_matches = if verification.verified {
-        let fresh = adapter
-            .discover_plugins(home, runner)
-            .map_err(|blocker| blocker.to_string())?;
-        verification
-            .observation
-            .as_ref()
-            .and_then(|observation| adapter.portable_intent(observation, &fresh))
-            .is_some_and(|rebuilt| rebuilt.content_sha256 == action.incoming_content_sha256)
-    } else {
-        false
-    };
-    if verification.verified && resulting_intent_matches {
+    let installed = after
+        .observation(&intent.plugin_id)
+        .filter(|observation| observation.installed);
+    let resulting_intent_matches = installed
+        .and_then(|observation| adapter.portable_intent(observation, &after))
+        .is_some_and(|rebuilt| rebuilt.content_sha256 == action.incoming_content_sha256);
+    if resulting_intent_matches {
         let outcome = match native.mode {
             PluginApplyMode::InstallMissing => CatalogActionOutcome::Installed,
             PluginApplyMode::OverwriteExisting => CatalogActionOutcome::Updated,
@@ -987,13 +983,17 @@ fn execute_plugin_action(
         )?;
         Ok(outcome)
     } else {
-        let detail = if verification.verified {
+        let detail = if installed.is_some() {
             format!(
-                "{} reports the plugin installed, but its install intent does not match the                  approved catalog intent yet",
+                "{} reports the plugin installed, but its install intent does not match the approved catalog intent yet",
                 native.provider.as_str()
             )
         } else {
-            verification.detail.clone()
+            format!(
+                "{} does not report '{}' installed after the operation",
+                native.provider.as_str(),
+                intent.plugin_id
+            )
         };
         journal_phase(
             repository,

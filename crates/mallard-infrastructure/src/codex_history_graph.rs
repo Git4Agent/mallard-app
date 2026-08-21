@@ -1650,4 +1650,224 @@ mod tests {
         assert!(preserved_push.subagents.is_empty());
         assert!(preserved_push.id_map.is_empty());
     }
+
+    /// The redaction sibling of the round trip above: planted secrets ride
+    /// the same A→B→A lifecycle over the real builder. The wire object
+    /// provably holds only typed placeholders (`redact(w) == w` certified),
+    /// per-record purity keeps the re-encoded prefix byte-stable across
+    /// machines so no hop classifies as divergent, the decoded
+    /// materialization carries placeholders verbatim, and the restored
+    /// prefix is the scrub of A's canonical content — working as designed,
+    /// not drift.
+    #[test]
+    fn a_to_b_to_a_round_trip_scrubs_planted_secrets() {
+        use crate::codex_standalone_builder::{build_standalone_codex_root, StandaloneBuildMode};
+        use crate::credential_redaction;
+        use mallard_domain::{
+            compare_conversation_tail, compute_portable_conversation_tail, SyncCurrency,
+            TailAccumulator, TailClassification, TailSideEvidence, VerifiedTailEvidence,
+            PORTABLE_TAIL_CODEC_V1, PORTABLE_TAIL_CODEC_WIRE_V1,
+        };
+
+        const ROOT_A: &str = "/tmp/machine-a";
+        const ROOT_B: &str = "/tmp/machine-b";
+        const SECRET_ANTHROPIC: &str = "sk-ant-api03-aaaabbbbccccddddeeee";
+        const SECRET_PASSWORD: &str = "hunter2";
+        const SECRET_OPENAI: &str = "sk-proj-bbbbccccddddeeeeffff";
+
+        let evidence = |accepted: &_, accepted_local: &_, local: &_, cloud: &_| {
+            VerifiedTailEvidence::new(
+                TailSideEvidence::Present(Clone::clone(accepted)),
+                TailSideEvidence::Present(Clone::clone(accepted_local)),
+                TailSideEvidence::Present(Clone::clone(local)),
+                TailSideEvidence::Present(Clone::clone(cloud)),
+            )
+            .unwrap()
+        };
+        let encode = |root: &str| StandaloneBuildMode::Encode {
+            root: root.to_string(),
+            canonical_root: None,
+        };
+        let decode = |id: &str, root: &str| StandaloneBuildMode::Decode {
+            root_provider_thread_id: id.to_string(),
+            target_root: root.to_string(),
+            canonical_target_root: None,
+        };
+        let meta = |id: &str, root: &str| {
+            serde_json::to_string(
+                &json!({"type": "session_meta", "payload": {"id": id, "cwd": root}}),
+            )
+            .unwrap()
+        };
+
+        // Machine A: one whole-thread rollout with an API key in prose, a
+        // credential assignment, and an in-root path in the same record.
+        let mut machine_a = graph();
+        let a_leaf = machine_a.write(
+            "a-secret",
+            &[
+                meta("a-secret", ROOT_A),
+                message_line("m1", &format!("my key is {SECRET_ANTHROPIC} ok")),
+                message_line(
+                    "m2",
+                    &format!("DB_PASSWORD={SECRET_PASSWORD} under /tmp/machine-a/src/main.rs"),
+                ),
+                message_line("m3", "plain closing text"),
+            ],
+        );
+        let resolved_a = resolve_codex_root(&a_leaf, &machine_a.lookup()).unwrap();
+        let a_local_v1 = compute_portable_conversation_tail(
+            TailPartitionKind::WholeThread,
+            0,
+            &resolved_a.chain,
+        )
+        .unwrap();
+
+        // A pushes: the artifact is a certified redaction fixpoint holding
+        // typed placeholders and the path token, never the secrets.
+        let push_one = build_standalone_codex_root(&resolved_a, &encode(ROOT_A), None).unwrap();
+        let cloud_v1 = push_one.portable_tail.clone();
+        assert_eq!(cloud_v1.codec, PORTABLE_TAIL_CODEC_WIRE_V1);
+        let wire_text = String::from_utf8(push_one.root_bytes.clone()).unwrap();
+        assert!(!wire_text.contains(SECRET_ANTHROPIC));
+        assert!(!wire_text.contains(SECRET_PASSWORD));
+        assert!(wire_text.contains("<anthropic-api-key>"));
+        assert!(wire_text.contains("DB_PASSWORD=<password>"));
+        assert!(wire_text.contains("/__mallard_root__/src/main.rs"));
+        credential_redaction::shared()
+            .certify_wire_document(push_one.root_bytes.clone())
+            .expect("published bytes are a redaction fixpoint");
+        assert_ne!(cloud_v1.accepted_tail_state, a_local_v1.accepted_tail_state);
+
+        // No false divergence on A after its own push.
+        assert_eq!(
+            compare_conversation_tail(&evidence(&cloud_v1, &a_local_v1, &a_local_v1, &cloud_v1)),
+            TailClassification::Sync(SyncCurrency::Current)
+        );
+
+        // B pulls: the decode materializes placeholders verbatim under B's
+        // root; the secrets never existed on this machine.
+        let mut machine_b = graph();
+        let staged = machine_b.directory.path().join("staged.jsonl");
+        fs::write(&staged, &push_one.root_bytes).unwrap();
+        let no_bases = |_: &str| Ok(None);
+        let resolved_staged = resolve_codex_root(&staged, &no_bases).unwrap();
+        let pulled =
+            build_standalone_codex_root(&resolved_staged, &decode("b-local", ROOT_B), None)
+                .unwrap();
+        let b_local_v1 = pulled.portable_tail.clone();
+        assert_eq!(b_local_v1.codec, PORTABLE_TAIL_CODEC_V1);
+        let b_text = String::from_utf8(pulled.root_bytes.clone()).unwrap();
+        assert!(!b_text.contains(SECRET_ANTHROPIC));
+        assert!(!b_text.contains(SECRET_PASSWORD));
+        assert!(b_text.contains("<anthropic-api-key>"));
+        assert!(b_text.contains("DB_PASSWORD=<password>"));
+        assert!(b_text.contains("/tmp/machine-b/src/main.rs"));
+        let b_local = machine_b.directory.path().join("b-local.jsonl");
+        fs::write(&b_local, &pulled.root_bytes).unwrap();
+        machine_b
+            .files
+            .insert("b-local".to_string(), b_local.clone());
+        let resolved_b = resolve_codex_root(&b_local, &machine_b.lookup()).unwrap();
+        let b_bytes = fs::read(&b_local).unwrap();
+        let seeded_b = seed_codex_root(&resolved_b, &b_bytes, None).unwrap();
+        assert_eq!(seeded_b.observed_tail, b_local_v1);
+        assert_eq!(
+            compare_conversation_tail(&evidence(
+                &cloud_v1,
+                &b_local_v1,
+                &seeded_b.observed_tail,
+                &cloud_v1
+            )),
+            TailClassification::Sync(SyncCurrency::Current)
+        );
+
+        // B extends with its own secret and pushes. Per-record purity: the
+        // re-encoded records 1..n reproduce the accepted wire prefix
+        // byte-for-byte even though B re-encodes from decoded local bytes,
+        // so resuming the accepted fold over the appended wire record
+        // reproduces B's published value and A later fast-forwards.
+        let append = |path: &PathBuf, id: &str, body: &str| {
+            let mut bytes = fs::read(path).unwrap();
+            append_paginated_line(&mut bytes, &message_line(id, body));
+            fs::write(path, &bytes).unwrap();
+        };
+        append(&b_local, "m4", &format!("also use {SECRET_OPENAI} now"));
+        let resolved_b2 = resolve_codex_root(&b_local, &machine_b.lookup()).unwrap();
+        let push_two = build_standalone_codex_root(&resolved_b2, &encode(ROOT_B), None).unwrap();
+        let cloud_v2 = push_two.portable_tail.clone();
+        let wire_two = String::from_utf8(push_two.root_bytes.clone()).unwrap();
+        assert!(!wire_two.contains(SECRET_OPENAI));
+        assert!(wire_two.contains("<openai-api-key>"));
+        let staged_two = machine_a.directory.path().join("staged-two.jsonl");
+        fs::write(&staged_two, &push_two.root_bytes).unwrap();
+        let resolved_staged_two = resolve_codex_root(&staged_two, &no_bases).unwrap();
+        let mut resumed = TailAccumulator::resume(
+            TailPartitionKind::WholeThread,
+            0,
+            3,
+            &cloud_v1.accepted_tail_state,
+        )
+        .unwrap();
+        resumed.fold_message(&resolved_staged_two.chain[3]).unwrap();
+        assert_eq!(resumed.state_hex(), cloud_v2.accepted_tail_state);
+
+        // A pulls the extension as CloudOutstanding — never Divergent — and
+        // the restored prefix is exactly the scrub of A's canonical
+        // content: same chain identities, placeholders where the secrets
+        // were, A's own secret included.
+        assert_eq!(
+            compare_conversation_tail(&evidence(&cloud_v1, &a_local_v1, &a_local_v1, &cloud_v2)),
+            TailClassification::CloudOutstanding
+        );
+        let a_adopted =
+            build_standalone_codex_root(&resolved_staged_two, &decode("a-tracked", ROOT_A), None)
+                .unwrap();
+        let restored = String::from_utf8(a_adopted.root_bytes.clone()).unwrap();
+        assert!(!restored.contains(SECRET_ANTHROPIC));
+        assert!(!restored.contains(SECRET_OPENAI));
+        assert!(restored.contains("<anthropic-api-key>"));
+        assert!(restored.contains("<openai-api-key>"));
+        assert!(restored.contains("/tmp/machine-a/src/main.rs"));
+        assert_eq!(a_adopted.portable_tail.accepted_end_record_count, 4);
+        let restored_ids: Vec<_> = resolve_codex_root(
+            &{
+                let path = machine_a.directory.path().join("a-tracked.jsonl");
+                fs::write(&path, &a_adopted.root_bytes).unwrap();
+                path
+            },
+            &no_bases,
+        )
+        .unwrap()
+        .chain
+        .iter()
+        .map(|message| message.message_id.clone())
+        .collect();
+        let original_ids: Vec<_> = resolved_a
+            .chain
+            .iter()
+            .map(|message| message.message_id.clone())
+            .collect();
+        assert_eq!(&restored_ids[..3], &original_ids[..]);
+
+        // Tamper certificate: a wire object doctored to carry a detectable
+        // secret is refused by the Decode build's wire self-check — never
+        // materialized — and the error payload never echoes the secret.
+        let planted = "sk-ant-api03-ttttuuuuvvvvwwwwxxxx";
+        let doctored = String::from_utf8(push_two.root_bytes.clone())
+            .unwrap()
+            .replace("plain closing text", &format!("stole {planted}"));
+        assert!(doctored.contains(planted), "tamper fixture must apply");
+        let tampered = machine_a.directory.path().join("tampered.jsonl");
+        fs::write(&tampered, doctored.as_bytes()).unwrap();
+        let resolved_tampered = resolve_codex_root(&tampered, &no_bases).unwrap();
+        let error =
+            build_standalone_codex_root(&resolved_tampered, &decode("a-tampered", ROOT_A), None)
+                .unwrap_err();
+        assert!(error.contains("wire_secret_detected"), "{error}");
+        assert!(
+            !error.contains(planted),
+            "payload must be content-free: {error}"
+        );
+    }
 }

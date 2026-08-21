@@ -69,16 +69,6 @@ pub struct CapturedBundleFile {
     pub mode: Option<u32>,
 }
 
-/// Result of the explicit object durability audit (`verify_objects`).
-#[derive(Clone, Debug, Serialize)]
-pub struct BundleObjectAudit {
-    pub revision: u64,
-    pub commit_id: String,
-    pub objects_total: usize,
-    pub objects_verified: usize,
-    pub failures: Vec<String>,
-}
-
 /// The reviewed next content for one writable sync scope.
 #[derive(Clone, Debug, Default)]
 pub struct ScopePublishInput {
@@ -511,13 +501,132 @@ impl<S: ObjectStore> BundleEngine<S> {
         Ok(Some((head, token)))
     }
 
+    /// Publish the empty registration manifest that makes a just-linked
+    /// bundle discoverable before its first push: revision 1, zero scopes,
+    /// identity and repository fingerprint only. This can only create a
+    /// bundle, never advance one — an existing head (including one written
+    /// concurrently, observed as a CAS conflict) is returned as the no-op
+    /// outcome so registration is idempotent and race-safe.
+    pub fn publish_registration(
+        &self,
+        identity: &BundleIdentity,
+        published_by_origin: &PortableOrigin,
+        updated_at: u64,
+    ) -> Result<PublishedBundle, String> {
+        identity.validate()?;
+        published_by_origin.validate()?;
+        if identity.kind != BundleKind::Project {
+            return Err("bundle registration supports only project bundles".to_string());
+        }
+        if updated_at == 0 {
+            return Err("registration timestamp must be non-zero".to_string());
+        }
+        let established = |fetched_at: u64| -> Result<Option<PublishedBundle>, String> {
+            let Some((head, _)) = self.read_head(&identity.bundle_id)? else {
+                return Ok(None);
+            };
+            let manifest = self.read_manifest(&head)?;
+            Ok(Some(PublishedBundle {
+                published: false,
+                snapshot: BundleSnapshot {
+                    storage_id: self.storage_id.clone(),
+                    head,
+                    manifest,
+                    fetched_at,
+                },
+            }))
+        };
+        if let Some(existing) = established(updated_at)? {
+            return Ok(existing);
+        }
+
+        let revision = 1;
+        let commit_id = random_named_id("commit")?;
+        let manifest = BundleManifest {
+            schema_version: BUNDLE_SCHEMA,
+            revision,
+            commit_id: commit_id.clone(),
+            updated_at,
+            bundle: identity.clone(),
+            published_by_origin: published_by_origin.clone(),
+            scopes: BTreeMap::new(),
+        };
+        manifest.validate()?;
+        let manifest_bytes = serde_json::to_vec(&manifest)
+            .map_err(|error| format!("serialize registration manifest: {error}"))?;
+        let manifest_size = u64::try_from(manifest_bytes.len())
+            .map_err(|_| "serialized registration manifest is too large".to_string())?;
+        let manifest_sha256 = sha256(&manifest_bytes);
+        let manifest_relative_key = format!("_manifests/{}-{}.json", revision, commit_id);
+        let manifest_key = repository_object_key(&identity.bundle_id, &manifest_relative_key)?;
+        self.store.put_immutable(&manifest_key, &manifest_bytes)?;
+
+        let commit = CommitRecord {
+            schema_version: BUNDLE_SCHEMA,
+            bundle_id: identity.bundle_id.clone(),
+            revision,
+            commit_id: commit_id.clone(),
+            manifest_key: manifest_relative_key.clone(),
+            manifest_sha256: manifest_sha256.clone(),
+            created_at: updated_at,
+            previous_commit_id: None,
+            added_files: 0,
+            changed_files: 0,
+            removed_files: 0,
+            published_by_origin: published_by_origin.clone(),
+        };
+        let commit_bytes = serde_json::to_vec(&commit)
+            .map_err(|error| format!("serialize registration commit: {error}"))?;
+        let commit_key = repository_object_key(
+            &identity.bundle_id,
+            &format!("_commits/{}-{}.json", revision, commit_id),
+        )?;
+        self.store.put_immutable(&commit_key, &commit_bytes)?;
+
+        let head = BundleHead {
+            schema_version: BUNDLE_SCHEMA,
+            bundle_id: identity.bundle_id.clone(),
+            kind: identity.kind,
+            revision,
+            commit_id,
+            manifest_key: manifest_relative_key,
+            manifest_sha256,
+            manifest_size,
+            updated_at,
+        };
+        head.validate()?;
+        let head_bytes = serde_json::to_vec(&head)
+            .map_err(|error| format!("serialize registration head: {error}"))?;
+        let head_key = repository_object_key(&identity.bundle_id, HEAD_FILE)?;
+        match self
+            .store
+            .compare_and_swap(&head_key, &CasExpectation::Absent, &head_bytes)?
+        {
+            CasOutcome::Written { .. } => {
+                let _ = self.publish_tag(&manifest);
+                Ok(PublishedBundle {
+                    published: true,
+                    snapshot: BundleSnapshot {
+                        storage_id: self.storage_id.clone(),
+                        head,
+                        manifest,
+                        fetched_at: updated_at,
+                    },
+                })
+            }
+            CasOutcome::Conflict { .. } => established(updated_at)?.ok_or_else(|| {
+                "bundle head disappeared during registration; the repository was removed"
+                    .to_string()
+            }),
+        }
+    }
+
     /// Publish one complete reviewed bundle snapshot. The caller supplies the
     /// live resource and conversation sets; the engine enforces retention
     /// against the previous hash-verified manifest, skips true no-ops, and
     /// advances the head only through compare-and-swap. Uploads carry their
     /// sha256 checksum so the accepted PUT is the verification receipt;
-    /// publish downloads nothing back. Durability audits are the separate
-    /// `verify_objects` pass.
+    /// publish downloads nothing back.
     #[cfg(any(test, feature = "test-support"))]
     pub fn publish(&self, request: PublishBundleRequest) -> Result<PublishedBundle, String> {
         self.publish_with_progress(request, &mut |_| {}, &mut |_, _| {})
@@ -578,6 +687,43 @@ impl<S: ObjectStore> BundleEngine<S> {
         }
         on_phase("publish: read head", phase_started.elapsed());
 
+        // Captured payloads are attempt-invariant: the CAS loop refetches
+        // only the head and manifest, never the request. Hashing a payload,
+        // building its entry, and copying its upload buffer therefore happen
+        // once here — a contended publish reuses them instead of paying a
+        // fresh pass over every payload on each retry.
+        let mut prepared_captures = BTreeMap::new();
+        for (scope_key, input) in &request.writable_scopes {
+            let mut prepared = BTreeMap::new();
+            for (path, captured) in &input.captured_files {
+                if captured.mode.is_some_and(|mode| mode & !0o777 != 0) {
+                    return Err(format!("bundle file '{}' has unsafe mode bits", path));
+                }
+                if !input.resources.contains_key(&captured.resource_id) {
+                    return Err(format!(
+                        "bundle file '{}' belongs to missing resource '{}'",
+                        path, captured.resource_id
+                    ));
+                }
+                let digest = sha256(&captured.bytes);
+                prepared.insert(
+                    path.clone(),
+                    (
+                        BundleFileEntry {
+                            resource_id: captured.resource_id.clone(),
+                            sha256: digest.clone(),
+                            size: captured.bytes.len() as u64,
+                            source_mtime: captured.source_mtime,
+                            object_key: format!("_objects/{}", digest),
+                            mode: captured.mode,
+                        },
+                        Bytes::from(captured.bytes.clone()),
+                    ),
+                );
+            }
+            prepared_captures.insert(scope_key, prepared);
+        }
+
         const MAX_CAS_ATTEMPTS: usize = 4;
         for attempt in 0..MAX_CAS_ATTEMPTS {
             let phase_started = Instant::now();
@@ -636,29 +782,10 @@ impl<S: ObjectStore> BundleEngine<S> {
                 let previous_scope = previous_manifest
                     .as_ref()
                     .and_then(|manifest| manifest.scopes.get(scope_key));
+                let prepared = prepared_captures.get(scope_key);
                 let mut files = input.retained_files.clone();
-                for (path, captured) in &input.captured_files {
-                    if captured.mode.is_some_and(|mode| mode & !0o777 != 0) {
-                        return Err(format!("bundle file '{}' has unsafe mode bits", path));
-                    }
-                    if !input.resources.contains_key(&captured.resource_id) {
-                        return Err(format!(
-                            "bundle file '{}' belongs to missing resource '{}'",
-                            path, captured.resource_id
-                        ));
-                    }
-                    let digest = sha256(&captured.bytes);
-                    files.insert(
-                        path.clone(),
-                        BundleFileEntry {
-                            resource_id: captured.resource_id.clone(),
-                            sha256: digest.clone(),
-                            size: captured.bytes.len() as u64,
-                            source_mtime: captured.source_mtime,
-                            object_key: format!("_objects/{}", digest),
-                            mode: captured.mode,
-                        },
-                    );
+                for (path, (entry, _)) in prepared.into_iter().flatten() {
+                    files.insert(path.clone(), entry.clone());
                 }
                 if let Some(previous_scope) = previous_scope {
                     validate_scope_conversation_retention(previous_scope, input)?;
@@ -676,10 +803,10 @@ impl<S: ObjectStore> BundleEngine<S> {
                     // nothing for that scope.
                     continue;
                 }
-                for captured in input.captured_files.values() {
+                for (_, (entry, bytes)) in prepared.into_iter().flatten() {
                     pending_uploads
-                        .entry(sha256(&captured.bytes))
-                        .or_insert_with(|| Bytes::from(captured.bytes.clone()));
+                        .entry(entry.sha256.clone())
+                        .or_insert_with(|| bytes.clone());
                 }
                 let revision = previous_scope
                     .map(|scope| scope.revision.saturating_add(1))
@@ -1046,59 +1173,6 @@ impl<S: ObjectStore> BundleEngine<S> {
             return Err("historical manifest coordinates do not match its contents".to_string());
         }
         Ok(Some(manifest))
-    }
-
-    /// Explicit durability audit: download every object the current manifest
-    /// references and verify each against its recorded digest and size. This
-    /// is the read-back publish deliberately does not perform; it runs only
-    /// when invoked, never as part of Push or Pull.
-    pub fn verify_objects(&self, bundle_id: &BundleId) -> Result<BundleObjectAudit, String> {
-        let snapshot = self.inspect(bundle_id)?;
-        let mut entries = BTreeMap::<String, (String, u64)>::new();
-        for (_, entry) in snapshot.manifest.all_files() {
-            entries
-                .entry(entry.object_key.clone())
-                .or_insert((entry.sha256.clone(), entry.size));
-        }
-        let entries = entries.into_iter().collect::<Vec<_>>();
-        let mut verified = 0_usize;
-        let mut failures = Vec::new();
-        for batch in entries.chunks(PREFETCH_BATCH_OBJECTS) {
-            let requests = batch
-                .iter()
-                .map(|(object_key, (expected_sha, expected_size))| {
-                    Ok((
-                        repository_object_key(bundle_id, object_key)?,
-                        ExpectedObject {
-                            size: *expected_size,
-                            sha256: expected_sha.clone(),
-                        },
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            let objects = self.store.stage_many_verified(&requests)?;
-            for ((key, _), outcome) in requests.iter().zip(objects) {
-                match outcome {
-                    StageOutcome::Missing => {
-                        failures.push(format!("bundle object '{}' is missing", key))
-                    }
-                    StageOutcome::Mismatch => {
-                        failures.push(format!(
-                            "bundle object '{}' does not match manifest size/hash",
-                            key
-                        ));
-                    }
-                    StageOutcome::Verified(_) => verified += 1,
-                }
-            }
-        }
-        Ok(BundleObjectAudit {
-            revision: snapshot.head.revision,
-            commit_id: snapshot.head.commit_id.clone(),
-            objects_total: entries.len(),
-            objects_verified: verified,
-            failures,
-        })
     }
 
     /// Cursor-paginated remote discovery. The cursor is the last returned
@@ -2513,6 +2587,48 @@ mod tests {
             )
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn registration_publishes_an_empty_discoverable_head_exactly_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = BundleEngine::open(
+            LocalObjectStore::open(temp.path().join("store")).unwrap(),
+            storage_id(),
+        )
+        .unwrap();
+        let mut who = identity(bundle_id(7), "Registered");
+        who.repository_fingerprint = Some("a".repeat(64));
+        let origin = PortableOrigin {
+            origin_host_token: domain::OriginHostToken::parse("0".repeat(64)).unwrap(),
+            origin_replica_token: domain::OriginReplicaToken::parse("0".repeat(64)).unwrap(),
+            shared_label: None,
+        };
+
+        let first = engine.publish_registration(&who, &origin, 10).unwrap();
+        assert!(first.published);
+        assert_eq!(first.snapshot.head.revision, 1);
+        assert!(first.snapshot.manifest.is_registration_only());
+        assert!(first.snapshot.manifest.scopes.is_empty());
+        assert_eq!(
+            first.snapshot.manifest.bundle.repository_fingerprint,
+            Some("a".repeat(64))
+        );
+
+        // Idempotent: a repeat registration adopts the standing head instead
+        // of advancing or replacing it.
+        let second = engine.publish_registration(&who, &origin, 20).unwrap();
+        assert!(!second.published);
+        assert_eq!(second.snapshot.head.revision, 1);
+        assert_eq!(
+            second.snapshot.head.commit_id,
+            first.snapshot.head.commit_id
+        );
+
+        // The discovery read path verifies and returns the registration.
+        let snapshot = engine.inspect(&bundle_id(7)).unwrap();
+        assert_eq!(snapshot.manifest.revision, 1);
+        assert!(snapshot.manifest.is_registration_only());
     }
 
     #[test]

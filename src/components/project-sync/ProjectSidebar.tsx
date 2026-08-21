@@ -138,6 +138,7 @@ interface Props {
   catalogScopes: CatalogScopeView[];
   activeCatalogScopeId: string | null;
   addingCatalogScope: boolean;
+  settingsOpen: boolean;
   loading: boolean;
   busy: boolean;
   activityOpen: boolean;
@@ -155,6 +156,7 @@ interface Props {
   onOpenCatalogScope: (scopeId: string) => void;
   onAddCatalogScope: () => void;
   onRemoveCatalogScope: (scopeId: string) => void;
+  onOpenSettings: () => void;
 }
 
 export default function ProjectSidebar({
@@ -169,6 +171,7 @@ export default function ProjectSidebar({
   catalogScopes,
   activeCatalogScopeId,
   addingCatalogScope,
+  settingsOpen,
   loading,
   busy,
   activityOpen,
@@ -186,6 +189,7 @@ export default function ProjectSidebar({
   onOpenCatalogScope,
   onAddCatalogScope,
   onRemoveCatalogScope,
+  onOpenSettings,
 }: Props) {
   const [sectionLayout, setSectionLayout] = useState<SectionLayout>(storedSectionLayout);
   const [resizingSections, setResizingSections] = useState(false);
@@ -408,7 +412,7 @@ export default function ProjectSidebar({
         <nav className="sync-primary-nav" aria-label="Project sync navigation">
           <button
             type="button"
-            className={!activeStorageId && !activeCatalogScopeId && !addingCatalogScope ? "active" : undefined}
+            className={!activeStorageId && !activeCatalogScopeId && !addingCatalogScope && !settingsOpen ? "active" : undefined}
             onClick={() => activeProjectId && onSelectProject(activeProjectId)}
             disabled={busy}
           >
@@ -429,6 +433,14 @@ export default function ProjectSidebar({
             disabled={busy || !primaryStorageId}
           >
             <Icon name="drive" size={15} /> Storages
+          </button>
+          <button
+            type="button"
+            className={settingsOpen ? "active" : undefined}
+            onClick={onOpenSettings}
+            disabled={busy}
+          >
+            <Icon name="settings" size={15} /> Settings
           </button>
           <button
             type="button"
@@ -537,7 +549,7 @@ export default function ProjectSidebar({
               return (
                 <div
                   key={project.local_project_id}
-                  className={`sidebar-profile-item${!activeDraftId && !activeStorageId && !activeCatalogScopeId && !addingCatalogScope && activeProjectId === project.local_project_id ? " active" : ""}${profileRequired ? " needs-profile" : ""}`}
+                  className={`sidebar-profile-item${!activeDraftId && !activeStorageId && !activeCatalogScopeId && !addingCatalogScope && !settingsOpen && activeProjectId === project.local_project_id ? " active" : ""}${profileRequired ? " needs-profile" : ""}`}
                 >
                   <button
                     type="button"

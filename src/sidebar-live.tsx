@@ -26,6 +26,7 @@ function Harness() {
         catalogScopes={[]}
         activeCatalogScopeId={null}
         addingCatalogScope={false}
+        settingsOpen={false}
         loading={false}
         busy={false}
         activityOpen={false}
@@ -43,6 +44,7 @@ function Harness() {
         onOpenCatalogScope={noop}
         onAddCatalogScope={noop}
         onRemoveCatalogScope={noop}
+        onOpenSettings={noop}
       />
     </div>
   );

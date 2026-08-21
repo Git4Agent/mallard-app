@@ -17,12 +17,11 @@ import ResourceInventory from "./ResourceInventory";
 import SyncReviewTabs from "../sync-review/SyncReviewTabs";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import { type SyncReviewStep, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
-import { categoryFor } from "./model";
+import { categoryFor, STORAGE_BLOCKING_STATES } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { isIrrecoverableSyncError } from "./syncError";
 
 const EMPTY_STATUSES = new Map<string, string>();
-const STORAGE_BLOCKING_STATES = new Set(["storage_only", "storage_ahead", "diverged"]);
 
 export interface PushReviewBlocker {
   kind: "storage" | "local";
@@ -271,10 +270,8 @@ export function recommendedPushSelection(
 
   const comparisonByResourceId = new Map(threadComparison.entries.map((entry) => [entry.resource_id, entry]));
   const conversations = resources.filter((resource) => categoryFor(resource) === "conversations");
-  const sessionIndex = conversations.find((resource) => resource.resource_id === "codex:session-index") ?? null;
 
   for (const resource of conversations) {
-    if (resource.resource_id === sessionIndex?.resource_id) continue;
     const comparison = comparisonByResourceId.get(resource.resource_id);
     if (!comparison) continue;
     if (
@@ -284,17 +281,6 @@ export function recommendedPushSelection(
       recommended.add(resource.resource_id);
     } else {
       recommended.delete(resource.resource_id);
-    }
-  }
-
-  if (sessionIndex) {
-    const hasSelectedSession = conversations.some((resource) => (
-      resource.resource_id !== sessionIndex.resource_id && recommended.has(resource.resource_id)
-    ));
-    if (hasSelectedSession && selectableIds.has(sessionIndex.resource_id)) {
-      recommended.add(sessionIndex.resource_id);
-    } else {
-      recommended.delete(sessionIndex.resource_id);
     }
   }
 
@@ -312,7 +298,7 @@ export function preserveSyncedPushRecipeEntries(
   if (syncedResourceIds.size === 0) return recipe;
 
   const entries = { ...recipe.entries };
-  for (const resourceId of [...syncedResourceIds, "codex:session-index"]) {
+  for (const resourceId of syncedResourceIds) {
     const sourceEntry = sourceRecipe.entries[resourceId];
     if (sourceEntry) entries[resourceId] = sourceEntry;
   }
@@ -402,8 +388,6 @@ export default function PushResourceWorkspace({
     () => resources.filter((resource) => categoryFor(resource) === "conversations"),
     [resources],
   );
-  const sessionIndex = conversations.find((resource) => resource.resource_id === "codex:session-index") ?? null;
-  const visibleConversations = conversations.filter((resource) => resource.resource_id !== sessionIndex?.resource_id);
   const projectFiles = useMemo(
     () => resources.filter((resource) => categoryFor(resource) === "project_files"),
     [resources],
@@ -426,7 +410,7 @@ export default function PushResourceWorkspace({
   );
 
   const counts = {
-    history: countSelected(visibleConversations, effectiveSelected) + countSelected(other, effectiveSelected),
+    history: countSelected(conversations, effectiveSelected) + countSelected(other, effectiveSelected),
     project_files: countSelected(projectFiles, effectiveSelected),
   };
   const blockers = pushReviewBlockers(
@@ -489,11 +473,6 @@ export default function PushResourceWorkspace({
     if (requiredProjectDirectories.has(resourceId)) return;
     if (next.has(resourceId)) next.delete(resourceId);
     else next.add(resourceId);
-    if (conversations.some((resource) => resource.resource_id === resourceId) && sessionIndex) {
-      const selectedSessionCount = visibleConversations.filter((resource) => next.has(resource.resource_id)).length;
-      if (selectedSessionCount > 0) next.add(sessionIndex.resource_id);
-      else next.delete(sessionIndex.resource_id);
-    }
     commitSelection(next);
   };
   const useRecommendedForStep = () => {
@@ -518,7 +497,7 @@ export default function PushResourceWorkspace({
     });
     commitSelection(next);
   };
-  const selectableConversationIds = new Set(visibleConversations
+  const selectableConversationIds = new Set(conversations
     .filter((resource) => selectableIds.has(resource.resource_id))
     .map((resource) => resource.resource_id));
   const requiredProjectDirectories = requiredProjectContentDirectoryIds(

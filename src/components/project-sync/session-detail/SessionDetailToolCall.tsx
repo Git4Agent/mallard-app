@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { SessionEventDetail, SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
+import { writeClipboardText } from "../../sync-review/clipboard";
 import { readableToolPayload, sessionToolDescriptor, toolCommandLabel } from "./sessionDetailModel";
 
 export interface SessionToolDetailState {
@@ -14,30 +15,6 @@ interface Props {
   expanded: boolean;
   detailState?: SessionToolDetailState;
   onExpandedChange: (eventId: string, expanded: boolean) => void;
-}
-
-async function copyText(value: string): Promise<void> {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(value);
-      return;
-    } catch {
-      // Some WebViews expose Clipboard but still reject it. Fall through.
-    }
-  }
-  if (typeof document === "undefined") return;
-  const field = document.createElement("textarea");
-  field.value = value;
-  field.readOnly = true;
-  field.style.position = "fixed";
-  field.style.opacity = "0";
-  document.body.appendChild(field);
-  field.select();
-  try {
-    document.execCommand("copy");
-  } finally {
-    field.remove();
-  }
 }
 
 /**
@@ -80,7 +57,7 @@ function PayloadSection({
             className="session-detail-payload-action"
             aria-label={`Copy ${label.toLowerCase()} to clipboard`}
             title="Copy to clipboard"
-            onClick={() => void copyText(body)}
+            onClick={() => void writeClipboardText(body)}
           >
             <Icon name="copy" size={12} />
           </button>
@@ -191,6 +168,13 @@ export default function SessionDetailToolCall({
         </span>
       </summary>
 
+      {/* Only an open row builds its payload. `<details>` hides a closed body
+          visually but still mounts it, so a session of a few hundred tool
+          calls was carrying megabytes of invisible <pre> text and running the
+          payload projection for every one of them. Nothing about the
+          disclosure behaviour changes: the summary, the toggle and the native
+          keyboard contract are all outside this guard. */}
+      {expanded && (
       <div className="session-detail-tool-body" aria-busy={detailState?.loading || undefined}>
         {detailState?.loading && (
           <div className="session-detail-local-state" role="status">
@@ -213,6 +197,7 @@ export default function SessionDetailToolCall({
           />
         )}
       </div>
+      )}
     </details>
   );
 }

@@ -36,7 +36,7 @@ const crumbs: PathBarCrumb[] = [
 function Harness() {
   const [dark, setDark] = useState(false);
   const [draft, setDraft] = useState<StorageConfig>(() => newStorage("local", 2));
-  const ready = storageConfigReady(draft);
+  const ready = storageConfigReady(draft, false);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
@@ -102,6 +102,7 @@ function Harness() {
                     storage={draft}
                     disabled={false}
                     onChange={setDraft}
+                    secretStored={false}
                     showNameField
                     showProgress={false}
                   />
@@ -110,7 +111,7 @@ function Harness() {
                 <footer className="sync-storage-setup-footer">
                   {draft.kind !== "local" && (
                     <span className="sync-storage-editor-progress" aria-live="polite">
-                      {r2FieldsSet(draft)} of 5 set
+                      {r2FieldsSet(draft, false)} of 5 set
                     </span>
                   )}
                   <div>

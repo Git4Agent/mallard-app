@@ -9,7 +9,7 @@ interface Props {
   projectFingerprint?: string | null;
   storage: StorageConfig;
   matches: BundleSnapshotSummary[];
-  reason: "link" | "missing";
+  reason: "link" | "missing" | "sibling";
   busy: boolean;
   error: string | null;
   onCancel: () => void;
@@ -43,6 +43,7 @@ export default function BundleConnectionDialog({
 
   const selected = matches.find((match) => match.bundle_id === selectedId) ?? null;
   const missing = reason === "missing";
+  const sibling = reason === "sibling";
   const selectedFingerprintDiffers = !!projectFingerprint
     && !!selected?.repository_fingerprint
     && projectFingerprint !== selected.repository_fingerprint;
@@ -62,12 +63,18 @@ export default function BundleConnectionDialog({
           <div>
             <span className="sync-eyebrow">Repo identity</span>
             <h1 id="sync-bundle-connection-title">
-              {missing ? "Choose the remote repo" : "Choose a repo from this storage"}
+              {sibling
+                ? "Connect to this repository's repo"
+                : missing
+                  ? "Choose the remote repo"
+                  : "Choose a repo from this storage"}
             </h1>
             <p>
-              {missing
-                ? `${projectName} has a local-only identity. Pull from an existing repo, or publish this one separately.`
-                : `${storage.name} contains the repos below. Git matches are recommended, but every repo remains available.`}
+              {sibling
+                ? `${storage.name} already has this repository in another repo. Connecting adopts it, so pushes and pulls from every machine converge; the current empty registration is abandoned.`
+                : missing
+                  ? `${projectName} has a local-only identity. Pull from an existing repo, or publish this one separately.`
+                  : `${storage.name} contains the repos below. Git matches are recommended, but every repo remains available.`}
             </p>
           </div>
           <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy} aria-label="Close repo chooser">
@@ -133,7 +140,7 @@ export default function BundleConnectionDialog({
 
         <footer className="sync-modal-footer">
           <button type="button" className="btn btn-ghost" onClick={onKeepCurrent} disabled={busy}>
-            {missing ? "Review separate Push" : "Create separate repo"}
+            {sibling ? "Not now" : missing ? "Review separate Push" : "Create separate repo"}
           </button>
           <div>
             <button type="button" className="btn" onClick={onCancel} disabled={busy}>Cancel</button>

@@ -32,9 +32,6 @@ export const storageCatalogApi = {
       path,
     }),
 
-  deleteProfile: (profileId: string, expectedRevision: number) =>
-    invoke<boolean>("delete_catalog_resource_profile", { profileId, expectedRevision }),
-
   listScopes: () => invoke<CatalogScopeView[]>("list_catalog_scopes"),
 
   /** Adding a row records a scope and nothing else — no inventory, no

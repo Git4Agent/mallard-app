@@ -1,6 +1,9 @@
 import { useMemo, useState } from "react";
 import type { ProjectFileSyncEligibility } from "../../types";
 import Icon from "../Icons";
+import { clockOptions } from "../../clock";
+import { formatBytes } from "../../format";
+import { STORAGE_BLOCKING_STATES } from "./model";
 
 export type ProjectFileReviewEntryType = "file" | "directory" | "blocked";
 
@@ -46,7 +49,6 @@ interface Props {
 }
 
 const MAX_RENDERED_ROWS = 500;
-const STORAGE_BLOCKING_STATES = new Set(["storage_only", "storage_ahead", "diverged", "unknown"]);
 
 function parentPath(path: string): string | null {
   const separator = path.lastIndexOf("/");
@@ -79,11 +81,20 @@ function displayState(row: ProjectFileReviewRow, mode: Props["mode"]): string {
   return labels[row.state] ?? row.state.replace(/_/g, " ");
 }
 
-function formatBytes(value?: number | null): string | null {
-  if (value == null) return null;
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+/** The only stamp on this page. It used to be a bare `toLocaleString()`, which
+ *  ignored the 24-hour preference every other surface honours. */
+function formatFileTimestamp(seconds: number): string {
+  return new Date(seconds * 1_000).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    ...clockOptions(),
+  });
+}
+
+/** The row's size is optional; everything else is the shared formatter. */
+function formatOptionalBytes(value?: number | null): string | null {
+  return value == null ? null : formatBytes(value);
 }
 
 function formatMode(mode?: number | null): string | null {
@@ -131,6 +142,19 @@ export default function ProjectFilesReviewPage({
     () => new Set(rows.filter((row) => row.entryType === "directory").map((row) => row.relativePath)),
     [rows],
   );
+  /* Every directory row used to count its descendants by scanning all of
+     `rows`, inside the row map — quadratic in the project's file count, redone
+     on every render. One walk up each row's ancestry gives the same numbers in
+     O(rows x depth), once per row change. */
+  const descendantCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      for (let parent = parentPath(row.relativePath); parent; parent = parentPath(parent)) {
+        counts.set(parent, (counts.get(parent) ?? 0) + 1);
+      }
+    }
+    return counts;
+  }, [rows]);
   const shownRows = useMemo(() => {
     if (normalizedSearch) {
       const matchingPaths = new Set(rows
@@ -241,6 +265,16 @@ export default function ProjectFilesReviewPage({
             type="search"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
+            /* Escape clears the filter, the same as any search field. Without
+               this it reaches the review's own window listener and throws the
+               whole prepared push away. An empty field has nothing to clear,
+               so it still closes the review. */
+            onKeyDown={(event) => {
+              if (event.key !== "Escape" || !search) return;
+              event.preventDefault();
+              event.stopPropagation();
+              setSearch("");
+            }}
             placeholder="Search files…"
             aria-label="Search project file paths"
           />
@@ -251,7 +285,13 @@ export default function ProjectFilesReviewPage({
       {rows.length === 0 ? (
         <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No changes</strong></span></div>
       ) : (
-        <div className="sync-project-file-tree" role="tree" aria-label="Project files">
+        /* A list, not an ARIA tree. The tree roles were here without any of
+           the contract they promise — no focusable treeitem, no arrow-key
+           navigation — and every row nests its own focusable controls, which a
+           tree forbids. VoiceOver announced "tree, N items" and then could not
+           move through it. As a list, Tab already walks the controls correctly
+           and the announcement matches what the widget actually does. */
+        <div className="sync-project-file-tree" role="list" aria-label="Project files">
           {shownRows.map((row) => {
             const isDirectory = row.entryType === "directory";
             const expanded = expandedDirectories.has(row.relativePath) || Boolean(normalizedSearch);
@@ -260,20 +300,18 @@ export default function ProjectFilesReviewPage({
             const removed = removalIds.has(row.resourceId);
             const selectable = rowIsSelectable(row, mode, eligible) && !removed;
             const detailsOpen = details.has(row.resourceId);
-            const childCount = isDirectory ? rows.filter((candidate) => candidate.relativePath.startsWith(`${row.relativePath}/`)).length : 0;
+            const childCount = isDirectory ? descendantCounts.get(row.relativePath) ?? 0 : 0;
             const warningAcknowledged = !!row.warningDigest && acknowledgedWarningDigests.has(row.warningDigest);
             return (
               <div
                 key={row.resourceId}
                 className={`sync-project-file-row${selected ? " selected" : ""}${required ? " required" : ""}${removed ? " removal" : ""}${row.blockedReason ? " blocked" : ""}`}
-                role="treeitem"
-                aria-level={depth(row.relativePath) + 1}
-                aria-expanded={isDirectory ? expanded : undefined}
+                role="listitem"
                 style={{ "--project-file-indent": `${depth(row.relativePath) * 16}px` } as React.CSSProperties}
               >
                 <div className="sync-project-file-row-main">
                   {isDirectory ? (
-                    <button type="button" className="sync-project-file-expand" onClick={() => toggleDirectory(row)} aria-label={`${expanded ? "Collapse" : "Expand"} ${row.relativePath}`}>
+                    <button type="button" className="sync-project-file-expand" aria-expanded={expanded} onClick={() => toggleDirectory(row)} aria-label={`${expanded ? "Collapse" : "Expand"} ${row.relativePath}`}>
                       <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
                     </button>
                   ) : <span className="sync-project-file-expand" />}
@@ -296,7 +334,7 @@ export default function ProjectFilesReviewPage({
                     <strong>{row.relativePath.split("/").slice(-1)[0]}</strong>
                     <small>{displayState(row, mode)}{required ? " · required directory" : ""}{childCount > 0 ? ` · ${childCount} descendant${childCount === 1 ? "" : "s"}` : ""}</small>
                   </button>
-                  {formatBytes(row.size) && <span className="sync-project-file-size">{formatBytes(row.size)}</span>}
+                  {formatOptionalBytes(row.size) && <span className="sync-project-file-size">{formatOptionalBytes(row.size)}</span>}
                   {row.warningCode && <span className="sync-project-file-warning"><Icon name="alert-triangle" size={13} /> Warning</span>}
                   {mode === "push" && row.storagePresent && onToggleRemoval && (
                     <button type="button" className={`btn btn-ghost sync-project-file-remove${removed ? " active" : ""}`} disabled={disabled || !eligible || required} onClick={() => onToggleRemoval(row.resourceId)}>
@@ -309,7 +347,7 @@ export default function ProjectFilesReviewPage({
                     <span>Path</span><code>{row.relativePath}</code>
                     <span>Type</span><code>{isDirectory ? "Directory" : row.entryType === "blocked" ? "Blocked entry" : "Regular file"}</code>
                     {formatMode(row.mode) && <><span>Mode</span><code>{formatMode(row.mode)}</code></>}
-                    {row.sourceMtime != null && <><span>Modified</span><code>{new Date(row.sourceMtime * 1000).toLocaleString()}</code></>}
+                    {row.sourceMtime != null && <><span>Modified</span><code>{formatFileTimestamp(row.sourceMtime)}</code></>}
                     {row.blockedReason && <><span>Blocked</span><code>{row.blockedReason}</code></>}
                   </div>
                 )}

@@ -474,69 +474,6 @@ pub async fn save_catalog_resource_profile(
     .await
 }
 
-pub fn delete_catalog_resource_profile_with_repositories(
-    catalog: &CatalogStateRepository,
-    profile_id: &LocalCatalogProfileId,
-    expected_revision: u64,
-) -> Result<bool, String> {
-    if catalog
-        .load_resources()?
-        .registrations
-        .iter()
-        .any(|registration| &registration.profile_id == profile_id)
-    {
-        return Err("this profile is used by a registered Library resource".to_string());
-    }
-    if catalog
-        .load_scopes()?
-        .scopes
-        .iter()
-        .any(|scope| &scope.profile_id == profile_id)
-    {
-        return Err("this profile is used by a Catalog menu row".to_string());
-    }
-    if catalog.list_resource_plans()?.iter().any(|plan| {
-        let pins = match plan {
-            CatalogResourcePlanDocument::Push(plan) => &plan.profile_pins,
-            CatalogResourcePlanDocument::Pull(plan) => &plan.profile_pins,
-            CatalogResourcePlanDocument::Fork(plan) => &plan.profile_pins,
-        };
-        pins.iter().any(|pin| &pin.profile_id == profile_id)
-    }) {
-        return Err("this profile is used by a Library review plan".to_string());
-    }
-    catalog.mutate_profiles(|document| {
-        let Some(index) = document
-            .profiles
-            .iter()
-            .position(|profile| &profile.profile_id == profile_id)
-        else {
-            return Ok(false);
-        };
-        if document.profiles[index].revision != expected_revision {
-            return Err("the catalog resource profile changed; refresh first".to_string());
-        }
-        document.profiles.remove(index);
-        Ok(true)
-    })
-}
-
-#[tauri::command]
-pub async fn delete_catalog_resource_profile(
-    _app: tauri::AppHandle,
-    profile_id: LocalCatalogProfileId,
-    expected_revision: u64,
-) -> Result<bool, String> {
-    run_blocking(move || {
-        delete_catalog_resource_profile_with_repositories(
-            &catalog_repository()?,
-            &profile_id,
-            expected_revision,
-        )
-    })
-    .await
-}
-
 fn resource_dto(
     state: &LocalStateRepository,
     document: &CatalogResourcesDocument,
@@ -3018,30 +2955,5 @@ mod tests {
             refused.contains("still owns registered resources"),
             "{refused}"
         );
-    }
-
-    #[test]
-    fn deleting_a_profile_refuses_while_a_scope_names_it() {
-        let fixture = library_fixture();
-        let row = skill_scope(&fixture);
-        let refused = delete_catalog_resource_profile_with_repositories(
-            &fixture.catalog,
-            &fixture.profile.profile_id,
-            fixture.profile.revision,
-        )
-        .unwrap_err();
-        assert_eq!(refused, "this profile is used by a Catalog menu row");
-
-        // Removing the row unblocks the profile.
-        assert!(
-            delete_catalog_scope_with_repositories(&fixture.catalog, &row.scope.scope_id, 1)
-                .unwrap()
-        );
-        assert!(delete_catalog_resource_profile_with_repositories(
-            &fixture.catalog,
-            &fixture.profile.profile_id,
-            fixture.profile.revision,
-        )
-        .unwrap());
     }
 }

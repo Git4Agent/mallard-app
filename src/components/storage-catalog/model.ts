@@ -1,4 +1,5 @@
 import type { IconName } from "../Icons";
+import { clockOptions } from "../../clock";
 import type { ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 import type {
   CatalogLinkState,
@@ -37,9 +38,9 @@ export function catalogScopeLabel(
   return profile ? `${meta.plural} · ${profile.display_name}` : meta.plural;
 }
 
-export function errorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
-}
+// The Library used to carry its own copy, which skipped both the R2
+// translation and the Bundle -> Repo wording pass the rest of the app applies.
+export { errorMessage, storageAccessErrorMessage } from "../../storageError";
 
 export function linkStateLabel(state: CatalogLinkState): string {
   return {
@@ -140,7 +141,7 @@ export function rowStamp(row: CatalogScopeRow): { short: string; detail: string 
       : elapsed < 86_400_000
         ? `${Math.floor(elapsed / 3_600_000)}h ago`
         : when.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  const exact = `${when.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })} · ${when.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+  const exact = `${when.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })} · ${when.toLocaleTimeString(undefined, clockOptions())}`;
   return { short, detail: `${local == null ? "Stored" : "Edited"} ${exact}` };
 }
 

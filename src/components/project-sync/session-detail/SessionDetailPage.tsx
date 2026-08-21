@@ -19,13 +19,12 @@ import type { SessionToolDetailState } from "./SessionDetailToolCall";
 import {
   ALL_SESSION_TOOL_CATEGORIES,
   createDefaultSessionDetailFilters,
-  eventAnchorId,
-  findCheckpointJump,
   includedSessionEventKinds,
   mergeSessionTimelinePages,
   normalizeSessionDetailFailure,
   type ProjectMarkdownImageState,
   sessionDetailFilterFingerprint,
+  sessionDetailFilterToggles,
   type SessionDetailFilters,
 } from "./sessionDetailModel";
 
@@ -57,7 +56,6 @@ interface Props {
   projectRoot: string;
   resourceId: string;
   occurrenceKey: string;
-  initialCheckpointId?: string;
   /**
    * Reports the loaded session's identity and refresh handle for the path bar.
    * Called with null while the detail is still loading or has failed, and once
@@ -98,7 +96,6 @@ export default function SessionDetailPage({
   projectRoot,
   resourceId,
   occurrenceKey,
-  initialCheckpointId,
   onHeaderChange,
 }: Props) {
   const [detail, setDetail] = useState<ProjectSessionDetail | null>(null);
@@ -121,9 +118,6 @@ export default function SessionDetailPage({
   const timelineRequestRef = useRef(0);
   const eventDetailRequestRef = useRef<Record<string, number>>({});
   const sequenceRef = useRef(0);
-  const pendingAnchorRef = useRef<string | null>(null);
-  const focusAnchorRef = useRef<string | null>(null);
-  const initialCheckpointRef = useRef(initialCheckpointId ?? null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const focusedHeadingRef = useRef(false);
 
@@ -135,12 +129,6 @@ export default function SessionDetailPage({
     try {
       const next = await projectSyncApi.getProjectSessionDetail(localProjectId, resourceId);
       if (requestId !== detailRequestRef.current) return;
-      const initialCheckpoint = initialCheckpointRef.current
-        ? findCheckpointJump(next.checkpoint_jumps, initialCheckpointRef.current)
-        : null;
-      initialCheckpointRef.current = null;
-      pendingAnchorRef.current = initialCheckpoint?.event_id ?? null;
-      focusAnchorRef.current = initialCheckpoint?.event_id ?? null;
       setSnapshotChanged(false);
       setTimelineError(null);
       setTimelineWarnings([]);
@@ -161,7 +149,6 @@ export default function SessionDetailPage({
   }, [localProjectId, resourceId]);
 
   useEffect(() => {
-    initialCheckpointRef.current = initialCheckpointId ?? null;
     focusedHeadingRef.current = false;
     setDetail(null);
     setFilters(null);
@@ -173,7 +160,7 @@ export default function SessionDetailPage({
       timelineRequestRef.current += 1;
       eventDetailRequestRef.current = {};
     };
-  }, [localProjectId, resourceId, occurrenceKey, initialCheckpointId, loadDetail]);
+  }, [localProjectId, resourceId, occurrenceKey, loadDetail]);
 
   // The refresh handle stays one stable function so the bar's button never
   // remounts mid-spin; the loader it calls is read through a ref.
@@ -204,31 +191,27 @@ export default function SessionDetailPage({
     return () => window.cancelAnimationFrame(frame);
   }, [detail]);
 
-  const focusTimelineAnchor = useCallback((eventId: string) => {
-    const frame = window.requestAnimationFrame(() => {
-      const target = document.getElementById(eventAnchorId(eventId));
-      target?.scrollIntoView({ block: "center" });
-      target?.focus({ preventScroll: true });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, []);
-
   const requestTimelinePage = useCallback(async ({
     sessionDetail,
     activeFilters,
     cursor = null,
-    anchorEventId = null,
     append = false,
   }: {
     sessionDetail: ProjectSessionDetail;
     activeFilters: SessionDetailFilters;
     cursor?: string | null;
-    anchorEventId?: string | null;
     append?: boolean;
   }) => {
     const requestId = ++timelineRequestRef.current;
     if (append) setTimelineLoadingMore(true);
-    else setTimelineLoading(true);
+    else {
+      setTimelineLoading(true);
+      // A cursor belongs to the filter set and snapshot that produced it. A
+      // fresh query must not leave the previous one reachable: pressing
+      // "Load 50 more" before the refiltered page arrived sent a cursor the
+      // backend rejects, and the correct page was discarded with it.
+      setNextCursor(null);
+    }
     setTimelineError(null);
     try {
       const page = await projectSyncApi.getProjectSessionTimelinePage(
@@ -237,7 +220,6 @@ export default function SessionDetailPage({
         {
           snapshot_id: sessionDetail.snapshot_id,
           cursor,
-          anchor_event_id: anchorEventId,
           limit: TIMELINE_PAGE_SIZE,
           included_event_kinds: includedSessionEventKinds(activeFilters),
           included_tool_categories: [...ALL_SESSION_TOOL_CATEGORIES],
@@ -251,11 +233,6 @@ export default function SessionDetailPage({
       setTimelineWarnings((current) => append
         ? mergeWarnings(current, page.warnings)
         : page.warnings);
-      const anchorToFocus = focusAnchorRef.current;
-      if (anchorToFocus) {
-        focusAnchorRef.current = null;
-        focusTimelineAnchor(anchorToFocus);
-      }
     } catch (reason) {
       if (requestId !== timelineRequestRef.current) return;
       const failure = normalizeSessionDetailFailure(reason);
@@ -271,18 +248,15 @@ export default function SessionDetailPage({
         setTimelineLoadingMore(false);
       }
     }
-  }, [focusTimelineAnchor, localProjectId, resourceId]);
+  }, [localProjectId, resourceId]);
 
   const filterFingerprint = filters ? sessionDetailFilterFingerprint(filters) : "";
   useEffect(() => {
     if (!detail || !filters) return;
-    const anchorEventId = pendingAnchorRef.current;
-    pendingAnchorRef.current = null;
     setExpandedToolIds(new Set());
     void requestTimelinePage({
       sessionDetail: detail,
       activeFilters: filters,
-      anchorEventId,
     });
   }, [detail, filterFingerprint, timelineReloadEpoch, requestTimelinePage]);
 
@@ -323,7 +297,7 @@ export default function SessionDetailPage({
     }
   }, [detail, localProjectId, resourceId, toolDetails]);
 
-  const handleToolExpandedChange = (eventId: string, expanded: boolean) => {
+  const handleToolExpandedChange = useCallback((eventId: string, expanded: boolean) => {
     setExpandedToolIds((current) => {
       const next = new Set(current);
       if (expanded) next.add(eventId);
@@ -331,7 +305,24 @@ export default function SessionDetailPage({
       return next;
     });
     if (expanded) void requestToolDetail(eventId);
-  };
+  }, [requestToolDetail]);
+
+  const retryTimeline = useCallback(() => {
+    setTimelineReloadEpoch((epoch) => epoch + 1);
+  }, []);
+
+  /* "Load 50 more" is only rendered once the session, its filters and a cursor
+     all exist; the guard keeps that a fact rather than an assumption. */
+  const loadMoreEvents = useCallback(() => {
+    // The timeline block, and so the button, renders only under `filters`.
+    if (!detail || !filters || !nextCursor) return;
+    void requestTimelinePage({
+      sessionDetail: detail,
+      activeFilters: filters,
+      cursor: nextCursor,
+      append: true,
+    });
+  }, [detail, filters, nextCursor, requestTimelinePage]);
 
   const openProjectPath = useCallback(async (relativePath: string) => {
     setActionError(null);
@@ -368,6 +359,18 @@ export default function SessionDetailPage({
     }
     setProjectImages((previous) => ({ ...previous, [relativePath]: state }));
   }, [localProjectId]);
+
+  /* The timeline hands these straight down to every event body, and the
+     memoized markdown only skips a re-parse while its props hold still. Fresh
+     arrows at the JSX site would change identity on every render and make the
+     memo dead weight. */
+  const handleOpenProjectPath = useCallback((relativePath: string) => {
+    void openProjectPath(relativePath);
+  }, [openProjectPath]);
+
+  const handleLoadProjectImage = useCallback((relativePath: string) => {
+    void loadProjectImage(relativePath);
+  }, [loadProjectImage]);
 
   const runAction = async (action: SessionActionDescriptor) => {
     if (!action.enabled || actionBusyId) return;
@@ -446,18 +449,15 @@ export default function SessionDetailPage({
             error={timelineError}
             expandedToolIds={expandedToolIds}
             toolDetails={toolDetails}
-            onRetry={() => setTimelineReloadEpoch((epoch) => epoch + 1)}
-            onLoadMore={() => void requestTimelinePage({
-              sessionDetail: detail,
-              activeFilters: filters,
-              cursor: nextCursor,
-              append: true,
-            })}
+            onRetry={retryTimeline}
+            onLoadMore={loadMoreEvents}
             onToolExpandedChange={handleToolExpandedChange}
-            onOpenProjectPath={(relativePath) => void openProjectPath(relativePath)}
+            onOpenProjectPath={handleOpenProjectPath}
             projectImages={projectImages}
-            onLoadProjectImage={(relativePath) => void loadProjectImage(relativePath)}
+            onLoadProjectImage={handleLoadProjectImage}
             projectRoot={projectRoot}
+            repositoryUrl={detail.github_repository_url}
+            hasFilterToggles={sessionDetailFilterToggles(detail.event_counts).length > 0}
           />
         </div>
       )}

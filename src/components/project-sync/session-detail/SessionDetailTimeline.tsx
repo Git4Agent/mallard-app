@@ -27,6 +27,10 @@ interface Props {
   projectImages: Readonly<Record<string, ProjectMarkdownImageState>>;
   onLoadProjectImage: (relativePath: string) => void;
   projectRoot: string;
+  repositoryUrl?: string | null;
+  /** False when the session holds no events at all, so the empty state can
+   *  stop blaming filters that do not exist. */
+  hasFilterToggles: boolean;
 }
 
 export default function SessionDetailTimeline({
@@ -46,6 +50,8 @@ export default function SessionDetailTimeline({
   projectImages,
   onLoadProjectImage,
   projectRoot,
+  repositoryUrl,
+  hasFilterToggles,
 }: Props) {
   // The record is the page; it needs no eyebrow announcing that it is a record,
   // and no count of its own now that the toolbar states one.
@@ -54,7 +60,7 @@ export default function SessionDetailTimeline({
 
   return (
     <section className="session-detail-timeline" aria-label="Session timeline">
-      {loading && events.length === 0 && (
+      {loading && (
         <div className="session-detail-state" role="status" aria-live="polite">
           <span className="status-loader" />
           <strong>Loading the filtered timeline…</strong>
@@ -74,11 +80,21 @@ export default function SessionDetailTimeline({
       {!loading && !error && events.length === 0 && (
         <div className="session-detail-state empty">
           <Icon name="message" size={24} />
-          <strong>No events match these filters.</strong>
-          <span>Turn another kind back on in the row above.</span>
+          {hasFilterToggles ? (
+            <>
+              <strong>No events match these filters.</strong>
+              <span>Turn another kind back on in the row above.</span>
+            </>
+          ) : (
+            <>
+              <strong>This session recorded no events.</strong>
+              <span>Nothing was captured for it, so there is nothing to filter.</span>
+            </>
+          )}
         </div>
       )}
 
+      <div className="session-detail-days" aria-busy={loading || undefined} data-refiltering={loading || undefined}>
       {days.map((day, dayIndex) => (
         <div className="session-detail-day" key={`${day.key}:${dayIndex}`}>
           {/* h2, directly under the page's h1: an h3 here implied a section
@@ -118,6 +134,7 @@ export default function SessionDetailTimeline({
                     projectImages={projectImages}
                     onLoadProjectImage={onLoadProjectImage}
                     projectRoot={projectRoot}
+                    repositoryUrl={repositoryUrl}
                   />
                 </li>
               );
@@ -125,12 +142,13 @@ export default function SessionDetailTimeline({
           </ol>
         </div>
       ))}
+      </div>
 
       {nextCursor && !error && (
         <button
           type="button"
           className="btn session-detail-load-more"
-          disabled={loadingMore}
+          disabled={loadingMore || loading}
           onClick={onLoadMore}
         >
           {loadingMore ? <span className="status-loader" /> : <Icon name="chevron-down" size={12} />}

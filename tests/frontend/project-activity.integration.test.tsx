@@ -876,7 +876,7 @@ test("activity content uses the local alias and renders commit and session rows"
   assert.doesNotMatch(html, /aria-label="Show session details"/);
   // Both endpoints are announced together on the single visible stamp.
   assert.match(html, /aria-label="Started [^"]+\. Ended [^"]+"/);
-  assert.match(html, /aria-label="User turns: 3"/);
+  assert.match(html, /aria-label="Messages: 8\. User turns: 3\. Agent messages: 5"/);
   assert.match(html, /data-tooltip="Total tokens · 25K"/);
   assert.match(html, /aria-label="1 session linked to commits"/);
   assert.match(html, /class="sync-history-session-title-button"/);
@@ -1005,9 +1005,11 @@ test("permanent session summaries label every metric icon", () => {
   assert.match(html, /data-icon="clock"/);
   // Only one stamp, and none of the old paired-range markup.
   assert.doesNotMatch(html, /sync-history-thread-time-start|sync-history-range-arrow/);
-  assert.match(html, /data-tooltip="User turns · 3"/);
   assert.match(html, /data-tooltip="Total tokens · 25K"/);
-  assert.match(html, /data-tooltip="Agent messages · 5"/);
+  // Turns are one chip now — the sum on the face, each half named on its own
+  // tooltip line — and the user glyph left the row with its readout.
+  assert.match(html, /data-tooltip="User turns · 3\nAgent messages · 5"[\s\S]*?data-icon="message"[\s\S]*?<b>8<\/b>/);
+  assert.doesNotMatch(html, /sync-history-thread-metric[^>]*>[^<]*<svg[^>]*data-icon="user"/);
   assert.match(html, /data-tooltip="Tool calls · 8"/);
 });
 
@@ -1126,7 +1128,7 @@ test("browse-mode session titles navigate without retaining the inline preview",
 
   assert.match(html, /class="sync-history-session-title-button"[^>]*>Add Git history mapping</);
   assert.match(html, /aria-label="View session details"/);
-  assert.match(html, /data-tooltip="User turns · 3"/);
+  assert.match(html, /data-tooltip="User turns · 3\nAgent messages · 5"/);
   assert.doesNotMatch(html, /sync-history-chat-details|Load 10 older messages|Nested conversation preview/);
   assert.doesNotMatch(html, /aria-expanded="(?:true|false)"[^>]*View session details/);
 });
@@ -1915,9 +1917,12 @@ test("sidebar navigation icons use the restrained Pixelarticons silhouettes", ()
 });
 
 test("history metrics use matching sourced pixel silhouettes", () => {
+  // `tool` is the one in-house mark on the row — a single spanner drawn on the
+  // same 12-cell grid, replacing the downloaded crossed-tools smudge — so the
+  // family gate names its provenance class alongside the downloaded ones.
   for (const name of ["user", "token", "message", "tool", "info"] as const) {
     const html = renderToStaticMarkup(<Icon name={name} size={12} />);
-    assert.match(html, /icon-(?:pixelarticons|hackernoon-pixel)/, `${name} must use the downloaded pixel icon family`);
+    assert.match(html, /icon-(?:pixelarticons|hackernoon-pixel|mallard-pixel)/, `${name} must use a named pixel icon family`);
     assert.match(html, /fill="currentColor"/);
     assert.match(html, /shape-rendering="crispEdges"/);
     assert.doesNotMatch(html, /<(?:circle|ellipse|line|polyline)\b/);
@@ -2083,6 +2088,18 @@ test("standalone Git branch icons stay monochrome in the retro skin", () => {
   );
 });
 
+test("a metric chip is one line, and only the retro timestamp absorbs the squeeze", () => {
+  // The geometry claim was verified by sweeping the live component 360-1100px
+  // (chips whole, stamp ellipsized, nothing crossing the divider); these pins
+  // only keep the two load-bearing declarations from being edited away. At
+  // `min-width: 0` the readout group shrank under its own chips and a squeezed
+  // `2d 11h` wrapped onto the divider beside it.
+  const base = readFileSync("src/App.css", "utf8");
+  const retro = readFileSync("src/RetroTheme.css", "utf8");
+  assert.match(base, /\.sync-history-thread-metric \{[^}]*white-space: nowrap/s);
+  assert.match(retro, /\.sync-history-thread-meta \{\n  min-width: auto;\n\}/);
+});
+
 test("completed projects use their main row for history and only mark Git repositories", () => {
   const html = renderToStaticMarkup(
     <ProjectSidebar
@@ -2149,13 +2166,16 @@ test("completed projects use their main row for history and only mark Git reposi
   const projectsNavIndex = primaryNav.indexOf(" Projects</button>");
   const storagesNavIndex = primaryNav.indexOf(" Storages</button>");
   const catalogNavIndex = primaryNav.indexOf(" Catalog</button>");
+  const settingsNavIndex = primaryNav.indexOf(" Settings</button>");
   const logsNavIndex = primaryNav.indexOf(" Logs</button>");
   assert.ok(projectsNavIndex >= 0);
   // Catalog is a destination like Projects and Storages, so it joins them in
-  // the nav; Logs stays last because it toggles a drawer instead of navigating.
+  // the nav; Settings sits above Logs, and Logs stays last because it toggles
+  // a drawer instead of navigating.
   assert.ok(catalogNavIndex > projectsNavIndex);
   assert.ok(storagesNavIndex > catalogNavIndex);
-  assert.ok(logsNavIndex > storagesNavIndex);
+  assert.ok(settingsNavIndex > storagesNavIndex);
+  assert.ok(logsNavIndex > settingsNavIndex);
   assert.match(html, /aria-label="Storages"/);
   assert.match(html, />Storages<\/span>/);
   // Every seam down the rail is a handle — each one is the same 3px of frame

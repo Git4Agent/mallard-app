@@ -142,11 +142,7 @@ function restoreActionCopy(action: RestoreAction): {
     };
   }
   if (kind === "manual") {
-    const conversationProvider = action.resource_id.startsWith("codex:session:")
-      ? "codex"
-      : action.resource_id.startsWith("claude:session:")
-        ? "claude"
-        : null;
+    const conversationProvider = conversationResourceProvider(action.resource_id);
     return {
       title: conversationProvider ? "Conflicted conversation" : "Manual review",
       detail: action.kind.message,
@@ -288,16 +284,20 @@ export function requiresApproval(item: PullReviewItem): boolean {
     .some((action) => action.requires_explicit_approval);
 }
 
+/* The review rows are the backend's signal and the only one. A Manual restore
+   action can never stand in for them: `manual_action` in bundle_engine.rs is
+   its sole constructor and leaves target_path and both digests unset. */
+/** The provider that owns a `<provider>:session:<id>` resource, or null when
+ *  the id is not a conversation. Parsed rather than matched against a list, so
+ *  registering a provider adapter needs no edit here. */
+export function conversationResourceProvider(resourceId: string): ProviderKey | null {
+  return /^([a-z0-9_-]+):session:/.exec(resourceId)?.[1] ?? null;
+}
+
 export function keepsLocalConversation(item: PullReviewItem): boolean {
   return item.conversationReviewRows.some((row) => (
     row.action === "report_push_eligible" || row.action === "report_local_only"
-  )) || (/^(codex|claude):session:/.test(item.resourceId)
-    && item.restoreActions.some((action) => (
-      action.kind.kind === "manual"
-      && Boolean(action.target_path)
-      && Boolean(action.source_sha256)
-      && Boolean(action.expected_target_sha256)
-    )));
+  ));
 }
 
 export function requiresManualResolution(item: PullReviewItem): boolean {

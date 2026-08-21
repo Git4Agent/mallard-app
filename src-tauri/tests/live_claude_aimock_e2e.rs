@@ -52,6 +52,11 @@ const PLACEHOLDER_API_KEY: &str = "mallard-local-aimock-placeholder";
 const INHERITED_SECRET_MARKER: &str = "mallard-inherited-secret-sentinel";
 const READ_TOOL_CALL_ID: &str = "mallard_claude_read_r1";
 const READ_FILE_MARKER: &str = "MALLARD_CLAUDE_READ_FILE";
+/// Fake credentials planted into the Read-tool file: shaped so the
+/// mallard.redact.v1 layers detect them (provider prefix; credential
+/// key/value), proving live cloud-object cleanliness end to end.
+const PLANTED_LIVE_ANTHROPIC_KEY: &str = "sk-ant-api03-fakelivecorpusaaaabbbb";
+const PLANTED_LIVE_PASSWORD: &str = "hunter2fakelive";
 const SOURCE_SESSION_ID: &str = "018f3f2e-7b91-7ad0-8000-000000000201";
 const FINAL_REOPEN_ACK: &str = "MALLARD_CLAUDE_REOPEN_CAPTURED";
 
@@ -204,6 +209,35 @@ fn byte_slice_contains(haystack: &[u8], needle: &[u8]) -> bool {
         && haystack
             .windows(needle.len())
             .any(|window| window == needle)
+}
+
+/// Positive control for exclusion scans: the needle must appear in at least
+/// one storage object body, proving the scan reads real plaintext objects.
+fn assert_storage_contains(storage_root: &Path, needle: &[u8]) {
+    let mut found = false;
+    for entry in WalkDir::new(storage_root).follow_links(false) {
+        let entry = redacted(entry, "cannot inspect Claude local-folder storage");
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let bytes = read_bounded(
+            entry.path(),
+            MAX_STORAGE_OBJECT_BYTES,
+            "Claude storage object",
+        );
+        if bytes
+            .windows(needle.len().max(1))
+            .any(|window| window == needle)
+        {
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "no storage object contains the expected needle of length {}",
+        needle.len()
+    );
 }
 
 fn assert_excludes(haystack: &[u8], needles: &[Vec<u8>], label: &str) {
@@ -3243,6 +3277,18 @@ fn lineage_of(bytes: &[u8]) -> mallard_infrastructure::conversation_codec::Codec
     analysis.lineage
 }
 
+/// The wire-form lineage of local transcript bytes: what the cloud row and
+/// every pulled materialization carry after credential redaction. Local
+/// bytes with detectable credentials fold differently from their wire form
+/// by design.
+fn wire_lineage_of(bytes: &[u8]) -> mallard_infrastructure::conversation_codec::CodecLineage {
+    let text = std::str::from_utf8(bytes).expect("Claude transcript is UTF-8");
+    let (redacted, _changed_lines) = mallard_infrastructure::credential_redaction::shared()
+        .redact_jsonl_text(text)
+        .expect("transcript redacts cleanly");
+    lineage_of(redacted.as_bytes())
+}
+
 #[test]
 fn live_tuzi_provider_document_is_strict_and_uses_the_site_root() {
     for url in ["https://api.tu-zi.com/", "https://api.tu-zi.com/v1"] {
@@ -3368,9 +3414,17 @@ fn live_claude_aimock_setup_push_pull_divergence() {
 
     assert_supported_claude_version(&process_home);
     let read_marker_path = project_a.join("read-marker.txt");
+    // The Read tool ingests this file verbatim, so its planted (fake)
+    // credentials ride the transcript's tool-result record into every
+    // push — the live proof that no detectable secret reaches the store
+    // and that typed placeholders arrive in its place.
     write_private_new(
         &read_marker_path,
-        format!("{READ_FILE_MARKER}\n").as_bytes(),
+        format!(
+            "{READ_FILE_MARKER}\nDB_PASSWORD={PLANTED_LIVE_PASSWORD}\n\
+             TOKEN={PLANTED_LIVE_ANTHROPIC_KEY}\n"
+        )
+        .as_bytes(),
     );
     let scenario = aimock_scenario_document(&read_marker_path);
     let _home_guard = EnvironmentGuard::set("HOME", &process_home);
@@ -3394,6 +3448,12 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         PLACEHOLDER_API_KEY.as_bytes().to_vec(),
         INHERITED_SECRET_MARKER.as_bytes().to_vec(),
     ];
+    // Store scans additionally forbid the planted transcript credentials;
+    // the process-level scans keep the base set (the aimock audit
+    // legitimately records the tool result that carries them).
+    let mut store_sensitive = sensitive.clone();
+    store_sensitive.push(PLANTED_LIVE_ANTHROPIC_KEY.as_bytes().to_vec());
+    store_sensitive.push(PLANTED_LIVE_PASSWORD.as_bytes().to_vec());
     let mut path_needles = vec![root.path().to_string_lossy().as_bytes().to_vec()];
     let canonical_needle = canonical_root.to_string_lossy().as_bytes().to_vec();
     if !path_needles.contains(&canonical_needle) {
@@ -3436,7 +3496,6 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &read_marker_path,
     );
     let source_r1_bytes = transcript_bytes(&claude_home_a, &project_a, SOURCE_SESSION_ID);
-    let source_r1_lineage = lineage_of(&source_r1_bytes);
     let first_push = push(&service_a, &project_id_a, &storage_id);
     assert_eq!(first_push.revision, Some(1));
     let logical_primary_a = logical_thread_id(&repository_a, &project_id_a, SOURCE_SESSION_ID);
@@ -3481,10 +3540,14 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &storage_id,
         &bundle_id,
         &storage_root,
-        &sensitive,
+        &store_sensitive,
         &path_needles,
         &r1_machine_identity_needles,
     );
+    // Positive control for the redaction scan: the stored transcript object
+    // carries the typed placeholders where the planted credentials were.
+    assert_storage_contains(&storage_root, b"<anthropic-api-key>");
+    assert_storage_contains(&storage_root, b"DB_PASSWORD=<password>");
 
     // Revision 2: B pulls, receives machine-local identities, and resumes the
     // production-relocated transcript through the real Claude CLI.
@@ -3536,10 +3599,25 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &read_marker_path,
     );
     let destination_r1_bytes = transcript_bytes(&claude_home_b, &project_b, &provider_primary_b);
+    // B materializes the wire form: identical chain identities, content
+    // redacted — so its lineage equals the wire fold of A's local bytes,
+    // and the planted credentials never arrive.
     assert_eq!(
         lineage_of(&destination_r1_bytes),
-        source_r1_lineage,
-        "production Claude relocation changed lineage or semantics"
+        wire_lineage_of(&source_r1_bytes),
+        "production Claude relocation changed lineage or semantics beyond redaction"
+    );
+    assert_excludes(
+        &destination_r1_bytes,
+        &[
+            PLANTED_LIVE_ANTHROPIC_KEY.as_bytes().to_vec(),
+            PLANTED_LIVE_PASSWORD.as_bytes().to_vec(),
+        ],
+        "replica-B materialized transcript",
+    );
+    assert!(
+        byte_slice_contains(&destination_r1_bytes, b"<anthropic-api-key>"),
+        "replica-B materialized transcript lost its typed placeholder"
     );
     assert_eq!(
         transcript_bytes(&claude_home_a, &project_a, SOURCE_SESSION_ID),
@@ -4034,7 +4112,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &storage_id,
         &bundle_id,
         &storage_root,
-        &sensitive,
+        &store_sensitive,
         &path_needles,
         &final_machine_identity_needles,
     );

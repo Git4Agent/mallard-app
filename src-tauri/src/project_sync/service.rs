@@ -138,7 +138,6 @@ impl<'a> ProjectSyncService<'a> {
         storage_id: &StorageId,
         on_phase: &mut dyn FnMut(&str, Duration),
     ) -> Result<PushReviewContext, String> {
-        commands::rebaseline_project_provider_caches(self.repository, local_project_id)?;
         commands::prepare_push_review_with_progress(
             self.repository,
             local_project_id,
@@ -213,7 +212,6 @@ impl<'a> ProjectSyncService<'a> {
         on_progress: &mut dyn FnMut(FetchProgress),
         on_phase: &mut dyn FnMut(&str, Duration),
     ) -> Result<mallard_domain::RestorePlan, String> {
-        commands::rebaseline_project_provider_caches(self.repository, &binding.local_project_id)?;
         commands::plan_bundle_restore_with_progress(
             self.repository,
             storage_id,
@@ -258,7 +256,6 @@ impl<'a> ProjectSyncService<'a> {
         local_project_id: &LocalProjectId,
         storage_id: &StorageId,
     ) -> Result<ThreadSyncComparison, String> {
-        commands::rebaseline_project_provider_caches(self.repository, local_project_id)?;
         commands::get_project_thread_sync_comparison_with_progress(
             self.repository,
             local_project_id,

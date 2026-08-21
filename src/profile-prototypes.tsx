@@ -2,13 +2,13 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import ProfilePagePrototypes from "./components/ProfilePagePrototypes";
 import type { AppTheme } from "./types";
-import { applyTheme, getStoredTheme } from "./theme";
+import { applyResolvedTheme, resolveTheme, getThemeChoice } from "./preferences";
 import "./App.css";
 
 function ProfilePrototypeApp() {
-  const [theme, setTheme] = useState<AppTheme>(getStoredTheme);
+  const [theme, setTheme] = useState<AppTheme>(() => resolveTheme(getThemeChoice()));
 
-  useEffect(() => applyTheme(theme), [theme]);
+  useEffect(() => applyResolvedTheme(theme), [theme]);
 
   return <ProfilePagePrototypes theme={theme} onThemeChange={setTheme} />;
 }

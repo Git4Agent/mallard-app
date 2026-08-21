@@ -1,10 +1,10 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect } from "react";
-import ReactMarkdown from "react-markdown";
+import { memo, useEffect, useMemo } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { SessionCount, SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
 import ProviderMark from "../../sync-review/ProviderMark";
+import { githubCommitUrl, openExternalUrl } from "../externalLink";
 import SessionDetailToolCall, { type SessionToolDetailState } from "./SessionDetailToolCall";
 import {
   eventAnchorId,
@@ -32,11 +32,8 @@ interface Props {
   projectImages?: Readonly<Record<string, ProjectMarkdownImageState>>;
   onLoadProjectImage?: (relativePath: string) => void;
   projectRoot: string;
-}
-
-async function openMarkdownLink(url: string): Promise<void> {
-  if (!isSafeExternalMarkdownUrl(url)) return;
-  await openUrl(url);
+  /** The project's GitHub remote, when it has one: a checkpoint sha links there. */
+  repositoryUrl?: string | null;
 }
 
 /** Alt text (or the path) inside a bordered chip: the still-loading and
@@ -90,7 +87,15 @@ function ProjectMarkdownImage({
   return <MarkdownImagePlaceholder label={alt || relativePath} loading />;
 }
 
-export function SessionDetailMarkdown({
+/* A fresh array literal every render is a changed prop to ReactMarkdown, so
+   this lives at module scope. */
+const REMARK_PLUGINS = [remarkGfm];
+
+/* Parsing a markdown body is the most expensive thing this page does, and the
+   page re-renders whenever any tool call expands or a tool detail resolves —
+   none of which changes any body's text. Memoized on its own inputs, each body
+   is parsed once and skipped thereafter. */
+export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
   text,
   onOpenProjectPath,
   projectImages,
@@ -103,12 +108,7 @@ export function SessionDetailMarkdown({
   onLoadProjectImage?: (relativePath: string) => void;
   projectRoot?: string;
 }) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      skipHtml
-      urlTransform={safeMarkdownUrl}
-      components={{
+  const components = useMemo<Components>(() => ({
         img: ({ src, alt }) => {
           const url = typeof src === "string" ? src : "";
           const label = alt ?? "";
@@ -174,7 +174,11 @@ export function SessionDetailMarkdown({
               onClick={external
                 ? (clickEvent) => {
                   clickEvent.preventDefault();
-                  void openMarkdownLink(safeHref);
+                  // The shared opener, so a webview that rejects the plugin
+                  // still gets the window.open fallback. The local duplicate
+                  // this replaced awaited openUrl bare: when it rejected, the
+                  // link silently did nothing.
+                  if (isSafeExternalMarkdownUrl(safeHref)) void openExternalUrl(safeHref);
                 }
                 : projectPath
                   ? (clickEvent) => {
@@ -187,22 +191,37 @@ export function SessionDetailMarkdown({
             </a>
           );
         },
-      }}
+  }), [onOpenProjectPath, projectImages, onLoadProjectImage, projectRoot]);
+
+  return (
+    <ReactMarkdown
+      remarkPlugins={REMARK_PLUGINS}
+      skipHtml
+      urlTransform={safeMarkdownUrl}
+      components={components}
     >
       {text}
     </ReactMarkdown>
   );
-}
+});
 
-function EventQuality({ event }: { event: SessionTimelineEvent }) {
+function EventQuality({ event, title }: { event: SessionTimelineEvent; title?: string }) {
   if (event.quality === "exact") return null;
   const label = event.quality === "lower_bound"
     ? "Partial"
     : event.quality === "inferred"
       ? "Inferred"
       : "Unavailable";
-  return <span className={`session-detail-quality quality-${event.quality}`}>{label}</span>;
+  return (
+    <span className={`session-detail-quality quality-${event.quality}`} title={title}>{label}</span>
+  );
 }
+
+/* One word is not enough to explain a matched commit, and the row has no space
+   for the sentence. Both arms of the match land after the session ended, so
+   this holds whichever one produced the checkpoint. */
+const CHECKPOINT_QUALITY_HINT =
+  "Matched from Git after the session ended. The transcript does not record a commit.";
 
 /**
  * The rail tile is the speaker: the headings that spelled `You` and `Codex` on
@@ -296,24 +315,50 @@ function PromptCard({
 }
 
 /** sha · subject · branch · clock — the fields the provider records; no more. */
-function CheckpointBody({ event }: { event: SessionTimelineEvent }) {
+function CheckpointBody({ event, repositoryUrl }: {
+  event: SessionTimelineEvent;
+  repositoryUrl?: string | null;
+}) {
   const checkpoint = event.checkpoint;
   const subject = checkpoint?.subject ?? event.text ?? "Git checkpoint";
   const sha = checkpoint?.short_sha ?? checkpoint?.sha.slice(0, 7);
+  // A sha links only where a remote can resolve it, the same rule the activity
+  // list follows; the glyph is what marks it as an off-app target.
+  const commitUrl = checkpoint ? githubCommitUrl(repositoryUrl, checkpoint.sha) : null;
   return (
     <div className="session-detail-checkpoint-card">
-      {sha && <code className="session-detail-checkpoint-sha" title={checkpoint?.sha}>{sha}</code>}
+      {sha && commitUrl && (
+        <a
+          className="session-detail-checkpoint-link"
+          href={commitUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Open ${checkpoint?.sha} on GitHub`}
+          onClick={(clickEvent) => { clickEvent.preventDefault(); void openExternalUrl(commitUrl); }}
+        >
+          <Icon name="external-link" size={12} />
+          <code className="session-detail-checkpoint-sha">{sha}</code>
+        </a>
+      )}
+      {sha && !commitUrl && (
+        <code className="session-detail-checkpoint-sha" title={checkpoint?.sha}>{sha}</code>
+      )}
       <span className="session-detail-checkpoint-subject" title={subject}>{subject}</span>
-      {checkpoint && (
-        <span className="session-detail-checkpoint-end">
-          {checkpoint.branch && (
-            <span className="session-detail-checkpoint-branch">{checkpoint.branch}</span>
-          )}
+      {/* The flag rides with branch and clock instead of taking a line of its
+          own above the card. Every checkpoint is matched rather than recorded,
+          so a stacked chip resized the row on the one kind that always carries
+          one — 62px for the same commit a plain row states in 36px. */}
+      <span className="session-detail-checkpoint-end">
+        <EventQuality event={event} title={CHECKPOINT_QUALITY_HINT} />
+        {checkpoint?.branch && (
+          <span className="session-detail-checkpoint-branch">{checkpoint.branch}</span>
+        )}
+        {checkpoint && (
           <time dateTime={sessionDetailDateTime(checkpoint.committed_at)}>
             {formatSessionDetailClock(checkpoint.committed_at)}
           </time>
-        </span>
-      )}
+        )}
+      </span>
     </div>
   );
 }
@@ -330,6 +375,7 @@ export default function SessionDetailEvent({
   projectImages,
   onLoadProjectImage,
   projectRoot,
+  repositoryUrl,
 }: Props) {
   const classes = [
     "session-detail-event",
@@ -353,7 +399,9 @@ export default function SessionDetailEvent({
         : <EventNode event={event} provider={provider} providerDisplayName={providerDisplayName} />}
 
       <div className="session-detail-event-body">
-        {event.quality !== "exact" && (
+        {/* Checkpoints carry their own flag inside the card; every other kind
+            has nowhere on its row to put one. */}
+        {event.kind !== "checkpoint" && event.quality !== "exact" && (
           <div className="session-detail-event-flags"><EventQuality event={event} /></div>
         )}
 
@@ -365,7 +413,7 @@ export default function SessionDetailEvent({
             onExpandedChange={onToolExpandedChange}
           />
         ) : event.kind === "checkpoint" ? (
-          <CheckpointBody event={event} />
+          <CheckpointBody event={event} repositoryUrl={repositoryUrl} />
         ) : event.kind === "prompt" ? (
           <PromptCard
             event={event}

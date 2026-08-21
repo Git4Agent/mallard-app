@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import Icon, { type IconName } from "../Icons";
+import { clockOptions } from "../../clock";
+import { formatBytes } from "../../format";
+import { storageAccessErrorMessage } from "../../storageError";
+import { writeClipboardText } from "../sync-review/clipboard";
+import { focusMenuEdge, moveMenuFocus } from "../sync-review/menuKeyboard";
 import ProviderMark from "../sync-review/ProviderMark";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
@@ -66,6 +71,10 @@ interface PullEntry {
   plan: CatalogResourcePullPlan;
 }
 
+/** Mirrors the shell's notice tones without importing them: storage-catalog
+ *  may not depend on project-sync. */
+type CatalogNoticeTone = "ok" | "attention";
+
 function providerLabel(provider: CatalogProviderKey): string {
   return provider === "codex" ? "Codex" : "Claude";
 }
@@ -111,17 +120,12 @@ interface RowAction {
   onChoose: (actionId: string) => void;
 }
 
-/** "12.8 KB", "1.2 MB": the size a card states for its payload on disk. */
-function formatBytes(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_048_576).toFixed(1)} MB`;
-  return `${value === 0 ? 0 : Math.max(1, Math.round(value / 1024))} KB`;
-}
-
-/** The activity page's own stamp, to the character: "Aug 17, 2026 at 9:11 PM". */
+/** The activity page's own stamp, to the character — both draw their clock
+ * fields from the shared preference: "Aug 17, 2026 at 21:11". */
 function fullStamp(seconds: number): string {
   const when = new Date(seconds * 1_000);
   const date = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(when);
-  const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(when);
+  const clock = new Intl.DateTimeFormat(undefined, clockOptions()).format(when);
   return `${date} at ${clock}`;
 }
 
@@ -177,7 +181,11 @@ function InfoMenu({ row }: { row: CatalogScopeRow }) {
       if (event.target instanceof Node && !rootRef.current?.contains(event.target)) setOpen(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key !== "Escape") return;
+      /* This layer consumed Escape; the Push/Pull review listens on window
+         and must not also close and discard the whole review. */
+      event.stopPropagation();
+      setOpen(false);
     };
     document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
@@ -231,16 +239,23 @@ function InfoMenu({ row }: { row: CatalogScopeRow }) {
               type="button"
               className="sync-history-debug-copy"
               title={`Copy ${entry.label.toLowerCase()}`}
+              /* Was a bare `navigator.clipboard?.writeText` — on a webview
+                 that exposes Clipboard but rejects it, and on one that exposes
+                 none at all, the click copied nothing and said nothing. The
+                 shared helper carries the document fallback the other three
+                 copy paths already had. */
               onClick={() => {
-                void navigator.clipboard?.writeText(entry.value)
+                void writeClipboardText(entry.value)
                   .then(() => setCopied(entry.label))
-                  .catch(() => setCopied(null));
+                  .catch(() => setCopied("__failed__"));
               }}
             >
               <span>{entry.label}</span>
               <code>{entry.value}</code>
               <small className={copied === entry.label ? "copied" : undefined}>
-                {copied === entry.label ? "Copied" : "Copy"}
+                {copied === entry.label
+                  ? "Copied"
+                  : copied === "__failed__" ? "Couldn’t copy" : "Copy"}
               </small>
             </button>
           ))}
@@ -320,8 +335,23 @@ function ResourceCard({
               </button>
               {action.expanded && (
                 /* The app's own popover, item markup and all: a checkable
-                   list with the current choice ticked. */
-                <div className="sync-path-menu end" role="menu" aria-label={`Local action for ${row.display_name}`}>
+                   list with the current choice ticked — and now the keyboard
+                   contract that `role="menu"` promises. It declared the role
+                   without any of it: arrows did nothing, focus stayed on the
+                   trigger when the menu opened, and Escape left focus nowhere. */
+                <div
+                  className="sync-path-menu end"
+                  role="menu"
+                  aria-label={`Local action for ${row.display_name}`}
+                  ref={(node) => focusMenuEdge(node, "first")}
+                  onKeyDown={(event) => {
+                    if (event.key === "Tab") {
+                      action.onToggle();
+                      return;
+                    }
+                    if (moveMenuFocus(event.currentTarget, event.key)) event.preventDefault();
+                  }}
+                >
                   <div className="sync-path-menu-group">
                     {action.options.map((option) => (
                       <button
@@ -401,12 +431,19 @@ function ResourceCard({
           <div className="sync-history-row-clickables">
             <InfoMenu row={row} />
           </div>
+          {/* The tooltip is the whole point of this stop — which time this is
+              — so it has to be the accessible name too, or a screen reader
+              hears a bare date and never learns whether it is the local
+              modification or the storage update. */}
           <span
             className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end"
             data-tooltip={rowStamp(row)?.detail}
+            aria-label={rowStamp(row)?.detail}
             tabIndex={0}
           >
-            <time>{seconds == null ? "—" : fullStamp(seconds)}</time>
+            <time dateTime={seconds == null ? undefined : new Date(seconds * 1_000).toISOString()}>
+              {seconds == null ? "—" : fullStamp(seconds)}
+            </time>
           </span>
         </div>
       </div>
@@ -443,8 +480,9 @@ export default function StorageCatalogPage({
   /** The row disappeared underneath the page (deleted elsewhere). */
   onScopeGone: () => void;
   /** Outcomes go to the shell's one notification surface, the way every other
-   * screen reports them — not to a block that pushes the list down. */
-  notify: (message: string) => void;
+   * screen reports them — not to a block that pushes the list down. The tone
+   * union is declared locally: this module may not import from project-sync. */
+  notify: (message: string, tone?: CatalogNoticeTone) => void;
   api?: StorageCatalogApi;
 }) {
   const label = catalogScopeLabel(scope.scope, scope.profile);
@@ -460,6 +498,10 @@ export default function StorageCatalogPage({
   const [inspectingLinks, setInspectingLinks] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /* Per-item failures are a list. Joining them with newlines into the single
+     error string put them in a flex callout that collapses whitespace, so five
+     failures rendered as one run-on sentence. */
+  const [failures, setFailures] = useState<string[]>([]);
 
   const [pushSelected, setPushSelected] = useState<Set<string>>(new Set());
   const [pushAcks, setPushAcks] = useState<Set<string>>(new Set());
@@ -479,10 +521,28 @@ export default function StorageCatalogPage({
   const epochRef = useRef(0);
   const inspectionEpochRef = useRef(0);
 
+  /* `onScopeGone` arrives as a fresh arrow on every parent render. Reading it
+     through a ref keeps the loader's identity tied to what it actually reads —
+     the scope and the chosen storage — so an unrelated re-render of the shell
+     (a splitter drag, a log keystroke, a sync event) no longer re-runs it.
+     Every real refresh is already explicit: each mutation below awaits load(),
+     and the path bar has its own Refresh. */
+  /* The same translation the project page applies: a transport failure names
+     what to check instead of quoting the AWS SDK. `storages` carries each
+     storage's kind, which is all the translation needs. */
+  const storageFailureMessage = (reason: unknown): string => storageAccessErrorMessage(
+    storages.find((candidate) => candidate.id === (chosenStorageId ?? storageId)) ?? null,
+    reason,
+  );
+
+  const onScopeGoneRef = useRef(onScopeGone);
+  onScopeGoneRef.current = onScopeGone;
+
   const load = useCallback(async () => {
     const epoch = ++epochRef.current;
     setLoading(true);
     setError(null);
+    setFailures([]);
     try {
       const next = await api.listScopeResources(scope.scope.scope_id, chosenStorageId);
       if (epoch !== epochRef.current) return;
@@ -490,14 +550,14 @@ export default function StorageCatalogPage({
     } catch (reason) {
       if (epoch !== epochRef.current) return;
       if (errorMessage(reason).startsWith("unknown catalog scope")) {
-        onScopeGone();
+        onScopeGoneRef.current();
         return;
       }
-      setError(errorMessage(reason));
+      setError(storageFailureMessage(reason));
     } finally {
       if (epoch === epochRef.current) setLoading(false);
     }
-  }, [api, chosenStorageId, onScopeGone, scope.scope.scope_id]);
+  }, [api, chosenStorageId, scope.scope.scope_id]);
 
   useEffect(() => {
     void load();
@@ -558,7 +618,11 @@ export default function StorageCatalogPage({
       setOpenChoices(null);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpenChoices(null);
+      if (event.key !== "Escape") return;
+      /* This layer consumed Escape; the Push/Pull review listens on window
+         and must not also close and discard the whole review. */
+      event.stopPropagation();
+      setOpenChoices(null);
     };
     document.addEventListener("mousedown", closeOnOutside);
     document.addEventListener("keydown", closeOnEscape);
@@ -595,6 +659,7 @@ export default function StorageCatalogPage({
     setPushSelected(new Set(pushRows.map((row) => row.row_id)));
     setPushAcks(new Set());
     setError(null);
+    setFailures([]);
     setMode({ kind: "push" });
   };
 
@@ -602,6 +667,7 @@ export default function StorageCatalogPage({
     const selected = pushRows.filter((row) => pushSelected.has(row.row_id));
     setBusy(true);
     setError(null);
+    setFailures([]);
     const failures: string[] = [];
     let pushed = 0;
     try {
@@ -616,7 +682,7 @@ export default function StorageCatalogPage({
           const result = await api.publish(linkId, plan.plan_id, true, [...pushAcks]);
           if (result.published) pushed += 1;
         } catch (reason) {
-          failures.push(`${row.display_name}: ${errorMessage(reason)}`);
+          failures.push(`${row.display_name}: ${storageFailureMessage(reason)}`);
         }
       }
     } finally {
@@ -626,8 +692,16 @@ export default function StorageCatalogPage({
     setMode({ kind: "list" });
     await load();
     const noun = pushed === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase();
+    // A run where everything failed is not a success, whatever the count says.
+    if (failures.length > 0) {
+      notify(
+        `Pushed ${pushed} of ${selected.length} ${kind.plural.toLowerCase()} — ${failures.length} failed.`,
+        "attention",
+      );
+      setFailures(failures);
+      return;
+    }
     notify(`Pushed ${pushed} ${noun} to ${storageName ?? "storage"}.`);
-    if (failures.length > 0) setError(failures.join("\n"));
   };
 
   /** Opening the Pull review plans every row it could act on. Rows the
@@ -637,6 +711,7 @@ export default function StorageCatalogPage({
   const openPull = async () => {
     setBusy(true);
     setError(null);
+    setFailures([]);
     setMode({ kind: "pull" });
     const entries: PullEntry[] = [];
     const blocked: Record<string, string> = {};
@@ -648,7 +723,7 @@ export default function StorageCatalogPage({
           const plan = await api.preparePull(linkId, null);
           entries.push({ row, linkId, plan });
         } catch (reason) {
-          blocked[row.row_id] = errorMessage(reason);
+          blocked[row.row_id] = storageFailureMessage(reason);
         }
       }
     } finally {
@@ -670,6 +745,7 @@ export default function StorageCatalogPage({
     const selected = pullEntries.filter((entry) => pullSelected.has(entry.row.row_id));
     setBusy(true);
     setError(null);
+    setFailures([]);
     const failures: string[] = [];
     let applied = 0;
     let unaccepted = 0;
@@ -686,7 +762,7 @@ export default function StorageCatalogPage({
           applied += 1;
           if (!result.remote_accepted) unaccepted += 1;
         } catch (reason) {
-          failures.push(`${entry.row.display_name}: ${errorMessage(reason)}`);
+          failures.push(`${entry.row.display_name}: ${storageFailureMessage(reason)}`);
         }
       }
     } finally {
@@ -696,10 +772,18 @@ export default function StorageCatalogPage({
     setMode({ kind: "list" });
     await load();
     const noun = applied === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase();
+    if (failures.length > 0) {
+      notify(
+        `Pulled ${applied} of ${selected.length} ${kind.plural.toLowerCase()} — ${failures.length} failed.`,
+        "attention",
+      );
+      setFailures(failures);
+      return;
+    }
     notify(unaccepted > 0
       ? `Pulled ${applied} ${noun}. Pull did not advance the comparison base for ${unaccepted} of them.`
-      : `Pulled ${applied} ${noun} from ${storageName ?? "storage"}.`);
-    if (failures.length > 0) setError(failures.join("\n"));
+      : `Pulled ${applied} ${noun} from ${storageName ?? "storage"}.`,
+      unaccepted > 0 ? "attention" : "ok");
   };
 
   const unlinkStorage = async () => {
@@ -712,21 +796,29 @@ export default function StorageCatalogPage({
     if (!approved) return;
     setBusy(true);
     setError(null);
+    setFailures([]);
     const failures: string[] = [];
     try {
       for (const row of linked) {
         try {
           await api.unlink(row.registration_id!, row.link_id!, row.link_revision ?? 1);
         } catch (reason) {
-          failures.push(`${row.display_name}: ${errorMessage(reason)}`);
+          failures.push(`${row.display_name}: ${storageFailureMessage(reason)}`);
         }
       }
     } finally {
       setBusy(false);
     }
     await load();
+    if (failures.length > 0) {
+      notify(
+        `Unlinked ${linked.length - failures.length} of ${linked.length} pairings — ${failures.length} failed.`,
+        "attention",
+      );
+      setFailures(failures);
+      return;
+    }
     notify("Storage links removed. Local and stored content were left untouched.");
-    if (failures.length > 0) setError(failures.join("\n"));
   };
 
   // ---- the per-resource detail behind a row -------------------------------
@@ -760,6 +852,7 @@ export default function StorageCatalogPage({
     const epoch = ++inspectionEpochRef.current;
     setInspectingLinks(true);
     setError(null);
+    setFailures([]);
     try {
       const inspections = await api.inspectLinks(registrationId);
       if (epoch !== inspectionEpochRef.current) return;
@@ -781,6 +874,7 @@ export default function StorageCatalogPage({
   const runFork = async (resource: CatalogResourceView) => {
     setBusy(true);
     setError(null);
+    setFailures([]);
     try {
       const plan = await api.prepareFork(resource.registration.registration_id, forkName.trim());
       const result = await api.applyFork(resource.registration.registration_id, plan.plan_id);
@@ -805,6 +899,7 @@ export default function StorageCatalogPage({
     if (!approved) return;
     setBusy(true);
     setError(null);
+    setFailures([]);
     try {
       await api.unlink(resource.registration.registration_id, linkId, revision);
       notify("Storage link removed. Local and remote content were left untouched.");
@@ -825,6 +920,7 @@ export default function StorageCatalogPage({
     if (!approved) return;
     setBusy(true);
     setError(null);
+    setFailures([]);
     try {
       await api.remove(resource.registration.registration_id, resource.registration.revision);
       notify("Registration removed. Provider content was left untouched.");
@@ -998,7 +1094,15 @@ export default function StorageCatalogPage({
       actions={(
         <>
           {counts.attention > 0 && (
-            <span className="sync-path-attention warning" tabIndex={0} role="status" data-tooltip={attentionDetail}>
+            /* Not role="status": this is a standing count, not an event, and
+               a live region re-announces it on every unrelated re-render. The
+               label carries what the number means. */
+            <span
+              className="sync-path-attention warning"
+              tabIndex={0}
+              data-tooltip={attentionDetail}
+              aria-label={`${counts.attention} needing attention. ${attentionDetail}`}
+            >
               <Icon name="alert-triangle" size={13} /><b>{counts.attention}</b>
             </span>
           )}
@@ -1056,6 +1160,14 @@ export default function StorageCatalogPage({
     <>
       {progress && <div className="sync-callout info" role="status">{progress}</div>}
       {error && <div className="sync-callout error" role="alert">{error}</div>}
+      {failures.length > 0 && (
+        <div className="sync-callout error sync-catalog-failures" role="alert">
+          <Icon name="alert-triangle" size={15} />
+          <ul>
+            {failures.map((failure) => <li key={failure}>{failure}</li>)}
+          </ul>
+        </div>
+      )}
     </>
   );
 
@@ -1461,6 +1573,18 @@ export default function StorageCatalogPage({
         {notices}
         {loading && !page ? (
           <div className="sync-history-state">{`Loading ${label}…`}</div>
+        ) : error && !page ? (
+          /* "None stored yet" is a fact about the storage. When the request
+             that would have listed them failed, we know no such thing — and
+             saying it anyway tells the user their content is gone. */
+          <div className="sync-history-state" role="alert">
+            <Icon name="alert-triangle" size={18} />
+            <strong>{`Couldn’t load ${label}.`}</strong>
+            <span>{error}</span>
+            <button type="button" className="btn" onClick={() => void load()}>
+              <Icon name="refresh" size={14} /> Retry
+            </button>
+          </div>
         ) : rows.length === 0 ? (
           /* Its own container: wrapping one sentence in a list card drew a
              second border around it. Nor does it name the home or the

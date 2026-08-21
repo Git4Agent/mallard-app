@@ -584,8 +584,9 @@ test("the storage group is skipped when it would frame nothing", () => {
   assert.match(workspace, /shouldShowConversationPathRepairNotice\(\s*conversationPathAudit,\s*conversationPathAuditError,\s*\)/);
   assert.match(workspace, /const storageGroupEmpty = !storageGroupNotice\s*&& !!selectedStorage\s*&& projectLinks\.length > 0\s*&& !storageBlockShown\s*&& linkingProjectId !== project\.local_project_id;/);
   assert.match(workspace, /if \(storageGroupEmpty\) return null;/);
-  // …and the block inside it goes the same way when it has no banner to carry.
-  assert.match(workspace, /if \(!activeNotice && !reviewOpen\) return null;/);
+  // …and the block inside it goes the same way when it has no banner to
+  // carry — the sibling-repo convergence banner counts as one.
+  assert.match(workspace, /if \(!activeNotice && !reviewOpen && !activeSibling\) return null;/);
 });
 
 test("the storage page is a rooted trail; the sidebar opens it and removes directly", () => {
@@ -608,7 +609,7 @@ test("the storage page is a rooted trail; the sidebar opens it and removes direc
   assert.match(shell, /onRemoveStorage=\{\(storageId\) => void removeStorage\(storageId\)\}/);
   assert.match(shell, /onClearStorage=\{\(storageId\) => void clearStorageData\(storageId\)\}/);
   assert.match(shell, /storageIndexOpen \? \(\s*<StorageIndexPage/);
-  assert.match(shell, /\(!!activeSummary\s*\|\| !!activeCatalogScope\s*\|\| storageIndexOpen\s*\|\| activeStorageSettingsId != null\)/);
+  assert.match(shell, /\(!!activeSummary\s*\|\| !!activeCatalogScope\s*\|\| storageIndexOpen\s*\|\| settingsOpen\s*\|\| activeStorageSettingsId != null\)/);
   // Removing the storage whose page is open lands on the trail's root.
   assert.match(shell, /if \(activeStorageSettingsId === storageId\) setStorageIndexOpen\(true\);/);
 
@@ -657,7 +658,7 @@ test("the storage page is a rooted trail; the sidebar opens it and removes direc
   assert.match(workspace, /const storagePathActions = creatingStorage \? undefined : \(/);
   assert.match(workspace, /showProgress=\{!creatingStorage\}/);
   assert.match(workspace, /\{creatingStorage && \(\s*<footer className="sync-storage-setup-footer">/);
-  assert.match(workspace, /\{r2FieldsSet\(storageDraft\)\} of 5 set/);
+  assert.match(workspace, /\{r2FieldsSet\(storageDraft, secretStored\)\} of 5 set/);
   assert.match(workspace, /className="btn btn-ghost"\s*disabled=\{busy\}\s*onClick=\{onOpenStorageIndex\}\s*>\s*Cancel/);
   assert.doesNotMatch(workspace, /sync-path-sync-label">\s*\{runningAction === `storage:/);
 
