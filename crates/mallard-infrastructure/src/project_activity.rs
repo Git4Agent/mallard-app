@@ -2369,7 +2369,7 @@ mod activity_only_tests {
     }
 
     #[test]
-    fn activity_cache_miss_uses_native_title_without_rich_timeline_method() {
+    fn activity_cache_fingerprints_and_force_revalidation_control_summary_reuse() {
         let temporary = tempfile::tempdir().unwrap();
         let home = temporary.path().join("provider");
         let project_root = temporary.path().join("project");
@@ -2471,7 +2471,7 @@ mod activity_only_tests {
             provider: provider.clone(),
             provider_thread_id: "session-1".to_string(),
             transcript_logical_path: "state/session.jsonl".to_string(),
-            source_path: transcript,
+            source_path: transcript.clone(),
             source_mtime: modified_secs(&transcript_metadata),
             source_size: transcript_metadata.len(),
         }];
@@ -2485,6 +2485,70 @@ mod activity_only_tests {
         )
         .unwrap();
         assert_eq!(rows.len(), 1);
+        assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
+
+        let cached_rows = scan_local_session_views(
+            &repository,
+            &registry,
+            &resolved,
+            &views,
+            false,
+            &mut warnings,
+        )
+        .unwrap();
+        assert_eq!(cached_rows[0].summary, rows[0].summary);
+        assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
+
+        let forced_rows = scan_local_session_views(
+            &repository,
+            &registry,
+            &resolved,
+            &views,
+            true,
+            &mut warnings,
+        )
+        .unwrap();
+        assert_eq!(forced_rows[0].summary, rows[0].summary);
+        assert_eq!(summary_calls.load(Ordering::SeqCst), 2);
+
+        fs::write(&transcript, b"{}\n{}\n").unwrap();
+        let size_after_append = fs::metadata(&transcript).unwrap().len();
+        assert_ne!(size_after_append, views[0].source_size);
+        let appended_rows = scan_local_session_views(
+            &repository,
+            &registry,
+            &resolved,
+            &views,
+            false,
+            &mut warnings,
+        )
+        .unwrap();
+        assert_eq!(appended_rows[0].summary, rows[0].summary);
+        assert_eq!(summary_calls.load(Ordering::SeqCst), 3);
+
+        let mtime_before_rewrite = modified_nanos(&fs::metadata(&transcript).unwrap());
+        fs::write(&transcript, b"[]\n{}\n").unwrap();
+        let transcript_file = fs::File::options().write(true).open(&transcript).unwrap();
+        transcript_file
+            .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_900_000_000))
+            .unwrap();
+        let rewritten_metadata = fs::metadata(&transcript).unwrap();
+        assert_eq!(rewritten_metadata.len(), size_after_append);
+        assert_ne!(rewritten_metadata.len(), views[0].source_size);
+        assert_ne!(modified_secs(&rewritten_metadata), views[0].source_mtime);
+        assert_ne!(modified_nanos(&rewritten_metadata), mtime_before_rewrite);
+        let rewritten_rows = scan_local_session_views(
+            &repository,
+            &registry,
+            &resolved,
+            &views,
+            false,
+            &mut warnings,
+        )
+        .unwrap();
+        assert_eq!(rewritten_rows[0].summary, rows[0].summary);
+        assert_eq!(summary_calls.load(Ordering::SeqCst), 4);
+
         let preserved_thread_id = initial_conversation_thread_id(
             &resolved.bundle_id,
             &ProviderKey::parse("instrumented").unwrap(),
@@ -2562,7 +2626,7 @@ mod activity_only_tests {
                 ordinal: 2,
             })
         );
-        assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(summary_calls.load(Ordering::SeqCst), 4);
         assert_eq!(timeline_calls.load(Ordering::SeqCst), 0);
     }
 }

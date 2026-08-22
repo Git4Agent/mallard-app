@@ -137,6 +137,12 @@ export interface CatalogScopeRow {
   /** The digest the comparison used: the local capture's when one exists,
    * otherwise the stored version's. */
   content_sha256?: string | null;
+  /** A small PNG of the pet's idle frame, as a data URI. Pet rows only;
+   * null when nothing local can be drawn — stored-only rows fetch theirs
+   * lazily through `getPetPreview`. */
+  preview_png?: string | null;
+  /** The pet descriptor's own sentence about itself. Pet rows only. */
+  pet_description?: string | null;
   registration_id?: string | null;
   registration_revision?: number | null;
   link_id?: string | null;

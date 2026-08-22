@@ -29,7 +29,7 @@ use super::domain::{
     CatalogResourcePullPlan, CatalogResourcePushPlan, CatalogResourceRegistration,
     CatalogResourceRepositoryId, CatalogResourceWarning, CatalogResourcesDocument, CatalogScope,
     CatalogScopeId, CodexPetFormat, LibraryHeadCoordinate, LibraryResourceTag, LocalCatalogProfile,
-    LocalCatalogProfileId, LocalCatalogTargetId, ProviderKey, CATALOG_SCHEMA,
+    LocalCatalogProfileId, LocalCatalogTargetId, ProviderKey, CATALOG_SCHEMA, MAX_PET_ATLAS_BYTES,
 };
 use super::inventory::{
     inventory_local, CatalogInventoryFilter, CatalogLocalInventory, LocalResourceRecord,
@@ -185,6 +185,13 @@ pub struct CatalogScopeRowDto {
     /// The digest the comparison used: the local capture's when one exists,
     /// otherwise the stored version's. `None` when neither side is captured.
     pub content_sha256: Option<String>,
+    /// A small PNG of the pet's idle frame, as a data URI, derived from this
+    /// Mac's atlas and cached by digest. Pet rows only; `None` when nothing
+    /// local can be drawn — stored-only rows fetch theirs lazily through
+    /// `get_catalog_pet_preview`.
+    pub preview_png: Option<String>,
+    /// The pet descriptor's own sentence about itself. Pet rows only.
+    pub pet_description: Option<String>,
     pub registration_id: Option<CatalogRegistrationId>,
     pub registration_revision: Option<u64>,
     pub link_id: Option<CatalogLinkId>,
@@ -736,6 +743,16 @@ pub fn list_catalog_scope_resources_with_repositories(
             .map(|record| scope_label(&record.resource))
             .unwrap_or_else(|| registration_scope_label(registration));
         row.repository_id = repository_id;
+        match (local, remote) {
+            (Some(record), _) => decorate_pet_row(
+                &mut row,
+                &record.resource,
+                record.target_path.as_deref(),
+                user_home,
+            ),
+            (None, Some((_, resource))) => decorate_pet_row(&mut row, resource, None, user_home),
+            (None, None) => {}
+        }
         row.registration_id = Some(registration.registration_id.clone());
         row.registration_revision = Some(registration.revision);
         row.other_storage_names = document
@@ -774,6 +791,12 @@ pub fn list_catalog_scope_resources_with_repositories(
             storage.is_some(),
         );
         row.repository_id = repository_id;
+        decorate_pet_row(
+            &mut row,
+            &record.resource,
+            record.target_path.as_deref(),
+            user_home,
+        );
         rows.push(row);
     }
 
@@ -793,6 +816,7 @@ pub fn list_catalog_scope_resources_with_repositories(
         );
         row.scope_label = scope_label(resource);
         row.repository_id = Some(repository_id.clone());
+        decorate_pet_row(&mut row, resource, None, user_home);
         rows.push(row);
     }
 
@@ -816,6 +840,8 @@ pub fn list_catalog_scope_resources_with_repositories(
             remote_revision: None,
             remote_updated_at: None,
             content_sha256: None,
+            preview_png: None,
+            pet_description: None,
             registration_id: None,
             registration_revision: None,
             link_id: None,
@@ -902,6 +928,45 @@ fn registration_scope_label(registration: &CatalogResourceRegistration) -> Optio
     }
 }
 
+/// Pet rows carry two things the scan already holds: the descriptor's own
+/// sentence about the pet, and — when the atlas is on this Mac — a small
+/// preview of its idle frame, derived once per digest and cached. Previews
+/// are decoration, so a failed derivation leaves the row without one rather
+/// than failing the page; the card draws the kind glyph instead. Stored-only
+/// rows are left to `get_catalog_pet_preview`, fetched lazily so no storage
+/// round-trip ever sits in the list's own path.
+fn decorate_pet_row(
+    row: &mut CatalogScopeRowDto,
+    resource: &CatalogResource,
+    target_path: Option<&Path>,
+    user_home: &Path,
+) {
+    let (format, pet) = match resource {
+        CatalogResource::CodexPetV1(pet) => (CodexPetFormat::V1, pet),
+        CatalogResource::CodexPetV2(pet) => (CodexPetFormat::V2, pet),
+        _ => return,
+    };
+    row.pet_description = Some(pet.descriptor.description.clone());
+    let Some(directory) = target_path else { return };
+    let atlas_path = directory.join(&pet.descriptor.atlas_basename);
+    row.preview_png = super::pet_preview::cached_preview_data_uri(
+        &super::pet_preview::preview_cache_dir(user_home),
+        format,
+        &pet.descriptor.atlas.sha256,
+        || {
+            // Capture bounded this file already, but it can change between
+            // scan and list — never trust a path twice.
+            let metadata =
+                fs::metadata(&atlas_path).map_err(|error| format!("read pet atlas: {}", error))?;
+            if metadata.len() > MAX_PET_ATLAS_BYTES {
+                return Err("pet atlas exceeds its encoded size limit".to_string());
+            }
+            fs::read(&atlas_path).map_err(|error| format!("read pet atlas: {}", error))
+        },
+    )
+    .ok();
+}
+
 /// The one comparison every row makes, whether or not a link exists.
 ///
 /// With a link, the accepted content is the base and drift is three-way. With
@@ -954,6 +1019,8 @@ fn row_for(
         remote_revision: remote.and_then(|(head, _)| head.as_ref().map(|head| head.revision)),
         remote_updated_at: remote.and_then(|(head, _)| head.as_ref().map(|head| head.updated_at)),
         content_sha256: local_sha.or(remote_sha).map(str::to_string),
+        preview_png: None,
+        pet_description: None,
         registration_id: None,
         registration_revision: None,
         link_id: link.map(|link| link.link_id.clone()),
@@ -976,6 +1043,61 @@ pub async fn list_catalog_scope_resources(
     run_blocking(move || {
         super::service::StorageCatalogService::from_user_home()?
             .list_scope_resources(&scope_id, storage_id.as_ref())
+    })
+    .await
+}
+
+/// The preview for a stored-only pet row, fetched from the storage on demand
+/// and cached by the atlas digest. Kept out of the list call on purpose: a
+/// page must never wait on one storage round-trip per row, and this Mac may
+/// be offline — the card asks lazily and keeps its glyph when this fails.
+pub fn get_catalog_pet_preview_with_repositories(
+    state: &LocalStateRepository,
+    catalog: &CatalogStateRepository,
+    scope_id: &CatalogScopeId,
+    storage_id: &StorageId,
+    repository_id: &CatalogResourceRepositoryId,
+    user_home: &Path,
+) -> Result<String, String> {
+    let ResolvedScope { scope, .. } = resolve_scope(catalog, scope_id)?;
+    let format = match scope.resource_kind {
+        CatalogResourceKindTag::CodexPetV1 => CodexPetFormat::V1,
+        CatalogResourceKindTag::CodexPetV2 => CodexPetFormat::V2,
+        _ => return Err("this Catalog row's resources have no preview".to_string()),
+    };
+    let storage = storage_for(state, storage_id)?;
+    let engine = engine_for(&storage)?;
+    let (_, manifest) = engine
+        .inspect(repository_id)?
+        .ok_or("the stored resource disappeared")?;
+    let pet = match (&manifest.resource, format) {
+        (CatalogResource::CodexPetV1(pet), CodexPetFormat::V1) => pet,
+        (CatalogResource::CodexPetV2(pet), CodexPetFormat::V2) => pet,
+        _ => return Err("the stored resource is not a pet of this row's kind".to_string()),
+    };
+    let atlas = pet.descriptor.atlas.clone();
+    atlas.validate("stored pet atlas", MAX_PET_ATLAS_BYTES)?;
+    super::pet_preview::cached_preview_data_uri(
+        &super::pet_preview::preview_cache_dir(user_home),
+        format,
+        &atlas.sha256,
+        || engine.fetch_payload(repository_id, &atlas.sha256, atlas.size),
+    )
+}
+
+#[tauri::command]
+pub async fn get_catalog_pet_preview(
+    _app: tauri::AppHandle,
+    scope_id: CatalogScopeId,
+    storage_id: StorageId,
+    repository_id: CatalogResourceRepositoryId,
+) -> Result<String, String> {
+    run_blocking(move || {
+        super::service::StorageCatalogService::from_user_home()?.pet_preview(
+            &scope_id,
+            &storage_id,
+            &repository_id,
+        )
     })
     .await
 }
@@ -2928,6 +3050,203 @@ mod tests {
         assert_eq!(page.rows[0].display_name, "Duck");
         assert_eq!(page.rows[0].scope_label.as_deref(), Some("v1"));
         assert!(page.rows[0].local_present && !page.rows[0].linked);
+        // The header-only fixture atlas cannot decode, and a preview is
+        // decoration: the row ships without one, the page does not fail, and
+        // the descriptor's sentence still arrives.
+        assert!(page.rows[0].preview_png.is_none());
+        assert_eq!(page.rows[0].pet_description.as_deref(), Some("A duck."));
+    }
+
+    /// A real, decodable PNG atlas with the format's exact dimensions — what
+    /// the header-only fixtures cannot provide.
+    fn decodable_png_atlas(format: CodexPetFormat) -> Vec<u8> {
+        let (width, height) = format.atlas_dimensions();
+        let image = image::RgbaImage::from_pixel(width, height, image::Rgba([90, 60, 30, 255]));
+        let mut bytes = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn a_pet_scope_lists_with_a_preview_derived_from_its_atlas() {
+        let fixture = library_fixture();
+        let codex_home = fixture.user_home.join("codex-home");
+        let atlas = decodable_png_atlas(CodexPetFormat::V1);
+        fs::create_dir_all(codex_home.join("pets/drake")).unwrap();
+        fs::write(
+            codex_home.join("pets/drake/pet.json"),
+            br#"{"id":"drake","displayName":"Drake","description":"A local pet.","spritesheetPath":"spritesheet.png"}"#,
+        )
+        .unwrap();
+        fs::write(codex_home.join("pets/drake/spritesheet.png"), &atlas).unwrap();
+
+        let row = create_catalog_scope_with_repositories(
+            &fixture.catalog,
+            ProviderKey::Codex,
+            fixture.profile.profile_id.clone(),
+            CatalogResourceKindTag::CodexPetV1,
+            2,
+        )
+        .unwrap();
+        let page = list_catalog_scope_resources_with_repositories(
+            &fixture.state,
+            &fixture.catalog,
+            &PanicRunner,
+            &row.scope.scope_id,
+            None,
+            &fixture.user_home,
+        )
+        .unwrap();
+        assert_eq!(page.rows.len(), 1);
+        let listed = &page.rows[0];
+        assert_eq!(listed.pet_description.as_deref(), Some("A local pet."));
+        let preview = listed.preview_png.as_deref().unwrap();
+        assert!(preview.starts_with("data:image/png;base64,"), "{}", preview);
+        // Derived once, cached by the atlas digest under `~/.mallard`.
+        let cache = super::super::pet_preview::preview_cache_dir(&fixture.user_home);
+        let digest = super::super::pet_preview::sha256_hex(&atlas);
+        assert!(cache.join(format!("{}.png", digest)).is_file());
+    }
+
+    #[test]
+    fn a_stored_only_pet_serves_its_preview_from_the_storage_then_the_cache() {
+        use super::super::domain::{
+            CatalogFileEntry, CodexPetDescriptor, CodexPetResource, PortableCatalogOrigin,
+        };
+
+        let fixture = library_fixture();
+        let atlas = decodable_png_atlas(CodexPetFormat::V2);
+        let atlas_sha = super::super::pet_preview::sha256_hex(&atlas);
+        let descriptor = CodexPetDescriptor {
+            pet_id: "biscuit".to_string(),
+            display_name: "Biscuit".to_string(),
+            description: "A stored-only pet.".to_string(),
+            atlas_basename: "spritesheet.png".to_string(),
+            atlas: CatalogFileEntry {
+                sha256: atlas_sha.clone(),
+                size: atlas.len() as u64,
+                mode: 0o644,
+                object_key: format!("_objects/{}", atlas_sha),
+            },
+        };
+        let mut pet = CodexPetResource {
+            descriptor,
+            content_sha256: String::new(),
+        };
+        pet.content_sha256 = pet.compute_content_sha256(CodexPetFormat::V2);
+        let resource = CatalogResource::CodexPetV2(pet);
+
+        let repository_id = CatalogResourceRepositoryId::generate().unwrap();
+        let engine = engine_for(&fixture.storage).unwrap();
+        engine
+            .publish(PublishLibraryResourceRequest {
+                repository_id: repository_id.clone(),
+                tag: LibraryResourceTag {
+                    schema_version: CATALOG_SCHEMA,
+                    repository_id: repository_id.clone(),
+                    provider: resource.provider(),
+                    resource_kind: resource.kind_tag(),
+                    resource_id: resource.resource_id(),
+                    stable_identity_sha256: resource.identity_sha256(),
+                    display_name: resource.display_name(),
+                    scope_label: None,
+                    created_at: 1,
+                },
+                observed: None,
+                resource,
+                payloads: BTreeMap::from([(atlas_sha.clone(), Bytes::from(atlas.clone()))]),
+                captured_with: CatalogCapturedWith {
+                    app: "mallard".to_string(),
+                    version: "test".to_string(),
+                },
+                published_by_origin: PortableCatalogOrigin {
+                    origin_host_token: "a".repeat(64),
+                    origin_replica_token: "b".repeat(64),
+                },
+                updated_at: 1,
+            })
+            .unwrap();
+
+        let row = create_catalog_scope_with_repositories(
+            &fixture.catalog,
+            ProviderKey::Codex,
+            fixture.profile.profile_id.clone(),
+            CatalogResourceKindTag::CodexPetV2,
+            2,
+        )
+        .unwrap();
+        let first = get_catalog_pet_preview_with_repositories(
+            &fixture.state,
+            &fixture.catalog,
+            &row.scope.scope_id,
+            &fixture.storage.id,
+            &repository_id,
+            &fixture.user_home,
+        )
+        .unwrap();
+        assert!(first.starts_with("data:image/png;base64,"), "{}", first);
+
+        // Remove the payload object from the storage: the second ask must be
+        // answered by the digest-keyed cache, never by another fetch.
+        let payload = walkdir::WalkDir::new(&fixture.storage_path)
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_type().is_file() && entry.file_name() == atlas_sha.as_str())
+            .expect("the published atlas payload exists in the storage");
+        fs::remove_file(payload.path()).unwrap();
+        let second = get_catalog_pet_preview_with_repositories(
+            &fixture.state,
+            &fixture.catalog,
+            &row.scope.scope_id,
+            &fixture.storage.id,
+            &repository_id,
+            &fixture.user_home,
+        )
+        .unwrap();
+        assert_eq!(second, first);
+    }
+
+    /// `delete_catalog_scope` is live and UI-reachable. Its success path and
+    /// revision guard used to be asserted only inside a test about the
+    /// now-deleted profile delete, so they are pinned here on their own.
+    #[test]
+    fn deleting_an_unowned_scope_removes_the_row_and_pins_its_revision() {
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+
+        // A stale revision must not clobber a concurrent edit.
+        let stale =
+            delete_catalog_scope_with_repositories(&fixture.catalog, &row.scope.scope_id, 0)
+                .unwrap_err();
+        assert_eq!(stale, "this Catalog row changed; refresh first");
+        assert!(fixture
+            .catalog
+            .load_scopes()
+            .unwrap()
+            .scope(&row.scope.scope_id)
+            .is_some());
+
+        assert!(
+            delete_catalog_scope_with_repositories(&fixture.catalog, &row.scope.scope_id, 1)
+                .unwrap()
+        );
+        assert!(fixture
+            .catalog
+            .load_scopes()
+            .unwrap()
+            .scope(&row.scope.scope_id)
+            .is_none());
+
+        // A row that is already gone reports false rather than failing.
+        assert!(
+            !delete_catalog_scope_with_repositories(&fixture.catalog, &row.scope.scope_id, 1)
+                .unwrap()
+        );
     }
 
     #[test]

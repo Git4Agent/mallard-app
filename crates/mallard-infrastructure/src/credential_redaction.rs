@@ -647,7 +647,7 @@ impl RedactionRuleset {
     }
 
     fn jdbc_gate(&self, candidate: &str) -> bool {
-        candidate.len() >= 5 && candidate[..5].eq_ignore_ascii_case("jdbc:")
+        starts_with_ascii_case_insensitive(candidate, b"jdbc:")
     }
 
     /// Database URLs need no host/user gate: the emission step itself only
@@ -1312,20 +1312,29 @@ enum ValueScanMode {
     Skip,
 }
 
+fn starts_with_ascii_case_insensitive(value: &str, prefix: &[u8]) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
 fn value_scan_mode(s: &str) -> ValueScanMode {
     let trimmed = s.trim();
-    if trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case("data:") {
-        let head = &trimmed[..trimmed.len().min(160)];
-        if head.contains(";base64,") {
+    if starts_with_ascii_case_insensitive(trimmed, b"data:") {
+        let head = &trimmed.as_bytes()[..trimmed.len().min(160)];
+        if head
+            .windows(b";base64,".len())
+            .any(|window| window == b";base64,")
+        {
             return ValueScanMode::Skip;
         }
     }
     let bare = !trimmed.is_empty() && !trimmed.chars().any(char::is_whitespace);
     if bare {
-        let lower_head = trimmed[..trimmed.len().min(8)].to_ascii_lowercase();
-        if lower_head.starts_with("http://")
-            || lower_head.starts_with("https://")
-            || lower_head.starts_with("file://")
+        if starts_with_ascii_case_insensitive(trimmed, b"http://")
+            || starts_with_ascii_case_insensitive(trimmed, b"https://")
+            || starts_with_ascii_case_insensitive(trimmed, b"file://")
             || trimmed.starts_with('/')
         {
             return ValueScanMode::EntropyExempt;
@@ -1352,7 +1361,9 @@ fn should_skip_object(object: &Map<String, Value>) -> bool {
     object
         .get("type")
         .and_then(Value::as_str)
-        .is_some_and(|kind| kind.starts_with("image") || kind == "base64")
+        .is_some_and(|kind| {
+            kind.starts_with("image") || kind == "ImageGeneration" || kind == "base64"
+        })
 }
 
 /// Shannon entropy in millibits per char over the byte distribution
@@ -1643,7 +1654,7 @@ fn ruleset_fingerprint_hex() -> String {
         "kv label={LABEL_PASSWORD} priority={PRIORITY_PASSWORD} shape={DB_PASSWORD_KEY_SHAPE} generic={GENERIC_PASSWORD_KEY_PATTERN}\n"
     ));
     input.push_str(&format!(
-        "skip suffixes={SKIP_KEY_SUFFIXES:?} paths={SKIP_PATH_KEYS:?} exact={SKIP_EXACT_KEYS:?} objects=image,base64\n"
+        "skip suffixes={SKIP_KEY_SUFFIXES:?} paths={SKIP_PATH_KEYS:?} exact={SKIP_EXACT_KEYS:?} objects=image*,ImageGeneration,base64\n"
     ));
     input.push_str(&format!(
         "placeholders values={PLACEHOLDER_SECRET_VALUES:?} bracket={BRACKETED_PLACEHOLDER_INTERIOR_PATTERN} expansion=${{}} masks=*x.-\n"
@@ -1884,6 +1895,16 @@ mod tests {
     }
 
     #[test]
+    fn value_shape_guard_accepts_multibyte_text_at_byte_cutoffs() {
+        assert_eq!(value_scan_mode("你我"), ValueScanMode::Full);
+        assert_eq!(value_scan_mode("abcdeé我"), ValueScanMode::Full);
+
+        let data_uri = format!("data:{};base64,AAAA", "我".repeat(52));
+        assert!(!data_uri.is_char_boundary(160));
+        assert_eq!(value_scan_mode(&data_uri), ValueScanMode::Full);
+    }
+
+    #[test]
     fn every_label_matches_the_frozen_shape() {
         for label in LABEL_VOCABULARY {
             assert!(label_shape_valid(label), "{label} violates the shape");
@@ -1984,6 +2005,22 @@ mod tests {
     }
 
     #[test]
+    fn image_generation_base64_is_skipped_in_legacy_and_projected_shapes() {
+        let result = "A7fK9q2ZpX4mW8vB1cN6dR3sT5uY0hgJx=";
+        assert_eq!(shared().first_finding_rule(result), Some("entropy"));
+
+        for value in [
+            json!({"type": "image_generation_end", "result": result}),
+            json!({"type": "ImageGeneration", "result": result}),
+        ] {
+            let (redacted, changed) = shared().redact_value(&value);
+            assert!(!changed);
+            assert_eq!(redacted, value);
+            shared().verify_wire_value(&value).unwrap();
+        }
+    }
+
+    #[test]
     fn value_tree_redacts_content_and_promotes_credential_context() {
         let record = json!({
             "type": "message",
@@ -2044,6 +2081,17 @@ mod tests {
         let (redacted, changed) = shared().redact_jsonl_text(text).unwrap();
         assert_eq!(changed, 0);
         assert_eq!(redacted, text);
+    }
+
+    #[test]
+    fn raw_line_mode_keeps_multibyte_conversation_text_unchanged() {
+        let text = "{\"type\":\"user\",\"message\":{\"content\":\"你我\"}}\n";
+        let (redacted, changed) = shared().redact_jsonl_text(text).unwrap();
+        assert_eq!(changed, 0);
+        assert_eq!(redacted, text);
+        shared()
+            .certify_wire_document(redacted.into_bytes())
+            .unwrap();
     }
 
     #[test]

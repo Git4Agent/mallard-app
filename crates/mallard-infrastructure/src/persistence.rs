@@ -93,6 +93,28 @@ pub struct StorageSyncMetadataResetResult {
     pub unreadable_plan_files_retained: u64,
 }
 
+/// What lives under `~/.mallard` right now, measured lock-free: the readout is
+/// a plain measurement and must stay readable while a sync holds the
+/// persistence lock. `backups_bytes` is called out separately because the
+/// backups subtree holds the only local copies of files Pull replaced — the
+/// one part of a wipe the confirm dialog has to name.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct LocalStateSummary {
+    pub root_path: String,
+    pub file_count: u64,
+    pub total_bytes: u64,
+    pub backups_bytes: u64,
+}
+
+/// Outcome of deleting the whole metadata root. `existed: false` means there
+/// was nothing to delete — the wipe is idempotent and that is a success.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct LocalStateWipeResult {
+    pub existed: bool,
+    pub files_removed: u64,
+    pub bytes_removed: u64,
+}
+
 impl<E> ConfigTransactionError<E> {
     pub fn into_persistence(self) -> Option<String> {
         match self {
@@ -281,6 +303,90 @@ impl LocalStateRepository {
         let path = self.root.join("backups");
         self.ensure_directory(&path)?;
         Ok(path)
+    }
+
+    /// Measure everything under the metadata root. Deliberately lock-free: a
+    /// racy readout is fine for a settings row, and it must not block behind a
+    /// running sync. A missing root reports zeros rather than an error.
+    pub fn local_state_summary(&self) -> Result<LocalStateSummary, String> {
+        let (file_count, total_bytes) = walk_local_state(&self.root)?;
+        let (_, backups_bytes) = walk_local_state(&self.root.join("backups"))?;
+        Ok(LocalStateSummary {
+            root_path: self.root.display().to_string(),
+            file_count,
+            total_bytes,
+            backups_bytes,
+        })
+    }
+
+    /// Delete the whole metadata root — sync state, host identity, saved
+    /// plans, backups, and logs. The caller restarts the app afterwards; the
+    /// next repository construction recreates a fresh root via `ensure_root`,
+    /// which is why nothing here recreates it.
+    pub fn wipe_local_state(&self) -> Result<LocalStateWipeResult, String> {
+        // Insurance against a future refactor pointing `root` anywhere else:
+        // this method deletes recursively and must never aim at a home dir.
+        if self.root.file_name() != Some(std::ffi::OsStr::new(".mallard")) {
+            return Err(format!(
+                "refusing to delete '{}': not a .mallard metadata root",
+                self.root.display()
+            ));
+        }
+        // Missing-root check BEFORE any lock: both guard files live inside the
+        // root, so acquiring first would recreate state and break idempotence.
+        match fs::symlink_metadata(&self.root) {
+            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "metadata directory '{}' is not a real directory",
+                    self.root.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LocalStateWipeResult {
+                    existed: false,
+                    files_removed: 0,
+                    bytes_removed: 0,
+                });
+            }
+            Err(error) => {
+                return Err(format!(
+                    "inspect metadata directory '{}': {}",
+                    self.root.display(),
+                    error
+                ));
+            }
+        }
+        // Same order as every host-sensitive mutation: host operation first
+        // (try-lock — a running push/pull makes the reset fail fast instead of
+        // queueing a deletion behind it), persistence second.
+        let _operation = self.acquire_host_operation()?;
+        let _guard = persistence_guard(&self.root)?;
+        let (files_removed, bytes_removed) = walk_local_state(&self.root)?;
+        // Once our own lock files are unlinked mid-traversal another process
+        // can recreate entries; a bounded retry absorbs that without ever
+        // resurrecting old data.
+        let mut attempts = 0;
+        loop {
+            match fs::remove_dir_all(&self.root) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(_) if attempts < 2 => attempts += 1,
+                Err(error) => {
+                    return Err(format!(
+                        "delete metadata directory '{}': {}",
+                        self.root.display(),
+                        error
+                    ));
+                }
+            }
+        }
+        Ok(LocalStateWipeResult {
+            existed: true,
+            files_removed,
+            bytes_removed,
+        })
     }
 
     /// Load the installation identity. A missing or damaged identity is
@@ -1444,17 +1550,6 @@ impl LocalStateRepository {
         Ok(plan)
     }
 
-    pub fn discard_restore_plan(&self, plan_id: &PlanId) -> Result<bool, String> {
-        let _guard = persistence_guard(&self.root)?;
-        let path = self.restore_plan_path(plan_id);
-        ensure_no_symlinks(&self.root, &path)?;
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(format!("remove restore plan '{}': {}", plan_id, error)),
-        }
-    }
-
     /// Reviewed Push plans are immutable and host-pinned, just like Pull
     /// plans. Keeping them in a separate directory prevents one plan type
     /// from being read as the other.
@@ -2377,6 +2472,42 @@ fn sync_directory(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Count files and bytes under a directory without following symlinks — a
+/// link contributes its own length, never its target's. Entries that vanish
+/// mid-walk are skipped: the walk runs under a live app.
+fn walk_local_state(dir: &Path) -> Result<(u64, u64), String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(error) => return Err(format!("read directory '{}': {}", dir.display(), error)),
+    };
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("read directory '{}': {}", dir.display(), error)),
+        };
+        let metadata = match fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!("inspect '{}': {}", entry.path().display(), error));
+            }
+        };
+        if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+            let (nested_files, nested_bytes) = walk_local_state(&entry.path())?;
+            files += nested_files;
+            bytes += nested_bytes;
+        } else {
+            files += 1;
+            bytes += metadata.len();
+        }
+    }
+    Ok((files, bytes))
+}
+
 fn persistence_guard(root: &Path) -> Result<PersistenceGuard, String> {
     let process = PERSISTENCE_LOCK
         .lock()
@@ -2618,6 +2749,69 @@ mod tests {
 
     fn repository(temp: &tempfile::TempDir) -> LocalStateRepository {
         LocalStateRepository::from_home_dir(temp.path()).unwrap()
+    }
+
+    #[test]
+    fn local_state_summary_measures_without_following_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        fs::write(repo.root().join("sync_config.json"), b"0123456789").unwrap();
+        fs::create_dir_all(repo.root().join("backups")).unwrap();
+        fs::write(repo.root().join("backups").join("copy.bak"), b"abcd").unwrap();
+        let outside = temp.path().join("huge.bin");
+        fs::write(&outside, vec![0u8; 4096]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, repo.root().join("link")).unwrap();
+
+        let summary = repo.local_state_summary().unwrap();
+        assert_eq!(summary.root_path, repo.root().display().to_string());
+        assert_eq!(summary.backups_bytes, 4);
+        assert!(summary.file_count >= 2);
+        assert!(summary.total_bytes >= 14);
+        // The symlink counts as itself, never as its 4096-byte target.
+        assert!(summary.total_bytes < 4096);
+    }
+
+    #[test]
+    fn wipe_local_state_removes_root_and_reopen_is_fresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let identity = repo.load_or_create_host_identity().unwrap();
+        let mut config = repo.load_config().unwrap();
+        config.projects.push(project());
+        repo.save_config(config).unwrap();
+        fs::create_dir_all(repo.root().join("backups")).unwrap();
+        fs::write(repo.root().join("backups").join("copy.bak"), b"abcd").unwrap();
+
+        let result = repo.wipe_local_state().unwrap();
+        assert!(result.existed);
+        assert!(result.files_removed > 0);
+        assert!(result.bytes_removed > 0);
+        assert!(!temp.path().join(".mallard").exists());
+
+        let reopened = repository(&temp);
+        assert!(reopened.load_config().unwrap().projects.is_empty());
+        let fresh = reopened.load_or_create_host_identity().unwrap();
+        assert_ne!(fresh.host_id, identity.host_id);
+    }
+
+    #[test]
+    fn wipe_local_state_is_idempotent_when_root_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        fs::remove_dir_all(repo.root()).unwrap();
+        // Same instance on purpose: constructing a new repository would
+        // recreate the root via ensure_root, and the missing-root check must
+        // run before any lock file could do the same.
+        let result = repo.wipe_local_state().unwrap();
+        assert_eq!(
+            result,
+            LocalStateWipeResult {
+                existed: false,
+                files_removed: 0,
+                bytes_removed: 0
+            }
+        );
     }
 
     fn project() -> LocalProjectRegistration {

@@ -448,12 +448,12 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /\.sync-history-spine-fold\s*\{[^}]*position: absolute;[^}]*top: calc\(var\(--sync-history-row-anchor-y\) - 12px\);[^}]*left: calc\(var\(--sync-history-rail-x\) - var\(--sync-history-card-offset\) - 12px\);[^}]*width: 24px;[^}]*height: 24px;[^}]*background: transparent;/s);
   assert.match(retroCss, /\.sync-history-spine-fold:disabled\s*\{[^}]*opacity: 0\.35;/s);
   assert.doesNotMatch(retroCss, /sync-history-commit-node|--sync-history-node-size|--sync-history-node-half|--retro-pixel-ring|sync-history-group-toggle/);
-  // Storage-only rows live outside the timeline and need the same row tokens;
-  // they are not inherited, so leaving the scope out would lose the rail inset.
-  // The actions column shrink-wraps (auto): a fixed 148px four-slot
-  // reservation left ~97px of blank between the ellipsized title and the
-  // first of the two buttons the markup settled on.
-  assert.match(retroCss, /\.sync-history-timeline,\s*\.sync-history-storage-only\s*\{[^}]*--sync-history-row-actions-column: auto;[^}]*--sync-history-commit-actions-column: 26px;[^}]*--sync-history-commit-date-column: 26ch;[^}]*--sync-history-row-icon-size: 18px;[^}]*--sync-history-row-anchor-y: 15px;[^}]*--sync-history-rail-x: 8px;[^}]*--sync-history-card-offset: 26px;/s);
+  // Storage-only rows and the Storage card live outside the timeline and need
+  // the same row tokens; they are not inherited, so leaving either scope out
+  // would lose the rail inset. The actions column shrink-wraps (auto): a fixed
+  // 148px four-slot reservation left ~97px of blank between the ellipsized
+  // title and the first of the two buttons the markup settled on.
+  assert.match(retroCss, /\.sync-history-timeline,\s*\.sync-history-storage-only,\s*\.project-storage-card\s*\{[^}]*--sync-history-row-actions-column: auto;[^}]*--sync-history-commit-actions-column: 26px;[^}]*--sync-history-commit-date-column: 26ch;[^}]*--sync-history-row-icon-size: 18px;[^}]*--sync-history-row-anchor-y: 15px;[^}]*--sync-history-rail-x: 8px;[^}]*--sync-history-card-offset: 26px;/s);
   // The storage-only group takes the timeline's inset so its fold lands in the
   // rail column, and keeps the Uncommitted frame's 10px gap before the rail.
   assert.match(retroCss, /\.sync-history-storage-only\s*\{[^}]*margin: 12px 0 10px var\(--sync-history-card-offset\);/s);

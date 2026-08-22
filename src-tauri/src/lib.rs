@@ -8,6 +8,8 @@ use tauri::Manager as _;
 #[cfg_attr(test, allow(dead_code))]
 mod activity_log;
 #[cfg_attr(test, allow(dead_code))]
+mod app_reset;
+#[cfg_attr(test, allow(dead_code))]
 mod project_sync;
 #[cfg_attr(test, allow(dead_code))]
 mod storage_catalog;
@@ -16,11 +18,12 @@ mod storage_catalog;
 mod sync_tests;
 
 pub use project_sync::service::{
-    CreateSetupDraftResult, ProjectDetail, ProjectOperationResult, ProjectSessionDetail,
-    ProjectSessionTimelinePage, ProjectSessionTimelineRequest, ProjectSyncService, PushApproval,
-    PushDestinationPullReason, PushDestinationStatus, PushReviewContext, RestoreResult,
-    SessionDetailError, SessionDetailErrorCode, SessionEventDetail, SessionTimelineEventKind,
-    SessionToolCategory, SetupDraftInspection, ThreadSyncComparison, ThreadSyncState,
+    CreateSetupDraftResult, ProjectActivityWorkspace, ProjectDetail, ProjectOperationResult,
+    ProjectSessionDetail, ProjectSessionTimelinePage, ProjectSessionTimelineRequest,
+    ProjectSyncService, PushApproval, PushDestinationPullReason, PushDestinationStatus,
+    PushReviewContext, RestoreResult, SessionDetailError, SessionDetailErrorCode,
+    SessionEventDetail, SessionTimelineEventKind, SessionToolCategory, SetupDraftInspection,
+    ThreadSyncComparison, ThreadSyncState,
 };
 pub use storage_catalog::adapters::{CmdOutput, PluginProcessRunner};
 pub use storage_catalog::domain::{
@@ -68,6 +71,8 @@ pub fn run() {
             activity_log::update_activity_log_policy,
             activity_log::cleanup_activity_logs,
             activity_log::get_activity_log_folder,
+            app_reset::get_local_state_summary,
+            app_reset::reset_local_state,
             project_sync::commands::get_project_sync_config,
             project_sync::commands::connect_r2_storage,
             project_sync::commands::get_mallard_cli_path,
@@ -126,6 +131,7 @@ pub fn run() {
             storage_catalog::resource_commands::create_catalog_scope,
             storage_catalog::resource_commands::delete_catalog_scope,
             storage_catalog::resource_commands::list_catalog_scope_resources,
+            storage_catalog::resource_commands::get_catalog_pet_preview,
             storage_catalog::resource_commands::link_catalog_scope_resource,
             storage_catalog::resource_commands::get_catalog_resource,
             storage_catalog::resource_commands::unlink_catalog_resource,

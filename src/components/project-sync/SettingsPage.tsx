@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import type { ActivityLogPolicy, ActivityLogStats } from "../../types";
+import type { ActivityLogPolicy, ActivityLogStats, LocalStateSummary } from "../../types";
 import Icon from "../Icons";
 import { formatBytes } from "../../format";
 import SyncPathBar, { type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import {
+  clearStoredUiState,
   setPreference,
   setThemeChoice,
   usePreference,
@@ -18,8 +19,8 @@ import { errorMessage } from "./model";
 
 /**
  * The app-wide Settings page: a primary-nav destination like the Storages
- * index, not a dialog. Five groups of rows — every row one global preference
- * or one log-maintenance verb. UI preferences write through preferences.ts;
+ * index, not a dialog. Six groups of rows — every row one global preference
+ * or one maintenance verb. UI preferences write through preferences.ts;
  * the Logs group is a front end to the activity-log policy the Rust side
  * keeps in ~/.mallard/logs/_policy.json, applied on change (this page
  * absorbed LogManagerDialog, whose explicit Save existed only to keep its
@@ -93,6 +94,10 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
   const [logsError, setLogsError] = useState<string | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
   const [logsNotice, setLogsNotice] = useState<string | null>(null);
+  const [localSummary, setLocalSummary] = useState<LocalStateSummary | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetPhase, setResetPhase] = useState<"idle" | "working" | "reloading">("idle");
 
   /* Retryable, because the card below renders plausible defaults when `stats`
      is null — 30 days, 100 MB — and a failed fetch used to leave those on
@@ -110,6 +115,22 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
   }, []);
 
   useEffect(() => { void loadStats(); }, [loadStats]);
+
+  /* Same retryable shape as loadStats: the readout is a measurement, and a
+     failed walk must not wedge the row it decorates. */
+  const loadLocalSummary = useCallback(async () => {
+    setSummaryLoading(true);
+    setResetError(null);
+    try {
+      setLocalSummary(await projectSyncApi.getLocalStateSummary());
+    } catch (reason) {
+      setResetError(errorMessage(reason));
+    } finally {
+      setSummaryLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadLocalSummary(); }, [loadLocalSummary]);
 
   /** Selects apply on change; the returned stats keep the readout current. */
   const applyPolicy = async (patch: Partial<ActivityLogPolicy>) => {
@@ -165,6 +186,39 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
     } catch (reason) {
       setLogsError(errorMessage(reason));
     }
+  };
+
+  /* Deliberately still offered when the summary failed to load: a user whose
+     local state is too broken to measure is exactly who needs the reset. The
+     confirm simply omits the size line then. */
+  const resetMallard = async () => {
+    const sizeLine = localSummary
+      ? ` (${formatBytes(localSummary.total_bytes)} across ${localSummary.file_count} file${localSummary.file_count === 1 ? "" : "s"}, including ${formatBytes(localSummary.backups_bytes)} of backups)`
+      : "";
+    const approved = await confirm(
+      `Permanently delete all of Mallard's local data and restart?\n\nEverything in ~/.mallard is deleted${sizeLine} — sync metadata, activity logs, and the only local backups of files Pull has replaced — and Mallard's settings return to their defaults. This cannot be undone.\n\nCloud revisions and your project files are not touched. Mallard will restart as a fresh install.`,
+      { title: "Reset Mallard", kind: "warning", okLabel: "Reset Mallard", cancelLabel: "Cancel" },
+    );
+    if (!approved) return;
+    setResetPhase("working");
+    setResetError(null);
+    try {
+      await projectSyncApi.resetLocalState();
+    } catch (reason) {
+      setResetError(errorMessage(reason));
+      setResetPhase("idle");
+      return;
+    }
+    // A reload, not a process restart: relaunching the binary under
+    // `tauri dev` orphans the frontend from its dev server (the CLI kills
+    // Vite when the original process exits) and lands on a white window.
+    // The backend re-armed its watchers inside the command, everything else
+    // there is per-call, and a reload re-boots the frontend the same way in
+    // dev and in production. Sweep the webview-side state first; no
+    // `finally` — the page stays locked until the reload tears it down.
+    clearStoredUiState();
+    setResetPhase("reloading");
+    window.location.reload();
   };
 
   const oldest = formatOldest(stats?.oldest_ts);
@@ -369,6 +423,56 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
                 catalog. Off follows the system locale.
               </SettingsRow>
             </div>
+          </section>
+
+          <section className="sync-settings-group" aria-labelledby="settings-local-data">
+            <h2 className="settings-section-title" id="settings-local-data">
+              <Icon name="drive" size={12} /> Local data
+            </h2>
+            <div className="sync-settings-card">
+              <SettingsRow
+                label="Reset Mallard"
+                control={(
+                  <>
+                    <span className="sync-settings-readout" title={localSummary?.root_path}>
+                      {localSummary
+                        ? `${localSummary.file_count} file${localSummary.file_count === 1 ? "" : "s"} · ${formatBytes(localSummary.total_bytes)}`
+                        : "…"}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn-ghost danger"
+                      onClick={() => void resetMallard()}
+                      disabled={resetPhase !== "idle"}
+                    >
+                      Reset Mallard
+                    </button>
+                  </>
+                )}
+              >
+                Permanently deletes everything in <code>~/.mallard</code> — sync
+                metadata, activity logs, and the backups of files Pull replaced —
+                clears Mallard's saved preferences, then restarts as a fresh
+                install. Cloud revisions and your project files are not touched.
+              </SettingsRow>
+            </div>
+            {resetError && (
+              <div className="sync-callout error" role="alert">
+                <Icon name="alert-triangle" size={15} />
+                <span>{resetError}</span>
+                {!localSummary && (
+                  <button type="button" className="btn" disabled={summaryLoading} onClick={() => void loadLocalSummary()}>
+                    <Icon name="refresh" size={14} className={summaryLoading ? "icon-spin" : undefined} />
+                    {summaryLoading ? "Retrying…" : "Retry"}
+                  </button>
+                )}
+              </div>
+            )}
+            {resetPhase === "reloading" && (
+              <div className="sync-settings-note" role="status">
+                <Icon name="check-circle" size={14} /> Local data deleted — starting fresh…
+              </div>
+            )}
           </section>
 
         </section>

@@ -18,6 +18,7 @@ pub mod codex_pet;
 pub mod domain;
 pub mod inventory;
 pub mod persistence;
+pub mod pet_preview;
 pub mod profiles;
 pub mod resource_commands;
 pub mod resource_engine;

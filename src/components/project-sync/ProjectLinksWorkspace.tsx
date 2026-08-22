@@ -1993,12 +1993,12 @@ export default function ProjectLinksWorkspace({
                   )}
                 />
               ) : null;
-              const renderStorageConnectionActions = (buttonClassName: string) => (
+              const renderStorageConnectionActions = () => (
                 <>
                   {availableStorages.length > 0 && (
                     <button
                       type="button"
-                      className={`${buttonClassName}${linkingProjectId === project.local_project_id ? " active" : ""}`}
+                      className={`sync-history-icon-action${linkingProjectId === project.local_project_id ? " active" : ""}`}
                       disabled={busy || !!inlineStorageReview}
                       aria-expanded={linkingProjectId === project.local_project_id}
                       aria-controls={`storage-link-picker-${project.local_project_id}`}
@@ -2013,7 +2013,7 @@ export default function ProjectLinksWorkspace({
                   )}
                   <button
                     type="button"
-                    className={buttonClassName}
+                    className="sync-history-icon-action"
                     disabled={busy || !!inlineStorageReview}
                     title="Add storage"
                     aria-label="Add storage"
@@ -2026,20 +2026,27 @@ export default function ProjectLinksWorkspace({
                   </button>
                 </>
               );
+              // The bar is the activity page's own section heading — same h2,
+              // count chip and icon-button vocabulary as Uncommitted below it,
+              // so the two card headings cannot drift apart.
               const storageHeading = (
-                <div
-                  className="project-profile-storage-heading"
-                  aria-label={`${projectLinks.length} linked storage location${projectLinks.length === 1 ? "" : "s"}`}
-                >
-                  <Icon name="link" size={14} className="project-profile-storage-icon" />
-                  <span>Storage</span>
-                  <small>{projectLinks.length}</small>
+                <div className="sync-history-section-heading">
+                  <h2><Icon name="link" size={14} />Storage</h2>
                   {!conversationPathNoticeBlocked && conversationPathNotice}
-                  <span className="project-profile-storage-actions">
+                  <span className="project-storage-heading-actions">
+                    {projectLinks.length > 0 && (
+                      <span
+                        className="sync-history-heading-count"
+                        title={`${projectLinks.length} linked storage location${projectLinks.length === 1 ? "" : "s"}`}
+                        aria-label={`${projectLinks.length} linked storage location${projectLinks.length === 1 ? "" : "s"}`}
+                      >
+                        <Icon name="cloud" size={12} />{projectLinks.length}
+                      </span>
+                    )}
                     {!bindingActive && !selectedStorage && (
                       <button
                         type="button"
-                        className="profile-link-another"
+                        className="project-storage-setup-action"
                         disabled={busy || !!inlineStorageReview}
                         onClick={() => void onConfigureBinding(project.local_project_id)}
                       >
@@ -2047,16 +2054,15 @@ export default function ProjectLinksWorkspace({
                         {projectBinding ? "Confirm setup" : "Set up project"}
                       </button>
                     )}
-                    {renderStorageConnectionActions("profile-link-another profile-storage-icon-action")}
+                    {renderStorageConnectionActions()}
                   </span>
                 </div>
               );
 
-              // The group is a framed box. Its contents used to be permanent —
-              // the storage card was always there — but the identity and the
-              // buttons moved to the path bar, so on a settled project it can
-              // now hold nothing at all, and an empty frame draws as a rule
-              // above the history.
+              // The card's contents used to be permanent — the storage row was
+              // always there — but the identity and the buttons moved to the
+              // path bar, so on a settled project it can now hold nothing at
+              // all, and an empty frame draws as a stray box above the history.
               const storageGroupNotice = (conversationPathNoticeBlocked || selectedStorage)
                 && conversationPathNotice;
               const storageBlockShown = !!selectedStorage
@@ -2083,19 +2089,46 @@ export default function ProjectLinksWorkspace({
                 >
                   <div className="profile-link-connections">
                     <section
-                      className="project-profile-group project-storage-group"
+                      className="project-storage-card"
                       aria-label={`${projectLabel(project)} storage`}
                     >
                       {storageGroupNotice}
 
                       {!selectedStorage && storageHeading}
-                    {projectLinks.length === 0 && <div className="profile-link-no-storage">No storage linked yet.</div>}
+                    {projectLinks.length === 0 && (
+                      <div className="project-storage-empty">
+                        <Icon name="cloud" size={16} />
+                        <span>No storage linked yet</span>
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={busy || !!inlineStorageReview}
+                          aria-expanded={availableStorages.length > 0
+                            ? linkingProjectId === project.local_project_id
+                            : undefined}
+                          aria-controls={availableStorages.length > 0
+                            ? `storage-link-picker-${project.local_project_id}`
+                            : undefined}
+                          onClick={() => {
+                            if (availableStorages.length === 0) {
+                              setLinkingProjectId(null);
+                              onAddStorage();
+                              return;
+                            }
+                            setLinkingProjectId((current) => current === project.local_project_id ? null : project.local_project_id);
+                          }}
+                        >
+                          <Icon name={availableStorages.length > 0 ? "link" : "plus"} size={13} />
+                          {availableStorages.length > 0 ? "Link storage" : "Add storage"}
+                        </button>
+                      </div>
+                    )}
 
                     {/* The block below returns null unless it has a notice or an
                         open review. Drop the wrapper with it: an empty list is
-                        still an element, and it would keep the group footer off
+                        still an element, and it would keep the card footer off
                         `:first-child`, leaving the footer's rule stacked 1px
-                        under the group frame as a doubled hairline. */}
+                        under the card frame as a doubled hairline. */}
                     {storageBlockShown && (
                     <div className="project-profile-storage-list">
                     {selectedStorage && (() => {
@@ -2275,7 +2308,7 @@ export default function ProjectLinksWorkspace({
                     {linkingProjectId === project.local_project_id && (
                       <div
                         id={`storage-link-picker-${project.local_project_id}`}
-                        className="project-profile-group-footer"
+                        className="project-storage-card-footer"
                       >
                         <div className="storage-link-picker">
                           <span>Choose a storage destination</span>

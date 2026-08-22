@@ -18,6 +18,8 @@ import type {
   CreateSetupDraftResult,
   HostIdentityStatus,
   LocalProjectRegistration,
+  LocalStateSummary,
+  LocalStateWipeResult,
   ProjectActivity,
   ProjectActivityWorkspace,
   ProjectBinding,
@@ -90,6 +92,12 @@ export const projectSyncApi = {
 
   getActivityLogFolder: () =>
     invoke<string>("get_activity_log_folder"),
+
+  getLocalStateSummary: () =>
+    invoke<LocalStateSummary>("get_local_state_summary"),
+
+  resetLocalState: () =>
+    invoke<LocalStateWipeResult>("reset_local_state"),
 
   listAgentProviders: () =>
     invoke<ProviderDescriptor[]>("list_agent_providers"),

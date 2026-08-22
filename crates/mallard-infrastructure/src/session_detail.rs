@@ -1836,6 +1836,11 @@ mod tests {
     use crate::providers::{
         SessionSourceSpan, SessionTimelineIndexEntry, SessionToolCallStatus, SessionToolIndexEntry,
     };
+    use mallard_domain::{
+        conversation_resource_id, initial_conversation_thread_id, BindingState, BundleId,
+        BundleRecipe, LocalProjectRegistration, LocalProviderProfileId, ProjectBinding,
+        ProviderProfile, ReplicaId,
+    };
 
     fn counts() -> SessionEventCounts {
         SessionEventCounts {
@@ -2168,6 +2173,205 @@ mod tests {
         let value = serde_json::to_value(error).unwrap();
         assert_eq!(value["code"], "snapshot_changed");
         assert_eq!(value["current_snapshot_id"], "current");
+    }
+
+    #[test]
+    fn timeline_page_rejects_a_snapshot_captured_before_transcript_append() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(sandbox.path()).unwrap();
+        let provider_home = sandbox.path().join("test-provider-home");
+        let sessions_root = provider_home.join("sessions");
+        let project_root = sandbox.path().join("project");
+        fs::create_dir_all(&sessions_root).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+
+        let provider =
+            ProviderKey::parse(crate::providers::test_provider::TEST_PROVIDER_KEY).unwrap();
+        let profile_id = LocalProviderProfileId::parse("session-detail-profile").unwrap();
+        let local_project_id = LocalProjectId::parse("session-detail-project").unwrap();
+        let bundle_id = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let identity = repository.load_or_create_host_identity().unwrap();
+        let canonical_project_root = fs::canonicalize(&project_root).unwrap();
+        let canonical_provider_home = fs::canonicalize(&provider_home).unwrap();
+        let project_binding = ProjectBinding {
+            host_id: identity.host_id.clone(),
+            replica_id: ReplicaId::parse("session-detail-replica").unwrap(),
+            local_project_id: local_project_id.clone(),
+            bundle_id: bundle_id.clone(),
+            project_root: project_root.to_string_lossy().into_owned(),
+            canonical_project_root: canonical_project_root.to_string_lossy().into_owned(),
+            profile_ids: BTreeMap::from([(provider.clone(), profile_id.clone())]),
+            state: BindingState::Active,
+            revision: 0,
+            updated_at: 1,
+        };
+        repository
+            .mutate_config(|config| {
+                config.projects.push(LocalProjectRegistration {
+                    local_project_id: local_project_id.clone(),
+                    bundle_id: bundle_id.clone(),
+                    display_name: "Session Detail project".to_string(),
+                    local_alias: None,
+                    repository_fingerprint: None,
+                    recipe: BundleRecipe::default(),
+                    revision: 0,
+                    created_at: 1,
+                    updated_at: 1,
+                });
+                Ok(())
+            })
+            .unwrap();
+        repository
+            .mutate_bindings(|_, machine| {
+                machine.profiles.push(ProviderProfile {
+                    profile_id: profile_id.clone(),
+                    provider: provider.clone(),
+                    display_name: "Test Provider".to_string(),
+                    path: provider_home.to_string_lossy().into_owned(),
+                    canonical_path: canonical_provider_home.to_string_lossy().into_owned(),
+                    revision: 0,
+                    created_at: 1,
+                    updated_at: 1,
+                });
+                machine.bindings.push(project_binding);
+                Ok(())
+            })
+            .unwrap();
+
+        let provider_session_id = "session-1";
+        let transcript = sessions_root.join(format!("{provider_session_id}.jsonl"));
+        let initial_records = [
+            serde_json::json!({
+                "type": "user",
+                "uuid": "user-1",
+                "sessionId": provider_session_id,
+                "cwd": canonical_project_root,
+                "timestamp": "2026-08-21T00:00:00Z",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "First prompt"}],
+                },
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "uuid": "assistant-1",
+                "sessionId": provider_session_id,
+                "cwd": canonical_project_root,
+                "timestamp": "2026-08-21T00:00:01Z",
+                "message": {
+                    "id": "message-1",
+                    "role": "assistant",
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "First response"}],
+                },
+            }),
+        ];
+        let mut transcript_bytes = Vec::new();
+        for record in initial_records {
+            serde_json::to_writer(&mut transcript_bytes, &record).unwrap();
+            transcript_bytes.push(b'\n');
+        }
+        fs::write(&transcript, &transcript_bytes).unwrap();
+
+        let transcript_metadata = fs::metadata(&transcript).unwrap();
+        let thread_id =
+            initial_conversation_thread_id(&bundle_id, &provider, provider_session_id).unwrap();
+        let resource_id = conversation_resource_id(&provider, &thread_id).unwrap();
+        let views = vec![LocalSessionView {
+            descriptor: crate::provider_capture::ResourceCandidate {
+                resource_id: resource_id.to_string(),
+                kind: crate::provider_capture::CaptureResourceKind::Conversation,
+                provider: Some(provider.clone()),
+                provider_resource_type: Some("session".to_string()),
+                display_name: "Session one".to_string(),
+                relative_cwd: Some(".".to_string()),
+                apply_policy: crate::provider_capture::CaptureApplyPolicy::SafeFile,
+                selected_by_default: true,
+                blocked_reason: None,
+                logical_paths: vec!["sessions/session-1.jsonl".to_string()],
+                metadata: BTreeMap::new(),
+            },
+            provider: provider.clone(),
+            provider_thread_id: provider_session_id.to_string(),
+            transcript_logical_path: "sessions/session-1.jsonl".to_string(),
+            source_path: transcript.clone(),
+            source_mtime: modified_secs(&transcript_metadata),
+            source_size: transcript_metadata.len(),
+        }];
+        let registry = ProviderRegistry::with_test_provider();
+        let before = get_project_session_detail(
+            &repository,
+            &registry,
+            &local_project_id,
+            resource_id.as_str(),
+            &views,
+        )
+        .unwrap();
+        let before_snapshot_id = before.snapshot_id.clone();
+
+        for record in [
+            serde_json::json!({
+                "type": "user",
+                "uuid": "user-2",
+                "sessionId": provider_session_id,
+                "cwd": canonical_project_root,
+                "timestamp": "2026-08-21T00:00:02Z",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Second prompt"}],
+                },
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "uuid": "assistant-2",
+                "sessionId": provider_session_id,
+                "cwd": canonical_project_root,
+                "timestamp": "2026-08-21T00:00:03Z",
+                "message": {
+                    "id": "message-2",
+                    "role": "assistant",
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "Second response"}],
+                },
+            }),
+        ] {
+            serde_json::to_writer(&mut transcript_bytes, &record).unwrap();
+            transcript_bytes.push(b'\n');
+        }
+        fs::write(&transcript, &transcript_bytes).unwrap();
+
+        let error = get_project_session_timeline_page(
+            &repository,
+            &registry,
+            &local_project_id,
+            resource_id.as_str(),
+            ProjectSessionTimelineRequest {
+                snapshot_id: before_snapshot_id.clone(),
+                cursor: None,
+                anchor_event_id: None,
+                limit: Some(10),
+                included_event_kinds: BTreeSet::from([
+                    SessionTimelineEventKind::Prompt,
+                    SessionTimelineEventKind::Response,
+                ]),
+                included_tool_categories: BTreeSet::new(),
+                turn_id: None,
+            },
+            &views,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, SessionDetailErrorCode::SnapshotChanged);
+
+        let after = get_project_session_detail(
+            &repository,
+            &registry,
+            &local_project_id,
+            resource_id.as_str(),
+            &views,
+        )
+        .unwrap();
+        assert_ne!(after.snapshot_id, before_snapshot_id);
+        assert_eq!(error.current_snapshot_id, Some(after.snapshot_id));
     }
 
     #[test]

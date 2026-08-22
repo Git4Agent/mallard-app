@@ -200,8 +200,9 @@ Priority is recommended remediation order. **P1** = high value or defect,
 | A3 | ✅ | `delete_catalog_resource_profile` (`resource_commands.rs:477-538`) is registered and frozen, and `tests/frontend/storage-catalog.integration.test.tsx:246` **asserts the UI must not reference it**. | 61 LOC Rust + 2 TS |
 
 > **Correction (2026-08-21, on landing).** The count is **20, not 19**:
-> `get_bundle_readiness` has no wrapper either and belongs with the other
-> seven. The reverse-direction check below held exactly as stated.
+> `get_bundle_readiness` belongs with the wrapper-less set (its `getReadiness`
+> wrapper had already been deleted by unrelated in-flight work). The
+> reverse-direction check below held exactly as stated.
 
 A1 was found independently by two auditors (the subsystem pass and the
 mechanical pass), which agreed exactly on the 7 no-wrapper commands. The
@@ -454,7 +455,7 @@ scan of that block undercounts by one — which is how the register reached 95).
 
 | Item | Planned | Shipped |
 | --- | --- | --- |
-| A1 | 19 commands | **20** — the register missed `get_bundle_readiness`, which fails the same two-direction check. Verified before deleting: no `invoke("…")` for the 8 wrapper-less names, and zero references (in `src/` *and* `tests/`) to the 12 dead wrapper keys. |
+| A1 | 19 commands | **20** — the register missed `get_bundle_readiness`, which fails the same two-direction check. Verified before deleting: no `invoke("…")` for the wrapper-less names, and zero references (in `src/` *and* `tests/`) to the dead wrapper keys. The wrapper/no-wrapper split is 8 + 13 against the working tree this change edited, or 7 + 14 against `e0d03b6` — `getReadiness` had already been deleted by unrelated in-flight work. Either way, 21 total. |
 | A2 | ~57 LOC | 63 LOC: `verify_objects` (53) + `BundleObjectAudit` (10), plus a stale doc reference on `publish`. |
 | A3 | 61 LOC Rust + 2 TS | 87 LOC Rust (command + helper + the test that was its only caller) + the `deleteProfile` wrapper, its `catalog-live` stub, and two lines of the frontend test that had been asserting the UI must not use it. |
 | B22 | 18 LOC in the hot loop | Done: `origin_label` gone from `ThreadSyncEntry`, its computation gone from `provider_thread_review`, the field gone from `types.ts`. The **cross-process lock + full conversation-bindings parse per thread** no longer runs on any review, plan, or Activity load. |
@@ -470,9 +471,20 @@ cutover, not dead-code removal, and belongs in its own change. Everything with
 
 **Two helpers moved into `mod tests`** rather than being deleted, because live
 tests use them for setup or observation: `register_local_project_with_repository`
-(20 fixture uses) and a new `readiness_for_binding` probe over the live
-`bundle_readiness_for_snapshot`. The first carries a named drift risk — see the
-decisions doc.
+(9 direct callers, ~60 transitively through the shared `register()` helper) and
+a new `readiness_for_binding` probe over the live `bundle_readiness_for_snapshot`.
+The first carries a named drift risk — see the decisions doc.
+
+**Adversarially verified after landing** (5 refuting reviewers + a critic). The
+IPC surface reconciles exactly and no production behavior broke, but the pass
+had made four mistakes, since fixed: it deleted the only test that
+`delete_catalog_scope_with_repositories` — a **live** command — ever succeeds;
+it left the binding-detach host-lock guard unpinned; it weakened a frontend
+`doesNotMatch` guard it was simultaneously citing as justification; and it
+missed two orphans (`Repository::discard_restore_plan`, `ProjectResourceState`).
+One rationale in the decisions doc was also materially false —
+`prepare_push_review` does **not** reproduce `get_bundle_status`'s per-resource
+digest comparison for recipe resources — and has been corrected there.
 
 **Round 3 — post-cutover leftovers.** B1–B11 as a batch; they are independent,
 each is small, and together they retire ~400 LOC of misleading surface. B1 and

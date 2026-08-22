@@ -864,7 +864,9 @@ summary {
   border: 1px solid transparent;
   border-radius: 5px;
   color: var(--text-0);
-  font-size: var(--type-lg);
+  /* One step under the type-lg it launched at: the nav names destinations, it
+     is not itself a destination heading. 13px stays on the pixel grid. */
+  font-size: var(--type-md);
 }
 
 .sync-primary-nav button > svg {
@@ -1181,29 +1183,8 @@ summary {
   padding-bottom: 14px;
 }
 
-.sync-project-workspace-page.sync-project-combined-page .sync-combined-project-heading {
-  min-height: 70px;
-  margin-bottom: 10px;
-  padding-bottom: 0;
-}
-
-.sync-project-combined-page .project-storage-group {
-  margin-bottom: 6px;
-  border: 1px solid var(--border-mid);
-  border-radius: 6px;
-  background: var(--surface-card);
-  box-shadow: none;
-}
-
 .sync-project-workspace-page.sync-project-combined-page .profile-link-connections {
   padding-bottom: 4px;
-}
-
-.sync-project-combined-page .project-profile-storage-list .storage-link-block.selected {
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  box-shadow: none;
 }
 
 .sync-project-combined-page .project-profile-storage-list .storage-link-block:last-child {
@@ -1443,8 +1424,12 @@ summary {
    Scoping to the list itself makes a session row self-sufficient wherever it
    renders; the sections below keep the same values for their own rows. */
 .sync-history-thread-list,
+/* .project-storage-card lives in a different subtree — ProjectLinksWorkspace
+   renders it above the timeline — but wears the timeline's card treatment, so
+   it joins this scope for the same inset and icon metrics. */
 .sync-history-timeline,
-.sync-history-storage-only {
+.sync-history-storage-only,
+.project-storage-card {
   /* The action cluster shrink-wraps its contents: the markup settled at two
      slots (debug panel and transcript chevron ride the second line now), and
      a fixed four-slot reservation left ~97px of permanent blank between the
@@ -1936,6 +1921,26 @@ summary {
 
 .sync-history-session-summary {
   min-width: 0;
+}
+
+/* A pet card opens a leading column in the card's own template: the same two
+   rows, with the preview tile spanning both — the two-line-row-with-artwork
+   grammar every list with pictures uses. Everything already placed by area
+   stays where it was; auto-placed extras — the acknowledgement chips — are
+   kept out of the preview column. */
+.catalog-card-pet {
+  grid-template-columns: auto minmax(0, 1fr) var(--sync-history-row-actions-column);
+  grid-template-areas:
+    "preview title actions"
+    "preview meta meta";
+}
+
+.catalog-card-pet > .catalog-pet-preview {
+  grid-area: preview;
+}
+
+.catalog-card-pet > .catalog-card-ack {
+  grid-column: 2 / -1;
 }
 
 /* `auto`, overriding the base stylesheet's `0`. The readouts are the line's

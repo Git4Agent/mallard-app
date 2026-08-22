@@ -71,6 +71,21 @@ export interface ActivityLogCleanupResult {
   stats: ActivityLogStats;
 }
 
+/** What lives under ~/.mallard right now; backups called out because a wipe
+ * deletes the only local copies of files Pull replaced. */
+export interface LocalStateSummary {
+  root_path: string;
+  file_count: number;
+  total_bytes: number;
+  backups_bytes: number;
+}
+
+export interface LocalStateWipeResult {
+  existed: boolean;
+  files_removed: number;
+  bytes_removed: number;
+}
+
 // ---------------------------------------------------------------------------
 // Project-scoped sync (local state and portable bundles)
 // ---------------------------------------------------------------------------
@@ -108,18 +123,6 @@ export type ProjectResourceCategory =
   | "conversations"
   | "project_files"
   | "tools";
-
-export type ProjectResourceState =
-  | "synced"
-  | "local_only"
-  | "local_ahead"
-  | "remote_only"
-  | "remote_ahead"
-  | "conflict"
-  | "missing"
-  | "blocked"
-  | "needs_review"
-  | "ready";
 
 export type ProjectResourceKind =
   | "conversation"

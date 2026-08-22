@@ -275,6 +275,7 @@ function ResourceCard({
   storageName,
   provider,
   providerTitle,
+  preview,
   onOpen,
   onReveal,
   selectable,
@@ -287,6 +288,10 @@ function ResourceCard({
   storageName: string | null;
   provider: CatalogProviderKey;
   providerTitle: string;
+  /** The pet's idle frame as a data URI. `null` draws the kind-glyph tile —
+   * the column never collapses and never shows a broken image — and
+   * `undefined` (non-pet scopes) draws no tile at all. */
+  preview?: string | null;
   onOpen?: () => void;
   onReveal: () => void;
   selectable?: boolean;
@@ -299,7 +304,19 @@ function ResourceCard({
 }) {
   const seconds = stampSeconds(row);
   return (
-    <article className="sync-history-thread-card catalog-card">
+    <article className={`sync-history-thread-card catalog-card${preview !== undefined ? " catalog-card-pet" : ""}`}>
+      {preview !== undefined && (
+        <span
+          className="catalog-pet-preview"
+          data-tooltip={row.pet_description ?? undefined}
+          tabIndex={row.pet_description ? 0 : undefined}
+          aria-hidden={row.pet_description ? undefined : true}
+        >
+          {preview
+            ? <img src={preview} alt={`${row.display_name} preview`} />
+            : <Icon name="openai" size={16} />}
+        </span>
+      )}
       <div className="sync-history-thread-topline">
         <div className="sync-history-thread-title">
           {selectable && (
@@ -490,6 +507,10 @@ export default function StorageCatalogPage({
   /* The provider mark's sentence, e.g. "Codex skill": whose home this is, in
      one glyph on every card. */
   const markTitle = `${providerLabel(scope.scope.provider)} ${kind.label.toLowerCase()}`;
+  /* Pets are the one kind that carries artwork: their rows grow a preview
+     tile, filled inline for local atlases and lazily for stored-only rows. */
+  const petKind = scope.scope.resource_kind === "codex_pet_v1"
+    || scope.scope.resource_kind === "codex_pet_v2";
   const [page, setPage] = useState<CatalogScopeResources | null>(null);
   const [chosenStorageId, setChosenStorageId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "list" });
@@ -513,6 +534,12 @@ export default function StorageCatalogPage({
   const [pullAcks, setPullAcks] = useState<Set<string>>(new Set());
   const [openChoices, setOpenChoices] = useState<string | null>(null);
   const pullListRef = useRef<HTMLDivElement | null>(null);
+
+  /* Previews for stored-only pet rows, keyed by row id. Each row asks once
+   * per page (the ref) so an offline storage is not hammered on every render;
+   * the backend caches the derived picture by digest across everything. */
+  const [remotePreviews, setRemotePreviews] = useState<Record<string, string>>({});
+  const previewAttempts = useRef<Set<string>>(new Set());
 
   const [detail, setDetail] = useState<CatalogResourceView | null>(null);
   const [recovery, setRecovery] = useState<string[]>([]);
@@ -570,6 +597,11 @@ export default function StorageCatalogPage({
     setMode({ kind: "list" });
     setChosenStorageId(null);
   }, [scope.scope.scope_id]);
+
+  useEffect(() => {
+    previewAttempts.current = new Set();
+    setRemotePreviews({});
+  }, [scope.scope.scope_id, chosenStorageId]);
 
   const rows = useMemo(() => page?.rows ?? [], [page]);
   const storageName = page?.storage_name ?? null;
@@ -631,6 +663,35 @@ export default function StorageCatalogPage({
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [openChoices]);
+
+  /* Stored-only pet rows ask for their preview after the list is on screen:
+     one storage round-trip per row, kept out of the list call on purpose —
+     this Mac may be offline, and a page must never wait on its decoration.
+     A failure keeps the glyph tile, silently. */
+  useEffect(() => {
+    if (!petKind || !storageId) return;
+    const scopeId = scope.scope.scope_id;
+    const targets = rows.filter((row) => !row.local_present && row.remote_present
+      && row.repository_id && !row.preview_png && !previewAttempts.current.has(row.row_id));
+    if (targets.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      for (const row of targets) {
+        previewAttempts.current.add(row.row_id);
+        try {
+          const preview = await api.getPetPreview(scopeId, storageId, row.repository_id!);
+          if (cancelled) return;
+          setRemotePreviews((current) => ({ ...current, [row.row_id]: preview }));
+        } catch {
+          // Decoration: offline or a missing payload keeps the glyph.
+        }
+        if (cancelled) return;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [api, petKind, rows, scope.scope.scope_id, storageId]);
 
   /** The card's one launch verb. Failures land on the page's own error
    * surface, the same place every other verb reports. */
@@ -1225,6 +1286,7 @@ export default function StorageCatalogPage({
                       storageName={storageName}
                       provider={scope.scope.provider}
                       providerTitle={markTitle}
+                      preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
                       onReveal={() => reveal(row)}
                       selectable
                       selected={pushSelected.has(row.row_id)}
@@ -1367,6 +1429,7 @@ export default function StorageCatalogPage({
                         storageName={storageName}
                         provider={scope.scope.provider}
                         providerTitle={markTitle}
+                        preview={petKind ? entry.row.preview_png ?? remotePreviews[entry.row.row_id] ?? null : undefined}
                         onReveal={() => reveal(entry.row)}
                         selectable
                         selected={included}
@@ -1594,13 +1657,12 @@ export default function StorageCatalogPage({
           </div>
         ) : (
           <section className="profile-links-section" aria-label={label}>
-            {/* The project's own section heading: what the list is, and how
-                many, in the same shape at the same weight. */}
+            {/* The project's own section heading: what the list is, in the
+                same shape at the same weight. No count — every row already
+                wears the same provider mark, so a mark-plus-number chip here
+                read as one more row rather than a summary. */}
             <div className="sync-history-section-heading">
               <h2><Icon name={kind.icon} size={14} />{kind.plural}</h2>
-              <span className="sync-history-heading-count">
-                <Icon name={kind.icon} size={12} />{rows.length}
-              </span>
             </div>
             <div className="sync-history-thread-list">
               {rows.map((row) => (
@@ -1610,6 +1672,7 @@ export default function StorageCatalogPage({
                   storageName={storageName}
                   provider={scope.scope.provider}
                   providerTitle={markTitle}
+                  preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
                   onReveal={() => reveal(row)}
                   onOpen={row.registration_id
                     ? () => setMode({ kind: "detail", registrationId: row.registration_id! })

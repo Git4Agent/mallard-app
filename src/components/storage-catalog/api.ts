@@ -56,6 +56,12 @@ export const storageCatalogApi = {
       storageId: storageId ?? null,
     }),
 
+  /** The preview for a stored-only pet row, fetched from the storage on
+   * demand and cached by the atlas digest. Called lazily per card — never in
+   * the list path — and a failure just leaves the glyph tile. */
+  getPetPreview: (scopeId: string, storageId: string, repositoryId: string) =>
+    invoke<string>("get_catalog_pet_preview", { scopeId, storageId, repositoryId }),
+
   linkScopeResource: (request: LinkCatalogScopeResourceRequest) =>
     invoke<CatalogScopeLinkOutcome>("link_catalog_scope_resource", { request }),
 

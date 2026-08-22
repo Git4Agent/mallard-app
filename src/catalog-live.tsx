@@ -8,6 +8,7 @@ import type {
   CatalogScopeRow,
   CatalogScopeView,
 } from "./components/storage-catalog/types";
+import { PET_THUMBS } from "./catalog-pet-mockup-thumbs";
 import "./App.css";
 import "./RetroTheme.css";
 
@@ -129,6 +130,64 @@ const ROWS: CatalogScopeRow[] = [
   }),
 ];
 
+/** Pets v2 · Default Codex: the three real v2 pets wearing their real idle
+ *  frames, a stored-only row whose preview arrives lazily from the storage,
+ *  and a blocked one that keeps the glyph tile. */
+const petScope: CatalogScopeView = {
+  scope: {
+    scope_id: "catscope-pets",
+    provider: "codex",
+    profile_id: "catprofile-1",
+    resource_kind: "codex_pet_v2",
+    revision: 1,
+    created_at: NOW,
+    updated_at: NOW,
+  },
+  profile: scope.profile,
+};
+
+const PET_ROWS: CatalogScopeRow[] = [
+  row({
+    row_id: "maple", display_name: "Maple", state: "in_sync",
+    scope_label: "v2", local_path: "/Users/hequ/.codex/pets/maple",
+    remote_present: true, remote_revision: 3,
+    local_files: 1, local_bytes: 2_633_494,
+    preview_png: PET_THUMBS.maple,
+    pet_description: "A compact brown-and-white border collie pet for Codex.",
+  }),
+  row({
+    row_id: "dahuang", display_name: "大黄", state: "local_changed",
+    scope_label: "v2", local_path: "/Users/hequ/.codex/pets/dahuang",
+    remote_present: true, remote_revision: 5, local_modified_at: NOW - 7_200,
+    local_files: 1, local_bytes: 1_784_464,
+    preview_png: PET_THUMBS.dahuang,
+    pet_description: "一只性格乖巧、黄身白脸、身形修长的中华田园犬。",
+  }),
+  row({
+    row_id: "patch", display_name: "Patch", state: "new", linked: false,
+    scope_label: "v2", local_path: "/Users/hequ/.codex/pets/patch",
+    link_id: null, registration_id: null, repository_id: null,
+    local_files: 1, local_bytes: 1_686_990,
+    preview_png: PET_THUMBS.patch,
+    pet_description: "A calm, observant green turtle with natural anatomy and patient, deliberate movement.",
+  }),
+  row({
+    row_id: "biscuit", display_name: "Biscuit", state: "local_missing",
+    scope_label: "v2", local_present: false, local_path: null, local_modified_at: null,
+    linked: false, local_files: null, local_bytes: null, preview_png: null,
+    link_id: null, registration_id: null,
+    remote_present: true, remote_revision: 2, remote_updated_at: NOW - 86_400 * 4,
+    pet_description: "A stored-only pet whose preview arrives from the storage.",
+  }),
+  row({
+    row_id: "scout", display_name: "Scout", state: "blocked",
+    scope_label: "v2", local_path: null, local_modified_at: null,
+    local_files: null, local_bytes: null, content_sha256: null, preview_png: null,
+    link_id: null, registration_id: null, repository_id: null,
+    blocker: "the pet package is a symlink, so its contents can't be captured safely",
+  }),
+];
+
 function pullPlan(rowId: string, actions: CatalogResourcePullPlan["item"]["actions"], claims: string[] = []): CatalogResourcePullPlan {
   return {
     schema_version: 1,
@@ -169,6 +228,9 @@ const PULL_PLANS: Record<string, CatalogResourcePullPlan> = {
   "deploy-checklist": pullPlan("deploy-checklist", [
     { action_id: "d1", resource_id: "resource-deploy-checklist", kind: { kind: "update_skill" }, requires_destructive_approval: false, incoming_content_sha256: "5".repeat(64) },
   ]),
+  biscuit: pullPlan("biscuit", [
+    { action_id: "p1", resource_id: "resource-biscuit", kind: { kind: "install_pet" }, requires_destructive_approval: false, incoming_content_sha256: "9".repeat(64) },
+  ]),
 };
 
 const STORAGES = [
@@ -176,15 +238,17 @@ const STORAGES = [
   { id: "storage-vault", name: "Vault", kind: "s3" as const, detail: "Bucket · mallard-vault", detailIsPath: false },
 ];
 
-function stubApi(storageId: string | null): StorageCatalogApi {
+function stubApi(storageId: string | null, view: "skills" | "pets"): StorageCatalogApi {
+  const activeScope = view === "pets" ? petScope : scope;
+  const activeRows = view === "pets" ? PET_ROWS : ROWS;
   const page = (): CatalogScopeResources => ({
-    scope: scope.scope,
-    profile: scope.profile,
+    scope: activeScope.scope,
+    profile: activeScope.profile,
     storage_id: storageId,
     storage_name: STORAGES.find((storage) => storage.id === storageId)?.name ?? null,
     /* Without a storage the backend lists only what the home scan saw — no
        stored-only rows — and a blocked row keeps saying so. */
-    rows: storageId ? ROWS : ROWS
+    rows: storageId ? activeRows : activeRows
       .filter((entry) => entry.local_present || entry.blocker)
       .map((entry) => ({ ...entry, state: entry.blocker ? entry.state : null, linked: false })),
     warnings: [],
@@ -192,6 +256,13 @@ function stubApi(storageId: string | null): StorageCatalogApi {
   const unsupported = () => Promise.reject(new Error("not wired in the live harness"));
   return {
     listScopeResources: async () => page(),
+    getPetPreview: async (_scopeId, _storageId, repositoryId) => {
+      // The stored-only pet, after a network-ish pause so the lazy fill is
+      // visible; everything else has nothing stored to draw.
+      if (repositoryId !== "repository-biscuit") throw new Error("no stored preview");
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      return PET_THUMBS.tracebill;
+    },
     preparePull: async (linkId: string) => {
       const plan = PULL_PLANS[linkId.replace(/^link-/, "")];
       if (!plan) throw new Error("no Pull plan for this row");
@@ -213,7 +284,7 @@ function stubApi(storageId: string | null): StorageCatalogApi {
     }),
     publish: async () => ({ plan_id: "p", published: true, revision: 7, message: "Published" }),
     linkScopeResource: async (request) => ({
-      resource: await stubApi(storageId).getResource("registration-triage"),
+      resource: await stubApi(storageId, view).getResource("registration-triage"),
       completion: "review_pull",
       link_id: `link-${(request.repository_id ?? request.local_resource_id ?? "").replace(/^(repository|resource)-/, "")}`,
     }),
@@ -254,13 +325,14 @@ function stubApi(storageId: string | null): StorageCatalogApi {
 
 function Harness() {
   const [storageId, setStorageId] = useState<string | null>("storage-local-1");
+  const [view, setView] = useState<"skills" | "pets">("skills");
   const [dark, setDark] = useState(false);
   return (
     <div className="app" style={{ height: "100vh" }}>
       <div className="sync-workspace">
         <StorageCatalogPage
-          scope={scope}
-          scopes={[scope]}
+          scope={view === "pets" ? petScope : scope}
+          scopes={[scope, petScope]}
           storages={STORAGES}
           appActions={[{
             items: [{
@@ -277,16 +349,21 @@ function Harness() {
               label: storageId ? "Forget the storage" : "Use Local storage 1",
               icon: "cloud",
               onSelect: () => setStorageId(storageId ? null : "storage-local-1"),
+            }, {
+              id: "view",
+              label: view === "pets" ? "View Skills" : "View Pets v2",
+              icon: "openai",
+              onSelect: () => setView(view === "pets" ? "skills" : "pets"),
             }],
           }]}
-          onOpenScope={() => undefined}
+          onOpenScope={(scopeId) => setView(scopeId === "catscope-pets" ? "pets" : "skills")}
           onOpenStorageSettings={() => undefined}
           onAddStorage={() => undefined}
           onAddScope={() => undefined}
           onRemoveScope={() => undefined}
           notify={(message) => console.info("notice:", message)}
           onScopeGone={() => undefined}
-          api={stubApi(storageId)}
+          api={stubApi(storageId, view)}
         />
       </div>
     </div>

@@ -548,6 +548,16 @@ impl ServiceInner {
 }
 
 impl SessionWatchService {
+    /// Forget every armed profile and cache. The whole-`~/.mallard` reset
+    /// invalidates the registrations these are keyed by, and the process
+    /// stays alive across that reset — dropping the profile watches here is
+    /// what disarms their backends.
+    pub(crate) fn reset_all_caches(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            *inner = ServiceInner::default();
+        }
+    }
+
     /// The discovery and session views for one capture request, reusing the
     /// cached inventory when the provider-profile watcher proves it clean.
     /// Each provider profile owns an independent cache entry. Multi-provider

@@ -19,6 +19,7 @@ const commandNames = [
   "apply_catalog_resource_pull",
   "create_catalog_scope",
   "delete_catalog_scope",
+  "get_catalog_pet_preview",
   "get_catalog_resource",
   "get_catalog_resource_status",
   "inspect_catalog_resource_links",
@@ -52,7 +53,7 @@ test("the Catalog API exposes only the scope-rowed per-resource command surface"
   );
   for (const method of [
     "listCapabilities", "listProfiles", "saveProfile",
-    "createScope", "listScopeResources", "linkScopeResource", "getResource",
+    "createScope", "listScopeResources", "getPetPreview", "linkScopeResource", "getResource",
     "unlink", "remove", "inspectLinks", "preparePush",
     "publish", "preparePull", "applyPull", "prepareFork", "applyFork", "getStatus",
   ]) {
@@ -190,6 +191,28 @@ test("every row is the activity card: badge, name as the door, facts, one ⓘ", 
   assert.match(page, /Reviewed this warning — /);
 });
 
+test("pet rows wear the preview tile, and stored-only previews arrive lazily", () => {
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  // Pets are the one kind with artwork: their cards open a preview column —
+  // image when a preview exists, the kind glyph when nothing can be drawn —
+  // and non-pet scopes never grow the column at all.
+  assert.match(page, /catalog-card-pet/);
+  assert.match(page, /catalog-pet-preview/);
+  assert.match(page, /petKind \? row\.preview_png \?\? remotePreviews\[row\.row_id\] \?\? null : undefined/);
+  // Stored-only rows ask after render, once per page, and a failure keeps
+  // the glyph — the list call itself never waits on a storage round-trip.
+  assert.match(page, /api\.getPetPreview\(scopeId, storageId, row\.repository_id!\)/);
+  assert.match(page, /previewAttempts/);
+  assert.doesNotMatch(page, /getPetPreview[\s\S]{0,400}listScopeResources\(/);
+  // The tile letterboxes in both stylesheets: the tile itself in App.css,
+  // the card's template extension beside the template it extends.
+  assert.match(readFileSync("src/App.css", "utf8"), /\.catalog-pet-preview \{/);
+  assert.match(
+    readFileSync("src/RetroTheme.css", "utf8"),
+    /\.catalog-card-pet \{[^}]*"preview title actions"[^}]*"preview meta meta"/,
+  );
+});
+
 test("Push and Pull are page verbs with one review each, and link on the way", () => {
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
   // The bar owns both verbs, with the count the list itself produced.
@@ -245,7 +268,7 @@ test("Add is Kind then agent profile, and never picks a storage or resource", ()
   assert.match(add, /aria-label="Provider"[\s\S]*?disabled=\{working\}/);
   assert.doesNotMatch(add, /disabled=\{working \|\| !kind\}/);
   assert.doesNotMatch(add, /Add profile|className="catalog-inline-form"/);
-  assert.doesNotMatch(add, /Manage saved homes|removeProfile/);
+  assert.doesNotMatch(add, /Manage saved homes|removeProfile|api\.deleteProfile/);
   assert.doesNotMatch(add, /probe_catalog_resource_profile|probeProviderProfile/);
   assert.doesNotMatch(readFileSync("src/App.css", "utf8"), /catalog-setup-(grid|card|step)/);
 });

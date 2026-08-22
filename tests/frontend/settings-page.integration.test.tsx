@@ -35,10 +35,10 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   assert.match(html, />Settings<\/span>/);
   assert.match(html, /aria-label="App actions"/);
 
-  // Five groups, in reading order, each heading on the shared chrome class.
-  const headings = [...html.matchAll(/class="settings-section-title"[^>]*>.*?<\/svg>\s*([A-Za-z-]+)</g)]
-    .map((match) => match[1]);
-  assert.deepEqual(headings, ["Appearance", "Privacy", "Sync", "Logs", "Display"]);
+  // Six groups, in reading order, each heading on the shared chrome class.
+  const headings = [...html.matchAll(/class="settings-section-title"[^>]*>.*?<\/svg>([^<]+)</g)]
+    .map((match) => match[1].trim());
+  assert.deepEqual(headings, ["Appearance", "Privacy", "Sync", "Logs", "Display", "Local data"]);
 
   // Theme: a radiogroup of the three choices; absence of a stored key means
   // System, so it is the checked one under the test's bare environment.
@@ -73,6 +73,18 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   // their defaults rather than inventing values.
   assert.match(html, /<option value="30" selected="">30 days<\/option>/);
   assert.match(html, /<option value="100" selected="">100 MB<\/option>/);
+
+  // Local data: the reset row is a danger verb with a size readout. In a
+  // static render the summary has not loaded — the readout shows an ellipsis
+  // and the button is deliberately NOT disabled: a user whose state is too
+  // broken to measure is exactly who needs the reset.
+  assert.match(html, /class="btn btn-ghost danger"[^>]*>Reset Mallard</);
+  assert.doesNotMatch(html, /<button[^>]*class="btn btn-ghost danger"[^>]*disabled[^>]*>Reset Mallard</);
+  assert.match(html, /class="sync-settings-readout"[^>]*>…</);
+  // The row copy names the irreversible parts: backups and preferences.
+  assert.match(html, /backups of files Pull replaced/);
+  // React escapes the apostrophe (&#x27;) in static markup.
+  assert.match(html, /clears Mallard(&#x27;|['’])s saved preferences/);
 });
 
 test("preferences default on, live under the mallard.* keys, and notify", () => {
@@ -99,6 +111,12 @@ test("preferences default on, live under the mallard.* keys, and notify", () => 
   // be named in prose, but no code path reads or writes it.
   assert.doesNotMatch(source, /(getItem|setItem)\("agent-sync-theme"/);
   assert.equal(existsSync("src/theme.ts"), false);
+
+  // Factory reset is a prefix sweep, not an enumerated key list — future
+  // mallard.* keys must be covered without anyone remembering this function.
+  assert.match(source, /export function clearStoredUiState\(/);
+  assert.match(source, /startsWith\("mallard\."\)/);
+  assert.match(source, /removeItem/);
 });
 
 test("one clock decision serves every timestamp", () => {
@@ -165,4 +183,37 @@ test("Settings is the fifth destination and absorbed the log manager", () => {
   assert.match(appCss, /\.sync-settings-switch::before \{[^}]*background: var\(--switch-thumb\);/s);
   assert.match(retroCss, /\.sync-settings-flag,\n/);
   assert.match(retroCss, /\.sync-settings-segment > button,\n/);
+});
+
+test("Reset Mallard wipes ~/.mallard behind a warning confirm and restarts", () => {
+  const page = readFileSync("src/components/project-sync/SettingsPage.tsx", "utf8");
+  const api = readFileSync("src/components/project-sync/api.ts", "utf8");
+  const reset = readFileSync("src-tauri/src/app_reset.rs", "utf8");
+  const lib = readFileSync("src-tauri/src/lib.rs", "utf8");
+
+  // One warning confirm whose copy owns the irreversibility; the cutover is
+  // a webview reload after the wipe resolves, with the localStorage sweep in
+  // between. Never a process restart: relaunching the raw binary under
+  // `tauri dev` orphans the frontend from its dev server (the CLI kills Vite
+  // when the original process exits) and lands on a white window.
+  assert.match(page, /This cannot be undone\./);
+  assert.match(page, /kind: "warning", okLabel: "Reset Mallard"/);
+  assert.match(page, /await projectSyncApi\.resetLocalState\(\);[\s\S]{0,900}clearStoredUiState\(\);[\s\S]{0,200}setResetPhase\("reloading"\);[\s\S]{0,200}window\.location\.reload\(\);/);
+
+  assert.match(api, /invoke<LocalStateSummary>\("get_local_state_summary"\)/);
+  assert.match(api, /invoke<LocalStateWipeResult>\("reset_local_state"\)/);
+  assert.doesNotMatch(api, /restart_app/);
+
+  // Rust side: the wipe holds the catalog-state guard, re-arms the only two
+  // long-lived holders of pre-wipe state (the process survives the reset),
+  // never relaunches the process, and logs no persisted success entry (that
+  // would recreate ~/.mallard/logs the reset just deleted).
+  assert.match(reset, /acquire_state_guard\(\)/);
+  assert.match(reset, /wipe_local_state\(\)/);
+  assert.match(reset, /session_watch_service\(\)\.reset_all_caches\(\);/);
+  assert.match(reset, /ConfigWatcher::start\(app\.clone\(\)\)/);
+  assert.doesNotMatch(reset, /request_restart|restart_app/);
+  assert.doesNotMatch(reset, /local_state_reset_(completed|succeeded)/);
+  assert.match(lib, /app_reset::get_local_state_summary,\s*app_reset::reset_local_state,/);
+  assert.doesNotMatch(lib, /restart_app/);
 });

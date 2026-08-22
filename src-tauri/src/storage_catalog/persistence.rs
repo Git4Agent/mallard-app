@@ -127,6 +127,13 @@ impl CatalogStateRepository {
         })
     }
 
+    /// The state guard for callers outside the catalog's own transactions —
+    /// today only the whole-`~/.mallard` reset, which must hold this while it
+    /// deletes the root so no catalog mutation is mid-write underneath it.
+    pub fn acquire_state_guard(&self) -> Result<CatalogStateGuard<'static>, String> {
+        self.guard()
+    }
+
     /// Exclusive mutation lock for one canonical provider path
     /// (`locks/provider-<canonical-path-sha256>.lock`).
     pub fn acquire_target_lock(&self, canonical_path: &Path) -> Result<CatalogTargetLock, String> {

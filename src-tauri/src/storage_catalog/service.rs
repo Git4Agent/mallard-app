@@ -188,6 +188,22 @@ impl StorageCatalogService {
         )
     }
 
+    pub fn pet_preview(
+        &self,
+        scope_id: &CatalogScopeId,
+        storage_id: &StorageId,
+        repository_id: &CatalogResourceRepositoryId,
+    ) -> Result<String, String> {
+        resource_commands::get_catalog_pet_preview_with_repositories(
+            &self.state,
+            &self.catalog,
+            scope_id,
+            storage_id,
+            repository_id,
+            &self.user_home,
+        )
+    }
+
     pub fn link_scope_resource(
         &self,
         request: LinkCatalogScopeResourceRequest,

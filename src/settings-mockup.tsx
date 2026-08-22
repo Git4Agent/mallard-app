@@ -404,6 +404,28 @@ function SettingsPage() {
             </div>
           </section>
 
+          <section className="sync-settings-group" aria-labelledby="settings-local-data">
+            <h2 id="settings-local-data">
+              <Icon name="drive" size={12} /> Local data
+            </h2>
+            <div className="sync-settings-card">
+              <SettingsRow
+                label="Reset Mallard"
+                control={(
+                  <>
+                    <span className="sync-settings-readout">412 files · 96 MB</span>
+                    <button type="button" className="btn btn-ghost danger">Reset Mallard</button>
+                  </>
+                )}
+              >
+                Permanently deletes everything in <code>~/.mallard</code> — sync
+                metadata, activity logs, and the backups of files Pull replaced —
+                clears Mallard's saved preferences, then restarts as a fresh
+                install. Cloud revisions and your project files are not touched.
+              </SettingsRow>
+            </div>
+          </section>
+
         </section>
       </main>
     </div>

@@ -20,6 +20,7 @@ use mallard_domain::{
     StorageConfig, StorageId, StorageKind, ThreadId, MAX_CONVERSATION_FILE_BYTES,
 };
 use mallard_infrastructure::persistence::LocalStateRepository;
+use mallard_infrastructure::project_activity::{ProjectSessionSummary, SessionSourceState};
 use mallard_infrastructure::providers::claude::{encode_claude_project_path, ClaudeAdapter};
 use mallard_infrastructure::providers::{
     SessionAdapter, SessionCountQuality, SessionTimelineContext, SessionTimelineEventKind,
@@ -34,11 +35,11 @@ use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri_app_lib::{
-    ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSyncService,
-    PushApproval, PushDestinationPullReason, PushDestinationStatus, RestoreResult,
-    ThreadSyncComparison, ThreadSyncState,
+    ProjectActivityWorkspace, ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest,
+    ProjectSyncService, PushApproval, PushDestinationPullReason, PushDestinationStatus,
+    RestoreResult, SessionDetailErrorCode, ThreadSyncComparison, ThreadSyncState,
 };
 use walkdir::WalkDir;
 
@@ -52,6 +53,7 @@ const PLACEHOLDER_API_KEY: &str = "mallard-local-aimock-placeholder";
 const INHERITED_SECRET_MARKER: &str = "mallard-inherited-secret-sentinel";
 const READ_TOOL_CALL_ID: &str = "mallard_claude_read_r1";
 const READ_FILE_MARKER: &str = "MALLARD_CLAUDE_READ_FILE";
+const FOREIGN_DECOY_SESSION_ID: &str = "018f3f2e-7b91-7ad0-8000-000000000299";
 /// Fake credentials planted into the Read-tool file: shaped so the
 /// mallard.redact.v1 layers detect them (provider prefix; credential
 /// key/value), proving live cloud-object cleanliness end to end.
@@ -1507,6 +1509,18 @@ fn run_claude(
         Some(expected_response),
         "Claude returned the wrong deterministic marker"
     );
+    let model_usage = output
+        .get("modelUsage")
+        .and_then(Value::as_object)
+        .expect("Claude result has no model usage map");
+    assert_eq!(
+        model_usage
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([MODEL]),
+        "Claude used an unexpected model or fallback"
+    );
     wait_for_transcript_marker(claude_home, project_root, session_id, expected_response);
     session_id.to_string()
 }
@@ -1864,6 +1878,138 @@ fn root_level_transcript_stems(claude_home: &Path, project_root: &Path) -> BTree
         );
     }
     stems
+}
+
+fn fixed_activity_before_time() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock predates the Unix epoch")
+        .as_secs()
+        .saturating_add(60 * 60)
+}
+
+fn activity_workspace(
+    service: &ProjectSyncService<'_>,
+    project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    before_time: u64,
+    force_revalidate: bool,
+) -> ProjectActivityWorkspace {
+    redacted(
+        service.get_project_activity_workspace(
+            project_id,
+            Some(storage_id),
+            None,
+            Some(before_time),
+            Some(90),
+            force_revalidate,
+        ),
+        "cannot load the Claude Activity workspace",
+    )
+}
+
+fn wait_for_activity_workspace(
+    service: &ProjectSyncService<'_>,
+    project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    before_time: u64,
+    mut ready: impl FnMut(&ProjectActivityWorkspace) -> bool,
+) -> ProjectActivityWorkspace {
+    let deadline = Instant::now() + TRANSCRIPT_SETTLE_TIMEOUT;
+    loop {
+        let workspace = activity_workspace(service, project_id, storage_id, before_time, false);
+        if ready(&workspace) {
+            return workspace;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Claude Activity did not converge before its bounded deadline"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn remove_volatile_workspace_fields(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                remove_volatile_workspace_fields(item);
+            }
+        }
+        Value::Object(object) => {
+            object.remove("compared_at");
+            object.remove("is_active");
+            for item in object.values_mut() {
+                remove_volatile_workspace_fields(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn stable_activity_workspace(workspace: &ProjectActivityWorkspace) -> Value {
+    let mut value = serde_json::to_value(workspace).expect("serialize Claude Activity workspace");
+    remove_volatile_workspace_fields(&mut value);
+    value
+}
+
+fn assert_activity_counts(
+    session: &ProjectSessionSummary,
+    user_round_count: u64,
+    agent_message_count: u64,
+    tool_call_count: u64,
+) {
+    assert_eq!(session.user_round_count, user_round_count);
+    assert_eq!(session.agent_message_count, agent_message_count);
+    assert_eq!(session.tool_call_count, tool_call_count);
+    assert!(
+        session.metrics_complete,
+        "Claude Activity metrics are partial"
+    );
+}
+
+fn marker_history_activity_counts(history: &[HistoryMarker]) -> (u64, u64, u64) {
+    let user_markers = history
+        .iter()
+        .filter(|marker| marker.role == HistoryRole::User)
+        .count() as u64;
+    let assistant_markers = history
+        .iter()
+        .filter(|marker| marker.role == HistoryRole::Assistant)
+        .count() as u64;
+    // Every lineage in this fixture inherits R1's one tool-use assistant
+    // record and one user-role tool-result record. Marker histories retain
+    // only human prompts and final assistant text, so account for those two
+    // durable records explicitly.
+    (user_markers + 1, assistant_markers + 1, 1)
+}
+
+fn write_foreign_cwd_decoy(source: &[u8], destination: &Path, foreign_project_root: &Path) {
+    let mut rewritten = Vec::with_capacity(source.len());
+    for raw in source
+        .split(|byte| *byte == b'\n')
+        .filter(|raw| !raw.is_empty())
+    {
+        let mut value: Value = serde_json::from_slice(raw).expect("decoy source line is JSON");
+        let object = value
+            .as_object_mut()
+            .expect("decoy source line is an object");
+        if object.contains_key("sessionId") {
+            object.insert(
+                "sessionId".to_string(),
+                Value::String(FOREIGN_DECOY_SESSION_ID.to_string()),
+            );
+        }
+        if object.contains_key("cwd") {
+            object.insert(
+                "cwd".to_string(),
+                Value::String(foreign_project_root.to_string_lossy().into_owned()),
+            );
+        }
+        rewritten.extend(serde_json::to_vec(&value).expect("encode foreign-cwd decoy line"));
+        rewritten.push(b'\n');
+    }
+    write_private_new(destination, &rewritten);
 }
 
 fn assert_identity_namespaces_distinct(local: &str, provider: &str, cloud: &str, label: &str) {
@@ -2305,7 +2451,12 @@ fn assert_fixed_point(comparison: &ThreadSyncComparison, revision: u64) {
             .entries
             .iter()
             .all(|entry| entry.state == ThreadSyncState::Synced),
-        "Claude comparison is not at a fixed point"
+        "Claude comparison is not at a fixed point: {:?}",
+        comparison
+            .entries
+            .iter()
+            .map(|entry| (&entry.cloud_thread_id, entry.state))
+            .collect::<Vec<_>>()
     );
     assert_eq!(comparison.counts.diverged, 0);
     assert_eq!(comparison.counts.local, 0);
@@ -2535,6 +2686,101 @@ fn assert_cross_replica_topology(
     }
 }
 
+fn assert_final_activity_workspace(
+    workspace: &ProjectActivityWorkspace,
+    topology: &ReplicaTopology,
+    histories: &[(CloudThreadId, Vec<HistoryMarker>)],
+    primary_cloud: &CloudThreadId,
+    expected_revision: u64,
+    label: &str,
+) {
+    assert!(
+        workspace.comparison_error.is_none(),
+        "{label} Activity comparison failed"
+    );
+    assert_fixed_point(
+        workspace
+            .comparison
+            .as_ref()
+            .expect("final Activity workspace has no comparison"),
+        expected_revision,
+    );
+    assert_eq!(
+        workspace.activity.sessions.len(),
+        topology.by_cloud.len(),
+        "{label} Activity has extra or missing sessions"
+    );
+    assert!(workspace.activity.unmapped.is_empty());
+    assert!(workspace.activity.warnings.is_empty());
+
+    let expected_resources = topology
+        .by_cloud
+        .values()
+        .map(|(local_id, _)| {
+            let local_id = ThreadId::parse(local_id).expect("parse final local thread ID");
+            mallard_domain::conversation_resource_id(&claude_key(), &local_id)
+                .expect("derive final Activity resource ID")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        workspace
+            .activity
+            .sessions
+            .iter()
+            .map(|session| session.resource_id.clone())
+            .collect::<BTreeSet<_>>(),
+        expected_resources,
+        "{label} Activity roster differs from conversation bindings"
+    );
+
+    let mut preservation_ordinals = BTreeSet::new();
+    for (cloud_id, (local_id, provider_id)) in &topology.by_cloud {
+        let session = workspace
+            .activity
+            .sessions
+            .iter()
+            .find(|session| session.logical_thread_id.as_deref() == Some(local_id.as_str()))
+            .expect("final Activity lacks a bound conversation");
+        assert_eq!(session.provider, claude_key());
+        assert_eq!(
+            session.provider_session_id.as_deref(),
+            Some(provider_id.as_str())
+        );
+        assert_eq!(session.source, SessionSourceState::LocalAndRemote);
+        let history = histories
+            .iter()
+            .find(|(history_cloud, _)| history_cloud.as_str() == cloud_id)
+            .map(|(_, history)| history.as_slice())
+            .expect("final Activity cloud identity has no history oracle");
+        let (users, agents, tools) = marker_history_activity_counts(history);
+        assert_activity_counts(session, users, agents, tools);
+
+        if cloud_id == primary_cloud.as_str() {
+            assert!(
+                session.preserved.is_none(),
+                "{label} primary Activity row is incorrectly preserved"
+            );
+        } else {
+            let preserved = session
+                .preserved
+                .as_ref()
+                .expect("preserved Activity row lacks provenance");
+            assert_eq!(preserved.preserved_from, *primary_cloud);
+            assert!(preserved.ordinal > 0);
+            assert!(
+                preservation_ordinals.insert(preserved.ordinal),
+                "{label} reused a preservation ordinal"
+            );
+        }
+    }
+    assert_eq!(
+        preservation_ordinals.len(),
+        topology.by_cloud.len().saturating_sub(1),
+        "{label} Activity has the wrong preserved-row count"
+    );
+}
+
 fn assert_pull_is_no_op(
     service: &ProjectSyncService<'_>,
     storage_id: &StorageId,
@@ -2762,6 +3008,8 @@ fn session_detail_history(
     resource_id: &ResourceId,
     provider_thread_id: &str,
     expected: &[HistoryMarker],
+    project_root: &Path,
+    read_marker_path: &Path,
 ) {
     let header = service
         .get_project_session_detail(project_id, resource_id)
@@ -2884,6 +3132,26 @@ fn session_detail_history(
             &event.event_id,
         )
         .expect("cannot expand Claude Session Detail Read event");
+    let arguments = detail
+        .arguments
+        .as_deref()
+        .expect("Session Detail Read event has no arguments");
+    let source_project_root = read_marker_path
+        .parent()
+        .expect("Read marker path has no project parent");
+    let expected_argument_path = if source_project_root == project_root {
+        "./read-marker.txt".to_string()
+    } else {
+        read_marker_path.to_string_lossy().into_owned()
+    };
+    assert!(
+        arguments.contains(&expected_argument_path),
+        "Session Detail Read arguments have the wrong local path presentation"
+    );
+    assert!(
+        !arguments.contains(project_root.to_string_lossy().as_ref()),
+        "Session Detail exposed the selected replica's absolute project root"
+    );
     assert!(detail
         .result
         .as_deref()
@@ -3228,6 +3496,8 @@ fn verify_final_histories(
                 &resource_id,
                 &provider_thread_id,
                 expected,
+                project_root,
+                read_marker_path,
             );
 
             let snapshot = tempfile::tempdir().expect("create Claude reopen snapshot root");
@@ -3385,6 +3655,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
     let claude_home_a = root.path().join("claude-a");
     let claude_home_b = root.path().join("claude-b");
     let project_a_input = root.path().join("project-a");
+    let foreign_project_input = root.path().join("project.a");
     let project_b_input = root.path().join("project-b");
     let storage_root = root.path().join("storage");
     let machine_a_home = root.path().join("machine-a");
@@ -3395,6 +3666,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &claude_home_a,
         &claude_home_b,
         &project_a_input,
+        &foreign_project_input,
         &project_b_input,
         &storage_root,
         &machine_a_home,
@@ -3405,12 +3677,20 @@ fn live_claude_aimock_setup_push_pull_divergence() {
     }
     let project_a =
         std::fs::canonicalize(&project_a_input).expect("canonicalize replica-A Claude project");
+    let foreign_project = std::fs::canonicalize(&foreign_project_input)
+        .expect("canonicalize foreign colliding Claude project");
     let project_b =
         std::fs::canonicalize(&project_b_input).expect("canonicalize replica-B Claude project");
     let canonical_root =
         std::fs::canonicalize(root.path()).expect("canonicalize Claude live-test root");
     assert_eq!(std::fs::canonicalize(&project_a).unwrap(), project_a);
     assert_eq!(std::fs::canonicalize(&project_b).unwrap(), project_b);
+    assert_ne!(project_a, foreign_project);
+    assert_eq!(
+        encode_claude_project_path(project_a.to_string_lossy().as_ref()),
+        encode_claude_project_path(foreign_project.to_string_lossy().as_ref()),
+        "the decoy fixture no longer exercises a lossy Claude bucket collision"
+    );
 
     assert_supported_claude_version(&process_home);
     let read_marker_path = project_a.join("read-marker.txt");
@@ -3460,8 +3740,10 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         path_needles.push(canonical_needle);
     }
     let mut process_count = 0_usize;
+    let activity_before_time = fixed_activity_before_time();
 
-    // Revision 1: replica A creates a real tool-bearing Claude session.
+    // Setup publishes the registration-only revision 1. Content revision 2:
+    // replica A creates and publishes a real tool-bearing Claude session.
     let first = finish_setup(
         &service_a,
         &project_a,
@@ -3496,29 +3778,130 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &read_marker_path,
     );
     let source_r1_bytes = transcript_bytes(&claude_home_a, &project_a, SOURCE_SESSION_ID);
+    let decoy_path = transcript_path(&claude_home_a, &project_a, FOREIGN_DECOY_SESSION_ID);
+    write_foreign_cwd_decoy(&source_r1_bytes, &decoy_path, &foreign_project);
+    assert_eq!(
+        transcript_path(&claude_home_a, &foreign_project, FOREIGN_DECOY_SESSION_ID,),
+        decoy_path,
+        "foreign Claude project did not collide in the same physical bucket"
+    );
+    assert_transcript_structure_and_history(
+        &claude_home_a,
+        &foreign_project,
+        FOREIGN_DECOY_SESSION_ID,
+        &r1_history,
+        4,
+        &read_marker_path,
+    );
+    let pre_push_activity = wait_for_activity_workspace(
+        &service_a,
+        &project_id_a,
+        &storage_id,
+        activity_before_time,
+        |workspace| {
+            workspace.activity.sessions.len() == 1
+                && workspace.activity.sessions[0]
+                    .provider_session_id
+                    .as_deref()
+                    == Some(SOURCE_SESSION_ID)
+        },
+    );
+    assert_eq!(pre_push_activity.activity.sessions.len(), 1);
+    let pre_push_session = &pre_push_activity.activity.sessions[0];
+    assert_eq!(
+        pre_push_session.provider_session_id.as_deref(),
+        Some(SOURCE_SESSION_ID)
+    );
+    assert_eq!(pre_push_session.source, SessionSourceState::LocalOnly);
+    assert_activity_counts(pre_push_session, 2, 2, 1);
+    let pre_push_comparison = pre_push_activity
+        .comparison
+        .as_ref()
+        .expect("pre-Push Activity workspace has no comparison");
+    assert_eq!(pre_push_comparison.entries.len(), 1);
+    assert_eq!(
+        pre_push_comparison.entries[0].state,
+        ThreadSyncState::LocalOnly
+    );
+    assert_eq!(
+        pre_push_comparison.entries[0].provider_thread_id.as_deref(),
+        Some(SOURCE_SESSION_ID),
+        "foreign-cwd decoy entered the pre-Push comparison"
+    );
     let first_push = push(&service_a, &project_id_a, &storage_id);
-    assert_eq!(first_push.revision, Some(1));
+    assert_eq!(first_push.revision, Some(2));
     let logical_primary_a = logical_thread_id(&repository_a, &project_id_a, SOURCE_SESSION_ID);
     let cloud_primary = cloud_thread_id_of(&repository_a, &project_id_a, &logical_primary_a);
     assert_identity_namespaces_distinct(
         logical_primary_a.as_str(),
         SOURCE_SESSION_ID,
         cloud_primary.as_str(),
-        "replica-A revision-1 conversation",
+        "replica-A content-revision-2 conversation",
     );
+    let r1_activity = activity_workspace(
+        &service_a,
+        &project_id_a,
+        &storage_id,
+        activity_before_time,
+        false,
+    );
+    assert_eq!(r1_activity.activity.sessions.len(), 1);
+    assert!(r1_activity.activity.warnings.is_empty());
+    let r1_activity_session = &r1_activity.activity.sessions[0];
+    assert_eq!(
+        r1_activity_session.source,
+        SessionSourceState::LocalAndRemote
+    );
+    assert_eq!(
+        r1_activity_session.provider_session_id.as_deref(),
+        Some(SOURCE_SESSION_ID)
+    );
+    assert_eq!(
+        r1_activity_session.logical_thread_id.as_deref(),
+        Some(logical_primary_a.as_str())
+    );
+    assert_activity_counts(r1_activity_session, 2, 2, 1);
+    let r1_comparison = r1_activity
+        .comparison
+        .as_ref()
+        .expect("R1 Activity workspace has no comparison");
+    assert_eq!(r1_comparison.entries.len(), 1);
+    assert_eq!(r1_comparison.entries[0].state, ThreadSyncState::Synced);
+    assert_eq!(
+        r1_comparison.entries[0].provider_thread_id.as_deref(),
+        Some(SOURCE_SESSION_ID),
+        "foreign-cwd decoy entered the pushed comparison"
+    );
+    let r1_snapshot = redacted(
+        service_a.inspect_bundle(&storage_id, &bundle_id),
+        "cannot inspect content-revision-2 Claude bundle",
+    );
+    let pushed_source_ids = r1_snapshot
+        .manifest
+        .all_conversations()
+        .filter_map(|(_, _, thread)| thread.source_thread_id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        pushed_source_ids,
+        BTreeSet::from([SOURCE_SESSION_ID.to_string()]),
+        "foreign-cwd decoy entered the pushed bundle"
+    );
+    std::fs::remove_file(&decoy_path).expect("remove bounded foreign-cwd decoy fixture");
     assert_eq!(
         root_level_transcript_stems(&claude_home_a, &project_a),
         BTreeSet::from([SOURCE_SESSION_ID.to_string()]),
-        "replica A did not have exactly one revision-1 Claude transcript"
+        "replica A did not have exactly one first-content Claude transcript"
     );
     let r1_resource = mallard_domain::conversation_resource_id(&claude_key(), &logical_primary_a)
-        .expect("derive revision-1 Claude resource ID");
+        .expect("derive first-content Claude resource ID");
     session_detail_history(
         &service_a,
         &project_id_a,
         &r1_resource,
         SOURCE_SESSION_ID,
         &r1_history,
+        &project_a,
+        &read_marker_path,
     );
     let mut r1_machine_identity_needles = identity_needles([
         project_id_a.as_str(),
@@ -3549,8 +3932,8 @@ fn live_claude_aimock_setup_push_pull_divergence() {
     assert_storage_contains(&storage_root, b"<anthropic-api-key>");
     assert_storage_contains(&storage_root, b"DB_PASSWORD=<password>");
 
-    // Revision 2: B pulls, receives machine-local identities, and resumes the
-    // production-relocated transcript through the real Claude CLI.
+    // Content revision 3: B pulls revision 2, receives machine-local
+    // identities, resumes the relocated transcript, and publishes it.
     let second = finish_setup(
         &service_b,
         &project_b,
@@ -3569,6 +3952,30 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         .clone()
         .expect("replica B setup has no binding");
     let project_id_b = second.project.local_project_id.clone();
+    let before_initial_pull = activity_workspace(
+        &service_b,
+        &project_id_b,
+        &storage_id,
+        activity_before_time,
+        false,
+    );
+    assert_eq!(before_initial_pull.activity.sessions.len(), 1);
+    let remote_only = &before_initial_pull.activity.sessions[0];
+    assert_eq!(remote_only.source, SessionSourceState::RemoteOnly);
+    assert_eq!(
+        remote_only.provider_session_id.as_deref(),
+        Some(SOURCE_SESSION_ID)
+    );
+    assert_activity_counts(remote_only, 2, 2, 1);
+    let storage_only_comparison = before_initial_pull
+        .comparison
+        .as_ref()
+        .expect("pre-Pull Activity workspace has no comparison");
+    assert_eq!(storage_only_comparison.entries.len(), 1);
+    assert_eq!(
+        storage_only_comparison.entries[0].state,
+        ThreadSyncState::StorageOnly
+    );
     let (_, initial_pull) = pull_and_apply(&service_b, &storage_id, &bundle_id, &binding_b);
     assert!(initial_pull.preserved_threads.is_empty());
     let logical_primary_b = local_thread_of_cloud(&repository_b, &project_id_b, &cloud_primary);
@@ -3583,7 +3990,36 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         logical_primary_b.as_str(),
         &provider_primary_b,
         cloud_primary.as_str(),
-        "replica-B revision-1 conversation",
+        "replica-B content-revision-2 conversation",
+    );
+    let after_initial_pull = wait_for_activity_workspace(
+        &service_b,
+        &project_id_b,
+        &storage_id,
+        activity_before_time,
+        |workspace| {
+            workspace.activity.sessions.len() == 1
+                && workspace.activity.sessions[0].source == SessionSourceState::LocalAndRemote
+                && workspace.activity.sessions[0]
+                    .provider_session_id
+                    .as_deref()
+                    == Some(provider_primary_b.as_str())
+        },
+    );
+    let materialized_activity = &after_initial_pull.activity.sessions[0];
+    assert_eq!(
+        materialized_activity.logical_thread_id.as_deref(),
+        Some(logical_primary_b.as_str())
+    );
+    assert_activity_counts(materialized_activity, 2, 2, 1);
+    let materialized_comparison = after_initial_pull
+        .comparison
+        .as_ref()
+        .expect("post-Pull Activity workspace has no comparison");
+    assert_eq!(materialized_comparison.entries.len(), 1);
+    assert_eq!(
+        materialized_comparison.entries[0].state,
+        ThreadSyncState::Synced
     );
     assert_eq!(
         root_level_transcript_stems(&claude_home_b, &project_b),
@@ -3648,10 +4084,46 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         6,
         &read_marker_path,
     );
+    let r2_resource = mallard_domain::conversation_resource_id(&claude_key(), &logical_primary_b)
+        .expect("derive replica-B R2 Session Detail resource ID");
+    session_detail_history(
+        &service_b,
+        &project_id_b,
+        &r2_resource,
+        &provider_primary_b,
+        &r2_history,
+        &project_b,
+        &read_marker_path,
+    );
+    let r2_activity = activity_workspace(
+        &service_b,
+        &project_id_b,
+        &storage_id,
+        activity_before_time,
+        true,
+    );
+    let r2_activity_session = r2_activity
+        .activity
+        .sessions
+        .iter()
+        .find(|session| session.resource_id == r2_resource.as_str())
+        .expect("forced Activity refresh omitted replica-B R2");
+    let (r2_users, r2_agents, r2_tools) = marker_history_activity_counts(&r2_history);
+    assert_activity_counts(r2_activity_session, r2_users, r2_agents, r2_tools);
+    assert!(r2_activity
+        .comparison
+        .as_ref()
+        .expect("forced R2 Activity workspace has no comparison")
+        .entries
+        .iter()
+        .any(|entry| {
+            entry.cloud_thread_id.as_ref() == Some(&cloud_primary)
+                && entry.state == ThreadSyncState::LocalAhead
+        }));
     let second_push = push(&service_b, &project_id_b, &storage_id);
-    assert_eq!(second_push.revision, Some(2));
+    assert_eq!(second_push.revision, Some(3));
 
-    // Revision 3: A advances its old base, is push-gated, and keeps both.
+    // Content revision 4: A advances its old base, is push-gated, and keeps both.
     run_claude(
         &mut process_count,
         &provider,
@@ -3723,7 +4195,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &read_marker_path,
     );
     let third_push = push(&service_a, &project_id_a, &storage_id);
-    assert_eq!(third_push.revision, Some(3));
+    assert_eq!(third_push.revision, Some(4));
     let preserved_a_cloud = cloud_thread_id_of(
         &repository_a,
         &project_id_a,
@@ -3731,8 +4203,8 @@ fn live_claude_aimock_setup_push_pull_divergence() {
     );
     assert_ne!(preserved_a_cloud, cloud_primary);
 
-    // B pulls revision 3, then both replicas advance the shared primary in
-    // opposite directions. A wins revision 4; B must keep both.
+    // B pulls content revision 4, then both replicas advance the shared
+    // primary in opposite directions. A wins revision 5; B must keep both.
     let (_, third_pull) = pull_and_apply(&service_b, &storage_id, &bundle_id, &binding_b);
     assert!(third_pull.preserved_threads.is_empty());
     assert_eq!(
@@ -3788,8 +4260,63 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         "MALLARD_CLAUDE_USER_R5",
         "MALLARD_CLAUDE_SECOND_LOCAL_BRANCH",
     ));
+    session_detail_history(
+        &service_a,
+        &project_id_a,
+        &r1_resource,
+        &first_keep.remote_provider_thread_id,
+        &r4_history,
+        &project_a,
+        &read_marker_path,
+    );
+    session_detail_history(
+        &service_b,
+        &project_id_b,
+        &r2_resource,
+        &provider_primary_b,
+        &r5_history,
+        &project_b,
+        &read_marker_path,
+    );
+    let r4_activity = activity_workspace(
+        &service_a,
+        &project_id_a,
+        &storage_id,
+        activity_before_time,
+        true,
+    );
+    assert!(r4_activity
+        .comparison
+        .as_ref()
+        .expect("forced R4 Activity workspace has no comparison")
+        .entries
+        .iter()
+        .any(|entry| {
+            entry.cloud_thread_id.as_ref() == Some(&cloud_primary)
+                && entry.provider_thread_id.as_deref()
+                    == Some(first_keep.remote_provider_thread_id.as_str())
+                && entry.state == ThreadSyncState::LocalAhead
+        }));
+    let r5_activity = activity_workspace(
+        &service_b,
+        &project_id_b,
+        &storage_id,
+        activity_before_time,
+        true,
+    );
+    assert!(r5_activity
+        .comparison
+        .as_ref()
+        .expect("forced R5 Activity workspace has no comparison")
+        .entries
+        .iter()
+        .any(|entry| {
+            entry.cloud_thread_id.as_ref() == Some(&cloud_primary)
+                && entry.provider_thread_id.as_deref() == Some(provider_primary_b.as_str())
+                && entry.state == ThreadSyncState::LocalAhead
+        }));
     let fourth_push = push(&service_a, &project_id_a, &storage_id);
-    assert_eq!(fourth_push.revision, Some(4));
+    assert_eq!(fourth_push.revision, Some(5));
     assert_divergent_push_gate(
         &service_b,
         &project_id_b,
@@ -3845,10 +4372,10 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &read_marker_path,
     );
 
-    // Revision 5 and fixed point: publish B's preserved branch, pull it to A,
-    // then require reviewed no-op Pull/Push and byte-identical storage.
+    // Content revision 6 and fixed point: publish B's preserved branch, pull
+    // it to A, then require reviewed no-op Pull/Push and byte-identical storage.
     let fifth_push = push(&service_b, &project_id_b, &storage_id);
-    assert_eq!(fifth_push.revision, Some(5));
+    assert_eq!(fifth_push.revision, Some(6));
     let preserved_b_cloud = cloud_thread_id_of(
         &repository_b,
         &project_id_b,
@@ -3880,11 +4407,11 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         .collect::<BTreeSet<_>>();
     assert_eq!(expected_cloud_ids.len(), 3);
     let storage_before_noops = tree_digest_inventory(&storage_root);
-    assert_pull_is_no_op(&service_a, &storage_id, &bundle_id, &binding_a, 5);
-    assert_pull_is_no_op(&service_b, &storage_id, &bundle_id, &binding_b, 5);
+    assert_pull_is_no_op(&service_a, &storage_id, &bundle_id, &binding_a, 6);
+    assert_pull_is_no_op(&service_b, &storage_id, &bundle_id, &binding_b, 6);
     for (service, project_id) in [(&service_a, &project_id_a), (&service_b, &project_id_b)] {
         let no_op = push(service, project_id, &storage_id);
-        assert_eq!(no_op.revision, Some(5));
+        assert_eq!(no_op.revision, Some(6));
         assert_eq!(no_op.resources_changed, Some(0));
     }
     assert_eq!(tree_digest_inventory(&storage_root), storage_before_noops);
@@ -3895,7 +4422,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         )
         .head
         .revision,
-        5
+        6
     );
     let topology_a = assert_exact_replica_topology(
         &repository_a,
@@ -3906,7 +4433,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &claude_home_a,
         &project_a,
         &expected_cloud_ids,
-        5,
+        6,
         "replica A",
     );
     let topology_b = assert_exact_replica_topology(
@@ -3918,7 +4445,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &claude_home_b,
         &project_b,
         &expected_cloud_ids,
-        5,
+        6,
         "replica B",
     );
     assert_cross_replica_topology(&topology_a, &topology_b, &expected_cloud_ids);
@@ -3939,6 +4466,85 @@ fn live_claude_aimock_setup_push_pull_divergence() {
             .collect::<Vec<_>>(),
         final_history_oracles(),
         "final Claude lineage oracle changed"
+    );
+    let final_activity_a_plain = activity_workspace(
+        &service_a,
+        &project_id_a,
+        &storage_id,
+        activity_before_time,
+        false,
+    );
+    let final_activity_a_cached = activity_workspace(
+        &service_a,
+        &project_id_a,
+        &storage_id,
+        activity_before_time,
+        false,
+    );
+    let final_activity_a_forced = activity_workspace(
+        &service_a,
+        &project_id_a,
+        &storage_id,
+        activity_before_time,
+        true,
+    );
+    assert_eq!(
+        stable_activity_workspace(&final_activity_a_plain),
+        stable_activity_workspace(&final_activity_a_cached),
+        "replica-A plain and cached Activity projections differ"
+    );
+    assert_eq!(
+        stable_activity_workspace(&final_activity_a_cached),
+        stable_activity_workspace(&final_activity_a_forced),
+        "replica-A cached and forced Activity projections differ"
+    );
+    assert_final_activity_workspace(
+        &final_activity_a_forced,
+        &topology_a,
+        &final_histories,
+        &cloud_primary,
+        6,
+        "replica A",
+    );
+
+    let final_activity_b_plain = activity_workspace(
+        &service_b,
+        &project_id_b,
+        &storage_id,
+        activity_before_time,
+        false,
+    );
+    let final_activity_b_cached = activity_workspace(
+        &service_b,
+        &project_id_b,
+        &storage_id,
+        activity_before_time,
+        false,
+    );
+    let final_activity_b_forced = activity_workspace(
+        &service_b,
+        &project_id_b,
+        &storage_id,
+        activity_before_time,
+        true,
+    );
+    assert_eq!(
+        stable_activity_workspace(&final_activity_b_plain),
+        stable_activity_workspace(&final_activity_b_cached),
+        "replica-B plain and cached Activity projections differ"
+    );
+    assert_eq!(
+        stable_activity_workspace(&final_activity_b_cached),
+        stable_activity_workspace(&final_activity_b_forced),
+        "replica-B cached and forced Activity projections differ"
+    );
+    assert_final_activity_workspace(
+        &final_activity_b_forced,
+        &topology_b,
+        &final_histories,
+        &cloud_primary,
+        6,
+        "replica B",
     );
     verify_final_histories(
         &mut process_count,
@@ -4001,6 +4607,42 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         }
         other => panic!("primary transcript lineage is not complete: {other:?}"),
     };
+    let primary_resource_a =
+        mallard_domain::conversation_resource_id(&claude_key(), &primary_local_a)
+            .expect("derive primary cursor-append Activity resource ID");
+    let activity_before_append = activity_workspace(
+        &service_a,
+        &project_id_a,
+        &storage_id,
+        activity_before_time,
+        false,
+    );
+    let primary_activity_before = activity_before_append
+        .activity
+        .sessions
+        .iter()
+        .find(|session| session.resource_id == primary_resource_a.as_str())
+        .expect("primary Activity row before the appended turn");
+    let activity_metrics_before = activity_before_append
+        .activity
+        .sessions
+        .iter()
+        .map(|session| {
+            (
+                session.resource_id.clone(),
+                (
+                    session.user_round_count,
+                    session.agent_message_count,
+                    session.tool_call_count,
+                    session.total_tokens,
+                    session.metrics_complete,
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let detail_before_append = service_a
+        .get_project_session_detail(&project_id_a, &primary_resource_a)
+        .expect("cannot load Session Detail before the appended Claude turn");
     run_claude(
         &mut process_count,
         &provider,
@@ -4077,6 +4719,119 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         serde_json::to_value(&settled.entries).expect("serialize settled rows"),
         serde_json::to_value(&extended.entries).expect("serialize extended rows"),
         "cursor-extended and settled comparisons produce identical rows"
+    );
+
+    let activity_after_append = wait_for_activity_workspace(
+        &service_a,
+        &project_id_a,
+        &storage_id,
+        activity_before_time,
+        |workspace| {
+            workspace.activity.sessions.iter().any(|session| {
+                session.resource_id == primary_resource_a.as_str()
+                    && session.user_round_count
+                        == primary_activity_before.user_round_count.saturating_add(1)
+                    && session.agent_message_count
+                        == primary_activity_before
+                            .agent_message_count
+                            .saturating_add(1)
+                    && session.tool_call_count == primary_activity_before.tool_call_count
+            })
+        },
+    );
+    assert_eq!(
+        activity_after_append
+            .activity
+            .sessions
+            .iter()
+            .map(|session| session.resource_id.clone())
+            .collect::<BTreeSet<_>>(),
+        activity_metrics_before
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        "cursor append changed the Activity roster"
+    );
+    for session in &activity_after_append.activity.sessions {
+        let before = activity_metrics_before
+            .get(&session.resource_id)
+            .expect("post-append Activity contains an unknown row");
+        if session.resource_id == primary_resource_a.as_str() {
+            assert_eq!(session.user_round_count, before.0 + 1);
+            assert_eq!(session.agent_message_count, before.1 + 1);
+            assert_eq!(session.tool_call_count, before.2);
+            assert!(session.metrics_complete);
+            assert_eq!(session.source, SessionSourceState::LocalAndRemote);
+        } else {
+            assert_eq!(
+                (
+                    session.user_round_count,
+                    session.agent_message_count,
+                    session.tool_call_count,
+                    session.total_tokens,
+                    session.metrics_complete,
+                ),
+                *before,
+                "cursor append changed an unrelated Activity row"
+            );
+        }
+    }
+
+    let detail_after_append = service_a
+        .get_project_session_detail(&project_id_a, &primary_resource_a)
+        .expect("cannot refresh Session Detail after the appended Claude turn");
+    assert_ne!(
+        detail_after_append.snapshot_id, detail_before_append.snapshot_id,
+        "Session Detail snapshot did not advance after an append"
+    );
+    let prompts_before_append = detail_before_append
+        .event_counts
+        .prompts
+        .value
+        .expect("pre-append Session Detail prompt count is unavailable");
+    let responses_before_append = detail_before_append
+        .event_counts
+        .responses
+        .value
+        .expect("pre-append Session Detail response count is unavailable");
+    assert_eq!(
+        detail_after_append.event_counts.prompts.value,
+        Some(prompts_before_append + 1)
+    );
+    assert_eq!(
+        detail_after_append.event_counts.responses.value,
+        Some(responses_before_append + 1)
+    );
+    assert_eq!(
+        detail_after_append.event_counts.tool_calls,
+        detail_before_append.event_counts.tool_calls
+    );
+    assert_eq!(
+        detail_after_append.event_counts.reads,
+        detail_before_append.event_counts.reads
+    );
+    let stale_snapshot_error = service_a
+        .get_project_session_timeline_page(
+            &project_id_a,
+            &primary_resource_a,
+            ProjectSessionTimelineRequest {
+                snapshot_id: detail_before_append.snapshot_id.clone(),
+                cursor: None,
+                anchor_event_id: None,
+                limit: Some(1),
+                included_event_kinds: BTreeSet::from([SessionTimelineEventKind::Prompt]),
+                included_tool_categories: BTreeSet::new(),
+                turn_id: None,
+            },
+        )
+        .expect_err("stale Session Detail snapshot unexpectedly loaded a page");
+    assert_eq!(
+        stale_snapshot_error.code,
+        SessionDetailErrorCode::SnapshotChanged
+    );
+    assert_eq!(
+        stale_snapshot_error.current_snapshot_id.as_deref(),
+        Some(detail_after_append.snapshot_id.as_str())
     );
     assert_eq!(
         process_count, EXPECTED_CURSOR_APPEND_PROCESSES,

@@ -1937,6 +1937,30 @@ mod tests {
     }
 
     #[test]
+    fn image_generation_projection_preserves_certified_base64() {
+        let result = "A7fK9q2ZpX4mW8vB1cN6dR3sT5uY0hgJx=";
+        let redactor = crate::credential_redaction::shared();
+        let source = vec![
+            start("turn-1"),
+            event(
+                "2026-08-12T10:02:30Z",
+                json!({"type": "image_generation_end", "call_id": "img-1",
+                       "status": "completed", "revised_prompt": null, "result": result,
+                       "saved_path": "/tmp/i.png"}),
+            ),
+        ]
+        .into_iter()
+        .map(|record| redactor.redact_record_gated(&record).unwrap())
+        .collect();
+
+        let output = project(source);
+        assert_eq!(items(&output)[0]["payload"]["item"]["result"], result);
+        for record in &output {
+            redactor.verify_wire_value(record).unwrap();
+        }
+    }
+
+    #[test]
     fn hook_prompt_response_item_projects_and_plain_messages_do_not() {
         let hook = json!({"timestamp": "2026-08-12T10:01:00Z", "type": "response_item",
             "payload": {"type": "message", "id": "msg_1", "role": "user",

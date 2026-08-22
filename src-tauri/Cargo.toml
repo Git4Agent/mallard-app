@@ -30,6 +30,9 @@ aws-smithy-http-client = { version = "1", features = ["rustls-aws-lc"] }
 # Base64 for x-amz-checksum-sha256 values; already in the tree via aws-sdk-s3.
 aws-smithy-types = "1"
 bytes = "1"
+# Pet preview derivation: decode PNG/WebP atlases, encode the cached PNG
+# thumbnail. Pure-Rust codecs only; no default features.
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
 sha2 = "0.10"
 hmac = "0.12"
 libc = "0.2"

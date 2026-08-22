@@ -96,6 +96,29 @@ export function setPreference(name: BooleanPreferenceName, value: boolean) {
   notify();
 }
 
+/**
+ * Factory reset: drop every `mallard.*` key — a prefix sweep, not a list,
+ * because keys live in three modules and future ones must be covered without
+ * remembering this function exists — plus the abandoned legacy theme key.
+ * Called by the Settings page after a successful `~/.mallard` wipe, right
+ * before the app restarts.
+ */
+export function clearStoredUiState() {
+  try {
+    const doomed: string[] = [];
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index);
+      if (key?.startsWith("mallard.")) doomed.push(key);
+    }
+    doomed.push("agent-sync-theme");
+    for (const key of doomed) window.localStorage.removeItem(key);
+  } catch {
+    // A locked-down webview can reject storage; the restart still lands on
+    // defaults-or-stale, which the app tolerates either way.
+  }
+  notify();
+}
+
 export function subscribePreferences(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);

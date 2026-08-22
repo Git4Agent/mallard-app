@@ -1170,7 +1170,7 @@ fn get_project_activity_with_repository(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn get_project_activity_workspace_with_repository(
+pub(super) fn get_project_activity_workspace_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: Option<&StorageId>,
@@ -8444,16 +8444,25 @@ fn conversation_thread_from_capture(
         .collect::<Result<Vec<_>, String>>()?;
     // Explicit provider titles win. Preserve an existing portable title when
     // the local index no longer contains it, then derive a bounded fallback
-    // from the reconstructed logical root. The reconstructed bytes include
-    // history_base ancestors, so an empty paginated leaf inherits the same
-    // first-user title as its complete conversation.
+    // from the exact wire transcript. Reconstructed Codex bytes include
+    // history_base ancestors; Claude summarizes its redacted wire form.
     // The title is content-derived (provider index titles, the bounded
     // first-user fallback), so it passes the same scrub as transcript
     // content before it becomes cloud metadata.
+    let transcript_title = if artifact.is_some() {
+        first_codex_user_summary(published_bytes)
+    } else if claude_wire.is_some() {
+        provider_registry()
+            .require_sessions(&action.provider)?
+            .summarize_bytes(published_bytes)?
+            .title
+    } else {
+        None
+    };
     let display_title = Some(descriptor.display_name.clone())
         .filter(|name| Some(name.as_str()) != conversation.source_thread_id.as_deref())
         .or_else(|| previous.and_then(|thread| thread.display_title.clone()))
-        .or_else(|| artifact.and_then(|_| first_codex_user_summary(published_bytes)))
+        .or(transcript_title)
         .map(|title| {
             credential_redaction::shared()
                 .redact_str(&title)
@@ -12346,6 +12355,14 @@ pub(super) fn apply_bundle_restore_with_progress(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let provider_home_changed = applied.receipts.iter().any(|receipt| {
+        receipt.status == ActionStatus::Applied
+            && (receipt.conversation.is_some()
+                || matches!(
+                    receipt.action_type,
+                    RestoreActionType::WriteFile | RestoreActionType::MergeFile
+                ))
+    });
     let success = overall_success;
     let message = if success {
         format!("Applied {} restore actions", applied_action_ids.len())
@@ -12387,6 +12404,13 @@ pub(super) fn apply_bundle_restore_with_progress(
                 )
             }),
     };
+    if provider_home_changed {
+        // These writes were performed by Mallard itself, so do not depend on
+        // asynchronous watcher delivery before the next Activity or review.
+        for home in resolved.homes.values() {
+            super::session_watch_service::session_watch_service().force_rebaseline(Path::new(home));
+        }
+    }
     on_phase("persist receipts and finalize", phase_started.elapsed());
     Ok(result)
 }
@@ -16687,6 +16711,16 @@ mod tests {
             &repo,
             &LocalProjectId::parse("project-a").unwrap(),
             &StorageId::parse("storage-a").unwrap(),
+        )
+        .unwrap_err()
+        .contains("host-sensitive operation"));
+        // Binding detach is guarded too. Its own command is gone, so the arm
+        // names the live entry point that still performs the mutation:
+        // `remove_local_project_with_repository` -> `remove_local_project_guarded`
+        // -> `detach_project_binding_guarded`.
+        assert!(remove_local_project_with_repository(
+            &repo,
+            &LocalProjectId::parse("project-a").unwrap()
         )
         .unwrap_err()
         .contains("host-sensitive operation"));
@@ -21851,6 +21885,49 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn claude_push_publishes_the_first_user_message_as_its_title() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("claude-title-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let claude_home = temp.path().join("claude-home");
+        bind_and_link_claude_replica(&repo, &project, &storage_id, &project_root, &claude_home);
+
+        let session_id = "claude-title-session";
+        let title = "Create a pelican-riding-a-bicycle SVG";
+        let transcript = claude_test_transcript(
+            session_id,
+            &project_root,
+            &[
+                ("u-1", None, "user", title),
+                ("a-1", Some("u-1"), "assistant", "Done"),
+            ],
+        );
+        std::fs::write(
+            claude_home
+                .join("projects/source")
+                .join(format!("{session_id}.jsonl")),
+            transcript,
+        )
+        .unwrap();
+
+        push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let snapshot = engine.inspect(&project.bundle_id).unwrap();
+        let thread = snapshot
+            .manifest
+            .all_conversations()
+            .find_map(|(_, _, thread)| {
+                (thread.source_thread_id.as_deref() == Some(session_id)).then_some(thread)
+            })
+            .expect("published Claude thread");
+        assert_eq!(thread.display_title.as_deref(), Some(title));
     }
 
     /// The Claude twin of the Codex probe-window proof: after a push, a

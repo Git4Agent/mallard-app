@@ -1,5 +1,9 @@
 # PLAN: Global Settings page
 
+Follow-up landed: the sixth **Local data** group (reset `~/.mallard` +
+factory reset + relaunch) is specified in
+`PLAN_SETTINGS_RESET_LOCAL_DATA.md`.
+
 Status: IMPLEMENTED (2026-08-21, uncommitted). All stages S1-S5 landed in one
 pass; `npx tsc --noEmit`, `npm run build`, and the full frontend suite (219)
 are green. Mockup specimen kept in sync at `settings-mockup.html` +

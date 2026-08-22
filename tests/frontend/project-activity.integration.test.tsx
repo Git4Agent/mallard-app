@@ -784,15 +784,44 @@ test("Push and Pull reviews use only the outer workspace scroll", () => {
   assert.doesNotMatch(pushReviewHandler, /scrollIntoView/);
 });
 
-test("the combined project header stays aligned with Storage and shares its divider", () => {
+/* The Storage card and the Uncommitted card are the same object drawn twice —
+   one by ProjectLinksWorkspace, one by the timeline — and they sit one above
+   the other, so any drift between their frames reads as a mistake. The frame
+   values live in two files (the card joins the timeline's skin from a foreign
+   subtree), which is exactly the arrangement that drifts silently. */
+test("the storage card wears the uncommitted card's frame", () => {
   const css = readFileSync("src/App.css", "utf8");
-  const combinedHeadingRule = css.match(/\.sync-project-combined-page \.sync-combined-project-heading\s*\{[^}]+\}/s)?.[0] ?? "";
-  const storageGroupRule = css.match(/\.sync-project-combined-page \.project-storage-group\s*\{[^}]+\}/s)?.[0] ?? "";
+  const retro = readFileSync("src/RetroTheme.css", "utf8");
+  const declaration = (rule: string, property: string) =>
+    rule.match(new RegExp(`[^-]${property}:\\s*([^;]+);`))?.[1];
 
-  assert.match(combinedHeadingRule, /align-items:\s*stretch/);
-  assert.match(combinedHeadingRule, /margin-bottom:\s*0/);
-  assert.match(combinedHeadingRule, /border-bottom:\s*0/);
-  assert.match(storageGroupRule, /border-top:\s*1px/);
+  const cardRule = css.match(/\.project-storage-card\s*\{[^}]+\}/s)?.[0] ?? "";
+  const uncommittedRule = retro.match(/\.sync-history-uncommitted\s*\{[^}]+\}/s)?.[0] ?? "";
+  for (const property of ["border", "border-radius", "background"]) {
+    assert.equal(
+      declaration(cardRule, property),
+      declaration(uncommittedRule, property),
+      `storage card ${property} must match the uncommitted card's`,
+    );
+  }
+  assert.match(cardRule, /margin:[^;]*var\(--sync-history-card-offset\)/,
+    "the storage card must share the timeline's rail inset, not approximate it");
+
+  // The inset and icon metrics only resolve if the card joins the timeline's
+  // token scope — it lives in a different subtree, so the vars don't reach it
+  // on their own and every var() would silently fall back to nothing.
+  const tokenScope = retro.match(/\.sync-history-timeline,[^{]*\{/s)?.[0] ?? "";
+  assert.match(tokenScope, /\.project-storage-card/);
+
+  const barRule = css.match(/\.project-storage-card > \.sync-history-section-heading\s*\{[^}]+\}/s)?.[0] ?? "";
+  const uncommittedBarRule = retro.match(/\.sync-history-uncommitted \.sync-history-section-heading\s*\{[^}]+\}/s)?.[0] ?? "";
+  for (const property of ["min-height", "padding", "border-bottom"]) {
+    assert.equal(
+      declaration(barRule, property),
+      declaration(uncommittedBarRule, property),
+      `storage heading bar ${property} must match the uncommitted bar's`,
+    );
+  }
 });
 
 test("activity requests share concurrent work but not completed results", async () => {

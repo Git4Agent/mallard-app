@@ -2414,12 +2414,6 @@ summary:focus-visible {
   max-width: 1100px;
 }
 
-.sync-project-combined-page .sync-combined-project-heading {
-  align-items: stretch;
-  margin-bottom: 0;
-  border-bottom: 0;
-}
-
 .sync-combined-settings-panel {
   position: relative;
   z-index: 2;
@@ -2449,14 +2443,117 @@ summary:focus-visible {
   padding: 0 0 22px;
 }
 
-.project-profile-group {
+/* Storage wears the timeline's own card — same frame, same 38px heading bar,
+   same 26px rail inset as .sync-history-uncommitted (RetroTheme.css) — so the
+   two cards share a left edge and a grammar instead of disagreeing one above
+   the other. It joins the timeline's token scope at RetroTheme.css for the
+   inset and icon metrics; a test pins this frame to Uncommitted's values.
+   overflow differs deliberately: this card clips its filled banners to the
+   radius, and hosts no rail segment that would need to escape. */
+.project-storage-card {
   overflow: hidden;
+  margin: 0 0 10px var(--sync-history-card-offset);
   border: 1px solid var(--border-mid);
-  border-radius: 10px;
-  background: var(--surface-card);
+  border-radius: 4px;
+  background: var(--surface-row);
 }
 
-.project-profile-group > .conversation-path-repair-notice {
+/* The bar matches the Uncommitted heading; only the layout differs, because
+   this one can carry a repair notice mid-bar and an actions cluster at the
+   end, and space-between would strand the notice in the middle. */
+.project-storage-card > .sync-history-section-heading {
+  min-height: 38px;
+  justify-content: flex-start;
+  margin: 0;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border-mid);
+}
+
+/* Nothing below the bar to part from (a link whose storage config is gone). */
+.project-storage-card > .sync-history-section-heading:last-child {
+  border-bottom: 0;
+}
+
+.project-storage-card .sync-history-section-heading h2 > svg {
+  width: var(--sync-history-row-icon-size);
+  height: var(--sync-history-row-icon-size);
+  flex: 0 0 var(--sync-history-row-icon-size);
+}
+
+.project-storage-heading-actions {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 2px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.project-storage-heading-actions .sync-history-heading-count {
+  margin-right: 6px;
+}
+
+.project-storage-heading-actions .sync-history-icon-action {
+  width: 28px;
+  height: 28px;
+}
+
+/* The labelled sibling of the bar's icon actions: same ghost treatment as
+   .sync-history-icon-action, sized for a text label. */
+.project-storage-setup-action {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--type-sm);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.project-storage-setup-action:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-0);
+}
+
+.project-storage-setup-action:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.project-storage-setup-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The empty body is laid out the way every session row in these cards is —
+   content against the left edge, action against the right — so the card does
+   not rearrange itself the moment a storage is linked. */
+.project-storage-empty {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  color: var(--text-2);
+  font-size: var(--type-md);
+}
+
+.project-storage-empty > svg {
+  flex: 0 0 auto;
+  color: var(--text-3);
+}
+
+.project-storage-empty > .btn {
+  margin-left: auto;
+}
+
+.project-storage-card > .conversation-path-repair-notice {
   min-height: 40px;
   margin: 0;
   padding: 4px 8px 4px 12px;
@@ -2466,195 +2563,68 @@ summary:focus-visible {
   background: color-mix(in srgb, var(--yellow) 3%, var(--surface-subtle));
 }
 
-.project-profile-group > .conversation-path-repair-notice .conversation-path-repair-copy {
+.project-storage-card > .conversation-path-repair-notice .conversation-path-repair-copy {
   flex-direction: row;
   align-items: center;
   gap: 7px;
 }
 
-.project-profile-group > .conversation-path-repair-notice .conversation-path-repair-copy strong {
+.project-storage-card > .conversation-path-repair-notice .conversation-path-repair-copy strong {
   flex: 0 0 auto;
   white-space: nowrap;
 }
 
-.project-profile-group > .conversation-path-repair-notice .conversation-path-repair-detail {
+.project-storage-card > .conversation-path-repair-notice .conversation-path-repair-detail {
   min-width: 0;
   flex: 1;
 }
 
-.project-profile-group > .conversation-path-repair-notice .conversation-path-repair-button {
+.project-storage-card > .conversation-path-repair-notice .conversation-path-repair-button {
   min-height: 28px;
   padding-right: 8px;
   padding-left: 8px;
 }
 
-.project-profile-storage-heading {
-  min-height: 34px;
-  display: flex;
-  align-items: center;
-  flex-wrap: nowrap;
-  gap: 7px;
-  padding: 0 12px;
-  border-top: 1px solid var(--border);
-  color: var(--text-1);
-  font-size: var(--type-xs);
-  font-weight: var(--weight-semibold);
-}
-
-.project-storage-group > .project-profile-storage-heading:first-child {
-  border-top: 0;
-}
-
-.project-profile-storage-heading small {
-  min-width: 18px;
-  min-height: 18px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
-  background: var(--surface-muted);
-  color: var(--text-2);
-  font-size: var(--type-3xs);
-}
-
-.project-profile-storage-heading > .conversation-path-repair-notice.repairable {
+.project-storage-card .sync-history-section-heading > .conversation-path-repair-notice.repairable {
   min-height: 28px;
-  margin: 0 0 0 3px;
+  margin: 0;
   padding: 0;
   border: 0;
   border-radius: 0;
   background: transparent;
 }
 
-.project-profile-storage-heading > .conversation-path-repair-notice .conversation-path-repair-button {
+.project-storage-card .sync-history-section-heading > .conversation-path-repair-notice .conversation-path-repair-button {
   min-height: 28px;
   padding-right: 7px;
   padding-left: 7px;
   font-size: var(--type-xs);
 }
 
-.project-profile-storage-icon {
-  flex: 0 0 auto;
-  color: var(--text-3);
-}
-
-.project-profile-storage-actions {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  gap: 2px;
-  margin-left: auto;
-  white-space: nowrap;
-}
-
-.project-profile-storage-heading .profile-link-another {
-  min-height: 28px;
-  gap: 5px;
-  margin: 0;
-  padding: 0 8px;
-  border: 0;
-  border-radius: 6px;
-  font-size: var(--type-sm);
-}
-
-.project-profile-storage-heading .profile-link-another.active {
-  background: var(--bg-hover);
-  color: var(--text-0);
-}
-
-.project-profile-storage-heading .profile-storage-icon-action {
-  width: 28px;
-  min-width: 28px;
-  padding: 0;
-}
-
-.project-profile-group .profile-link-no-storage {
-  min-height: 62px;
-  padding: 0 12px;
-  border: 0;
-  border-top: 1px solid var(--border);
-  border-radius: 0;
-  background: var(--surface-row);
-}
-
+/* The list holds exactly one block now — the active storage's banners and
+   open review. It is the card's first child whenever it shows (the heading
+   yields to the path bar once a storage is selected), so the card frame parts
+   it and it draws no chrome of its own. */
 .project-profile-storage-list .storage-link-block {
   margin: 0;
   border: 0;
-  border-top: 1px solid var(--border);
   border-radius: 0;
-  background: var(--surface-row);
+  background: transparent;
   box-shadow: none;
 }
 
-.project-profile-storage-list .storage-link-block:hover,
-.project-profile-storage-list .storage-link-block.sync-review-open {
-  border-color: var(--border);
-  background: var(--surface-row-hover);
-  box-shadow: none;
-}
-
-.project-profile-group-footer {
+.project-storage-card-footer {
   padding: 10px 12px 12px;
   border-top: 1px solid var(--border);
   background: var(--surface-subtle);
 }
 
-/* On a settled project the group holds nothing but this footer, and its rule
-   would land 1px under the group frame as a doubled hairline. It parts the
+/* On a settled project the card holds nothing but this footer, and its rule
+   would land 1px under the card frame as a doubled hairline. It parts the
    footer from what precedes it, so with nothing above it there is nothing to
    part. (ProjectLinksWorkspace drops the empty storage list so this matches.) */
-.project-profile-group-footer:first-child {
+.project-storage-card-footer:first-child {
   border-top: 0;
-}
-
-/* The combined project page uses the same flat rail for storage and threads. */
-.sync-project-combined-page .project-storage-group {
-  overflow: visible;
-  border: 0;
-  border-top: 1px solid var(--border);
-  border-radius: 0;
-  background: transparent;
-}
-
-.sync-project-combined-page .project-profile-storage-heading {
-  min-height: 46px;
-  padding: 0 8px;
-  border-top: 0;
-  color: var(--text-0);
-  font-size: var(--type-md);
-  font-weight: var(--weight-bold);
-}
-
-.sync-project-combined-page .project-profile-storage-heading small {
-  min-width: auto;
-  min-height: auto;
-  background: transparent;
-  color: var(--text-3);
-  font-size: var(--type-xs);
-}
-
-.sync-project-combined-page .project-profile-storage-heading .profile-link-another {
-  font-size: var(--type-xs);
-}
-
-.sync-project-combined-page .project-profile-storage-list .storage-link-block {
-  background: transparent;
-}
-
-.sync-project-combined-page .project-profile-storage-list .storage-link-block.selected {
-  border-top: 0;
-  background: var(--surface-subtle);
-  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 72%, transparent);
-}
-
-.sync-project-combined-page .project-profile-storage-list .storage-link-block:last-child {
-  border-bottom: 1px solid var(--border);
-}
-
-.sync-project-combined-page .storage-link-more {
-  width: 30px;
-  height: 30px;
-  border-radius: 6px;
 }
 
 /* ---------------------------------------------------------------------------
@@ -3714,17 +3684,6 @@ span.sync-path-crumb {
   min-width: 0;
 }
 
-.profile-link-no-storage {
-  min-height: 58px;
-  display: flex;
-  align-items: center;
-  padding: 0 16px;
-  border: 1px dashed var(--border-mid);
-  border-radius: 9px;
-  color: var(--text-2);
-  font-size: var(--type-md);
-}
-
 .storage-link-block {
   container-type: inline-size;
   overflow: hidden;
@@ -4433,38 +4392,10 @@ span.sync-path-crumb {
   margin-top: -3px;
 }
 
-.profile-link-another {
-  min-height: 41px;
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  margin-top: 5px;
-  padding: 0 14px;
-  border: 1px dashed var(--border-mid);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-1);
-  font: inherit;
-  font-size: var(--type-md);
-  cursor: pointer;
-  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
-}
-
-.profile-link-another:hover:not(:disabled) {
-  border-color: var(--border-strong);
-  background: var(--bg-hover);
-  color: var(--text-0);
-}
-
-.profile-link-another:disabled {
-  opacity: 0.42;
-  cursor: default;
-}
-
-/* The picker is the storage group's footer content, not a card of its own.
+/* The picker is the storage card's footer content, not a card of its own.
    It used to carry a popover skin from when it opened loose inside the project
-   card; inside the framed group that skin drew a second border 11px in from the
-   first, in the same colour and at a larger radius. The group frames it now. */
+   card; inside the framed card that skin drew a second border 11px in from the
+   first, in the same colour and at a larger radius. The card frames it now. */
 .storage-link-picker {
   display: flex;
   flex-wrap: wrap;
@@ -4537,7 +4468,6 @@ span.sync-path-crumb {
 
 .sync-settings-group > .settings-section-title > svg { color: var(--text-1); }
 
-/* Same card recipe as .project-storage-group. */
 .sync-settings-card {
   border: 1px solid var(--border-mid);
   border-radius: 6px;
@@ -7046,6 +6976,31 @@ button.sync-project-file-expand { cursor: pointer; }
 
 .catalog-card-name:hover {
   text-decoration: underline;
+}
+
+/* The pet's idle frame in a fixed 44x48 tile — the atlas cell's 192:208 on
+   the pixel grid — letterboxed on the card's own paper. The empty tile wears
+   the kind glyph, so the column never collapses and never shows a broken
+   image. Painterly atlases downscale smoothly on purpose: `pixelated` is for
+   true pixel art only. */
+.catalog-pet-preview {
+  width: 44px;
+  height: 48px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text-3);
+}
+
+.catalog-pet-preview > img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 /* The Pull review's local action: the row states it in one word, the way the
