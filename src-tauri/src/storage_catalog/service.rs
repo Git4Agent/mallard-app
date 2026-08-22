@@ -1,11 +1,12 @@
 //! Non-Tauri application boundary for storage-scoped Library resources.
 //!
 //! Desktop commands and external integration tests use this service so
-//! profile setup, discovery, linking, reviewed Push publication, and reviewed
-//! Pull application all cross the same production orchestration path. Tests
-//! inject an isolated machine home and a bounded provider process runner; no
-//! operation needs to redirect the process-wide user home.
+//! profile setup, discovery, scope linking, reviewed Push publication, and
+//! reviewed Pull application all cross the same production orchestration
+//! path. Tests inject an isolated machine home and a bounded provider process
+//! runner; no operation needs to redirect the process-wide user home.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,16 +15,15 @@ use mallard_infrastructure::persistence::LocalStateRepository;
 
 use super::adapters::{NativeProcessRunner, PluginProcessRunner};
 use super::domain::{
-    CatalogLinkId, CatalogPlanActionId, CatalogPlanId, CatalogRegistrationId, CatalogResource,
-    CatalogResourceKindTag, CatalogResourcePullPlan, CatalogResourcePushPlan,
-    CatalogResourceRepositoryId, CatalogScopeId, LibraryHeadCoordinate, LibraryResourceTag,
-    LocalCatalogProfile, LocalCatalogProfileId, ProviderKey,
+    CatalogLinkId, CatalogPlanActionId, CatalogPlanId, CatalogResource, CatalogResourceId,
+    CatalogResourceKindTag, CatalogResourceRepositoryId, CatalogScopeId, CatalogScopePullPlan,
+    CatalogScopePushPlan, LibraryHeadCoordinate, LibraryResourceTag, LocalCatalogProfile,
+    LocalCatalogProfileId, ProviderKey,
 };
 use super::persistence::CatalogStateRepository;
 use super::resource_commands::{
-    self, CatalogResourceLinkInspectionDto, CatalogResourcePullOutcomeDto,
-    CatalogResourcePushOutcomeDto, CatalogScopeDto, CatalogScopeLinkOutcomeDto,
-    CatalogScopeResourcesDto, LinkCatalogScopeResourceRequest,
+    self, CatalogScopeDto, CatalogScopeLinkOutcomeDto, CatalogScopePullOutcomeDto,
+    CatalogScopePushOutcomeDto, CatalogScopeResourcesDto,
 };
 
 fn now_secs() -> u64 {
@@ -33,55 +33,69 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// The complete approval captured by a reviewed Library Push.
+/// The complete approval captured by a reviewed scope Push.
 #[derive(Clone, Debug)]
-pub struct CatalogPublishApproval {
+pub struct CatalogPushApproval {
     pub plan_id: CatalogPlanId,
-    pub include: bool,
+    pub selected_resource_ids: Vec<CatalogResourceId>,
     pub acknowledged_warning_digests: Vec<String>,
 }
 
-impl CatalogPublishApproval {
-    /// Select the resource exactly as recommended by the review. Warning
+impl CatalogPushApproval {
+    /// Select every row exactly as recommended by the review. Warning
     /// acknowledgement is deliberately empty: callers must copy the digests
     /// they actually displayed and received approval for.
-    pub fn recommended(plan: &CatalogResourcePushPlan) -> Self {
+    pub fn recommended(plan: &CatalogScopePushPlan) -> Self {
         Self {
             plan_id: plan.plan_id.clone(),
-            include: plan.row.selectable,
+            selected_resource_ids: plan
+                .rows
+                .iter()
+                .filter(|row| row.row.selected_by_default)
+                .map(|row| row.row.resource_id.clone())
+                .collect(),
             acknowledged_warning_digests: Vec::new(),
         }
     }
 }
 
-/// The exact action approved from a reviewed Library Pull.
+/// The exact per-item actions approved from a reviewed scope Pull.
 #[derive(Clone, Debug)]
 pub struct CatalogPullApproval {
     pub plan_id: CatalogPlanId,
-    pub approved_action_id: Option<CatalogPlanActionId>,
-    pub destructive_acknowledged: bool,
+    pub choices: BTreeMap<CatalogResourceId, CatalogPlanActionId>,
+    pub destructive_acknowledged: Vec<CatalogResourceId>,
 }
 
 impl CatalogPullApproval {
-    /// Approve the plan's recommended action, or Skip when the plan has no
-    /// recommended mutation.
-    pub fn recommended(plan: &CatalogResourcePullPlan) -> Self {
+    /// Approve every item's recommended action; items with no recommendation
+    /// are explicit Skips.
+    pub fn recommended(plan: &CatalogScopePullPlan) -> Self {
         Self {
             plan_id: plan.plan_id.clone(),
-            approved_action_id: plan.item.default_action_id.clone(),
-            destructive_acknowledged: false,
+            choices: plan
+                .items
+                .iter()
+                .filter_map(|item| {
+                    item.item
+                        .default_action_id
+                        .clone()
+                        .map(|action_id| (item.item.resource_id.clone(), action_id))
+                })
+                .collect(),
+            destructive_acknowledged: Vec::new(),
         }
     }
 }
 
-/// Verified current state of one independent Library repository.
+/// Verified current state of one kind repository.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogRepositoryInspectionDto {
     pub storage_id: StorageId,
     pub repository_id: CatalogResourceRepositoryId,
     pub tag: Option<LibraryResourceTag>,
     pub head: Option<LibraryHeadCoordinate>,
-    pub resource: Option<CatalogResource>,
+    pub resources: BTreeMap<CatalogResourceId, CatalogResource>,
 }
 
 /// Production Library use cases with explicitly selected machine state,
@@ -146,14 +160,27 @@ impl StorageCatalogService {
     pub fn save_profile(
         &self,
         provider: ProviderKey,
-        display_name: String,
         configured_home: String,
     ) -> Result<LocalCatalogProfile, String> {
         resource_commands::save_catalog_resource_profile_with_repository(
             &self.catalog,
             provider,
-            display_name,
             configured_home,
+            now_secs(),
+        )
+    }
+
+    pub fn rename_profile(
+        &self,
+        profile_id: &LocalCatalogProfileId,
+        display_name: String,
+        expected_revision: u64,
+    ) -> Result<LocalCatalogProfile, String> {
+        resource_commands::rename_catalog_resource_profile_with_repository(
+            &self.catalog,
+            profile_id,
+            display_name,
+            expected_revision,
             now_secs(),
         )
     }
@@ -192,69 +219,73 @@ impl StorageCatalogService {
         &self,
         scope_id: &CatalogScopeId,
         storage_id: &StorageId,
-        repository_id: &CatalogResourceRepositoryId,
+        resource_id: &CatalogResourceId,
     ) -> Result<String, String> {
         resource_commands::get_catalog_pet_preview_with_repositories(
             &self.state,
             &self.catalog,
             scope_id,
             storage_id,
-            repository_id,
+            resource_id,
             &self.user_home,
         )
     }
 
-    pub fn link_scope_resource(
+    pub fn link_scope_storage(
         &self,
-        request: LinkCatalogScopeResourceRequest,
+        scope_id: &CatalogScopeId,
+        storage_id: &StorageId,
     ) -> Result<CatalogScopeLinkOutcomeDto, String> {
-        resource_commands::link_catalog_scope_resource_with_repositories(
+        resource_commands::link_catalog_scope_storage_with_repositories(
             &self.state,
             &self.catalog,
             self.runner.as_ref(),
-            request,
+            scope_id,
+            storage_id,
             &self.user_home,
             now_secs(),
         )
     }
 
-    pub fn inspect_links(
+    pub fn unlink_scope_storage(
         &self,
-        registration_id: &CatalogRegistrationId,
-    ) -> Result<Vec<CatalogResourceLinkInspectionDto>, String> {
-        resource_commands::inspect_links_with_repositories(
-            &self.state,
+        link_id: &CatalogLinkId,
+        expected_revision: u64,
+    ) -> Result<bool, String> {
+        resource_commands::unlink_catalog_scope_storage_with_repositories(
             &self.catalog,
-            self.runner.as_ref(),
-            registration_id,
+            link_id,
+            expected_revision,
             &self.user_home,
-            now_secs(),
         )
     }
 
-    pub fn prepare_push(&self, link_id: &CatalogLinkId) -> Result<CatalogResourcePushPlan, String> {
+    pub fn prepare_push(
+        &self,
+        scope_id: &CatalogScopeId,
+        storage_id: &StorageId,
+    ) -> Result<CatalogScopePushPlan, String> {
         resource_commands::prepare_push_with_repositories(
             &self.state,
             &self.catalog,
             self.runner.as_ref(),
-            link_id,
+            scope_id,
+            storage_id,
             &self.user_home,
             now_secs(),
         )
     }
 
-    pub fn publish_reviewed(
+    pub fn apply_push(
         &self,
-        link_id: &CatalogLinkId,
-        approval: CatalogPublishApproval,
-    ) -> Result<CatalogResourcePushOutcomeDto, String> {
-        resource_commands::publish_with_repositories(
+        approval: CatalogPushApproval,
+    ) -> Result<CatalogScopePushOutcomeDto, String> {
+        resource_commands::apply_push_with_repositories(
             &self.state,
             &self.catalog,
             self.runner.as_ref(),
-            link_id,
             approval.plan_id,
-            approval.include,
+            approval.selected_resource_ids,
             approval.acknowledged_warning_digests,
             &self.user_home,
             now_secs(),
@@ -263,15 +294,17 @@ impl StorageCatalogService {
 
     pub fn prepare_pull(
         &self,
-        link_id: &CatalogLinkId,
-        requested_copy_name: Option<&str>,
-    ) -> Result<CatalogResourcePullPlan, String> {
+        scope_id: &CatalogScopeId,
+        storage_id: &StorageId,
+        requested_copy_names: BTreeMap<CatalogResourceId, String>,
+    ) -> Result<CatalogScopePullPlan, String> {
         resource_commands::prepare_pull_with_repositories(
             &self.state,
             &self.catalog,
             self.runner.as_ref(),
-            link_id,
-            requested_copy_name,
+            scope_id,
+            storage_id,
+            requested_copy_names,
             &self.user_home,
             now_secs(),
         )
@@ -279,16 +312,14 @@ impl StorageCatalogService {
 
     pub fn apply_pull(
         &self,
-        link_id: &CatalogLinkId,
         approval: CatalogPullApproval,
-    ) -> Result<CatalogResourcePullOutcomeDto, String> {
+    ) -> Result<CatalogScopePullOutcomeDto, String> {
         resource_commands::apply_pull_with_repositories(
             &self.state,
             &self.catalog,
             self.runner.as_ref(),
-            link_id,
             approval.plan_id,
-            approval.approved_action_id,
+            approval.choices,
             approval.destructive_acknowledged,
             &self.user_home,
             now_secs(),
@@ -304,19 +335,11 @@ impl StorageCatalogService {
         let engine = resource_commands::engine_for(&storage)?;
         let tag = engine.read_tag(repository_id)?.map(|(tag, _)| tag);
         let inspected = engine.inspect(repository_id)?;
-        let (head, resource) = match inspected {
+        let (head, resources) = match inspected {
             Some((observed, manifest)) => {
-                let tag = tag
-                    .as_ref()
-                    .ok_or("the Library repository has a head but no discovery tag")?;
-                if tag.repository_id != *repository_id
-                    || tag.resource_id != manifest.resource.resource_id()
-                    || tag.resource_kind != manifest.resource.kind_tag()
-                    || tag.provider != manifest.resource.provider()
-                    || tag.stable_identity_sha256 != manifest.resource.identity_sha256()
-                {
+                if tag.is_none() {
                     return Err(
-                        "the Library repository has inconsistent discovery metadata".to_string()
+                        "the Library repository has a head but no discovery tag".to_string()
                     );
                 }
                 (
@@ -324,14 +347,14 @@ impl StorageCatalogService {
                         &observed.head,
                         &super::resource_engine::storage_identity_for_config(&storage),
                     )),
-                    Some(manifest.resource),
+                    manifest.resource_map(),
                 )
             }
             None => {
                 if tag.is_some() {
                     return Err("the Library repository has a tag but no head".to_string());
                 }
-                (None, None)
+                (None, BTreeMap::new())
             }
         };
         Ok(CatalogRepositoryInspectionDto {
@@ -339,7 +362,7 @@ impl StorageCatalogService {
             repository_id: repository_id.clone(),
             tag,
             head,
-            resource,
+            resources,
         })
     }
 }
@@ -386,12 +409,9 @@ mod tests {
             StorageCatalogService::from_home_dirs(&machine_home, &user_home, empty_codex_runner())
                 .expect("construct isolated service");
         let profile = service
-            .save_profile(
-                ProviderKey::Codex,
-                "Codex one".to_string(),
-                codex_home.to_string_lossy().to_string(),
-            )
+            .save_profile(ProviderKey::Codex, codex_home.to_string_lossy().to_string())
             .expect("save profile");
+        assert_eq!(profile.display_name, "myconf1");
         let scope = service
             .create_scope(
                 ProviderKey::Codex,
@@ -410,7 +430,7 @@ mod tests {
         assert_eq!(resources.rows.len(), 1);
         assert_eq!(resources.rows[0].display_name, "mallard-alpha");
         assert!(resources.rows[0].local_present);
-        assert!(!resources.rows[0].linked);
+        assert!(resources.link.is_none());
         assert!(!resources.rows[0].remote_present);
     }
 

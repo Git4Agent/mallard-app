@@ -167,6 +167,7 @@ export function StorageEditor({
   secretStored,
   showNameField = true,
   showProgress = true,
+  agentSlot,
 }: {
   storage: StorageConfig;
   disabled: boolean;
@@ -181,6 +182,10 @@ export function StorageEditor({
   /** False when the page hoists the R2 tally into its own commit bar, so the
    *  card does not end in a band holding a lone readout. */
   showProgress?: boolean;
+  /** The agent-setup action for the R2 guide row's tail — the workspace owns
+   *  the copy verb and its listening/connected lifecycle, the editor only
+   *  seats it. */
+  agentSlot?: ReactNode;
 }) {
   const set = (patch: Partial<StorageConfig>) => onChange({ ...storage, ...patch });
   const derivedS3ApiUrl = r2S3ApiUrl(
@@ -293,17 +298,24 @@ export function StorageEditor({
         </label>
       ) : (
         <>
-          {/* One line instead of a heading, a sentence, a numbered list, and a
-              warning: every doc the list linked is still one click away behind
-              the field it explains, and the only unrecoverable fact — the
-              secret is shown once — survives as the line's tail. */}
+          {/* One line instead of a heading, a sentence, and a numbered list:
+              every doc the list linked is still one click away behind the
+              field it explains. */}
           <div className="sync-r2-guide" role="note">
             <Icon name="info" size={13} />
             <span className="sync-r2-guide-copy">
-              Needs one bucket and an <strong>Object Read &amp; Write</strong> token scoped to that bucket.
+              Needs one bucket and an{" "}
+              <span className="sync-r2-token-help">
+                <strong>Object Read &amp; Write</strong> token
+                <HelpButton
+                  url={R2_CREDENTIALS_DOC}
+                  label="How to create an Object Read & Write R2 token"
+                />
+              </span>{" "}
+              scoped to that bucket.
             </span>
             <button type="button" className="btn-link" onClick={() => void openHelp(R2_SETUP_DOC)}>Setup guide</button>
-            <span className="sync-r2-guide-warning">Secret shown once</span>
+            {agentSlot}
           </div>
 
           <div className="sync-storage-fields sync-r2-fields">

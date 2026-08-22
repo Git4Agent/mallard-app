@@ -28,20 +28,17 @@ pub use project_sync::service::{
 pub use storage_catalog::adapters::{CmdOutput, PluginProcessRunner};
 pub use storage_catalog::domain::{
     CatalogActionOutcome, CatalogLinkId, CatalogLinkState, CatalogPlanActionId, CatalogPlanId,
-    CatalogPullActionKind, CatalogPullDisposition, CatalogRegistrationId, CatalogResource,
-    CatalogResourceId, CatalogResourceKindTag, CatalogResourcePullPlan, CatalogResourcePushPlan,
-    CatalogResourceRelation, CatalogResourceRepositoryId, CatalogScopeId, CodexPetFormat,
-    LibraryHeadCoordinate, LibraryResourceTag, LocalCatalogProfile, LocalCatalogProfileId,
-    ProviderKey, CATALOG_SCHEMA,
+    CatalogPullActionKind, CatalogPullDisposition, CatalogResource, CatalogResourceId,
+    CatalogResourceKindTag, CatalogResourceRelation, CatalogResourceRepositoryId, CatalogScopeId,
+    CatalogScopePullPlan, CatalogScopePushPlan, CodexPetFormat, LibraryHeadCoordinate,
+    LibraryResourceTag, LocalCatalogProfile, LocalCatalogProfileId, ProviderKey, CATALOG_SCHEMA,
 };
 pub use storage_catalog::resource_commands::{
-    CatalogResourceLinkInspectionDto, CatalogResourcePullOutcomeDto, CatalogResourcePushOutcomeDto,
-    CatalogScopeDto, CatalogScopeLinkOutcomeDto, CatalogScopeResourcesDto, CatalogScopeRowDto,
-    LinkCatalogScopeResourceRequest,
+    CatalogScopeDto, CatalogScopeLinkOutcomeDto, CatalogScopePullOutcomeDto,
+    CatalogScopePushOutcomeDto, CatalogScopeResourcesDto, CatalogScopeRowDto,
 };
 pub use storage_catalog::service::{
-    CatalogPublishApproval, CatalogPullApproval, CatalogRepositoryInspectionDto,
-    StorageCatalogService,
+    CatalogPullApproval, CatalogPushApproval, CatalogRepositoryInspectionDto, StorageCatalogService,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -127,23 +124,20 @@ pub fn run() {
             storage_catalog::resource_commands::list_catalog_capabilities,
             storage_catalog::resource_commands::list_catalog_resource_profiles,
             storage_catalog::resource_commands::save_catalog_resource_profile,
+            storage_catalog::resource_commands::rename_catalog_resource_profile,
             storage_catalog::resource_commands::list_catalog_scopes,
             storage_catalog::resource_commands::create_catalog_scope,
             storage_catalog::resource_commands::delete_catalog_scope,
             storage_catalog::resource_commands::list_catalog_scope_resources,
             storage_catalog::resource_commands::get_catalog_pet_preview,
-            storage_catalog::resource_commands::link_catalog_scope_resource,
-            storage_catalog::resource_commands::get_catalog_resource,
-            storage_catalog::resource_commands::unlink_catalog_resource,
-            storage_catalog::resource_commands::remove_catalog_resource,
-            storage_catalog::resource_commands::inspect_catalog_resource_links,
-            storage_catalog::resource_commands::prepare_catalog_resource_push,
-            storage_catalog::resource_commands::publish_catalog_resource,
-            storage_catalog::resource_commands::prepare_catalog_resource_pull,
-            storage_catalog::resource_commands::apply_catalog_resource_pull,
+            storage_catalog::resource_commands::link_catalog_scope_storage,
+            storage_catalog::resource_commands::unlink_catalog_scope_storage,
+            storage_catalog::resource_commands::prepare_catalog_scope_push,
+            storage_catalog::resource_commands::apply_catalog_scope_push,
+            storage_catalog::resource_commands::prepare_catalog_scope_pull,
+            storage_catalog::resource_commands::apply_catalog_scope_pull,
             storage_catalog::resource_commands::prepare_catalog_resource_fork,
             storage_catalog::resource_commands::apply_catalog_resource_fork,
-            storage_catalog::resource_commands::get_catalog_resource_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

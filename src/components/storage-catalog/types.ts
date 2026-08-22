@@ -60,62 +60,10 @@ export interface CatalogScopeView {
   profile: LocalCatalogProfile;
 }
 
-export type LocalCatalogTarget =
-  | { kind: "skill_directory"; scope: string; canonical_root: string; install_directory: string }
-  | { kind: "plugin"; provider: CatalogProviderKey; canonical_home: string; namespace: string; plugin_id: string }
-  | { kind: "pet_directory"; canonical_home: string; pet_id: string };
-
-export interface CatalogResourceRegistration {
-  registration_id: string;
-  provider: CatalogProviderKey;
-  profile_id: string;
-  resource_kind: CatalogResourceKind;
-  resource_id: string;
-  local_target: LocalCatalogTarget;
-  display_name: string;
-  revision: number;
-  created_at: number;
-  updated_at: number;
-}
-
-export interface LibraryHeadCoordinate {
-  repository_id: string;
-  revision: number;
-  commit_id: string;
-  manifest_sha256: string;
-  manifest_size: number;
-  storage_identity_sha256: string;
-}
-
-export interface CatalogResourceLink {
-  link_id: string;
-  registration_id: string;
-  storage_id: string;
-  repository_id: string;
-  accepted_head?: LibraryHeadCoordinate | null;
-  accepted_content_sha256?: string | null;
-  revision: number;
-  created_at: number;
-  updated_at: number;
-}
-
-export interface CatalogResourceLinkView {
-  link: CatalogResourceLink;
-  storage_name: string;
-}
-
-export interface CatalogResourceView {
-  registration: CatalogResourceRegistration;
-  scope_label?: string | null;
-  pet_format?: CatalogPetFormat | null;
-  links: CatalogResourceLinkView[];
-}
-
 /** One row on a scope page: a resource of this kind compared against the one
- * storage the page is scoped to. Registered, discovered-but-unlinked and
- * stored-but-not-installed resources share this shape, because the page draws
- * them the same way — which one a row is reads off `linked`, `local_present`
- * and `remote_present`. */
+ * storage the page is scoped to. Local-only, stored-only and both-sides
+ * resources share this shape, because the page draws them the same way —
+ * which one a row is reads off `local_present` and `remote_present`. */
 export interface CatalogScopeRow {
   row_id: string;
   display_name: string;
@@ -123,7 +71,6 @@ export interface CatalogScopeRow {
   scope_label?: string | null;
   /** Null only when no storage is chosen: nothing to compare against. */
   state?: CatalogLinkState | null;
-  linked: boolean;
   local_present: boolean;
   local_path?: string | null;
   local_modified_at?: number | null;
@@ -132,7 +79,7 @@ export interface CatalogScopeRow {
   local_files?: number | null;
   local_bytes?: number | null;
   remote_present: boolean;
-  remote_revision?: number | null;
+  /** When the stored copy last changed, from its manifest entry. */
   remote_updated_at?: number | null;
   /** The digest the comparison used: the local capture's when one exists,
    * otherwise the stored version's. */
@@ -143,14 +90,15 @@ export interface CatalogScopeRow {
   preview_png?: string | null;
   /** The pet descriptor's own sentence about itself. Pet rows only. */
   pet_description?: string | null;
-  registration_id?: string | null;
-  registration_revision?: number | null;
-  link_id?: string | null;
-  link_revision?: number | null;
-  repository_id?: string | null;
-  other_storage_names: string[];
   warnings: CatalogResourceWarning[];
   blocker?: string | null;
+}
+
+/** The page-level scope link, when this scope is linked to the page's
+ * storage. One link per (scope, storage) — resources never link alone. */
+export interface CatalogScopePageLink {
+  link_id: string;
+  revision: number;
 }
 
 export interface CatalogScopeResources {
@@ -158,38 +106,19 @@ export interface CatalogScopeResources {
   profile: LocalCatalogProfile;
   storage_id?: string | null;
   storage_name?: string | null;
+  link?: CatalogScopePageLink | null;
+  /** The stored kind repository's current revision, when one exists. */
+  storage_revision?: number | null;
   rows: CatalogScopeRow[];
   warnings: string[];
-}
-
-/** Exactly one of `local_resource_id` and `repository_id` identifies the
- * resource being linked. */
-export interface LinkCatalogScopeResourceRequest {
-  scope_id: string;
-  storage_id: string;
-  local_resource_id?: string | null;
-  repository_id?: string | null;
+  /** Startup-recovery messages from the operations journal. */
+  recovery: string[];
 }
 
 export interface CatalogScopeLinkOutcome {
-  resource: CatalogResourceView;
+  link_id: string;
+  revision: number;
   completion: "open" | "review_pull";
-  link_id: string;
-}
-
-export interface CatalogLinkInspection {
-  registration_id: string;
-  link_id: string;
-  storage_id: string;
-  repository_id: string;
-  state: CatalogLinkState;
-  local_present: boolean;
-  remote_present: boolean;
-  local_content_sha256?: string | null;
-  remote_content_sha256?: string | null;
-  remote_revision?: number | null;
-  blocker?: string | null;
-  generated_at: number;
 }
 
 export interface CatalogResourceWarning {
@@ -216,20 +145,28 @@ export interface CatalogPushRow {
   detail?: string | null;
 }
 
-export interface CatalogResourcePushPlan {
+/** One row of the scope Push review. The captured resource rides along for
+ * the backend's re-verification; the review reads only `row`. */
+export interface CatalogScopePushRow {
+  row: CatalogPushRow;
+  resource?: unknown;
+}
+
+export interface CatalogScopePushPlan {
   schema_version: 1;
   plan_id: string;
-  registration_id: string;
+  scope_id: string;
   link_id: string;
+  link_revision: number;
   storage_id: string;
   repository_id: string;
-  row: CatalogPushRow;
+  rows: CatalogScopePushRow[];
   warning_digests: string[];
   created_at: number;
   expires_at: number;
 }
 
-export interface CatalogResourcePushOutcome {
+export interface CatalogScopePushOutcome {
   plan_id: string;
   published: boolean;
   revision?: number | null;
@@ -292,15 +229,23 @@ export interface CatalogClaimPin {
   content_sha256: string;
 }
 
-export interface CatalogResourcePullPlan {
+/** One item of the scope Pull review: the presentation item plus its
+ * cross-storage claim pins. The stored resource rides along for apply. */
+export interface CatalogScopePullItem {
+  item: CatalogPullItem;
+  resource?: unknown;
+  conflicting_claims: CatalogClaimPin[];
+}
+
+export interface CatalogScopePullPlan {
   schema_version: 1;
   plan_id: string;
-  registration_id: string;
+  scope_id: string;
   link_id: string;
+  link_revision: number;
   storage_id: string;
   repository_id: string;
-  item: CatalogPullItem;
-  conflicting_claims: CatalogClaimPin[];
+  items: CatalogScopePullItem[];
   created_at: number;
   expires_at: number;
 }
@@ -325,16 +270,18 @@ export interface CatalogActionResult {
   message?: string | null;
 }
 
-export interface CatalogResourcePullOutcome {
+export interface CatalogScopePullOutcome {
   plan_id: string;
+  /** Whether the whole review advanced the accepted head — false when any
+   * row failed, keeping the comparison base honest. */
   remote_accepted: boolean;
-  result: CatalogActionResult;
+  results: CatalogActionResult[];
 }
 
 export interface CatalogResourceForkPlan {
   schema_version: 1;
   plan_id: string;
-  registration_id: string;
+  scope_id: string;
   source_resource_id: string;
   source_display_name: string;
   copy_name: string;
@@ -342,11 +289,4 @@ export interface CatalogResourceForkPlan {
   copy_target_path: string;
   created_at: number;
   expires_at: number;
-}
-
-export interface CatalogResourceStatus {
-  registration_id: string;
-  link_id?: string | null;
-  active_plan_ids: string[];
-  recovery_messages: string[];
 }

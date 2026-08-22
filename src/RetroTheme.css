@@ -410,7 +410,6 @@ body {
 .sync-field-name,
 .sync-storage-repository-details > dt,
 .sync-storage-repo-chip > span,
-.sync-r2-guide-warning,
 .sync-r2-guide > .btn-link,
 .sync-secret-reveal,
 .session-detail-day-divider > span,
@@ -435,7 +434,6 @@ body {
 .sync-field-name,
 .sync-storage-repository-details > dt,
 .sync-storage-repo-chip > span,
-.sync-r2-guide-warning,
 .sync-settings-flag {
   font-size: var(--type-3xs);
   letter-spacing: 1px;
@@ -769,10 +767,16 @@ summary {
 .sidebar-catalog-pane,
 .sync-sidebar-product-mark,
 .sync-titlebar,
+.sync-workspace > .sync-backend-banner,
 .sync-workspace > .sync-main,
 .sync-log-drawer.open {
   border: 1px solid var(--retro-frame-edge);
   border-radius: var(--retro-panel-radius);
+}
+
+/* Sits in the stack on the same gutter the titlebar keeps below itself. */
+.sync-workspace > .sync-backend-banner {
+  margin-bottom: var(--retro-gutter);
 }
 
 .sync-sidebar-head {

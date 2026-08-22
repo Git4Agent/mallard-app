@@ -2,20 +2,16 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   CatalogActionResult,
   CatalogCapability,
-  CatalogLinkInspection,
   CatalogProviderKey,
   CatalogResourceForkPlan,
   CatalogResourceKind,
-  CatalogResourcePullOutcome,
-  CatalogResourcePullPlan,
-  CatalogResourcePushOutcome,
-  CatalogResourcePushPlan,
-  CatalogResourceStatus,
-  CatalogResourceView,
   CatalogScopeLinkOutcome,
+  CatalogScopePullOutcome,
+  CatalogScopePullPlan,
+  CatalogScopePushOutcome,
+  CatalogScopePushPlan,
   CatalogScopeResources,
   CatalogScopeView,
-  LinkCatalogScopeResourceRequest,
   LocalCatalogProfile,
 } from "./types";
 
@@ -25,11 +21,21 @@ export const storageCatalogApi = {
   listProfiles: () =>
     invoke<LocalCatalogProfile[]>("list_catalog_resource_profiles"),
 
-  saveProfile: (provider: CatalogProviderKey, displayName: string, path: string) =>
+  /** Saving a home derives its name from the folder — setup never asks for
+   * one. Re-saving an existing home returns that profile. */
+  saveProfile: (provider: CatalogProviderKey, path: string) =>
     invoke<LocalCatalogProfile>("save_catalog_resource_profile", {
       provider,
-      displayName,
       path,
+    }),
+
+  /** Renames the profile everywhere it appears — every Catalog row using this
+   * home relabels at once. */
+  renameProfile: (profileId: string, displayName: string, expectedRevision: number) =>
+    invoke<LocalCatalogProfile>("rename_catalog_resource_profile", {
+      profileId,
+      displayName,
+      expectedRevision,
     }),
 
   listScopes: () => invoke<CatalogScopeView[]>("list_catalog_scopes"),
@@ -59,80 +65,68 @@ export const storageCatalogApi = {
   /** The preview for a stored-only pet row, fetched from the storage on
    * demand and cached by the atlas digest. Called lazily per card — never in
    * the list path — and a failure just leaves the glyph tile. */
-  getPetPreview: (scopeId: string, storageId: string, repositoryId: string) =>
-    invoke<string>("get_catalog_pet_preview", { scopeId, storageId, repositoryId }),
+  getPetPreview: (scopeId: string, storageId: string, resourceId: string) =>
+    invoke<string>("get_catalog_pet_preview", { scopeId, storageId, resourceId }),
 
-  linkScopeResource: (request: LinkCatalogScopeResourceRequest) =>
-    invoke<CatalogScopeLinkOutcome>("link_catalog_scope_resource", { request }),
-
-  /** The per-resource detail behind a row: its storage links and identity. */
-  getResource: (registrationId: string) =>
-    invoke<CatalogResourceView>("get_catalog_resource", { registrationId }),
-
-  unlink: (registrationId: string, linkId: string, expectedRevision: number) =>
-    invoke<boolean>("unlink_catalog_resource", {
-      registrationId,
-      linkId,
-      expectedRevision,
+  /** The scope links to the storage once; every resource of this kind syncs
+   * through that one pairing. Linking is configuration only. */
+  linkScopeStorage: (scopeId: string, storageId: string) =>
+    invoke<CatalogScopeLinkOutcome>("link_catalog_scope_storage", {
+      scopeId,
+      storageId,
     }),
 
-  remove: (registrationId: string, expectedRevision: number) =>
-    invoke<boolean>("remove_catalog_resource", { registrationId, expectedRevision }),
+  unlinkScopeStorage: (linkId: string, expectedRevision: number) =>
+    invoke<boolean>("unlink_catalog_scope_storage", { linkId, expectedRevision }),
 
-  inspectLinks: (registrationId: string) =>
-    invoke<CatalogLinkInspection[]>("inspect_catalog_resource_links", {
-      registrationId,
+  preparePush: (scopeId: string, storageId: string) =>
+    invoke<CatalogScopePushPlan>("prepare_catalog_scope_push", {
+      scopeId,
+      storageId,
     }),
 
-  preparePush: (linkId: string) =>
-    invoke<CatalogResourcePushPlan>("prepare_catalog_resource_push", { linkId }),
-
-  publish: (
-    linkId: string,
+  applyPush: (
     planId: string,
-    include: boolean,
+    selectedResourceIds: string[],
     acknowledgedWarningDigests: string[],
-  ) => invoke<CatalogResourcePushOutcome>("publish_catalog_resource", {
-    linkId,
+  ) => invoke<CatalogScopePushOutcome>("apply_catalog_scope_push", {
     planId,
-    include,
+    selectedResourceIds,
     acknowledgedWarningDigests,
   }),
 
-  preparePull: (linkId: string, requestedCopyName?: string | null) =>
-    invoke<CatalogResourcePullPlan>("prepare_catalog_resource_pull", {
-      linkId,
-      requestedCopyName: requestedCopyName ?? null,
+  preparePull: (
+    scopeId: string,
+    storageId: string,
+    requestedCopyNames?: Record<string, string> | null,
+  ) =>
+    invoke<CatalogScopePullPlan>("prepare_catalog_scope_pull", {
+      scopeId,
+      storageId,
+      requestedCopyNames: requestedCopyNames ?? null,
     }),
 
   applyPull: (
-    linkId: string,
     planId: string,
-    approvedActionId: string | null,
-    destructiveAcknowledged: boolean,
-  ) => invoke<CatalogResourcePullOutcome>("apply_catalog_resource_pull", {
-    linkId,
+    choices: Record<string, string>,
+    destructiveAcknowledged: string[],
+  ) => invoke<CatalogScopePullOutcome>("apply_catalog_scope_pull", {
     planId,
-    approvedActionId,
+    choices,
     destructiveAcknowledged,
   }),
 
-  prepareFork: (registrationId: string, requestedName: string) =>
+  prepareFork: (scopeId: string, resourceId: string, requestedName: string) =>
     invoke<CatalogResourceForkPlan>("prepare_catalog_resource_fork", {
-      registrationId,
+      scopeId,
+      resourceId,
       requestedName,
     }),
 
-  applyFork: (registrationId: string, planId: string) =>
+  applyFork: (scopeId: string, planId: string) =>
     invoke<CatalogActionResult>("apply_catalog_resource_fork", {
-      registrationId,
+      scopeId,
       planId,
-    }),
-
-  getStatus: (registrationId: string, linkId?: string | null) =>
-    invoke<CatalogResourceStatus>("get_catalog_resource_status", {
-      registrationId,
-      linkId: linkId ?? null,
     }),
 };
 

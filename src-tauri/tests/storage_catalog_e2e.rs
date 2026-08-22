@@ -72,9 +72,8 @@ fn skills_and_codex_pets_round_trip_update_and_preserve_divergence() {
         privacy_needles: &privacy_needles,
     });
 
-    assert_eq!(report.repository_count, 8);
-    assert_eq!(report.primary_revisions, vec![4, 4, 4, 4]);
-    assert_eq!(report.preserved_copy_revisions, vec![1, 1, 1, 1]);
+    assert_eq!(report.repository_count, 3);
+    assert_eq!(report.kind_repository_revisions, vec![5, 5, 10]);
     assert_eq!(report.native_provider_process_calls, 0);
     assert!(report.injected_inventory_calls > 0);
     assert_eq!(

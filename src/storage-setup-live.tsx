@@ -37,6 +37,13 @@ function Harness() {
   const [dark, setDark] = useState(false);
   const [draft, setDraft] = useState<StorageConfig>(() => newStorage("local", 2));
   const ready = storageConfigReady(draft, false);
+  // The workspace's agent lifecycle, answered locally: copy flips the row to
+  // listening, and a fake CLI finish lands the adoption note seconds later.
+  const [agentPhase, setAgentPhase] = useState<"offer" | "listening" | "connected">("offer");
+  const copyInstruction = () => {
+    setAgentPhase("listening");
+    window.setTimeout(() => setAgentPhase("connected"), 2800);
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
@@ -105,6 +112,19 @@ function Harness() {
                     secretStored={false}
                     showNameField
                     showProgress={false}
+                    agentSlot={agentPhase === "listening" ? (
+                      <span className="sync-r2-guide-wait" role="status">
+                        <span className="status-loader" /> Paste into your agent — listening…
+                      </span>
+                    ) : agentPhase === "connected" ? (
+                      <span className="sync-r2-guide-connected" role="status">
+                        <Icon name="check-circle" size={13} /> Connected R2 storage 2. Settings filled in automatically.
+                      </span>
+                    ) : (
+                      <button type="button" className="btn sync-r2-guide-btn sync-r2-agent-cta" onClick={copyInstruction}>
+                        <Icon name="terminal" size={13} /> Copy agent instruction
+                      </button>
+                    )}
                   />
                 </div>
 

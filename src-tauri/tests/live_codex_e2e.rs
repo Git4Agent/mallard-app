@@ -6251,9 +6251,8 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         storage: &storage,
         privacy_needles: &catalog_privacy_needles,
     });
-    assert_eq!(catalog_report.repository_count, 8);
-    assert_eq!(catalog_report.primary_revisions, vec![4, 4, 4, 4]);
-    assert_eq!(catalog_report.preserved_copy_revisions, vec![1, 1, 1, 1]);
+    assert_eq!(catalog_report.repository_count, 3);
+    assert_eq!(catalog_report.kind_repository_revisions, vec![5, 5, 10]);
     assert_eq!(catalog_report.native_provider_process_calls, 0);
     assert!(catalog_report.injected_inventory_calls > 0);
     let project_after_library = redacted(

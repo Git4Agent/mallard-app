@@ -857,6 +857,8 @@ export interface ConversationReviewRow {
   blocker?: ConversationBlocker | null;
   blocked_reason?: string | null;
   action_id?: string | null;
+  /** The stored thread's name; absent when the stored thread has none. */
+  display_title?: string | null;
 }
 
 export interface RestorePlan {

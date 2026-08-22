@@ -73,7 +73,6 @@ export default function AddCatalogScopeWorkspace({
   const [capabilities, setCapabilities] = useState<CatalogCapability[]>([]);
   const [profileEditor, setProfileEditor] = useState<{
     provider: CatalogProviderKey;
-    displayName: string;
     path: string;
   } | null>(null);
   const [homePath, setHomePath] = useState<string | null>(null);
@@ -164,40 +163,40 @@ export default function AddCatalogScopeWorkspace({
       const picked = await open({ directory: true, multiple: false });
       if (!workflowIsActive() || typeof picked !== "string" || !picked) return;
       setProfileId(null);
-      setProfileEditor({
-        provider,
-        displayName: profileEditor?.provider === provider ? profileEditor.displayName : "",
-        path: picked,
-      });
+      setProfileEditor({ provider, path: picked });
     } catch (reason) {
       if (workflowIsActive()) setError(errorMessage(reason));
     }
   };
 
-  const saveProfile = async () => {
-    if (!profileEditor) return;
-    setError(null);
-    try {
-      const saved = await api.saveProfile(
-        profileEditor.provider,
-        profileEditor.displayName,
-        expandHomePath(profileEditor.path, homePath),
-      );
-      if (!workflowIsActive()) return;
-      setProfiles((current) => [...current, saved]);
-      setProfileEditor(null);
-      setProfileId(saved.profile_id);
-    } catch (reason) {
-      if (workflowIsActive()) setError(errorMessage(reason));
-    }
-  };
+  const working = busy || submitting;
+  const expandedProfilePath = expandHomePath(profileEditor?.path ?? "", homePath);
+  const customPathReady = profileEditor !== null && isAbsoluteProfilePath(expandedProfilePath);
 
+  /** A pending path is saved as part of Add itself — its name derives from
+   * the folder, and renaming afterwards lives on the row's page. If scope
+   * creation then fails, the freshly saved profile stays selected so a retry
+   * is just pressing Add again. */
   const submit = async () => {
-    if (!kind || !provider || !profileId) return;
+    if (!kind || !provider) return;
     setSubmitting(true);
     setError(null);
     try {
-      const created = await api.createScope(provider, profileId, kind);
+      let chosenProfileId = profileId;
+      if (chosenProfileId === null) {
+        if (!customPathReady) return;
+        const saved = await api.saveProfile(provider, expandedProfilePath);
+        if (!workflowIsActive()) return;
+        setProfiles((current) => (
+          current.some((profile) => profile.profile_id === saved.profile_id)
+            ? current
+            : [...current, saved]
+        ));
+        setProfileEditor(null);
+        setProfileId(saved.profile_id);
+        chosenProfileId = saved.profile_id;
+      }
+      const created = await api.createScope(provider, chosenProfileId, kind);
       if (!workflowIsActive()) return;
       onCreated(created, workflowEpoch);
     } catch (reason) {
@@ -208,14 +207,10 @@ export default function AddCatalogScopeWorkspace({
     }
   };
 
-  const working = busy || submitting;
-  const expandedProfilePath = expandHomePath(profileEditor?.path ?? "", homePath);
-  const customPathReady = profileEditor !== null && isAbsoluteProfilePath(expandedProfilePath);
-  const canSaveProfile = profileEditor !== null
-    && profileEditor.displayName.trim().length > 0
-    && customPathReady
+  const canAdd = kind !== null
+    && provider !== null
+    && (profileId !== null || customPathReady)
     && !working;
-  const canAdd = kind !== null && provider !== null && profileId !== null && !working;
   const customPathHint = profileEditor
     ? !expandedProfilePath
       ? "Type or paste a path, or Browse. ~ means your home folder."
@@ -282,7 +277,8 @@ export default function AddCatalogScopeWorkspace({
             <section className="sync-setup-section">
               <div className="sync-card-heading">
                 <div><strong>Agent profile</strong></div>
-                {attentionBadge(kind !== null && (provider === null || profileId === null))}
+                {attentionBadge(kind !== null
+                  && (provider === null || (profileId === null && !customPathReady)))}
               </div>
               <div className="sync-profile-select-row">
                 <span className="sync-select-shell">
@@ -313,7 +309,7 @@ export default function AddCatalogScopeWorkspace({
                         const next = event.target.value;
                         if (next === "__pending") {
                           setProfileId(null);
-                          setProfileEditor({ provider, displayName: "", path: "" });
+                          setProfileEditor({ provider, path: "" });
                           return;
                         }
                         setProfileEditor(null);
@@ -361,40 +357,6 @@ export default function AddCatalogScopeWorkspace({
                       {customPathReady && <code>{expandedProfilePath}</code>}
                     </p>
                   )}
-                </div>
-              )}
-              {profileEditor && (
-                <div className="catalog-profile-save-row">
-                  <label>
-                    <span>Profile name</span>
-                    <input
-                      value={profileEditor.displayName}
-                      disabled={working}
-                      placeholder={`${providerLabel(profileEditor.provider)} profile name`}
-                      onChange={(event) => setProfileEditor({
-                        ...profileEditor,
-                        displayName: event.target.value,
-                      })}
-                    />
-                  </label>
-                  <div>
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      disabled={!canSaveProfile}
-                      onClick={() => void saveProfile()}
-                    >
-                      Save home
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      disabled={working}
-                      onClick={() => setProfileEditor(null)}
-                    >
-                      Cancel
-                    </button>
-                  </div>
                 </div>
               )}
               {kind !== null && provider === null && (

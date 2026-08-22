@@ -102,6 +102,8 @@ interface Props {
   overflow?: PathBarMenuGroup[];
   overflowLabel?: string;
   overflowDisabled?: boolean;
+  /** Opens an existing menu in response to an action outside the path bar. */
+  openMenuRequest?: { menuId: string; requestId: number };
   /** Pull and Push: rendered by the caller, which owns their state. */
   actions?: ReactNode;
   ariaLabel?: string;
@@ -257,6 +259,7 @@ export default function SyncPathBar({
   overflow,
   overflowLabel = "More actions",
   overflowDisabled,
+  openMenuRequest,
   actions,
   ariaLabel = "Workspace path",
 }: Props) {
@@ -310,6 +313,16 @@ export default function SyncPathBar({
       else options[options.length - 1]?.focus();
     });
   };
+
+  useEffect(() => {
+    if (!openMenuRequest) return;
+    const exists = crumbs.some((crumb) => (
+      crumb.id === openMenuRequest.menuId && hasItems(crumb.menu)
+    ));
+    if (!exists) return;
+    setOpenMenu(openMenuRequest.menuId);
+    focusMenuOption(openMenuRequest.menuId, "first");
+  }, [openMenuRequest?.menuId, openMenuRequest?.requestId]);
 
   const registerMenuRef = (key: string) => (node: HTMLDivElement | null) => {
     if (node) menuRefs.current.set(key, node);

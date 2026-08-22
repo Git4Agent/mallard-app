@@ -1,6 +1,10 @@
 //! Reusable two-replica Library exercise shared by the deterministic and live
 //! integration tests. All provider discovery is injected; storage and local
 //! materialization use the production implementations.
+//!
+//! The scope is the sync object: each replica links its scope to the shared
+//! storage once, every push and pull is one review over rows, and all
+//! resources of one (provider, kind) pair converge into one kind repository.
 
 use mallard_domain::{StorageConfig, StorageId};
 use mallard_infrastructure::persistence::LocalStateRepository;
@@ -12,12 +16,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tauri_app_lib::{
-    CatalogActionOutcome, CatalogLinkId, CatalogLinkState, CatalogPublishApproval,
-    CatalogPullActionKind, CatalogPullApproval, CatalogPullDisposition, CatalogRegistrationId,
-    CatalogResource, CatalogResourceId, CatalogResourceKindTag, CatalogResourceRelation,
-    CatalogResourceRepositoryId, CatalogScopeId, CmdOutput, CodexPetFormat,
-    LinkCatalogScopeResourceRequest, PluginProcessRunner, ProviderKey, StorageCatalogService,
-    CATALOG_SCHEMA,
+    CatalogActionOutcome, CatalogLinkState, CatalogPullActionKind, CatalogPullApproval,
+    CatalogPullDisposition, CatalogPushApproval, CatalogResourceId, CatalogResourceKindTag,
+    CatalogResourceRelation, CatalogResourceRepositoryId, CatalogScopeId, CatalogScopePullPlan,
+    CatalogScopePushPlan, CmdOutput, CodexPetFormat, PluginProcessRunner, ProviderKey,
+    StorageCatalogService, CATALOG_SCHEMA,
 };
 use walkdir::WalkDir;
 
@@ -43,9 +46,10 @@ pub struct CatalogFlowInputs<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogFlowReport {
+    /// One repository per (provider, kind): skills, pets v1, pets v2.
     pub repository_count: usize,
-    pub primary_revisions: Vec<u64>,
-    pub preserved_copy_revisions: Vec<u64>,
+    /// Final head revisions of the kind repositories, sorted ascending.
+    pub kind_repository_revisions: Vec<u64>,
     pub native_provider_process_calls: usize,
     pub injected_inventory_calls: usize,
 }
@@ -61,22 +65,6 @@ struct Replica {
     service: StorageCatalogService,
     codex_home: PathBuf,
     scopes: ScopeSet,
-}
-
-#[derive(Clone)]
-struct SyncedResource {
-    a_link: CatalogLinkId,
-    b_link: CatalogLinkId,
-    repository_id: CatalogResourceRepositoryId,
-    resource_id: CatalogResourceId,
-}
-
-#[derive(Clone)]
-struct LinkedResource {
-    link_id: CatalogLinkId,
-    registration_id: CatalogRegistrationId,
-    repository_id: CatalogResourceRepositoryId,
-    resource_id: CatalogResourceId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,7 +167,6 @@ fn create_replica(
     codex_home: &Path,
     storage: &StorageConfig,
     calls: Arc<AtomicUsize>,
-    label: &str,
 ) -> Replica {
     for directory in [machine_home, user_home, codex_home] {
         fs::create_dir_all(directory).expect("create isolated Library home");
@@ -198,7 +185,6 @@ fn create_replica(
     let profile = service
         .save_profile(
             ProviderKey::Codex,
-            format!("Codex {label}"),
             canonical_codex_home.to_string_lossy().to_string(),
         )
         .expect("save isolated Codex profile");
@@ -328,6 +314,7 @@ fn pet_manifest(
     bytes
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_pet(
     replica: &Replica,
     format: CodexPetFormat,
@@ -554,145 +541,72 @@ pub fn storage_snapshot(root: &Path) -> BTreeMap<String, (u64, [u8; 32])> {
     result
 }
 
-fn link_local_resource(
+fn link_scope(
     replica: &Replica,
     scope_id: &CatalogScopeId,
     storage_id: &StorageId,
-    local_directory: &Path,
-) -> LinkedResource {
-    let page = replica
-        .service
-        .list_scope_resources(scope_id, Some(storage_id))
-        .expect("list local Library resource");
-    let local_directory = fs::canonicalize(local_directory).expect("canonicalize local resource");
-    let row = page
-        .rows
-        .iter()
-        .find(|row| {
-            row.local_present
-                && !row.linked
-                && row
-                    .local_path
-                    .as_ref()
-                    .and_then(|path| fs::canonicalize(path).ok())
-                    .as_ref()
-                    == Some(&local_directory)
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "local resource '{}' is absent from its Library scope",
-                local_directory.display()
-            )
-        });
-    let local_resource_id = row
-        .resource_id
-        .clone()
-        .expect("local Library row has a resource id");
+    expected_completion: &str,
+) {
     let outcome = replica
         .service
-        .link_scope_resource(LinkCatalogScopeResourceRequest {
-            scope_id: scope_id.clone(),
-            storage_id: storage_id.clone(),
-            local_resource_id: Some(local_resource_id.clone()),
-            repository_id: None,
-        })
-        .expect("link local Library resource");
-    assert_eq!(outcome.completion, "open");
-    let registration = outcome.resource.registration;
-    assert_eq!(registration.resource_id, local_resource_id);
-    let link_id = outcome.link_id;
-    let repository_id = outcome
-        .resource
-        .links
-        .iter()
-        .find(|link| link.link.link_id == link_id)
-        .expect("link outcome contains created link")
-        .link
-        .repository_id
-        .clone();
-    LinkedResource {
-        link_id,
-        registration_id: registration.registration_id,
-        repository_id,
-        resource_id: registration.resource_id,
-    }
+        .link_scope_storage(scope_id, storage_id)
+        .expect("link Library scope to storage");
+    assert_eq!(outcome.completion, expected_completion);
 }
 
-fn adopt_remote_resource(
+fn assert_row_state(
     replica: &Replica,
     scope_id: &CatalogScopeId,
     storage_id: &StorageId,
-    repository_id: &CatalogResourceRepositoryId,
-) -> LinkedResource {
+    name: &str,
+    expected: CatalogLinkState,
+) {
     let page = replica
         .service
         .list_scope_resources(scope_id, Some(storage_id))
-        .expect("list storage-only Library resource");
+        .expect("list Library scope page");
     let row = page
         .rows
         .iter()
-        .find(|row| {
-            row.repository_id.as_ref() == Some(repository_id) && row.remote_present && !row.linked
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "remote repository '{}' is absent from its Library scope",
-                repository_id
-            )
-        });
-    assert!(!row.local_present);
-    let outcome = replica
-        .service
-        .link_scope_resource(LinkCatalogScopeResourceRequest {
-            scope_id: scope_id.clone(),
-            storage_id: storage_id.clone(),
-            local_resource_id: None,
-            repository_id: Some(repository_id.clone()),
-        })
-        .expect("adopt storage-only Library resource");
-    let registration = outcome.resource.registration;
-    LinkedResource {
-        link_id: outcome.link_id,
-        registration_id: registration.registration_id,
-        repository_id: repository_id.clone(),
-        resource_id: registration.resource_id,
-    }
-}
-
-fn assert_link_state(replica: &Replica, linked: &LinkedResource, expected: CatalogLinkState) {
-    let inspection = replica
-        .service
-        .inspect_links(&linked.registration_id)
-        .expect("inspect Library link")
-        .into_iter()
-        .find(|inspection| inspection.link_id == linked.link_id)
-        .expect("created link is inspectable");
-    assert_eq!(inspection.state, expected);
-    assert_eq!(inspection.repository_id, linked.repository_id);
+        .find(|row| row.display_name == name)
+        .unwrap_or_else(|| panic!("row '{name}' is absent from its Library scope page"));
+    assert_eq!(row.state, Some(expected), "unexpected state for '{name}'");
 }
 
 fn push_resource(
     replica: &Replica,
-    linked: &LinkedResource,
+    scope_id: &CatalogScopeId,
+    storage_id: &StorageId,
+    name: &str,
     expected_relation: CatalogResourceRelation,
     expected_revision: u64,
 ) -> CatalogResourceId {
     let plan = replica
         .service
-        .prepare_push(&linked.link_id)
+        .prepare_push(scope_id, storage_id)
         .expect("prepare reviewed Library Push");
     assert_eq!(plan.schema_version, CATALOG_SCHEMA);
-    assert_eq!(plan.row.relation, expected_relation);
-    assert!(plan.row.selectable);
-    assert!(plan.row.selected_by_default);
-    assert!(!plan.row.held_for_pull);
-    assert_eq!(plan.repository_id, linked.repository_id);
-    let resource_id = plan.row.resource_id.clone();
-    let mut approval = CatalogPublishApproval::recommended(&plan);
-    assert!(approval.include);
-    assert!(approval.acknowledged_warning_digests.is_empty());
-    if matches!(plan.resource, CatalogResource::AgentSkill(_)) {
-        let executable = plan
+    let row = plan
+        .rows
+        .iter()
+        .find(|row| row.row.display_name == name)
+        .unwrap_or_else(|| panic!("push review lacks a row for '{name}'"));
+    assert_eq!(row.row.relation, expected_relation);
+    assert!(row.row.selectable);
+    assert!(row.row.selected_by_default);
+    assert!(!row.row.held_for_pull);
+    let resource_id = row.row.resource_id.clone();
+    let mut approval = CatalogPushApproval {
+        plan_id: plan.plan_id.clone(),
+        selected_resource_ids: vec![resource_id.clone()],
+        acknowledged_warning_digests: Vec::new(),
+    };
+    if row
+        .resource
+        .as_ref()
+        .is_some_and(|resource| matches!(resource, tauri_app_lib::CatalogResource::AgentSkill(_)))
+    {
+        let executable = row
             .row
             .warnings
             .iter()
@@ -703,27 +617,30 @@ fn push_resource(
             "executable warning did not identify the reviewed fixture path"
         );
     }
-    if !plan.row.warnings.is_empty() {
+    if !row.row.warnings.is_empty() {
         let error = replica
             .service
-            .publish_reviewed(&linked.link_id, approval.clone())
+            .apply_push(approval.clone())
             .expect_err("unacknowledged resource warning must block publication");
         assert!(
             error.contains("unacknowledged warning"),
             "unexpected warning acknowledgement error: {error}"
         );
-        approval.acknowledged_warning_digests = plan
+        approval.acknowledged_warning_digests = row
             .row
             .warnings
             .iter()
             .map(|warning| warning.digest.clone())
             .collect();
+        // The discarded first attempt consumed nothing; the plan survives a
+        // refused apply only if apply fails before consuming it.
+        let _ = &approval;
     }
     let outcome = replica
         .service
-        .publish_reviewed(&linked.link_id, approval)
-        .expect("publish reviewed Library resource");
-    assert!(outcome.published);
+        .apply_push(approval)
+        .expect("publish reviewed Library resources");
+    assert!(outcome.published, "{}", outcome.message);
     assert_eq!(outcome.revision, Some(expected_revision));
     resource_id
 }
@@ -752,32 +669,67 @@ fn assert_pull_kind(kind: &CatalogPullActionKind, expected: PullMutation) {
     );
 }
 
+fn prepare_pull(
+    replica: &Replica,
+    scope_id: &CatalogScopeId,
+    storage_id: &StorageId,
+    requested_copy_names: BTreeMap<CatalogResourceId, String>,
+) -> CatalogScopePullPlan {
+    replica
+        .service
+        .prepare_pull(scope_id, storage_id, requested_copy_names)
+        .expect("prepare reviewed Library Pull")
+}
+
+#[allow(clippy::too_many_arguments)]
 fn pull_resource(
     replica: &Replica,
-    linked: &LinkedResource,
+    scope_id: &CatalogScopeId,
+    storage_id: &StorageId,
+    name: &str,
     expected_relation: CatalogResourceRelation,
     expected_mutation: PullMutation,
     copy_name: Option<&str>,
     expected_outcome: CatalogActionOutcome,
 ) {
-    let plan = replica
-        .service
-        .prepare_pull(&linked.link_id, copy_name)
-        .expect("prepare reviewed Library Pull");
+    let mut plan = prepare_pull(replica, scope_id, storage_id, BTreeMap::new());
+    let find_item = |plan: &CatalogScopePullPlan| -> CatalogResourceId {
+        plan.items
+            .iter()
+            .find(|item| item.item.display_name == name)
+            .unwrap_or_else(|| panic!("pull review lacks an item for '{name}'"))
+            .item
+            .resource_id
+            .clone()
+    };
+    let resource_id = find_item(&plan);
+    if let Some(copy_name) = copy_name {
+        // Choosing a copy name re-prepares the review, exactly as the UI does.
+        plan = prepare_pull(
+            replica,
+            scope_id,
+            storage_id,
+            BTreeMap::from([(resource_id.clone(), copy_name.to_string())]),
+        );
+    }
     assert_eq!(plan.schema_version, CATALOG_SCHEMA);
-    assert_eq!(plan.repository_id, linked.repository_id);
-    assert_eq!(plan.item.relation, expected_relation);
-    assert_eq!(plan.item.disposition, CatalogPullDisposition::Executable);
-    let action_id = plan
+    let item = plan
+        .items
+        .iter()
+        .find(|item| item.item.resource_id == resource_id)
+        .expect("re-prepared pull review keeps its item");
+    assert_eq!(item.item.relation, expected_relation);
+    assert_eq!(item.item.disposition, CatalogPullDisposition::Executable);
+    let action_id = item
         .item
         .default_action_id
-        .as_ref()
+        .clone()
         .expect("mutating Pull has a recommended action");
-    let action = plan
+    let action = item
         .item
         .actions
         .iter()
-        .find(|action| &action.action_id == action_id)
+        .find(|action| action.action_id == action_id)
         .expect("recommended Pull action exists");
     assert_pull_kind(&action.kind, expected_mutation);
     if let Some(copy_name) = copy_name {
@@ -787,7 +739,7 @@ fn pull_resource(
             .expect("divergent Pull defaults to preservation");
         assert_eq!(preservation.copy_name, copy_name);
         assert!(!action.requires_destructive_approval);
-        let destructive = plan
+        let destructive = item
             .item
             .actions
             .iter()
@@ -796,14 +748,11 @@ fn pull_resource(
         assert!(destructive.requires_destructive_approval);
         let error = replica
             .service
-            .apply_pull(
-                &linked.link_id,
-                CatalogPullApproval {
-                    plan_id: plan.plan_id.clone(),
-                    approved_action_id: Some(destructive.action_id.clone()),
-                    destructive_acknowledged: false,
-                },
-            )
+            .apply_pull(CatalogPullApproval {
+                plan_id: plan.plan_id.clone(),
+                choices: BTreeMap::from([(resource_id.clone(), destructive.action_id.clone())]),
+                destructive_acknowledged: Vec::new(),
+            })
             .expect_err("destructive overwrite without acknowledgement must fail");
         assert!(
             error.contains("requires explicit acknowledgement"),
@@ -812,21 +761,31 @@ fn pull_resource(
     }
     let outcome = replica
         .service
-        .apply_pull(&linked.link_id, CatalogPullApproval::recommended(&plan))
+        .apply_pull(CatalogPullApproval {
+            plan_id: plan.plan_id.clone(),
+            choices: BTreeMap::from([(resource_id.clone(), action_id)]),
+            destructive_acknowledged: Vec::new(),
+        })
         .expect("apply reviewed Library Pull");
     assert!(outcome.remote_accepted);
-    assert_eq!(outcome.result.outcome, expected_outcome);
+    let result = outcome
+        .results
+        .iter()
+        .find(|result| result.resource_id == resource_id)
+        .expect("pull outcome reports the approved row");
+    assert_eq!(result.outcome, expected_outcome);
 }
 
-fn assert_stale_push_rejected(
-    replica: &Replica,
-    linked: &LinkedResource,
-    stale_plan: tauri_app_lib::CatalogResourcePushPlan,
-) {
-    let approval = CatalogPublishApproval {
+fn assert_stale_push_rejected(replica: &Replica, stale_plan: CatalogScopePushPlan, name: &str) {
+    let row = stale_plan
+        .rows
+        .iter()
+        .find(|row| row.row.display_name == name)
+        .expect("stale push review carries its row");
+    let approval = CatalogPushApproval {
         plan_id: stale_plan.plan_id.clone(),
-        include: stale_plan.row.selectable,
-        acknowledged_warning_digests: stale_plan
+        selected_resource_ids: vec![row.row.resource_id.clone()],
+        acknowledged_warning_digests: row
             .row
             .warnings
             .iter()
@@ -835,7 +794,7 @@ fn assert_stale_push_rejected(
     };
     let error = replica
         .service
-        .publish_reviewed(&linked.link_id, approval)
+        .apply_push(approval)
         .expect_err("stale reviewed Push must fail");
     assert!(
         error.contains("storage head changed after review"),
@@ -843,97 +802,138 @@ fn assert_stale_push_rejected(
     );
 }
 
-fn assert_divergent_push_held(replica: &Replica, linked: &LinkedResource) {
+fn assert_divergent_push_held(
+    replica: &Replica,
+    scope_id: &CatalogScopeId,
+    storage_id: &StorageId,
+    name: &str,
+) {
     let plan = replica
         .service
-        .prepare_push(&linked.link_id)
+        .prepare_push(scope_id, storage_id)
         .expect("prepare divergent Library Push review");
-    assert_eq!(plan.row.relation, CatalogResourceRelation::ChangedBoth);
-    assert!(!plan.row.selectable);
-    assert!(!plan.row.selected_by_default);
-    assert!(plan.row.held_for_pull);
+    let row = plan
+        .rows
+        .iter()
+        .find(|row| row.row.display_name == name)
+        .expect("divergent push review carries its row");
+    assert_eq!(row.row.relation, CatalogResourceRelation::ChangedBoth);
+    assert!(!row.row.selectable);
+    assert!(!row.row.selected_by_default);
+    assert!(row.row.held_for_pull);
     let error = replica
         .service
-        .publish_reviewed(
-            &linked.link_id,
-            CatalogPublishApproval {
-                plan_id: plan.plan_id.clone(),
-                include: true,
-                acknowledged_warning_digests: plan
-                    .row
-                    .warnings
-                    .iter()
-                    .map(|warning| warning.digest.clone())
-                    .collect(),
-            },
-        )
+        .apply_push(CatalogPushApproval {
+            plan_id: plan.plan_id.clone(),
+            selected_resource_ids: vec![row.row.resource_id.clone()],
+            acknowledged_warning_digests: row
+                .row
+                .warnings
+                .iter()
+                .map(|warning| warning.digest.clone())
+                .collect(),
+        })
         .expect_err("divergent Push cannot bypass Pull review");
     assert!(error.contains("Pull") || error.contains("safe to Push"));
 }
 
-fn adopt_and_install(
-    replica: &Replica,
-    scope_id: &CatalogScopeId,
-    storage_id: &StorageId,
-    repository_id: &CatalogResourceRepositoryId,
-    expected_mutation: PullMutation,
-) -> LinkedResource {
-    let linked = adopt_remote_resource(replica, scope_id, storage_id, repository_id);
-    pull_resource(
-        replica,
-        &linked,
-        CatalogResourceRelation::StorageOnly,
-        expected_mutation,
-        None,
-        CatalogActionOutcome::Installed,
-    );
-    linked
+struct KindFlow {
+    repository_id: CatalogResourceRepositoryId,
+    revision: u64,
+    resource_ids: BTreeSet<CatalogResourceId>,
 }
 
-fn run_skill_flow(
-    a: &Replica,
-    b: &Replica,
-    storage_id: &StorageId,
-) -> (Vec<SyncedResource>, Vec<u64>, Vec<u64>) {
+#[allow(clippy::too_many_lines)]
+fn run_skill_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> KindFlow {
+    let mut revision = 0_u64;
     let alpha_v1 = write_skill(a, ALPHA, "alpha-v1-from-a");
     let beta_v1 = write_skill(b, BETA, "beta-v1-from-b");
 
-    let alpha_a = link_local_resource(a, &a.scopes.skills, storage_id, &skill_path(a, ALPHA));
-    let alpha_resource_id = push_resource(a, &alpha_a, CatalogResourceRelation::LocalOnly, 1);
-    assert_eq!(alpha_resource_id, alpha_a.resource_id);
-    let alpha_b = adopt_and_install(
-        b,
-        &b.scopes.skills,
-        storage_id,
-        &alpha_a.repository_id,
-        PullMutation::InstallSkill,
-    );
-    assert_eq!(alpha_b.resource_id, alpha_resource_id);
-    assert_tree(&skill_path(b, ALPHA), &alpha_v1);
-
-    let beta_b = link_local_resource(b, &b.scopes.skills, storage_id, &skill_path(b, BETA));
-    let beta_resource_id = push_resource(b, &beta_b, CatalogResourceRelation::LocalOnly, 1);
-    assert_eq!(beta_resource_id, beta_b.resource_id);
-    let beta_a = adopt_and_install(
+    // A links first: the storage is empty, nothing to review.
+    link_scope(a, &a.scopes.skills, storage_id, "open");
+    revision += 1;
+    let alpha_id = push_resource(
         a,
         &a.scopes.skills,
         storage_id,
-        &beta_b.repository_id,
-        PullMutation::InstallSkill,
+        ALPHA,
+        CatalogResourceRelation::LocalOnly,
+        revision,
     );
-    assert_eq!(beta_a.resource_id, beta_resource_id);
-    assert_tree(&skill_path(a, BETA), &beta_v1);
 
-    let alpha_v2 = write_skill(a, ALPHA, "alpha-v2-from-a");
-    assert_link_state(a, &alpha_a, CatalogLinkState::LocalChanged);
-    assert_eq!(
-        push_resource(a, &alpha_a, CatalogResourceRelation::LocalChanged, 2),
-        alpha_resource_id
+    // B links second: the storage already holds alpha, which B has never
+    // reviewed, so the link routes to Pull.
+    link_scope(b, &b.scopes.skills, storage_id, "review_pull");
+    assert_row_state(
+        b,
+        &b.scopes.skills,
+        storage_id,
+        ALPHA,
+        CatalogLinkState::UnreviewedRemote,
     );
-    assert_link_state(b, &alpha_b, CatalogLinkState::StorageChanged);
     pull_resource(
         b,
-        &alpha_b,
+        &b.scopes.skills,
+        storage_id,
+        ALPHA,
+        CatalogResourceRelation::StorageOnly,
+        PullMutation::InstallSkill,
+        None,
+        CatalogActionOutcome::Installed,
+    );
+    assert_tree(&skill_path(b, ALPHA), &alpha_v1);
+
+    revision += 1;
+    let beta_id = push_resource(
+        b,
+        &b.scopes.skills,
+        storage_id,
+        BETA,
+        CatalogResourceRelation::LocalOnly,
+        revision,
+    );
+    pull_resource(
+        a,
+        &a.scopes.skills,
+        storage_id,
+        BETA,
+        CatalogResourceRelation::StorageOnly,
+        PullMutation::InstallSkill,
+        None,
+        CatalogActionOutcome::Installed,
+    );
+    assert_tree(&skill_path(a, BETA), &beta_v1);
+
+    // Ordinary next revisions travel in both directions.
+    let alpha_v2 = write_skill(a, ALPHA, "alpha-v2-from-a");
+    assert_row_state(
+        a,
+        &a.scopes.skills,
+        storage_id,
+        ALPHA,
+        CatalogLinkState::LocalChanged,
+    );
+    revision += 1;
+    push_resource(
+        a,
+        &a.scopes.skills,
+        storage_id,
+        ALPHA,
+        CatalogResourceRelation::LocalChanged,
+        revision,
+    );
+    assert_row_state(
+        b,
+        &b.scopes.skills,
+        storage_id,
+        ALPHA,
+        CatalogLinkState::StorageChanged,
+    );
+    pull_resource(
+        b,
+        &b.scopes.skills,
+        storage_id,
+        ALPHA,
         CatalogResourceRelation::StorageChanged,
         PullMutation::UpdateSkill,
         None,
@@ -942,15 +942,20 @@ fn run_skill_flow(
     assert_tree(&skill_path(b, ALPHA), &alpha_v2);
 
     let beta_v2 = write_skill(b, BETA, "beta-v2-from-b");
-    assert_link_state(b, &beta_b, CatalogLinkState::LocalChanged);
-    assert_eq!(
-        push_resource(b, &beta_b, CatalogResourceRelation::LocalChanged, 2),
-        beta_resource_id
+    revision += 1;
+    push_resource(
+        b,
+        &b.scopes.skills,
+        storage_id,
+        BETA,
+        CatalogResourceRelation::LocalChanged,
+        revision,
     );
-    assert_link_state(a, &beta_a, CatalogLinkState::StorageChanged);
     pull_resource(
         a,
-        &beta_a,
+        &a.scopes.skills,
+        storage_id,
+        BETA,
         CatalogResourceRelation::StorageChanged,
         PullMutation::UpdateSkill,
         None,
@@ -963,21 +968,24 @@ fn run_skill_flow(
     let alpha_b_loser = write_skill(b, ALPHA, "alpha-v3-b-preserved-local");
     let alpha_b_stale = b
         .service
-        .prepare_push(&alpha_b.link_id)
+        .prepare_push(&b.scopes.skills, storage_id)
         .expect("prepare alpha losing Push");
-    assert_eq!(
-        alpha_b_stale.row.relation,
-        CatalogResourceRelation::LocalChanged
+    revision += 1;
+    push_resource(
+        a,
+        &a.scopes.skills,
+        storage_id,
+        ALPHA,
+        CatalogResourceRelation::LocalChanged,
+        revision,
     );
-    assert_eq!(
-        push_resource(a, &alpha_a, CatalogResourceRelation::LocalChanged, 3),
-        alpha_resource_id
-    );
-    assert_stale_push_rejected(b, &alpha_b, alpha_b_stale);
-    assert_divergent_push_held(b, &alpha_b);
+    assert_stale_push_rejected(b, alpha_b_stale, ALPHA);
+    assert_divergent_push_held(b, &b.scopes.skills, storage_id, ALPHA);
     pull_resource(
         b,
-        &alpha_b,
+        &b.scopes.skills,
+        storage_id,
+        ALPHA,
         CatalogResourceRelation::ChangedBoth,
         PullMutation::PreserveSkill,
         Some(ALPHA_COPY),
@@ -987,20 +995,27 @@ fn run_skill_flow(
     let alpha_copy_snapshot = renamed_skill_snapshot(&alpha_b_loser, ALPHA_COPY);
     assert_tree(&skill_path(b, ALPHA_COPY), &alpha_copy_snapshot);
 
-    let alpha_copy_b =
-        link_local_resource(b, &b.scopes.skills, storage_id, &skill_path(b, ALPHA_COPY));
-    let alpha_copy_resource_id =
-        push_resource(b, &alpha_copy_b, CatalogResourceRelation::LocalOnly, 1);
-    assert_ne!(alpha_copy_resource_id, alpha_resource_id);
-    assert_ne!(alpha_copy_b.repository_id, alpha_b.repository_id);
-    let alpha_copy_a = adopt_and_install(
+    // The preserved copy is an ordinary new resource in the same repository.
+    revision += 1;
+    let alpha_copy_id = push_resource(
+        b,
+        &b.scopes.skills,
+        storage_id,
+        ALPHA_COPY,
+        CatalogResourceRelation::LocalOnly,
+        revision,
+    );
+    assert_ne!(alpha_copy_id, alpha_id);
+    pull_resource(
         a,
         &a.scopes.skills,
         storage_id,
-        &alpha_copy_b.repository_id,
+        ALPHA_COPY,
+        CatalogResourceRelation::StorageOnly,
         PullMutation::InstallSkill,
+        None,
+        CatalogActionOutcome::Installed,
     );
-    assert_eq!(alpha_copy_a.resource_id, alpha_copy_resource_id);
     assert_tree(&skill_path(a, ALPHA_COPY), &alpha_copy_snapshot);
 
     // Beta diverges in the opposite direction. B wins; A is preserved.
@@ -1008,21 +1023,24 @@ fn run_skill_flow(
     let beta_b_winner = write_skill(b, BETA, "beta-v3-b-storage-winner");
     let beta_a_stale = a
         .service
-        .prepare_push(&beta_a.link_id)
+        .prepare_push(&a.scopes.skills, storage_id)
         .expect("prepare beta losing Push");
-    assert_eq!(
-        beta_a_stale.row.relation,
-        CatalogResourceRelation::LocalChanged
+    revision += 1;
+    push_resource(
+        b,
+        &b.scopes.skills,
+        storage_id,
+        BETA,
+        CatalogResourceRelation::LocalChanged,
+        revision,
     );
-    assert_eq!(
-        push_resource(b, &beta_b, CatalogResourceRelation::LocalChanged, 3),
-        beta_resource_id
-    );
-    assert_stale_push_rejected(a, &beta_a, beta_a_stale);
-    assert_divergent_push_held(a, &beta_a);
+    assert_stale_push_rejected(a, beta_a_stale, BETA);
+    assert_divergent_push_held(a, &a.scopes.skills, storage_id, BETA);
     pull_resource(
         a,
-        &beta_a,
+        &a.scopes.skills,
+        storage_id,
+        BETA,
         CatalogResourceRelation::ChangedBoth,
         PullMutation::PreserveSkill,
         Some(BETA_COPY),
@@ -1032,32 +1050,45 @@ fn run_skill_flow(
     let beta_copy_snapshot = renamed_skill_snapshot(&beta_a_loser, BETA_COPY);
     assert_tree(&skill_path(a, BETA_COPY), &beta_copy_snapshot);
 
-    let beta_copy_a =
-        link_local_resource(a, &a.scopes.skills, storage_id, &skill_path(a, BETA_COPY));
-    let beta_copy_resource_id =
-        push_resource(a, &beta_copy_a, CatalogResourceRelation::LocalOnly, 1);
-    assert_ne!(beta_copy_resource_id, beta_resource_id);
-    assert_ne!(beta_copy_a.repository_id, beta_a.repository_id);
-    let beta_copy_b = adopt_and_install(
+    revision += 1;
+    let beta_copy_id = push_resource(
+        a,
+        &a.scopes.skills,
+        storage_id,
+        BETA_COPY,
+        CatalogResourceRelation::LocalOnly,
+        revision,
+    );
+    assert_ne!(beta_copy_id, beta_id);
+    pull_resource(
         b,
         &b.scopes.skills,
         storage_id,
-        &beta_copy_a.repository_id,
+        BETA_COPY,
+        CatalogResourceRelation::StorageOnly,
         PullMutation::InstallSkill,
+        None,
+        CatalogActionOutcome::Installed,
     );
-    assert_eq!(beta_copy_b.resource_id, beta_copy_resource_id);
     assert_tree(&skill_path(b, BETA_COPY), &beta_copy_snapshot);
 
-    // A preserved conflict does not poison the primary link: the former
-    // losing replica can publish a normal next revision in either direction.
+    // A preserved conflict does not poison the resource: the former losing
+    // replica can publish a normal next revision in either direction.
     let alpha_v4 = write_skill(b, ALPHA, "alpha-v4-from-former-loser-b");
-    assert_eq!(
-        push_resource(b, &alpha_b, CatalogResourceRelation::LocalChanged, 4),
-        alpha_resource_id
+    revision += 1;
+    push_resource(
+        b,
+        &b.scopes.skills,
+        storage_id,
+        ALPHA,
+        CatalogResourceRelation::LocalChanged,
+        revision,
     );
     pull_resource(
         a,
-        &alpha_a,
+        &a.scopes.skills,
+        storage_id,
+        ALPHA,
         CatalogResourceRelation::StorageChanged,
         PullMutation::UpdateSkill,
         None,
@@ -1066,13 +1097,20 @@ fn run_skill_flow(
     assert_tree(&skill_path(a, ALPHA), &alpha_v4);
 
     let beta_v4 = write_skill(a, BETA, "beta-v4-from-former-loser-a");
-    assert_eq!(
-        push_resource(a, &beta_a, CatalogResourceRelation::LocalChanged, 4),
-        beta_resource_id
+    revision += 1;
+    push_resource(
+        a,
+        &a.scopes.skills,
+        storage_id,
+        BETA,
+        CatalogResourceRelation::LocalChanged,
+        revision,
     );
     pull_resource(
         b,
-        &beta_b,
+        &b.scopes.skills,
+        storage_id,
+        BETA,
         CatalogResourceRelation::StorageChanged,
         PullMutation::UpdateSkill,
         None,
@@ -1080,43 +1118,20 @@ fn run_skill_flow(
     );
     assert_tree(&skill_path(b, BETA), &beta_v4);
 
-    (
-        vec![
-            SyncedResource {
-                a_link: alpha_a.link_id,
-                b_link: alpha_b.link_id,
-                repository_id: alpha_a.repository_id,
-                resource_id: alpha_resource_id,
-            },
-            SyncedResource {
-                a_link: beta_a.link_id,
-                b_link: beta_b.link_id,
-                repository_id: beta_a.repository_id,
-                resource_id: beta_resource_id,
-            },
-            SyncedResource {
-                a_link: alpha_copy_a.link_id,
-                b_link: alpha_copy_b.link_id,
-                repository_id: alpha_copy_a.repository_id,
-                resource_id: alpha_copy_resource_id,
-            },
-            SyncedResource {
-                a_link: beta_copy_a.link_id,
-                b_link: beta_copy_b.link_id,
-                repository_id: beta_copy_a.repository_id,
-                resource_id: beta_copy_resource_id,
-            },
-        ],
-        vec![4, 4],
-        vec![1, 1],
-    )
+    KindFlow {
+        repository_id: CatalogResourceRepositoryId::for_kind(
+            ProviderKey::Codex,
+            CatalogResourceKindTag::AgentSkill,
+        ),
+        revision,
+        resource_ids: BTreeSet::from([alpha_id, beta_id, alpha_copy_id, beta_copy_id]),
+    }
 }
 
-fn run_pet_flow(
-    a: &Replica,
-    b: &Replica,
-    storage_id: &StorageId,
-) -> (Vec<SyncedResource>, Vec<u64>, Vec<u64>) {
+#[allow(clippy::too_many_lines)]
+fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, KindFlow) {
+    let mut v1_revision = 0_u64;
+    let mut v2_revision = 0_u64;
     let duck_v1 = write_pet(
         a,
         CodexPetFormat::V1,
@@ -1136,31 +1151,51 @@ fn run_pet_flow(
         11,
     );
 
-    let duck_a = link_local_resource(a, &a.scopes.pets_v1, storage_id, &pet_path(a, DUCK));
-    let duck_resource_id = push_resource(a, &duck_a, CatalogResourceRelation::LocalOnly, 1);
-    let duck_b = adopt_and_install(
+    link_scope(a, &a.scopes.pets_v1, storage_id, "open");
+    v1_revision += 1;
+    let duck_id = push_resource(
+        a,
+        &a.scopes.pets_v1,
+        storage_id,
+        "Mallard Duck",
+        CatalogResourceRelation::LocalOnly,
+        v1_revision,
+    );
+    link_scope(b, &b.scopes.pets_v1, storage_id, "review_pull");
+    pull_resource(
         b,
         &b.scopes.pets_v1,
         storage_id,
-        &duck_a.repository_id,
+        "Mallard Duck",
+        CatalogResourceRelation::StorageOnly,
         PullMutation::InstallPet,
+        None,
+        CatalogActionOutcome::Installed,
     );
-    assert_eq!(duck_a.resource_id, duck_resource_id);
-    assert_eq!(duck_b.resource_id, duck_resource_id);
     assert_tree(&pet_path(b, DUCK), &duck_v1);
 
-    let owl_b = link_local_resource(b, &b.scopes.pets_v2, storage_id, &pet_path(b, OWL));
-    let owl_resource_id = push_resource(b, &owl_b, CatalogResourceRelation::LocalOnly, 1);
-    let owl_a = adopt_and_install(
+    link_scope(b, &b.scopes.pets_v2, storage_id, "open");
+    v2_revision += 1;
+    let owl_id = push_resource(
+        b,
+        &b.scopes.pets_v2,
+        storage_id,
+        "Mallard Owl",
+        CatalogResourceRelation::LocalOnly,
+        v2_revision,
+    );
+    link_scope(a, &a.scopes.pets_v2, storage_id, "review_pull");
+    pull_resource(
         a,
         &a.scopes.pets_v2,
         storage_id,
-        &owl_b.repository_id,
+        "Mallard Owl",
+        CatalogResourceRelation::StorageOnly,
         PullMutation::InstallPet,
+        None,
+        CatalogActionOutcome::Installed,
     );
-    assert_eq!(owl_a.resource_id, owl_resource_id);
-    assert_eq!(owl_b.resource_id, owl_resource_id);
-    assert_ne!(duck_resource_id, owl_resource_id);
+    assert_ne!(duck_id, owl_id);
     assert_tree(&pet_path(a, OWL), &owl_v1);
 
     // The receiving replica may publish the next ordinary revision.
@@ -1173,13 +1208,20 @@ fn run_pet_flow(
         "duck.webp",
         2,
     );
-    assert_eq!(
-        push_resource(b, &duck_b, CatalogResourceRelation::LocalChanged, 2),
-        duck_resource_id
+    v1_revision += 1;
+    push_resource(
+        b,
+        &b.scopes.pets_v1,
+        storage_id,
+        "Mallard Duck",
+        CatalogResourceRelation::LocalChanged,
+        v1_revision,
     );
     pull_resource(
         a,
-        &duck_a,
+        &a.scopes.pets_v1,
+        storage_id,
+        "Mallard Duck",
         CatalogResourceRelation::StorageChanged,
         PullMutation::UpdatePet,
         None,
@@ -1196,13 +1238,20 @@ fn run_pet_flow(
         "owl.webp",
         12,
     );
-    assert_eq!(
-        push_resource(a, &owl_a, CatalogResourceRelation::LocalChanged, 2),
-        owl_resource_id
+    v2_revision += 1;
+    push_resource(
+        a,
+        &a.scopes.pets_v2,
+        storage_id,
+        "Mallard Owl",
+        CatalogResourceRelation::LocalChanged,
+        v2_revision,
     );
     pull_resource(
         b,
-        &owl_b,
+        &b.scopes.pets_v2,
+        storage_id,
+        "Mallard Owl",
         CatalogResourceRelation::StorageChanged,
         PullMutation::UpdatePet,
         None,
@@ -1231,17 +1280,24 @@ fn run_pet_flow(
     );
     let duck_b_stale = b
         .service
-        .prepare_push(&duck_b.link_id)
+        .prepare_push(&b.scopes.pets_v1, storage_id)
         .expect("prepare duck losing Push");
-    assert_eq!(
-        push_resource(a, &duck_a, CatalogResourceRelation::LocalChanged, 3),
-        duck_resource_id
+    v1_revision += 1;
+    push_resource(
+        a,
+        &a.scopes.pets_v1,
+        storage_id,
+        "Mallard Duck",
+        CatalogResourceRelation::LocalChanged,
+        v1_revision,
     );
-    assert_stale_push_rejected(b, &duck_b, duck_b_stale);
-    assert_divergent_push_held(b, &duck_b);
+    assert_stale_push_rejected(b, duck_b_stale, "Mallard Duck");
+    assert_divergent_push_held(b, &b.scopes.pets_v1, storage_id, "Mallard Duck");
     pull_resource(
         b,
-        &duck_b,
+        &b.scopes.pets_v1,
+        storage_id,
+        "Mallard Duck",
         CatalogResourceRelation::ChangedBoth,
         PullMutation::PreservePet,
         Some(DUCK_COPY),
@@ -1257,20 +1313,26 @@ fn run_pet_flow(
     );
     assert_tree(&pet_path(b, DUCK_COPY), &duck_copy_snapshot);
 
-    let duck_copy_b =
-        link_local_resource(b, &b.scopes.pets_v1, storage_id, &pet_path(b, DUCK_COPY));
-    let duck_copy_resource_id =
-        push_resource(b, &duck_copy_b, CatalogResourceRelation::LocalOnly, 1);
-    assert_ne!(duck_copy_resource_id, duck_resource_id);
-    assert_ne!(duck_copy_b.repository_id, duck_b.repository_id);
-    let duck_copy_a = adopt_and_install(
+    v1_revision += 1;
+    let duck_copy_id = push_resource(
+        b,
+        &b.scopes.pets_v1,
+        storage_id,
+        DUCK_COPY,
+        CatalogResourceRelation::LocalOnly,
+        v1_revision,
+    );
+    assert_ne!(duck_copy_id, duck_id);
+    pull_resource(
         a,
         &a.scopes.pets_v1,
         storage_id,
-        &duck_copy_b.repository_id,
+        DUCK_COPY,
+        CatalogResourceRelation::StorageOnly,
         PullMutation::InstallPet,
+        None,
+        CatalogActionOutcome::Installed,
     );
-    assert_eq!(duck_copy_a.resource_id, duck_copy_resource_id);
     assert_tree(&pet_path(a, DUCK_COPY), &duck_copy_snapshot);
 
     // Owl divergence reverses the winner/loser roles and preserves v2.
@@ -1294,17 +1356,24 @@ fn run_pet_flow(
     );
     let owl_a_stale = a
         .service
-        .prepare_push(&owl_a.link_id)
+        .prepare_push(&a.scopes.pets_v2, storage_id)
         .expect("prepare owl losing Push");
-    assert_eq!(
-        push_resource(b, &owl_b, CatalogResourceRelation::LocalChanged, 3),
-        owl_resource_id
+    v2_revision += 1;
+    push_resource(
+        b,
+        &b.scopes.pets_v2,
+        storage_id,
+        "Mallard Owl",
+        CatalogResourceRelation::LocalChanged,
+        v2_revision,
     );
-    assert_stale_push_rejected(a, &owl_a, owl_a_stale);
-    assert_divergent_push_held(a, &owl_a);
+    assert_stale_push_rejected(a, owl_a_stale, "Mallard Owl");
+    assert_divergent_push_held(a, &a.scopes.pets_v2, storage_id, "Mallard Owl");
     pull_resource(
         a,
-        &owl_a,
+        &a.scopes.pets_v2,
+        storage_id,
+        "Mallard Owl",
         CatalogResourceRelation::ChangedBoth,
         PullMutation::PreservePet,
         Some(OWL_COPY),
@@ -1320,18 +1389,26 @@ fn run_pet_flow(
     );
     assert_tree(&pet_path(a, OWL_COPY), &owl_copy_snapshot);
 
-    let owl_copy_a = link_local_resource(a, &a.scopes.pets_v2, storage_id, &pet_path(a, OWL_COPY));
-    let owl_copy_resource_id = push_resource(a, &owl_copy_a, CatalogResourceRelation::LocalOnly, 1);
-    assert_ne!(owl_copy_resource_id, owl_resource_id);
-    assert_ne!(owl_copy_a.repository_id, owl_a.repository_id);
-    let owl_copy_b = adopt_and_install(
+    v2_revision += 1;
+    let owl_copy_id = push_resource(
+        a,
+        &a.scopes.pets_v2,
+        storage_id,
+        OWL_COPY,
+        CatalogResourceRelation::LocalOnly,
+        v2_revision,
+    );
+    assert_ne!(owl_copy_id, owl_id);
+    pull_resource(
         b,
         &b.scopes.pets_v2,
         storage_id,
-        &owl_copy_a.repository_id,
+        OWL_COPY,
+        CatalogResourceRelation::StorageOnly,
         PullMutation::InstallPet,
+        None,
+        CatalogActionOutcome::Installed,
     );
-    assert_eq!(owl_copy_b.resource_id, owl_copy_resource_id);
     assert_tree(&pet_path(b, OWL_COPY), &owl_copy_snapshot);
 
     let duck_v4 = write_pet(
@@ -1343,13 +1420,20 @@ fn run_pet_flow(
         "duck.webp",
         5,
     );
-    assert_eq!(
-        push_resource(b, &duck_b, CatalogResourceRelation::LocalChanged, 4),
-        duck_resource_id
+    v1_revision += 1;
+    push_resource(
+        b,
+        &b.scopes.pets_v1,
+        storage_id,
+        "Mallard Duck",
+        CatalogResourceRelation::LocalChanged,
+        v1_revision,
     );
     pull_resource(
         a,
-        &duck_a,
+        &a.scopes.pets_v1,
+        storage_id,
+        "Mallard Duck",
         CatalogResourceRelation::StorageChanged,
         PullMutation::UpdatePet,
         None,
@@ -1366,13 +1450,20 @@ fn run_pet_flow(
         "owl.webp",
         15,
     );
-    assert_eq!(
-        push_resource(a, &owl_a, CatalogResourceRelation::LocalChanged, 4),
-        owl_resource_id
+    v2_revision += 1;
+    push_resource(
+        a,
+        &a.scopes.pets_v2,
+        storage_id,
+        "Mallard Owl",
+        CatalogResourceRelation::LocalChanged,
+        v2_revision,
     );
     pull_resource(
         b,
-        &owl_b,
+        &b.scopes.pets_v2,
+        storage_id,
+        "Mallard Owl",
         CatalogResourceRelation::StorageChanged,
         PullMutation::UpdatePet,
         None,
@@ -1381,110 +1472,90 @@ fn run_pet_flow(
     assert_tree(&pet_path(b, OWL), &owl_v4);
 
     (
-        vec![
-            SyncedResource {
-                a_link: duck_a.link_id,
-                b_link: duck_b.link_id,
-                repository_id: duck_a.repository_id,
-                resource_id: duck_resource_id,
-            },
-            SyncedResource {
-                a_link: owl_a.link_id,
-                b_link: owl_b.link_id,
-                repository_id: owl_a.repository_id,
-                resource_id: owl_resource_id,
-            },
-            SyncedResource {
-                a_link: duck_copy_a.link_id,
-                b_link: duck_copy_b.link_id,
-                repository_id: duck_copy_a.repository_id,
-                resource_id: duck_copy_resource_id,
-            },
-            SyncedResource {
-                a_link: owl_copy_a.link_id,
-                b_link: owl_copy_b.link_id,
-                repository_id: owl_copy_a.repository_id,
-                resource_id: owl_copy_resource_id,
-            },
-        ],
-        vec![4, 4],
-        vec![1, 1],
+        KindFlow {
+            repository_id: CatalogResourceRepositoryId::for_kind(
+                ProviderKey::Codex,
+                CatalogResourceKindTag::CodexPetV1,
+            ),
+            revision: v1_revision,
+            resource_ids: BTreeSet::from([duck_id, duck_copy_id]),
+        },
+        KindFlow {
+            repository_id: CatalogResourceRepositoryId::for_kind(
+                ProviderKey::Codex,
+                CatalogResourceKindTag::CodexPetV2,
+            ),
+            revision: v2_revision,
+            resource_ids: BTreeSet::from([owl_id, owl_copy_id]),
+        },
     )
 }
 
-fn assert_repository(
-    replica: &Replica,
-    storage_id: &StorageId,
-    resource: &SyncedResource,
-    expected_revision: u64,
-) {
+fn assert_kind_repository(replica: &Replica, storage_id: &StorageId, flow: &KindFlow) {
     let inspection = replica
         .service
-        .inspect_repository(storage_id, &resource.repository_id)
-        .expect("inspect immutable Library repository");
+        .inspect_repository(storage_id, &flow.repository_id)
+        .expect("inspect kind Library repository");
     let tag = inspection.tag.expect("published repository has a tag");
     let head = inspection.head.expect("published repository has a head");
-    let stored = inspection
-        .resource
-        .expect("published repository has a resource manifest");
     assert_eq!(tag.schema_version, CATALOG_SCHEMA);
-    assert_eq!(tag.repository_id, resource.repository_id);
-    assert_eq!(tag.resource_id, resource.resource_id);
-    assert_eq!(head.repository_id, resource.repository_id);
-    assert_eq!(head.revision, expected_revision);
-    assert_eq!(stored.resource_id(), resource.resource_id);
+    assert_eq!(tag.repository_id, flow.repository_id);
+    assert_eq!(head.repository_id, flow.repository_id);
+    assert_eq!(head.revision, flow.revision);
+    assert_eq!(
+        inspection
+            .resources
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        flow.resource_ids,
+        "kind repository holds exactly the converged resource set"
+    );
 }
 
-fn assert_noop_fixed_point(
-    replica: &Replica,
-    link_id: &CatalogLinkId,
-    resource_id: &CatalogResourceId,
-    expected_revision: u64,
-) {
+fn assert_noop_fixed_point(replica: &Replica, scope_id: &CatalogScopeId, storage_id: &StorageId) {
     let push = replica
         .service
-        .prepare_push(link_id)
+        .prepare_push(scope_id, storage_id)
         .expect("prepare fixed-point Push");
-    assert_eq!(push.row.relation, CatalogResourceRelation::Matching);
-    assert_eq!(&push.row.resource_id, resource_id);
-    assert!(!push.row.selectable);
-    assert!(!push.row.selected_by_default);
-    assert!(!push.row.held_for_pull);
+    for row in &push.rows {
+        assert_eq!(row.row.relation, CatalogResourceRelation::Matching);
+        assert!(!row.row.selectable);
+        assert!(!row.row.selected_by_default);
+        assert!(!row.row.held_for_pull);
+    }
     let outcome = replica
         .service
-        .publish_reviewed(link_id, CatalogPublishApproval::recommended(&push))
+        .apply_push(CatalogPushApproval::recommended(&push))
         .expect("skip fixed-point Push");
     assert!(!outcome.published);
-    assert_eq!(outcome.revision, Some(expected_revision));
 
-    let pull = replica
-        .service
-        .prepare_pull(link_id, None)
-        .expect("prepare fixed-point Pull");
-    assert_eq!(pull.item.relation, CatalogResourceRelation::Matching);
-    assert_eq!(
-        pull.item.disposition,
-        CatalogPullDisposition::AlreadyMatching
-    );
-    assert!(pull.item.actions.is_empty());
-    assert!(pull.item.default_action_id.is_none());
+    let pull = prepare_pull(replica, scope_id, storage_id, BTreeMap::new());
+    for item in &pull.items {
+        assert_eq!(item.item.relation, CatalogResourceRelation::Matching);
+        assert_eq!(
+            item.item.disposition,
+            CatalogPullDisposition::AlreadyMatching
+        );
+        assert!(item.item.actions.is_empty());
+        assert!(item.item.default_action_id.is_none());
+    }
     let outcome = replica
         .service
-        .apply_pull(link_id, CatalogPullApproval::recommended(&pull))
+        .apply_pull(CatalogPullApproval::recommended(&pull))
         .expect("apply fixed-point Pull");
     assert!(outcome.remote_accepted);
-    assert_eq!(
-        outcome.result.outcome,
-        CatalogActionOutcome::AlreadyMatching
-    );
+    assert!(outcome
+        .results
+        .iter()
+        .all(|result| result.outcome == CatalogActionOutcome::AlreadyMatching));
 
     let after = replica
         .service
-        .prepare_push(link_id)
+        .prepare_push(scope_id, storage_id)
         .expect("reinspect fixed-point link after no-op Pull");
-    assert_eq!(after.row.relation, CatalogResourceRelation::Matching);
     assert_eq!(after.link_revision, push.link_revision);
-    assert!(!after.row.selectable);
+    assert!(after.rows.iter().all(|row| !row.row.selectable));
 }
 
 fn assert_final_local_trees(a: &Replica, b: &Replica) {
@@ -1568,7 +1639,11 @@ fn assert_storage_privacy(storage_root: &Path, needles: &[Vec<u8>]) -> usize {
             repositories.insert(entry.file_name());
         }
     }
-    assert_eq!(repositories.len(), 8);
+    assert_eq!(
+        repositories.len(),
+        3,
+        "one converged repository per kind: skills, pets v1, pets v2"
+    );
 
     // The shared store may also contain project-bundle payloads. Raw provider
     // rollouts legitimately carry their captured cwd, so the Library-specific
@@ -1642,7 +1717,6 @@ pub fn run_catalog_flow(inputs: CatalogFlowInputs<'_>) -> CatalogFlowReport {
         inputs.codex_home_a,
         inputs.storage,
         calls.clone(),
-        "myconf1",
     );
     let b = create_replica(
         inputs.machine_home_b,
@@ -1650,69 +1724,35 @@ pub fn run_catalog_flow(inputs: CatalogFlowInputs<'_>) -> CatalogFlowReport {
         inputs.codex_home_b,
         inputs.storage,
         calls.clone(),
-        "myconf2",
     );
 
-    let (mut resources, mut primary_revisions, mut copy_revisions) =
-        run_skill_flow(&a, &b, &inputs.storage.id);
+    let skills = run_skill_flow(&a, &b, &inputs.storage.id);
     let injected_inventory_calls = calls.load(Ordering::Relaxed);
     assert!(
         injected_inventory_calls > 0,
         "skill ownership was not checked through the injected runner"
     );
-    let (pet_resources, pet_primary_revisions, pet_copy_revisions) =
-        run_pet_flow(&a, &b, &inputs.storage.id);
+    let (pets_v1, pets_v2) = run_pet_flow(&a, &b, &inputs.storage.id);
     assert_eq!(
         calls.load(Ordering::Relaxed),
         injected_inventory_calls,
         "pet inventory unexpectedly launched the provider ownership runner"
     );
-    resources.extend(pet_resources);
-    primary_revisions.extend(pet_primary_revisions);
-    copy_revisions.extend(pet_copy_revisions);
-    assert_eq!(resources.len(), 8);
-    assert_eq!(
-        resources
-            .iter()
-            .map(|resource| &resource.repository_id)
-            .collect::<BTreeSet<_>>()
-            .len(),
-        8,
-        "each primary and preserved copy owns an independent repository"
-    );
-    assert_eq!(
-        resources
-            .iter()
-            .map(|resource| &resource.resource_id)
-            .collect::<BTreeSet<_>>()
-            .len(),
-        8,
-        "each primary and preserved copy owns an independent resource identity"
-    );
+    assert_eq!(skills.resource_ids.len(), 4);
+    assert_eq!(pets_v1.resource_ids.len(), 2);
+    assert_eq!(pets_v2.resource_ids.len(), 2);
 
     assert_final_local_trees(&a, &b);
     let local_before_noops = final_local_tree_inventory(&a, &b);
     let before_noops = storage_snapshot(storage_root);
-    for (index, resource) in resources.iter().enumerate() {
-        let expected_revision = if index < 2 || (4..6).contains(&index) {
-            4
-        } else {
-            1
-        };
-        assert_repository(&a, &inputs.storage.id, resource, expected_revision);
-        assert_repository(&b, &inputs.storage.id, resource, expected_revision);
-        assert_noop_fixed_point(
-            &a,
-            &resource.a_link,
-            &resource.resource_id,
-            expected_revision,
-        );
-        assert_noop_fixed_point(
-            &b,
-            &resource.b_link,
-            &resource.resource_id,
-            expected_revision,
-        );
+    for flow in [&skills, &pets_v1, &pets_v2] {
+        assert_kind_repository(&a, &inputs.storage.id, flow);
+        assert_kind_repository(&b, &inputs.storage.id, flow);
+    }
+    for replica in [&a, &b] {
+        assert_noop_fixed_point(replica, &replica.scopes.skills, &inputs.storage.id);
+        assert_noop_fixed_point(replica, &replica.scopes.pets_v1, &inputs.storage.id);
+        assert_noop_fixed_point(replica, &replica.scopes.pets_v2, &inputs.storage.id);
     }
     assert_eq!(
         storage_snapshot(storage_root),
@@ -1726,12 +1766,11 @@ pub fn run_catalog_flow(inputs: CatalogFlowInputs<'_>) -> CatalogFlowReport {
     );
     let repository_count = assert_storage_privacy(storage_root, inputs.privacy_needles);
 
-    primary_revisions.sort_unstable();
-    copy_revisions.sort_unstable();
+    let mut kind_repository_revisions = vec![skills.revision, pets_v1.revision, pets_v2.revision];
+    kind_repository_revisions.sort_unstable();
     CatalogFlowReport {
         repository_count,
-        primary_revisions,
-        preserved_copy_revisions: copy_revisions,
+        kind_repository_revisions,
         // The injected runner returns bounded fixture JSON; no native Codex
         // process and no model request is launched by this flow.
         native_provider_process_calls: 0,

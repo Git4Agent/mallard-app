@@ -2834,8 +2834,17 @@ fn plan_actions_validate_relation_action_and_pins() {
         blocker: None,
         blocked_reason: None,
         action_id: None,
+        display_title: None,
     };
     informational.validate().unwrap();
+    // A title is optional, but "untitled" is one state on the wire: absent.
+    // An empty string would be a second spelling of it.
+    let mut titled = informational.clone();
+    titled.display_title = Some("Add horror story document".to_string());
+    titled.validate().unwrap();
+    let mut blank = informational.clone();
+    blank.display_title = Some(String::new());
+    assert!(blank.validate().is_err());
     // A row must name at least one identity.
     let mut nameless = informational.clone();
     nameless.thread_id = None;
@@ -3161,6 +3170,7 @@ fn pre_cutover_documents_fail_closed_on_missing_identity_keys() {
         blocker: None,
         blocked_reason: None,
         action_id: None,
+        display_title: None,
     };
     let mut value = serde_json::to_value(&row).unwrap();
     value.as_object_mut().unwrap().remove("cloud_thread_id");

@@ -1,9 +1,13 @@
 import { StrictMode, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import AddCatalogScopeWorkspace from "./components/storage-catalog/AddCatalogScopeWorkspace";
 import StorageCatalogPage from "./components/storage-catalog/StorageCatalogPage";
 import type { StorageCatalogApi } from "./components/storage-catalog/api";
 import type {
-  CatalogResourcePullPlan,
+  CatalogPullItem,
+  CatalogScopePullItem,
+  CatalogScopePullPlan,
+  CatalogScopePushPlan,
   CatalogScopeResources,
   CatalogScopeRow,
   CatalogScopeView,
@@ -55,22 +59,14 @@ function row(overrides: Partial<CatalogScopeRow> & { row_id: string; display_nam
     resource_id: `resource-${overrides.row_id}`,
     scope_label: "Codex home",
     state: null,
-    linked: false,
     local_present: true,
     local_path: `/Users/hequ/.codex/skills/${overrides.display_name}`,
     local_modified_at: NOW - 86_400 * 3,
     local_files: 5,
     local_bytes: 22_100,
     remote_present: false,
-    remote_revision: null,
     remote_updated_at: null,
     content_sha256: digest(overrides.display_name),
-    registration_id: `registration-${overrides.row_id}`,
-    registration_revision: 1,
-    link_id: `link-${overrides.row_id}`,
-    link_revision: 1,
-    repository_id: `repository-${overrides.row_id}`,
-    other_storage_names: [],
     warnings: [],
     blocker: null,
     ...overrides,
@@ -80,52 +76,49 @@ function row(overrides: Partial<CatalogScopeRow> & { row_id: string; display_nam
 const ROWS: CatalogScopeRow[] = [
   row({
     row_id: "triage", display_name: "triage", state: "in_sync",
-    remote_present: true, remote_revision: 4, other_storage_names: ["Vault"],
+    remote_present: true, remote_updated_at: NOW - 86_400 * 3,
     local_modified_at: NOW - 86_400 * 3,
     local_files: 6, local_bytes: 41_300,
   }),
   row({
     row_id: "changelog-writer", display_name: "changelog-writer", state: "local_changed",
-    remote_present: true, remote_revision: 2, local_modified_at: NOW - 7_200,
+    remote_present: true, remote_updated_at: NOW - 86_400 * 9, local_modified_at: NOW - 7_200,
     local_files: 3, local_bytes: 12_800,
     warnings: [{ code: "secret_shaped", message: "contains a secret-shaped value", digest: "digest-secret" }],
   }),
   row({
-    row_id: "pdf-filler", display_name: "pdf-filler", state: "new", linked: false,
+    row_id: "pdf-filler", display_name: "pdf-filler", state: "new",
     scope_label: "Shared user", local_path: "/Users/hequ/.agents/skills/pdf-filler",
-    link_id: null, registration_id: null, repository_id: null,
     local_modified_at: NOW - 86_400 * 2,
     local_files: 11, local_bytes: 264_000,
   }),
   row({
     row_id: "release-notes", display_name: "release-notes", state: "storage_changed",
-    remote_present: true, remote_revision: 6, local_modified_at: NOW - 86_400 * 5,
+    remote_present: true, remote_updated_at: NOW - 3_600, local_modified_at: NOW - 86_400 * 5,
     local_files: 4, local_bytes: 18_400,
   }),
   row({
     row_id: "sql-review", display_name: "sql-review", state: "local_missing",
-    local_present: false, local_path: null, local_modified_at: null, linked: false,
+    local_present: false, local_path: null, local_modified_at: null,
     local_files: null, local_bytes: null,
-    link_id: null, registration_id: null,
-    remote_present: true, remote_revision: 3, remote_updated_at: NOW - 86_400 * 8,
+    remote_present: true, remote_updated_at: NOW - 86_400 * 8,
   }),
   row({
     row_id: "api-designer", display_name: "api-designer", state: "diverged",
     scope_label: "Shared user", local_path: "/Users/hequ/.agents/skills/api-designer",
-    remote_present: true, remote_revision: 5, local_modified_at: NOW - 3_600,
+    remote_present: true, remote_updated_at: NOW - 5_400, local_modified_at: NOW - 3_600,
     local_files: 9, local_bytes: 87_600,
     warnings: [{ code: "executable", message: "contains an executable file", digest: "digest-exec" }],
   }),
   row({
     row_id: "deploy-checklist", display_name: "deploy-checklist", state: "unreviewed_remote",
-    remote_present: true, remote_revision: 1, local_modified_at: NOW - 86_400 * 6,
+    remote_present: true, remote_updated_at: NOW - 86_400, local_modified_at: NOW - 86_400 * 6,
     local_files: 5, local_bytes: 22_100,
   }),
   row({
     row_id: "legacy-import", display_name: "legacy-import", state: "blocked",
-    scope_label: "Shared user", local_path: null, local_modified_at: null,
+    resource_id: null, scope_label: "Shared user", local_path: null, local_modified_at: null,
     local_files: null, local_bytes: null, content_sha256: null,
-    link_id: null, registration_id: null, repository_id: null,
     blocker: "the skill directory is a symlink, so its contents can't be captured safely",
   }),
 ];
@@ -150,7 +143,7 @@ const PET_ROWS: CatalogScopeRow[] = [
   row({
     row_id: "maple", display_name: "Maple", state: "in_sync",
     scope_label: "v2", local_path: "/Users/hequ/.codex/pets/maple",
-    remote_present: true, remote_revision: 3,
+    remote_present: true, remote_updated_at: NOW - 86_400 * 2,
     local_files: 1, local_bytes: 2_633_494,
     preview_png: PET_THUMBS.maple,
     pet_description: "A compact brown-and-white border collie pet for Codex.",
@@ -158,15 +151,14 @@ const PET_ROWS: CatalogScopeRow[] = [
   row({
     row_id: "dahuang", display_name: "大黄", state: "local_changed",
     scope_label: "v2", local_path: "/Users/hequ/.codex/pets/dahuang",
-    remote_present: true, remote_revision: 5, local_modified_at: NOW - 7_200,
+    remote_present: true, remote_updated_at: NOW - 86_400 * 4, local_modified_at: NOW - 7_200,
     local_files: 1, local_bytes: 1_784_464,
     preview_png: PET_THUMBS.dahuang,
     pet_description: "一只性格乖巧、黄身白脸、身形修长的中华田园犬。",
   }),
   row({
-    row_id: "patch", display_name: "Patch", state: "new", linked: false,
+    row_id: "patch", display_name: "Patch", state: "new",
     scope_label: "v2", local_path: "/Users/hequ/.codex/pets/patch",
-    link_id: null, registration_id: null, repository_id: null,
     local_files: 1, local_bytes: 1_686_990,
     preview_png: PET_THUMBS.patch,
     pet_description: "A calm, observant green turtle with natural anatomy and patient, deliberate movement.",
@@ -174,31 +166,28 @@ const PET_ROWS: CatalogScopeRow[] = [
   row({
     row_id: "biscuit", display_name: "Biscuit", state: "local_missing",
     scope_label: "v2", local_present: false, local_path: null, local_modified_at: null,
-    linked: false, local_files: null, local_bytes: null, preview_png: null,
-    link_id: null, registration_id: null,
-    remote_present: true, remote_revision: 2, remote_updated_at: NOW - 86_400 * 4,
+    local_files: null, local_bytes: null, preview_png: null,
+    remote_present: true, remote_updated_at: NOW - 86_400 * 4,
     pet_description: "A stored-only pet whose preview arrives from the storage.",
   }),
   row({
     row_id: "scout", display_name: "Scout", state: "blocked",
-    scope_label: "v2", local_path: null, local_modified_at: null,
+    resource_id: null, scope_label: "v2", local_path: null, local_modified_at: null,
     local_files: null, local_bytes: null, content_sha256: null, preview_png: null,
-    link_id: null, registration_id: null, repository_id: null,
     blocker: "the pet package is a symlink, so its contents can't be captured safely",
   }),
 ];
 
-function pullPlan(rowId: string, actions: CatalogResourcePullPlan["item"]["actions"], claims: string[] = []): CatalogResourcePullPlan {
+function pullItem(
+  rowId: string,
+  actions: CatalogPullItem["actions"],
+  claims: string[] = [],
+  kind: CatalogPullItem["kind"] = "agent_skill",
+): CatalogScopePullItem {
   return {
-    schema_version: 1,
-    plan_id: `plan-${rowId}`,
-    registration_id: `registration-${rowId}`,
-    link_id: `link-${rowId}`,
-    storage_id: "storage-local-1",
-    repository_id: `repository-${rowId}`,
     item: {
       resource_id: `resource-${rowId}`,
-      kind: "agent_skill",
+      kind,
       display_name: rowId,
       provider: "codex",
       relation: "storage_changed",
@@ -207,31 +196,46 @@ function pullPlan(rowId: string, actions: CatalogResourcePullPlan["item"]["actio
       default_action_id: actions[0]?.action_id ?? null,
     },
     conflicting_claims: claims.map((storage_id) => ({ storage_id, content_sha256: "a".repeat(64) })),
-    created_at: NOW,
-    expires_at: NOW + 900,
   };
 }
 
-const PULL_PLANS: Record<string, CatalogResourcePullPlan> = {
-  "release-notes": pullPlan("release-notes", [
+const SKILL_PULL_ITEMS: CatalogScopePullItem[] = [
+  pullItem("release-notes", [
     { action_id: "a1", resource_id: "resource-release-notes", kind: { kind: "update_skill" }, requires_destructive_approval: false, incoming_content_sha256: "b".repeat(64) },
     { action_id: "a2", resource_id: "resource-release-notes", kind: { kind: "preserve_skill_as_copy_and_overwrite", copy: { copy_name: "release-notes-local-copy", copy_resource_id: "resource-copy", copy_target_path: "/Users/hequ/.codex/skills/release-notes-local-copy", transformed_content_sha256: "c".repeat(64), original_content_sha256: "d".repeat(64), storage_content_sha256: "e".repeat(64), reusable_witness: false } }, requires_destructive_approval: false, incoming_content_sha256: "b".repeat(64) },
     { action_id: "a3", resource_id: "resource-release-notes", kind: { kind: "overwrite_skill_with_storage" }, requires_destructive_approval: true, incoming_content_sha256: "b".repeat(64) },
   ]),
-  "sql-review": pullPlan("sql-review", [
+  pullItem("sql-review", [
     { action_id: "b1", resource_id: "resource-sql-review", kind: { kind: "install_skill" }, requires_destructive_approval: false, incoming_content_sha256: "f".repeat(64) },
   ]),
-  "api-designer": pullPlan("api-designer", [
+  pullItem("api-designer", [
     { action_id: "c1", resource_id: "resource-api-designer", kind: { kind: "preserve_skill_as_copy_and_overwrite", copy: { copy_name: "api-designer-local-copy", copy_resource_id: "resource-copy-2", copy_target_path: "/Users/hequ/.agents/skills/api-designer-local-copy", transformed_content_sha256: "1".repeat(64), original_content_sha256: "2".repeat(64), storage_content_sha256: "3".repeat(64), reusable_witness: false } }, requires_destructive_approval: false, incoming_content_sha256: "4".repeat(64) },
     { action_id: "c2", resource_id: "resource-api-designer", kind: { kind: "overwrite_skill_with_storage" }, requires_destructive_approval: true, incoming_content_sha256: "4".repeat(64) },
   ], ["storage-vault"]),
-  "deploy-checklist": pullPlan("deploy-checklist", [
+  pullItem("deploy-checklist", [
     { action_id: "d1", resource_id: "resource-deploy-checklist", kind: { kind: "update_skill" }, requires_destructive_approval: false, incoming_content_sha256: "5".repeat(64) },
   ]),
-  biscuit: pullPlan("biscuit", [
+  // Already-settled rows arrive in the plan and stay out of the review.
+  {
+    item: {
+      resource_id: "resource-triage",
+      kind: "agent_skill",
+      display_name: "triage",
+      provider: "codex",
+      relation: "matching",
+      disposition: { kind: "already_matching" },
+      actions: [],
+      default_action_id: null,
+    },
+    conflicting_claims: [],
+  },
+];
+
+const PET_PULL_ITEMS: CatalogScopePullItem[] = [
+  pullItem("biscuit", [
     { action_id: "p1", resource_id: "resource-biscuit", kind: { kind: "install_pet" }, requires_destructive_approval: false, incoming_content_sha256: "9".repeat(64) },
-  ]),
-};
+  ], [], "codex_pet_v2"),
+];
 
 const STORAGES = [
   { id: "storage-local-1", name: "Local storage 1", kind: "local" as const, detail: "~/Library/Mallard/local-1", detailIsPath: true },
@@ -246,77 +250,139 @@ function stubApi(storageId: string | null, view: "skills" | "pets"): StorageCata
     profile: activeScope.profile,
     storage_id: storageId,
     storage_name: STORAGES.find((storage) => storage.id === storageId)?.name ?? null,
+    link: storageId ? { link_id: `catlink-${view}`, revision: 3 } : null,
+    storage_revision: storageId ? 6 : null,
     /* Without a storage the backend lists only what the home scan saw — no
        stored-only rows — and a blocked row keeps saying so. */
     rows: storageId ? activeRows : activeRows
       .filter((entry) => entry.local_present || entry.blocker)
-      .map((entry) => ({ ...entry, state: entry.blocker ? entry.state : null, linked: false })),
+      .map((entry) => ({ ...entry, state: entry.blocker ? entry.state : null })),
     warnings: [],
+    recovery: [],
   });
-  const unsupported = () => Promise.reject(new Error("not wired in the live harness"));
+  const pushPlan = (): CatalogScopePushPlan => ({
+    schema_version: 1,
+    plan_id: `push-${view}`,
+    scope_id: activeScope.scope.scope_id,
+    link_id: `catlink-${view}`,
+    link_revision: 3,
+    storage_id: storageId ?? "",
+    repository_id: "library-kind",
+    rows: activeRows
+      .filter((entry) => entry.resource_id && (entry.local_present || entry.remote_present))
+      .map((entry) => {
+        const selectable = entry.state === "new" || entry.state === "local_changed";
+        const held = entry.state === "diverged" || entry.state === "unreviewed_remote";
+        return {
+          row: {
+            resource_id: entry.resource_id!,
+            kind: activeScope.scope.resource_kind,
+            display_name: entry.display_name,
+            provider: "codex" as const,
+            scope_label: entry.scope_label ?? null,
+            relation: entry.state === "new"
+              ? ("local_only" as const)
+              : entry.state === "local_changed"
+                ? ("local_changed" as const)
+                : entry.state === "diverged"
+                  ? ("changed_both" as const)
+                  : ("matching" as const),
+            selectable,
+            selected_by_default: selectable,
+            held_for_pull: held,
+            removal_candidate: false,
+            blocked_reason: held ? "Storage changed; review Pull before pushing" : null,
+            warnings: entry.warnings,
+            detail: selectable ? "Publish this resource to the linked local storage" : null,
+          },
+        };
+      }),
+    warning_digests: activeRows.flatMap((entry) => entry.warnings.map((warning) => warning.digest)),
+    created_at: NOW,
+    expires_at: NOW + 900,
+  });
+  const pullPlan = (): CatalogScopePullPlan => ({
+    schema_version: 1,
+    plan_id: `pull-${view}`,
+    scope_id: activeScope.scope.scope_id,
+    link_id: `catlink-${view}`,
+    link_revision: 3,
+    storage_id: storageId ?? "",
+    repository_id: "library-kind",
+    items: view === "pets" ? PET_PULL_ITEMS : SKILL_PULL_ITEMS,
+    created_at: NOW,
+    expires_at: NOW + 900,
+  });
   return {
     listScopeResources: async () => page(),
-    getPetPreview: async (_scopeId, _storageId, repositoryId) => {
+    getPetPreview: async (_scopeId, _storageId, resourceId) => {
       // The stored-only pet, after a network-ish pause so the lazy fill is
       // visible; everything else has nothing stored to draw.
-      if (repositoryId !== "repository-biscuit") throw new Error("no stored preview");
+      if (resourceId !== "resource-biscuit") throw new Error("no stored preview");
       await new Promise((resolve) => setTimeout(resolve, 700));
       return PET_THUMBS.tracebill;
     },
-    preparePull: async (linkId: string) => {
-      const plan = PULL_PLANS[linkId.replace(/^link-/, "")];
-      if (!plan) throw new Error("no Pull plan for this row");
-      return plan;
-    },
-    applyPull: async () => ({
-      plan_id: "plan", remote_accepted: true,
-      result: { resource_id: "r", display_name: "row", outcome: "updated" },
+    linkScopeStorage: async () => ({
+      link_id: `catlink-${view}`,
+      revision: 3,
+      completion: "open",
     }),
-    preparePush: async (linkId: string) => ({
-      schema_version: 1, plan_id: `push-${linkId}`, registration_id: "r", link_id: linkId,
-      storage_id: storageId ?? "", repository_id: "repo",
-      row: {
-        resource_id: "r", kind: "agent_skill", display_name: "row", provider: "codex",
-        relation: "local_changed", selectable: true, selected_by_default: true,
-        held_for_pull: false, removal_candidate: false, warnings: [],
+    unlinkScopeStorage: async () => true,
+    preparePush: async () => pushPlan(),
+    applyPush: async (_planId, selectedResourceIds) => ({
+      plan_id: `push-${view}`,
+      published: selectedResourceIds.length > 0,
+      revision: 7,
+      message: selectedResourceIds.length > 0 ? "Published revision 7" : "Nothing was pushed",
+    }),
+    preparePull: async () => pullPlan(),
+    applyPull: async (_planId, choices) => ({
+      plan_id: `pull-${view}`,
+      remote_accepted: true,
+      results: Object.keys(choices).map((resourceId) => ({
+        resource_id: resourceId,
+        display_name: resourceId.replace(/^resource-/, ""),
+        outcome: "updated" as const,
+      })),
+    }),
+    prepareFork: async (scopeId, resourceId, requestedName) => ({
+      schema_version: 1,
+      plan_id: `fork-${resourceId}`,
+      scope_id: scopeId,
+      source_resource_id: resourceId,
+      source_display_name: resourceId.replace(/^resource-/, ""),
+      copy_name: requestedName,
+      copy_resource_id: `resource-${requestedName}`,
+      copy_target_path: `/Users/hequ/.codex/skills/${requestedName}`,
+      created_at: NOW,
+      expires_at: NOW + 900,
+    }),
+    applyFork: async (_scopeId, planId) => ({
+      resource_id: planId.replace(/^fork-/, ""),
+      display_name: planId.replace(/^fork-resource-/, ""),
+      outcome: "forked",
+      message: `Created ${planId.replace(/^fork-resource-/, "")}; local-only until you push it`,
+    }),
+    listCapabilities: async () => [
+      {
+        provider: "codex",
+        kinds: ["agent_skill", "plugin_install_intent", "codex_pet_v1", "codex_pet_v2"],
       },
-      warning_digests: [], created_at: NOW, expires_at: NOW + 900,
-    }),
-    publish: async () => ({ plan_id: "p", published: true, revision: 7, message: "Published" }),
-    linkScopeResource: async (request) => ({
-      resource: await stubApi(storageId, view).getResource("registration-triage"),
-      completion: "review_pull",
-      link_id: `link-${(request.repository_id ?? request.local_resource_id ?? "").replace(/^(repository|resource)-/, "")}`,
-    }),
-    getResource: async () => ({
-      registration: {
-        registration_id: "registration-triage", provider: "codex", profile_id: "catprofile-1",
-        resource_kind: "agent_skill", resource_id: "resource-triage",
-        local_target: { kind: "skill_directory", scope: "codex_home", canonical_root: "/Users/hequ/.codex/skills", install_directory: "triage" },
-        display_name: "triage", revision: 1, created_at: NOW, updated_at: NOW,
-      },
-      scope_label: "Codex home",
-      links: [{
-        link: {
-          link_id: "link-triage", registration_id: "registration-triage", storage_id: "storage-local-1",
-          repository_id: "repository-triage-0123456789abcdef", revision: 2, created_at: NOW, updated_at: NOW,
-        },
-        storage_name: "Local storage 1",
-      }],
-    }),
-    getStatus: async () => ({ registration_id: "registration-triage", active_plan_ids: [], recovery_messages: [] }),
-    inspectLinks: async () => [{
-      registration_id: "registration-triage", link_id: "link-triage", storage_id: "storage-local-1",
-      repository_id: "repository-triage", state: "in_sync", local_present: true, remote_present: true,
-      remote_revision: 4, generated_at: NOW,
-    }],
-    unlink: async () => true,
-    remove: async () => true,
-    prepareFork: async () => unsupported() as never,
-    applyFork: async () => unsupported() as never,
-    listCapabilities: async () => [],
+      { provider: "claude", kinds: ["agent_skill", "plugin_install_intent"] },
+    ],
     listProfiles: async () => [scope.profile],
-    saveProfile: async () => scope.profile,
+    /* Mirrors the backend: the name derives from the folder, nobody types one. */
+    saveProfile: async (_provider, path) => ({
+      ...scope.profile,
+      profile_id: "catprofile-added",
+      display_name: path.split("/").filter(Boolean).pop() ?? "profile",
+      configured_home: path,
+    }),
+    renameProfile: async (_profileId, displayName) => ({
+      ...scope.profile,
+      display_name: displayName,
+      revision: scope.profile.revision + 1,
+    }),
     listScopes: async () => [scope],
     createScope: async () => scope,
     deleteScope: async () => true,
@@ -325,8 +391,24 @@ function stubApi(storageId: string | null, view: "skills" | "pets"): StorageCata
 
 function Harness() {
   const [storageId, setStorageId] = useState<string | null>("storage-local-1");
-  const [view, setView] = useState<"skills" | "pets">("skills");
+  const [view, setView] = useState<"skills" | "pets" | "add">("skills");
   const [dark, setDark] = useState(false);
+  if (view === "add") {
+    return (
+      <div className="app" style={{ height: "100vh" }}>
+        <div className="sync-workspace">
+          <AddCatalogScopeWorkspace
+            workflowEpoch={0}
+            isWorkflowCurrent={() => true}
+            busy={false}
+            onClose={() => setView("skills")}
+            onCreated={() => setView("pets")}
+            api={stubApi(storageId, "pets")}
+          />
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="app" style={{ height: "100vh" }}>
       <div className="sync-workspace">
@@ -354,6 +436,11 @@ function Harness() {
               label: view === "pets" ? "View Skills" : "View Pets v2",
               icon: "openai",
               onSelect: () => setView(view === "pets" ? "skills" : "pets"),
+            }, {
+              id: "add",
+              label: "View Add resource",
+              icon: "plus",
+              onSelect: () => setView("add"),
             }],
           }]}
           onOpenScope={(scopeId) => setView(scopeId === "catscope-pets" ? "pets" : "skills")}
@@ -361,6 +448,7 @@ function Harness() {
           onAddStorage={() => undefined}
           onAddScope={() => undefined}
           onRemoveScope={() => undefined}
+          onProfileRenamed={() => undefined}
           notify={(message) => console.info("notice:", message)}
           onScopeGone={() => undefined}
           api={stubApi(storageId, view)}

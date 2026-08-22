@@ -12,7 +12,13 @@ type PullReviewCategory = "project_data" | "project_content";
 export interface PullReviewItem {
   resourceId: string;
   category: PullReviewCategory;
+  /** What kind of thing this is, and what the review list prints. Conversations
+   *  share the one label "Conversation" — itemKindLabel and the review's
+   *  grouping both read it, so it is not a place to put a session's name. */
   title: string;
+  /** A conversation's own name: "" when the stored thread has none, and null
+   *  when the item is not a conversation at all. */
+  threadTitle: string | null;
   detail: string;
   provider: ProviderKey | null;
   restoreActions: RestoreAction[];
@@ -177,6 +183,7 @@ export function buildPullReviewItems(plan: RestorePlan): PullReviewItem[] {
       resourceId,
       category,
       title,
+      threadTitle: null,
       detail,
       provider,
       restoreActions: [],
@@ -223,6 +230,10 @@ export function buildPullReviewItems(plan: RestorePlan): PullReviewItem[] {
       }
     }
     item.detail = detail;
+    // Assigned on the item rather than through ensure(): ensure early-returns
+    // for a resource it has already seen and drops its title argument, which
+    // is why detail is set here too.
+    item.threadTitle = row.display_title?.trim() ?? "";
   }
 
   return [...items.values()].sort((left, right) => {

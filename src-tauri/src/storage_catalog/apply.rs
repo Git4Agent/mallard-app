@@ -22,8 +22,8 @@ use super::domain::{
     CatalogActionOutcome, CatalogActionResult, CatalogClaim, CatalogOperationId,
     CatalogOperationJournalEntry, CatalogOperationKind, CatalogOperationPhase, CatalogPlanActionId,
     CatalogPlanId, CatalogPreservationPin, CatalogPreservationWitness, CatalogPullAction,
-    CatalogPullActionKind, CatalogPullDisposition, CatalogResource, CatalogResourceForkPlan,
-    CatalogResourceId, CatalogResourcePullPlan, CatalogTargetExpectation, CodexPetDescriptor,
+    CatalogPullActionKind, CatalogPullDisposition, CatalogPullItem, CatalogResource,
+    CatalogResourceForkPlan, CatalogResourceId, CatalogTargetExpectation, CodexPetDescriptor,
     CodexPetFormat, LocalCatalogTargetId, NativePluginPlan, PluginApplyMode,
 };
 use super::persistence::CatalogStateRepository;
@@ -1056,17 +1056,19 @@ fn incoming_payload_for(
     }
 }
 
-/// Execute the single approved action (or explicit Skip) for a draft-linked
-/// resource Pull. The command layer advances the accepted remote head only
-/// after this returns a non-failed, non-partial outcome; explicit Skip is a
+/// Execute the single approved action (or explicit Skip) for one Pull item.
+/// The command layer advances the accepted base for a resource only after
+/// this returns a non-failed, non-partial outcome; explicit Skip is a
 /// successful accept-without-mutation decision.
-pub fn execute_resource_pull_action(
+pub fn execute_scope_pull_item(
     environment: &PullApplyEnvironment<'_>,
-    plan: &CatalogResourcePullPlan,
+    storage_id: &StorageId,
+    plan_id: &CatalogPlanId,
+    manifest_resources: &BTreeMap<CatalogResourceId, CatalogResource>,
+    item: &CatalogPullItem,
     approved: Option<&CatalogPullAction>,
     now: u64,
 ) -> CatalogActionResult {
-    let item = &plan.item;
     let display_name = item.display_name.clone();
     let fixed = match &item.disposition {
         CatalogPullDisposition::AlreadyMatching => {
@@ -1098,17 +1100,14 @@ pub fn execute_resource_pull_action(
             action_id: None,
             display_name,
             outcome: CatalogActionOutcome::Skipped,
-            message: Some(
-                "Stored content was accepted; local content was left unchanged".to_string(),
-            ),
+            message: Some("Skipped; local content was left unchanged".to_string()),
         };
     };
-    let resources = BTreeMap::from([(plan.resource.resource_id(), plan.resource.clone())]);
     match execute_one_action(
         environment,
-        &plan.storage_id,
-        &plan.plan_id,
-        &resources,
+        storage_id,
+        plan_id,
+        manifest_resources,
         action,
         now,
     ) {

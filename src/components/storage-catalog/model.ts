@@ -1,8 +1,8 @@
 import type { IconName } from "../Icons";
 import { clockOptions } from "../../clock";
+import { errorMessage } from "../../storageError";
 import type { ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 import type {
-  CatalogLinkState,
   CatalogPullAction,
   CatalogResourceKind,
   CatalogScope,
@@ -42,18 +42,31 @@ export function catalogScopeLabel(
 // translation and the Bundle -> Repo wording pass the rest of the app applies.
 export { errorMessage, storageAccessErrorMessage } from "../../storageError";
 
-export function linkStateLabel(state: CatalogLinkState): string {
-  return {
-    new: "Not pushed",
-    in_sync: "In sync",
-    local_changed: "Changed locally",
-    storage_changed: "Changed in storage",
-    diverged: "Diverged",
-    local_missing: "Missing locally",
-    remote_missing: "Missing in storage",
-    unreviewed_remote: "Pull review needed",
-    blocked: "Blocked",
-  }[state];
+const CATALOG_SCOPE_LINKS_STORAGES = "still links storages";
+
+export function catalogScopeRemovalRequiresCleanup(reason: unknown): boolean {
+  return errorMessage(reason).includes(CATALOG_SCOPE_LINKS_STORAGES);
+}
+
+/**
+ * Removing a Catalog row can be refused for two reasons, and the backend
+ * states both for a log rather than for a person. Translate the linked-storage
+ * refusal into the exact UI action that clears the row: unlink every storage
+ * from the storage crumb's menu.
+ *
+ * The match is on the backend's wording, which no compiler defends, so
+ * `catalog-scope-removal.integration.test.tsx` pins both strings verbatim
+ * against their source in `resource_commands.rs`.
+ */
+export function catalogScopeRemovalMessage(label: string, reason: unknown): string {
+  const message = errorMessage(reason);
+  if (catalogScopeRemovalRequiresCleanup(reason)) {
+    return `Unlink every storage from “${label}”, then remove it again.`;
+  }
+  if (message.includes("Catalog row changed")) {
+    return `“${label}” changed somewhere else. Refresh the Catalog, then try removing it again.`;
+  }
+  return message;
 }
 
 /** The badge a row wears. Every one of these is a state the backend derives,
@@ -89,9 +102,7 @@ export function rowStatusLabel(row: CatalogScopeRow, storageName: string | null)
     case "in_sync":
       return `Up to date here and in ${storage}.`;
     case "new":
-      return row.linked
-        ? `Never pushed. Push to save it in ${storage}.`
-        : `Only on this computer. Push to save it in ${storage}.`;
+      return `Only on this computer. Push to save it in ${storage}.`;
     case "local_changed":
       return `Newer on this computer. Push to update ${storage}.`;
     case "remote_missing":
@@ -100,9 +111,7 @@ export function rowStatusLabel(row: CatalogScopeRow, storageName: string | null)
       return `Newer in ${storage}. Pull to update this computer.`;
     case "local_missing":
       if (!row.remote_present) return `Not on this computer, and not in ${storage}.`;
-      return row.linked
-        ? `Gone from this computer. Pull to reinstall it from ${storage}.`
-        : `Only in ${storage}. Pull to download it here.`;
+      return `Only in ${storage}. Pull to download it here.`;
     case "diverged":
       return `Changed here and in ${storage}. Review before syncing.`;
     case "unreviewed_remote":

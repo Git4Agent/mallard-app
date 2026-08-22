@@ -78,7 +78,11 @@ import StorageCatalogPage, {
 import AddCatalogScopeWorkspace from "../storage-catalog/AddCatalogScopeWorkspace";
 import { storageCatalogApi } from "../storage-catalog/api";
 import type { CatalogScopeView } from "../storage-catalog/types";
-import { catalogScopeLabel, errorMessage as catalogErrorMessage } from "../storage-catalog/model";
+import {
+  catalogScopeLabel,
+  catalogScopeRemovalMessage,
+  catalogScopeRemovalRequiresCleanup,
+} from "../storage-catalog/model";
 import RestorePlanView, { type PullReviewPrimary } from "./RestorePlanView";
 import StartupLoadingScreen, { type StartupStage } from "./StartupLoadingScreen";
 import { type SyncReviewStep } from "./reviewSteps";
@@ -366,6 +370,15 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const busyRef = useRef(false);
   busyRef.current = busy;
   const [error, setError] = useState<string | null>(null);
+  const [catalogRemovalErrorTarget, setCatalogRemovalErrorTarget] = useState<{
+    label: string;
+    message: string;
+    scopeId: string;
+  } | null>(null);
+  const [catalogStorageMenuRequest, setCatalogStorageMenuRequest] = useState<{
+    requestId: number;
+    scopeId: string;
+  } | null>(null);
   const [backendError, setBackendError] = useState<string | null>(null);
   // A notice carries its tone so the toast can say which happened. It used to
   // be a bare string with a hardcoded green tick, which meant a failed Pull
@@ -823,6 +836,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const activeCatalogScope = catalogScopeId && !setupDraftId && !addingCatalogScope
     ? catalogScopes.find((candidate) => candidate.scope.scope_id === catalogScopeId) ?? null
     : null;
+  useEffect(() => {
+    if (catalogStorageMenuRequest?.scopeId !== activeCatalogScope?.scope.scope_id) return;
+    setCatalogStorageMenuRequest(null);
+  }, [activeCatalogScope?.scope.scope_id, catalogStorageMenuRequest]);
   const catalogStorages: CatalogStorageOption[] = config.storages.map((storage) => ({
     id: storage.id,
     name: storage.name,
@@ -1579,6 +1596,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
     setBusy(true);
     setError(null);
+    setCatalogRemovalErrorTarget(null);
     try {
       await storageCatalogApi.deleteScope(scopeId, scope.scope.revision);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
@@ -1588,7 +1606,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       notify(`${label} removed — no provider or storage content touched.`);
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) {
-        setError(catalogErrorMessage(reason));
+        const message = catalogScopeRemovalMessage(label, reason);
+        setError(message);
+        setCatalogRemovalErrorTarget(catalogScopeRemovalRequiresCleanup(reason)
+          ? { label, message, scopeId }
+          : null);
       }
     } finally {
       if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
@@ -3491,10 +3513,30 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           <div className="sync-backend-banner sync-shell-error" role="alert">
             <Icon name="alert-triangle" size={15} />
             <span>{error}</span>
+            {catalogRemovalErrorTarget?.message === error && (
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setCatalogStorageMenuRequest((current) => ({
+                    requestId: (current?.requestId ?? 0) + 1,
+                    scopeId: catalogRemovalErrorTarget.scopeId,
+                  }));
+                  setCatalogRemovalErrorTarget(null);
+                  openCatalogScope(catalogRemovalErrorTarget.scopeId);
+                }}
+                title={`Open ${catalogRemovalErrorTarget.label}`}
+              >
+                Open storage menu
+              </button>
+            )}
             <button
               type="button"
               className="sync-notice-dismiss"
-              onClick={() => setError(null)}
+              onClick={() => {
+                setError(null);
+                setCatalogRemovalErrorTarget(null);
+              }}
               title="Dismiss"
               aria-label="Dismiss error"
             >
@@ -3537,6 +3579,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             onAddStorage={openNewStorageConfiguration}
             onAddScope={() => beginAddCatalogScope()}
             onRemoveScope={() => void removeCatalogScope(activeCatalogScope.scope.scope_id)}
+            onProfileRenamed={() => void refreshCatalogScopes()}
+            openStorageMenuRequestId={catalogStorageMenuRequest?.scopeId === activeCatalogScope.scope.scope_id
+              ? catalogStorageMenuRequest.requestId
+              : null}
             notify={(message) => notify(message)}
             onScopeGone={() => {
               setCatalogScopeId(null);

@@ -1,31 +1,29 @@
 //! Immutable/CAS storage protocol for draft-linked Library resources.
 //!
-//! Each repository contains exactly one stable provider resource. The flat
-//! `.mallard/v1/catalog` namespace is deliberately absent from this module.
+//! Each repository holds every resource of one (provider, kind) pair as one
+//! set manifest. The flat `.mallard/v1/catalog` namespace is deliberately
+//! absent from this module, and so is bucket listing: a repository is always
+//! addressed by its derived id and read as one head plus one manifest.
 
 use bytes::Bytes;
 use mallard_domain::{StorageConfig, StorageKind};
 use mallard_infrastructure::storage_core::{
     ensure_storage_marker, library_object_key, CasExpectation, CasOutcome, ExpectedObject,
-    ImmutablePutOutcome, ObjectPrefix, ObjectStore, StageOutcome, HEAD_FILE, LIBRARY_PREFIX,
-    TAG_FILE,
+    ImmutablePutOutcome, ObjectStore, StageOutcome, HEAD_FILE, TAG_FILE,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 use super::domain::{
     library_commit_relative_key, library_manifest_relative_key, CatalogCommitId, CatalogResource,
-    CatalogResourceRepositoryId, LibraryHeadCoordinate, LibraryResourceCommit, LibraryResourceHead,
-    LibraryResourceManifest, LibraryResourceTag, PortableCatalogOrigin, CATALOG_SCHEMA,
-    MAX_REVISION_PAYLOAD_BYTES,
+    CatalogResourceId, CatalogResourceRepositoryId, LibraryHeadCoordinate, LibraryResourceCommit,
+    LibraryResourceHead, LibraryResourceManifest, LibraryResourceTag, PortableCatalogOrigin,
+    PublishedResourceEntry, CATALOG_SCHEMA, MAX_REVISION_PAYLOAD_BYTES,
 };
 
 const MAX_TAG_BYTES: u64 = 64 * 1024;
 const MAX_HEAD_BYTES: u64 = 64 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_LIBRARY_OBJECTS_OBSERVED: usize = 1_000_000;
-const MAX_LIBRARY_REPOSITORIES: usize = 10_000;
-const MAX_LIST_PAGE: usize = 10_000;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(64);
@@ -124,17 +122,13 @@ pub struct ObservedLibraryHead {
     pub etag: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct RemoteLibraryResource {
-    pub tag: LibraryResourceTag,
-    pub head: Option<LibraryResourceHead>,
-}
-
 pub struct PublishLibraryResourceRequest {
     pub repository_id: CatalogResourceRepositoryId,
     pub tag: LibraryResourceTag,
     pub observed: Option<ObservedLibraryHead>,
-    pub resource: CatalogResource,
+    /// The complete new published set. Publish replaces the manifest with
+    /// exactly this set; callers build it as observed-set-plus-upserts.
+    pub resources: BTreeMap<CatalogResourceId, PublishedResourceEntry>,
     pub payloads: BTreeMap<String, Bytes>,
     pub captured_with: super::domain::CatalogCapturedWith,
     pub published_by_origin: PortableCatalogOrigin,
@@ -235,57 +229,6 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
         Ok(Some((head, manifest)))
     }
 
-    pub fn list_resources(&self) -> Result<Vec<RemoteLibraryResource>, String> {
-        let prefix = ObjectPrefix::parse(LIBRARY_PREFIX)?;
-        let mut cursor = None;
-        let mut tag_keys = Vec::new();
-        let mut observed = 0_usize;
-        loop {
-            let page = self.store.list(&prefix, cursor.as_deref(), MAX_LIST_PAGE)?;
-            observed = observed.saturating_add(page.keys.len());
-            if observed > MAX_LIBRARY_OBJECTS_OBSERVED {
-                return Err("Library listing exceeds one million objects".to_string());
-            }
-            tag_keys.extend(
-                page.keys
-                    .into_iter()
-                    .filter(|key| key.as_str().ends_with("/_tag.json")),
-            );
-            let Some(next) = page.next_cursor else {
-                break;
-            };
-            cursor = Some(next);
-        }
-        if tag_keys.len() > MAX_LIBRARY_REPOSITORIES {
-            return Err("Library contains too many resource repositories".to_string());
-        }
-
-        let expected_prefix = format!("{}/", LIBRARY_PREFIX);
-        let mut resources = Vec::new();
-        for key in tag_keys {
-            let Some(component) = key
-                .as_str()
-                .strip_prefix(&expected_prefix)
-                .and_then(|value| value.strip_suffix("/_tag.json"))
-            else {
-                continue;
-            };
-            if component.contains('/') {
-                continue;
-            }
-            let repository_id = CatalogResourceRepositoryId::parse(component.to_string())?;
-            let Some((tag, _)) = self.read_tag(&repository_id)? else {
-                return Err(format!("listed Library tag '{}' disappeared", key));
-            };
-            let head = self
-                .read_head(&repository_id)?
-                .map(|observed| observed.head);
-            resources.push(RemoteLibraryResource { tag, head });
-        }
-        resources.sort_by(|left, right| left.tag.repository_id.cmp(&right.tag.repository_id));
-        Ok(resources)
-    }
-
     pub fn fetch_payload(
         &self,
         repository_id: &CatalogResourceRepositoryId,
@@ -313,14 +256,8 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
     ) -> Result<PublishedLibraryResource, String> {
         ensure_storage_marker(&self.store)?;
         request.tag.validate()?;
-        request.resource.validate()?;
-        if request.repository_id != request.tag.repository_id
-            || request.tag.provider != request.resource.provider()
-            || request.tag.resource_kind != request.resource.kind_tag()
-            || request.tag.resource_id != request.resource.resource_id()
-            || request.tag.stable_identity_sha256 != request.resource.identity_sha256()
-        {
-            return Err("Library publication tag does not match its resource".to_string());
+        if request.repository_id != request.tag.repository_id {
+            return Err("Library publication tag does not match its repository".to_string());
         }
         if request.updated_at == 0 {
             return Err("Library publication requires a timestamp".to_string());
@@ -334,22 +271,27 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
             _ => return Err("Library resource head changed after review".to_string()),
         }
 
-        if let Some((existing_tag, _)) = self.read_tag(&request.repository_id)? {
-            if existing_tag.provider != request.tag.provider
-                || existing_tag.resource_kind != request.tag.resource_kind
-                || existing_tag.resource_id != request.tag.resource_id
-                || existing_tag.stable_identity_sha256 != request.tag.stable_identity_sha256
-            {
-                return Err("Library resource repository identity cannot change".to_string());
-            }
-        }
+        // The tag freezes exactly the derivation identity; validate() above
+        // already proved (provider, kind) matches the repository id, so any
+        // existing tag under the same repository can only disagree on its
+        // creation timestamp.
+        let existing_tag = self.read_tag(&request.repository_id)?;
 
         if let Some(current) = &current {
             let previous = self.read_manifest(&current.head)?;
-            if previous.resource.resource_id() != request.resource.resource_id() {
-                return Err("Library resource repository identity cannot change".to_string());
-            }
-            if previous.resource.content_sha256() == request.resource.content_sha256() {
+            // A set whose per-resource content is unchanged is a no-op even
+            // when entry timestamps differ; the head never moves for nothing.
+            let previous_contents: BTreeMap<_, _> = previous
+                .resources
+                .iter()
+                .map(|(id, entry)| (id.clone(), entry.resource.content_sha256().to_string()))
+                .collect();
+            let requested_contents: BTreeMap<_, _> = request
+                .resources
+                .iter()
+                .map(|(id, entry)| (id.clone(), entry.resource.content_sha256().to_string()))
+                .collect();
+            if previous_contents == requested_contents {
                 return Ok(PublishedLibraryResource {
                     head: current.head.clone(),
                     manifest: previous,
@@ -358,7 +300,18 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
             }
         }
 
-        let referenced = referenced_payloads(&request.resource);
+        let mut referenced: BTreeMap<String, u64> = BTreeMap::new();
+        for entry in request.resources.values() {
+            for (sha256, size) in referenced_payloads(&entry.resource) {
+                if let Some(existing) = referenced.insert(sha256.clone(), size) {
+                    if existing != size {
+                        return Err(
+                            "Library publication references one payload at two sizes".to_string()
+                        );
+                    }
+                }
+            }
+        }
         if request
             .payloads
             .keys()
@@ -428,7 +381,7 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
             updated_at: request.updated_at,
             captured_with: request.captured_with,
             published_by_origin: request.published_by_origin.clone(),
-            resource: request.resource,
+            resources: request.resources,
         };
         manifest.validate()?;
         let manifest_bytes = serde_json::to_vec(&manifest)
@@ -437,6 +390,7 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
             return Err("Library resource manifest exceeds its size limit".to_string());
         }
         let manifest_sha256 = sha256_hex(&manifest_bytes);
+        let manifest_size = manifest_bytes.len() as u64;
         let manifest_key = library_manifest_relative_key(revision, &commit_id);
         let commit_key = library_commit_relative_key(revision, &commit_id);
         let commit = LibraryResourceCommit {
@@ -469,12 +423,14 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
                 ImmutablePutOutcome::Written | ImmutablePutOutcome::AlreadyPresent => {}
             }
         }
-        let tag_bytes = serde_json::to_vec(&request.tag)
-            .map_err(|error| format!("serialize Library resource tag: {}", error))?;
-        self.store.put_immutable(
-            &library_object_key(request.repository_id.as_str(), TAG_FILE)?,
-            &tag_bytes,
-        )?;
+        if existing_tag.is_none() {
+            let tag_bytes = serde_json::to_vec(&request.tag)
+                .map_err(|error| format!("serialize Library resource tag: {}", error))?;
+            self.store.put_immutable(
+                &library_object_key(request.repository_id.as_str(), TAG_FILE)?,
+                &tag_bytes,
+            )?;
+        }
 
         let head = LibraryResourceHead {
             schema_version: CATALOG_SCHEMA,
@@ -483,7 +439,7 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
             commit_id,
             manifest_key,
             manifest_sha256,
-            manifest_size: manifest_bytes_len(&manifest)?,
+            manifest_size,
             updated_at: request.updated_at,
         };
         head.validate()?;
@@ -516,12 +472,6 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
     }
 }
 
-fn manifest_bytes_len(manifest: &LibraryResourceManifest) -> Result<u64, String> {
-    let bytes = serde_json::to_vec(manifest)
-        .map_err(|error| format!("serialize Library resource manifest: {}", error))?;
-    u64::try_from(bytes.len()).map_err(|_| "Library manifest size overflow".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,8 +479,9 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::storage_catalog::domain::{
-        CatalogCapturedWith, GitMarketplaceSource, PluginInstallIntentDescriptor,
-        PluginInstallIntentResource, PluginResolutionPolicy, PortablePluginSource, ProviderKey,
+        CatalogCapturedWith, CatalogResourceKindTag, GitMarketplaceSource,
+        PluginInstallIntentDescriptor, PluginInstallIntentResource, PluginResolutionPolicy,
+        PortablePluginSource, ProviderKey,
     };
 
     fn plugin(plugin_id: &str, git_ref: &str) -> CatalogResource {
@@ -556,35 +507,52 @@ mod tests {
         CatalogResource::PluginInstallIntent(resource)
     }
 
-    fn tag(
-        repository_id: &CatalogResourceRepositoryId,
-        resource: &CatalogResource,
-    ) -> LibraryResourceTag {
+    fn plugin_repository() -> CatalogResourceRepositoryId {
+        CatalogResourceRepositoryId::for_kind(
+            ProviderKey::Codex,
+            CatalogResourceKindTag::PluginInstallIntent,
+        )
+    }
+
+    fn tag(repository_id: &CatalogResourceRepositoryId) -> LibraryResourceTag {
         LibraryResourceTag {
             schema_version: CATALOG_SCHEMA,
             repository_id: repository_id.clone(),
-            provider: resource.provider(),
-            resource_kind: resource.kind_tag(),
-            resource_id: resource.resource_id(),
-            stable_identity_sha256: resource.identity_sha256(),
-            display_name: resource.display_name(),
-            scope_label: None,
+            provider: ProviderKey::Codex,
+            resource_kind: CatalogResourceKindTag::PluginInstallIntent,
             created_at: 1,
         }
+    }
+
+    fn set_of(
+        resources: &[CatalogResource],
+    ) -> BTreeMap<CatalogResourceId, PublishedResourceEntry> {
+        resources
+            .iter()
+            .map(|resource| {
+                (
+                    resource.resource_id(),
+                    PublishedResourceEntry {
+                        resource: resource.clone(),
+                        updated_at: 1,
+                    },
+                )
+            })
+            .collect()
     }
 
     fn publish(
         engine: &LibraryResourceEngine<LocalObjectStore>,
         repository_id: &CatalogResourceRepositoryId,
         observed: Option<ObservedLibraryHead>,
-        resource: CatalogResource,
+        resources: &[CatalogResource],
         updated_at: u64,
     ) -> Result<PublishedLibraryResource, String> {
         engine.publish(PublishLibraryResourceRequest {
             repository_id: repository_id.clone(),
-            tag: tag(repository_id, &resource),
+            tag: tag(repository_id),
             observed,
-            resource,
+            resources: set_of(resources),
             payloads: BTreeMap::new(),
             captured_with: CatalogCapturedWith {
                 app: "mallard".to_string(),
@@ -599,37 +567,55 @@ mod tests {
     }
 
     #[test]
-    fn one_library_repository_lists_inspects_and_rejects_a_stale_writer() {
+    fn one_kind_repository_grows_its_set_and_rejects_a_stale_writer() {
         let temporary = tempdir().unwrap();
         let store = LocalObjectStore::open(temporary.path()).unwrap();
         let engine = LibraryResourceEngine::new(store);
-        let repository_id = CatalogResourceRepositoryId::generate().unwrap();
+        let repository_id = plugin_repository();
         let first_resource = plugin("review@review-market", "main");
-        let first = publish(&engine, &repository_id, None, first_resource.clone(), 1).unwrap();
+        let first = publish(
+            &engine,
+            &repository_id,
+            None,
+            std::slice::from_ref(&first_resource),
+            1,
+        )
+        .unwrap();
         assert_eq!(first.head.revision, 1);
-        assert_eq!(engine.list_resources().unwrap().len(), 1);
         assert_eq!(
-            engine.inspect(&repository_id).unwrap().unwrap().1.resource,
-            first_resource
+            engine
+                .inspect(&repository_id)
+                .unwrap()
+                .unwrap()
+                .1
+                .resource_map(),
+            BTreeMap::from([(first_resource.resource_id(), first_resource.clone())])
         );
 
+        // The set grows: a second resource joins the first in one manifest.
         let stale = engine.read_head(&repository_id).unwrap().unwrap();
-        let second_resource = plugin("review@review-market", "release");
+        let second_resource = plugin("tools@review-market", "main");
         let second = publish(
             &engine,
             &repository_id,
             Some(stale.clone()),
-            second_resource,
+            &[first_resource.clone(), second_resource.clone()],
             2,
         )
         .unwrap();
         assert_eq!(second.head.revision, 2);
+        assert_eq!(second.manifest.resources.len(), 2);
 
+        // A writer holding the superseded head is refused.
         let error = publish(
             &engine,
             &repository_id,
             Some(stale),
-            plugin("review@review-market", "next"),
+            &[
+                first_resource,
+                second_resource,
+                plugin("late@review-market", "next"),
+            ],
             3,
         )
         .unwrap_err();
@@ -646,28 +632,91 @@ mod tests {
     }
 
     #[test]
-    fn a_library_repository_identity_cannot_change() {
+    fn an_identical_set_publishes_nothing() {
         let temporary = tempdir().unwrap();
         let store = LocalObjectStore::open(temporary.path()).unwrap();
         let engine = LibraryResourceEngine::new(store);
-        let repository_id = CatalogResourceRepositoryId::generate().unwrap();
+        let repository_id = plugin_repository();
+        let resource = plugin("review@review-market", "main");
         publish(
             &engine,
             &repository_id,
             None,
-            plugin("review@review-market", "main"),
+            std::slice::from_ref(&resource),
             1,
         )
         .unwrap();
+
         let observed = engine.read_head(&repository_id).unwrap();
-        let error = publish(
-            &engine,
-            &repository_id,
-            observed,
-            plugin("different@review-market", "main"),
-            2,
-        )
-        .unwrap_err();
-        assert!(error.contains("identity cannot change"), "{error}");
+        let repeat = publish(&engine, &repository_id, observed, &[resource], 2).unwrap();
+        assert!(!repeat.published);
+        assert_eq!(repeat.head.revision, 1);
+    }
+
+    #[test]
+    fn a_kind_repository_rejects_foreign_kinds() {
+        let temporary = tempdir().unwrap();
+        let store = LocalObjectStore::open(temporary.path()).unwrap();
+        let engine = LibraryResourceEngine::new(store);
+        // A tag pinned to the skills repository cannot publish under the
+        // plugin repository id: the derivation check fails closed.
+        let skills_repository = CatalogResourceRepositoryId::for_kind(
+            ProviderKey::Codex,
+            CatalogResourceKindTag::AgentSkill,
+        );
+        let error = engine
+            .publish(PublishLibraryResourceRequest {
+                repository_id: skills_repository.clone(),
+                tag: tag(&plugin_repository()),
+                observed: None,
+                resources: set_of(&[plugin("review@review-market", "main")]),
+                payloads: BTreeMap::new(),
+                captured_with: CatalogCapturedWith {
+                    app: "mallard".to_string(),
+                    version: "test".to_string(),
+                },
+                published_by_origin: PortableCatalogOrigin {
+                    origin_host_token: "a".repeat(64),
+                    origin_replica_token: "b".repeat(64),
+                },
+                updated_at: 1,
+            })
+            .unwrap_err();
+        assert!(
+            error.contains("tag does not match its repository"),
+            "{error}"
+        );
+
+        // A plugin entry cannot enter the skills repository even under the
+        // skills repository's own valid tag: the manifest's homogeneity
+        // validation refuses the set.
+        let error = engine
+            .publish(PublishLibraryResourceRequest {
+                repository_id: skills_repository.clone(),
+                tag: LibraryResourceTag {
+                    schema_version: CATALOG_SCHEMA,
+                    repository_id: skills_repository,
+                    provider: ProviderKey::Codex,
+                    resource_kind: CatalogResourceKindTag::AgentSkill,
+                    created_at: 1,
+                },
+                observed: None,
+                resources: set_of(&[plugin("review@review-market", "main")]),
+                payloads: BTreeMap::new(),
+                captured_with: CatalogCapturedWith {
+                    app: "mallard".to_string(),
+                    version: "test".to_string(),
+                },
+                published_by_origin: PortableCatalogOrigin {
+                    origin_host_token: "a".repeat(64),
+                    origin_replica_token: "b".repeat(64),
+                },
+                updated_at: 1,
+            })
+            .unwrap_err();
+        assert!(
+            error.contains("does not belong to this kind repository"),
+            "{error}"
+        );
     }
 }

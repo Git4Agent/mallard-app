@@ -6,7 +6,6 @@ import StorageCatalogPage from "../../src/components/storage-catalog/StorageCata
 import {
   actionLabel,
   catalogScopeLabel,
-  linkStateLabel,
 } from "../../src/components/storage-catalog/model";
 import type {
   CatalogPullAction,
@@ -16,28 +15,25 @@ import type {
 
 const commandNames = [
   "apply_catalog_resource_fork",
-  "apply_catalog_resource_pull",
+  "apply_catalog_scope_pull",
+  "apply_catalog_scope_push",
   "create_catalog_scope",
   "delete_catalog_scope",
   "get_catalog_pet_preview",
-  "get_catalog_resource",
-  "get_catalog_resource_status",
-  "inspect_catalog_resource_links",
-  "link_catalog_scope_resource",
+  "link_catalog_scope_storage",
   "list_catalog_capabilities",
   "list_catalog_resource_profiles",
   "list_catalog_scope_resources",
   "list_catalog_scopes",
   "prepare_catalog_resource_fork",
-  "prepare_catalog_resource_pull",
-  "prepare_catalog_resource_push",
-  "publish_catalog_resource",
-  "remove_catalog_resource",
+  "prepare_catalog_scope_pull",
+  "prepare_catalog_scope_push",
+  "rename_catalog_resource_profile",
   "save_catalog_resource_profile",
-  "unlink_catalog_resource",
+  "unlink_catalog_scope_storage",
 ].sort();
 
-test("the Catalog API exposes only the scope-rowed per-resource command surface", () => {
+test("the Catalog API exposes only the scope-level command surface", () => {
   const source = readFileSync("src/components/storage-catalog/api.ts", "utf8");
   const callers = [
     readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8"),
@@ -52,10 +48,10 @@ test("the Catalog API exposes only the scope-rowed per-resource command surface"
     /storage_catalog_binding|prepare_storage_catalog|publish_storage_catalog|apply_storage_catalog|catalog_profiles|setup_draft/,
   );
   for (const method of [
-    "listCapabilities", "listProfiles", "saveProfile",
-    "createScope", "listScopeResources", "getPetPreview", "linkScopeResource", "getResource",
-    "unlink", "remove", "inspectLinks", "preparePush",
-    "publish", "preparePull", "applyPull", "prepareFork", "applyFork", "getStatus",
+    "listCapabilities", "listProfiles", "saveProfile", "renameProfile",
+    "createScope", "listScopeResources", "getPetPreview", "linkScopeStorage",
+    "unlinkScopeStorage", "preparePush", "applyPush", "preparePull", "applyPull",
+    "prepareFork", "applyFork",
   ]) {
     assert.match(callers, new RegExp(`api\\.${method}\\(`), `${method} has a production caller`);
   }
@@ -123,6 +119,7 @@ function renderScopePage() {
       onAddStorage={() => undefined}
       onAddScope={() => undefined}
       onRemoveScope={() => undefined}
+      onProfileRenamed={() => undefined}
       notify={() => undefined}
     />,
   );
@@ -162,14 +159,14 @@ test("every row is the activity card: badge, name as the door, facts, one ⓘ", 
   ]) {
     assert.match(model, new RegExp(`case "${state}":`), `${state} has a badge`);
   }
-  // The card is the activity card, and the name is its one door — the chevron
-  // column went with the row grammar that carried it.
+  // The card is the activity card. The name is plain text — the per-resource
+  // detail page it used to open went with the per-resource links.
   assert.match(page, /sync-history-thread-card catalog-card/);
-  assert.match(page, /className="catalog-card-name"/);
   assert.doesNotMatch(
     page,
-    /chevron-right|catalog-row-name|catalog-row-place|catalog-row-stamp|catalog-row-open|catalog-review-row|catalog-row-list/,
+    /catalog-card-name|chevron-right|catalog-row-name|catalog-row-place|catalog-row-stamp|catalog-row-open|catalog-review-row|catalog-row-list/,
   );
+  assert.doesNotMatch(page, /kind: "detail"|catalog-link-card|inspectLinks|registration_id/);
   // Line two states what the scan measured — files, bytes on disk — never a
   // recount of its own.
   assert.match(page, /row\.local_files/);
@@ -201,7 +198,7 @@ test("pet rows wear the preview tile, and stored-only previews arrive lazily", (
   assert.match(page, /petKind \? row\.preview_png \?\? remotePreviews\[row\.row_id\] \?\? null : undefined/);
   // Stored-only rows ask after render, once per page, and a failure keeps
   // the glyph — the list call itself never waits on a storage round-trip.
-  assert.match(page, /api\.getPetPreview\(scopeId, storageId, row\.repository_id!\)/);
+  assert.match(page, /api\.getPetPreview\(scopeId, storageId, row\.resource_id!\)/);
   assert.match(page, /previewAttempts/);
   assert.doesNotMatch(page, /getPetPreview[\s\S]{0,400}listScopeResources\(/);
   // The tile letterboxes in both stylesheets: the tile itself in App.css,
@@ -219,12 +216,13 @@ test("Push and Pull are page verbs with one review each, and link on the way", (
   assert.match(page, /sync-path-sync[\s\S]*Pull<\/span>[\s\S]*counts\.pull/);
   assert.match(page, /sync-path-sync[\s\S]*Push<\/span>[\s\S]*counts\.push/);
   assert.match(page, /counts = useMemo\(\(\) => rows\.reduce/);
-  // Push and Pull create the pairing they need; the user never links by hand.
-  assert.match(page, /ensureLink[\s\S]*api\.linkScopeResource/);
-  assert.match(page, /const linkId = await ensureLink\(row\);[\s\S]*api\.preparePush\(linkId\)/);
-  assert.match(page, /api\.publish\(linkId, plan\.plan_id, true/);
-  assert.match(page, /const linkId = await ensureLink\(row\);[\s\S]*api\.preparePull\(linkId, null\)/);
-  assert.match(page, /api\.applyPull\(\s*entry\.linkId,\s*entry\.plan\.plan_id/);
+  // Push and Pull create the one scope-storage pairing they need; the user
+  // never links by hand, and each review consumes exactly one plan.
+  assert.match(page, /ensureLink[\s\S]*api\.linkScopeStorage/);
+  assert.match(page, /await ensureLink\(\);[\s\S]*api\.preparePush\(scope\.scope\.scope_id, storageId\)/);
+  assert.match(page, /api\.applyPush\(pushPlan\.plan_id, selected, \[\.\.\.pushAcks\]\)/);
+  assert.match(page, /await ensureLink\(\);[\s\S]*api\.preparePull\(scope\.scope\.scope_id, storageId, null\)/);
+  assert.match(page, /api\.applyPull\(pullPlan\.plan_id, choices, \[\.\.\.pullAcks\]\)/);
   // The reviews are the project's own review chrome.
   assert.match(page, /SyncReviewSelectionBar/);
   assert.match(page, /sync-inline-push-review sync-sync-review-workspace/);
@@ -246,7 +244,7 @@ test("Add is Kind then agent profile, and never picks a storage or resource", ()
   // Kind is a visible four-way choice, not a hidden select.
   assert.match(add, /role="radiogroup"[\s\S]*?CATALOG_KINDS\.map/);
   assert.match(add, /Codex only/);
-  assert.match(add, /api\.createScope\(provider, profileId, kind\)/);
+  assert.match(add, /api\.createScope\(provider, chosenProfileId, kind\)/);
   // No storage, no repository, no local resource: those belong to the row's
   // own page, chosen per resource link.
   assert.doesNotMatch(
@@ -273,30 +271,55 @@ test("Add is Kind then agent profile, and never picks a storage or resource", ()
   assert.doesNotMatch(readFileSync("src/App.css", "utf8"), /catalog-setup-(grid|card|step)/);
 });
 
+test("the profile is named by its folder, and renamed from the row's page", () => {
+  const add = readFileSync("src/components/storage-catalog/AddCatalogScopeWorkspace.tsx", "utf8");
+  // Setup never asks for a name: no name input, no separate commit step. A
+  // pending path is saved as part of Add itself, then the scope lands on it.
+  assert.doesNotMatch(add, /Profile name|Save home|displayName|catalog-profile-save-row/);
+  assert.match(add, /await api\.saveProfile\(provider, expandedProfilePath\)/);
+  assert.match(add, /profileId !== null \|\| customPathReady/);
+  assert.doesNotMatch(readFileSync("src/App.css", "utf8"), /catalog-profile-save-row/);
+
+  // Renaming lives on the row's page: the scope crumb's menu opens the same
+  // rename row the project page uses, pinned to the profile's revision, with
+  // the derived folder name one click away.
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  assert.match(page, /label: "Rename profile…"/);
+  assert.match(page, /for every Catalog row that uses this home/);
+  assert.match(page, /className="sync-path-rename"/);
+  assert.match(page, /api\.renameProfile\(profile\.profile_id, profileNameDraft\.trim\(\), profile\.revision\)/);
+  assert.match(page, /Use folder name/);
+  // A successful rename relabels the shell too — sidebar and Switch-to read
+  // the scope list.
+  assert.match(page, /onProfileRenamed\(\)/);
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  assert.match(shell, /onProfileRenamed=\{\(\) => void refreshCatalogScopes\(\)\}/);
+});
+
 test("linking is a side effect of the verb, and never syncs content", () => {
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
   // Link changes configuration only; the comment on the one place that calls
   // it says so, because nothing in the UI asks the user to do it any more.
   assert.match(page, /configuration only, no provider content changed/);
-  // A local-only row links by resource; a stored-only row adopts the
-  // repository. Both decided from the row, not from a picker.
-  assert.match(page, /local_resource_id: row\.repository_id \? null : row\.resource_id/);
-  assert.match(page, /repository_id: row\.repository_id \?\? null/);
-  // A row that is already paired never links again.
-  assert.match(page, /if \(row\.link_id\) return row\.link_id;/);
+  // The scope links to the storage once — never per resource.
+  assert.match(page, /api\.linkScopeStorage\(scope\.scope\.scope_id, storageId\)/);
+  // A page that is already paired never links again.
+  assert.match(page, /if \(page\?\.link\) return;/);
 });
 
-test("Refresh, Unlink and Fork stay scoped to one resource behind the row", () => {
+test("Unlink is the storage crumb's verb and Fork lives on the card", () => {
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
-  assert.match(page, /api\.inspectLinks\(registrationId\)/);
-  assert.match(page, /inspectionEpochRef/);
-  assert.doesNotMatch(page, /forceRevalidate|force_revalidate/);
-  assert.match(page, /api\.prepareFork\(resource\.registration\.registration_id/);
-  assert.match(page, /api\.unlink\(resource\.registration\.registration_id, linkId, revision\)/);
-  // Unlinking the whole pairing is the storage crumb's verb, worded the way
-  // the project's is, and it names the count before it runs.
+  // Unlinking the one pairing is the storage crumb's verb, worded the way
+  // the project's is, pinned to the link's own revision.
   assert.match(page, /label: `Unlink from \$\{label\}…`/);
-  assert.match(page, /Push and Pull stop for all \$\{linked\.length\} paired/);
+  assert.match(page, /api\.unlinkScopeStorage\(pageLink\.link_id, pageLink\.revision\)/);
+  assert.match(page, /Push and Pull stop for these/);
+  // Fork is the card's own verb: a git-fork button toggling an inline form,
+  // keyed by the scope and the resource — no registration anywhere.
+  assert.match(page, /api\.prepareFork\(scope\.scope\.scope_id, row\.resource_id, forkName\.trim\(\)\)/);
+  assert.match(page, /api\.applyFork\(scope\.scope\.scope_id, plan\.plan_id\)/);
+  assert.match(page, /catalog-inline-form catalog-fork-form/);
+  assert.doesNotMatch(page, /forceRevalidate|force_revalidate/);
   assert.doesNotMatch(page, /forkCodexThread|fork_codex_thread|storage-wide|bulk sync/i);
 });
 
@@ -345,8 +368,6 @@ test("Pull labels preserve copies for skills and pets while plugins only overwri
     actionLabel(action({ kind: "overwrite_plugin_with_storage", plan: {} })),
     "Overwrite local content",
   );
-  assert.equal(linkStateLabel("diverged"), "Diverged");
-
   const types = readFileSync("src/components/storage-catalog/types.ts", "utf8");
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
   assert.match(types, /conflicting_claims: CatalogClaimPin\[\]/);

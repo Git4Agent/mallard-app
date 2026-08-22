@@ -137,6 +137,7 @@ function conversationRow(
   action: ConversationReviewAction,
   actionId: string | null = null,
   blocker: ConversationBlocker | null = null,
+  displayTitle: string | null = null,
 ): ConversationReviewRow {
   return {
     provider: "codex",
@@ -145,6 +146,7 @@ function conversationRow(
     action,
     action_id: actionId,
     blocker,
+    display_title: displayTitle,
   };
 }
 
@@ -296,6 +298,45 @@ test("blocked conversation evidence is visible but cannot be selected", () => {
   const html = renderReview(plan);
   assert.match(html, /Can&#x27;t sync/);
   assert.doesNotMatch(html, /Select Conversation/);
+});
+
+/* The row's name comes from the stored thread, and when the stored thread has
+   none the row says so. It must never be named after its id: a CloudThreadId's
+   first characters are the mandatory "cloudthread-" namespace, so every
+   untitled cloud row would carry the identical name — which is what the
+   deleted `Task ${threadId.slice(0, 8)}` fallback did. */
+test("a restored row is named by its stored title, or reads untitled", () => {
+  const materialize = conversationAction("materialize_cloud");
+  const restoredFor = (displayTitle: string | null) => {
+    const plan = {
+      ...restorePlan,
+      actions: [],
+      conversation_actions: [materialize],
+      conversation_review: [
+        conversationRow("materialize_cloud", materialize.action_id, null, displayTitle),
+      ],
+    };
+    return buildPullOutcome({
+      projectId: binding.local_project_id,
+      plan,
+      result: result({ applied_action_ids: [materialize.action_id] }),
+      readiness: { bundle_id: binding.bundle_id, state: "ready", issues: [] },
+      items: buildPullReviewItems(plan),
+      completedResourceIds: new Set([materialize.source_resource_id!]),
+    });
+  };
+
+  const titled = restoredFor("Can you create a pelican-riding-a-bicycle svg");
+  assert.equal(titled.rows[0].status, "synced");
+  assert.equal(titled.rows[0].title, "Can you create a pelican-riding-a-bicycle svg");
+
+  const untitled = restoredFor(null);
+  assert.equal(untitled.rows[0].title, "Untitled session");
+  // Neither the id-derived stub nor the bare kind label may name a row.
+  assert.doesNotMatch(untitled.rows[0].title, /^Task /);
+  assert.notEqual(untitled.rows[0].title, "Conversation");
+  // The whole identifier still rides line 2.
+  assert.equal(untitled.rows[0].threadId, materialize.thread_id);
 });
 
 test("keep-both completion reports the independent session and optional Codex refresh", () => {

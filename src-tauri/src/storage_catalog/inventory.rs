@@ -420,13 +420,6 @@ pub enum CatalogInventoryFilter {
     #[cfg(test)]
     Everything,
     Kind(CatalogResourceKindTag),
-    /// Observe one registered target. A changed resource ID is retained when
-    /// it still occupies that target; pet v1/v2 occupants are both relevant
-    /// because the formats share a directory.
-    Resource {
-        kind: CatalogResourceKindTag,
-        target: LocalCatalogTargetId,
-    },
 }
 
 impl CatalogInventoryFilter {
@@ -434,9 +427,7 @@ impl CatalogInventoryFilter {
         match self {
             #[cfg(test)]
             CatalogInventoryFilter::Everything => None,
-            CatalogInventoryFilter::Kind(kind) | CatalogInventoryFilter::Resource { kind, .. } => {
-                Some(*kind)
-            }
+            CatalogInventoryFilter::Kind(kind) => Some(*kind),
         }
     }
 
@@ -444,7 +435,7 @@ impl CatalogInventoryFilter {
         match self {
             #[cfg(test)]
             CatalogInventoryFilter::Everything => true,
-            CatalogInventoryFilter::Kind(kind) | CatalogInventoryFilter::Resource { kind, .. } => {
+            CatalogInventoryFilter::Kind(kind) => {
                 matches!(
                     kind,
                     CatalogResourceKindTag::AgentSkill
@@ -468,11 +459,11 @@ impl CatalogInventoryFilter {
         match self {
             #[cfg(test)]
             CatalogInventoryFilter::Everything => true,
-            CatalogInventoryFilter::Kind(wanted) => *wanted == record.resource.kind_tag(),
-            CatalogInventoryFilter::Resource { kind, target } => {
-                if &record.target != target {
-                    return false;
-                }
+            // A kind inventory keeps cross-format pet occupants because the
+            // formats share a directory: conflict handling must see the v1
+            // pet sitting where a v2 pull wants to land. Scope rows filter
+            // back down to their own kind through `scope_local_records`.
+            CatalogInventoryFilter::Kind(kind) => {
                 *kind == record.resource.kind_tag()
                     || kind.pet_format().is_some()
                         && record.resource.kind_tag().pet_format().is_some()
@@ -572,30 +563,10 @@ pub fn inventory_local(
     // 3-6. Skills from the fixed roots, then pets.
     if filter.wants_skill_roots() {
         for root in &context.skill_roots {
-            let scan = match &filter {
-                CatalogInventoryFilter::Resource {
-                    target:
-                        LocalCatalogTargetId::SkillDirectory {
-                            scope,
-                            canonical_root,
-                            install_directory,
-                        },
-                    ..
-                } if *scope == root.scope
-                    && Path::new(canonical_root) == root.canonical_root.as_path() =>
-                {
-                    Some(Some(install_directory.as_str()))
-                }
-                CatalogInventoryFilter::Resource { .. } => None,
-                _ => Some(None),
-            };
-            let Some(only_install_directory) = scan else {
-                continue;
-            };
             scan_skill_root(
                 root.scope,
                 &root.canonical_root,
-                only_install_directory,
+                None,
                 &ownership_roots,
                 &owner_labels,
                 &mut inventory,
@@ -605,24 +576,8 @@ pub fn inventory_local(
     }
     if filter.wants_pets() {
         if let Some(codex) = &context.codex {
-            let scan = match &filter {
-                CatalogInventoryFilter::Resource {
-                    target:
-                        LocalCatalogTargetId::PetDirectory {
-                            canonical_home,
-                            pet_id,
-                        },
-                    ..
-                } if Path::new(canonical_home) == codex.canonical_home.as_path() => {
-                    Some(Some(pet_id.as_str()))
-                }
-                CatalogInventoryFilter::Resource { .. } => None,
-                _ => Some(None),
-            };
-            if let Some(only_pet_id) = scan {
-                scan_pets(&codex.canonical_home, only_pet_id, &mut inventory)
-                    .map_err(|detail| CatalogBlocker::InventoryFailed { detail })?;
-            }
+            scan_pets(&codex.canonical_home, None, &mut inventory)
+                .map_err(|detail| CatalogBlocker::InventoryFailed { detail })?;
         }
     }
 
@@ -927,47 +882,5 @@ mod tests {
             "owned",
             "owned"
         )));
-    }
-
-    #[test]
-    fn a_resource_inventory_reads_only_the_registered_target() {
-        let temp = tempfile::tempdir().unwrap();
-        let context = context_for(&temp);
-        let codex_home = context.codex.as_ref().unwrap().canonical_home.clone();
-        write(
-            &codex_home.join("skills/review/SKILL.md"),
-            b"---\nname: review\n---\n",
-        );
-        write(
-            &codex_home.join("skills/unrelated/SKILL.md"),
-            b"---\nname: unrelated\n---\n",
-        );
-        // This would be reported as a blocked candidate by a broad scan.
-        write(
-            &codex_home.join("skills/bad name/SKILL.md"),
-            b"---\nname: bad-name\n---\n",
-        );
-
-        let inventory = inventory_local(
-            &context,
-            CatalogInventoryFilter::Resource {
-                kind: CatalogResourceKindTag::AgentSkill,
-                target: LocalCatalogTargetId::SkillDirectory {
-                    scope: AgentSkillScope::CodexHome,
-                    canonical_root: codex_home.join("skills").to_string_lossy().to_string(),
-                    install_directory: "review".to_string(),
-                },
-            },
-            &EmptyRunner,
-        )
-        .unwrap();
-
-        assert_eq!(inventory.resources.len(), 1);
-        assert!(inventory.resources.contains_key(&skill_resource_id(
-            AgentSkillScope::CodexHome,
-            "review",
-            "review"
-        )));
-        assert!(inventory.blocked.is_empty());
     }
 }

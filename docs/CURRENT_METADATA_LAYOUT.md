@@ -21,14 +21,19 @@ Mallard has three separate data domains:
    `CODEX_HOME`, and `CLAUDE_CONFIG_DIR`. Mallard reads selected content from
    these locations and materializes approved Pull results back into them.
 3. **Portable storage** in either a local folder or an S3-compatible bucket.
-   Project bundles use `.mallard/v1/repositories/<bundle-id>/`; independent
-   Library resources use `.mallard/v1/library/<resource-repository-id>/`.
+   Project bundles use `.mallard/v1/repositories/<bundle-id>/`; Library
+   resources use `.mallard/v1/library/<kind-repository-id>/` — one repository
+   per (provider, resource kind), holding every resource of that kind as a
+   set manifest.
 
-The portable anchor is `bundle_id` for a project or `resource_repository_id`
-for one Library resource. Local project, storage, host, replica, profile,
-registration, and link IDs do not appear in portable documents. A mutable
-head points to an immutable manifest, commit record, and content-addressed
-payload objects.
+The portable anchor is `bundle_id` for a project or the kind repository id
+for the Library. A Library repository id is derived, never minted:
+`library-` + the first 32 hex of a domain-tagged digest over the provider and
+kind tokens, so every replica that syncs the same kind converges on the same
+repository. Local project, storage, host, replica, profile, and link IDs do
+not appear in portable documents. A mutable head points to an immutable
+manifest, commit record, and content-addressed payload objects; the Library
+manifest maps resource ids to their published entries.
 
 All active local and portable schemas are version 1. Compatibility is a clean
 cutover: there is no backward-compatibility support, migration, legacy
@@ -49,7 +54,7 @@ Machine-private control plane
 Portable storage
 <local storage folder or S3/R2 bucket>/.mallard/v1/
   repositories/<bundle-id>/       project bundle snapshots
-  library/<resource-repository-id>/ one typed Library resource
+  library/<kind-repository-id>/   every Library resource of one (provider, kind)
 
                               ^
                               |
@@ -86,7 +91,7 @@ on demand.
 |-- activity_cache.json
 |-- catalog_resource_profiles.json
 |-- catalog_scopes.json
-|-- catalog_resources.json
+|-- catalog_scope_links.json
 |-- catalog_resource_materializations.json
 |-- catalog_resource_preservations.json
 |-- catalog_resource_operations.json
@@ -141,9 +146,9 @@ on demand.
 | `materializations.json` | Durable Pull history | Plan and bundle coordinates, status, action receipts, absolute targets, backup paths, conversation receipts, errors | No |
 | `activity_cache.json` | Local session-history acceleration for every bound provider | File size/mtime keys, provider key, parsed ownership, cwd, Git/session metrics, and identities; cached title, summary, and chat text are deliberately omitted | No |
 | `catalog_resource_profiles.json` | Machine-local Codex/Claude Library profiles | Provider key, display name, configured `CODEX_HOME`/`CLAUDE_CONFIG_DIR` path, revisions | No |
-| `catalog_scopes.json` | User-added Catalog menu rows | One row per (profile × resource kind); membership over registrations is derived, never stored | No |
-| `catalog_resources.json` | Resource registrations and independent storage links | Provider/profile identity, typed local target, remote resource-repository ID, accepted head/content base, revisions | No |
-| `catalog_resource_plans/<plan-id>.json` | Immutable per-resource Push/Pull/Fork reviews | Digest-pinned action, preservation-copy pins, profile/root/link revisions, expiry | No |
+| `catalog_scopes.json` | User-added Catalog menu rows | One row per (profile × resource kind); membership is the kind inventory, never stored | No |
+| `catalog_scope_links.json` | Scope-storage links | One link per (scope × storage): the derived kind-repository ID, the accepted head continuity pin, and per-resource accepted content bases | No |
+| `catalog_resource_plans/<plan-id>.json` | Immutable scope Push/Pull and resource Fork reviews | One review per scope link with per-resource rows/items, digest-pinned actions, preservation-copy pins, profile/root/link revisions, expiry | No |
 | `catalog_resource_materializations.json` | Verified per-target Library receipts | Cross-storage claim edges keyed by canonical target identity with content digests and outcomes | No |
 | `catalog_resource_preservations.json` | Named-copy preservation witnesses | Source/preserved targets, digests, and operation IDs used for idempotent recovery | No |
 | `catalog_resource_operations.json` | Library mutation journal | In-flight and recent directory/preservation/fork/plugin operations with phases, paths, and terminal outcomes | No |
@@ -267,7 +272,7 @@ error.
 | --- | --- | --- |
 | `restore_plans/` | `RestorePlan` | Host/replica, storage/bundle, revision, commit, manifest hash, binding revision, expiry, absolute targets, expected target state, selected file/conversation actions |
 | `conversation_push_plans/` | `ConversationPushPlan` | Host/replica/project/profile revisions, current or absent head coordinates, conversation relations/actions, target expectations, lineage/semantic pins, expiry |
-| `catalog_resource_plans/` | `CatalogResourcePlanDocument` | Exactly one Library registration/link or Fork source, provider/root/storage/head revisions, local and remote digests, cross-storage claim pins, exact action, and expiry |
+| `catalog_resource_plans/` | `CatalogResourcePlanDocument` | Exactly one scope link (Push/Pull) or Fork source, provider/root/storage/head revisions, per-resource local and remote digests, cross-storage claim pins, exact actions, and expiry |
 
 Restore and Library resource plans normally expire after 24 hours. Completed
 project results live in `materializations.json`; Library outcomes and recovery
@@ -285,8 +290,8 @@ Setup has two local layers:
   makes interrupted finalization idempotently recoverable.
 
 The Library needs neither layer: adding a Catalog row records one scope in
-`catalog_scopes.json`, and linking a resource lands its registration and
-storage link in `catalog_resources.json` in a single locked mutation.
+`catalog_scopes.json`, and linking the scope to a storage lands one link in
+`catalog_scope_links.json` in a single locked mutation.
 
 ### 3.5 Conversation operation payloads and backups
 
@@ -415,7 +420,7 @@ reactivate them.
 | `activity_cache.json` | 32 MiB / 50,000 entries |
 | `catalog_resource_profiles.json` | 1 MiB |
 | `catalog_scopes.json` | 1 MiB |
-| `catalog_resources.json` | 16 MiB |
+| `catalog_scope_links.json` | 16 MiB |
 | `catalog_resource_plans/<id>.json` | 64 MiB |
 | `catalog_resource_materializations.json` | 16 MiB |
 | `catalog_resource_preservations.json` | 8 MiB |
@@ -495,7 +500,7 @@ The local-folder and S3/R2 adapters expose the same object keys:
         |       |   `-- <revision>-<commit-id>.json
         |       `-- _uploads/                 # reserved for project bundles
         `-- library/
-            `-- <resource-repository-id>/
+            `-- <kind-repository-id>/
                 |-- _tag.json                 # immutable, create-only discovery
                 |-- _head.json                # authoritative CAS pointer
                 |-- _objects/
@@ -648,25 +653,29 @@ Library `_head.json` pins the resource repository, revision, commit,
 manifest key, manifest SHA-256, exact manifest size, and update time.
 
 The immutable manifest records the repository/revision/commit coordinates,
-capture version, privacy-preserving publisher origin, and one closed
-`CatalogResource`: Agent Skill, plugin install intent, Codex pet v1, or Codex
-pet v2. The immutable commit records the same manifest coordinates, previous
-commit when present, and publisher origin. The head is the only visibility
-boundary and advances with compare-and-swap.
+capture version, privacy-preserving publisher origin, and the repository's
+complete resource set: a map from resource id to a published entry holding
+one closed `CatalogResource` — Agent Skill, plugin install intent, Codex pet
+v1, or Codex pet v2 — and its update time. Every entry must belong to the
+repository's own (provider, kind) derivation. The immutable commit records
+the same manifest coordinates, previous commit when present, and publisher
+origin. The head is the only visibility boundary and advances with
+compare-and-swap; a push publishes the observed set plus the reviewed
+upserts, so it can never delete another replica's resources.
 
 Plugin resources contain semantic provider-native installation intent and no
 payload directory. Skills store their bounded regular-file tree; pets store
 one validated PNG or WebP atlas. Pet v1 and v2 are different resource IDs,
-resource kinds, registrations, links, and remote repositories. The user opens
-and operates the desired v1 or v2 link explicitly; Mallard performs no format
-conversion or combined implicit selection.
+resource kinds, scopes, and kind repositories. The user opens and operates
+the desired v1 or v2 row explicitly; Mallard performs no format conversion
+or combined implicit selection.
 
-Machine-local registrations and links hold provider paths, storage IDs, and
-accepted comparison bases. Portable Library documents contain none of those
-machine-local values. Pull reviews pin cross-storage claims; a target claimed
-at another digest can only be preserved as a named semantic copy, explicitly
-overwritten with acknowledgement, or skipped. Plugins offer overwrite or
-skip only.
+Machine-local scope links hold provider paths, storage IDs, the accepted head
+continuity pin, and per-resource accepted content bases. Portable Library
+documents contain none of those machine-local values. Pull reviews pin
+cross-storage claims per item; a target claimed at another digest can only be
+preserved as a named semantic copy, explicitly overwritten with
+acknowledgement, or skipped. Plugins offer overwrite or skip only.
 
 ### 5.6 Typed conversation metadata
 
@@ -804,11 +813,12 @@ One publication performs:
 8. Best-effort compare-and-swap `_tag.json`.
 9. Commit the corresponding local bindings and reviewed base.
 
-For one Library link, the same immutable-object and CAS ordering applies to
-exactly one `library/<resource-repository-id>/` head. Its create-only tag is
-written once, and only that link's accepted head/content base advances after
-publication succeeds. A concurrent head change makes the reviewed plan stale
-or is resolved by verified read-back; it never advances another resource.
+For one Library scope link, the same immutable-object and CAS ordering
+applies to exactly one `library/<kind-repository-id>/` head. Its create-only
+tag is written once, and only that link's accepted head and the reviewed
+rows' accepted bases advance after publication succeeds. A concurrent head
+change makes the reviewed plan stale or is resolved by verified read-back;
+it never silently advances an unreviewed resource.
 
 Local-folder CAS is serialized by `.mallard/.storage.lock`; its ETag is the
 SHA-256 of the current bytes. S3/R2 uses service ETags with
@@ -863,10 +873,11 @@ payload is safe. Shared storage should be treated as private user data.
 
 - `bundle_id`: exactly 32 lowercase hexadecimal characters from 128 random
   bits.
-- `resource_repository_id`: `library-` plus exactly 32 lowercase hexadecimal
-  characters from 128 random bits.
-- Library registration, link, scope, plan, action, commit, and operation IDs:
-  closed prefixes plus fixed lowercase hexadecimal suffixes.
+- kind repository id: `library-` plus the first 32 lowercase hexadecimal
+  characters of a domain-tagged digest over the provider and kind tokens —
+  derived, never random.
+- Library link, scope, plan, action, commit, and operation IDs: closed
+  prefixes plus fixed lowercase hexadecimal suffixes.
 - Library resource ID: `resource-` plus a 64-character identity SHA-256.
 - `host_id`: exactly 32 lowercase hexadecimal characters and private.
 - origin host/replica token: exactly 64 lowercase hexadecimal characters.
@@ -884,7 +895,8 @@ payload is safe. Shared storage should be treated as private user data.
 - aggregate selected capture/project content: at most 512 MiB.
 - conversation bindings: at most 100,000.
 - active conversation journal operations: at most 10,000.
-- Library resources: at most 512 registrations/links per document.
+- Library resources: at most 512 per kind-repository manifest; scope links:
+  at most 128 storages per scope.
 - one standalone skill: at most 256 regular files, 2 MiB per file, and 16 MiB
   total.
 - one pet manifest: at most 16 KiB; one pet atlas: at most 8 MiB compressed
@@ -937,14 +949,15 @@ are authoritative.
 - [`activity_log.rs`](../src-tauri/src/activity_log.rs): local JSONL event
   schema, redaction, segmentation, locking, and retention.
 - [`storage_catalog/domain.rs`](../src-tauri/src/storage_catalog/domain.rs):
-  Library resource identities, strict schemas, scopes, registrations, links,
-  claims, and per-resource plans.
+  Library resource identities, strict schemas, scopes, scope links, claims,
+  and scope-level plans.
 - [`storage_catalog/resource_engine.rs`](../src-tauri/src/storage_catalog/resource_engine.rs):
-  Library tag listing, immutable objects/manifests/commits, verified reads,
-  head CAS, and continuity checks.
+  Library set-manifest publication, immutable objects/manifests/commits,
+  verified reads, head CAS, and continuity checks.
 - [`storage_catalog/persistence.rs`](../src-tauri/src/storage_catalog/persistence.rs):
   independent bounded Library state, quarantine, target locks, and backups.
 - [`storage_catalog/resource_commands.rs`](../src-tauri/src/storage_catalog/resource_commands.rs):
-  scope rows, per-resource linking, and per-link Push/Pull/Refresh/Fork.
+  scope rows, scope-storage linking, and scope-level Push/Pull plus
+  per-resource Fork.
 - [`src/types.ts`](../src/types.ts): frontend DTO mirror of serialized Rust
   contracts.

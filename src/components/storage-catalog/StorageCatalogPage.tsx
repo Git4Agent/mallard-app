@@ -17,7 +17,6 @@ import {
   catalogKindMeta,
   catalogScopeLabel,
   errorMessage,
-  linkStateLabel,
   rowPullable,
   rowPushable,
   rowStamp,
@@ -25,10 +24,11 @@ import {
   rowStatusLabel,
 } from "./model";
 import type {
-  CatalogLinkInspection,
   CatalogProviderKey,
-  CatalogResourcePullPlan,
-  CatalogResourceView,
+  CatalogPullItem,
+  CatalogResourceKind,
+  CatalogScopePullPlan,
+  CatalogScopePushPlan,
   CatalogScopeResources,
   CatalogScopeRow,
   CatalogScopeView,
@@ -37,13 +37,13 @@ import type {
 /**
  * One Catalog row's page, drawn the way a project's is: the storage chosen in
  * the path bar, one flat list of resources each wearing the status badge a
- * thread wears, and Push and Pull as page verbs with a review — rather than a
- * per-resource drill-down with a storage picker on every row.
+ * thread wears, and Push and Pull as page verbs with one review each — the
+ * scope links to the storage once, and every review covers the whole set.
  *
  * The storage in the bar is the page's outer scope. Every resource of this
- * kind is listed against it, whether it is registered here, only on this Mac,
- * or only in that storage; the badge says which. Linking is not a step the
- * user takes — Push and Pull create the pairing they need, which is what
+ * kind is listed against it, whether it is on this Mac, only in that storage,
+ * or both; the badge says which. Linking is not a step the user takes — Push
+ * and Pull create the one scope-storage pairing they need, which is what
  * makes this page read like the project one.
  */
 
@@ -57,19 +57,7 @@ export interface CatalogStorageOption {
   detailIsPath: boolean;
 }
 
-type Mode =
-  | { kind: "list" }
-  | { kind: "push" }
-  | { kind: "pull" }
-  | { kind: "detail"; registrationId: string };
-
-/** One reviewed row in the Pull review: the pairing it needed, and the exact
- * local actions the backend planned for it. */
-interface PullEntry {
-  row: CatalogScopeRow;
-  linkId: string;
-  plan: CatalogResourcePullPlan;
-}
+type Mode = { kind: "list" } | { kind: "push" } | { kind: "pull" };
 
 /** Mirrors the shell's notice tones without importing them: storage-catalog
  *  may not depend on project-sync. */
@@ -79,11 +67,13 @@ function providerLabel(provider: CatalogProviderKey): string {
   return provider === "codex" ? "Codex" : "Claude";
 }
 
-function resourceKindLabel(resource: CatalogResourceView): string {
-  if (resource.registration.resource_kind === "codex_pet_v1") return "Codex pet v1";
-  if (resource.registration.resource_kind === "codex_pet_v2") return "Codex pet v2";
-  if (resource.registration.resource_kind === "plugin_install_intent") return "Plugin intent";
-  return resource.scope_label ? `${resource.scope_label} skill` : "Skill";
+/** "Codex pet v1", "Plugin intent", "Codex home skill" — the phrase the fork
+ * button carries so the copy names exactly what it duplicates. */
+function resourceKindPhrase(kind: CatalogResourceKind, scopeLabel?: string | null): string {
+  if (kind === "codex_pet_v1") return "Codex pet v1";
+  if (kind === "codex_pet_v2") return "Codex pet v2";
+  if (kind === "plugin_install_intent") return "Plugin intent";
+  return scopeLabel ? `${scopeLabel} skill` : "Skill";
 }
 
 /** The verb a local action reduces to, for the row's trailing readout. The
@@ -137,10 +127,7 @@ function stampSeconds(row: CatalogScopeRow): number | null {
 
 function badge(row: CatalogScopeRow, storageName: string | null) {
   const status = rowStatus(row);
-  const label = [
-    rowStatusLabel(row, storageName),
-    row.other_storage_names.length > 0 && `Also linked to ${row.other_storage_names.join(", ")}.`,
-  ].filter(Boolean).join(" ");
+  const label = rowStatusLabel(row, storageName);
   return (
     <span
       className={`sync-thread-sync-indicator ${TONE[status] ?? "unknown"}`}
@@ -170,7 +157,7 @@ function Metric({ icon, value, detail, muted }: { icon: IconName; value: string;
 
 /** The ⓘ, carrying what a session card's debug menu carries: the row's paths
  * and digests, each a click to copy. Same wrapper, same popover. */
-function InfoMenu({ row }: { row: CatalogScopeRow }) {
+function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevision: number | null }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -207,7 +194,15 @@ function InfoMenu({ row }: { row: CatalogScopeRow }) {
       value: row.local_path
         ?? (row.local_present ? "In this provider home — not captured" : "Not on this Mac"),
     },
-    { label: "Storage repository", value: row.repository_id ?? "Not stored yet" },
+    {
+      label: "Stored copy",
+      value: !row.remote_present
+        ? "Not stored yet"
+        : [
+          storageRevision == null ? null : `Revision ${storageRevision}`,
+          row.remote_updated_at == null ? null : `updated ${fullStamp(row.remote_updated_at)}`,
+        ].filter(Boolean).join(" · ") || "In this storage",
+    },
     {
       label: "Content digest",
       value: row.content_sha256 ? `sha256:${row.content_sha256}` : "Nothing captured",
@@ -266,34 +261,40 @@ function InfoMenu({ row }: { row: CatalogScopeRow }) {
 }
 
 /** One card per resource, wearing the activity card's grammar. Line one: the
- * badge, the name as the door, the provider mark and Reveal in Finder. Line
- * two: files and size, the rule, the ⓘ, and the full stamp. Reviews put the
+ * badge, the name, the provider mark, Fork, and Reveal in Finder. Line two:
+ * files and size, the rule, the ⓘ, and the full stamp. Reviews put the
  * checkbox where a session's review puts it — inside the title line — and
  * hang the Pull action pill after the name. */
 function ResourceCard({
   row,
   storageName,
+  storageRevision,
   provider,
   providerTitle,
   preview,
-  onOpen,
   onReveal,
+  onFork,
+  forkTitle,
   selectable,
   selected,
   onToggle,
   action,
   acks,
+  footer,
 }: {
   row: CatalogScopeRow;
   storageName: string | null;
+  storageRevision: number | null;
   provider: CatalogProviderKey;
   providerTitle: string;
   /** The pet's idle frame as a data URI. `null` draws the kind-glyph tile —
    * the column never collapses and never shows a broken image — and
    * `undefined` (non-pet scopes) draws no tile at all. */
   preview?: string | null;
-  onOpen?: () => void;
   onReveal: () => void;
+  /** Fork lives on the card: local rows of forkable kinds grow the button. */
+  onFork?: () => void;
+  forkTitle?: string;
   selectable?: boolean;
   selected?: boolean;
   onToggle?: () => void;
@@ -301,6 +302,8 @@ function ResourceCard({
   /** Acknowledgement chips, part of the card the way the project files
    * review attaches "Reviewed this warning." to its own row. */
   acks?: ReactNode;
+  /** The inline fork form, when this card's Fork is open. */
+  footer?: ReactNode;
 }) {
   const seconds = stampSeconds(row);
   return (
@@ -330,13 +333,7 @@ function ResourceCard({
             </label>
           )}
           {badge(row, storageName)}
-          {onOpen ? (
-            <button type="button" className="catalog-card-name" title="Storage links, fork, unlink" onClick={onOpen}>
-              {row.display_name}
-            </button>
-          ) : (
-            <strong title={row.display_name}>{row.display_name}</strong>
-          )}
+          <strong title={row.display_name}>{row.display_name}</strong>
           {action && (action.options.length > 1 ? (
             <span className="catalog-row-action-shell">
               <button
@@ -352,10 +349,8 @@ function ResourceCard({
               </button>
               {action.expanded && (
                 /* The app's own popover, item markup and all: a checkable
-                   list with the current choice ticked — and now the keyboard
-                   contract that `role="menu"` promises. It declared the role
-                   without any of it: arrows did nothing, focus stayed on the
-                   trigger when the menu opened, and Escape left focus nowhere. */
+                   list with the current choice ticked — and the keyboard
+                   contract that `role="menu"` promises. */
                 <div
                   className="sync-path-menu end"
                   role="menu"
@@ -396,13 +391,24 @@ function ResourceCard({
             <span className="catalog-row-action" title={action.chosen}>{actionVerb(action.chosen)}</span>
           ))}
         </div>
-        {/* Line one's right-hand pair, read across from a session's: the
-            provider mark that says whose home this is, and the one verb that
-            opens the thing somewhere else — Finder rather than a terminal. */}
+        {/* Line one's right-hand run, read across from a session's: the
+            provider mark that says whose home this is, Fork when the resource
+            can be duplicated on this Mac, and Reveal in Finder. */}
         <div className="sync-history-thread-actions">
           <span className="sync-history-launch-action sync-history-provider-inert" title={providerTitle}>
             <ProviderMark provider={provider} displayName={providerLabel(provider)} />
           </span>
+          {onFork && (
+            <button
+              type="button"
+              className="btn btn-ghost sync-history-launch-action"
+              title={forkTitle}
+              aria-label={forkTitle}
+              onClick={onFork}
+            >
+              <Icon name="git-fork" size={14} />
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-ghost sync-history-launch-action"
@@ -446,7 +452,7 @@ function ResourceCard({
           {/* The rule parts the two readouts from the one button. */}
           <span className="sync-history-actions-divider" aria-hidden="true" />
           <div className="sync-history-row-clickables">
-            <InfoMenu row={row} />
+            <InfoMenu row={row} storageRevision={storageRevision} />
           </div>
           {/* The tooltip is the whole point of this stop — which time this is
               — so it has to be the accessible name too, or a screen reader
@@ -465,6 +471,7 @@ function ResourceCard({
         </div>
       </div>
       {acks}
+      {footer}
     </article>
   );
 }
@@ -479,6 +486,8 @@ export default function StorageCatalogPage({
   onAddStorage,
   onAddScope,
   onRemoveScope,
+  onProfileRenamed,
+  openStorageMenuRequestId,
   onScopeGone,
   notify,
   api = storageCatalogApi,
@@ -494,6 +503,11 @@ export default function StorageCatalogPage({
   onAddStorage: () => void;
   onAddScope: () => void;
   onRemoveScope: () => void;
+  /** The profile was renamed here — sidebar labels and the Switch-to menu
+   * read the scope list, so the shell reloads it. */
+  onProfileRenamed: () => void;
+  /** Opens the storage crumb menu for recovery actions initiated by the shell. */
+  openStorageMenuRequestId?: number | null;
   /** The row disappeared underneath the page (deleted elsewhere). */
   onScopeGone: () => void;
   /** Outcomes go to the shell's one notification surface, the way every other
@@ -511,12 +525,12 @@ export default function StorageCatalogPage({
      tile, filled inline for local atlases and lazily for stored-only rows. */
   const petKind = scope.scope.resource_kind === "codex_pet_v1"
     || scope.scope.resource_kind === "codex_pet_v2";
+  const forkableKind = scope.scope.resource_kind !== "plugin_install_intent";
   const [page, setPage] = useState<CatalogScopeResources | null>(null);
   const [chosenStorageId, setChosenStorageId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "list" });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [inspectingLinks, setInspectingLinks] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   /* Per-item failures are a list. Joining them with newlines into the single
@@ -524,11 +538,21 @@ export default function StorageCatalogPage({
      failures rendered as one run-on sentence. */
   const [failures, setFailures] = useState<string[]>([]);
 
+  /* Renaming the profile — setup derived its name from the folder, and this
+     is the one place a name is chosen. It opens from the scope crumb's menu
+     as a row under the trail, the shape the project page uses, and relabels
+     every Catalog row on this home at once. */
+  const [renamingProfile, setRenamingProfile] = useState(false);
+  const [profileNameDraft, setProfileNameDraft] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+
+  /* The reviews hold the one plan the backend pinned; selections and
+     acknowledgements are keyed by resource id, the plan's own key. */
+  const [pushPlan, setPushPlan] = useState<CatalogScopePushPlan | null>(null);
   const [pushSelected, setPushSelected] = useState<Set<string>>(new Set());
   const [pushAcks, setPushAcks] = useState<Set<string>>(new Set());
 
-  const [pullEntries, setPullEntries] = useState<PullEntry[]>([]);
-  const [pullBlocked, setPullBlocked] = useState<Record<string, string>>({});
+  const [pullPlan, setPullPlan] = useState<CatalogScopePullPlan | null>(null);
   const [pullSelected, setPullSelected] = useState<Set<string>>(new Set());
   const [pullChoice, setPullChoice] = useState<Record<string, string>>({});
   const [pullAcks, setPullAcks] = useState<Set<string>>(new Set());
@@ -541,12 +565,11 @@ export default function StorageCatalogPage({
   const [remotePreviews, setRemotePreviews] = useState<Record<string, string>>({});
   const previewAttempts = useRef<Set<string>>(new Set());
 
-  const [detail, setDetail] = useState<CatalogResourceView | null>(null);
-  const [recovery, setRecovery] = useState<string[]>([]);
-  const [linkInspections, setLinkInspections] = useState<Record<string, CatalogLinkInspection>>({});
+  /* Fork lives on the card: the id of the resource whose inline form is
+     open, and the name being typed into it. */
+  const [forkFor, setForkFor] = useState<string | null>(null);
   const [forkName, setForkName] = useState("");
   const epochRef = useRef(0);
-  const inspectionEpochRef = useRef(0);
 
   /* `onScopeGone` arrives as a fresh arrow on every parent render. Reading it
      through a ref keeps the loader's identity tied to what it actually reads —
@@ -596,6 +619,7 @@ export default function StorageCatalogPage({
   useEffect(() => {
     setMode({ kind: "list" });
     setChosenStorageId(null);
+    setForkFor(null);
   }, [scope.scope.scope_id]);
 
   useEffect(() => {
@@ -606,16 +630,41 @@ export default function StorageCatalogPage({
   const rows = useMemo(() => page?.rows ?? [], [page]);
   const storageName = page?.storage_name ?? null;
   const storageId = page?.storage_id ?? null;
+  const pageLink = page?.link ?? null;
+  const storageRevision = page?.storage_revision ?? null;
+  const rowByResource = useMemo(() => {
+    const map = new Map<string, CatalogScopeRow>();
+    for (const row of rows) {
+      if (row.resource_id) map.set(row.resource_id, row);
+    }
+    return map;
+  }, [rows]);
+
+  /* The loaded page carries the profile at its current revision; the prop
+     stands in before the first load. Rename pins the fresh revision. */
+  const profile = page?.profile ?? scope.profile;
+  const profileFolderName =
+    profile.configured_home.split(/[\\/]/).filter(Boolean).pop() ?? "";
+  const profileNameChanged = profileNameDraft.trim().length > 0
+    && profileNameDraft.trim() !== profile.display_name;
+
+  const saveProfileName = async () => {
+    if (!profileNameChanged) return;
+    setBusy(true);
+    setRenameError(null);
+    try {
+      await api.renameProfile(profile.profile_id, profileNameDraft.trim(), profile.revision);
+      setRenamingProfile(false);
+      onProfileRenamed();
+      await load();
+    } catch (reason) {
+      setRenameError(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
   const pushRows = useMemo(() => rows.filter(rowPushable), [rows]);
   const pullRows = useMemo(() => rows.filter(rowPullable), [rows]);
-  /* Local changes that Push cannot take yet: the storage moved too, so Pull
-     has to settle them first. Counted here rather than written as a number,
-     so the banner and the list can never disagree. */
-  const heldForPull = useMemo(
-    () => rows.filter((row) => row.local_present
-      && (row.state === "diverged" || row.state === "unreviewed_remote")),
-    [rows],
-  );
 
   /* The bar's three numbers are read off the same rows the list draws — the
      project derives its own header tally the same way. */
@@ -672,14 +721,14 @@ export default function StorageCatalogPage({
     if (!petKind || !storageId) return;
     const scopeId = scope.scope.scope_id;
     const targets = rows.filter((row) => !row.local_present && row.remote_present
-      && row.repository_id && !row.preview_png && !previewAttempts.current.has(row.row_id));
+      && row.resource_id && !row.preview_png && !previewAttempts.current.has(row.row_id));
     if (targets.length === 0) return;
     let cancelled = false;
     void (async () => {
       for (const row of targets) {
         previewAttempts.current.add(row.row_id);
         try {
-          const preview = await api.getPetPreview(scopeId, storageId, row.repository_id!);
+          const preview = await api.getPetPreview(scopeId, storageId, row.resource_id!);
           if (cancelled) return;
           setRemotePreviews((current) => ({ ...current, [row.row_id]: preview }));
         } catch {
@@ -700,292 +749,173 @@ export default function StorageCatalogPage({
     void revealItemInDir(row.local_path).catch((reason) => setError(errorMessage(reason)));
   }, []);
 
-  /** Every row Push and Pull act on needs a pairing with this storage.
-   * Linking is configuration only, no provider content changed, so creating
-   * it as part of the verb the user pressed is safe — and it is why nothing
-   * on this page asks the user to link by hand. */
-  const ensureLink = useCallback(async (row: CatalogScopeRow): Promise<string> => {
-    if (row.link_id) return row.link_id;
+  /** Push and Pull need the scope's one pairing with this storage. Linking is
+   * configuration only, no provider content changed, so creating it as part
+   * of the verb the user pressed is safe — and it is why nothing on this page
+   * asks the user to link by hand. */
+  const ensureLink = useCallback(async (): Promise<void> => {
+    if (page?.link) return;
     if (!storageId) throw new Error("choose a storage first");
-    const result = await api.linkScopeResource({
-      scope_id: scope.scope.scope_id,
-      storage_id: storageId,
-      local_resource_id: row.repository_id ? null : row.resource_id ?? null,
-      repository_id: row.repository_id ?? null,
-    });
-    return result.link_id;
-  }, [api, scope.scope.scope_id, storageId]);
+    await api.linkScopeStorage(scope.scope.scope_id, storageId);
+  }, [api, page, scope.scope.scope_id, storageId]);
 
-  const openPush = () => {
-    setPushSelected(new Set(pushRows.map((row) => row.row_id)));
-    setPushAcks(new Set());
+  const openPush = async () => {
+    if (!storageId) return;
+    setBusy(true);
     setError(null);
     setFailures([]);
-    setMode({ kind: "push" });
+    try {
+      await ensureLink();
+      const plan = await api.preparePush(scope.scope.scope_id, storageId);
+      setPushPlan(plan);
+      setPushSelected(new Set(plan.rows
+        .filter((row) => row.row.selected_by_default)
+        .map((row) => row.row.resource_id)));
+      setPushAcks(new Set());
+      setMode({ kind: "push" });
+    } catch (reason) {
+      setError(storageFailureMessage(reason));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const runPush = async () => {
-    const selected = pushRows.filter((row) => pushSelected.has(row.row_id));
+    if (!pushPlan) return;
+    const selected = [...pushSelected];
     setBusy(true);
     setError(null);
     setFailures([]);
-    const failures: string[] = [];
-    let pushed = 0;
+    setProgress(`Pushing ${selected.length} ${selected.length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase()}…`);
     try {
-      for (const [index, row] of selected.entries()) {
-        setProgress(`Pushing ${row.display_name} (${index + 1} of ${selected.length})…`);
-        try {
-          const linkId = await ensureLink(row);
-          const plan = await api.preparePush(linkId);
-          if (!plan.row.selectable) {
-            throw new Error(plan.row.blocked_reason ?? "nothing safe to push");
-          }
-          const result = await api.publish(linkId, plan.plan_id, true, [...pushAcks]);
-          if (result.published) pushed += 1;
-        } catch (reason) {
-          failures.push(`${row.display_name}: ${storageFailureMessage(reason)}`);
-        }
-      }
+      const outcome = await api.applyPush(pushPlan.plan_id, selected, [...pushAcks]);
+      setMode({ kind: "list" });
+      setPushPlan(null);
+      await load();
+      const noun = selected.length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase();
+      notify(outcome.published
+        ? `Pushed ${selected.length} ${noun} to ${storageName ?? "storage"}.`
+        : outcome.message);
+    } catch (reason) {
+      setMode({ kind: "list" });
+      setPushPlan(null);
+      await load();
+      notify(`Push failed — nothing was published.`, "attention");
+      setFailures([storageFailureMessage(reason)]);
     } finally {
       setProgress(null);
       setBusy(false);
     }
-    setMode({ kind: "list" });
-    await load();
-    const noun = pushed === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase();
-    // A run where everything failed is not a success, whatever the count says.
-    if (failures.length > 0) {
-      notify(
-        `Pushed ${pushed} of ${selected.length} ${kind.plural.toLowerCase()} — ${failures.length} failed.`,
-        "attention",
-      );
-      setFailures(failures);
-      return;
-    }
-    notify(`Pushed ${pushed} ${noun} to ${storageName ?? "storage"}.`);
   };
 
-  /** Opening the Pull review plans every row it could act on. Rows the
-   * storage holds but this row has never paired with are linked first — the
-   * same "link for review" step this page has always taken, configuration
-   * only, no provider content changed. */
+  /** Opening the Pull review pins one plan over every stored resource. The
+   * scope pairs with the storage first when it never has — the same "link for
+   * review" step this page has always taken, configuration only, no provider
+   * content changed. */
   const openPull = async () => {
+    if (!storageId) return;
     setBusy(true);
     setError(null);
     setFailures([]);
-    setMode({ kind: "pull" });
-    const entries: PullEntry[] = [];
-    const blocked: Record<string, string> = {};
     try {
-      for (const [index, row] of pullRows.entries()) {
-        setProgress(`Reviewing ${row.display_name} (${index + 1} of ${pullRows.length})…`);
-        try {
-          const linkId = await ensureLink(row);
-          const plan = await api.preparePull(linkId, null);
-          entries.push({ row, linkId, plan });
-        } catch (reason) {
-          blocked[row.row_id] = storageFailureMessage(reason);
-        }
-      }
+      await ensureLink();
+      const plan = await api.preparePull(scope.scope.scope_id, storageId, null);
+      setPullPlan(plan);
+      setPullSelected(new Set(plan.items
+        .filter((item) => item.item.default_action_id)
+        .map((item) => item.item.resource_id)));
+      setPullChoice(Object.fromEntries(plan.items
+        .filter((item) => item.item.default_action_id)
+        .map((item) => [item.item.resource_id, item.item.default_action_id as string])));
+      setPullAcks(new Set());
+      setMode({ kind: "pull" });
+    } catch (reason) {
+      setError(storageFailureMessage(reason));
     } finally {
-      setProgress(null);
       setBusy(false);
     }
-    setPullEntries(entries);
-    setPullBlocked(blocked);
-    setPullSelected(new Set(entries
-      .filter((entry) => entry.plan.item.default_action_id)
-      .map((entry) => entry.row.row_id)));
-    setPullChoice(Object.fromEntries(entries
-      .filter((entry) => entry.plan.item.default_action_id)
-      .map((entry) => [entry.row.row_id, entry.plan.item.default_action_id as string])));
-    setPullAcks(new Set());
   };
 
   const runPull = async () => {
-    const selected = pullEntries.filter((entry) => pullSelected.has(entry.row.row_id));
+    if (!pullPlan) return;
+    const choices: Record<string, string> = {};
+    for (const resourceId of pullSelected) {
+      const actionId = pullChoice[resourceId];
+      if (actionId) choices[resourceId] = actionId;
+    }
     setBusy(true);
     setError(null);
     setFailures([]);
-    const failures: string[] = [];
-    let applied = 0;
-    let unaccepted = 0;
+    setProgress(`Pulling ${Object.keys(choices).length} ${Object.keys(choices).length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase()}…`);
     try {
-      for (const [index, entry] of selected.entries()) {
-        setProgress(`Pulling ${entry.row.display_name} (${index + 1} of ${selected.length})…`);
-        try {
-          const result = await api.applyPull(
-            entry.linkId,
-            entry.plan.plan_id,
-            pullChoice[entry.row.row_id] ?? null,
-            pullAcks.has(entry.row.row_id),
-          );
-          applied += 1;
-          if (!result.remote_accepted) unaccepted += 1;
-        } catch (reason) {
-          failures.push(`${entry.row.display_name}: ${storageFailureMessage(reason)}`);
-        }
+      const outcome = await api.applyPull(pullPlan.plan_id, choices, [...pullAcks]);
+      setMode({ kind: "list" });
+      setPullPlan(null);
+      await load();
+      const failed = outcome.results
+        .filter((result) => result.outcome === "failed" || result.outcome === "partial")
+        .map((result) => `${result.display_name}: ${result.message ?? result.outcome}`);
+      const applied = outcome.results
+        .filter((result) => result.outcome === "installed"
+          || result.outcome === "updated"
+          || result.outcome === "preserved_and_updated").length;
+      const noun = applied === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase();
+      if (failed.length > 0) {
+        notify(
+          `Pulled ${applied} of ${Object.keys(choices).length} ${kind.plural.toLowerCase()} — ${failed.length} failed.`,
+          "attention",
+        );
+        setFailures(failed);
+        return;
       }
+      notify(outcome.remote_accepted
+        ? `Pulled ${applied} ${noun} from ${storageName ?? "storage"}.`
+        : `Pulled ${applied} ${noun}. Pull did not advance the comparison base.`,
+        outcome.remote_accepted ? "ok" : "attention");
+    } catch (reason) {
+      setMode({ kind: "list" });
+      setPullPlan(null);
+      await load();
+      notify(`Pull failed — nothing was changed.`, "attention");
+      setFailures([storageFailureMessage(reason)]);
     } finally {
       setProgress(null);
       setBusy(false);
     }
-    setMode({ kind: "list" });
-    await load();
-    const noun = applied === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase();
-    if (failures.length > 0) {
-      notify(
-        `Pulled ${applied} of ${selected.length} ${kind.plural.toLowerCase()} — ${failures.length} failed.`,
-        "attention",
-      );
-      setFailures(failures);
-      return;
-    }
-    notify(unaccepted > 0
-      ? `Pulled ${applied} ${noun}. Pull did not advance the comparison base for ${unaccepted} of them.`
-      : `Pulled ${applied} ${noun} from ${storageName ?? "storage"}.`,
-      unaccepted > 0 ? "attention" : "ok");
   };
 
   const unlinkStorage = async () => {
-    if (!storageId) return;
-    const linked = rows.filter((row) => row.link_id && row.registration_id);
+    if (!storageId || !pageLink) return;
     const approved = await confirm(
-      `Unlink “${storageName}” from ${label}?\n\nPush and Pull stop for all ${linked.length} paired ${kind.plural.toLowerCase()}. Content already stored there and local content are left untouched, and you can link again later.`,
+      `Unlink “${storageName}” from ${label}?\n\nPush and Pull stop for these ${kind.plural.toLowerCase()}. Content already stored there and local content are left untouched, and you can link again later.`,
       { title: "Unlink storage" },
     );
     if (!approved) return;
     setBusy(true);
     setError(null);
     setFailures([]);
-    const failures: string[] = [];
     try {
-      for (const row of linked) {
-        try {
-          await api.unlink(row.registration_id!, row.link_id!, row.link_revision ?? 1);
-        } catch (reason) {
-          failures.push(`${row.display_name}: ${storageFailureMessage(reason)}`);
-        }
-      }
+      await api.unlinkScopeStorage(pageLink.link_id, pageLink.revision);
+      notify("Storage link removed. Local and stored content were left untouched.");
+    } catch (reason) {
+      setError(errorMessage(reason));
     } finally {
       setBusy(false);
     }
     await load();
-    if (failures.length > 0) {
-      notify(
-        `Unlinked ${linked.length - failures.length} of ${linked.length} pairings — ${failures.length} failed.`,
-        "attention",
-      );
-      setFailures(failures);
-      return;
-    }
-    notify("Storage links removed. Local and stored content were left untouched.");
   };
 
-  // ---- the per-resource detail behind a row -------------------------------
-
-  useEffect(() => {
-    inspectionEpochRef.current += 1;
-    setInspectingLinks(false);
-    setLinkInspections({});
-    if (mode.kind !== "detail") {
-      setDetail(null);
-      setRecovery([]);
-      return;
-    }
-    let cancelled = false;
-    void api.getResource(mode.registrationId).then((resource) => {
-      if (!cancelled) setDetail(resource);
-    }).catch((reason) => {
-      if (!cancelled) setError(errorMessage(reason));
-    });
-    // Anything a half-finished operation left behind is the resource's own
-    // news, so it is reported where the resource is.
-    void api.getStatus(mode.registrationId).then((status) => {
-      if (!cancelled) setRecovery(status.recovery_messages);
-    }).catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [api, mode]);
-
-  const inspectLinks = useCallback(async (registrationId: string) => {
-    const epoch = ++inspectionEpochRef.current;
-    setInspectingLinks(true);
-    setError(null);
-    setFailures([]);
-    try {
-      const inspections = await api.inspectLinks(registrationId);
-      if (epoch !== inspectionEpochRef.current) return;
-      setLinkInspections(Object.fromEntries(
-        inspections.map((inspection) => [inspection.link_id, inspection]),
-      ));
-    } catch (reason) {
-      if (epoch === inspectionEpochRef.current) setError(errorMessage(reason));
-    } finally {
-      if (epoch === inspectionEpochRef.current) setInspectingLinks(false);
-    }
-  }, [api]);
-
-  useEffect(() => {
-    if (!detail) return;
-    void inspectLinks(detail.registration.registration_id);
-  }, [detail, inspectLinks]);
-
-  const runFork = async (resource: CatalogResourceView) => {
+  const runFork = async (row: CatalogScopeRow) => {
+    if (!row.resource_id) return;
     setBusy(true);
     setError(null);
     setFailures([]);
     try {
-      const plan = await api.prepareFork(resource.registration.registration_id, forkName.trim());
-      const result = await api.applyFork(resource.registration.registration_id, plan.plan_id);
+      const plan = await api.prepareFork(scope.scope.scope_id, row.resource_id, forkName.trim());
+      const result = await api.applyFork(scope.scope.scope_id, plan.plan_id);
+      setForkFor(null);
       setForkName("");
       notify(result.message ?? `Created ${result.display_name}`);
-      await load();
-    } catch (reason) {
-      setError(errorMessage(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const unlinkOne = async (resource: CatalogResourceView, linkId: string, revision: number) => {
-    // Unlink sits beside Refresh, so a misclick must not tear down the
-    // pairing unannounced — the same contract project-scoped unlink keeps.
-    const name = resource.links.find((candidate) => candidate.link.link_id === linkId)?.storage_name ?? "this storage";
-    const approved = await confirm(
-      `Unlink “${name}” from “${resource.registration.display_name}”?\n\nPush and Pull will stop for this pairing. Content already stored there and local content will not be deleted, and you can link the storage again later.`,
-      { title: "Unlink storage" },
-    );
-    if (!approved) return;
-    setBusy(true);
-    setError(null);
-    setFailures([]);
-    try {
-      await api.unlink(resource.registration.registration_id, linkId, revision);
-      notify("Storage link removed. Local and remote content were left untouched.");
-      setMode({ kind: "list" });
-      await load();
-    } catch (reason) {
-      setError(errorMessage(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const removeResource = async (resource: CatalogResourceView) => {
-    const approved = await confirm(
-      `Remove the registration for “${resource.registration.display_name}”?\n\nThe Library stops tracking this resource. Provider content on disk is left untouched, and you can register it again later.`,
-      { title: "Remove registration" },
-    );
-    if (!approved) return;
-    setBusy(true);
-    setError(null);
-    setFailures([]);
-    try {
-      await api.remove(resource.registration.registration_id, resource.registration.revision);
-      notify("Registration removed. Provider content was left untouched.");
-      setMode({ kind: "list" });
       await load();
     } catch (reason) {
       setError(errorMessage(reason));
@@ -1035,8 +965,8 @@ export default function StorageCatalogPage({
               label: `Unlink from ${label}…`,
               icon: "link-off",
               danger: true,
-              disabled: !storageId || busy || !rows.some((row) => row.link_id),
-              disabledReason: storageId ? "Nothing here is paired with it yet" : undefined,
+              disabled: !storageId || busy || !pageLink,
+              disabledReason: storageId ? "This row is not linked to it yet" : undefined,
               title: "Stop syncing this pairing; content already in storage is kept",
               onSelect: () => void unlinkStorage(),
             },
@@ -1075,9 +1005,7 @@ export default function StorageCatalogPage({
       label,
       icon: kind.icon,
       title: `${label}\n${scope.profile.configured_home}`,
-      ariaLabel: mode.kind === "detail"
-        ? `Back to ${label}`
-        : `${label}. Catalog row menu`,
+      ariaLabel: `${label}. Catalog row menu`,
       menuLabel: "Catalog row",
       menuHeader: {
         label,
@@ -1085,8 +1013,7 @@ export default function StorageCatalogPage({
         detailIsPath: true,
         icon: kind.icon,
       },
-      onActivate: mode.kind === "detail" ? () => setMode({ kind: "list" }) : undefined,
-      menu: mode.kind === "detail" ? undefined : [
+      menu: [
         {
           items: [
             {
@@ -1095,6 +1022,19 @@ export default function StorageCatalogPage({
               icon: "refresh",
               disabled: busy || loading,
               onSelect: () => void load(),
+            },
+            {
+              id: "rename",
+              label: "Rename profile…",
+              icon: "edit",
+              disabled: busy,
+              title: `Renames “${profile.display_name}” for every Catalog row that uses this home`,
+              onSelect: () => {
+                setMode({ kind: "list" });
+                setProfileNameDraft(profile.display_name);
+                setRenameError(null);
+                setRenamingProfile(true);
+              },
             },
             {
               id: "remove",
@@ -1133,14 +1073,6 @@ export default function StorageCatalogPage({
       ],
     },
   ];
-  if (mode.kind === "detail" && detail) {
-    crumbs.push({
-      id: "resource",
-      label: detail.registration.display_name,
-      icon: "file",
-      title: `${providerLabel(detail.registration.provider)} · ${resourceKindLabel(detail)}`,
-    });
-  }
 
   const syncDisabled = busy || !storageId || loading;
   const syncDisabledReason = storageId
@@ -1151,6 +1083,9 @@ export default function StorageCatalogPage({
       crumbs={crumbs}
       overflow={appActions}
       overflowLabel="App actions"
+      openMenuRequest={openStorageMenuRequestId == null
+        ? undefined
+        : { menuId: "storage", requestId: openStorageMenuRequestId }}
       ariaLabel={`${label} path`}
       actions={(
         <>
@@ -1200,7 +1135,7 @@ export default function StorageCatalogPage({
               aria-expanded={mode.kind === "push"}
               disabled={syncDisabled || pushRows.length === 0}
               title={syncDisabledReason}
-              onClick={openPush}
+              onClick={() => void openPush()}
             >
               <Icon name="upload" size={14} />
               <span className="sync-path-sync-label">Push</span>
@@ -1232,13 +1167,28 @@ export default function StorageCatalogPage({
     </>
   );
 
+  /* Review cards read the same list rows the page drew; a plan row whose page
+     row vanished mid-review still renders from the plan's own facts. */
+  const rowForItem = (item: CatalogPullItem): CatalogScopeRow => rowByResource.get(item.resource_id) ?? {
+    row_id: `resource:${item.resource_id}`,
+    display_name: item.display_name,
+    resource_id: item.resource_id,
+    scope_label: item.scope_label ?? null,
+    state: null,
+    local_present: false,
+    remote_present: true,
+    warnings: [],
+  };
+
   // ---- Push review -------------------------------------------------------
 
-  if (mode.kind === "push") {
-    const warnings = pushRows
-      .filter((row) => pushSelected.has(row.row_id))
-      .flatMap((row) => row.warnings.map((warning) => ({ row, warning })));
-    const unacknowledged = warnings.some(({ warning }) => !pushAcks.has(warning.digest));
+  if (mode.kind === "push" && pushPlan) {
+    const reviewRows = pushPlan.rows.filter((row) => row.row.selectable);
+    const heldRows = pushPlan.rows.filter((row) => row.row.held_for_pull);
+    const warnings = reviewRows
+      .filter((row) => pushSelected.has(row.row.resource_id))
+      .flatMap((row) => row.row.warnings);
+    const unacknowledged = warnings.some((warning) => !pushAcks.has(warning.digest));
     return (
       <>
         {bar}
@@ -1248,12 +1198,12 @@ export default function StorageCatalogPage({
               <div className="sync-sync-review-title"><h2 id="catalog-push-title">Push review</h2></div>
               <SyncReviewSelectionBar
                 count={pushSelected.size}
-                total={pushRows.length}
+                total={reviewRows.length}
                 busy={busy}
-                recommendedTitle={`Use the recommended selection (${pushRows.length})`}
-                recommendedAriaLabel={`Use recommended selection (${pushRows.length})`}
-                recommendedDisabled={pushSelected.size === pushRows.length}
-                onRecommended={() => setPushSelected(new Set(pushRows.map((row) => row.row_id)))}
+                recommendedTitle={`Use the recommended selection (${reviewRows.length})`}
+                recommendedAriaLabel={`Use recommended selection (${reviewRows.length})`}
+                recommendedDisabled={pushSelected.size === reviewRows.length}
+                onRecommended={() => setPushSelected(new Set(reviewRows.map((row) => row.row.resource_id)))}
                 clearDisabled={pushSelected.size === 0}
                 onClear={() => setPushSelected(new Set())}
                 close={{ ariaLabel: "Close Push review", onClose: () => setMode({ kind: "list" }) }}
@@ -1262,15 +1212,15 @@ export default function StorageCatalogPage({
             <div className="sync-inline-action-content sync-sync-review-content">
               <div className="sync-inline-action-scroll sync-sync-review-scroll">
                 {notices}
-                {heldForPull.length > 0 && (
+                {heldRows.length > 0 && (
                   <div className="sync-review-banners">
                     <div className="sync-callout sync-sync-review-pull-holds" role="status">
                       <ThreadStatusIcon status="divergent" size={16} />
                       <span>
                         <strong>
-                          {`${heldForPull.length} ${heldForPull.length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase()} held for Pull`}
+                          {`${heldRows.length} ${heldRows.length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase()} held for Pull`}
                         </strong>
-                        {`${storageName ?? "Storage"} has newer versions of them, so their local changes cannot push yet. Selected ${kind.plural.toLowerCase()} still push.`}
+                        {`${storageName ?? "Storage"} has versions this Mac has not reviewed, so their local changes cannot push yet. Selected ${kind.plural.toLowerCase()} still push.`}
                       </span>
                       <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void openPull()}>
                         Open Pull review
@@ -1279,49 +1229,63 @@ export default function StorageCatalogPage({
                   </div>
                 )}
                 <div className="sync-history-thread-list">
-                  {pushRows.map((row) => (
-                    <ResourceCard
-                      key={row.row_id}
-                      row={row}
-                      storageName={storageName}
-                      provider={scope.scope.provider}
-                      providerTitle={markTitle}
-                      preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
-                      onReveal={() => reveal(row)}
-                      selectable
-                      selected={pushSelected.has(row.row_id)}
-                      onToggle={() => setPushSelected((current) => {
-                        const next = new Set(current);
-                        if (next.has(row.row_id)) next.delete(row.row_id);
-                        else next.add(row.row_id);
-                        return next;
-                      })}
-                      acks={pushSelected.has(row.row_id) && row.warnings.map((warning) => (
-                        /* Inside the card that raised it, as a row-sized
-                           callout: a warning collected at the foot of the
-                           list makes you count rows to find out who it is
-                           about. */
-                        <label key={warning.digest} className="catalog-card-ack">
-                          <span className="sync-sync-row-choice">
-                            <input
-                              type="checkbox"
-                              checked={pushAcks.has(warning.digest)}
-                              aria-label={`Reviewed: ${warning.message}`}
-                              onChange={(event) => setPushAcks((current) => {
-                                const next = new Set(current);
-                                if (event.target.checked) next.add(warning.digest);
-                                else next.delete(warning.digest);
-                                return next;
-                              })}
-                            />
-                          </span>
-                          <Icon name="alert-triangle" size={12} />
-                          <span>{`Reviewed this warning — ${warning.message}.`}</span>
-                        </label>
-                      ))}
-                    />
-                  ))}
-                  {pushRows.length === 0 && (
+                  {reviewRows.map((planRow) => {
+                    const resourceId = planRow.row.resource_id;
+                    const row = rowByResource.get(resourceId) ?? {
+                      row_id: `resource:${resourceId}`,
+                      display_name: planRow.row.display_name,
+                      resource_id: resourceId,
+                      scope_label: planRow.row.scope_label ?? null,
+                      state: null,
+                      local_present: true,
+                      remote_present: planRow.row.storage_content_sha256 != null,
+                      warnings: planRow.row.warnings,
+                    };
+                    return (
+                      <ResourceCard
+                        key={resourceId}
+                        row={row}
+                        storageName={storageName}
+                        storageRevision={storageRevision}
+                        provider={scope.scope.provider}
+                        providerTitle={markTitle}
+                        preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
+                        onReveal={() => reveal(row)}
+                        selectable
+                        selected={pushSelected.has(resourceId)}
+                        onToggle={() => setPushSelected((current) => {
+                          const next = new Set(current);
+                          if (next.has(resourceId)) next.delete(resourceId);
+                          else next.add(resourceId);
+                          return next;
+                        })}
+                        acks={pushSelected.has(resourceId) && planRow.row.warnings.map((warning) => (
+                          /* Inside the card that raised it, as a row-sized
+                             callout: a warning collected at the foot of the
+                             list makes you count rows to find out who it is
+                             about. */
+                          <label key={warning.digest} className="catalog-card-ack">
+                            <span className="sync-sync-row-choice">
+                              <input
+                                type="checkbox"
+                                checked={pushAcks.has(warning.digest)}
+                                aria-label={`Reviewed: ${warning.message}`}
+                                onChange={(event) => setPushAcks((current) => {
+                                  const next = new Set(current);
+                                  if (event.target.checked) next.add(warning.digest);
+                                  else next.delete(warning.digest);
+                                  return next;
+                                })}
+                              />
+                            </span>
+                            <Icon name="alert-triangle" size={12} />
+                            <span>{`Reviewed this warning — ${warning.message}.`}</span>
+                          </label>
+                        ))}
+                      />
+                    );
+                  })}
+                  {reviewRows.length === 0 && (
                     <div className="sync-pull-empty">
                       <Icon name="check-circle" size={16} />
                       <span>
@@ -1353,20 +1317,24 @@ export default function StorageCatalogPage({
 
   // ---- Pull review -------------------------------------------------------
 
-  if (mode.kind === "pull") {
-    const chosenLabel = (entry: PullEntry) => {
-      const actionId = pullChoice[entry.row.row_id];
-      const action = entry.plan.item.actions.find((candidate) => candidate.action_id === actionId);
+  if (mode.kind === "pull" && pullPlan) {
+    /* Rows already settled — in sync, or deliberately kept local — stay out
+       of the review; the review is the work, not the inventory. */
+    const reviewItems = pullPlan.items.filter((item) => item.item.disposition.kind !== "already_matching"
+      && item.item.disposition.kind !== "kept_local");
+    const chosenLabel = (item: (typeof reviewItems)[number]) => {
+      const actionId = pullChoice[item.item.resource_id];
+      const action = item.item.actions.find((candidate) => candidate.action_id === actionId);
       return action ? actionLabel(action) : "Skip";
     };
-    const needsAck = (entry: PullEntry) => {
-      const actionId = pullChoice[entry.row.row_id];
-      return entry.plan.item.actions
+    const needsAck = (item: (typeof reviewItems)[number]) => {
+      const actionId = pullChoice[item.item.resource_id];
+      return item.item.actions
         .find((candidate) => candidate.action_id === actionId)?.requires_destructive_approval ?? false;
     };
-    const claimed = pullEntries.filter((entry) => entry.plan.conflicting_claims.length > 0);
-    const blocked = pullEntries.some((entry) => pullSelected.has(entry.row.row_id)
-      && needsAck(entry) && !pullAcks.has(entry.row.row_id));
+    const claimed = reviewItems.filter((item) => item.conflicting_claims.length > 0);
+    const blocked = reviewItems.some((item) => pullSelected.has(item.item.resource_id)
+      && needsAck(item) && !pullAcks.has(item.item.resource_id));
     return (
       <>
         {bar}
@@ -1376,18 +1344,18 @@ export default function StorageCatalogPage({
               <div className="sync-sync-review-title"><h2 id="catalog-pull-title">Pull review</h2></div>
               <SyncReviewSelectionBar
                 count={pullSelected.size}
-                total={pullEntries.length}
+                total={reviewItems.length}
                 busy={busy}
-                recommendedTitle={`Use the recommended local actions (${pullEntries.length})`}
-                recommendedAriaLabel={`Use recommended selection (${pullEntries.length})`}
+                recommendedTitle={`Use the recommended local actions (${reviewItems.length})`}
+                recommendedAriaLabel={`Use recommended selection (${reviewItems.length})`}
                 recommendedDisabled={busy}
                 onRecommended={() => {
-                  setPullSelected(new Set(pullEntries
-                    .filter((entry) => entry.plan.item.default_action_id)
-                    .map((entry) => entry.row.row_id)));
-                  setPullChoice(Object.fromEntries(pullEntries
-                    .filter((entry) => entry.plan.item.default_action_id)
-                    .map((entry) => [entry.row.row_id, entry.plan.item.default_action_id as string])));
+                  setPullSelected(new Set(pullPlan.items
+                    .filter((item) => item.item.default_action_id)
+                    .map((item) => item.item.resource_id)));
+                  setPullChoice(Object.fromEntries(pullPlan.items
+                    .filter((item) => item.item.default_action_id)
+                    .map((item) => [item.item.resource_id, item.item.default_action_id as string])));
                   setPullAcks(new Set());
                 }}
                 clearDisabled={pullSelected.size === 0}
@@ -1402,12 +1370,12 @@ export default function StorageCatalogPage({
                     reviews place plan-derived facts — never a zone per row. */}
                 {claimed.length > 0 && (
                   <div className="sync-review-banners">
-                    {claimed.map((entry) => (
-                      <div key={entry.row.row_id} className="sync-callout warning" role="status">
+                    {claimed.map((item) => (
+                      <div key={item.item.resource_id} className="sync-callout warning" role="status">
                         <Icon name="alert-triangle" size={16} />
                         <span>
                           <strong>
-                            {`${entry.row.display_name} is claimed by ${entry.plan.conflicting_claims
+                            {`${item.item.display_name} is claimed by ${item.conflicting_claims
                               .map((claim) => storages.find((storage) => storage.id === claim.storage_id)?.name ?? claim.storage_id)
                               .join(", ")}`}
                           </strong>
@@ -1418,47 +1386,51 @@ export default function StorageCatalogPage({
                   </div>
                 )}
                 <div className="sync-history-thread-list" ref={pullListRef}>
-                  {pullEntries.map((entry) => {
-                    const included = pullSelected.has(entry.row.row_id);
-                    const expanded = openChoices === entry.row.row_id;
-                    const chosen = chosenLabel(entry);
+                  {reviewItems.map((item) => {
+                    const resourceId = item.item.resource_id;
+                    const row = rowForItem(item.item);
+                    const included = pullSelected.has(resourceId);
+                    const expanded = openChoices === resourceId;
+                    const chosen = chosenLabel(item);
+                    const executable = item.item.disposition.kind === "executable";
                     return (
                       <ResourceCard
-                        key={entry.row.row_id}
-                        row={entry.row}
+                        key={resourceId}
+                        row={row}
                         storageName={storageName}
+                        storageRevision={storageRevision}
                         provider={scope.scope.provider}
                         providerTitle={markTitle}
-                        preview={petKind ? entry.row.preview_png ?? remotePreviews[entry.row.row_id] ?? null : undefined}
-                        onReveal={() => reveal(entry.row)}
-                        selectable
+                        preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
+                        onReveal={() => reveal(row)}
+                        selectable={executable}
                         selected={included}
                         onToggle={() => setPullSelected((current) => {
                           const next = new Set(current);
-                          if (next.has(entry.row.row_id)) next.delete(entry.row.row_id);
-                          else next.add(entry.row.row_id);
+                          if (next.has(resourceId)) next.delete(resourceId);
+                          else next.add(resourceId);
                           return next;
                         })}
-                        action={included ? {
+                        action={executable && included ? {
                           chosen,
-                          options: entry.plan.item.actions.map((action) => ({
+                          options: item.item.actions.map((action) => ({
                             id: action.action_id,
                             label: actionLabel(action),
                           })),
                           expanded,
-                          destructive: needsAck(entry),
-                          onToggle: () => setOpenChoices(expanded ? null : entry.row.row_id),
+                          destructive: needsAck(item),
+                          onToggle: () => setOpenChoices(expanded ? null : resourceId),
                           onChoose: (actionId) => {
-                            setPullChoice((current) => ({ ...current, [entry.row.row_id]: actionId }));
+                            setPullChoice((current) => ({ ...current, [resourceId]: actionId }));
                             setPullAcks((current) => {
                               const next = new Set(current);
-                              next.delete(entry.row.row_id);
+                              next.delete(resourceId);
                               return next;
                             });
                             setOpenChoices(null);
                           },
                         } : undefined}
-                        acks={included && needsAck(entry) && (
+                        acks={included && needsAck(item) && (
                           /* Part of the card it belongs to, not the footer:
                              the footer says why the button is off, this says
                              which row turned it off. */
@@ -1466,29 +1438,24 @@ export default function StorageCatalogPage({
                             <span className="sync-sync-row-choice">
                               <input
                                 type="checkbox"
-                                checked={pullAcks.has(entry.row.row_id)}
-                                aria-label={`Approve overwriting ${entry.row.display_name}`}
+                                checked={pullAcks.has(resourceId)}
+                                aria-label={`Approve overwriting ${item.item.display_name}`}
                                 onChange={(event) => setPullAcks((current) => {
                                   const next = new Set(current);
-                                  if (event.target.checked) next.add(entry.row.row_id);
-                                  else next.delete(entry.row.row_id);
+                                  if (event.target.checked) next.add(resourceId);
+                                  else next.delete(resourceId);
                                   return next;
                                 })}
                               />
                             </span>
                             <Icon name="alert-triangle" size={12} />
-                            <span>{`I understand this replaces the current ${entry.row.display_name} on this Mac.`}</span>
+                            <span>{`I understand this replaces the current ${item.item.display_name} on this Mac.`}</span>
                           </label>
                         )}
                       />
                     );
                   })}
-                  {Object.entries(pullBlocked).map(([rowId, reason]) => (
-                    <div key={rowId} className="sync-callout warning" role="status">
-                      {`${rows.find((row) => row.row_id === rowId)?.display_name ?? rowId}: ${reason}`}
-                    </div>
-                  ))}
-                  {pullEntries.length === 0 && !busy && (
+                  {reviewItems.length === 0 && !busy && (
                     <div className="sync-pull-empty">
                       <Icon name="check-circle" size={16} />
                       <span>
@@ -1518,122 +1485,71 @@ export default function StorageCatalogPage({
     );
   }
 
-  // ---- the detail behind a row -------------------------------------------
-
-  if (mode.kind === "detail") {
-    const forkable = detail && detail.registration.resource_kind !== "plugin_install_intent";
-    const detailBusy = busy || inspectingLinks;
-    return (
-      <>
-        {bar}
-        <main className="sync-main sync-project-links-page catalog-category-page">
-          <section className="profile-links-section" aria-label={detail?.registration.display_name ?? "Resource"}>
-            {notices}
-            {recovery.map((message) => (
-              <div key={message} className="sync-callout warning" role="status">{message}</div>
-            ))}
-            {!detail ? (
-              <div className="profile-links-empty">Loading…</div>
-            ) : (
-              <>
-                {/* No heading: the trail's last crumb already names this
-                    resource, and carries the provider and kind in its own
-                    title. The bar owns the title on every screen. */}
-                {forkable && (
-                  <form
-                    className="catalog-inline-form catalog-fork-form"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      void runFork(detail);
-                    }}
-                  >
-                    <label>
-                      <span>Fork local resource</span>
-                      <input
-                        placeholder={`${detail.registration.display_name}-local-copy`}
-                        value={forkName}
-                        onChange={(event) => setForkName(event.target.value)}
-                      />
-                    </label>
-                    <button type="submit" className="btn btn-ghost" disabled={detailBusy || forkName.trim() === ""}>
-                      <Icon name="git-fork" size={13} /> Fork
-                    </button>
-                  </form>
-                )}
-                <div className="catalog-link-grid">
-                  {detail.links.map(({ link, storage_name: name }) => {
-                    const inspection = linkInspections[link.link_id];
-                    const state = inspection?.state;
-                    return (
-                      <article key={link.link_id} className="catalog-link-card">
-                        <div className="catalog-link-card-heading">
-                          <div>
-                            <h2>{name}</h2>
-                            <span className={`catalog-state-badge ${state ?? "loading"}`}>
-                              {state ? linkStateLabel(state) : "Checking…"}
-                            </span>
-                          </div>
-                          <button
-                            type="button"
-                            className="sync-history-icon-action"
-                            title="Refresh local and stored resource"
-                            aria-label={`Refresh ${name}`}
-                            disabled={detailBusy}
-                            onClick={() => void inspectLinks(detail.registration.registration_id)}
-                          >
-                            <Icon name="refresh" size={14} />
-                          </button>
-                        </div>
-                        {inspection?.blocker && <div className="sync-callout error">{inspection.blocker}</div>}
-                        <div className="catalog-link-meta">
-                          <span>{`Repository ${link.repository_id.slice(0, 20)}…`}</span>
-                          {inspection?.remote_revision != null && <span>{`Revision ${inspection.remote_revision}`}</span>}
-                          {!inspection?.local_present && <span>missing locally</span>}
-                        </div>
-                        <div className="catalog-link-actions">
-                          <button
-                            type="button"
-                            className="btn btn-ghost danger"
-                            disabled={detailBusy}
-                            onClick={() => void unlinkOne(detail, link.link_id, link.revision)}
-                          >
-                            Unlink
-                          </button>
-                        </div>
-                      </article>
-                    );
-                  })}
-                  {detail.links.length === 0 && (
-                    <div className="profile-links-empty">
-                      This resource has no storage links. Push adds it to the storage in the bar.
-                    </div>
-                  )}
-                </div>
-                {detail.links.length === 0 && (
-                  <button
-                    type="button"
-                    className="btn btn-ghost danger"
-                    disabled={detailBusy}
-                    onClick={() => void removeResource(detail)}
-                  >
-                    <Icon name="trash" size={13} /> Remove registration
-                  </button>
-                )}
-              </>
-            )}
-          </section>
-        </main>
-      </>
-    );
-  }
-
   // ---- the list ----------------------------------------------------------
 
   return (
     <>
       {bar}
       <main className="sync-main sync-project-links-page sync-git-info-page sync-history-page">
+        {renamingProfile && (
+          <form
+            className="sync-path-rename"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveProfileName();
+            }}
+          >
+            <label htmlFor="catalog-profile-rename-input">Profile name</label>
+            <input
+              id="catalog-profile-rename-input"
+              value={profileNameDraft}
+              onChange={(event) => setProfileNameDraft(event.target.value)}
+              aria-label="Profile name"
+              disabled={busy}
+              autoFocus
+            />
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={busy || !profileNameChanged}
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={busy}
+              onClick={() => {
+                setProfileNameDraft(profile.display_name);
+                setRenamingProfile(false);
+                setRenameError(null);
+              }}
+            >
+              Cancel
+            </button>
+            {profileFolderName && profileFolderName !== profileNameDraft.trim() && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={busy}
+                onClick={() => setProfileNameDraft(profileFolderName)}
+              >
+                Use folder name
+              </button>
+            )}
+            {renameError && (
+              <div className="sync-path-rename-error" role="alert">
+                <Icon name="alert-triangle" size={13} /> {renameError}
+              </div>
+            )}
+          </form>
+        )}
         {notices}
+        {/* Anything a half-finished operation left behind is this page's own
+            news now that no other screen hosts it. */}
+        {(page?.recovery ?? []).map((message) => (
+          <div key={message} className="sync-callout warning" role="status">{message}</div>
+        ))}
         {loading && !page ? (
           <div className="sync-history-state">{`Loading ${label}…`}</div>
         ) : error && !page ? (
@@ -1665,20 +1581,58 @@ export default function StorageCatalogPage({
               <h2><Icon name={kind.icon} size={14} />{kind.plural}</h2>
             </div>
             <div className="sync-history-thread-list">
-              {rows.map((row) => (
-                <ResourceCard
-                  key={row.row_id}
-                  row={row}
-                  storageName={storageName}
-                  provider={scope.scope.provider}
-                  providerTitle={markTitle}
-                  preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
-                  onReveal={() => reveal(row)}
-                  onOpen={row.registration_id
-                    ? () => setMode({ kind: "detail", registrationId: row.registration_id! })
-                    : undefined}
-                />
-              ))}
+              {rows.map((row) => {
+                const forkable = forkableKind && row.local_present && !!row.resource_id;
+                const forkOpen = forkable && forkFor === row.resource_id;
+                const kindPhrase = resourceKindPhrase(scope.scope.resource_kind, row.scope_label);
+                return (
+                  <ResourceCard
+                    key={row.row_id}
+                    row={row}
+                    storageName={storageName}
+                    storageRevision={storageRevision}
+                    provider={scope.scope.provider}
+                    providerTitle={markTitle}
+                    preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
+                    onReveal={() => reveal(row)}
+                    onFork={forkable ? () => {
+                      setForkName("");
+                      setForkFor(forkOpen ? null : row.resource_id!);
+                    } : undefined}
+                    forkTitle={`Fork ${row.display_name} — duplicate this ${kindPhrase} under a new name`}
+                    footer={forkOpen && (
+                      <form
+                        className="catalog-inline-form catalog-fork-form"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void runFork(row);
+                        }}
+                      >
+                        <label>
+                          <span>Fork local resource</span>
+                          <input
+                            placeholder={`${row.display_name}-local-copy`}
+                            value={forkName}
+                            onChange={(event) => setForkName(event.target.value)}
+                            autoFocus
+                          />
+                        </label>
+                        <button type="submit" className="btn btn-ghost" disabled={busy || forkName.trim() === ""}>
+                          <Icon name="git-fork" size={13} /> Fork
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          disabled={busy}
+                          onClick={() => setForkFor(null)}
+                        >
+                          Cancel
+                        </button>
+                      </form>
+                    )}
+                  />
+                );
+              })}
             </div>
           </section>
         )}

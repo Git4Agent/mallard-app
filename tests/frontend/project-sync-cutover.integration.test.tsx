@@ -361,7 +361,7 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /\.sync-app\s*\{[^}]*padding: var\(--retro-gutter\);[^}]*border: 0;[^}]*border-radius: 0;[^}]*background: var\(--retro-frame-gutter\);[^}]*box-shadow: none;/s);
   assert.match(retroCss, /\.sync-sidebar\s*\{[^}]*overflow: visible;[^}]*gap: var\(--retro-gutter\);[^}]*border: 0;[^}]*border-radius: 0;[^}]*background: var\(--retro-frame-gutter\);[^}]*box-shadow: none;/s);
   assert.match(retroCss, /\.sync-workspace\s*\{[^}]*overflow: visible;[^}]*border: 0;[^}]*border-radius: 0;[^}]*background: var\(--retro-frame-gutter\);[^}]*box-shadow: none;/s);
-  assert.match(retroCss, /\.sync-sidebar-head,\s*\.sidebar-project-pane,\s*\.sidebar-storage-pane,\s*\.sidebar-catalog-pane,\s*\.sync-sidebar-product-mark,\s*\.sync-titlebar,\s*\.sync-workspace > \.sync-main,\s*\.sync-log-drawer\.open\s*\{[^}]*border: 1px solid var\(--retro-frame-edge\);[^}]*border-radius: var\(--retro-panel-radius\);/s);
+  assert.match(retroCss, /\.sync-sidebar-head,\s*\.sidebar-project-pane,\s*\.sidebar-storage-pane,\s*\.sidebar-catalog-pane,\s*\.sync-sidebar-product-mark,\s*\.sync-titlebar,\s*\.sync-workspace > \.sync-backend-banner,\s*\.sync-workspace > \.sync-main,\s*\.sync-log-drawer\.open\s*\{[^}]*border: 1px solid var\(--retro-frame-edge\);[^}]*border-radius: var\(--retro-panel-radius\);/s);
   assert.match(sidebar, /className="sync-sidebar-head"/);
   assert.doesNotMatch(retroCss, /\.sync-(?:sidebar|workspace)::after/);
   assert.match(retroCss, /\.sync-sidebar-resizer\s*\{[^}]*width: 7px;[^}]*margin-right: -2px;[^}]*margin-left: -2px;[^}]*flex: 0 0 7px;[^}]*background: transparent;/s);

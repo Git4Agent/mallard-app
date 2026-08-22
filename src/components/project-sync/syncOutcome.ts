@@ -158,7 +158,7 @@ export function buildPullOutcome({
   completedResourceIds: ReadonlySet<string>;
   error?: string | null;
 }): SyncOutcome {
-  const titleByResource = new Map(items.map((item) => [item.resourceId, item.title]));
+  const itemByResource = new Map(items.map((item) => [item.resourceId, item]));
   const actionRowKey = (action: RestorePlan["conversation_actions"][number]): string =>
     action.source_resource_id
       ?? `${action.provider}:conversation:${action.thread_id ?? action.cloud_thread_id}`;
@@ -170,11 +170,14 @@ export function buildPullOutcome({
     actionRowKey(action),
     action.thread_id ?? action.cloud_thread_id,
   ]));
+  // A conversation names itself. "" means the stored thread has no name at
+  // all, which displayThreadTitle renders as "Untitled session" — the row does
+  // not invent one out of a truncated id, because line 2 already prints the
+  // whole identifier and a cloud id's first characters are pure namespace.
   const nameFor = (resourceId: string): string => {
-    const itemTitle = titleByResource.get(resourceId);
-    if (itemTitle && itemTitle !== "Conversation") return itemTitle;
-    const threadId = threadByResource.get(resourceId);
-    return threadId ? `Task ${threadId.slice(0, 8)}` : (itemTitle ?? resourceId);
+    const item = itemByResource.get(resourceId);
+    if (!item) return resourceId;
+    return item.threadTitle ?? item.title;
   };
 
   const preserved = result.preserved_threads ?? [];

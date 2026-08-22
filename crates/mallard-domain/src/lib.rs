@@ -3645,6 +3645,11 @@ pub struct ConversationReviewRow {
     pub blocked_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_id: Option<ActionId>,
+    /// The stored thread's own presentation title, when it has one. Never an
+    /// identity and never a fallback: absent means the row is genuinely
+    /// untitled, and the reviewer says so rather than naming it after an id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_title: Option<String>,
 }
 
 impl ConversationReviewRow {
@@ -3660,6 +3665,11 @@ impl ConversationReviewRow {
         }
         if let Some(reason) = &self.blocked_reason {
             validate_display_text("conversation review blocker", reason, false)?;
+        }
+        // Rejects Some("") too, which is what keeps "untitled" a single
+        // state on the wire: absent, never an empty string.
+        if let Some(title) = &self.display_title {
+            validate_display_text("conversation review title", title, false)?;
         }
         Ok(())
     }

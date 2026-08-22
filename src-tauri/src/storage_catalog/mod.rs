@@ -7,7 +7,7 @@
 //! roots; `adapters` speaks the native plugin CLIs; `skill_tree` and
 //! `codex_pet` validate and transform payload directories; `inventory`
 //! assembles the local view; `resource_engine` owns the independent remote
-//! repository protocol; `resource_planning` reconciles and pins per-resource
+//! repository protocol; `resource_planning` reconciles and pins scope-level
 //! plans; `apply` executes approved mutations; `service` is the non-Tauri
 //! application boundary shared by tests and `resource_commands`, the Tauri
 //! surface.

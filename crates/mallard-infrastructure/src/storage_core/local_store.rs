@@ -302,10 +302,24 @@ impl ObjectStore for LocalObjectStore {
             return Err(format!("object '{}' is not a regular no-follow file", key));
         }
         fs::remove_file(&path).map_err(|error| format!("delete object '{}': {}", key, error))?;
-        sync_directory(
-            path.parent()
-                .ok_or_else(|| format!("object '{}' has no parent", key))?,
-        )
+        // Empty parent directories go with their last object. The store's
+        // namespace is files; a husk directory left behind would make a
+        // cleared storage look uncleared.
+        let mut directory = path
+            .parent()
+            .ok_or_else(|| format!("object '{}' has no parent", key))?
+            .to_path_buf();
+        while directory != self.root && directory.starts_with(&self.root) {
+            if fs::remove_dir(&directory).is_err() {
+                // Still holds entries, or a concurrent writer recreated it.
+                break;
+            }
+            match directory.parent() {
+                Some(next) => directory = next.to_path_buf(),
+                None => break,
+            }
+        }
+        sync_directory(&directory)
     }
 
     fn list(
@@ -575,5 +589,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(page.keys, vec![repository_key]);
+    }
+
+    #[test]
+    fn deleting_the_last_object_removes_its_emptied_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("store");
+        let store = LocalObjectStore::open(&root).unwrap();
+        let deep = ObjectKey::parse(format!(
+            ".mallard/v1/library/library-{}/_objects/{}",
+            "a".repeat(32),
+            "b".repeat(64)
+        ))
+        .unwrap();
+        let sibling = ObjectKey::parse(format!(
+            ".mallard/v1/library/library-{}/_tag.json",
+            "c".repeat(32)
+        ))
+        .unwrap();
+        store.put_immutable(&deep, b"payload").unwrap();
+        store.put_immutable(&sibling, b"tag").unwrap();
+
+        // The emptied chain under the deleted object goes; the sibling
+        // repository and the shared parents above it stay.
+        store.delete(&deep).unwrap();
+        assert!(!root
+            .join(format!(".mallard/v1/library/library-{}", "a".repeat(32)))
+            .exists());
+        assert!(root
+            .join(format!(
+                ".mallard/v1/library/library-{}/_tag.json",
+                "c".repeat(32)
+            ))
+            .is_file());
+
+        // Deleting the last object leaves no husk anywhere below the store
+        // root — the root itself stays.
+        store.delete(&sibling).unwrap();
+        assert!(!root.join(".mallard/v1").exists());
+        assert!(root.exists());
     }
 }

@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::domain::{
     CatalogMaterializationsDocument, CatalogOperationsDocument, CatalogPlanId,
     CatalogPreservationsDocument, CatalogProfilesDocument, CatalogResourcePlanDocument,
-    CatalogResourcesDocument, CatalogScopesDocument,
+    CatalogScopeLinksDocument, CatalogScopesDocument,
 };
 
 const MAX_CATALOG_PROFILES_BYTES: u64 = 1024 * 1024;
@@ -28,7 +28,7 @@ const MAX_CATALOG_PLAN_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CATALOG_MATERIALIZATIONS_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CATALOG_PRESERVATIONS_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_CATALOG_OPERATIONS_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_CATALOG_RESOURCES_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_CATALOG_SCOPE_LINKS_BYTES: u64 = 16 * 1024 * 1024;
 
 /// One process-wide guard over catalog document read-modify-write, paired
 /// with an OS lock so a second Mallard process serializes too.
@@ -156,8 +156,8 @@ impl CatalogStateRepository {
         self.root.join("catalog_resource_profiles.json")
     }
 
-    fn resources_path(&self) -> PathBuf {
-        self.root.join("catalog_resources.json")
+    fn scope_links_path(&self) -> PathBuf {
+        self.root.join("catalog_scope_links.json")
     }
 
     fn scopes_path(&self) -> PathBuf {
@@ -307,26 +307,26 @@ impl CatalogStateRepository {
         Ok(value)
     }
 
-    pub fn load_resources(&self) -> Result<CatalogResourcesDocument, String> {
+    pub fn load_scope_links(&self) -> Result<CatalogScopeLinksDocument, String> {
         let _guard = self.guard()?;
-        let document: CatalogResourcesDocument = self.load_document(
-            &self.resources_path(),
-            MAX_CATALOG_RESOURCES_BYTES,
-            "catalog resources",
+        let document: CatalogScopeLinksDocument = self.load_document(
+            &self.scope_links_path(),
+            MAX_CATALOG_SCOPE_LINKS_BYTES,
+            "catalog scope links",
         )?;
         document.validate()?;
         Ok(document)
     }
 
-    pub fn mutate_resources<T>(
+    pub fn mutate_scope_links<T>(
         &self,
-        mutate: impl FnOnce(&mut CatalogResourcesDocument) -> Result<T, String>,
+        mutate: impl FnOnce(&mut CatalogScopeLinksDocument) -> Result<T, String>,
     ) -> Result<T, String> {
         let _guard = self.guard()?;
-        let mut document: CatalogResourcesDocument = self.load_document(
-            &self.resources_path(),
-            MAX_CATALOG_RESOURCES_BYTES,
-            "catalog resources",
+        let mut document: CatalogScopeLinksDocument = self.load_document(
+            &self.scope_links_path(),
+            MAX_CATALOG_SCOPE_LINKS_BYTES,
+            "catalog scope links",
         )?;
         document.validate()?;
         let value = mutate(&mut document)?;
@@ -334,9 +334,9 @@ impl CatalogStateRepository {
         document.validate()?;
         write_json_atomic(
             &self.root,
-            &self.resources_path(),
+            &self.scope_links_path(),
             &document,
-            MAX_CATALOG_RESOURCES_BYTES,
+            MAX_CATALOG_SCOPE_LINKS_BYTES,
         )?;
         Ok(value)
     }
@@ -553,14 +553,12 @@ impl CatalogStateRepository {
         storage_id: &mallard_domain::StorageId,
     ) -> Result<Option<String>, String> {
         if self
-            .load_resources()?
+            .load_scope_links()?
             .links
             .iter()
             .any(|link| &link.storage_id == storage_id)
         {
-            return Ok(Some(
-                "a Library resource link uses this storage".to_string(),
-            ));
+            return Ok(Some("a Library link uses this storage".to_string()));
         }
         if self.list_resource_plans()?.iter().any(|plan| match plan {
             CatalogResourcePlanDocument::Push(plan) => &plan.storage_id == storage_id,
@@ -601,18 +599,18 @@ impl CatalogStateRepository {
 
     /// Hold the catalog-wide lock while the caller clears the shared remote
     /// namespaces and project-sync metadata, then detach every Library record
-    /// for this destination. Registrations and links remain configured so a
-    /// later Push can repopulate the now-empty storage.
+    /// for this destination. Scope links remain configured so a later Push
+    /// can repopulate the now-empty storage.
     pub fn clear_storage_data<T>(
         &self,
         storage_id: &mallard_domain::StorageId,
         clear_remote_and_project_state: impl FnOnce() -> Result<T, String>,
     ) -> Result<(T, CatalogStorageDataClearResult), String> {
         let _guard = self.guard()?;
-        let mut resources: CatalogResourcesDocument = self.load_document(
-            &self.resources_path(),
-            MAX_CATALOG_RESOURCES_BYTES,
-            "catalog resources",
+        let mut scope_links: CatalogScopeLinksDocument = self.load_document(
+            &self.scope_links_path(),
+            MAX_CATALOG_SCOPE_LINKS_BYTES,
+            "catalog scope links",
         )?;
         let mut materializations: CatalogMaterializationsDocument = self.load_document(
             &self.materializations_path(),
@@ -629,7 +627,7 @@ impl CatalogStateRepository {
             MAX_CATALOG_OPERATIONS_BYTES,
             "catalog operations",
         )?;
-        resources.validate()?;
+        scope_links.validate()?;
         materializations.validate()?;
         preservations.validate()?;
         operations.validate()?;
@@ -658,14 +656,14 @@ impl CatalogStateRepository {
             .map_err(|_| "system clock is before Unix epoch".to_string())?
             .as_secs();
         let mut links_reset = 0_u64;
-        for link in resources
+        for link in scope_links
             .links
             .iter_mut()
             .filter(|link| &link.storage_id == storage_id)
         {
-            if link.accepted_head.is_some() || link.accepted_content_sha256.is_some() {
+            if link.accepted_head.is_some() || !link.accepted_resources.is_empty() {
                 link.accepted_head = None;
-                link.accepted_content_sha256 = None;
+                link.accepted_resources.clear();
                 link.revision = link.revision.saturating_add(1);
                 link.updated_at = link.updated_at.max(now);
                 links_reset = links_reset.saturating_add(1);
@@ -688,7 +686,7 @@ impl CatalogStateRepository {
         let terminal_operations_removed = (operation_count - operations.operations.len()) as u64;
 
         if links_reset > 0 {
-            resources.revision = resources.revision.saturating_add(1);
+            scope_links.revision = scope_links.revision.saturating_add(1);
         }
         if claims_removed > 0 {
             materializations.revision = materializations.revision.saturating_add(1);
@@ -699,7 +697,7 @@ impl CatalogStateRepository {
         if terminal_operations_removed > 0 {
             operations.revision = operations.revision.saturating_add(1);
         }
-        resources.validate()?;
+        scope_links.validate()?;
         materializations.validate()?;
         preservations.validate()?;
         operations.validate()?;
@@ -709,9 +707,9 @@ impl CatalogStateRepository {
         if links_reset > 0 {
             write_json_atomic(
                 &self.root,
-                &self.resources_path(),
-                &resources,
-                MAX_CATALOG_RESOURCES_BYTES,
+                &self.scope_links_path(),
+                &scope_links,
+                MAX_CATALOG_SCOPE_LINKS_BYTES,
             )?;
         }
         if claims_removed > 0 {
@@ -950,14 +948,14 @@ fn sync_directory(_directory: &Path) {}
 #[cfg(test)]
 mod tests {
     use super::super::domain::{
-        skill_resource_id, AgentSkillScope, CatalogCommitId, CatalogLinkId, CatalogPlanId,
-        CatalogProfilesDocument, CatalogRegistrationId, CatalogResourceKindTag,
-        CatalogResourceLink, CatalogResourceRegistration, CatalogResourceRepositoryId,
-        CatalogScope, CatalogScopeId, CatalogScopesDocument, LibraryHeadCoordinate,
-        LocalCatalogProfile, LocalCatalogProfileId, LocalCatalogTargetId, ProviderKey,
+        CatalogCommitId, CatalogLinkId, CatalogPlanId, CatalogProfilesDocument,
+        CatalogResourceKindTag, CatalogResourceRepositoryId, CatalogScope, CatalogScopeId,
+        CatalogScopeLink, CatalogScopesDocument, LibraryHeadCoordinate, LocalCatalogProfile,
+        LocalCatalogProfileId, ProviderKey,
     };
     use super::*;
     use mallard_domain::StorageId;
+    use std::collections::BTreeMap;
 
     fn repository(temp: &tempfile::TempDir) -> CatalogStateRepository {
         CatalogStateRepository::from_home_dir(temp.path()).unwrap()
@@ -1061,7 +1059,7 @@ mod tests {
             repo.load_profiles().unwrap(),
             CatalogProfilesDocument::default()
         );
-        assert!(repo.load_resources().unwrap().registrations.is_empty());
+        assert!(repo.load_scope_links().unwrap().links.is_empty());
         assert!(repo.root().join("catalog_profiles.json").exists());
         assert!(repo.root().join("storage_catalog.json").exists());
     }
@@ -1071,37 +1069,17 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("storage-a").unwrap();
-        let registration_id = CatalogRegistrationId::generate().unwrap();
-        let profile_id = LocalCatalogProfileId::generate().unwrap();
-        let resource_id = skill_resource_id(AgentSkillScope::CodexHome, "review", "review");
-        repo.mutate_resources(|document| {
-            document.registrations.push(CatalogResourceRegistration {
-                registration_id: registration_id.clone(),
-                provider: ProviderKey::Codex,
-                profile_id,
-                resource_kind: CatalogResourceKindTag::AgentSkill,
-                resource_id,
-                local_target: LocalCatalogTargetId::SkillDirectory {
-                    scope: AgentSkillScope::CodexHome,
-                    canonical_root: temp
-                        .path()
-                        .join("codex/skills")
-                        .to_string_lossy()
-                        .to_string(),
-                    install_directory: "review".to_string(),
-                },
-                display_name: "Review".to_string(),
-                revision: 1,
-                created_at: 1,
-                updated_at: 1,
-            });
-            document.links.push(CatalogResourceLink {
+        repo.mutate_scope_links(|document| {
+            document.links.push(CatalogScopeLink {
                 link_id: CatalogLinkId::generate().unwrap(),
-                registration_id,
+                scope_id: CatalogScopeId::generate().unwrap(),
                 storage_id: storage_id.clone(),
-                repository_id: CatalogResourceRepositoryId::generate().unwrap(),
+                repository_id: CatalogResourceRepositoryId::for_kind(
+                    ProviderKey::Codex,
+                    CatalogResourceKindTag::AgentSkill,
+                ),
                 accepted_head: None,
-                accepted_content_sha256: None,
+                accepted_resources: BTreeMap::new(),
                 revision: 1,
                 created_at: 1,
                 updated_at: 1,
@@ -1121,32 +1099,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("storage-a").unwrap();
-        let registration_id = CatalogRegistrationId::generate().unwrap();
-        let repository_id = CatalogResourceRepositoryId::generate().unwrap();
-        repo.mutate_resources(|document| {
-            document.registrations.push(CatalogResourceRegistration {
-                registration_id: registration_id.clone(),
-                provider: ProviderKey::Codex,
-                profile_id: LocalCatalogProfileId::generate().unwrap(),
-                resource_kind: CatalogResourceKindTag::AgentSkill,
-                resource_id: skill_resource_id(AgentSkillScope::CodexHome, "review", "review"),
-                local_target: LocalCatalogTargetId::SkillDirectory {
-                    scope: AgentSkillScope::CodexHome,
-                    canonical_root: temp
-                        .path()
-                        .join("codex/skills")
-                        .to_string_lossy()
-                        .to_string(),
-                    install_directory: "review".to_string(),
-                },
-                display_name: "Review".to_string(),
-                revision: 1,
-                created_at: 1,
-                updated_at: 1,
-            });
-            document.links.push(CatalogResourceLink {
+        let repository_id = CatalogResourceRepositoryId::for_kind(
+            ProviderKey::Codex,
+            CatalogResourceKindTag::AgentSkill,
+        );
+        repo.mutate_scope_links(|document| {
+            document.links.push(CatalogScopeLink {
                 link_id: CatalogLinkId::generate().unwrap(),
-                registration_id,
+                scope_id: CatalogScopeId::generate().unwrap(),
                 storage_id: storage_id.clone(),
                 repository_id: repository_id.clone(),
                 accepted_head: Some(LibraryHeadCoordinate {
@@ -1157,7 +1117,14 @@ mod tests {
                     manifest_size: 1,
                     storage_identity_sha256: "b".repeat(64),
                 }),
-                accepted_content_sha256: Some("c".repeat(64)),
+                accepted_resources: BTreeMap::from([(
+                    crate::storage_catalog::domain::skill_resource_id(
+                        crate::storage_catalog::domain::AgentSkillScope::CodexHome,
+                        "review",
+                        "review",
+                    ),
+                    "c".repeat(64),
+                )]),
                 revision: 1,
                 created_at: 1,
                 updated_at: 1,
@@ -1177,9 +1144,9 @@ mod tests {
         assert!(callback_called);
         assert_eq!(value, "cleared");
         assert_eq!(result.links_reset, 1);
-        let resources = repo.load_resources().unwrap();
-        assert_eq!(resources.links.len(), 1);
-        assert!(resources.links[0].accepted_head.is_none());
-        assert!(resources.links[0].accepted_content_sha256.is_none());
+        let links = repo.load_scope_links().unwrap();
+        assert_eq!(links.links.len(), 1);
+        assert!(links.links[0].accepted_head.is_none());
+        assert!(links.links[0].accepted_resources.is_empty());
     }
 }

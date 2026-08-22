@@ -286,6 +286,13 @@ export function reconcileAgentSetup(
   return { kind: "adopt", storage: candidates[0] };
 }
 
+/** What the guide row's agent slot is saying: the copy landed and the page is
+ *  listening, the CLI's storage was adopted, or the copy itself failed. */
+export type AgentSetupNotice =
+  | { kind: "listening" }
+  | { kind: "connected"; message: string }
+  | { kind: "error"; message: string };
+
 export type AgentSetupEditorAdoption = {
   editingStorage: LinkKey;
   storageDraft: StorageConfig;
@@ -505,7 +512,7 @@ export default function ProjectLinksWorkspace({
   const [storageDraft, setStorageDraft] = useState<StorageConfig | null>(null);
   const [storageBaseline, setStorageBaseline] = useState<StorageConfig | null>(null);
   const [storageConflict, setStorageConflict] = useState<"changed" | "removed" | null>(null);
-  const [agentCopyStatus, setAgentCopyStatus] = useState<string | null>(null);
+  const [agentNotice, setAgentNotice] = useState<AgentSetupNotice | null>(null);
   const [storageDetailsExpanded, setStorageDetailsExpanded] = useState(false);
   const [renamingStorageId, setRenamingStorageId] = useState<string | null>(null);
   const [storageNameDraft, setStorageNameDraft] = useState("");
@@ -679,7 +686,7 @@ export default function ProjectLinksWorkspace({
       setStorageDraft(null);
       setStorageBaseline(null);
       setStorageConflict(null);
-      setAgentCopyStatus(null);
+      setAgentNotice(null);
       setStorageDetailsExpanded(false);
       setRemoteBundles(null);
       setBundleError(null);
@@ -694,7 +701,7 @@ export default function ProjectLinksWorkspace({
       setStorageDraft(storage);
       setStorageBaseline(null);
       setStorageConflict(null);
-      setAgentCopyStatus(null);
+      setAgentNotice(null);
       setStorageDetailsExpanded(true);
       setRemoteBundles(null);
       setBundleError(null);
@@ -713,7 +720,7 @@ export default function ProjectLinksWorkspace({
       setStorageDraft({ ...storage });
       setStorageBaseline({ ...storage });
       setStorageConflict(null);
-      setAgentCopyStatus(null);
+      setAgentNotice(null);
       void loadStorageBundles(storage);
     }
     setStorageDetailsExpanded(storageEditorRequest.settingsExpanded);
@@ -728,7 +735,7 @@ export default function ProjectLinksWorkspace({
       setStorageDraft({ ...storage });
       setStorageBaseline({ ...storage });
       setStorageConflict(null);
-      setAgentCopyStatus(null);
+      setAgentNotice(null);
     }
 
     setStorageDetailsExpanded(true);
@@ -760,7 +767,7 @@ export default function ProjectLinksWorkspace({
     setStorageDetailsExpanded(adoption.storageDetailsExpanded);
     setRemoteBundles(null);
     setBundleError(null);
-    setAgentCopyStatus(adoption.status);
+    setAgentNotice({ kind: "connected", message: adoption.status });
     void loadStorageBundles(reconciliation.storage);
   }, [storages]);
 
@@ -818,7 +825,7 @@ export default function ProjectLinksWorkspace({
 
   const copyAgentSetupInstruction = async () => {
     if (!storageDraft || storageDraft.kind !== "s3") return;
-    setAgentCopyStatus(null);
+    setAgentNotice(null);
     try {
       const cliPath = await projectSyncApi.getMallardCliPath();
       const instruction = buildR2AgentSetupInstruction({
@@ -831,9 +838,9 @@ export default function ProjectLinksWorkspace({
         storages,
         storageDraft.id,
       );
-      setAgentCopyStatus("Agent setup instruction copied.");
+      setAgentNotice({ kind: "listening" });
     } catch (reason) {
-      setAgentCopyStatus(`Could not copy agent setup instructions: ${String(reason)}`);
+      setAgentNotice({ kind: "error", message: `Could not copy agent setup instructions: ${String(reason)}` });
     }
   };
 
@@ -1007,7 +1014,7 @@ export default function ProjectLinksWorkspace({
     const saveEditedStorage = () => run(`storage:${editedStorageConfig.id}`, async () => {
       const wasCreatingR2 = creatingStorage && storageDraft.kind === "s3";
       agentSetupMarkerRef.current = null;
-      setAgentCopyStatus(null);
+      setAgentNotice(null);
       const saved = await onSaveStorage(storageDraft, storageBaseline);
       if (saved === false) return;
       setStorageConflict(null);
@@ -1241,27 +1248,6 @@ export default function ProjectLinksWorkspace({
                       </button>
                     </div>
                   )}
-                  {creatingStorage && storageDraft.kind === "s3" && (
-                    <div className="sync-callout" role="status">
-                      <Icon name="terminal" size={14} />
-                      <span>Let a terminal coding agent connect R2 through Mallard’s packaged CLI.</span>
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        disabled={busy}
-                        onClick={() => void copyAgentSetupInstruction()}
-                      >
-                        Set up with an agent
-                      </button>
-                      {agentCopyStatus && <span>{agentCopyStatus}</span>}
-                    </div>
-                  )}
-                  {!creatingStorage && agentCopyStatus && (
-                    <div className="sync-callout" role="status">
-                      <Icon name="check-circle" size={14} />
-                      <span>{agentCopyStatus}</span>
-                    </div>
-                  )}
                   <StorageEditor
                     /* Identity, so every per-storage ref inside the editor —
                        the R2 jurisdiction, the S3 API URL draft and its
@@ -1272,12 +1258,39 @@ export default function ProjectLinksWorkspace({
                     storage={storageDraft}
                     disabled={busy || !!storageConflict}
                     onChange={(nextDraft) => {
+                      // An edit orphans the copied instruction, so the marker
+                      // dies — and with it the row's claim to be listening.
                       agentSetupMarkerRef.current = null;
+                      setAgentNotice((current) => (current?.kind === "listening" ? null : current));
                       setStorageDraft(nextDraft);
                     }}
                     secretStored={secretStored}
                     showNameField={creatingStorage}
                     showProgress={!creatingStorage}
+                    agentSlot={storageDraft.kind !== "s3" ? undefined
+                      : agentNotice?.kind === "listening" ? (
+                        <span className="sync-r2-guide-wait" role="status">
+                          <span className="status-loader" /> Paste into your agent — listening…
+                        </span>
+                      )
+                      : agentNotice?.kind === "connected" ? (
+                        <span className="sync-r2-guide-connected" role="status">
+                          <Icon name="check-circle" size={13} /> {agentNotice.message}
+                        </span>
+                      )
+                      : agentNotice?.kind === "error" ? (
+                        <span className="sync-r2-guide-error" role="alert">{agentNotice.message}</span>
+                      )
+                      : creatingStorage ? (
+                        <button
+                          type="button"
+                          className="btn sync-r2-guide-btn sync-r2-agent-cta"
+                          disabled={busy}
+                          onClick={() => void copyAgentSetupInstruction()}
+                        >
+                          <Icon name="terminal" size={13} /> Copy agent instruction
+                        </button>
+                      ) : undefined}
                     // A draft's create is the page's verb and lives in the
                     // commit bar below; a settled storage's save belongs to the
                     // drawer it commits.
@@ -1380,10 +1393,10 @@ export default function ProjectLinksWorkspace({
               <div className="profile-links-subtitle">Select a completed project to view its Codex history.</div>
             </div>
           </div>
-          {agentCopyStatus && (
-            <div className="sync-callout" role="status">
-              <Icon name="check-circle" size={14} />
-              <span>{agentCopyStatus}</span>
+          {agentNotice && agentNotice.kind !== "listening" && (
+            <div className={agentNotice.kind === "error" ? "sync-callout error" : "sync-callout"} role="status">
+              <Icon name={agentNotice.kind === "error" ? "alert-triangle" : "check-circle"} size={14} />
+              <span>{agentNotice.message}</span>
             </div>
           )}
         </section>
@@ -1927,10 +1940,10 @@ export default function ProjectLinksWorkspace({
           </div>
         )}
 
-        {agentCopyStatus && (
-          <div className="sync-callout" role="status">
-            <Icon name="check-circle" size={14} />
-            <span>{agentCopyStatus}</span>
+        {agentNotice && agentNotice.kind !== "listening" && (
+          <div className={agentNotice.kind === "error" ? "sync-callout error" : "sync-callout"} role="status">
+            <Icon name={agentNotice.kind === "error" ? "alert-triangle" : "check-circle"} size={14} />
+            <span>{agentNotice.message}</span>
           </div>
         )}
 

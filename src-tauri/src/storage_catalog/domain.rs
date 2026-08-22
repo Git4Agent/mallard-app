@@ -1,6 +1,6 @@
-//! Scope-rowed Library resource domain: portable schema-1 resource
-//! repositories, machine-local profiles and scopes, registrations and links,
-//! immutable Push/Pull/Fork plans, and their validation.
+//! Scope-rowed Library resource domain: portable schema-1 kind
+//! repositories with set manifests, machine-local profiles, scopes, and
+//! scope-storage links, immutable Push/Pull/Fork plans, and their validation.
 //!
 //! This module is deliberately independent of the project-sync domain. It
 //! imports only storage-neutral identifiers (`StorageId`) and shared digest
@@ -32,7 +32,7 @@ pub const MAX_CATALOG_PROFILES: usize = 64;
 // Every scope is a distinct (profile, kind) pair, so the ceiling is exactly
 // profiles times the four resource kinds.
 pub const MAX_CATALOG_SCOPES: usize = MAX_CATALOG_PROFILES * 4;
-pub const MAX_CATALOG_LINKS_PER_RESOURCE: usize = 128;
+pub const MAX_CATALOG_LINKS_PER_SCOPE: usize = 128;
 pub const MAX_CATALOG_CLAIMS: usize = 4_096;
 pub const MAX_CATALOG_WITNESSES: usize = 512;
 pub const MAX_CATALOG_OPERATIONS: usize = 256;
@@ -127,12 +127,6 @@ catalog_id!(
     32,
     "catalog resource repository id"
 );
-catalog_id!(
-    CatalogRegistrationId,
-    "catreg",
-    24,
-    "catalog registration id"
-);
 catalog_id!(CatalogLinkId, "catlink", 24, "catalog link id");
 catalog_id!(CatalogScopeId, "catscope", 24, "catalog scope id");
 catalog_id!(
@@ -167,14 +161,17 @@ impl CatalogOperationId {
 }
 
 impl CatalogResourceRepositoryId {
-    pub fn generate() -> Result<Self, String> {
-        Self::parse(format!("library-{}", random_hex(16)?))
-    }
-}
-
-impl CatalogRegistrationId {
-    pub fn generate() -> Result<Self, String> {
-        Self::parse(format!("catreg-{}", random_hex(12)?))
+    /// The one repository a (provider, kind) pair maps to, on every machine.
+    /// Deriving instead of minting is what makes two replicas that push
+    /// resources of the same kind converge on the same repository without
+    /// ever seeing each other first.
+    pub fn for_kind(provider: ProviderKey, kind: CatalogResourceKindTag) -> Self {
+        let digest = length_prefixed_digest(
+            b"mallard-catalog-kind-repository-v1",
+            &[provider.as_str().as_bytes(), kind.kind_token().as_bytes()],
+        );
+        Self::parse(format!("library-{}", &digest[..32]))
+            .expect("derived catalog repository ids are always valid")
     }
 }
 
@@ -883,16 +880,6 @@ impl CatalogResource {
         }
     }
 
-    /// The identity digest encoded in the stable resource ID. This is safe to
-    /// publish in a discovery tag and cannot reveal local paths.
-    pub fn identity_sha256(&self) -> String {
-        self.resource_id()
-            .as_str()
-            .strip_prefix("resource-")
-            .expect("validated resource IDs always have their prefix")
-            .to_string()
-    }
-
     /// Total portable payload bytes owned by this resource.
     pub fn payload_bytes(&self) -> u64 {
         match self {
@@ -1035,12 +1022,13 @@ pub fn derive_library_origin(
 }
 
 // ---------------------------------------------------------------------------
-// Per-resource Library repositories
+// Per-kind Library repositories
 // ---------------------------------------------------------------------------
 
-/// Immutable discovery metadata for one resource repository. It contains no
-/// local profile/path/storage identity and is never trusted in place of the
-/// verified head and manifest.
+/// Immutable discovery metadata for one kind repository. It freezes exactly
+/// the identity the repository id derives from — provider and kind — and it
+/// contains no local profile/path/storage identity. It is never trusted in
+/// place of the verified head and manifest.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryResourceTag {
@@ -1048,11 +1036,6 @@ pub struct LibraryResourceTag {
     pub repository_id: CatalogResourceRepositoryId,
     pub provider: ProviderKey,
     pub resource_kind: CatalogResourceKindTag,
-    pub resource_id: CatalogResourceId,
-    pub stable_identity_sha256: String,
-    pub display_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope_label: Option<String>,
     pub created_at: u64,
 }
 
@@ -1064,24 +1047,29 @@ impl LibraryResourceTag {
                 self.schema_version, CATALOG_SCHEMA
             ));
         }
-        validate_sha256("library tag stable identity", &self.stable_identity_sha256)?;
-        validate_display_text("library tag display name", &self.display_name, 256)?;
-        if let Some(scope) = &self.scope_label {
-            validate_display_text("library tag scope", scope, 128)?;
+        if !provider_owns_kind(self.provider, self.resource_kind) {
+            return Err("library tag pairs a provider with a kind it cannot host".to_string());
+        }
+        if self.repository_id
+            != CatalogResourceRepositoryId::for_kind(self.provider, self.resource_kind)
+        {
+            return Err(
+                "library repository id does not match its provider and kind derivation".to_string(),
+            );
         }
         if self.created_at == 0 {
             return Err("library tag requires a creation timestamp".to_string());
         }
-        let encoded_identity = self
-            .resource_id
-            .as_str()
-            .strip_prefix("resource-")
-            .expect("validated resource IDs always carry their prefix");
-        if encoded_identity != self.stable_identity_sha256 {
-            return Err("library tag resource identity digest is inconsistent".to_string());
-        }
         Ok(())
     }
+}
+
+/// One resource inside a kind repository's published set.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PublishedResourceEntry {
+    pub resource: CatalogResource,
+    pub updated_at: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1093,8 +1081,9 @@ pub struct LibraryResourceManifest {
     pub commit_id: CatalogCommitId,
     pub updated_at: u64,
     pub captured_with: CatalogCapturedWith,
+    /// The last publisher; per-entry origins are deliberately not tracked.
     pub published_by_origin: PortableCatalogOrigin,
-    pub resource: CatalogResource,
+    pub resources: BTreeMap<CatalogResourceId, PublishedResourceEntry>,
 }
 
 impl LibraryResourceManifest {
@@ -1110,13 +1099,46 @@ impl LibraryResourceManifest {
         }
         self.captured_with.validate()?;
         self.published_by_origin.validate()?;
-        self.resource.validate()?;
-        if self.resource.file_count() > MAX_CATALOG_FILES
-            || self.resource.payload_bytes() > MAX_REVISION_PAYLOAD_BYTES
-        {
-            return Err("library resource exceeds its revision limits".to_string());
+        if self.resources.len() > MAX_CATALOG_RESOURCES {
+            return Err(format!(
+                "library manifest exceeds the {} resource limit",
+                MAX_CATALOG_RESOURCES
+            ));
+        }
+        for (resource_id, entry) in &self.resources {
+            entry.resource.validate()?;
+            if resource_id != &entry.resource.resource_id() {
+                return Err("library manifest entry is keyed by a foreign resource id".to_string());
+            }
+            if entry.updated_at == 0 {
+                return Err("library manifest entry requires a timestamp".to_string());
+            }
+            // Every entry must belong to the repository's own derivation, so
+            // one manifest can never mix providers or kinds.
+            if CatalogResourceRepositoryId::for_kind(
+                entry.resource.provider(),
+                entry.resource.kind_tag(),
+            ) != self.repository_id
+            {
+                return Err(
+                    "library manifest entry does not belong to this kind repository".to_string(),
+                );
+            }
+            if entry.resource.file_count() > MAX_CATALOG_FILES
+                || entry.resource.payload_bytes() > MAX_REVISION_PAYLOAD_BYTES
+            {
+                return Err("a library resource exceeds its revision limits".to_string());
+            }
         }
         Ok(())
+    }
+
+    /// The published set as plain resources, the shape Pull execution reads.
+    pub fn resource_map(&self) -> BTreeMap<CatalogResourceId, CatalogResource> {
+        self.resources
+            .iter()
+            .map(|(resource_id, entry)| (resource_id.clone(), entry.resource.clone()))
+            .collect()
     }
 }
 
@@ -1188,7 +1210,7 @@ impl LibraryResourceCommit {
     }
 }
 
-/// Machine-local accepted coordinate for one registration/storage link.
+/// Machine-local accepted coordinate for one scope/storage link.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryHeadCoordinate {
@@ -1303,8 +1325,8 @@ impl CatalogProfilesDocument {
 
 /// One user-added Catalog menu row: every resource of one kind under one
 /// provider profile. Carries no display name — the label always derives from
-/// the kind plus the profile's current name — and no storage, because storage
-/// is chosen per resource link inside the row.
+/// the kind plus the profile's current name — and no storage, because the
+/// scope links to storages through `CatalogScopeLink` records.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogScope {
@@ -1333,13 +1355,6 @@ impl CatalogScope {
         }
         Ok(())
     }
-}
-
-/// Scope membership is a pure derivation over identity a registration already
-/// carries; a registration never stores a scope pointer, so links, plans, and
-/// claims are untouched by scope changes.
-pub fn scope_owns(scope: &CatalogScope, registration: &CatalogResourceRegistration) -> bool {
-    scope.profile_id == registration.profile_id && scope.resource_kind == registration.resource_kind
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1398,103 +1413,51 @@ impl CatalogScopesDocument {
 }
 
 // ---------------------------------------------------------------------------
-// Registrations and storage links
+// Scope-storage links
 // ---------------------------------------------------------------------------
 
+/// One scope's connection to one storage: the kind repository it reads, the
+/// continuity pin for that repository's head, and the per-resource accepted
+/// content bases the three-way comparison runs against.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct CatalogResourceRegistration {
-    pub registration_id: CatalogRegistrationId,
-    pub provider: ProviderKey,
-    pub profile_id: LocalCatalogProfileId,
-    pub resource_kind: CatalogResourceKindTag,
-    pub resource_id: CatalogResourceId,
-    pub local_target: LocalCatalogTargetId,
-    pub display_name: String,
-    pub revision: u64,
-    pub created_at: u64,
-    pub updated_at: u64,
-}
-
-impl CatalogResourceRegistration {
-    pub fn validate(&self) -> Result<(), String> {
-        self.local_target.validate()?;
-        validate_display_text("catalog resource display name", &self.display_name, 256)?;
-        if self.provider != self.local_target.provider() {
-            return Err(format!(
-                "catalog registration '{}' provider does not match its local target",
-                self.registration_id
-            ));
-        }
-        let target_kind_matches = matches!(
-            (self.resource_kind, &self.local_target),
-            (
-                CatalogResourceKindTag::AgentSkill,
-                LocalCatalogTargetId::SkillDirectory { .. }
-            ) | (
-                CatalogResourceKindTag::PluginInstallIntent,
-                LocalCatalogTargetId::Plugin { .. }
-            ) | (
-                CatalogResourceKindTag::CodexPetV1 | CatalogResourceKindTag::CodexPetV2,
-                LocalCatalogTargetId::PetDirectory { .. }
-            )
-        );
-        if !target_kind_matches {
-            return Err(format!(
-                "catalog registration '{}' kind does not match its local target",
-                self.registration_id
-            ));
-        }
-        if self.revision == 0 || self.created_at == 0 || self.created_at > self.updated_at {
-            return Err(format!(
-                "catalog registration '{}' has invalid revision or timestamps",
-                self.registration_id
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CatalogResourceLink {
+pub struct CatalogScopeLink {
     pub link_id: CatalogLinkId,
-    pub registration_id: CatalogRegistrationId,
+    pub scope_id: CatalogScopeId,
     pub storage_id: StorageId,
     pub repository_id: CatalogResourceRepositoryId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_head: Option<LibraryHeadCoordinate>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accepted_content_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub accepted_resources: BTreeMap<CatalogResourceId, String>,
     pub revision: u64,
     pub created_at: u64,
     pub updated_at: u64,
 }
 
-impl CatalogResourceLink {
+impl CatalogScopeLink {
     pub fn validate(&self) -> Result<(), String> {
-        match (&self.accepted_head, &self.accepted_content_sha256) {
-            (None, None) => {}
-            (Some(head), Some(content)) => {
-                head.validate()?;
-                validate_sha256("accepted catalog resource content", content)?;
-                if head.repository_id != self.repository_id {
-                    return Err(format!(
-                        "catalog link '{}' accepted a different repository",
-                        self.link_id
-                    ));
-                }
-            }
-            _ => {
+        if let Some(head) = &self.accepted_head {
+            head.validate()?;
+            if head.repository_id != self.repository_id {
                 return Err(format!(
-                    "catalog link '{}' must pair its accepted head and content digest",
+                    "catalog scope link '{}' accepted a different repository",
                     self.link_id
-                ))
+                ));
             }
+        }
+        if self.accepted_resources.len() > MAX_CATALOG_RESOURCES {
+            return Err(format!(
+                "catalog scope link '{}' exceeds the {} accepted-resource limit",
+                self.link_id, MAX_CATALOG_RESOURCES
+            ));
+        }
+        for content in self.accepted_resources.values() {
+            validate_sha256("accepted catalog resource content", content)?;
         }
         if self.revision == 0 || self.created_at == 0 || self.created_at > self.updated_at {
             return Err(format!(
-                "catalog link '{}' has invalid revision or timestamps",
+                "catalog scope link '{}' has invalid revision or timestamps",
                 self.link_id
             ));
         }
@@ -1504,122 +1467,72 @@ impl CatalogResourceLink {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct CatalogResourcesDocument {
+pub struct CatalogScopeLinksDocument {
     pub schema: u32,
     pub revision: u64,
     #[serde(default)]
-    pub registrations: Vec<CatalogResourceRegistration>,
-    #[serde(default)]
-    pub links: Vec<CatalogResourceLink>,
+    pub links: Vec<CatalogScopeLink>,
 }
 
-impl Default for CatalogResourcesDocument {
+impl Default for CatalogScopeLinksDocument {
     fn default() -> Self {
         Self {
             schema: CATALOG_SCHEMA,
             revision: 0,
-            registrations: Vec::new(),
             links: Vec::new(),
         }
     }
 }
 
-impl CatalogResourcesDocument {
+impl CatalogScopeLinksDocument {
     pub fn validate(&self) -> Result<(), String> {
         if self.schema != CATALOG_SCHEMA {
             return Err(format!(
-                "unsupported catalog resources schema {} (expected {})",
+                "unsupported catalog scope links schema {} (expected {})",
                 self.schema, CATALOG_SCHEMA
             ));
         }
-        if self.registrations.len() > MAX_CATALOG_RESOURCES
-            || self.links.len() > MAX_CATALOG_LINKS_PER_RESOURCE * MAX_CATALOG_RESOURCES
-        {
-            return Err("catalog registrations or links exceed their limits".to_string());
-        }
-        let mut registration_ids = BTreeSet::new();
-        let mut local_identities = BTreeSet::new();
-        for registration in &self.registrations {
-            registration.validate()?;
-            if !registration_ids.insert(registration.registration_id.clone()) {
-                return Err(format!(
-                    "duplicate catalog registration '{}'",
-                    registration.registration_id
-                ));
-            }
-            let identity = (
-                registration.profile_id.clone(),
-                registration.resource_kind,
-                registration.local_target.clone(),
-            );
-            if !local_identities.insert(identity) {
-                return Err(format!(
-                    "duplicate provider target for catalog registration '{}'",
-                    registration.registration_id
-                ));
-            }
+        if self.links.len() > MAX_CATALOG_SCOPES * MAX_CATALOG_LINKS_PER_SCOPE {
+            return Err("catalog scope links exceed their limit".to_string());
         }
         let mut link_ids = BTreeSet::new();
-        let mut link_coordinates = BTreeSet::new();
-        let mut repositories = BTreeSet::new();
-        let mut links_per_registration = BTreeMap::new();
+        let mut coordinates = BTreeSet::new();
         for link in &self.links {
             link.validate()?;
-            if !registration_ids.contains(&link.registration_id) {
-                return Err(format!(
-                    "catalog link '{}' references an unknown registration",
-                    link.link_id
-                ));
-            }
             if !link_ids.insert(link.link_id.clone()) {
-                return Err(format!("duplicate catalog link '{}'", link.link_id));
+                return Err(format!("duplicate catalog scope link '{}'", link.link_id));
             }
-            if !link_coordinates.insert((link.registration_id.clone(), link.storage_id.clone())) {
+            if !coordinates.insert((link.scope_id.clone(), link.storage_id.clone())) {
                 return Err(format!(
-                    "catalog registration '{}' already has a link on storage '{}'",
-                    link.registration_id, link.storage_id
-                ));
-            }
-            if !repositories.insert((link.storage_id.clone(), link.repository_id.clone())) {
-                return Err(format!(
-                    "catalog repository '{}' is linked more than once on storage '{}'",
-                    link.repository_id, link.storage_id
-                ));
-            }
-            let count = links_per_registration
-                .entry(link.registration_id.clone())
-                .or_insert(0_usize);
-            *count = count.saturating_add(1);
-            if *count > MAX_CATALOG_LINKS_PER_RESOURCE {
-                return Err(format!(
-                    "catalog registration '{}' exceeds the {} storage-link limit",
-                    link.registration_id, MAX_CATALOG_LINKS_PER_RESOURCE
+                    "catalog scope '{}' already has a link on storage '{}'",
+                    link.scope_id, link.storage_id
                 ));
             }
         }
         Ok(())
     }
 
-    pub fn registration(
-        &self,
-        registration_id: &CatalogRegistrationId,
-    ) -> Option<&CatalogResourceRegistration> {
-        self.registrations
-            .iter()
-            .find(|registration| &registration.registration_id == registration_id)
+    pub fn link(&self, link_id: &CatalogLinkId) -> Option<&CatalogScopeLink> {
+        self.links.iter().find(|link| &link.link_id == link_id)
     }
 
-    pub fn link(&self, link_id: &CatalogLinkId) -> Option<&CatalogResourceLink> {
-        self.links.iter().find(|link| &link.link_id == link_id)
+    pub fn link_for(
+        &self,
+        scope_id: &CatalogScopeId,
+        storage_id: &StorageId,
+    ) -> Option<&CatalogScopeLink> {
+        self.links
+            .iter()
+            .find(|link| &link.scope_id == scope_id && &link.storage_id == storage_id)
     }
 
     pub fn links_for<'a>(
         &'a self,
-        registration_id: &'a CatalogRegistrationId,
-    ) -> impl Iterator<Item = &'a CatalogResourceLink> + 'a {
+        scope_id: &'a CatalogScopeId,
+    ) -> impl Iterator<Item = &'a CatalogScopeLink> + 'a {
         self.links
             .iter()
-            .filter(move |link| &link.registration_id == registration_id)
+            .filter(move |link| &link.scope_id == scope_id)
     }
 }
 
@@ -1996,6 +1909,17 @@ pub enum CatalogResourceKindTag {
 }
 
 impl CatalogResourceKindTag {
+    /// Stable identity token for the kind-repository derivation. Pet tokens
+    /// reuse the format's own token so identities stay format-distinct.
+    pub fn kind_token(&self) -> &'static str {
+        match self {
+            CatalogResourceKindTag::AgentSkill => "agent_skill",
+            CatalogResourceKindTag::PluginInstallIntent => "plugin_install_intent",
+            CatalogResourceKindTag::CodexPetV1 => CodexPetFormat::V1.kind_token(),
+            CatalogResourceKindTag::CodexPetV2 => CodexPetFormat::V2.kind_token(),
+        }
+    }
+
     pub fn pet_format(&self) -> Option<CodexPetFormat> {
         match self {
             CatalogResourceKindTag::CodexPetV1 => Some(CodexPetFormat::V1),
@@ -2308,16 +2232,53 @@ pub enum CatalogForkSourceKind {
     CodexPetV2,
 }
 
-/// Immutable review for exactly one registration link and one remote
-/// resource repository.
+/// One row inside a scope Push review: the presentation row plus the exact
+/// captured resource the publish would upsert. Storage-only rows carry no
+/// resource and can never be selected.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct CatalogResourcePushPlan {
+pub struct CatalogScopePushRow {
+    pub row: CatalogPushRow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<CatalogResource>,
+}
+
+impl CatalogScopePushRow {
+    pub fn validate(&self) -> Result<(), String> {
+        match &self.resource {
+            Some(resource) => {
+                resource.validate()?;
+                if resource.resource_id() != self.row.resource_id
+                    || resource.kind_tag() != self.row.kind
+                    || resource.provider() != self.row.provider
+                {
+                    return Err("catalog Push row does not match its resource".to_string());
+                }
+                if self.row.local_content_sha256.as_deref() != Some(resource.content_sha256()) {
+                    return Err(
+                        "catalog Push row content pin does not match its capture".to_string()
+                    );
+                }
+            }
+            None => {
+                if self.row.selectable {
+                    return Err("a selectable catalog Push row must carry its resource".to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Immutable Push review for one scope link: one observed repository head and
+/// one row per resource on either side.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogScopePushPlan {
     pub schema_version: u32,
     pub plan_id: CatalogPlanId,
-    pub registration_id: CatalogRegistrationId,
+    pub scope_id: CatalogScopeId,
     pub link_id: CatalogLinkId,
-    pub registration_revision: u64,
     pub link_revision: u64,
     pub storage_id: StorageId,
     pub repository_id: CatalogResourceRepositoryId,
@@ -2326,115 +2287,107 @@ pub struct CatalogResourcePushPlan {
     pub skill_root_pins: Vec<CatalogSkillRootPin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_head: Option<LibraryHeadCoordinate>,
-    pub resource: CatalogResource,
-    pub row: CatalogPushRow,
+    pub rows: Vec<CatalogScopePushRow>,
     pub warning_digests: Vec<String>,
     pub created_at: u64,
     pub expires_at: u64,
 }
 
-impl CatalogResourcePushPlan {
+impl CatalogScopePushPlan {
     pub fn validate(&self) -> Result<(), String> {
         if self.schema_version != CATALOG_SCHEMA {
             return Err(format!(
-                "unsupported catalog resource Push schema {} (expected {})",
+                "unsupported catalog Push schema {} (expected {})",
                 self.schema_version, CATALOG_SCHEMA
             ));
         }
         validate_sha256(
-            "catalog resource Push storage identity",
+            "catalog Push storage identity",
             &self.storage_identity_sha256,
         )?;
         if let Some(head) = &self.observed_head {
             head.validate()?;
             if head.repository_id != self.repository_id {
-                return Err("catalog resource Push head belongs to another repository".to_string());
+                return Err("catalog Push head belongs to another repository".to_string());
             }
         }
-        self.resource.validate()?;
-        if self.resource.resource_id() != self.row.resource_id
-            || self.resource.kind_tag() != self.row.kind
-            || self.resource.provider() != self.row.provider
-        {
-            return Err("catalog resource Push row does not match its resource".to_string());
+        if self.rows.len() > MAX_CATALOG_RESOURCES {
+            return Err("catalog Push review exceeds its row limit".to_string());
         }
-        let warnings: BTreeSet<_> = self
-            .row
-            .warnings
-            .iter()
-            .map(|warning| &warning.digest)
-            .collect();
+        let mut resource_ids = BTreeSet::new();
+        let mut warnings = BTreeSet::new();
+        for row in &self.rows {
+            row.validate()?;
+            if !resource_ids.insert(row.row.resource_id.clone()) {
+                return Err("catalog Push review repeats a resource".to_string());
+            }
+            for warning in &row.row.warnings {
+                warnings.insert(&warning.digest);
+            }
+        }
         let warning_digests: BTreeSet<_> = self.warning_digests.iter().collect();
-        if warnings.len() != self.row.warnings.len()
-            || warning_digests.len() != self.warning_digests.len()
-            || warning_digests != warnings
-        {
-            return Err("catalog resource Push warning pins are inconsistent".to_string());
+        if warning_digests.len() != self.warning_digests.len() || warning_digests != warnings {
+            return Err("catalog Push warning pins are inconsistent".to_string());
         }
-        if self.registration_revision == 0
-            || self.link_revision == 0
-            || self.expires_at <= self.created_at
-        {
-            return Err("catalog resource Push has invalid revisions or lifetime".to_string());
+        if self.link_revision == 0 || self.expires_at <= self.created_at {
+            return Err("catalog Push has an invalid revision or lifetime".to_string());
         }
         Ok(())
     }
+
+    pub fn push_row(&self, resource_id: &CatalogResourceId) -> Option<&CatalogScopePushRow> {
+        self.rows
+            .iter()
+            .find(|row| &row.row.resource_id == resource_id)
+    }
 }
 
+/// One item inside a scope Pull review: the presentation item, the stored
+/// resource its actions would materialize, and its cross-storage claim pins.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct CatalogResourcePullPlan {
-    pub schema_version: u32,
-    pub plan_id: CatalogPlanId,
-    pub registration_id: CatalogRegistrationId,
-    pub link_id: CatalogLinkId,
-    pub registration_revision: u64,
-    pub link_revision: u64,
-    pub storage_id: StorageId,
-    pub repository_id: CatalogResourceRepositoryId,
-    pub storage_identity_sha256: String,
-    pub profile_pins: Vec<CatalogProfilePin>,
-    pub skill_root_pins: Vec<CatalogSkillRootPin>,
-    pub head: LibraryHeadCoordinate,
-    pub resource: CatalogResource,
+pub struct CatalogScopePullItem {
     pub item: CatalogPullItem,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<CatalogResource>,
+    #[serde(default)]
     pub conflicting_claims: Vec<CatalogClaimPin>,
-    pub created_at: u64,
-    pub expires_at: u64,
 }
 
-impl CatalogResourcePullPlan {
+impl CatalogScopePullItem {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != CATALOG_SCHEMA {
-            return Err(format!(
-                "unsupported catalog resource Pull schema {} (expected {})",
-                self.schema_version, CATALOG_SCHEMA
-            ));
-        }
-        validate_sha256(
-            "catalog resource Pull storage identity",
-            &self.storage_identity_sha256,
-        )?;
-        self.head.validate()?;
-        self.resource.validate()?;
         self.item.validate()?;
+        match &self.resource {
+            Some(resource) => {
+                resource.validate()?;
+                if resource.resource_id() != self.item.resource_id
+                    || resource.kind_tag() != self.item.kind
+                    || resource.provider() != self.item.provider
+                {
+                    return Err("catalog Pull item does not match its resource".to_string());
+                }
+                if self
+                    .item
+                    .actions
+                    .iter()
+                    .any(|action| action.incoming_content_sha256 != resource.content_sha256())
+                {
+                    return Err("catalog Pull action pins a different content digest".to_string());
+                }
+            }
+            None => {
+                if matches!(self.item.disposition, CatalogPullDisposition::Executable) {
+                    return Err(
+                        "an executable catalog Pull item must carry its resource".to_string()
+                    );
+                }
+            }
+        }
         if self.conflicting_claims.len() > MAX_CATALOG_CLAIMS {
             return Err(format!(
-                "catalog resource Pull claim pins exceed the {} entry limit",
+                "catalog Pull claim pins exceed the {} entry limit",
                 MAX_CATALOG_CLAIMS
             ));
-        }
-        let mut claiming_storages = BTreeSet::new();
-        for claim in &self.conflicting_claims {
-            claim.validate()?;
-            if claim.storage_id == self.storage_id {
-                return Err(
-                    "catalog resource Pull cannot conflict with its own storage".to_string()
-                );
-            }
-            if !claiming_storages.insert(&claim.storage_id) {
-                return Err("catalog resource Pull has duplicate claim pins".to_string());
-            }
         }
         if !self.conflicting_claims.is_empty()
             && self.item.actions.iter().any(|action| {
@@ -2445,19 +2398,6 @@ impl CatalogResourcePullPlan {
                 "a cross-storage conflict may offer only preservation, overwrite, or Skip"
                     .to_string(),
             );
-        }
-        if self.head.repository_id != self.repository_id
-            || self.resource.resource_id() != self.item.resource_id
-            || self.resource.kind_tag() != self.item.kind
-            || self.resource.provider() != self.item.provider
-        {
-            return Err("catalog resource Pull coordinates are inconsistent".to_string());
-        }
-        if self.registration_revision == 0
-            || self.link_revision == 0
-            || self.expires_at <= self.created_at
-        {
-            return Err("catalog resource Pull has invalid revisions or lifetime".to_string());
         }
         Ok(())
     }
@@ -2470,13 +2410,82 @@ impl CatalogResourcePullPlan {
     }
 }
 
+/// Immutable Pull review for one scope link: one mandatory repository head
+/// and one item per stored resource.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogScopePullPlan {
+    pub schema_version: u32,
+    pub plan_id: CatalogPlanId,
+    pub scope_id: CatalogScopeId,
+    pub link_id: CatalogLinkId,
+    pub link_revision: u64,
+    pub storage_id: StorageId,
+    pub repository_id: CatalogResourceRepositoryId,
+    pub storage_identity_sha256: String,
+    pub profile_pins: Vec<CatalogProfilePin>,
+    pub skill_root_pins: Vec<CatalogSkillRootPin>,
+    pub head: LibraryHeadCoordinate,
+    pub items: Vec<CatalogScopePullItem>,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+impl CatalogScopePullPlan {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != CATALOG_SCHEMA {
+            return Err(format!(
+                "unsupported catalog Pull schema {} (expected {})",
+                self.schema_version, CATALOG_SCHEMA
+            ));
+        }
+        validate_sha256(
+            "catalog Pull storage identity",
+            &self.storage_identity_sha256,
+        )?;
+        self.head.validate()?;
+        if self.head.repository_id != self.repository_id {
+            return Err("catalog Pull head belongs to another repository".to_string());
+        }
+        if self.items.len() > MAX_CATALOG_RESOURCES {
+            return Err("catalog Pull review exceeds its item limit".to_string());
+        }
+        let mut resource_ids = BTreeSet::new();
+        for item in &self.items {
+            item.validate()?;
+            if !resource_ids.insert(item.item.resource_id.clone()) {
+                return Err("catalog Pull review repeats a resource".to_string());
+            }
+            let mut claiming_storages = BTreeSet::new();
+            for claim in &item.conflicting_claims {
+                claim.validate()?;
+                if claim.storage_id == self.storage_id {
+                    return Err("catalog Pull cannot conflict with its own storage".to_string());
+                }
+                if !claiming_storages.insert(&claim.storage_id) {
+                    return Err("catalog Pull has duplicate claim pins".to_string());
+                }
+            }
+        }
+        if self.link_revision == 0 || self.expires_at <= self.created_at {
+            return Err("catalog Pull has an invalid revision or lifetime".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn pull_item(&self, resource_id: &CatalogResourceId) -> Option<&CatalogScopePullItem> {
+        self.items
+            .iter()
+            .find(|item| &item.item.resource_id == resource_id)
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogResourceForkPlan {
     pub schema_version: u32,
     pub plan_id: CatalogPlanId,
-    pub registration_id: CatalogRegistrationId,
-    pub registration_revision: u64,
+    pub scope_id: CatalogScopeId,
     pub profile_pins: Vec<CatalogProfilePin>,
     pub skill_root_pins: Vec<CatalogSkillRootPin>,
     pub source_kind: CatalogForkSourceKind,
@@ -2495,10 +2504,8 @@ pub struct CatalogResourceForkPlan {
 
 impl CatalogResourceForkPlan {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != CATALOG_SCHEMA || self.registration_revision == 0 {
-            return Err(
-                "invalid catalog resource Fork schema or registration revision".to_string(),
-            );
+        if self.schema_version != CATALOG_SCHEMA {
+            return Err("invalid catalog resource Fork schema".to_string());
         }
         self.source_target.validate()?;
         if matches!(self.source_target, LocalCatalogTargetId::Plugin { .. }) {
@@ -2519,8 +2526,8 @@ impl CatalogResourceForkPlan {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CatalogResourcePlanDocument {
-    Push(CatalogResourcePushPlan),
-    Pull(CatalogResourcePullPlan),
+    Push(CatalogScopePushPlan),
+    Pull(CatalogScopePullPlan),
     Fork(CatalogResourceForkPlan),
 }
 
@@ -2742,14 +2749,15 @@ mod tests {
     }
 
     #[test]
-    fn v1_and_v2_pets_use_separate_resource_manifests() {
+    fn v1_and_v2_pets_live_in_separate_kind_repositories() {
         let v1 = CatalogResource::CodexPetV1(pet_resource("duck", CodexPetFormat::V1));
         let v2 = CatalogResource::CodexPetV2(pet_resource("duck", CodexPetFormat::V2));
-        let repositories = [
-            CatalogResourceRepositoryId::generate().unwrap(),
-            CatalogResourceRepositoryId::generate().unwrap(),
-        ];
-        for (resource, repository_id) in [v1, v2].into_iter().zip(repositories) {
+        let v1_repository =
+            CatalogResourceRepositoryId::for_kind(ProviderKey::Codex, v1.kind_tag());
+        let v2_repository =
+            CatalogResourceRepositoryId::for_kind(ProviderKey::Codex, v2.kind_tag());
+        assert_ne!(v1_repository, v2_repository);
+        for (repository_id, resource) in [(v1_repository, v1), (v2_repository, v2)] {
             let manifest = LibraryResourceManifest {
                 schema_version: CATALOG_SCHEMA,
                 repository_id: repository_id.clone(),
@@ -2762,10 +2770,65 @@ mod tests {
                 },
                 published_by_origin: derive_library_origin("host", "replica", &repository_id)
                     .unwrap(),
-                resource,
+                resources: BTreeMap::from([(
+                    resource.resource_id(),
+                    PublishedResourceEntry {
+                        resource,
+                        updated_at: 10,
+                    },
+                )]),
             };
             manifest.validate().unwrap();
         }
+    }
+
+    #[test]
+    fn set_manifests_reject_foreign_keys_and_mixed_kinds() {
+        let repository_id = CatalogResourceRepositoryId::for_kind(
+            ProviderKey::Codex,
+            CatalogResourceKindTag::CodexPetV2,
+        );
+        let duck = CatalogResource::CodexPetV2(pet_resource("duck", CodexPetFormat::V2));
+        let manifest = |resources| LibraryResourceManifest {
+            schema_version: CATALOG_SCHEMA,
+            repository_id: repository_id.clone(),
+            revision: 1,
+            commit_id: CatalogCommitId::generate().unwrap(),
+            updated_at: 10,
+            captured_with: CatalogCapturedWith {
+                app: "mallard".to_string(),
+                version: "0.1.2".to_string(),
+            },
+            published_by_origin: derive_library_origin("host", "replica", &repository_id).unwrap(),
+            resources,
+        };
+
+        // An entry keyed by another resource's id is unrepresentable.
+        let foreign_key = manifest(BTreeMap::from([(
+            pet_resource_id(CodexPetFormat::V2, "other"),
+            PublishedResourceEntry {
+                resource: duck.clone(),
+                updated_at: 10,
+            },
+        )]));
+        assert!(foreign_key
+            .validate()
+            .unwrap_err()
+            .contains("foreign resource id"));
+
+        // A v1 pet cannot enter the v2 kind repository.
+        let stranger = CatalogResource::CodexPetV1(pet_resource("duck", CodexPetFormat::V1));
+        let mixed = manifest(BTreeMap::from([(
+            stranger.resource_id(),
+            PublishedResourceEntry {
+                resource: stranger,
+                updated_at: 10,
+            },
+        )]));
+        assert!(mixed
+            .validate()
+            .unwrap_err()
+            .contains("does not belong to this kind repository"));
     }
 
     #[test]
@@ -2863,26 +2926,6 @@ mod tests {
     }
 
     #[test]
-    fn registrations_reject_kind_target_mismatches() {
-        let registration = CatalogResourceRegistration {
-            registration_id: CatalogRegistrationId::generate().unwrap(),
-            provider: ProviderKey::Codex,
-            profile_id: LocalCatalogProfileId::generate().unwrap(),
-            resource_kind: CatalogResourceKindTag::AgentSkill,
-            resource_id: skill_resource_id(AgentSkillScope::CodexHome, "review", "review"),
-            local_target: LocalCatalogTargetId::PetDirectory {
-                canonical_home: "/tmp/codex".to_string(),
-                pet_id: "review".to_string(),
-            },
-            display_name: "Review".to_string(),
-            revision: 1,
-            created_at: 1,
-            updated_at: 1,
-        };
-        assert!(registration.validate().unwrap_err().contains("kind"));
-    }
-
-    #[test]
     fn pull_actions_pair_kinds_with_matching_targets() {
         let plugin_target = LocalCatalogTargetId::Plugin {
             provider: ProviderKey::Claude,
@@ -2904,37 +2947,120 @@ mod tests {
     }
 
     #[test]
-    fn v1_and_v2_registrations_are_distinct_resources_on_one_target() {
-        let profile_id = LocalCatalogProfileId::generate().unwrap();
-        let target = LocalCatalogTargetId::PetDirectory {
-            canonical_home: "/tmp/codex".to_string(),
-            pet_id: "duck".to_string(),
-        };
-        let registration = |format| CatalogResourceRegistration {
-            registration_id: CatalogRegistrationId::generate().unwrap(),
+    fn repository_ids_derive_from_provider_and_kind() {
+        let skills = CatalogResourceRepositoryId::for_kind(
+            ProviderKey::Codex,
+            CatalogResourceKindTag::AgentSkill,
+        );
+        // Deterministic on every machine, distinct per provider and per kind.
+        assert_eq!(
+            skills,
+            CatalogResourceRepositoryId::for_kind(
+                ProviderKey::Codex,
+                CatalogResourceKindTag::AgentSkill,
+            )
+        );
+        assert_ne!(
+            skills,
+            CatalogResourceRepositoryId::for_kind(
+                ProviderKey::Claude,
+                CatalogResourceKindTag::AgentSkill,
+            )
+        );
+        assert_ne!(
+            CatalogResourceRepositoryId::for_kind(
+                ProviderKey::Codex,
+                CatalogResourceKindTag::CodexPetV1,
+            ),
+            CatalogResourceRepositoryId::for_kind(
+                ProviderKey::Codex,
+                CatalogResourceKindTag::CodexPetV2,
+            )
+        );
+    }
+
+    #[test]
+    fn a_library_tag_must_match_its_kind_derivation() {
+        let tag = LibraryResourceTag {
+            schema_version: CATALOG_SCHEMA,
+            repository_id: CatalogResourceRepositoryId::for_kind(
+                ProviderKey::Codex,
+                CatalogResourceKindTag::AgentSkill,
+            ),
             provider: ProviderKey::Codex,
-            profile_id: profile_id.clone(),
-            resource_kind: match format {
-                CodexPetFormat::V1 => CatalogResourceKindTag::CodexPetV1,
-                CodexPetFormat::V2 => CatalogResourceKindTag::CodexPetV2,
-            },
-            resource_id: pet_resource_id(format, "duck"),
-            local_target: target.clone(),
-            display_name: format!("Duck {}", format.display_label()),
+            resource_kind: CatalogResourceKindTag::AgentSkill,
+            created_at: 1,
+        };
+        tag.validate().unwrap();
+
+        let mismatched = LibraryResourceTag {
+            resource_kind: CatalogResourceKindTag::CodexPetV1,
+            ..tag.clone()
+        };
+        assert!(mismatched
+            .validate()
+            .unwrap_err()
+            .contains("does not match its provider and kind derivation"));
+
+        let unhostable = LibraryResourceTag {
+            provider: ProviderKey::Claude,
+            resource_kind: CatalogResourceKindTag::CodexPetV1,
+            repository_id: CatalogResourceRepositoryId::for_kind(
+                ProviderKey::Claude,
+                CatalogResourceKindTag::AgentSkill,
+            ),
+            ..tag
+        };
+        assert!(unhostable.validate().unwrap_err().contains("cannot host"));
+    }
+
+    #[test]
+    fn a_scope_links_each_storage_at_most_once() {
+        let scope_id = CatalogScopeId::generate().unwrap();
+        let link = |storage: &str| CatalogScopeLink {
+            link_id: CatalogLinkId::generate().unwrap(),
+            scope_id: scope_id.clone(),
+            storage_id: StorageId::parse(storage).unwrap(),
+            repository_id: CatalogResourceRepositoryId::for_kind(
+                ProviderKey::Codex,
+                CatalogResourceKindTag::CodexPetV2,
+            ),
+            accepted_head: None,
+            accepted_resources: BTreeMap::new(),
             revision: 1,
             created_at: 1,
             updated_at: 1,
         };
-        let document = CatalogResourcesDocument {
+        let document = |links| CatalogScopeLinksDocument {
             schema: CATALOG_SCHEMA,
             revision: 1,
-            registrations: vec![
-                registration(CodexPetFormat::V1),
-                registration(CodexPetFormat::V2),
-            ],
-            links: Vec::new(),
+            links,
         };
-        document.validate().unwrap();
+        document(vec![link("storage-a"), link("storage-b")])
+            .validate()
+            .unwrap();
+        let error = document(vec![link("storage-a"), link("storage-a")])
+            .validate()
+            .unwrap_err();
+        assert!(error.contains("already has a link"), "{error}");
+
+        // An accepted head must belong to the link's own repository.
+        let mut crossed = link("storage-a");
+        crossed.accepted_head = Some(LibraryHeadCoordinate {
+            repository_id: CatalogResourceRepositoryId::for_kind(
+                ProviderKey::Codex,
+                CatalogResourceKindTag::AgentSkill,
+            ),
+            revision: 1,
+            commit_id: CatalogCommitId::generate().unwrap(),
+            manifest_sha256: sha(1),
+            manifest_size: 1,
+            storage_identity_sha256: sha(2),
+        });
+        assert!(crossed
+            .validate()
+            .unwrap_err()
+            .contains("accepted a different repository"));
     }
 
     #[test]
@@ -2942,8 +3068,7 @@ mod tests {
         let plan = CatalogResourceForkPlan {
             schema_version: CATALOG_SCHEMA,
             plan_id: CatalogPlanId::generate().unwrap(),
-            registration_id: CatalogRegistrationId::generate().unwrap(),
-            registration_revision: 1,
+            scope_id: CatalogScopeId::generate().unwrap(),
             profile_pins: Vec::new(),
             skill_root_pins: Vec::new(),
             source_kind: CatalogForkSourceKind::AgentSkill,
@@ -2976,7 +3101,10 @@ mod tests {
 
     #[test]
     fn library_origin_tokens_are_domain_separated() {
-        let repository_id = CatalogResourceRepositoryId::generate().unwrap();
+        let repository_id = CatalogResourceRepositoryId::for_kind(
+            ProviderKey::Codex,
+            CatalogResourceKindTag::AgentSkill,
+        );
         let origin = derive_library_origin("host", "replica", &repository_id).unwrap();
         origin.validate().unwrap();
         let other = derive_library_origin("host", "replica-2", &repository_id).unwrap();
@@ -3053,39 +3181,5 @@ mod tests {
         document(vec![first, pet_v1, pet_v2, other_profile])
             .validate()
             .unwrap();
-    }
-
-    #[test]
-    fn scope_ownership_derives_from_profile_and_kind() {
-        let scope = scope_row(ProviderKey::Codex, CatalogResourceKindTag::AgentSkill);
-        let registration = |profile_id: &LocalCatalogProfileId, kind| CatalogResourceRegistration {
-            registration_id: CatalogRegistrationId::generate().unwrap(),
-            provider: ProviderKey::Codex,
-            profile_id: profile_id.clone(),
-            resource_kind: kind,
-            resource_id: skill_resource_id(AgentSkillScope::CodexHome, "review", "review"),
-            local_target: LocalCatalogTargetId::SkillDirectory {
-                scope: AgentSkillScope::CodexHome,
-                canonical_root: "/tmp/codex/skills".to_string(),
-                install_directory: "review".to_string(),
-            },
-            display_name: "review".to_string(),
-            revision: 1,
-            created_at: 1,
-            updated_at: 1,
-        };
-        assert!(scope_owns(
-            &scope,
-            &registration(&scope.profile_id, CatalogResourceKindTag::AgentSkill)
-        ));
-        assert!(!scope_owns(
-            &scope,
-            &registration(&scope.profile_id, CatalogResourceKindTag::CodexPetV1)
-        ));
-        let other_profile = LocalCatalogProfileId::generate().unwrap();
-        assert!(!scope_owns(
-            &scope,
-            &registration(&other_profile, CatalogResourceKindTag::AgentSkill)
-        ));
     }
 }

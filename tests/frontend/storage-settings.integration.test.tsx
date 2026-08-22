@@ -341,12 +341,14 @@ test("cloud storage editor keeps a one-line guide and states each example once",
   );
 
   assert.match(html, /Cloudflare R2/);
-  // The four-part guide block is gone; one line carries the requirement, the
-  // doc link, and the only unrecoverable fact.
+  // The four-part guide block is gone; one line carries the requirement and
+  // its documentation link without repeating token-creation guidance.
   assert.match(html, /sync-r2-guide/);
   assert.match(html, /Object Read &amp; Write/);
+  assert.match(html, /sync-r2-token-help/);
+  assert.match(html, /aria-label="How to create an Object Read &amp; Write R2 token"/);
   assert.match(html, /Setup guide/);
-  assert.match(html, /Secret shown once/);
+  assert.doesNotMatch(html, /Secret shown once/i);
   assert.doesNotMatch(html, /Connect a Cloudflare R2 bucket/);
   assert.doesNotMatch(html, /Create an R2 bucket/);
   assert.match(html, /Bucket name/);

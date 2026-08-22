@@ -6665,6 +6665,11 @@ fn provider_thread_review(
                 blocker: pull.blocker,
                 blocked_reason: pull.blocked_reason.clone(),
                 action_id,
+                // The stored title only. Deliberately not `display_name` from
+                // above: that one tails off into the descriptor name and then
+                // the raw id, and a Claude descriptor's name IS the session
+                // UUID, so reusing it would print an id as a title.
+                display_title: thread.and_then(|thread| thread.display_title.clone()),
             });
         }
     }
@@ -24461,6 +24466,16 @@ mod tests {
         .unwrap();
         assert_eq!(review.pull_actions.len(), 2);
         assert_eq!(review.pull_review.len(), 3);
+        // The stored title rides the review row onto the plan. Without it the
+        // Pull banner has no name to print and falls back to naming a session
+        // after its id, which for a cloud id is the same constant every time.
+        assert!(
+            review
+                .pull_review
+                .iter()
+                .any(|row| row.display_title.as_deref() == Some("Thread test conversation")),
+            "a cloud-backed review row carries the stored thread's title"
+        );
         assert_eq!(
             bytes.prefetches.len(),
             1,
