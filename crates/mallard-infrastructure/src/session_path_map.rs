@@ -1,4 +1,4 @@
-//! In-cwd path encoder/decoder for the canonical Codex wire form.
+//! In-cwd path encoder/decoder for the canonical conversation wire forms.
 //!
 //! Cloud conversation artifacts store a machine-neutral encoding: every path
 //! occurrence under the **project working directory** — string values and
@@ -11,6 +11,12 @@
 //! adoption, and same-machine repair; the round-trip gates below are the
 //! only proof machinery — there is no escaping, and reserved-namespace
 //! collisions fail closed with a typed error naming the record.
+//!
+//! The record transforms are provider-neutral `serde_json::Value` walks.
+//! Codex composes them inside its standalone builder (record-level, with
+//! the in-band `__mallard_path_map__` declaration); Claude composes them
+//! through the line-level facades below (its wire is pure provider JSONL,
+//! declared out-of-band by the thread row's `wire_path_map` stamp).
 
 use crate::path_text_boundary::{boundary_valid, left_boundary_valid, valid_json_text};
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
@@ -138,7 +144,7 @@ struct EncodePattern {
 /// function of `(root, canonical alias, $HOME)` — nothing accumulates across
 /// pushes, so re-encoding old records always reproduces the accepted wire
 /// prefix byte-for-byte.
-pub struct CodexPathMapper {
+pub struct SessionPathMapper {
     root: String,
     encode_automaton: AhoCorasick,
     encode_patterns: Vec<EncodePattern>,
@@ -146,7 +152,7 @@ pub struct CodexPathMapper {
     decode_replacements: Vec<String>,
 }
 
-impl CodexPathMapper {
+impl SessionPathMapper {
     fn match_boundary_valid(
         input: &str,
         start: usize,
@@ -416,6 +422,11 @@ impl CodexPathMapper {
     /// the legal BTreeMap key re-sort a canonicalized key can cause.
     pub fn encode_record_gated(&self, record: &Value) -> Result<Value, String> {
         let encoded = self.encode_record(record)?;
+        self.gate_encoded(&encoded)?;
+        Ok(encoded.wire)
+    }
+
+    fn gate_encoded(&self, encoded: &EncodedRecord) -> Result<(), String> {
         if encoded.changed {
             let decoded = self.decode_record(&encoded.wire)?;
             if decoded != encoded.canonical_source {
@@ -426,7 +437,38 @@ impl CodexPathMapper {
                 );
             }
         }
-        Ok(encoded.wire)
+        Ok(())
+    }
+
+    /// Line-level push facade for pure-JSONL wire forms (Claude): parse one
+    /// transcript line, encode it under the span gate, and keep the original
+    /// bytes when nothing matched, so untouched lines ship byte-identical.
+    /// Unparseable input is a typed error — unreachable behind a Complete
+    /// analysis, defensive otherwise. Callers name the line ordinal.
+    pub fn encode_jsonl_line_gated(&self, line: &str) -> Result<String, String> {
+        let record: Value = serde_json::from_str(line).map_err(|_| {
+            "transcript line is not valid JSON and cannot be path-encoded".to_string()
+        })?;
+        let encoded = self.encode_record(&record)?;
+        if !encoded.changed {
+            return Ok(line.to_string());
+        }
+        self.gate_encoded(&encoded)?;
+        serde_json::to_string(&encoded.wire)
+            .map_err(|error| format!("serialize path-encoded record: {error}"))
+    }
+
+    /// Line-level pull facade: parse one wire line, prove the wire
+    /// self-check (`encode(decode(w)) == w` under this machine's
+    /// future-push pattern set — also the target-root collision detector),
+    /// then decode to this mapper's root. Returns the decoded `Value` so
+    /// the caller can restamp identity fields before serializing once.
+    pub fn decode_jsonl_line_verified(&self, line: &str) -> Result<Value, String> {
+        let record: Value = serde_json::from_str(line).map_err(|_| {
+            "wire transcript line is not valid JSON and cannot be path-decoded".to_string()
+        })?;
+        self.verify_wire_record(&record)?;
+        self.decode_record(&record)
     }
 
     /// Wire self-check (push over the complete emitted body, pull over the
@@ -501,12 +543,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn mapper() -> CodexPathMapper {
-        CodexPathMapper::new("/homeA/projact_alpha", None, Some("/homeA")).unwrap()
+    fn mapper() -> SessionPathMapper {
+        SessionPathMapper::new("/homeA/projact_alpha", None, Some("/homeA")).unwrap()
     }
 
-    fn target(root: &str) -> CodexPathMapper {
-        CodexPathMapper::new(root, None, Some("/homeB")).unwrap()
+    fn target(root: &str) -> SessionPathMapper {
+        SessionPathMapper::new(root, None, Some("/homeB")).unwrap()
     }
 
     #[test]
@@ -581,7 +623,7 @@ mod tests {
 
     #[test]
     fn boundary_rule_does_not_rewrite_a_project_name_prefix_sibling() {
-        let mapper = CodexPathMapper::new("/tmp/run/project1", None, None).unwrap();
+        let mapper = SessionPathMapper::new("/tmp/run/project1", None, None).unwrap();
         let record = json!({
             "inside": "/tmp/run/project1/file",
             "outside_underscore": "/tmp/run/project1_external/outside.txt",
@@ -683,7 +725,7 @@ mod tests {
     #[test]
     fn injectivity_pins_hold_on_hostile_targets() {
         // Space-containing source root onto an escape-free target.
-        let spaced = CodexPathMapper::new("/homeA/my project", None, Some("/homeA")).unwrap();
+        let spaced = SessionPathMapper::new("/homeA/my project", None, Some("/homeA")).unwrap();
         let record = json!({
             "uri": "file:///homeA/my%20project/doc.md",
             "raw": "/homeA/my project/doc.md",
@@ -713,7 +755,7 @@ mod tests {
         let wire = mapper
             .encode_record_gated(&json!("file:///homeA/projact_alpha/x"))
             .unwrap();
-        let spacey = CodexPathMapper::new("/homeB/my stuff", None, Some("/homeB")).unwrap();
+        let spacey = SessionPathMapper::new("/homeB/my stuff", None, Some("/homeB")).unwrap();
         assert_eq!(
             spacey.decode_record(&wire).unwrap(),
             json!("file:///homeB/my%20stuff/x")
@@ -725,7 +767,7 @@ mod tests {
         let wire = mapper
             .encode_record_gated(&json!("~/projact_alpha/x"))
             .unwrap();
-        let outside = CodexPathMapper::new("/srv/checkout", None, Some("/homeB")).unwrap();
+        let outside = SessionPathMapper::new("/srv/checkout", None, Some("/homeB")).unwrap();
         assert_eq!(
             outside.decode_record(&wire).unwrap(),
             json!("/srv/checkout/x")
@@ -736,7 +778,7 @@ mod tests {
     #[test]
     fn canonical_alias_spellings_collapse_to_one_token() {
         let mapper =
-            CodexPathMapper::new("/var/folders/proj", Some("/private/var/folders/proj"), None)
+            SessionPathMapper::new("/var/folders/proj", Some("/private/var/folders/proj"), None)
                 .unwrap();
         let record = json!(["/var/folders/proj/a", "/private/var/folders/proj/b"]);
         let wire = mapper.encode_record_gated(&record).unwrap();
@@ -780,7 +822,7 @@ mod tests {
 
     #[test]
     fn root_followed_by_root_shaped_suffix_tokenizes_once() {
-        let mapper = CodexPathMapper::new("/a/proj", None, None).unwrap();
+        let mapper = SessionPathMapper::new("/a/proj", None, None).unwrap();
         // The suffix repeats the root's own spelling; the boundary rule
         // (preceding byte 'j' is a word byte) keeps it a suffix.
         let wire = mapper
@@ -831,6 +873,70 @@ mod tests {
         let error = validate_path_map_marker(&json!({"codec": "mallard.pathmap.v9"})).unwrap_err();
         assert!(error.contains("update Mallard"), "{error}");
         assert!(validate_path_map_marker(&json!({})).is_err());
+    }
+
+    #[test]
+    fn jsonl_line_facades_round_trip_and_keep_unmatched_lines_byte_identical() {
+        let encoder = mapper();
+        // Claude-shaped record: structural cwd in a subdir, tool input path,
+        // tilde and URI spellings in content — all one line.
+        let line = concat!(
+            "{\"type\":\"user\",\"uuid\":\"u-1\",\"parentUuid\":null,",
+            "\"sessionId\":\"s-1\",\"cwd\":\"/homeA/projact_alpha/frontend\",",
+            "\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_use\",",
+            "\"input\":{\"file_path\":\"/homeA/projact_alpha/readme\"},",
+            "\"text\":\"see ~/projact_alpha/x and file:///homeA/projact_alpha/y\"}]}}"
+        );
+        let wire = encoder.encode_jsonl_line_gated(line).unwrap();
+        assert!(!wire.contains("/homeA/projact_alpha"));
+        assert!(!wire.contains("~/projact_alpha"));
+        assert!(wire.contains("\"cwd\":\"/__mallard_root__/frontend\""));
+        assert!(wire.contains("\"file_path\":\"/__mallard_root__/readme\""));
+        assert!(wire.contains("file:///__mallard_root__/y"));
+
+        let puller = target("/homeB/projact_beta");
+        let decoded = puller.decode_jsonl_line_verified(&wire).unwrap();
+        // The subdir suffix survives the hop — the structural cwd is no
+        // longer flattened to the bare destination root.
+        assert_eq!(decoded["cwd"], json!("/homeB/projact_beta/frontend"));
+        assert_eq!(
+            decoded["message"]["content"][0]["input"]["file_path"],
+            json!("/homeB/projact_beta/readme")
+        );
+
+        // A line with no in-root occurrence (foreign cwd included) passes
+        // through byte-identical: no parse-and-reserialize churn.
+        let foreign = "{\"type\":\"user\",\"uuid\":\"u-2\",\"cwd\":\"/other/place\",\"z\":1}";
+        assert_eq!(encoder.encode_jsonl_line_gated(foreign).unwrap(), foreign);
+        assert_eq!(
+            puller.decode_jsonl_line_verified(foreign).unwrap(),
+            serde_json::from_str::<Value>(foreign).unwrap()
+        );
+    }
+
+    #[test]
+    fn jsonl_line_facades_fail_typed_on_malformed_and_reserved_input() {
+        let encoder = mapper();
+        assert!(encoder
+            .encode_jsonl_line_gated("{not json}")
+            .unwrap_err()
+            .contains("not valid JSON"));
+        assert!(target("/homeB/projact_beta")
+            .decode_jsonl_line_verified("{not json}")
+            .unwrap_err()
+            .contains("not valid JSON"));
+        let reserved = "{\"text\":\"token is /__mallard_root__/x\"}";
+        assert!(encoder
+            .encode_jsonl_line_gated(reserved)
+            .unwrap_err()
+            .contains("reserved wire token"));
+        // The decode facade runs the collision detector: wire content
+        // holding the destination root verbatim fails closed.
+        let colliding = "{\"other\":\"/b/project/x\",\"mine\":\"/__mallard_root__/y\"}";
+        assert!(target("/b/project")
+            .decode_jsonl_line_verified(colliding)
+            .unwrap_err()
+            .contains("round-trip gate"));
     }
 
     #[test]

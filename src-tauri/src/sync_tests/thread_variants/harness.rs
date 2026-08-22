@@ -276,6 +276,9 @@ pub fn publish_request(
             // The real binary stamp: harness rows flow through the real
             // pull gates, which require fingerprint equality.
             wire_redaction: Some(crate::project_sync::credential_redaction::shared().stamp()),
+            // Codex declares its path map in-band; the out-of-band stamp is
+            // claude-only and forbidden here.
+            wire_path_map: None,
             forked_from: spec.forked_from.clone(),
             preserved: spec.preserved.clone(),
             source_thread_id: Some(spec.source_thread_id.clone()),

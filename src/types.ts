@@ -1175,7 +1175,8 @@ export type ConversationBlocker =
   | "ambiguous_binding"
   | "missing_binding"
   | "busy"
-  | "redaction_ruleset_mismatch";
+  | "redaction_ruleset_mismatch"
+  | "path_map_codec_mismatch";
 
 export interface ThreadSyncDecision {
   action: ConversationReviewAction;

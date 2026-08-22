@@ -16,7 +16,6 @@ use super::codex_app_refresh::{
 };
 use super::codex_history_graph;
 use super::codex_history_graph::CodexSeededRoot;
-use super::codex_path_map::{validate_pathmap_root, CodexPathMapper};
 use super::codex_rollout::analyze_codex_rollout_structure;
 use super::codex_standalone_builder::{
     build_standalone_codex_root, StandaloneBuildMode, StandaloneConversationArtifact,
@@ -86,6 +85,7 @@ use super::session_detail::{
     self, ProjectSessionDetail, ProjectSessionTimelinePage, ProjectSessionTimelineRequest,
     SessionDetailError, SessionDetailErrorCode,
 };
+use super::session_path_map::{validate_pathmap_root, SessionPathMapper};
 use super::storage_core::{
     clear_managed_storage_data, ConfiguredObjectStore, ManagedStorageClearResult, VerifiedBody,
 };
@@ -5049,6 +5049,8 @@ fn observe_claude_local(
     checkpoint: Option<&ConversationCheckpoint>,
     layout: Option<&RootTailLayout>,
     adoption_probe: Option<&PortableConversationTail>,
+    project_root: &str,
+    canonical_project_root: &str,
 ) -> Result<ProviderLocalObservation, String> {
     let invalid = || ProviderLocalObservation {
         observation: LocalTailObservation {
@@ -5204,13 +5206,31 @@ fn observe_claude_local(
         return Ok(invalid());
     }
     let verified_acceptance = adoption_probe.and_then(|probe| {
-        // The probe folds redacted wire bytes: redact the analyzed local
-        // slice under the same pure encoder the push uses, re-analyze, and
-        // compare wire against wire. Any failure leaves the pair unproven —
-        // adoption is a fast path, never a correctness requirement.
+        // The probe folds the published wire form — `redact(pathenc(x))` —
+        // so the analyzed local slice runs the same pure composition the
+        // push uses before the wire-vs-wire comparison. Any failure leaves
+        // the pair unproven — adoption is a fast path, never a correctness
+        // requirement.
+        let mapper = SessionPathMapper::new(
+            project_root,
+            (canonical_project_root != project_root).then_some(canonical_project_root),
+            std::env::var("HOME").ok().as_deref(),
+        )
+        .ok()?;
         let text = std::str::from_utf8(&bytes[..consumed]).ok()?;
+        let mut encoded = String::with_capacity(text.len());
+        for (index, line) in text.split('\n').enumerate() {
+            if index > 0 {
+                encoded.push('\n');
+            }
+            if line.trim().is_empty() {
+                encoded.push_str(line);
+                continue;
+            }
+            encoded.push_str(&mapper.encode_jsonl_line_gated(line).ok()?);
+        }
         let (redacted, _changed_lines) = credential_redaction::shared()
-            .redact_jsonl_text(text)
+            .redact_jsonl_text(&encoded)
             .ok()?;
         let wire_analysis =
             super::providers::claude::analyze_claude_transcript(redacted.as_bytes());
@@ -5852,7 +5872,14 @@ fn provider_thread_review(
                                 &binding.canonical_project_root,
                             )
                         } else {
-                            observe_claude_local(*local, *checkpoint, *layout, *probe)
+                            observe_claude_local(
+                                *local,
+                                *checkpoint,
+                                *layout,
+                                *probe,
+                                &binding.project_root,
+                                &binding.canonical_project_root,
+                            )
                         };
                         if outcome.is_err() {
                             failed.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -6232,6 +6259,20 @@ fn provider_thread_review(
             {
                 let blocked = super::domain::blocked_conversation_decision(
                     ConversationBlocker::RedactionRulesetMismatch,
+                );
+                (blocked.clone(), blocked)
+            }
+            _ => (push, pull),
+        };
+        // Path-map codec gate, the same shape: a claude row whose
+        // out-of-band declaration names a foreign codec can be neither
+        // re-encoded nor decoded by this binary. Manifest validation makes
+        // the stamp mandatory for claude rows, so only a foreign value can
+        // reach this check.
+        let (push, pull) = match thread.and_then(|thread| thread.wire_path_map.as_ref()) {
+            Some(stamp) if stamp.codec != super::session_path_map::PATH_MAP_CODEC_V1 => {
+                let blocked = super::domain::blocked_conversation_decision(
+                    ConversationBlocker::PathMapCodecMismatch,
                 );
                 (blocked.clone(), blocked)
             }
@@ -8490,6 +8531,11 @@ fn conversation_thread_from_capture(
             .map(|artifact| artifact.portable_tail.clone())
             .or_else(|| claude_wire.map(|wire| wire.wire_tail.clone())),
         wire_redaction: Some(credential_redaction::shared().stamp()),
+        // Claude's path-map declaration is this out-of-band stamp; Codex
+        // carries its declaration in-band and must not repeat it here.
+        wire_path_map: claude_wire.map(|_| super::domain::ConversationWirePathMap {
+            codec: super::session_path_map::PATH_MAP_CODEC_V1.to_string(),
+        }),
         forked_from,
         preserved,
         source_thread_id: conversation.source_thread_id.clone(),
@@ -8955,6 +9001,24 @@ fn build_publish_request(
                 ));
             }
         }
+        // The Claude wire re-encodes the accepted prefix on every push, so
+        // the stored row's path-map codec must be the one this binary
+        // carries — a foreign codec can never be silently re-encoded.
+        if let Some(stamp) = previous_thread
+            .as_ref()
+            .and_then(|thread| thread.wire_path_map.as_ref())
+        {
+            if stamp.codec != super::session_path_map::PATH_MAP_CODEC_V1 {
+                return Err(format!(
+                    "path_map_codec_mismatch: conversation '{}' was published under \
+                     path-map codec '{}'; this app carries '{}'. Align app versions \
+                     before pushing.",
+                    result_thread_id,
+                    stamp.codec,
+                    super::session_path_map::PATH_MAP_CODEC_V1
+                ));
+            }
+        }
         let (artifact, seeded, claude_wire) = if is_codex {
             // Operation-level Windows gate: the path-map root grammar is
             // checked before any rollout bytes are parsed.
@@ -9007,9 +9071,14 @@ fn build_publish_request(
         } else if supports_cursor {
             // Claude: the local fold (review check, `accepted_local_tail`)
             // seeds from the original bytes; the wire fold seeds from the
-            // redacted transcript — two genuinely different folds, since
-            // the wire form carries redacted content. Apply re-derives the
-            // observed tail from the exact installed bytes on pull.
+            // path-encoded, redacted transcript — two genuinely different
+            // folds, since the wire form carries token paths and redacted
+            // content. Apply re-derives the observed tail from the exact
+            // installed bytes on pull.
+            //
+            // Operation-level Windows gate: the path-map root grammar is
+            // checked before any transcript bytes are parsed.
+            validate_pathmap_root("project root", &binding.project_root)?;
             let source = captured_transcript_source(conversation)?;
             let analysis = super::providers::SessionAnalysis {
                 source_provider_session_id: conversation.source_thread_id.clone(),
@@ -9033,16 +9102,75 @@ fn build_publish_request(
                     result_thread_id
                 ));
             }
-            let redactor = credential_redaction::shared();
+            // The wire transform is `redact(pathenc(x))` — the Codex
+            // composition order, over lines instead of builder records. The
+            // mapper's patterns are a pure function of the binding root, so
+            // re-encoding old lines always reproduces the accepted wire
+            // prefix states.
+            let mapper = SessionPathMapper::new(
+                &binding.project_root,
+                (binding.canonical_project_root != binding.project_root)
+                    .then_some(binding.canonical_project_root.as_str()),
+                std::env::var("HOME").ok().as_deref(),
+            )?;
             let transcript_text = std::str::from_utf8(&transcript.bytes).map_err(|_| {
                 format!(
                     "conversation '{}' transcript is not valid UTF-8",
                     result_thread_id
                 )
             })?;
+            let mut encoded_text = String::with_capacity(transcript_text.len());
+            for (index, line) in transcript_text.split('\n').enumerate() {
+                if index > 0 {
+                    encoded_text.push('\n');
+                }
+                if line.trim().is_empty() {
+                    encoded_text.push_str(line);
+                    continue;
+                }
+                let encoded = mapper.encode_jsonl_line_gated(line).map_err(|error| {
+                    format!(
+                        "conversation '{}' record {}: {error}",
+                        result_thread_id,
+                        index + 1
+                    )
+                })?;
+                encoded_text.push_str(&encoded);
+            }
+            if encoded_text.len() as u64 > MAX_CONVERSATION_FILE_BYTES {
+                return Err(format!(
+                    "conversation '{}' exceeds the bounded transcript limit after path \
+                     encoding",
+                    result_thread_id
+                ));
+            }
+            let redactor = credential_redaction::shared();
             let (redacted_text, _changed_lines) = redactor
-                .redact_jsonl_text(transcript_text)
+                .redact_jsonl_text(&encoded_text)
                 .map_err(|error| format!("conversation '{}': {error}", result_thread_id))?;
+            // Wire self-check over the complete emitted body: every line
+            // must sit in a declared wire form (`encode(decode(w)) == w`),
+            // which also certifies that redaction placeholders neither
+            // minted nor destroyed token spellings.
+            for (index, line) in redacted_text.split('\n').enumerate() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let record: serde_json::Value = serde_json::from_str(line).map_err(|_| {
+                    format!(
+                        "conversation '{}' record {} is not valid JSON on the wire",
+                        result_thread_id,
+                        index + 1
+                    )
+                })?;
+                mapper.verify_wire_record(&record).map_err(|error| {
+                    format!(
+                        "conversation '{}' record {}: {error}",
+                        result_thread_id,
+                        index + 1
+                    )
+                })?;
+            }
             let redacted = redactor
                 .certify_wire_document(redacted_text.into_bytes())
                 .map_err(|error| format!("conversation '{}': {error}", result_thread_id))?;
@@ -10592,6 +10720,7 @@ struct PreparedPullConversation {
     cloud_preserved: Option<PreservedProvenance>,
     cloud_display_title: Option<String>,
     cloud_wire_redaction: Option<super::domain::ConversationWireRedaction>,
+    cloud_wire_path_map: Option<super::domain::ConversationWirePathMap>,
     cloud_updated_at: u64,
     /// Sidecar references of the cloud row, for apply-time target
     /// computation under the minted destination identity.
@@ -10904,6 +11033,7 @@ fn prepare_pull_conversation_actions(
             cloud_preserved: thread.preserved.clone(),
             cloud_display_title: thread.display_title.clone(),
             cloud_wire_redaction: thread.wire_redaction.clone(),
+            cloud_wire_path_map: thread.wire_path_map.clone(),
             cloud_updated_at: thread.updated_at,
             cloud_sidecars: conversation_sidecar_refs(&action.provider, thread)?,
             local_display_name,
@@ -10973,7 +11103,7 @@ fn decode_codex_portable_display_title(
 ) -> Result<String, String> {
     validate_pathmap_root("project root", target_root)?;
     let home = std::env::var("HOME").ok();
-    let mapper = CodexPathMapper::new(
+    let mapper = SessionPathMapper::new(
         target_root,
         (canonical_target_root != target_root).then_some(canonical_target_root),
         home.as_deref(),
@@ -11301,6 +11431,28 @@ fn apply_prepared_pull_conversation(
                 ));
             }
         }
+        // Claude wire objects decode under the declared path-map codec; the
+        // out-of-band stamp is the declaration (Codex validates its in-band
+        // marker inside the standalone decode).
+        if !is_codex {
+            match &prepared.cloud_wire_path_map {
+                Some(stamp) if stamp.codec == super::session_path_map::PATH_MAP_CODEC_V1 => {}
+                Some(stamp) => {
+                    return Err(format!(
+                        "path_map_codec_mismatch: conversation '{}' was published under \
+                         path-map codec '{}'; align app versions before pulling",
+                        cloud_thread_id, stamp.codec
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "path_map_codec_mismatch: conversation '{}' carries no path-map \
+                         stamp and cannot be materialized",
+                        cloud_thread_id
+                    ));
+                }
+            }
+        }
     }
     let (installed_bytes, imported_layout, checkpoint_seed) = if is_codex {
         // Operation-level Windows gate: the path-map root grammar is
@@ -11375,30 +11527,96 @@ fn apply_prepared_pull_conversation(
             ),
         )
     } else if provider_supports_tail_cursor(&action.provider) {
-        // Claude: the downloaded wire object must be a redaction fixpoint —
-        // the pull-side leak/tamper certificate — before anything is
-        // rewritten or installed. The rewritten (still-redacted) transcript
-        // is then the installed root; its re-analysis must refold to the
-        // accepted cloud pin (identity rewrites touch only
-        // fingerprint-exempt structural fields), and the checkpoint seeds
-        // the real cursor from the installed bytes, so on this machine the
-        // local fold equals the wire fold relabeled.
+        // Claude: wire-form verification ends before any decode. The
+        // downloaded wire object must be a redaction fixpoint (the
+        // pull-side leak/tamper certificate) and must refold to the
+        // accepted cloud pin; only then is it decoded per line — wire
+        // self-check, token paths to the destination root, leaf
+        // `sessionId` restamped — and the installed bytes are re-analyzed
+        // as the genuine local form, whose fold becomes
+        // `accepted_local_tail`. The old relabel (a local label wrapped
+        // around the cloud wire state) died with the path-map cutover: the
+        // forms genuinely diverge now.
+        validate_pathmap_root("project root", &binding.project_root)?;
         credential_redaction::shared()
             .certify_wire_document(prepared.cloud_transcript.clone())
             .map_err(|error| format!("conversation '{}': {error}", cloud_thread_id))?;
-        let rewritten = adapter.rewrite(&super::providers::SessionRewriteRequest {
-            bytes: &prepared.cloud_transcript,
-            expected_source_session_id: Some(&prepared.cloud_provider_thread_id),
-            destination_session_id: &destination_provider_thread_id,
-            expected_source_cwd: Some(&prepared.cloud_cwd),
-            destination_cwd: &binding.project_root,
-        })?;
         if cloud_tail.codec != super::domain::CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1
             || cloud_tail.partition_kind != TailPartitionKind::WholeThread
             || cloud_tail.start_record_count != 0
         {
             return Err("accepted cloud tail is not a Claude wire value".to_string());
         }
+        let wire_analysis =
+            super::providers::claude::analyze_claude_transcript(&prepared.cloud_transcript);
+        let CodecLineage::Complete {
+            chain: wire_chain, ..
+        } = &wire_analysis.lineage
+        else {
+            return Err("cloud conversation failed its Claude wire analysis".to_string());
+        };
+        if wire_analysis.source_provider_session_id.as_deref()
+            != Some(prepared.cloud_provider_thread_id.as_str())
+            || wire_analysis.source_cwd.as_deref() != Some(prepared.cloud_cwd.as_str())
+        {
+            return Err("cloud conversation does not match its reviewed wire identity".to_string());
+        }
+        let refolded = super::domain::compute_conversation_tail_state(
+            TailPartitionKind::WholeThread,
+            0,
+            cloud_tail.accepted_end_record_count,
+            wire_chain,
+        )?;
+        if refolded != cloud_tail.accepted_tail_state
+            || cloud_tail.accepted_end_record_count != wire_chain.len() as u64
+        {
+            return Err(
+                "cloud conversation does not refold to the accepted cloud tail".to_string(),
+            );
+        }
+        // Decode pass: per line, the wire self-check under this binding's
+        // future-push pattern set (destination-root text already present in
+        // out-of-root wire content fails closed — the documented collision
+        // residual), then token → destination root. The structural `cwd`
+        // needs no dedicated rewrite: a bound session's cwd is the binding
+        // root, so its token decodes to this machine's root (the engine's
+        // staged-payload gate holds that line); foreign spellings ship
+        // verbatim. Only `sessionId` occurrences equal to the leaf identity
+        // are restamped; resume-copied history keeps its ids as provenance.
+        let mapper = SessionPathMapper::new(
+            &binding.project_root,
+            (binding.canonical_project_root != binding.project_root)
+                .then_some(binding.canonical_project_root.as_str()),
+            std::env::var("HOME").ok().as_deref(),
+        )?;
+        let wire_text = std::str::from_utf8(&prepared.cloud_transcript)
+            .map_err(|_| format!("conversation '{}' wire is not valid UTF-8", cloud_thread_id))?;
+        let mut decoded_text = String::with_capacity(wire_text.len());
+        for (index, line) in wire_text.split('\n').enumerate() {
+            if index > 0 {
+                decoded_text.push('\n');
+            }
+            if line.trim().is_empty() {
+                decoded_text.push_str(line);
+                continue;
+            }
+            let mut value = mapper.decode_jsonl_line_verified(line).map_err(|error| {
+                format!(
+                    "conversation '{}' record {}: {error}",
+                    cloud_thread_id,
+                    index + 1
+                )
+            })?;
+            if let Some(session_id) = value.get_mut("sessionId") {
+                if session_id.as_str() == Some(prepared.cloud_provider_thread_id.as_str()) {
+                    *session_id = serde_json::Value::String(destination_provider_thread_id.clone());
+                }
+            }
+            let serialized = serde_json::to_string(&value)
+                .map_err(|error| format!("serialize decoded conversation record: {error}"))?;
+            decoded_text.push_str(&serialized);
+        }
+        let rewritten = decoded_text.into_bytes();
         let staged = super::providers::claude::analyze_claude_transcript(&rewritten);
         let CodecLineage::Complete {
             chain,
@@ -11406,19 +11624,14 @@ fn apply_prepared_pull_conversation(
             semantic_digest,
         } = &staged.lineage
         else {
-            return Err("rewritten conversation failed its Claude re-analysis".to_string());
+            return Err("decoded conversation failed its Claude re-analysis".to_string());
         };
-        let refolded = super::domain::compute_conversation_tail_state(
-            TailPartitionKind::WholeThread,
-            0,
-            cloud_tail.accepted_end_record_count,
-            chain,
-        )?;
-        if refolded != cloud_tail.accepted_tail_state
-            || cloud_tail.accepted_end_record_count != chain.len() as u64
+        if staged.source_provider_session_id.as_deref()
+            != Some(destination_provider_thread_id.as_str())
+            || chain.len() != wire_chain.len()
         {
             return Err(
-                "reconstructed conversation does not refold to the accepted cloud tail".to_string(),
+                "decoded conversation lost its destination identity or record layout".to_string(),
             );
         }
         let layout = RootTailLayout {
@@ -11426,12 +11639,20 @@ fn apply_prepared_pull_conversation(
             partition_kind: TailPartitionKind::WholeThread,
             start_record_count: 0,
         };
+        // The genuine local fold of the installed bytes: the twin pin the
+        // form ledger requires, never a relabel of the wire state.
+        let accepted_local_state = super::domain::compute_conversation_tail_state(
+            TailPartitionKind::WholeThread,
+            0,
+            cloud_tail.accepted_end_record_count,
+            chain,
+        )?;
         let accepted_local_tail = PortableConversationTail {
             codec: super::domain::CLAUDE_PORTABLE_TAIL_CODEC_V1.to_string(),
             partition_kind: TailPartitionKind::WholeThread,
             start_record_count: 0,
             accepted_end_record_count: cloud_tail.accepted_end_record_count,
-            accepted_tail_state: cloud_tail.accepted_tail_state.clone(),
+            accepted_tail_state: accepted_local_state,
         };
         let sha = hex_digest(Sha256::digest(&rewritten).as_slice());
         let leaf = chain
@@ -15754,7 +15975,7 @@ fn repair_codex_conversation_paths_with_repository(
     // path-map grammar before any file is touched.
     validate_pathmap_root("project root", &binding.project_root)?;
     let repair_home = std::env::var("HOME").ok();
-    let mapper_new = CodexPathMapper::new(
+    let mapper_new = SessionPathMapper::new(
         &binding.project_root,
         (binding.canonical_project_root != binding.project_root)
             .then_some(binding.canonical_project_root.as_str()),
@@ -15846,7 +16067,7 @@ fn repair_codex_conversation_paths_with_repository(
         // the path-map grammar rejects cannot be repaired mechanically.
         validate_pathmap_root("stale Codex conversation root", &issue.recorded_cwd)
             .map_err(|error| format!("Codex conversation '{}': {}", issue.thread_id, error))?;
-        let mapper_old = CodexPathMapper::new(
+        let mapper_old = SessionPathMapper::new(
             &issue.recorded_cwd,
             derive_canonical_alias(&issue.recorded_cwd).as_deref(),
             repair_home.as_deref(),
@@ -16339,8 +16560,8 @@ fn inspect_codex_structural_cwds(
 fn remap_codex_conversation_paths(
     source: &[u8],
     expected_thread_id: &str,
-    mapper_old: &CodexPathMapper,
-    mapper_new: &CodexPathMapper,
+    mapper_old: &SessionPathMapper,
+    mapper_new: &SessionPathMapper,
     gate_wire_equality: bool,
 ) -> Result<Vec<u8>, String> {
     let before = analyze_codex_rollout_structure(source, Some(expected_thread_id))
@@ -19307,8 +19528,8 @@ mod tests {
         .collect::<Vec<_>>()
         .join("\n")
         .into_bytes();
-        let mapper_old = CodexPathMapper::new(old_root, None, None).unwrap();
-        let mapper_new = CodexPathMapper::new("/tmp/new-project", None, None).unwrap();
+        let mapper_old = SessionPathMapper::new(old_root, None, None).unwrap();
+        let mapper_new = SessionPathMapper::new("/tmp/new-project", None, None).unwrap();
         let repaired =
             remap_codex_conversation_paths(&source, active, &mapper_old, &mapper_new, false)
                 .unwrap();
@@ -19344,8 +19565,8 @@ mod tests {
         let stale =
             inspect_codex_structural_cwds(&source, active, Path::new("/tmp/new-project")).unwrap();
         assert_eq!(stale.len(), 2);
-        let mapper_old = CodexPathMapper::new(old_root, None, None).unwrap();
-        let mapper_new = CodexPathMapper::new("/tmp/new-project", None, None).unwrap();
+        let mapper_old = SessionPathMapper::new(old_root, None, None).unwrap();
+        let mapper_new = SessionPathMapper::new("/tmp/new-project", None, None).unwrap();
         let repaired =
             remap_codex_conversation_paths(&source, active, &mapper_old, &mapper_new, false)
                 .unwrap();
@@ -22631,24 +22852,41 @@ mod tests {
         let a_claude = temp.path().join("claude-a");
         bind_and_link_claude_replica(&repo, &machine_a, &storage_id, &a_root, &a_claude);
         let session_id = "claude-redaction-session";
-        let transcript = claude_test_transcript(
+        // The assistant turn carries in-root paths in prose and tool input:
+        // secrets and paths ride one wire (`redact(pathenc(x))`), so this
+        // test proves both transforms end to end. The path-bearing text
+        // stays out of the first *user* message deliberately — the title
+        // fallback is a documented path-remap non-goal.
+        let a_root_text = a_root.to_string_lossy().into_owned();
+        let mut transcript = claude_test_transcript(
             session_id,
             &a_root,
-            &[
-                (
-                    "u-1",
-                    None,
-                    "user",
-                    &format!("my key is {SECRET_A} and DB_PASSWORD={SECRET_A_PASSWORD}"),
-                ),
-                (
-                    "a-1",
-                    Some("u-1"),
-                    "assistant",
-                    "acknowledged without echoing anything",
-                ),
-            ],
+            &[(
+                "u-1",
+                None,
+                "user",
+                &format!("my key is {SECRET_A} and DB_PASSWORD={SECRET_A_PASSWORD}"),
+            )],
         );
+        serde_json::to_writer(
+            &mut transcript,
+            &serde_json::json!({
+                "type": "assistant",
+                "uuid": "a-1",
+                "parentUuid": "u-1",
+                "sessionId": session_id,
+                "cwd": a_root_text,
+                "message": {"role": "assistant", "content": [
+                    {"type": "text",
+                     "text": format!("editing {a_root_text}/readme per your ask")},
+                    {"type": "tool_use", "id": "toolu-1", "name": "Write",
+                     "input": {"file_path": format!("{a_root_text}/readme"),
+                               "content": "hello"}}
+                ]}
+            }),
+        )
+        .unwrap();
+        transcript.push(b'\n');
         let a_session_path = a_claude
             .join("projects/source")
             .join(format!("{session_id}.jsonl"));
@@ -22724,11 +22962,14 @@ mod tests {
 
         // The store never holds the secrets — placeholders prove the scan
         // reads real plaintext objects (positive control), and the local
-        // transcript keeps its secrets untouched.
+        // transcript keeps its secrets untouched. In-root paths ship the
+        // same way: token spellings only, never the machine root.
         assert!(!store_contains(&store_root, SECRET_A));
         assert!(!store_contains(&store_root, SECRET_A_PASSWORD));
         assert!(store_contains(&store_root, "<anthropic-api-key>"));
         assert!(store_contains(&store_root, "DB_PASSWORD=<password>"));
+        assert!(!store_contains(&store_root, &a_root_text));
+        assert!(store_contains(&store_root, "/__mallard_root__/readme"));
         assert!(
             store_contains(&store_root, "APP=demo"),
             "file-history sidecar must ship"
@@ -22835,13 +23076,48 @@ mod tests {
         assert!(!b_installed.contains(SECRET_A_PASSWORD));
         assert!(b_installed.contains("<anthropic-api-key>"));
         assert!(b_installed.contains("DB_PASSWORD=<password>"));
+        // The reported bug, pinned: content paths arrive respelled under
+        // B's root — no dead source-machine spelling survives anywhere in
+        // the installed transcript.
+        let b_root_text = b_root.to_string_lossy().into_owned();
+        assert!(!b_installed.contains(&a_root_text));
+        assert!(b_installed.contains(&format!("editing {b_root_text}/readme per your ask")));
+        assert!(b_installed.contains(&format!("\"file_path\":\"{b_root_text}/readme\"")));
 
-        // B extends the thread with its own secret and pushes: the
-        // re-encoded prefix reproduces the accepted wire bytes, so the
-        // extension fast-forwards instead of diverging.
         let first: serde_json::Value =
             serde_json::from_str(b_installed.lines().next().unwrap()).unwrap();
         let minted_session_id = first["sessionId"].as_str().unwrap().to_string();
+        // Session Detail regression: the Write tool classifies under B's
+        // root and indexes the relative path — before the remap the foreign
+        // source path never matched and `affected_paths` stayed empty.
+        let claude_sessions = provider_registry()
+            .require_sessions(&ProviderKey::parse("claude").unwrap())
+            .unwrap();
+        let index = claude_sessions
+            .build_timeline_index(
+                &b_session_path,
+                &crate::project_sync::providers::SessionTimelineContext {
+                    resource_id: "res-remap-b",
+                    provider_session_id: &minted_session_id,
+                    project_root: &b_root,
+                    project_root_aliases: &[],
+                },
+            )
+            .unwrap();
+        let write_tool = index
+            .events
+            .iter()
+            .filter_map(|entry| entry.tool.as_ref())
+            .find(|tool| tool.native_name == "Write")
+            .expect("Write tool indexed");
+        assert_eq!(write_tool.affected_paths, vec!["readme".to_string()]);
+        assert!(!serde_json::to_string(&index)
+            .unwrap()
+            .contains(&a_root_text));
+
+        // B extends the thread with its own secret and an in-root path,
+        // then pushes: the re-encoded prefix reproduces the accepted wire
+        // states, so the extension fast-forwards instead of diverging.
         let mut extended = b_installed.into_bytes();
         serde_json::to_writer(
             &mut extended,
@@ -22853,7 +23129,9 @@ mod tests {
                 "cwd": b_root.to_string_lossy().into_owned(),
                 "message": {
                     "role": "user",
-                    "content": [{"type": "text", "text": format!("also use {SECRET_B} now")}]
+                    "content": [{"type": "text", "text": format!(
+                        "also use {SECRET_B} now and update {b_root_text}/readme2"
+                    )}]
                 }
             }),
         )
@@ -22863,6 +23141,8 @@ mod tests {
         push_bundle_with_repository(&repo, &machine_b.local_project_id, &storage_id).unwrap();
         assert!(!store_contains(&store_root, SECRET_B));
         assert!(store_contains(&store_root, "<openai-api-key>"));
+        assert!(!store_contains(&store_root, &b_root_text));
+        assert!(store_contains(&store_root, "/__mallard_root__/readme2"));
         let comparison = get_project_thread_sync_comparison_with_repository(
             &repo,
             &machine_b.local_project_id,
@@ -22910,6 +23190,11 @@ mod tests {
         assert!(a_after.contains("DB_PASSWORD=<password>"));
         assert!(a_after.contains("<openai-api-key>"));
         assert!(a_after.contains(session_id));
+        // A's own path decodes home again, and B's contribution arrives
+        // respelled under A's root — no B spelling survives the lifecycle.
+        assert!(!a_after.contains(&b_root_text));
+        assert!(a_after.contains(&format!("editing {a_root_text}/readme per your ask")));
+        assert!(a_after.contains(&format!("update {a_root_text}/readme2")));
         let comparison = get_project_thread_sync_comparison_with_repository(
             &repo,
             &machine_a.local_project_id,
@@ -23152,6 +23437,140 @@ mod tests {
         );
     }
 
+    /// The path-map twin of the redaction blocker test above: a claude row
+    /// whose out-of-band `wire_path_map` names a foreign codec blocks both
+    /// review directions with the typed blocker. The planning override path
+    /// is shared with the redaction gate and proven there; this pins the
+    /// claude-specific stamp read.
+    #[test]
+    fn foreign_path_map_codec_blocks_review() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("pathmap-mismatch-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let bundle_id = BundleId::parse("df29babc833808e68ad0efa4d01d7d70").unwrap();
+        let machine_a = register_local_project_with_repository(
+            &repo,
+            RegisterLocalProjectRequest {
+                display_name: "pathmapMismatch".to_string(),
+                repository_fingerprint: Some("a".repeat(64)),
+                bundle_id: Some(bundle_id.clone()),
+            },
+        )
+        .unwrap();
+        let a_root = temp.path().join("proj-pathmap");
+        let a_claude = temp.path().join("claude-pathmap");
+        bind_and_link_claude_replica(&repo, &machine_a, &storage_id, &a_root, &a_claude);
+        let session_id = "claude-pathmap-session";
+        std::fs::write(
+            a_claude
+                .join("projects/source")
+                .join(format!("{session_id}.jsonl")),
+            claude_test_transcript(
+                session_id,
+                &a_root,
+                &[("u-1", None, "user", "plain question")],
+            ),
+        )
+        .unwrap();
+        push_bundle_with_repository(&repo, &machine_a.local_project_id, &storage_id).unwrap();
+
+        // Republish the same manifest with the row's path-map codec
+        // replaced by a future version.
+        let storage = repo
+            .load_config()
+            .unwrap()
+            .storages
+            .iter()
+            .find(|storage| storage.id == storage_id)
+            .cloned()
+            .unwrap();
+        let engine = engine_for_storage_config(&storage).unwrap();
+        let snapshot = engine.inspect(&bundle_id).unwrap();
+        let scope_key = SyncScopeKey::Provider(ProviderKey::parse("claude").unwrap());
+        let scope = snapshot.manifest.scope(&scope_key).unwrap();
+        let mut conversations = scope.conversations.clone();
+        assert_eq!(conversations.len(), 1);
+        for thread in conversations.values_mut() {
+            assert_eq!(
+                thread
+                    .wire_path_map
+                    .as_ref()
+                    .map(|stamp| stamp.codec.as_str()),
+                Some(crate::project_sync::session_path_map::PATH_MAP_CODEC_V1),
+                "push stamps the compiled-in path-map codec"
+            );
+            thread.wire_path_map = Some(crate::project_sync::domain::ConversationWirePathMap {
+                codec: "mallard.pathmap.v9".to_string(),
+            });
+        }
+        let (_, head_token) = engine.read_head(&bundle_id).unwrap().unwrap();
+        engine
+            .publish(crate::project_sync::bundle_engine::PublishBundleRequest {
+                identity: BundleIdentity {
+                    bundle_id: bundle_id.clone(),
+                    display_name: "pathmapMismatch".to_string(),
+                    kind: BundleKind::Project,
+                    repository_fingerprint: Some("a".repeat(64)),
+                },
+                published_by_origin: scope
+                    .conversations
+                    .values()
+                    .next()
+                    .unwrap()
+                    .last_updated_by_origin
+                    .clone()
+                    .unwrap(),
+                writable_scopes: BTreeMap::from([(
+                    scope_key.clone(),
+                    crate::project_sync::bundle_engine::ScopePublishInput {
+                        recipe: scope.recipe.clone(),
+                        captured_with: scope.captured_with.clone(),
+                        conversations,
+                        resources: scope.resources.clone(),
+                        retained_files: scope.files.clone(),
+                        captured_files: BTreeMap::new(),
+                        directories: scope.directories.clone(),
+                        tombstones: scope.tombstones.clone(),
+                    },
+                )]),
+                reviewed_scope_pins: BTreeMap::from([(
+                    scope_key.clone(),
+                    (scope.revision, scope.content_sha256.clone()),
+                )]),
+                expected_head: crate::project_sync::bundle_engine::PublishExpectation::Match(
+                    head_token,
+                ),
+                updated_at: 99,
+            })
+            .unwrap();
+
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &machine_a.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(comparison.entries.len(), 1);
+        let entry = &comparison.entries[0];
+        assert_eq!(
+            entry.push_decision.action,
+            ConversationReviewAction::Blocked
+        );
+        assert_eq!(
+            entry.push_decision.blocker,
+            Some(ConversationBlocker::PathMapCodecMismatch)
+        );
+        assert_eq!(
+            entry.pull_decision.action,
+            ConversationReviewAction::Blocked
+        );
+        assert_eq!(
+            entry.pull_decision.blocker,
+            Some(ConversationBlocker::PathMapCodecMismatch)
+        );
+    }
+
     /// First-contact adoption survives redaction: a removed project is
     /// re-registered (binding pairing survives detached, the checkpoint's
     /// accepted pins do not), and the secret-bearing local transcript must
@@ -23217,7 +23636,16 @@ mod tests {
                 &project_dir,
                 &[
                     ("u-1", None, "user", &format!("key {SECRET} here")),
-                    ("a-1", Some("u-1"), "assistant", "noted"),
+                    (
+                        "a-1",
+                        Some("u-1"),
+                        "assistant",
+                        // An in-root content path: the accepted wire pin
+                        // folds `redact(pathenc(x))`, so adoption below can
+                        // only re-prove the pair by running the same
+                        // composition over the local bytes.
+                        &format!("noted in {}/todo.md", project_dir.to_string_lossy()),
+                    ),
                 ],
             ),
         )

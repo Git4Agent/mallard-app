@@ -28,13 +28,15 @@
 //! links. Records off the path (abandoned branches, shadowed re-emissions,
 //! pre-compaction history) are excluded.
 //!
-//! It returns typed `Unknown` reasons instead of guessing and rewrites only
-//! the declared structural `sessionId` and `cwd` fields — round-tripping the
-//! result through this same parser and proving unchanged lineage and
-//! semantic digests before bytes may become a resumable provider transcript.
-//! Raw bytes stay raw everywhere else: captures publish verbatim transcript
-//! bytes (thinking included), and byte pins, probe hashes, and torn-tail
-//! handling never see the projection.
+//! It returns typed `Unknown` reasons instead of guessing. This codec no
+//! longer rewrites transcripts at all: cross-machine materialization decodes
+//! the path-encoded wire form per line and restamps the leaf `sessionId` in
+//! the pull flow (`session_path_map` line facades + the command layer), so
+//! in-root content paths remap with the structural `cwd` instead of
+//! surviving as dead source-machine spellings. Raw bytes stay raw
+//! everywhere else: captures keep verbatim transcript bytes (thinking
+//! included), and byte pins, probe hashes, and torn-tail handling never see
+//! the projection.
 
 use crate::conversation_codec::{CodecLineage, CodecUnknownReason};
 use crate::providers::traits::SessionAnalysis;
@@ -414,113 +416,6 @@ fn canonical_json(value: &Value) -> String {
     }
 }
 
-/// Rewrite only the declared structural `sessionId` and `cwd` fields, then
-/// prove the result round-trips with identical lineage and semantics. Only
-/// occurrences equal to the leaf identity are restamped; resume-copied
-/// history keeps its original ids verbatim as provenance.
-pub fn rewrite_claude_transcript(
-    bytes: &[u8],
-    expected_source_session_id: &str,
-    destination_session_id: &str,
-    expected_source_cwd: &str,
-    destination_cwd: &str,
-) -> Result<Vec<u8>, String> {
-    validate_rewrite_value("source session id", expected_source_session_id, 128)?;
-    validate_rewrite_value("destination session id", destination_session_id, 128)?;
-    validate_rewrite_value("source cwd", expected_source_cwd, 4096)?;
-    validate_rewrite_value("destination cwd", destination_cwd, 4096)?;
-    let before = analyze_claude_transcript(bytes);
-    if !before.is_resumable()
-        || before.source_provider_session_id.as_deref() != Some(expected_source_session_id)
-        || before.source_cwd.as_deref() != Some(expected_source_cwd)
-    {
-        return Err("Claude transcript does not match the reviewed source identity".to_string());
-    }
-
-    let final_newline = bytes.ends_with(b"\n");
-    let mut lines = Vec::new();
-    for raw in bytes.split(|byte| *byte == b'\n') {
-        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-        if raw.is_empty() {
-            continue;
-        }
-        let mut value: Value = serde_json::from_slice(raw)
-            .map_err(|_| "Claude transcript contains malformed JSON".to_string())?;
-        if let Some(object) = value.as_object_mut() {
-            rewrite_matching_string(
-                object,
-                "sessionId",
-                expected_source_session_id,
-                destination_session_id,
-            )?;
-            rewrite_matching_string(object, "cwd", expected_source_cwd, destination_cwd)?;
-        }
-        lines.push(
-            serde_json::to_vec(&value)
-                .map_err(|error| format!("serialize rewritten Claude record: {error}"))?,
-        );
-    }
-    let mut rewritten = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        if index > 0 {
-            rewritten.push(b'\n');
-        }
-        rewritten.extend_from_slice(line);
-    }
-    if final_newline {
-        rewritten.push(b'\n');
-    }
-
-    let after = analyze_claude_transcript(&rewritten);
-    if !after.is_resumable()
-        || after.source_provider_session_id.as_deref() != Some(destination_session_id)
-        || after.source_cwd.as_deref() != Some(destination_cwd)
-        || lineage_digests(&before) != lineage_digests(&after)
-    {
-        return Err(
-            "rewritten Claude transcript failed semantic round-trip validation".to_string(),
-        );
-    }
-    Ok(rewritten)
-}
-
-fn lineage_digests(analysis: &SessionAnalysis) -> Option<(&str, &str)> {
-    match &analysis.lineage {
-        CodecLineage::Complete {
-            lineage_digest,
-            semantic_digest,
-            ..
-        } => Some((lineage_digest, semantic_digest)),
-        CodecLineage::Unknown { .. } => None,
-    }
-}
-
-fn rewrite_matching_string(
-    object: &mut Map<String, Value>,
-    key: &str,
-    expected: &str,
-    replacement: &str,
-) -> Result<(), String> {
-    let Some(value) = object.get_mut(key) else {
-        return Ok(());
-    };
-    let observed = value
-        .as_str()
-        .ok_or_else(|| format!("Claude structural field '{key}' is not a string"))?;
-    if observed == expected {
-        *value = Value::String(replacement.to_string());
-    }
-    Ok(())
-}
-
-fn validate_rewrite_value(label: &str, value: &str, max: usize) -> Result<(), String> {
-    if value.is_empty() || value.len() > max || value.chars().any(char::is_control) {
-        Err(format!("invalid Claude {label}"))
-    } else {
-        Ok(())
-    }
-}
-
 pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut output = String::with_capacity(64);
@@ -572,6 +467,17 @@ mod tests {
             .iter()
             .map(|message| message.message_id.as_str())
             .collect()
+    }
+
+    fn lineage_digests(analysis: &SessionAnalysis) -> Option<(&str, &str)> {
+        match &analysis.lineage {
+            CodecLineage::Complete {
+                lineage_digest,
+                semantic_digest,
+                ..
+            } => Some((lineage_digest, semantic_digest)),
+            CodecLineage::Unknown { .. } => None,
+        }
     }
 
     #[test]
@@ -690,22 +596,6 @@ mod tests {
                 "assistant-1",
             ]
         );
-
-        let rewritten = rewrite_claude_transcript(
-            &bytes,
-            session,
-            "33333333-3333-4333-8333-333333333333",
-            cwd,
-            "/tmp/project-b",
-        )
-        .unwrap();
-        let after = analyze_claude_transcript(&rewritten);
-        assert_eq!(lineage_digests(&before), lineage_digests(&after));
-        assert_eq!(
-            after.source_provider_session_id.as_deref(),
-            Some("33333333-3333-4333-8333-333333333333")
-        );
-        assert_eq!(after.source_cwd.as_deref(), Some("/tmp/project-b"));
     }
 
     #[test]
@@ -1331,45 +1221,6 @@ mod tests {
         assert_eq!(analysis.record_count, 4);
     }
 
-    #[test]
-    fn structural_rewrite_preserves_lineage_and_semantics() {
-        let bytes = transcript(
-            "11111111-1111-4111-8111-111111111111",
-            "/tmp/project-a",
-            &[
-                ("u-1", None, "user", "one"),
-                ("a-1", Some("u-1"), "assistant", "two"),
-            ],
-        );
-        let before = analyze_claude_transcript(&bytes);
-        let rewritten = rewrite_claude_transcript(
-            &bytes,
-            "11111111-1111-4111-8111-111111111111",
-            "33333333-3333-4333-8333-333333333333",
-            "/tmp/project-a",
-            "/tmp/project-b",
-        )
-        .unwrap();
-        let after = analyze_claude_transcript(&rewritten);
-        assert_eq!(lineage_digests(&before), lineage_digests(&after));
-        assert_eq!(
-            after.source_provider_session_id.as_deref(),
-            Some("33333333-3333-4333-8333-333333333333")
-        );
-        assert_eq!(after.source_cwd.as_deref(), Some("/tmp/project-b"));
-        assert_ne!(bytes, rewritten);
-
-        // Rewriting with a mismatched identity is refused.
-        assert!(rewrite_claude_transcript(
-            &bytes,
-            "99999999-9999-4999-8999-999999999999",
-            "33333333-3333-4333-8333-333333333333",
-            "/tmp/project-a",
-            "/tmp/project-b",
-        )
-        .is_err());
-    }
-
     /// S4's manual corpus gate (`docs/PLAN_CLAUDE_DESKTOP_IMPORT_TOLERANCE.md`):
     /// the shipped Rust analyzer must hold the import-equivalence property
     /// on every real transcript, agreeing with the Python scan
@@ -1452,35 +1303,108 @@ mod tests {
         assert!(complete > 0, "the corpus gate must see real sessions");
     }
 
+    /// The inverse of the deleted structural-rewrite pin: a committed
+    /// two-root fixture whose prose, tool input, tool result, attachment
+    /// filename, and file-history snapshot all embed the source root must
+    /// come out of the wire hop with the source spelling byte-absent —
+    /// content paths travel with the structural `cwd` now, per line, under
+    /// the shared mapper's gates.
     #[test]
-    fn rewrite_touches_only_declared_structural_fields() {
-        let mut bytes = transcript(
-            "11111111-1111-4111-8111-111111111111",
-            "/tmp/project-a",
-            &[("u-1", None, "user", "mentions /tmp/project-a in text")],
-        );
-        // A record embedding the cwd inside content must keep it verbatim.
-        bytes.extend_from_slice(
-            serde_json::to_string(&json!({
+    fn claude_wire_fixture_remaps_content_paths_and_round_trips() {
+        use crate::session_path_map::SessionPathMapper;
+
+        let source_root = "/homeA/projact_alpha";
+        let session = "11111111-1111-4111-8111-111111111111";
+        let records = [
+            json!({
+                "type": "user",
+                "uuid": "u-1",
+                "parentUuid": null,
+                "sessionId": session,
+                "cwd": source_root,
+                "message": {"role": "user", "content": [
+                    {"type": "text", "text": "edit /homeA/projact_alpha/readme please"}
+                ]}
+            }),
+            json!({
+                "type": "assistant",
+                "uuid": "a-1",
+                "parentUuid": "u-1",
+                "sessionId": session,
+                "cwd": source_root,
+                "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t-1", "name": "Write",
+                     "input": {"file_path": "/homeA/projact_alpha/readme", "content": "hi"}}
+                ]}
+            }),
+            json!({
+                "type": "user",
+                "uuid": "u-2",
+                "parentUuid": "a-1",
+                "sessionId": session,
+                "cwd": format!("{source_root}/frontend"),
+                "toolUseResult": {"filePath": "/homeA/projact_alpha/readme"},
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t-1", "content": "ok"}
+                ]}
+            }),
+            json!({
+                "type": "attachment",
+                "uuid": "att-1",
+                "parentUuid": "u-2",
+                "sessionId": session,
+                "cwd": source_root,
+                "attachment": {"type": "file", "filename": "/homeA/projact_alpha/notes.md"}
+            }),
+            json!({
                 "type": "file-history-snapshot",
                 "messageId": "u-1",
-                "snapshot": {"path": "/tmp/project-a/file.txt"}
-            }))
+                "snapshot": {"path": "/homeA/projact_alpha/file.txt",
+                             "outside": "/homeA/other-project/keep.txt"}
+            }),
+        ];
+        let source = encode_records(&records);
+        let before = analyze_claude_transcript(&source);
+        assert!(before.is_resumable(), "{:?}", before.lineage);
+
+        // Push half: encode per line under the source mapper.
+        let encoder = SessionPathMapper::new(source_root, None, Some("/homeA")).unwrap();
+        let wire_text = String::from_utf8(source.clone())
             .unwrap()
-            .as_bytes(),
+            .lines()
+            .map(|line| encoder.encode_jsonl_line_gated(line).unwrap() + "\n")
+            .collect::<String>();
+        assert!(!wire_text.contains(source_root));
+        assert!(wire_text.contains("\"cwd\":\"/__mallard_root__/frontend\""));
+        // The wire form analyzes Complete with the chain identities intact.
+        let wire_analysis = analyze_claude_transcript(wire_text.as_bytes());
+        assert_eq!(chain_ids(&wire_analysis), chain_ids(&before));
+
+        // Pull half: verify + decode per line under the destination mapper.
+        let decoder = SessionPathMapper::new("/homeB/projact_beta", None, Some("/homeB")).unwrap();
+        let decoded_text = wire_text
+            .lines()
+            .map(|line| {
+                let value = decoder.decode_jsonl_line_verified(line).unwrap();
+                serde_json::to_string(&value).unwrap() + "\n"
+            })
+            .collect::<String>();
+        assert!(
+            !decoded_text.contains(source_root),
+            "source-root spellings must not survive the hop"
         );
-        bytes.push(b'\n');
-        let rewritten = rewrite_claude_transcript(
-            &bytes,
-            "11111111-1111-4111-8111-111111111111",
-            "33333333-3333-4333-8333-333333333333",
-            "/tmp/project-a",
-            "/tmp/project-b",
-        )
-        .unwrap();
-        let text = String::from_utf8(rewritten).unwrap();
-        assert!(text.contains("mentions /tmp/project-a in text"));
-        assert!(text.contains("/tmp/project-a/file.txt"));
-        assert!(!text.contains("\"cwd\":\"/tmp/project-a\""));
+        assert!(decoded_text.contains("edit /homeB/projact_beta/readme please"));
+        assert!(decoded_text.contains("\"file_path\":\"/homeB/projact_beta/readme\""));
+        assert!(decoded_text.contains("\"filePath\":\"/homeB/projact_beta/readme\""));
+        assert!(decoded_text.contains("\"filename\":\"/homeB/projact_beta/notes.md\""));
+        assert!(decoded_text.contains("\"path\":\"/homeB/projact_beta/file.txt\""));
+        // Out-of-root paths ship byte-identical — the hard invariant.
+        assert!(decoded_text.contains("/homeA/other-project/keep.txt"));
+        let after = analyze_claude_transcript(decoded_text.as_bytes());
+        assert!(after.is_resumable(), "{:?}", after.lineage);
+        assert_eq!(chain_ids(&after), chain_ids(&before));
+        // A bound session's leaf cwd is the project root (a subdir launch is
+        // its own project); mid-file subdir spellings remap as content.
+        assert_eq!(after.source_cwd.as_deref(), Some("/homeB/projact_beta"));
     }
 }

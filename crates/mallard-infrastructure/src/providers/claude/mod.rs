@@ -22,8 +22,8 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 pub use codec::{
-    analyze_claude_transcript, project_claude_record, rewrite_claude_transcript,
-    CLAUDE_CODEC_VERSION, CLAUDE_LINEAGE_CODEC_KEY,
+    analyze_claude_transcript, project_claude_record, CLAUDE_CODEC_VERSION,
+    CLAUDE_LINEAGE_CODEC_KEY,
 };
 pub use materialization::encode_claude_project_path;
 
@@ -134,20 +134,13 @@ impl SessionAdapter for ClaudeAdapter {
         codec::analyze_claude_transcript(bytes)
     }
 
-    fn rewrite(&self, request: &SessionRewriteRequest<'_>) -> Result<Vec<u8>, String> {
-        let source_id = request
-            .expected_source_session_id
-            .ok_or_else(|| "Claude rewrite requires the reviewed source session id".to_string())?;
-        let source_cwd = request
-            .expected_source_cwd
-            .ok_or_else(|| "Claude rewrite requires the reviewed source cwd".to_string())?;
-        codec::rewrite_claude_transcript(
-            request.bytes,
-            source_id,
-            request.destination_session_id,
-            source_cwd,
-            request.destination_cwd,
-        )
+    fn rewrite(&self, _request: &SessionRewriteRequest<'_>) -> Result<Vec<u8>, String> {
+        // Claude conversations materialize exclusively through the pull
+        // flow's wire decode (verify + path decode + sessionId restamp);
+        // the generic structural rewrite has no correct meaning for
+        // token-form cloud objects and was removed with the path-map
+        // cutover.
+        Err("Claude conversations materialize through the wire decode".to_string())
     }
 
     fn materialization_targets(

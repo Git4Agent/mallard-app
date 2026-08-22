@@ -687,6 +687,12 @@ portable_tail                 # codec, partition_kind, start_record_count,
                               # required for Codex entries (codex wire codec)
                               # and Claude entries (claude wire codec),
                               # end == message_count
+wire_redaction                # {codec, ruleset fingerprint} of the stored
+                              # wire bytes; required for codex/claude rows
+wire_path_map                 # {codec: mallard.pathmap.v1}; required for
+                              # claude rows (whose pure-JSONL wire has no
+                              # in-band record), forbidden elsewhere — codex
+                              # declares in-band via __mallard_path_map__
 optional forked_from          # cloud id space
 optional preserved            # keep-both provenance: preserved_from (cloud
                               # id space) + ordinal

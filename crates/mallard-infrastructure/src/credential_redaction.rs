@@ -1331,14 +1331,13 @@ fn value_scan_mode(s: &str) -> ValueScanMode {
         }
     }
     let bare = !trimmed.is_empty() && !trimmed.chars().any(char::is_whitespace);
-    if bare {
-        if starts_with_ascii_case_insensitive(trimmed, b"http://")
+    if bare
+        && (starts_with_ascii_case_insensitive(trimmed, b"http://")
             || starts_with_ascii_case_insensitive(trimmed, b"https://")
             || starts_with_ascii_case_insensitive(trimmed, b"file://")
-            || trimmed.starts_with('/')
-        {
-            return ValueScanMode::EntropyExempt;
-        }
+            || trimmed.starts_with('/'))
+    {
+        return ValueScanMode::EntropyExempt;
     }
     ValueScanMode::Full
 }

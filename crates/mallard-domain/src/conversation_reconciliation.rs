@@ -273,6 +273,10 @@ fn blocked_reason(blocker: ConversationBlocker) -> &'static str {
             "This conversation's stored redaction ruleset does not match this app version. \
              Update Mallard everywhere before syncing it."
         }
+        ConversationBlocker::PathMapCodecMismatch => {
+            "This conversation's stored path encoding does not match this app version. \
+             Update Mallard everywhere before syncing it."
+        }
     }
 }
 

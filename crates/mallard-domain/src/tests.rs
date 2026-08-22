@@ -774,6 +774,9 @@ fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderSco
             _ => None,
         },
         wire_redaction: test_wire_redaction(),
+        wire_path_map: (provider_key == "claude").then(|| ConversationWirePathMap {
+            codec: "mallard.pathmap.v1".to_string(),
+        }),
         forked_from: None,
         preserved: None,
         source_thread_id: Some("provider-native-thread".to_string()),
@@ -878,6 +881,50 @@ fn mixed_provider_manifest_validates_with_unknown_scopes_preserved() {
     decoded.validate().unwrap();
 }
 
+/// The out-of-band path-map stamp is claimed exactly where no in-band
+/// declaration exists: a claude row without one is unreadable by design,
+/// and an in-band provider carrying one is a writer bug.
+#[test]
+fn wire_path_map_stamp_is_required_for_claude_and_forbidden_elsewhere() {
+    let claude = sealed_provider_scope("claude", "31111111111111111111111111111111");
+    let mut manifest = scoped_manifest(BTreeMap::from([(
+        SyncScopeKey::Provider(provider("claude")),
+        claude.scope,
+    )]));
+    manifest.validate().unwrap();
+    let reseal = |manifest: &mut BundleManifest| {
+        for (key, scope) in manifest.scopes.iter_mut() {
+            scope.content_sha256 = scope.compute_content_sha256(key).unwrap();
+        }
+    };
+    for scope in manifest.scopes.values_mut() {
+        for thread in scope.conversations.values_mut() {
+            thread.wire_path_map = None;
+        }
+    }
+    reseal(&mut manifest);
+    assert!(manifest
+        .validate()
+        .unwrap_err()
+        .contains("wire path-map stamp"));
+
+    let codex = sealed_provider_scope("codex", "40123456789abcdef0123456789abcde");
+    let mut manifest = scoped_manifest(BTreeMap::from([(
+        SyncScopeKey::Provider(provider("codex")),
+        codex.scope,
+    )]));
+    manifest.validate().unwrap();
+    for scope in manifest.scopes.values_mut() {
+        for thread in scope.conversations.values_mut() {
+            thread.wire_path_map = Some(ConversationWirePathMap {
+                codec: "mallard.pathmap.v1".to_string(),
+            });
+        }
+    }
+    reseal(&mut manifest);
+    assert!(manifest.validate().unwrap_err().contains("in-band"));
+}
+
 #[test]
 fn scope_digests_are_deterministic_and_tamper_evident() {
     let parts = sealed_provider_scope("codex", "0123456789abcdef0123456789abcdef");
@@ -979,6 +1026,9 @@ fn duplicate_threads_across_scopes_are_rejected() {
             .unwrap(),
         ),
         wire_redaction: test_wire_redaction(),
+        wire_path_map: Some(ConversationWirePathMap {
+            codec: "mallard.pathmap.v1".to_string(),
+        }),
         forked_from: None,
         preserved: None,
         source_thread_id: None,

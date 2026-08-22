@@ -2,7 +2,7 @@
 //!
 //! Every selected conversation passes through this one builder: dependencies
 //! resolved, the in-cwd path layer transformed through the shared
-//! `codex_path_map` matcher, supported identity edges rewritten, output
+//! `session_path_map` matcher, supported identity edges rewritten, output
 //! emitted as one paginated null-base rollout, and every output record gated
 //! and re-verified against the resolved canonical chain before anything is
 //! published or installed.
@@ -30,13 +30,13 @@ use crate::codex_history_graph::ResolvedCodexRoot;
 use crate::codex_paginated_projection::{
     complete_paginated_item_projection, verify_projection_fixpoint,
 };
-use crate::codex_path_map::{
-    path_map_marker, validate_path_map_marker, CodexPathMapper, PATH_MAP_FIELD,
-};
 use crate::codex_rollout::{session_meta_id, structural_record_type};
 use crate::conversation_codec::{analyze_codex_transcript, CodecLineage};
 use crate::credential_redaction;
 use crate::jsonl_tail_io::read_bounded;
+use crate::session_path_map::{
+    path_map_marker, validate_path_map_marker, SessionPathMapper, PATH_MAP_FIELD,
+};
 use mallard_domain::{
     compute_portable_conversation_tail_with_codec, conversation_prefix_witness,
     ConversationPrefixWitness, PortableConversationTail, MAX_CONVERSATION_FILE_BYTES,
@@ -136,7 +136,7 @@ pub fn build_standalone_codex_root(
             canonical_root,
         } => (
             resolved.leaf_meta.id.clone(),
-            CodexPathMapper::new(root, canonical_root.as_deref(), home.as_deref())?,
+            SessionPathMapper::new(root, canonical_root.as_deref(), home.as_deref())?,
             true,
         ),
         StandaloneBuildMode::Decode {
@@ -145,7 +145,7 @@ pub fn build_standalone_codex_root(
             canonical_target_root,
         } => (
             root_provider_thread_id.clone(),
-            CodexPathMapper::new(
+            SessionPathMapper::new(
                 target_root,
                 canonical_target_root.as_deref(),
                 home.as_deref(),
@@ -310,7 +310,7 @@ pub fn build_standalone_codex_root(
 /// fresh ordinals later.
 fn collect_flattened_non_metadata_records(
     resolved: &ResolvedCodexRoot,
-    mapper: &CodexPathMapper,
+    mapper: &SessionPathMapper,
     encode_mode: bool,
 ) -> Result<Vec<Value>, String> {
     let mut records = Vec::new();
@@ -612,7 +612,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::codex_history_graph::resolve_codex_root;
-    use crate::codex_path_map::ROOT_TOKEN;
+    use crate::session_path_map::ROOT_TOKEN;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::path::PathBuf;

@@ -3018,6 +3018,25 @@ impl ConversationWireRedaction {
     }
 }
 
+/// The path-map codec a conversation thread's wire bytes were encoded
+/// under. Claude's wire is pure provider JSONL with no metadata record, so
+/// its declaration lives out-of-band on the thread row — the twin of
+/// Codex's in-band `__mallard_path_map__` marker, and the same pattern as
+/// `wire_redaction`. Push and pull both require the running binary's codec;
+/// a mismatch is the typed `path_map_codec_mismatch` blocker, never a
+/// silent re-encode under different grammar.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationWirePathMap {
+    pub codec: String,
+}
+
+impl ConversationWirePathMap {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_display_text("conversation path-map codec", &self.codec, false)
+    }
+}
+
 /// One cloud conversation row. Keyed entirely in the cloud id space
 /// (`cloudthread-…`): the id is minted at push apply, independent of any
 /// machine's local thread id, and stays the thread's one portable identity
@@ -3057,6 +3076,12 @@ pub struct ConversationThread {
     /// `credential_redaction` module.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wire_redaction: Option<ConversationWireRedaction>,
+    /// The in-cwd path-map codec of the stored wire bytes. Required when
+    /// `provider == claude` (whose pure-JSONL wire has no in-band record to
+    /// carry a declaration) and forbidden elsewhere — Codex declares its
+    /// path map inside the authoritative metadata record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_path_map: Option<ConversationWirePathMap>,
     /// Provenance of a fork only. Never consulted by the resolver, and the
     /// referenced thread may have been tombstoned or pruned since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3180,6 +3205,28 @@ impl ConversationThread {
                 if matches!(self.provider.as_str(), "codex" | "claude") {
                     return Err(format!(
                         "conversation thread '{}' lacks its wire redaction stamp",
+                        self.thread_id
+                    ));
+                }
+            }
+        }
+        // The path-map declaration is out-of-band exactly where no in-band
+        // record exists: required for claude, forbidden everywhere else.
+        match &self.wire_path_map {
+            Some(stamp) => {
+                if self.provider.as_str() != "claude" {
+                    return Err(format!(
+                        "conversation thread '{}' declares an out-of-band path map for a \
+                         provider that declares in-band",
+                        self.thread_id
+                    ));
+                }
+                stamp.validate()?;
+            }
+            None => {
+                if self.provider.as_str() == "claude" {
+                    return Err(format!(
+                        "conversation thread '{}' lacks its wire path-map stamp",
                         self.thread_id
                     ));
                 }
@@ -3326,6 +3373,10 @@ pub enum ConversationBlocker {
     /// does not carry: neither push nor pull may touch the thread until the
     /// binaries align (or the standing wipe resolves it).
     RedactionRulesetMismatch,
+    /// The cloud row's `wire_path_map` stamp names a path-map codec this
+    /// binary does not carry: neither direction may re-encode or decode the
+    /// wire until the binaries align.
+    PathMapCodecMismatch,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
