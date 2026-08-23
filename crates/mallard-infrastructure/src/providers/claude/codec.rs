@@ -138,9 +138,96 @@ pub fn project_claude_record(mut value: Value) -> Option<Value> {
 struct ChainRecord {
     message_id: MessageId,
     parent: Option<MessageId>,
-    session_id: Option<String>,
-    cwd: Option<String>,
     fingerprint: String,
+}
+
+/// The provider identity carried by a Claude transcript's active leaf.
+///
+/// Claude resume/fork files copy historical records without restamping their
+/// `sessionId` or `cwd`, so the first record is not authoritative. The last
+/// projected chain record is the provider leaf; when that record omits one
+/// identity field, the codec's established rule falls back field-by-field to
+/// the last projected record carrying it.
+#[derive(Default)]
+pub(crate) struct ClaudeSessionIdentityTracker {
+    last_session_id: Option<String>,
+    last_cwd: Option<String>,
+    last_metadata_identity: Option<(String, String)>,
+    leaf_session_id: Option<String>,
+    leaf_cwd: Option<String>,
+    saw_chain_record: bool,
+}
+
+impl ClaudeSessionIdentityTracker {
+    /// Observe one raw or already-projected record. Thinking-only assistant
+    /// rows are the only records the Desktop projection removes entirely;
+    /// every other projection change leaves identity and chain membership
+    /// unchanged.
+    pub(crate) fn observe(&mut self, value: &Value) {
+        let Some(object) = value.as_object() else {
+            return;
+        };
+        if is_thinking_only_record(object) {
+            return;
+        }
+        let session_id = object
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(observed) = &session_id {
+            self.last_session_id = Some(observed.clone());
+        }
+        let cwd = object
+            .get("cwd")
+            .and_then(Value::as_str)
+            .filter(|cwd| !cwd.is_empty())
+            .map(str::to_string);
+        if let Some(observed) = &cwd {
+            self.last_cwd = Some(observed.clone());
+        }
+        let is_durable_metadata = matches!(
+            object.get("type").and_then(Value::as_str),
+            Some("user") | Some("assistant") | Some("system")
+        ) && !object
+            .get("isSidechain")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && !object
+                .get("isMeta")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        if is_durable_metadata {
+            if let (Some(session_id), Some(cwd)) = (&session_id, &cwd) {
+                self.last_metadata_identity = Some((session_id.clone(), cwd.clone()));
+            }
+        }
+        if is_chain_record(object) {
+            self.saw_chain_record = true;
+            self.leaf_session_id = session_id;
+            self.leaf_cwd = cwd;
+        }
+    }
+
+    pub(crate) fn observed_identity(&self) -> (Option<String>, Option<String>) {
+        (self.last_session_id.clone(), self.last_cwd.clone())
+    }
+
+    pub(crate) fn leaf_identity(&self) -> (Option<String>, Option<String>) {
+        if !self.saw_chain_record {
+            return self
+                .last_metadata_identity
+                .clone()
+                .map_or((None, None), |(session_id, cwd)| {
+                    (Some(session_id), Some(cwd))
+                });
+        }
+        (
+            self.leaf_session_id
+                .clone()
+                .or_else(|| self.last_session_id.clone()),
+            self.leaf_cwd.clone().or_else(|| self.last_cwd.clone()),
+        )
+    }
 }
 
 /// Analyze a Claude session transcript. Content failures become bounded
@@ -151,8 +238,7 @@ pub fn analyze_claude_transcript(bytes: &[u8]) -> SessionAnalysis {
         return unknown(None, None, 0, CodecUnknownReason::Empty);
     }
     let mut record_count = 0_usize;
-    let mut last_session_id: Option<String> = None;
-    let mut last_cwd: Option<String> = None;
+    let mut identity = ClaudeSessionIdentityTracker::default();
     let mut records: Vec<ChainRecord> = Vec::new();
     let mut occurrences = BTreeMap::<String, Vec<usize>>::new();
     // Every uuid in the projection, chain record or not: the walk uses it to
@@ -167,12 +253,13 @@ pub fn analyze_claude_transcript(bytes: &[u8]) -> SessionAnalysis {
         let value: Value = match serde_json::from_slice(raw) {
             Ok(value) => value,
             Err(_) => {
+                let (session_id, cwd) = identity.observed_identity();
                 return unknown(
-                    last_session_id,
-                    last_cwd,
+                    session_id,
+                    cwd,
                     record_count.saturating_add(1),
                     CodecUnknownReason::MalformedJson,
-                )
+                );
             }
         };
         // The derivation sees only the projection: a projected-out row
@@ -182,44 +269,33 @@ pub fn analyze_claude_transcript(bytes: &[u8]) -> SessionAnalysis {
         };
         record_count = record_count.saturating_add(1);
         if record_count > MAX_CLAUDE_RECORDS {
+            let (session_id, cwd) = identity.observed_identity();
             return unknown(
-                last_session_id,
-                last_cwd,
+                session_id,
+                cwd,
                 record_count,
                 CodecUnknownReason::TooManyRecords,
             );
         }
         let Some(object) = value.as_object() else {
+            let (session_id, cwd) = identity.observed_identity();
             return unknown(
-                last_session_id,
-                last_cwd,
+                session_id,
+                cwd,
                 record_count,
                 CodecUnknownReason::MalformedJson,
             );
         };
+        identity.observe(&value);
         if let Some(uuid) = object.get("uuid").and_then(Value::as_str) {
             all_uuids.insert(uuid.to_string());
-        }
-        let session_id = object
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        if let Some(observed) = &session_id {
-            last_session_id = Some(observed.clone());
-        }
-        let cwd = object
-            .get("cwd")
-            .and_then(Value::as_str)
-            .filter(|cwd| !cwd.is_empty())
-            .map(str::to_string);
-        if let Some(observed) = &cwd {
-            last_cwd = Some(observed.clone());
         }
         let (message_id, parent) = match classify_claude_record(object) {
             Ok(ClaudeRecordClass::NotChain) => continue,
             Ok(ClaudeRecordClass::Chain { message_id, parent }) => (message_id, parent),
             Err(reason) => {
-                return unknown(last_session_id, last_cwd, record_count, reason);
+                let (session_id, cwd) = identity.observed_identity();
+                return unknown(session_id, cwd, record_count, reason);
             }
         };
         occurrences
@@ -229,16 +305,15 @@ pub fn analyze_claude_transcript(bytes: &[u8]) -> SessionAnalysis {
         records.push(ChainRecord {
             message_id,
             parent,
-            session_id,
-            cwd,
             fingerprint: semantic_record_fingerprint(value),
         });
     }
 
     if records.is_empty() {
+        let (session_id, cwd) = identity.observed_identity();
         return unknown(
-            last_session_id,
-            last_cwd,
+            session_id,
+            cwd,
             record_count,
             CodecUnknownReason::MissingMessageId,
         );
@@ -276,9 +351,7 @@ pub fn analyze_claude_transcript(bytes: &[u8]) -> SessionAnalysis {
 
     // Leaf-wins identity: resume-copied history legitimately mixes ids, and
     // the leaf record carries the identity Claude itself resumes under.
-    let leaf = &records[*path.last().expect("walk visits the leaf")];
-    let session_id = leaf.session_id.clone().or(last_session_id);
-    let source_cwd = leaf.cwd.clone().or(last_cwd);
+    let (session_id, source_cwd) = identity.leaf_identity();
     if session_id.is_none() {
         return unknown(
             None,

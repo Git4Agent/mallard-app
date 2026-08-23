@@ -23,6 +23,7 @@ import type {
   StorageConfig,
 } from "../../types";
 import Icon from "../Icons";
+import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import { clockOptions } from "../../clock";
 import ProjectActivityPage, { BranchPicker, type ActivityHeaderModel } from "./ProjectActivityPage";
 import type {
@@ -43,6 +44,9 @@ import { syncOutcomeView } from "./syncOutcome";
 import { isIrrecoverableSyncError } from "./syncError";
 import type { SyncOutcome } from "./syncOutcome";
 import { newStorage, r2FieldsSet, storageConfigReady, StorageEditor } from "./StorageSettings";
+import { storageCatalogApi } from "../storage-catalog/api";
+import { catalogKindMeta } from "../storage-catalog/model";
+import type { CatalogStorageRepository } from "../storage-catalog/types";
 import { projectSyncApi } from "./api";
 import {
   compactProjectPath,
@@ -410,6 +414,77 @@ export function StorageRepositoryRow({ bundle }: { bundle: RemoteBundleSummary }
   );
 }
 
+/** A Catalog kind repository in the project row's exact grammar: the kind
+ * icon as the identity tile, the scope-label name one level up ("Skills ·
+ * Codex"), the same chips and fold. When the derived id answers but cannot
+ * be read, the row states the refusal where the chips would be — on a
+ * listing, a silent hole reads as "nothing stored". */
+export function CatalogStorageRepositoryRow({ repo }: { repo: CatalogStorageRepository }) {
+  const [open, setOpen] = useState(false);
+  const meta = catalogKindMeta(repo.resource_kind);
+  const name = `${meta.plural} · ${providerLabel(repo.provider)}`;
+  const detailsId = `catalog-repo-details-${repo.repository_id}`;
+  const unreadable = repo.error != null;
+  /* The fold names the whole set until it stops being a glance. */
+  const shownNames = repo.resource_names.slice(0, 12);
+  const moreNames = repo.resource_names.length - shownNames.length;
+  return (
+    <div className="sync-storage-repository-item">
+      <div className="sync-storage-repository-row">
+        <span className={`sync-storage-repository-icon${unreadable ? " danger" : ""}`}>
+          <Icon name={unreadable ? "alert-triangle" : meta.icon} size={14} />
+        </span>
+        <strong className="sync-storage-repository-name">{name}</strong>
+        {unreadable ? (
+          <span className="sync-storage-repo-unreadable">Can’t be read</span>
+        ) : (
+          <span className="sync-storage-repository-chips">
+            <span className="sync-storage-repo-chip"><span>Revision</span><b>{repo.revision ?? "—"}</b></span>
+            <span className="sync-storage-repo-chip"><span>Updated</span><b>{formatRelativeTime(repo.updated_at ?? undefined)}</b></span>
+          </span>
+        )}
+        <button
+          type="button"
+          className="sync-history-commit-toggle"
+          aria-expanded={open}
+          aria-controls={detailsId}
+          aria-label={`${open ? "Hide" : "Show"} details for ${name}`}
+          title={`${open ? "Hide" : "Show"} details for ${name}`}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <Icon name={open ? "chevron-up" : "chevron-down"} size={12} />
+        </button>
+      </div>
+      {open && (
+        <dl className="sync-storage-repository-details" id={detailsId}>
+          <dt>Repository ID</dt>
+          <dd><code>{repo.repository_id}</code></dd>
+          {typeof repo.updated_at === "number" && (
+            <>
+              <dt>Updated</dt>
+              <dd>{absoluteTime(repo.updated_at)}</dd>
+            </>
+          )}
+          {repo.resource_names.length > 0 && (
+            <>
+              <dt>Resources</dt>
+              <dd>{repo.resource_names.length}</dd>
+              <dt>Contents</dt>
+              <dd>{shownNames.join(" · ")}{moreNames > 0 ? ` · +${moreNames} more` : ""}</dd>
+            </>
+          )}
+          {repo.error && (
+            <>
+              <dt>Problem</dt>
+              <dd className="sync-storage-repo-problem">{repo.error}</dd>
+            </>
+          )}
+        </dl>
+      )}
+    </div>
+  );
+}
+
 export function conversationPathsBlockSync(
   hasBinding: boolean,
   audit: CodexConversationPathAudit | undefined,
@@ -519,6 +594,11 @@ export default function ProjectLinksWorkspace({
   const [remoteBundles, setRemoteBundles] = useState<BundleSnapshotSummary[] | null>(null);
   const [bundleLoading, setBundleLoading] = useState(false);
   const [bundleError, setBundleError] = useState<string | null>(null);
+  /* The Catalog's kind repositories in the same storage, listed beside the
+     project ones. Their failure has its own surface — a callout under the
+     list — so one broken half never hides the other. */
+  const [catalogRepos, setCatalogRepos] = useState<CatalogStorageRepository[] | null>(null);
+  const [catalogRepoError, setCatalogRepoError] = useState<string | null>(null);
   /* Revealing is `reveal_item_in_dir`, not `open_path`: the capability grants
      open_path only for the log folder, so a project root or a storage folder
      is refused there. The rejection is surfaced, never dropped — a folder that
@@ -639,6 +719,11 @@ export default function ProjectLinksWorkspace({
   const orderedRemoteBundles = [...(remoteBundles ?? [])].sort((left, right) => {
     return (right.updated_at ?? 0) - (left.updated_at ?? 0);
   });
+  /* Catalog sets follow the projects, newest first among themselves; a
+     refusal row carries no timestamp and sinks to the end. */
+  const orderedCatalogRepos = [...(catalogRepos ?? [])].sort((left, right) => {
+    return (right.updated_at ?? 0) - (left.updated_at ?? 0);
+  });
   const run = async (key: string, action: () => Promise<void> | void) => {
     setRunningAction(key);
     try {
@@ -653,9 +738,14 @@ export default function ProjectLinksWorkspace({
     const requestId = ++bundleRequestRef.current;
     setRemoteBundles(null);
     setBundleError(null);
+    setCatalogRepos(null);
+    setCatalogRepoError(null);
     setBundleLoading(true);
+    // Both reads start together under the one loading gate.
+    const bundlesRead = projectSyncApi.listRemoteBundleSnapshots(storageId);
+    const catalogRead = storageCatalogApi.listStorageRepositories(storageId);
     try {
-      const bundles = await projectSyncApi.listRemoteBundleSnapshots(storageId);
+      const bundles = await bundlesRead;
       if (bundleRequestRef.current === requestId) {
         setRemoteBundles(bundles);
         onStorageIssueChange?.(storageId, null);
@@ -665,6 +755,14 @@ export default function ProjectLinksWorkspace({
         const issue = storageAccessErrorMessage(storage, reason);
         setBundleError(issue);
         onStorageIssueChange?.(storageId, issue);
+      }
+    }
+    try {
+      const repositories = await catalogRead;
+      if (bundleRequestRef.current === requestId) setCatalogRepos(repositories);
+    } catch (reason) {
+      if (bundleRequestRef.current === requestId) {
+        setCatalogRepoError(storageAccessErrorMessage(storage, reason));
       }
     } finally {
       if (bundleRequestRef.current === requestId) setBundleLoading(false);
@@ -690,6 +788,8 @@ export default function ProjectLinksWorkspace({
       setStorageDetailsExpanded(false);
       setRemoteBundles(null);
       setBundleError(null);
+      setCatalogRepos(null);
+      setCatalogRepoError(null);
       setBundleLoading(false);
       onStorageEditorRequestHandled?.();
       return;
@@ -705,6 +805,8 @@ export default function ProjectLinksWorkspace({
       setStorageDetailsExpanded(true);
       setRemoteBundles(null);
       setBundleError(null);
+      setCatalogRepos(null);
+      setCatalogRepoError(null);
       setBundleLoading(false);
       onStorageEditorRequestHandled?.();
       return;
@@ -1170,6 +1272,47 @@ export default function ProjectLinksWorkspace({
       </button>
     );
 
+    /* Everything this column has to say, in one box. The externally changed
+     * draft, the two reads behind the repository list and the two loose
+     * callouts under it were five separate rows down one page, each with its
+     * own frame; they are rungs of one ladder, and the box takes the loudest
+     * rung present. Conditions are carried over exactly, including the
+     * conflict's — it only ever rendered inside the expanded panel. */
+    const storageNotices: NoticeItem[] = [];
+    if (showStorageDetails && storageConflict) {
+      storageNotices.push({
+        key: "storage-changed-externally",
+        severity: "warning",
+        message: `This storage was ${storageConflict === "removed" ? "removed" : "changed"} outside this editor, so this draft can no longer be saved. Loading the current configuration discards the draft.`,
+        action: (
+          <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void reloadExternalStorage()}>
+            Load current
+          </button>
+        ),
+      });
+    }
+    if (!creatingStorage && !bundleLoading && bundleError) {
+      storageNotices.push({ key: "repository-list-failed", severity: "danger", message: bundleError });
+    }
+    if (!creatingStorage && !bundleLoading && !bundleError && catalogRepoError) {
+      storageNotices.push({ key: "catalog-repositories-failed", severity: "danger", message: catalogRepoError });
+    }
+    if (revealError) {
+      storageNotices.push({ key: "reveal-failed", severity: "danger", message: revealError });
+    }
+    if (error && !renamingStorage) {
+      storageNotices.push({ key: "storage-action-failed", severity: "danger", message: error });
+    }
+    /* Standing by default: both read failures are set by the load this page
+     * starts as it opens, and `error` arrives as a prop, so all three are on
+     * screen the moment the view renders and must not announce. The two that
+     * ARE events re-time the whole box — a reveal the user asked for came
+     * back refused, and the conflict lands from the config watcher while the
+     * draft is open and stops it from ever being saved. */
+    const storageNoticeTiming: NoticeTiming = revealError || (showStorageDetails && storageConflict)
+      ? { timing: "blocking" }
+      : { timing: "standing", label: "Problems with this storage" };
+
     return (
       <>
       <SyncPathBar
@@ -1230,82 +1373,77 @@ export default function ProjectLinksWorkspace({
             ref={storageSettingsRef}
             className={`sync-storage-settings-below sync-storage-settings-dedicated${showStorageDetails ? " settings-expanded" : " settings-collapsed"}`}
           >
+            {/* The column's one box, at the head of the column it speaks for,
+                the way the session page's zone sits under its header. */}
+            <NoticeZone
+              items={storageNotices}
+              subject="problems with this storage"
+              {...storageNoticeTiming}
+            />
+
             <div
               id={storageDetailsId}
               className="sync-storage-details-panel"
               hidden={!showStorageDetails}
             >
               {showStorageDetails && (
-                <>
-                  {storageConflict && (
-                    <div className="sync-callout warning" role="alert">
-                      <Icon name="alert-triangle" size={14} />
-                      <span>
-                        This storage was {storageConflict === "removed" ? "removed" : "changed"} outside this editor, so this draft can no longer be saved. Loading the current configuration discards the draft.
+                <StorageEditor
+                  /* Identity, so every per-storage ref inside the editor —
+                     the R2 jurisdiction, the S3 API URL draft and its
+                     editing flag — resets when the storage does. Without it
+                     a new R2 draft inherited the previous storage's
+                     jurisdiction until the endpoint happened to parse. */
+                  key={storageDraft.id}
+                  storage={storageDraft}
+                  disabled={busy || !!storageConflict}
+                  onChange={(nextDraft) => {
+                    // An edit orphans the copied instruction, so the marker
+                    // dies — and with it the row's claim to be listening.
+                    agentSetupMarkerRef.current = null;
+                    setAgentNotice((current) => (current?.kind === "listening" ? null : current));
+                    setStorageDraft(nextDraft);
+                  }}
+                  secretStored={secretStored}
+                  showNameField={creatingStorage}
+                  showProgress={!creatingStorage}
+                  agentSlot={storageDraft.kind !== "s3" ? undefined
+                    : agentNotice?.kind === "listening" ? (
+                      <span className="sync-r2-guide-wait" role="status">
+                        <span className="status-loader" /> Paste into your agent — listening…
                       </span>
-                      <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void reloadExternalStorage()}>
-                        Load current
-                      </button>
-                    </div>
-                  )}
-                  <StorageEditor
-                    /* Identity, so every per-storage ref inside the editor —
-                       the R2 jurisdiction, the S3 API URL draft and its
-                       editing flag — resets when the storage does. Without it
-                       a new R2 draft inherited the previous storage's
-                       jurisdiction until the endpoint happened to parse. */
-                    key={storageDraft.id}
-                    storage={storageDraft}
-                    disabled={busy || !!storageConflict}
-                    onChange={(nextDraft) => {
-                      // An edit orphans the copied instruction, so the marker
-                      // dies — and with it the row's claim to be listening.
-                      agentSetupMarkerRef.current = null;
-                      setAgentNotice((current) => (current?.kind === "listening" ? null : current));
-                      setStorageDraft(nextDraft);
-                    }}
-                    secretStored={secretStored}
-                    showNameField={creatingStorage}
-                    showProgress={!creatingStorage}
-                    agentSlot={storageDraft.kind !== "s3" ? undefined
-                      : agentNotice?.kind === "listening" ? (
-                        <span className="sync-r2-guide-wait" role="status">
-                          <span className="status-loader" /> Paste into your agent — listening…
-                        </span>
-                      )
-                      : agentNotice?.kind === "connected" ? (
-                        <span className="sync-r2-guide-connected" role="status">
-                          <Icon name="check-circle" size={13} /> {agentNotice.message}
-                        </span>
-                      )
-                      : agentNotice?.kind === "error" ? (
-                        <span className="sync-r2-guide-error" role="alert">{agentNotice.message}</span>
-                      )
-                      : creatingStorage ? (
-                        <button
-                          type="button"
-                          className="btn sync-r2-guide-btn sync-r2-agent-cta"
-                          disabled={busy}
-                          onClick={() => void copyAgentSetupInstruction()}
-                        >
-                          <Icon name="terminal" size={13} /> Copy agent instruction
-                        </button>
-                      ) : undefined}
-                    // A draft's create is the page's verb and lives in the
-                    // commit bar below; a settled storage's save belongs to the
-                    // drawer it commits.
-                    primaryAction={creatingStorage ? undefined : (
+                    )
+                    : agentNotice?.kind === "connected" ? (
+                      <span className="sync-r2-guide-connected" role="status">
+                        <Icon name="check-circle" size={13} /> {agentNotice.message}
+                      </span>
+                    )
+                    : agentNotice?.kind === "error" ? (
+                      <span className="sync-r2-guide-error" role="alert">{agentNotice.message}</span>
+                    )
+                    : creatingStorage ? (
                       <button
                         type="button"
-                        className="btn btn-primary"
-                        disabled={busy || !!storageConflict || !storageReady || (!!storageBaseline && sameStorage(storageDraft, storageBaseline))}
-                        onClick={() => void saveEditedStorage()}
+                        className="btn sync-r2-guide-btn sync-r2-agent-cta"
+                        disabled={busy}
+                        onClick={() => void copyAgentSetupInstruction()}
                       >
-                        {runningAction === `storage:${editedStorageConfig.id}` ? "Saving…" : "Save storage"}
+                        <Icon name="terminal" size={13} /> Copy agent instruction
                       </button>
-                    )}
-                  />
-                </>
+                    ) : undefined}
+                  // A draft's create is the page's verb and lives in the
+                  // commit bar below; a settled storage's save belongs to the
+                  // drawer it commits.
+                  primaryAction={creatingStorage ? undefined : (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={busy || !!storageConflict || !storageReady || (!!storageBaseline && sameStorage(storageDraft, storageBaseline))}
+                      onClick={() => void saveEditedStorage()}
+                    >
+                      {runningAction === `storage:${editedStorageConfig.id}` ? "Saving…" : "Save storage"}
+                    </button>
+                  )}
+                />
               )}
             </div>
 
@@ -1319,31 +1457,30 @@ export default function ProjectLinksWorkspace({
 
                 {bundleLoading ? (
                   <div className="sync-storage-repository-state"><span className="status-loader" /> Loading repositories…</div>
-                ) : bundleError ? (
-                  <div className="sync-callout error" role="alert">
-                    <Icon name="alert-triangle" size={15} />
-                    <span>{bundleError}</span>
-                  </div>
-                ) : orderedRemoteBundles.length === 0 ? (
-                  <div className="sync-storage-repository-state">No repositories in this storage.</div>
+                ) : orderedRemoteBundles.length === 0 && orderedCatalogRepos.length === 0 ? (
+                  /* Emptiness is tested before failure, because the two lists
+                     are read independently: a project-bundle listing that
+                     refuses says nothing about the Catalog repositories that
+                     loaded beside it, and hiding the rows because its sibling
+                     failed left the card showing a heading and nothing else.
+                     A failure only suppresses the line below, which is
+                     reserved for a storage that really does hold nothing —
+                     the refusal itself is already a rung of the column's one
+                     box above, so the card does not say it twice. */
+                  bundleError || catalogRepoError ? null : (
+                    <div className="sync-storage-repository-state">No repositories in this storage.</div>
+                  )
                 ) : (
                   <div className="sync-storage-repository-list">
                     {orderedRemoteBundles.map((bundle) => (
                       <StorageRepositoryRow key={bundle.bundle_id} bundle={bundle} />
                     ))}
+                    {orderedCatalogRepos.map((repo) => (
+                      <CatalogStorageRepositoryRow key={repo.repository_id} repo={repo} />
+                    ))}
                   </div>
                 )}
               </section>
-            )}
-
-            {revealError && (
-              <div className="sync-callout error" role="alert">
-                <Icon name="alert-triangle" size={15} />
-                <span>{revealError}</span>
-              </div>
-            )}
-            {error && !renamingStorage && (
-              <div className="sync-callout error"><Icon name="alert-triangle" size={15} /> {error}</div>
             )}
 
             {/* The draft's verbs close its column, under the fields they act
@@ -1383,6 +1520,22 @@ export default function ProjectLinksWorkspace({
     );
   }
 
+  /* What the R2 agent handover left behind, said once on each of the two
+   * screens that outlive the editor. Both surviving kinds are receipts — the
+   * CLI's storage was adopted, or the copy itself failed — so the non-error
+   * one is `success`, which is also the check-circle the row has always drawn.
+   * Standing, not an event: neither screen can set `agentNotice`, because the
+   * copy button and the adoption effect both need the storage editor open and
+   * both of these render only once it is closed. By the time it is read here
+   * it is content the view already came with, so it must not announce. */
+  const agentSetupNotices: NoticeItem[] = agentNotice && agentNotice.kind !== "listening"
+    ? [{
+        key: "agent-setup",
+        severity: agentNotice.kind === "error" ? "danger" : "success",
+        message: agentNotice.message,
+      }]
+    : [];
+
   if (!workspaceProject && !editingStorage && !newProjectSetup) {
     return (
       <main className="sync-main sync-project-links-page sync-git-info-page">
@@ -1393,12 +1546,12 @@ export default function ProjectLinksWorkspace({
               <div className="profile-links-subtitle">Select a completed project to view its Codex history.</div>
             </div>
           </div>
-          {agentNotice && agentNotice.kind !== "listening" && (
-            <div className={agentNotice.kind === "error" ? "sync-callout error" : "sync-callout"} role="status">
-              <Icon name={agentNotice.kind === "error" ? "alert-triangle" : "check-circle"} size={14} />
-              <span>{agentNotice.message}</span>
-            </div>
-          )}
+          <NoticeZone
+            items={agentSetupNotices}
+            subject="notes about storage setup"
+            timing="standing"
+            label="Notes about storage setup"
+          />
         </section>
       </main>
     );
@@ -1694,10 +1847,12 @@ export default function ProjectLinksWorkspace({
           tallies said the same thing in a vocabulary nothing else on the page
           used, and none of them was actionable. */}
       {attention > 0 && (
+        /* Not role="status": this is a standing count, not an event, and a
+           live region re-announces it on every unrelated re-render. The label
+           carries what the number means. */
         <span
           className={`sync-path-attention ${activityHeader?.counts.severity ?? "warning"}`}
           tabIndex={0}
-          role="status"
           data-tooltip={activityHeader?.counts.detail}
           aria-label={`${attention} thread${attention === 1 ? "" : "s"} need attention: ${activityHeader?.counts.detail}`}
         >
@@ -1823,6 +1978,19 @@ export default function ProjectLinksWorkspace({
     </>
   ) : null;
 
+  /* The workspace's own two messages, in one box above the page. A refused
+   * reveal is an event — the user picked it out of a crumb menu a moment ago —
+   * and it re-times the box; the setup receipt beside it is standing, for the
+   * reason spelled out where `agentSetupNotices` is built. */
+  const workspaceNotices: NoticeItem[] = [];
+  if (revealError) {
+    workspaceNotices.push({ key: "reveal-failed", severity: "danger", message: revealError });
+  }
+  workspaceNotices.push(...agentSetupNotices);
+  const workspaceNoticeTiming: NoticeTiming = revealError
+    ? { timing: "blocking" }
+    : { timing: "standing", label: "Notes about this workspace" };
+
   return (
     <>
     {workspaceProject && (
@@ -1933,19 +2101,11 @@ export default function ProjectLinksWorkspace({
           </form>
         )}
 
-        {revealError && (
-          <div className="sync-callout error" role="alert">
-            <Icon name="alert-triangle" size={15} />
-            <span>{revealError}</span>
-          </div>
-        )}
-
-        {agentNotice && agentNotice.kind !== "listening" && (
-          <div className={agentNotice.kind === "error" ? "sync-callout error" : "sync-callout"} role="status">
-            <Icon name={agentNotice.kind === "error" ? "alert-triangle" : "check-circle"} size={14} />
-            <span>{agentNotice.message}</span>
-          </div>
-        )}
+        <NoticeZone
+          items={workspaceNotices}
+          subject="notes about this workspace"
+          {...workspaceNoticeTiming}
+        />
 
         {newProjectSetup}
 
@@ -2169,6 +2329,150 @@ export default function ProjectLinksWorkspace({
                       // reads as a gap above the history.
                       if (!activeNotice && !reviewOpen && !activeSibling) return null;
 
+                      /* The four gates, in one box. They are a discriminated
+                       * union, so at most one is ever present — and they were
+                       * still four frames carrying four hand-written roles.
+                       * Copy, controls and order are carried over unchanged.
+                       *
+                       * All four are events without exception: ProjectSync
+                       * initialises the notice at null and only ever sets it
+                       * inside the Push and Pull handlers, so none of them can
+                       * be on screen when the card first renders. Each one is
+                       * a Push or a Pull that did not start, so the box stops
+                       * the flow whatever rung it reads at. */
+                      const gateNotices: NoticeItem[] = [];
+                      if (activeNotice?.kind === "requires_pull") {
+                        gateNotices.push({
+                          key: "requires-pull",
+                          /* A destination waiting on a Pull is a step, not a
+                             failure — nothing is broken and one action clears
+                             it, which is why this banner never carried a tone
+                             class and drew its glyph in blue. */
+                          severity: "info",
+                          title: activeNotice.copy.title,
+                          message: (
+                            <>
+                              {activeNotice.copy.body}
+                              <small className="sync-sync-review-pull-detail">{activeNotice.copy.detail}</small>
+                            </>
+                          ),
+                          action: (
+                            <div className="sync-sync-review-recovery-actions">
+                              <button
+                                type="button"
+                                className="btn btn-ghost"
+                                disabled={noticeActionsDisabled}
+                                onClick={() => void run(`pull:${actionPrefix}`, () => onPull(project.local_project_id, storage.id))}
+                              >
+                                <Icon name="download" size={13} />
+                                Open Pull review
+                              </button>
+                            </div>
+                          ),
+                        });
+                      }
+                      if (activeNotice?.kind === "remote_missing") {
+                        gateNotices.push({
+                          key: "remote-missing",
+                          /* Nothing failed and nothing was lost locally; Push
+                             is held until someone decides what the storage is
+                             now. That is the warning rung, and the amber the
+                             banner already drew. */
+                          severity: "warning",
+                          title: "Remote history is missing",
+                          message: `${storage.name || "This storage"} no longer holds this project's sync history, so Push is paused. If this is expected, unlink and link the storage again.`,
+                          action: (
+                            <div className="sync-sync-review-recovery-actions">
+                              <button
+                                type="button"
+                                className="btn btn-ghost"
+                                disabled={noticeActionsDisabled}
+                                onClick={() => onOpenStorage(storage.id, true)}
+                              >
+                                Storage settings
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-ghost danger"
+                                disabled={noticeActionsDisabled}
+                                onClick={() => void run(`unlink:${actionPrefix}`, () => onUnlinkStorage(project.local_project_id, storage.id))}
+                              >
+                                Unlink storage…
+                              </button>
+                            </div>
+                          ),
+                        });
+                      }
+                      if (activeNotice?.kind === "remote_replaced") {
+                        gateNotices.push({
+                          key: "remote-replaced",
+                          severity: "warning",
+                          title: "Storage history changed",
+                          message: `${storage.name || "This storage"} holds a different sync history than this project last synced${activeNotice.baseRevision != null ? ` (revision ${activeNotice.baseRevision})` : ""}. Review & adopt pulls the new history; unlinking doesn't delete files.`,
+                          action: (
+                            <div className="sync-sync-review-recovery-actions">
+                              <button
+                                type="button"
+                                className="btn btn-ghost danger"
+                                disabled={noticeActionsDisabled}
+                                onClick={() => void run(`unlink:${actionPrefix}`, () => onUnlinkStorage(project.local_project_id, storage.id))}
+                              >
+                                Unlink storage…
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-ghost"
+                                disabled={noticeActionsDisabled}
+                                onClick={() => void run(`pull:${actionPrefix}`, () => onPull(project.local_project_id, storage.id))}
+                              >
+                                <Icon name="download" size={13} />
+                                Review &amp; adopt
+                              </button>
+                            </div>
+                          ),
+                        });
+                      }
+                      if (activeNotice?.kind === "action_failed") {
+                        const failedAction = activeNotice.action;
+                        const failedMessage = activeNotice.message;
+                        gateNotices.push({
+                          key: "action-failed",
+                          severity: "danger",
+                          title: failedAction === "push" ? "Push couldn't start" : "Pull couldn't start",
+                          message: failedMessage,
+                          action: (
+                            <div className="sync-sync-review-recovery-actions">
+                              {isIrrecoverableSyncError(failedMessage) ? (
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost danger"
+                                  disabled={noticeActionsDisabled}
+                                  onClick={() => void run(
+                                    `reset-sync-metadata:${project.local_project_id}`,
+                                    () => onResetProjectMetadata(project.local_project_id),
+                                  )}
+                                >
+                                  <Icon name="trash" size={13} />
+                                  Reset local sync state
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  disabled={noticeActionsDisabled}
+                                  onClick={() => void run(
+                                    `${failedAction}:${actionPrefix}`,
+                                    () => (failedAction === "push" ? onPush : onPull)(project.local_project_id, storage.id),
+                                  )}
+                                >
+                                  Retry
+                                </button>
+                              )}
+                            </div>
+                          ),
+                        });
+                      }
+
                       return (
                         <div
                           key={storage.id}
@@ -2194,119 +2498,12 @@ export default function ProjectLinksWorkspace({
                               onDismiss={() => onDismissStorageNotice?.()}
                             />
                           )}
-                          {activeNotice && activeNotice.kind === "requires_pull" && (
-                            <div className="sync-callout sync-storage-notice sync-sync-review-pull-required" role="status">
-                              <Icon name="git-compare-arrows" size={15} />
-                              <span>
-                                <strong>{activeNotice.copy.title}</strong>
-                                {activeNotice.copy.body}
-                                <small className="sync-sync-review-pull-detail">{activeNotice.copy.detail}</small>
-                              </span>
-                              <div className="sync-sync-review-recovery-actions">
-                                <button
-                                  type="button"
-                                  className="btn btn-ghost"
-                                  disabled={noticeActionsDisabled}
-                                  onClick={() => void run(`pull:${actionPrefix}`, () => onPull(project.local_project_id, storage.id))}
-                                >
-                                  <Icon name="download" size={13} />
-                                  Open Pull review
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                          {activeNotice && activeNotice.kind === "remote_missing" && (
-                            <div className="sync-callout sync-storage-notice sync-sync-review-remote-missing" role="alert">
-                              <Icon name="alert-triangle" size={15} />
-                              <span>
-                                <strong>Remote history is missing</strong>
-                                {`${storage.name || "This storage"} no longer holds this project's sync history, so Push is paused. If this is expected, unlink and link the storage again.`}
-                              </span>
-                              <div className="sync-sync-review-recovery-actions">
-                                <button
-                                  type="button"
-                                  className="btn btn-ghost"
-                                  disabled={noticeActionsDisabled}
-                                  onClick={() => onOpenStorage(storage.id, true)}
-                                >
-                                  Storage settings
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn btn-ghost danger"
-                                  disabled={noticeActionsDisabled}
-                                  onClick={() => void run(`unlink:${actionPrefix}`, () => onUnlinkStorage(project.local_project_id, storage.id))}
-                                >
-                                  Unlink storage…
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                          {activeNotice && activeNotice.kind === "remote_replaced" && (
-                            <div className="sync-callout sync-storage-notice sync-sync-review-remote-missing" role="alert">
-                              <Icon name="alert-triangle" size={15} />
-                              <span>
-                                <strong>Storage history changed</strong>
-                                {`${storage.name || "This storage"} holds a different sync history than this project last synced${activeNotice.baseRevision != null ? ` (revision ${activeNotice.baseRevision})` : ""}. Review & adopt pulls the new history; unlinking doesn't delete files.`}
-                              </span>
-                              <div className="sync-sync-review-recovery-actions">
-                                <button
-                                  type="button"
-                                  className="btn btn-ghost danger"
-                                  disabled={noticeActionsDisabled}
-                                  onClick={() => void run(`unlink:${actionPrefix}`, () => onUnlinkStorage(project.local_project_id, storage.id))}
-                                >
-                                  Unlink storage…
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn btn-ghost"
-                                  disabled={noticeActionsDisabled}
-                                  onClick={() => void run(`pull:${actionPrefix}`, () => onPull(project.local_project_id, storage.id))}
-                                >
-                                  <Icon name="download" size={13} />
-                                  Review &amp; adopt
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                          {activeNotice && activeNotice.kind === "action_failed" && (
-                            <div className="sync-callout sync-storage-notice error" role="alert">
-                              <Icon name="alert-triangle" size={15} />
-                              <span>
-                                <strong>{activeNotice.action === "push" ? "Push couldn't start" : "Pull couldn't start"}</strong>
-                                {activeNotice.message}
-                              </span>
-                              <div className="sync-sync-review-recovery-actions">
-                                {isIrrecoverableSyncError(activeNotice.message) ? (
-                                  <button
-                                    type="button"
-                                    className="btn btn-ghost danger"
-                                    disabled={noticeActionsDisabled}
-                                    onClick={() => void run(
-                                      `reset-sync-metadata:${project.local_project_id}`,
-                                      () => onResetProjectMetadata(project.local_project_id),
-                                    )}
-                                  >
-                                    <Icon name="trash" size={13} />
-                                    Reset local sync state
-                                  </button>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    className="btn btn-ghost"
-                                    disabled={noticeActionsDisabled}
-                                    onClick={() => void run(
-                                      `${activeNotice.action}:${actionPrefix}`,
-                                      () => (activeNotice.action === "push" ? onPush : onPull)(project.local_project_id, storage.id),
-                                    )}
-                                  >
-                                    Retry
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          )}
+                          <NoticeZone
+                            items={gateNotices}
+                            subject="reasons this storage is held"
+                            className="sync-storage-notice"
+                            timing="blocking"
+                          />
                           {reviewOpen && (
                             <div id={reviewPanelId} className="sync-storage-inline-review" tabIndex={-1}>
                               {inlineStorageReview?.content}
@@ -2379,7 +2576,11 @@ export default function ProjectLinksWorkspace({
 
       {sessionDetailSubview && workspaceProject && (
         <Suspense fallback={(
-          <section className="session-detail-page session-detail-entry-state" role="status">
+          /* Not role="status": the region and its sentence mount in the same
+             commit, so there is no change for a live region to announce — the
+             text is simply what this view renders with while the chunk
+             loads. */
+          <section className="session-detail-page session-detail-entry-state">
             <span className="status-loader" />
             <strong>Opening session detail…</strong>
           </section>

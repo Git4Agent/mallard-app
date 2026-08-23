@@ -170,6 +170,8 @@
   --loader-track: rgba(255, 238, 217, 0.2);
   --danger-soft: rgba(251, 115, 97, 0.11);
   --warning-soft: rgba(244, 185, 79, 0.11);
+  --info-soft: rgba(105, 198, 244, 0.11);
+  --success-soft: rgba(99, 205, 130, 0.11);
   --accent-soft: rgba(239, 231, 212, 0.1);
   --accent-contrast: #100e0b;
   --switch-off: #575048;
@@ -285,6 +287,8 @@
   --loader-track: rgba(82, 58, 43, 0.18);
   --danger-soft: rgba(205, 69, 49, 0.09);
   --warning-soft: rgba(192, 124, 12, 0.1);
+  --info-soft: rgba(47, 136, 180, 0.09);
+  --success-soft: rgba(75, 150, 97, 0.09);
   --accent-soft: rgba(82, 58, 43, 0.075);
   --accent-contrast: #fffaf4;
   --switch-off: #ad9e92;
@@ -304,7 +308,11 @@
      short of the 4.5:1 an error sentence needs. One step darker measures
      4.9:1 and is indistinguishable at a glance. The dark palette's red
      already clears the bar, so only this block overrides the default. */
-  --danger-text: #c73d28;
+  /* Darkened from #c73d28. The ink is picked against paper, but a danger
+     notice prints it on `--danger-soft` over that paper, and there it measured
+     4.37:1 — under the 4.5 this palette holds itself to. Every rung now clears
+     the bar on its own fill; see the notice-contrast gate in css-hygiene. */
+  --danger-text: #be3824;
   --yellow: #d99609;
   --amber: var(--yellow);
   --blue: #2f88b4;
@@ -533,14 +541,11 @@ body {
   letter-spacing: 0;
 }
 
-/* Sentences the app wrote are still sentences: they read in the clean face at
-   prose leading, not in blocks. */
 .profile-links-subtitle,
 .sync-empty-state p,
 .sync-empty-state > span,
 .sync-pane-message,
-.sync-backend-banner span,
-.sync-callout,
+.notice,
 .sync-modal-footer span {
   font-family: var(--font-sans);
   line-height: var(--leading-prose);
@@ -2477,24 +2482,9 @@ summary {
   background: var(--surface-row-active);
 }
 
-.sync-callout,
 .conversation-path-repair-notice {
   border-radius: 4px;
   box-shadow: none;
-}
-
-/* App.css leaves this at 11.5px, a fractional legacy size that is on no step
-   of the scale. */
-.sync-callout {
-  font-size: var(--type-sm);
-}
-
-.sync-callout.error {
-  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
-}
-
-.sync-callout.warning {
-  border-color: color-mix(in srgb, var(--yellow) 45%, var(--border));
 }
 
 .sync-agent-choice,
@@ -2931,50 +2921,6 @@ summary {
   color: var(--text-1);
   font-family: var(--font-mono);
   font-size: var(--type-2xs);
-}
-
-.sync-notice,
-.sync-backend-banner {
-  border-color: var(--border-mid);
-  background: var(--surface-card);
-  box-shadow: 2px 2px 0 color-mix(in srgb, var(--border-strong) 14%, transparent);
-}
-
-/* Restated here because the rule above resets the border App.css tinted: this
-   sheet loads second, so an App.css-only modifier would never apply. */
-.sync-backend-banner.sync-shell-error {
-  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
-}
-
-/* The toast was the last 8px corner in a 4px app, and its 10.5px text sat off
-   the whole-pixel scale. The rail replaces the tinted border App.css used to
-   carry the tone: one solid edge, read before the words are. */
-.sync-notice {
-  overflow: hidden;
-  border-radius: 4px;
-  font-family: var(--font-sans);
-  font-size: var(--type-xs);
-  line-height: var(--leading-snug);
-}
-
-/* Positioned, not a stretched flex item: `align-self: stretch` spans only the
-   content box, so the toast's 5px of vertical padding left the rail floating
-   short of both edges. The toast is already absolute, so this anchors to it;
-   `overflow: hidden` trims the square end to the 4px corner. */
-.sync-notice::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 3px;
-  background: var(--green);
-}
-
-.sync-notice.is-attention::before {
-  background: var(--yellow);
-}
-
-.sync-notice.is-attention > svg {
-  color: var(--yellow);
 }
 
 .sync-notice-dismiss {

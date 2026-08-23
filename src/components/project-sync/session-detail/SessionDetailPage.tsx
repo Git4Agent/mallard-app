@@ -11,6 +11,7 @@ import type {
   SessionTimelineEvent,
 } from "../../../types";
 import Icon from "../../Icons";
+import { NoticeZone, type NoticeItem, type NoticeTiming } from "../../notice/Notice";
 import { projectSyncApi } from "../api";
 import SessionDetailHeader from "./SessionDetailHeader";
 import SessionDetailTimeline from "./SessionDetailTimeline";
@@ -397,6 +398,44 @@ export default function SessionDetailPage({
 
   const warnings = mergeWarnings(detail.warnings, timelineWarnings);
 
+  /* Everything the page has to say about this record, in one box. A failed
+   * action, a snapshot that moved under us and the backend's own notes were
+   * three separate amber rows before; they are three rungs of one ladder, and
+   * the box takes the loudest present. */
+  const notices: NoticeItem[] = [];
+  if (actionError) {
+    notices.push({ key: "action-failed", severity: "danger", message: actionError });
+  }
+  if (snapshotChanged) {
+    notices.push({
+      key: "snapshot-changed",
+      severity: "warning",
+      title: "This session changed.",
+      message: "Refresh before continuing so pages are not mixed across snapshots.",
+      action: (
+        <button type="button" className="btn btn-ghost" onClick={() => void loadDetail(true)}>Refresh</button>
+      ),
+    });
+  }
+  for (const warning of warnings) {
+    notices.push({
+      key: `${warning.code}:${warning.message}`,
+      severity: warning.severity,
+      message: warning.message,
+    });
+  }
+  /* `detail.warnings` come with the page, so a box holding only those is a
+   * named region and never announces. The other three rungs all arrive after
+   * the page has painted: a failed action, a snapshot that moved under a page
+   * request, and the timeline's own warnings, which land with the first page
+   * of events rather than with the detail. Any of them re-times the whole box
+   * — the snapshot banner especially, since its Refresh button is the only way
+   * out of a session whose pages would otherwise mix across snapshots. */
+  const settled = actionError !== null || snapshotChanged || timelineWarnings.length > 0;
+  const noticeTiming: NoticeTiming = settled
+    ? { timing: "blocking" }
+    : { timing: "standing", label: "Notes about this session" };
+
   return (
     <section
       className="session-detail-page"
@@ -408,28 +447,15 @@ export default function SessionDetailPage({
         detail={detail}
         headingRef={headingRef}
         actionBusyId={actionBusyId}
-        actionError={actionError}
         onAction={(action) => void runAction(action)}
       />
 
-      {snapshotChanged && (
-        <div className="sync-callout warning session-detail-stale" role="alert">
-          <Icon name="refresh" size={12} />
-          <span><strong>This session changed.</strong> Refresh before continuing so pages are not mixed across snapshots.</span>
-          <button type="button" className="btn btn-ghost" onClick={() => void loadDetail(true)}>Refresh</button>
-        </div>
-      )}
-
-      {warnings.length > 0 && (
-        <section className="session-detail-warnings" aria-label="Session detail warnings">
-          {warnings.map((warning) => (
-            <div key={`${warning.code}:${warning.message}`} className="sync-callout warning" role="status">
-              <Icon name="alert-triangle" size={12} />
-              <span>{warning.message}</span>
-            </div>
-          ))}
-        </section>
-      )}
+      <NoticeZone
+        items={notices}
+        subject="notes about this session"
+        className="session-detail-notices"
+        {...noticeTiming}
+      />
 
       {filters && (
         <div className="session-detail-layout">

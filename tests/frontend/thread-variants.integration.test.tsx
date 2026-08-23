@@ -63,7 +63,6 @@ function localSession(threadId: string, title: string) {
     started_at: WINDOW_START + 1_000,
     ended_at: WINDOW_START + 2_000,
     working_directory: null,
-    relative_cwd: null,
     branch: "main",
     recorded_sha: "a".repeat(40),
     is_active: false,

@@ -2,6 +2,7 @@ import { homeDir } from "@tauri-apps/api/path";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icons";
+import Notice from "../notice/Notice";
 import { storageCatalogApi, type StorageCatalogApi } from "./api";
 import { CATALOG_KINDS, errorMessage } from "./model";
 import type {
@@ -367,9 +368,15 @@ export default function AddCatalogScopeWorkspace({
             </section>
 
             {error && (
-              <div className="sync-setup-field-error sync-setup-system-error" role="alert">
-                <Icon name="alert-triangle" size={13} /> {error}
-              </div>
+              /* The page's failure, not a field's: it wore the field-error
+                 class for the colour and describes no control. Add is what
+                 fills it — the profile save or the scope creation that did not
+                 happen — so it announces assertively. The mount listing writes
+                 here too, and a Catalog page that could not load its providers
+                 is worth the same rung. */
+              <Notice severity="danger" timing="blocking" className="sync-setup-system-error">
+                {error}
+              </Notice>
             )}
           </div>
 

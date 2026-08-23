@@ -1,5 +1,6 @@
 import type { SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
+import Notice from "../../notice/Notice";
 import SessionDetailEvent from "./SessionDetailEvent";
 import type { SessionToolDetailState } from "./SessionDetailToolCall";
 import {
@@ -60,21 +61,32 @@ export default function SessionDetailTimeline({
 
   return (
     <section className="session-detail-timeline" aria-label="Session timeline">
+      {/* Both of these land after the view's first commit — the first page
+          request fires from an effect once the detail has resolved — so they
+          are events, not content the timeline renders with, and live regions
+          are the right shape. `role="status"` already carries
+          `aria-live="polite"`, so authoring the attribute beside it was noise. */}
       {loading && (
-        <div className="session-detail-state" role="status" aria-live="polite">
+        <div className="session-detail-state" role="status">
           <span className="status-loader" />
           <strong>Loading the filtered timeline…</strong>
           <span>Conversation text and tool bodies are read only when needed.</span>
         </div>
       )}
 
+      {/* A failed page leaves the transcript with nothing to show, so it stops
+          the flow rather than advising on it: `blocking`, and the box prints
+          the severity as a word instead of leaving it to the tint and glyph
+          the pane used to carry. */}
       {error && (
-        <div className="session-detail-state error" role="alert">
-          <Icon name="alert-triangle" size={24} />
-          <strong>Timeline unavailable</strong>
-          <span>{error}</span>
-          <button type="button" className="btn btn-ghost" onClick={onRetry}>Try again</button>
-        </div>
+        <Notice
+          severity="danger"
+          timing="blocking"
+          title="Timeline unavailable"
+          action={<button type="button" className="btn btn-ghost" onClick={onRetry}>Try again</button>}
+        >
+          {error}
+        </Notice>
       )}
 
       {!loading && !error && events.length === 0 && (

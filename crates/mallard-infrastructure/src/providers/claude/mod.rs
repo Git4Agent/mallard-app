@@ -16,9 +16,10 @@ use super::traits::{
     SessionRewriteRequest, SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice,
     SessionTimelineQuery,
 };
-use crate::provider_capture::{scan_session_metadata_with, ParsedSessionMetadata};
-use mallard_domain::ProviderKey;
-use serde::Deserialize;
+use crate::provider_capture::validated_session_metadata;
+use mallard_domain::{ProviderKey, MAX_CONVERSATION_FILE_BYTES};
+use serde_json::Value;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 pub use codec::{
@@ -31,42 +32,75 @@ pub fn provider_key() -> ProviderKey {
     ProviderKey::parse("claude").expect("static provider key")
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum ClaudeMetadataRecordType {
-    User,
-    Assistant,
-    System,
-}
-
-#[derive(Deserialize)]
-struct ClaudeSessionMetadataRecord {
-    #[serde(rename = "type")]
-    record_type: ClaudeMetadataRecordType,
-    #[serde(rename = "sessionId")]
-    session_id: String,
-    cwd: String,
-    #[serde(default, rename = "isSidechain")]
-    is_sidechain: bool,
-    #[serde(default, rename = "isMeta")]
-    is_meta: bool,
-}
-
-fn parse_claude_session_metadata(line: &[u8]) -> Option<ParsedSessionMetadata> {
-    let record: ClaudeSessionMetadataRecord = serde_json::from_slice(line).ok()?;
-    match record.record_type {
-        ClaudeMetadataRecordType::User
-        | ClaudeMetadataRecordType::Assistant
-        | ClaudeMetadataRecordType::System => {}
+fn scan_claude_session_metadata(path: &Path) -> Result<SessionFileMetadata, String> {
+    crate::sync_metrics::record_file_head_read(path);
+    let file = crate::jsonl_tail_io::open_no_follow(path)?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect Claude session '{}': {}", path.display(), error))?;
+    if !metadata.is_file() {
+        return Err("Claude session transcript is not a regular file".to_string());
     }
-    if record.is_sidechain || record.is_meta {
-        return None;
+    if metadata.len() > MAX_CONVERSATION_FILE_BYTES {
+        return Err(format!(
+            "Claude session exceeds {} bytes",
+            MAX_CONVERSATION_FILE_BYTES
+        ));
     }
-    Some(ParsedSessionMetadata {
-        session_id: record.session_id,
-        cwd: record.cwd,
-        is_internal_subagent: false,
-    })
+
+    let mut reader = BufReader::new(file);
+    let mut identity = codec::ClaudeSessionIdentityTracker::default();
+    let mut bytes_read = 0_u64;
+    let mut record_count = 0_usize;
+    loop {
+        let mut line = Vec::new();
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .map_err(|error| format!("read Claude session metadata: {}", error))?;
+        if read == 0 {
+            break;
+        }
+        bytes_read = bytes_read.saturating_add(read as u64);
+        if bytes_read > MAX_CONVERSATION_FILE_BYTES {
+            return Err(format!(
+                "Claude session exceeds {} bytes",
+                MAX_CONVERSATION_FILE_BYTES
+            ));
+        }
+        // The provider is allowed to be appending. A non-newline-terminated
+        // tail is not a durable record yet and cannot change leaf identity.
+        if line.last() != Some(&b'\n') {
+            break;
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        record_count = record_count.saturating_add(1);
+        if record_count > codec::MAX_CLAUDE_RECORDS {
+            return Err(format!(
+                "Claude session exceeds {} metadata records",
+                codec::MAX_CLAUDE_RECORDS
+            ));
+        }
+        if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+            identity.observe(&value);
+        }
+    }
+    crate::sync_metrics::record_transcript_bytes_read(path, bytes_read);
+
+    let (session_id, cwd) = identity.leaf_identity();
+    let session_id = session_id
+        .ok_or_else(|| "authoritative Claude leaf session ID was not found".to_string())?;
+    let cwd = cwd.ok_or_else(|| "authoritative Claude leaf cwd was not found".to_string())?;
+    let file_session_id = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".jsonl"))
+        .ok_or_else(|| "Claude session filename is invalid".to_string())?;
+    if file_session_id != session_id {
+        return Err("Claude session filename does not match its leaf session ID".to_string());
+    }
+    validated_session_metadata(session_id, cwd, false)
 }
 
 pub struct ClaudeAdapter;
@@ -127,7 +161,7 @@ impl SessionAdapter for ClaudeAdapter {
     }
 
     fn scan_metadata(&self, path: &Path) -> Result<SessionFileMetadata, String> {
-        scan_session_metadata_with(path, parse_claude_session_metadata)
+        scan_claude_session_metadata(path)
     }
 
     fn analyze(&self, bytes: &[u8]) -> SessionAnalysis {
@@ -154,10 +188,9 @@ impl SessionAdapter for ClaudeAdapter {
         &self,
         provider_home: &Path,
         project_root: &str,
-        relative_cwd: Option<&str>,
         logical_suffix: &str,
     ) -> Result<PathBuf, String> {
-        materialization::state_target(provider_home, project_root, relative_cwd, logical_suffix)
+        materialization::state_target(provider_home, project_root, logical_suffix)
     }
 
     fn summarize_file(&self, path: &Path) -> Result<SessionFileSummary, String> {
@@ -252,19 +285,21 @@ mod tests {
         )
         .unwrap();
 
-        let error = scan_session_metadata_with(&path, parse_claude_session_metadata).unwrap_err();
-        assert!(error.contains("authoritative session metadata"));
+        let error = scan_claude_session_metadata(&path).unwrap_err();
+        assert!(error.contains("authoritative Claude leaf"));
     }
 
     #[test]
-    fn metadata_scan_reads_complete_durable_top_level_record() {
+    fn metadata_scan_reads_complete_durable_leaf_record() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("session.jsonl");
+        let path = temp.path().join("current-session.jsonl");
         let cwd = temp.path().to_string_lossy().into_owned();
         fs::write(
             &path,
             jsonl([serde_json::json!({
                 "type": "user",
+                "uuid": "user-current",
+                "parentUuid": null,
                 "sessionId": "current-session",
                 "cwd": cwd,
                 "message": {
@@ -275,8 +310,52 @@ mod tests {
         )
         .unwrap();
 
-        let metadata = scan_session_metadata_with(&path, parse_claude_session_metadata).unwrap();
+        let metadata = scan_claude_session_metadata(&path).unwrap();
         assert_eq!(metadata.session_id, "current-session");
         assert_eq!(metadata.cwd, temp.path());
+    }
+
+    #[test]
+    fn metadata_scan_uses_resumed_leaf_identity_and_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let original_cwd = temp.path().join("original");
+        let resumed_cwd = temp.path().join("resumed");
+        fs::create_dir_all(&original_cwd).unwrap();
+        fs::create_dir_all(&resumed_cwd).unwrap();
+        let path = temp.path().join("resumed-session.jsonl");
+        fs::write(
+            &path,
+            jsonl([
+                serde_json::json!({
+                    "type": "user",
+                    "uuid": "user-original",
+                    "parentUuid": null,
+                    "sessionId": "original-session",
+                    "cwd": original_cwd,
+                    "message": {"role": "user", "content": "original"}
+                }),
+                serde_json::json!({
+                    "type": "assistant",
+                    "uuid": "assistant-resumed",
+                    "parentUuid": "user-original",
+                    "sessionId": "resumed-session",
+                    "cwd": resumed_cwd,
+                    "message": {"role": "assistant", "content": [{
+                        "type": "text", "text": "resumed"
+                    }]}
+                }),
+            ]),
+        )
+        .unwrap();
+
+        let metadata = scan_claude_session_metadata(&path).unwrap();
+        assert_eq!(metadata.session_id, "resumed-session");
+        assert_eq!(metadata.cwd, resumed_cwd);
+
+        let mismatched = temp.path().join("wrong-session.jsonl");
+        fs::copy(&path, &mismatched).unwrap();
+        assert!(scan_claude_session_metadata(&mismatched)
+            .unwrap_err()
+            .contains("filename does not match"));
     }
 }

@@ -256,7 +256,6 @@ test("the header is one strip: hidden h1, facts as chips, verbs on the right", (
       detail={{ ...detail, summary: detail.title }}
       headingRef={{ current: null }}
       actionBusyId={null}
-      actionError={null}
       onAction={() => undefined}
     />,
   );
@@ -292,7 +291,6 @@ test("the header is one strip: hidden h1, facts as chips, verbs on the right", (
       detail={{ ...detail, is_active: true }}
       headingRef={{ current: null }}
       actionBusyId={null}
-      actionError={null}
       onAction={() => undefined}
     />,
   );
@@ -315,7 +313,6 @@ test("the header is one strip: hidden h1, facts as chips, verbs on the right", (
       detail={detail}
       headingRef={{ current: null }}
       actionBusyId={null}
-      actionError={null}
       onAction={() => undefined}
     />,
   );
@@ -468,7 +465,7 @@ test("a matched checkpoint flags itself on the row, not on a line above it", () 
   assert.doesNotMatch(html, /session-detail-event-flags/);
   assert.match(
     html,
-    /class="session-detail-checkpoint-end"><span class="session-detail-quality quality-inferred" title="Matched from Git[^"]*">Inferred<\/span><span class="session-detail-checkpoint-branch">main</,
+    /class="session-detail-checkpoint-end"><span class="session-detail-quality quality-inferred" title="Matched from Git[^"]*">Inferred<span class="sync-visually-hidden"> Matched from Git[^"]*<\/span><\/span><span class="session-detail-checkpoint-branch">main</,
   );
 
   // Every other kind still flags above its body: their rows have nowhere to
@@ -870,8 +867,10 @@ test("Markdown images outside the project never reach the webview as requests", 
   assert.equal(images.length, 1);
   assert.match(images[0], /src="https:\/\/example\.com\/chart\.png"/);
   assert.match(images[0], /alt="Remote"/);
+  // The chip names the file AND says what happened to it: a bare alt text left
+  // "not shown" to the 30%-opacity tint, which no screen reader reports.
   for (const alt of ["Escape", "Parent", "Scheme"]) {
-    assert.match(html, new RegExp(`session-detail-image-placeholder[^>]*aria-label="${alt}"`));
+    assert.match(html, new RegExp(`session-detail-image-placeholder[^>]*aria-label="${alt} — image not shown`));
   }
   // Without a loader wired (plain markdown contexts), project images also
   // stay chips instead of firing requests.

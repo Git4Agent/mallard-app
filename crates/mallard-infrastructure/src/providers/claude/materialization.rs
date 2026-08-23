@@ -3,7 +3,6 @@
 //! performs the final canonical-boundary, no-follow, collision, size, and
 //! digest checks.
 
-use crate::provider_capture::relative_cwd_key;
 use crate::providers::traits::{MaterializationTargetRequest, PlannedProviderTarget};
 use mallard_domain::ConversationFileRole;
 use std::path::{Path, PathBuf};
@@ -80,32 +79,20 @@ pub(super) fn materialization_targets(
     Ok(targets)
 }
 
-/// Map one provider-state logical suffix (`memory/<cwd-key>/<rel>`) to its
-/// machine path under the Claude home.
+/// Map one provider-state logical suffix (`memory/<rel>`) to its machine
+/// path in the project root's canonical bucket under the Claude home.
 pub(super) fn state_target(
     provider_home: &Path,
     project_root: &str,
-    relative_cwd: Option<&str>,
     logical_suffix: &str,
 ) -> Result<PathBuf, String> {
-    let relative_cwd = relative_cwd.unwrap_or(".");
-    let expected_prefix = format!("memory/{}/", relative_cwd_key(relative_cwd));
-    let Some(remainder) = logical_suffix.strip_prefix(&expected_prefix) else {
+    let Some(remainder) = logical_suffix.strip_prefix("memory/") else {
         return Err(format!(
-            "Claude state path '{}' does not match its resource cwd",
+            "Claude state path '{}' is not project memory",
             logical_suffix
         ));
     };
-    let cwd = if relative_cwd == "." {
-        project_root.to_string()
-    } else {
-        format!(
-            "{}/{}",
-            project_root.trim_end_matches('/'),
-            relative_cwd.trim_start_matches("./")
-        )
-    };
-    let bucket = encode_claude_project_path(&cwd);
+    let bucket = encode_claude_project_path(project_root);
     let mut target = provider_home.join("projects").join(bucket).join("memory");
     for component in remainder.split('/') {
         if component.is_empty() || component == "." || component == ".." {

@@ -3,7 +3,8 @@ import type { ActivityLogLevel, ActivityLogType, LogLine } from "../types";
 import { clockOptions } from "../clock";
 import { usePreference } from "../preferences";
 import { userFacingRepoTerms } from "../terminology";
-import Icon from "./Icons";
+import Icon, { type IconName } from "./Icons";
+import Notice from "./notice/Notice";
 
 interface Props {
   lines: LogLine[];
@@ -80,6 +81,25 @@ function typeSelectionLabel(selected: ActivityLogType[]): string {
   return `${selected.length} selected`;
 }
 
+/* Until now a row's level reached the screen as the colour of its message and
+   as nothing else, so a reader who cannot separate the hues read four levels as
+   one (WCAG 1.4.1). The mark gives the level the second channel ThreadStatusIcon
+   uses for the same reason — a shape. Error takes the octagon rather than the
+   triangle a notice would draw, because a notice separates the two by printing
+   "Error ·" beside the glyph and a log row has no room for that word: here the
+   silhouettes have to do it alone.
+
+   `info` is absent on purpose. It is the baseline face — `.log-info .log-msg`
+   paints the same ink as an unclassed message — so it carries no colour to
+   duplicate, and a glyph on every ordinary row would be noise over the whole
+   log. Its slot is still rendered, empty, so the columns beside it stay
+   straight whichever level a row happens to be. */
+const LEVEL_MARKS: Partial<Record<ActivityLogLevel, { icon: IconName; label: string }>> = {
+  success: { icon: "check-circle", label: "Success" },
+  warning: { icon: "alert-triangle", label: "Warning" },
+  error: { icon: "octagon-x", label: "Error" },
+};
+
 /* Memoized so an incoming line reconciles one new row instead of every
    retained one. Both props are stable: the formatter is memoized on the clock
    preference, and each line object is immutable once emitted. */
@@ -90,9 +110,20 @@ const LogRow = memo(function LogRow({
   line: LogLine;
   formatter: Intl.DateTimeFormat;
 }) {
+  const mark = LEVEL_MARKS[line.level];
   return (
     <div className={`log-line log-${line.level}`}>
       <span className="log-ts">{formatter.format(line.ts)}</span>
+      <span className="log-level-mark">
+        {mark && (
+          <>
+            <Icon name={mark.icon} size={12} />
+            {/* The glyph is decorative to a screen reader, which had no level
+                at all before; the word is what it reads. */}
+            <span className="sync-visually-hidden">{mark.label}</span>
+          </>
+        )}
+      </span>
       <span className={`log-type log-type-${line.type ?? "system"}`}>{line.type ?? "system"}</span>
       <span className="log-msg">{userFacingRepoTerms(line.message)}</span>
     </div>
@@ -317,7 +348,18 @@ export default function LogPanel({
             {loadingOlder ? "Loading…" : "Load older logs"}
           </button>
         )}
-        {error && <div className="log-empty log-load-error">Could not load retained logs: {error}</div>}
+        {error && (
+          /* The drawer is mounted for the life of the window, so this box is
+             inserted the moment a read fails and is never part of the first
+             render — it announces rather than sitting as a named region.
+             Polite, not assertive: the drawer is clipped shut until the user
+             opens it, and one of the reads that can fail is started by a mount
+             effect, so an assertive role would interrupt at app start about a
+             panel nobody had opened. Nothing here blocks anything. */
+          <Notice severity="danger" timing="progress" className="log-load-error">
+            Could not load retained logs: {error}
+          </Notice>
+        )}
         {loading && lines.length === 0 ? (
           <div className="log-empty"><span className="status-loader" /> Loading retained logs…</div>
         ) : lines.length === 0 ? (

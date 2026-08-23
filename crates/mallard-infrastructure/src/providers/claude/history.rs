@@ -1,15 +1,17 @@
 //! Bounded Claude session summaries and detail previews for Activity.
 
+use super::codec::ClaudeSessionIdentityTracker;
 use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
-    most_specific_project_relative_path, SessionCount, SessionCountQuality, SessionDetailWarning,
-    SessionEventCounts, SessionEventDetail, SessionFileSummary, SessionSourceSpan,
-    SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
-    SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
-    SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
-    SessionTurnToolSummary, TIMELINE_TOOL_PREVIEW_BYTES,
+    most_specific_project_relative_path, timeline_tool_detail_budgets, SessionCount,
+    SessionCountQuality, SessionDetailWarning, SessionEventCounts, SessionEventDetail,
+    SessionFileSummary, SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent,
+    SessionTimelineEventKind, SessionTimelineIndex, SessionTimelineIndexEntry,
+    SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus,
+    SessionToolCategory, SessionToolIndexEntry, SessionTurnToolSummary,
+    TIMELINE_MESSAGE_PREVIEW_BYTES, TIMELINE_PAGE_CONTENT_BYTES, TIMELINE_TOOL_PREVIEW_BYTES,
 };
-use mallard_domain::MAX_CONVERSATION_FILE_BYTES;
+use mallard_domain::{NoticeSeverity, MAX_CONVERSATION_FILE_BYTES};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -20,8 +22,6 @@ const TITLE_CHARS: usize = 120;
 const MAX_LINE_BYTES: usize = MAX_CONVERSATION_FILE_BYTES as usize;
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_CLAUDE_RECORDS: usize = 100_000;
-const TIMELINE_MESSAGE_PREVIEW_BYTES: usize = 16 * 1024;
-const TIMELINE_DETAIL_BYTES: usize = 64 * 1024;
 pub(crate) const TIMELINE_PARSER_VERSION: u32 = 1;
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
@@ -96,6 +96,7 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
         metrics_complete: true,
         ..SessionFileSummary::default()
     };
+    let mut identity = ClaudeSessionIdentityTracker::default();
     let mut first_user_text: Option<String> = None;
     for raw in bytes.split(|byte| *byte == b'\n') {
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
@@ -106,15 +107,11 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
             summary.metrics_complete = false;
             continue;
         };
+        identity.observe(&value);
         let Some(object) = value.as_object() else {
             summary.metrics_complete = false;
             continue;
         };
-        if summary.session_id.is_empty() {
-            if let Some(session) = object.get("sessionId").and_then(Value::as_str) {
-                summary.session_id = session.to_string();
-            }
-        }
         if let Some(timestamp) = object.get("timestamp").and_then(parse_timestamp_value) {
             if summary.started_at.is_none_or(|start| timestamp < start) {
                 summary.started_at = Some(timestamp);
@@ -179,9 +176,10 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
             _ => {}
         }
     }
-    if summary.session_id.is_empty() {
-        return Err("Claude session file has no session ID".to_string());
-    }
+    summary.session_id = identity
+        .leaf_identity()
+        .0
+        .ok_or_else(|| "Claude session file has no leaf session ID".to_string())?;
     summary.summary = first_user_text.clone();
     if summary.title.is_none() {
         summary.title = first_user_text;
@@ -216,7 +214,9 @@ fn is_terminal_response_stop_reason(stop_reason: &str) -> bool {
 struct ClaudeTimelineBuilder {
     events: Vec<PendingTimelineEvent>,
     assistant_groups: BTreeMap<String, AssistantGroup>,
-    tool_positions: BTreeMap<String, usize>,
+    // Claude can re-emit a call after later prompts; the provider call ID is
+    // the event identity, independent of the parser's current turn.
+    tool_positions_by_call_id: BTreeMap<String, usize>,
     prompt_ids: BTreeSet<String>,
     current_turn_id: Option<String>,
     degraded_all: bool,
@@ -227,26 +227,31 @@ struct ClaudeTimelineBuilder {
 }
 
 impl ClaudeTimelineBuilder {
-    fn warning(&mut self, code: &str, message: &str) {
+    fn warning(&mut self, code: &str, message: &str, severity: NoticeSeverity) {
         if self.warnings.iter().any(|warning| warning.code == code) {
             return;
         }
         self.warnings.push(SessionDetailWarning {
             code: code.to_string(),
             message: message.to_string(),
+            severity,
         });
     }
 
+    /// Degrading every count means the reader is provably seeing less than the
+    /// transcript holds, so these always read as `Warning`.
     fn mark_all_lower_bound(&mut self, code: &str, message: &str) {
         self.degraded_all = true;
         self.degraded_tools = true;
         self.truncated = true;
-        self.warning(code, message);
+        self.warning(code, message, NoticeSeverity::Warning);
     }
 
+    /// Tool counts degrade to a floor, so the reader is again seeing less than
+    /// the transcript holds: `Warning`.
     fn mark_tools_lower_bound(&mut self, code: &str, message: &str) {
         self.degraded_tools = true;
-        self.warning(code, message);
+        self.warning(code, message, NoticeSeverity::Warning);
     }
 
     fn add_prompt(
@@ -272,7 +277,8 @@ impl ClaudeTimelineBuilder {
         let quality = if text_len > TIMELINE_MESSAGE_PREVIEW_BYTES {
             self.warning(
                 "message_preview_truncated",
-                "At least one Claude message exceeds the 16-KiB timeline display limit and is shown as a truncated preview.",
+                "At least one Claude message exceeds the 1-MiB timeline display limit and is shown as a truncated preview.",
+                NoticeSeverity::Warning,
             );
             SessionCountQuality::LowerBound
         } else {
@@ -361,8 +367,7 @@ impl ClaudeTimelineBuilder {
         affected_paths: Vec<String>,
         parent_event_id: Option<String>,
     ) {
-        let tool_key = format!("{turn_id}\0{call_id}");
-        if let Some(position) = self.tool_positions.get(&tool_key).copied() {
+        if let Some(position) = self.tool_positions_by_call_id.get(&call_id).copied() {
             let pending = &mut self.events[position];
             if let Some(tool) = pending.entry.tool.as_mut() {
                 if tool.native_name == "unknown" && native_name != "unknown" {
@@ -390,7 +395,8 @@ impl ClaudeTimelineBuilder {
             return;
         }
         let position = self.events.len();
-        self.tool_positions.insert(tool_key, position);
+        self.tool_positions_by_call_id
+            .insert(call_id.clone(), position);
         self.events.push(PendingTimelineEvent {
             entry: SessionTimelineIndexEntry {
                 event_id: format!("claude:tool:{call_id}"),
@@ -424,19 +430,7 @@ impl ClaudeTimelineBuilder {
         status: SessionToolCallStatus,
         source: SessionSourceSpan,
     ) {
-        let current_turn = self.current_turn_id.as_deref();
-        let position = self
-            .events
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(position, pending)| {
-                let tool = pending.entry.tool.as_ref()?;
-                (tool.provider_call_id == call_id
-                    && current_turn
-                        .is_none_or(|turn_id| pending.entry.turn_id.as_deref() == Some(turn_id)))
-                .then_some(position)
-            });
+        let position = self.tool_positions_by_call_id.get(call_id).copied();
         let Some(position) = position else {
             self.mark_tools_lower_bound(
                 "orphan_tool_result",
@@ -490,7 +484,8 @@ impl ClaudeTimelineBuilder {
                 quality = SessionCountQuality::LowerBound;
                 self.warning(
                     "message_preview_truncated",
-                    "At least one Claude message exceeds the 16-KiB timeline display limit and is shown as a truncated preview.",
+                    "At least one Claude message exceeds the 1-MiB timeline display limit and is shown as a truncated preview.",
+                    NoticeSeverity::Warning,
                 );
             }
             self.events.push(PendingTimelineEvent {
@@ -513,6 +508,7 @@ impl ClaudeTimelineBuilder {
             self.warning(
                 "message_phase_inferred",
                 "At least one Claude assistant message lacked a terminal stop reason, so its final-response placement was inferred.",
+                NoticeSeverity::Info,
             );
         }
 
@@ -1411,11 +1407,12 @@ pub(crate) fn read_timeline_page(
         }
     }
     let mut events = Vec::new();
+    let mut page_content_bytes = 0usize;
     let mut position = start;
     while position < index.events.len() && events.len() < limit {
         let entry = &index.events[position];
-        position += 1;
         if !matching_entry(entry, query) {
+            position += 1;
             continue;
         }
         let text = if entry.kind == SessionTimelineEventKind::ToolCall {
@@ -1445,6 +1442,26 @@ pub(crate) fn read_timeline_page(
         } else {
             None
         };
+        let event_content_bytes = text
+            .as_ref()
+            .map_or(0, String::len)
+            .saturating_add(
+                tool.as_ref()
+                    .and_then(|preview| preview.argument_preview.as_ref())
+                    .map_or(0, String::len),
+            )
+            .saturating_add(
+                tool.as_ref()
+                    .and_then(|preview| preview.result_preview.as_ref())
+                    .map_or(0, String::len),
+            );
+        if !events.is_empty()
+            && page_content_bytes.saturating_add(event_content_bytes) > TIMELINE_PAGE_CONTENT_BYTES
+        {
+            break;
+        }
+        page_content_bytes = page_content_bytes.saturating_add(event_content_bytes);
+        position += 1;
         let mut turn_tool_summary = None;
         if entry.kind != SessionTimelineEventKind::ToolCall {
             if let Some(turn_id) = &entry.turn_id {
@@ -1494,10 +1511,9 @@ pub(crate) fn read_event_detail(
     let mut file =
         File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
     let (arguments, result, _) = tool_payloads(&mut file, entry)?;
-    let argument_budget = TIMELINE_DETAIL_BYTES / 2;
+    let (argument_budget, result_budget) =
+        timeline_tool_detail_budgets(arguments.as_deref(), result.as_deref());
     let (arguments, arguments_truncated) = bounded_text(arguments, argument_budget);
-    let used = arguments.as_ref().map_or(0, String::len);
-    let result_budget = TIMELINE_DETAIL_BYTES.saturating_sub(used).max(1);
     let (result, result_truncated) = bounded_text(result, result_budget);
     Ok(SessionEventDetail {
         event_id: event_id.to_string(),
@@ -1536,6 +1552,38 @@ mod tests {
 
     fn count_value(count: &SessionCount) -> u64 {
         count.value.expect("supported count")
+    }
+
+    #[test]
+    fn activity_summary_uses_resumed_leaf_session_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("resumed-session.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({
+                    "type": "user",
+                    "uuid": "user-original",
+                    "parentUuid": null,
+                    "sessionId": "original-session",
+                    "cwd": "/tmp/original",
+                    "message": {"role": "user", "content": "original"}
+                }),
+                json!({
+                    "type": "assistant",
+                    "uuid": "assistant-resumed",
+                    "parentUuid": "user-original",
+                    "sessionId": "resumed-session",
+                    "cwd": "/tmp/resumed",
+                    "message": {"role": "assistant", "content": [{
+                        "type": "text", "text": "resumed"
+                    }]}
+                }),
+            ],
+        );
+
+        let summary = summarize_file(&transcript).unwrap();
+        assert_eq!(summary.session_id, "resumed-session");
     }
 
     #[test]
@@ -1613,6 +1661,167 @@ mod tests {
 
         let detail = read_event_detail(&transcript, &index, &tool_entry.event_id).unwrap();
         assert!(detail.arguments.as_deref().unwrap().contains("src/lib.rs"));
+        assert_eq!(detail.result.as_deref(), Some("source contents"));
+    }
+
+    #[test]
+    fn replayed_tool_call_after_later_prompt_is_deduplicated_by_provider_call_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("session.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({
+                    "type": "user",
+                    "uuid": "u-1",
+                    "parentUuid": null,
+                    "sessionId": "session-1",
+                    "timestamp": "2026-08-07T00:00:00Z",
+                    "message": {"role": "user", "content": "Read the source"}
+                }),
+                json!({
+                    "type": "assistant",
+                    "uuid": "a-1",
+                    "parentUuid": "u-1",
+                    "sessionId": "session-1",
+                    "timestamp": "2026-08-07T00:00:01Z",
+                    "message": {
+                        "id": "msg-1",
+                        "role": "assistant",
+                        "stop_reason": "tool_use",
+                        "content": [
+                            {"type": "text", "text": "I will inspect it."},
+                            {
+                                "type": "tool_use",
+                                "id": "tool-1",
+                                "name": "Read",
+                                "input": {"file_path": "src/lib.rs"}
+                            }
+                        ]
+                    }
+                }),
+                json!({
+                    "type": "user",
+                    "uuid": "result-1",
+                    "parentUuid": "a-1",
+                    "sessionId": "session-1",
+                    "timestamp": "2026-08-07T00:00:02Z",
+                    "message": {
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": "tool-1",
+                            "content": "source contents"
+                        }]
+                    }
+                }),
+                json!({
+                    "type": "user",
+                    "uuid": "u-2",
+                    "parentUuid": "result-1",
+                    "sessionId": "session-1",
+                    "timestamp": "2026-08-07T00:00:03Z",
+                    "message": {"role": "user", "content": "Now explain it"}
+                }),
+                json!({
+                    "type": "bridge-session",
+                    "sessionId": "session-1",
+                    "bridgeSessionId": "bridge-1"
+                }),
+                json!({
+                    "type": "assistant",
+                    "uuid": "a-1",
+                    "parentUuid": "u-1",
+                    "sessionId": "session-1",
+                    "slug": "replayed-session",
+                    "timestamp": "2026-08-07T00:00:01Z",
+                    "message": {
+                        "id": "msg-1",
+                        "role": "assistant",
+                        "stop_reason": "tool_use",
+                        "content": [
+                            {"type": "text", "text": "I will inspect it."},
+                            {
+                                "type": "tool_use",
+                                "id": "tool-1",
+                                "name": "Read",
+                                "input": {"file_path": "src/lib.rs"}
+                            }
+                        ]
+                    }
+                }),
+                json!({
+                    "type": "user",
+                    "uuid": "result-1",
+                    "parentUuid": "a-1",
+                    "sessionId": "session-1",
+                    "slug": "replayed-session",
+                    "timestamp": "2026-08-07T00:00:02Z",
+                    "message": {
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": "tool-1",
+                            "content": "source contents"
+                        }]
+                    }
+                }),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        assert_eq!(count_value(&index.counts.prompts), 2);
+        assert_eq!(count_value(&index.counts.intermediate_steps), 1);
+        assert_eq!(count_value(&index.counts.tool_calls), 1);
+        assert_eq!(count_value(&index.counts.reads), 1);
+        assert_eq!(
+            index
+                .events
+                .iter()
+                .map(|entry| entry.event_id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            index.events.len()
+        );
+
+        let tool_entry = index
+            .events
+            .iter()
+            .find(|entry| entry.kind == SessionTimelineEventKind::ToolCall)
+            .unwrap();
+        assert_eq!(tool_entry.event_id, "claude:tool:tool-1");
+        assert_eq!(tool_entry.turn_id.as_deref(), Some("claude:turn:u-1"));
+        assert_eq!(
+            tool_entry.tool.as_ref().unwrap().status,
+            SessionToolCallStatus::Completed
+        );
+
+        let first_prompt = index
+            .events
+            .iter()
+            .find(|entry| entry.event_id == "claude:prompt:u-1")
+            .unwrap();
+        assert_eq!(
+            first_prompt
+                .turn_tool_summary
+                .as_ref()
+                .and_then(|summary| summary.tool_calls.value),
+            Some(1)
+        );
+        let second_prompt = index
+            .events
+            .iter()
+            .find(|entry| entry.event_id == "claude:prompt:u-2")
+            .unwrap();
+        assert!(second_prompt.turn_tool_summary.is_none());
+        assert!(!index
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "orphan_tool_result"));
+
+        let detail = read_event_detail(&transcript, &index, &tool_entry.event_id).unwrap();
         assert_eq!(detail.result.as_deref(), Some("source contents"));
     }
 
@@ -1926,6 +2135,86 @@ mod tests {
         assert!(result.contains(BINARY_PREVIEW_OMISSION));
         assert!(result.contains("image/png"));
         assert!(!result.contains(&"A".repeat(512)));
+    }
+
+    #[test]
+    fn large_tool_previews_paginate_without_skipping_the_next_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("session.jsonl");
+        let arguments = "a ".repeat(300 * 1024);
+        let result = "r ".repeat(300 * 1024);
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"user","uuid":"u-1","sessionId":"session-1","cwd":project_root,"message":{"role":"user","content":"Run both tools"}}),
+                json!({"type":"assistant","uuid":"a-1","sessionId":"session-1","message":{"id":"msg-1","role":"assistant","stop_reason":"tool_use","content":[
+                    {"type":"tool_use","id":"tool-1","name":"Custom","input":{"prompt":arguments.clone()}},
+                    {"type":"tool_use","id":"tool-2","name":"Custom","input":{"prompt":arguments.clone()}}
+                ]}}),
+                json!({"type":"user","uuid":"r-1","sessionId":"session-1","message":{"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"tool-1","content":result.clone()},
+                    {"type":"tool_result","tool_use_id":"tool-2","content":result.clone()}
+                ]}}),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        let first_query = SessionTimelineQuery {
+            start_index: None,
+            anchor_event_id: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
+            included_tool_categories: BTreeSet::from([SessionToolCategory::Other]),
+            turn_id: None,
+        };
+        let first_page = read_timeline_page(&transcript, &index, &first_query).unwrap();
+        assert_eq!(first_page.events.len(), 1);
+        let first_tool = first_page.events[0].tool.as_ref().unwrap();
+        assert_eq!(first_tool.provider_call_id, "tool-1");
+        assert!(first_tool.argument_preview.as_ref().unwrap().len() > 512 * 1024);
+        assert_eq!(
+            first_tool.result_preview.as_ref().unwrap().len(),
+            result.len()
+        );
+        assert!(!first_tool.argument_truncated);
+        assert!(!first_tool.result_truncated);
+
+        let second_query = SessionTimelineQuery {
+            start_index: first_page.next_index,
+            ..first_query
+        };
+        let second_page = read_timeline_page(&transcript, &index, &second_query).unwrap();
+        assert_eq!(second_page.events.len(), 1);
+        assert_eq!(
+            second_page.events[0]
+                .tool
+                .as_ref()
+                .unwrap()
+                .provider_call_id,
+            "tool-2"
+        );
+        assert_eq!(second_page.next_index, None);
+
+        let first_entry = index
+            .events
+            .iter()
+            .find(|entry| {
+                entry
+                    .tool
+                    .as_ref()
+                    .is_some_and(|tool| tool.provider_call_id == "tool-1")
+            })
+            .unwrap();
+        let detail = read_event_detail(&transcript, &index, &first_entry.event_id).unwrap();
+        let detail_bytes = detail.arguments.as_ref().map_or(0, String::len)
+            + detail.result.as_ref().map_or(0, String::len);
+        assert!(detail.arguments_truncated);
+        assert!(detail.result_truncated);
+        assert!(detail.arguments.as_ref().unwrap().len() > 64 * 1024);
+        assert!(detail.result.as_ref().unwrap().len() > 64 * 1024);
+        assert!(detail_bytes <= crate::providers::traits::TIMELINE_TOOL_DETAIL_BYTES);
     }
 
     #[test]

@@ -527,29 +527,35 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(workspace, /aria-label="App actions"[\s\S]*?<Icon name="more" size=\{16\} \/>/);
 });
 
-test("the notice toast squares off and reports its own tone", () => {
+test("the shell notice reports its own tone from the shared severity ladder", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const appCss = readFileSync("src/App.css", "utf8");
   const retroCss = readFileSync("src/RetroTheme.css", "utf8");
 
-  // Squared to the app's corner, and on the whole-pixel scale: 8px/10.5px were
-  // the last of App.css's pill styling showing through the retro skin.
-  assert.match(retroCss, /\.sync-notice\s*\{[^}]*border-radius: 4px;[^}]*font-size: var\(--type-xs\);/s);
+  // The toast is gone as a box of its own: it is one message in the shell's
+  // single notice zone, so its tint, its corner and its coloured rail are the
+  // notice recipe's now. Only the dismiss control kept its own rule.
+  assert.doesNotMatch(retroCss, /\.sync-notice[\s.,:{]/);
+  assert.doesNotMatch(appCss, /\.sync-notice[\s.,:{]/);
   assert.match(retroCss, /\.sync-notice-dismiss\s*\{[^}]*border-radius: 3px;/s);
-  // The rail is positioned, not a stretched flex item: stretch spans only the
-  // content box, which left it short of both edges by the toast's padding.
-  assert.match(retroCss, /\.sync-notice::before\s*\{[^}]*position: absolute;[^}]*inset: 0 auto 0 0;[^}]*width: 3px;[^}]*background: var\(--green\);/s);
-  assert.match(retroCss, /\.sync-notice\s*\{[^}]*overflow: hidden;/s);
-  assert.match(retroCss, /\.sync-notice\.is-attention::before\s*\{[^}]*background: var\(--yellow\);/s);
 
   // A green tick used to announce every notice, including the ones that report
-  // a stop. Tone drives the glyph, so those two cannot drift apart again.
+  // a stop. The tone maps onto the app-wide rung, so those two cannot drift
+  // apart again — and the rung decides the glyph, the tint AND the word the
+  // box prints before its message.
   assert.match(workspace, /type SyncNoticeTone = "ok" \| "attention"/);
-  assert.match(workspace, /notice\.tone === "attention" \? "alert-triangle" : "check-circle"/);
-  assert.match(workspace, /notice\.tone === "attention" \? " is-attention" : ""/);
+  assert.match(workspace, /severity: notice\.tone === "attention" \? "warning" : "success"/);
   // An unconfirmed binding is a stop, not a success.
   assert.match(workspace, /before pulling\.",\s*"attention"\)/);
   // Every other call site stays a one-argument confirmation.
   assert.match(workspace, /const notify = \(message: string, tone: SyncNoticeTone = "ok"\) => setNotice\(\{ message, tone \}\)/);
+
+  // The shell slot fills opaquely at every rung. A translucent tint here sits
+  // on the frame gutter rather than on paper, which is what took the ink below
+  // 4.5:1 when the banner last carried one.
+  for (const rung of ["danger", "warning", "info", "success"]) {
+    assert.match(appCss, new RegExp(`\\.notice\\.sync-backend-banner\\.${rung} \\{ background: color-mix\\(in srgb, var\\(--\\w+\\) \\d+%, var\\(--surface-card\\)\\); \\}`));
+  }
 });
 
 test("notice copy stays one line: no two-sentence reassurance", () => {

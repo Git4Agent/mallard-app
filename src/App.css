@@ -499,6 +499,17 @@ summary:focus-visible {
   font-size: var(--type-xs);
 }
 
+/* A fixed track, occupied or not: a level mark on some rows and nothing on
+   others pushed TYPE and MESSAGE 12px right on exactly the rows that had one,
+   which is the ragged column the empty slot exists to prevent. */
+.log-level-mark {
+  width: 12px;
+  flex: 0 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .log-type-filter {
   position: relative;
   height: 28px;
@@ -1154,7 +1165,7 @@ summary:focus-visible {
   background: var(--bg-0);
 }
 .sync-host-recovery .sync-empty-state { width: min(620px, 100%); }
-.sync-host-recovery .sync-callout { margin: 8px 0; }
+.sync-host-recovery .notice { margin: 8px 0; }
 
 .sync-main {
   flex: 1;
@@ -1385,21 +1396,54 @@ summary:focus-visible {
 .sync-resource-detail-grid dd { margin: 0; min-width: 0; color: var(--text-1); }
 .sync-resource-blocker { color: var(--danger-text); }
 
-.sync-callout {
-  max-width: 1180px;
-  margin: 0 auto 12px;
+/* One box for every notice in the app: an app-shell banner, a page warning, a
+   review gate, a field-level failure summary. The numbers here are the SHIPPED
+   ones — 4px corners, no shadow, tone borders mixed at 45% against --border —
+   so RetroTheme needs no override of this family and there is no cascade to
+   reason about.
+
+   Deliberately no `max-width` and no `margin: 0 auto`: a notice fills the zone
+   it sits in. Page-width capping belongs to the page container. When the box
+   carried the cap itself, every call site inside a narrower column inherited
+   page-centring, and inside a grid — where auto inline margins disable
+   `justify-self: stretch` — each box shrink-wrapped to its own sentence and
+   floated mid-column at a different width from its neighbour. */
+.notice {
+  margin: 0 0 10px;
   padding: 9px 11px;
   display: flex;
   align-items: flex-start;
   gap: 8px;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 4px;
   color: var(--text-1);
   background: var(--surface-subtle);
   font-size: var(--type-sm);
 }
-.sync-callout.error { color: var(--danger-text); background: var(--danger-soft); border-color: color-mix(in srgb, var(--red) 24%, transparent); }
-.sync-callout.warning { color: var(--warning-text); background: var(--warning-soft); border-color: color-mix(in srgb, var(--yellow) 22%, transparent); }
+
+/* The glyph is decorative — the type name in the text carries the severity —
+   so it rides the first line rather than centring against the whole box. */
+.notice-mark { flex: 0 0 auto; margin-top: 2px; }
+.notice-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.notice-line { margin: 0; }
+.notice-type,
+.notice-lead { font-weight: var(--weight-semibold); }
+.notice-list { margin: 0; padding-left: 15px; display: grid; gap: 3px; }
+.notice-list > li::marker { color: var(--text-3); }
+/* A per-message control rides its own message, not the box. */
+.notice-list .btn { margin-left: 8px; }
+
+/* One trailing control for the box, pinned to the far edge. */
+.notice > .btn { flex: 0 0 auto; margin-left: auto; align-self: center; white-space: nowrap; }
+/* An irreversible action stays red wherever it sits. This used to hang off a
+   wrapper div the zone no longer needs, which left "Unlink storage" rendering
+   in the same neutral ink as the "Try again" beside it. */
+.notice .btn.danger { color: var(--danger-text); }
+
+.notice.danger { color: var(--danger-text); background: var(--danger-soft); border-color: color-mix(in srgb, var(--red) 45%, var(--border)); }
+.notice.warning { color: var(--warning-text); background: var(--warning-soft); border-color: color-mix(in srgb, var(--yellow) 45%, var(--border)); }
+.notice.info { color: var(--info-text); background: var(--info-soft); border-color: color-mix(in srgb, var(--blue) 45%, var(--border)); }
+.notice.success { color: var(--success-text); background: var(--success-soft); border-color: color-mix(in srgb, var(--green) 45%, var(--border)); }
 
 .sync-empty-state {
   min-height: 360px;
@@ -1424,26 +1468,30 @@ summary:focus-visible {
    layer give it their border and radius. It used to inset itself 14px a side,
    which put a narrower, differently-rounded box directly above two aligned
    ones. */
+/* The shell's banner slot: where the zone sits and how tall it stands. Its box
+   — frame, fill, corners, the row inside it — is `.notice`'s now, and the tone
+   comes from the loudest message present rather than from a class here. */
 .sync-backend-banner {
   position: relative;
   z-index: 8;
   margin: 0 0 10px;
   min-height: 42px;
-  padding: 7px 8px 7px 11px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border: 1px solid color-mix(in srgb, var(--yellow) 25%, transparent);
-  border-radius: 9px;
-  color: var(--warning-text);
-  /* Opaque, like every other panel in this stack. A translucent tint here sits
-     on the frame gutter rather than on paper, which dragged the effective
-     ground three shades darker and took the text below the 4.5:1 the palette
-     picks its ink against. */
-  background: color-mix(in srgb, var(--yellow) 5%, var(--surface-card));
   font-size: var(--type-xs);
 }
-.sync-backend-banner span { margin-right: auto; }
+
+/* Opaque fills, one per rung, replacing `.notice`'s translucent ones for this
+   slot only. A translucent tint here sits on the frame gutter rather than on
+   paper, which dragged the effective ground three shades darker and took the
+   text below the 4.5:1 the palette picks its ink against.
+
+   The border stays the theme's frame edge, not the rung's: this banner is a
+   panel in the workspace stack, a sibling of the path bar and the page, and it
+   carries their outline. Its severity is in the fill, the ink and the word
+   before the middle dot — three channels, none of them the frame. */
+.notice.sync-backend-banner.danger { background: color-mix(in srgb, var(--red) 4%, var(--surface-card)); }
+.notice.sync-backend-banner.warning { background: color-mix(in srgb, var(--yellow) 5%, var(--surface-card)); }
+.notice.sync-backend-banner.info { background: color-mix(in srgb, var(--blue) 5%, var(--surface-card)); }
+.notice.sync-backend-banner.success { background: color-mix(in srgb, var(--green) 5%, var(--surface-card)); }
 .sync-backend-banner .btn { min-height: 27px; font-size: var(--type-2xs); }
 
 /* Rows stay on screen while a new filter set loads, dimmed rather than
@@ -1453,50 +1501,6 @@ summary:focus-visible {
   pointer-events: none;
   transition: opacity 120ms ease;
 }
-
-/* Per-item failure lists: a real list, so the items stay separate lines in a
-   flex callout that would otherwise collapse the newlines between them. */
-.sync-catalog-failures { align-items: flex-start; }
-.sync-catalog-failures ul {
-  margin: 0;
-  padding-left: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.sync-catalog-failures li { overflow-wrap: anywhere; }
-
-/* The shell's own failures are errors, not the backend's warning tone. The
-   fill is mixed onto paper rather than layered over it: --danger-text is
-   picked at 4.9:1 against paper, and a film over the gutter left it at 3.08. */
-.sync-backend-banner.sync-shell-error {
-  color: var(--danger-text);
-  background: color-mix(in srgb, var(--red) 4%, var(--surface-card));
-  border-color: color-mix(in srgb, var(--red) 24%, transparent);
-}
-
-.sync-notice {
-  position: absolute;
-  z-index: 30;
-  top: 62px;
-  right: 18px;
-  width: fit-content;
-  max-width: min(380px, calc(100% - 36px));
-  min-height: 32px;
-  padding: 5px 5px 5px 8px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid color-mix(in srgb, var(--green) 20%, var(--border));
-  border-radius: 8px;
-  color: var(--text-1);
-  background: var(--surface-overlay);
-  box-shadow: var(--shadow-overlay);
-  font-size: var(--type-xs);
-  text-align: left;
-}
-.sync-notice > svg { flex: 0 0 auto; color: var(--green); }
-.sync-notice > span { min-width: 0; line-height: 1.3; }
 .sync-notice-dismiss {
   width: 22px;
   height: 22px;
@@ -1806,7 +1810,6 @@ summary:focus-visible {
 .sync-bundle-context > span { min-width: 0; display: flex; flex-direction: column; }
 .sync-bundle-context strong { color: var(--text-0); font-size: var(--type-sm); }
 .sync-bundle-context small { color: var(--text-3); font-family: var(--font-mono); font-size: var(--type-3xs); }
-.sync-bundle-connection-dialog .sync-callout { margin-top: 12px; }
 /* Restore plans */
 
 /* Pull review workspace */
@@ -2022,7 +2025,8 @@ summary:focus-visible {
   font-size: var(--type-xs);
 }
 
-.sync-pull-error { max-width: none; margin: 14px 0; }
+.sync-bundle-connection-dialog .notice { margin-top: 12px; }
+.sync-pull-error { margin: 14px 0; }
 
 .sync-pull-apply-bar {
   position: sticky;
@@ -2611,23 +2615,6 @@ summary:focus-visible {
   border-radius: 0;
   background: color-mix(in srgb, var(--yellow) 3%, var(--surface-subtle));
 }
-
-.project-storage-card > .conversation-path-repair-notice .conversation-path-repair-copy {
-  flex-direction: row;
-  align-items: center;
-  gap: 7px;
-}
-
-.project-storage-card > .conversation-path-repair-notice .conversation-path-repair-copy strong {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
-.project-storage-card > .conversation-path-repair-notice .conversation-path-repair-detail {
-  min-width: 0;
-  flex: 1;
-}
-
 .project-storage-card > .conversation-path-repair-notice .conversation-path-repair-button {
   min-height: 28px;
   padding-right: 8px;
@@ -3933,89 +3920,15 @@ span.sync-path-crumb {
   color: var(--warning-text);
 }
 
+/* Placement only. The frame, the fill and the row inside them are `.notice`'s,
+   and the tone follows the severity: an audit Mallard could not run reads as an
+   error, paths it can see read as a warning. The `.blocked` neutral surface
+   went with the class-driven tone — a blocker is not quieter than a repairable
+   one, it is the half the reader cannot act on. */
 .conversation-path-repair-notice {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   min-height: 42px;
   margin-bottom: 9px;
-  padding: 5px 8px;
-  border: 1px solid color-mix(in srgb, var(--yellow) 34%, var(--border));
-  border-radius: 9px;
-  background: var(--warning-soft);
-  color: var(--text-0);
 }
-
-.conversation-path-repair-notice.blocked {
-  border-color: var(--border-strong);
-  background: var(--surface-muted);
-}
-
-.conversation-path-repair-icon {
-  flex: 0 0 auto;
-  color: var(--yellow);
-}
-
-.conversation-path-repair-copy {
-  min-width: 0;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.conversation-path-repair-copy strong {
-  font-size: var(--type-sm);
-  font-weight: var(--weight-semibold);
-}
-
-.conversation-path-repair-copy > span {
-  overflow: hidden;
-  color: var(--text-1);
-  font-size: var(--type-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.conversation-path-repair-copy > .conversation-path-repair-scope {
-  color: var(--text-0);
-  font-size: var(--type-sm);
-  font-weight: var(--weight-semibold);
-}
-
-.conversation-path-repair-copy > .conversation-path-repair-detail {
-  color: var(--text-1);
-}
-
-.conversation-path-repair-notice.repairable {
-  justify-content: flex-start;
-  gap: 3px;
-}
-
-.conversation-path-repair-help {
-  width: 26px;
-  height: 26px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  border-radius: 6px;
-  color: var(--text-2);
-  cursor: help;
-  transition: background 140ms ease, color 140ms ease;
-}
-
-.conversation-path-repair-help:hover,
-.conversation-path-repair-help:focus-visible {
-  color: var(--text-0);
-  background: var(--button-bg-hover);
-}
-
-.conversation-path-repair-help:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
-
 .conversation-path-repair-button {
   min-height: 28px;
   flex: 0 0 auto;
@@ -4074,14 +3987,6 @@ span.sync-path-crumb {
     flex-wrap: wrap;
   }
 
-  .conversation-path-repair-copy {
-    min-width: calc(100% - 30px);
-  }
-
-  .conversation-path-repair-copy > span {
-    white-space: normal;
-  }
-
   .conversation-path-repair-button {
     margin-left: 0;
   }
@@ -4099,6 +4004,10 @@ span.sync-path-crumb {
 
 /* A stack of sibling cards — settings editor, totals band, repository list —
    rather than one card with ruled regions, so each panel owns its own frame. */
+.sync-storage-repositories > .notice {
+  margin: 14px 16px 16px;
+}
+
 .sync-storage-settings-below {
   width: 100%;
   max-width: 1180px;
@@ -4108,6 +4017,9 @@ span.sync-path-crumb {
   gap: 12px;
   animation: storage-link-reveal 180ms ease-out both;
 }
+
+/* The stack owns the rhythm between its children, so the box adds none. */
+.sync-storage-settings-below > .notice { margin: 0; }
 
 .sync-storage-settings-dedicated {
   margin-top: 26px;
@@ -4276,6 +4188,23 @@ span.sync-path-crumb {
   white-space: nowrap;
 }
 
+/* An unreadable Catalog repository states its refusal where the chips would
+   be; the fold carries the backend's sentence. */
+.sync-storage-repo-unreadable {
+  color: var(--danger-text);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.sync-storage-repository-icon.danger {
+  color: var(--danger-text);
+}
+
+.sync-storage-repo-problem {
+  color: var(--danger-text);
+}
+
 .sync-storage-repository-state {
   min-height: 72px;
   padding: 18px 16px;
@@ -4285,14 +4214,6 @@ span.sync-path-crumb {
   gap: 8px;
   color: var(--text-2);
   font-size: var(--type-xs);
-}
-
-.sync-storage-repositories > .sync-callout {
-  margin: 14px 16px 16px;
-}
-
-.sync-storage-settings-below > .sync-callout {
-  margin: 0;
 }
 
 /* ---------------------------------------------------------------------------
@@ -4369,7 +4290,12 @@ span.sync-path-crumb {
   white-space: nowrap;
 }
 
+/* Glyph and word, not glyph alone: a storage in trouble reads as such without
+   the amber. Both children sit on one line with air between them. */
 .sync-storage-index-warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   color: var(--warning-text);
 }
 
@@ -4505,6 +4431,8 @@ span.sync-path-crumb {
    column. The extra class outweighs RetroTheme's page-wide rule. */
 .sync-main.sync-settings-page .profile-links-section { max-width: 760px; }
 
+/* Outcome lines under a settings card. */
+.sync-settings-group > .notice { margin-top: 10px; }
 .sync-settings-group { margin: 0 0 30px; }
 
 .sync-settings-group > .settings-section-title {
@@ -4654,20 +4582,6 @@ span.sync-path-crumb {
 
 .sync-settings-control .btn { min-height: 32px; font-size: var(--type-xs); }
 .sync-settings-control .danger { color: var(--danger-text); }
-
-/* Outcome lines under the Logs card. */
-.sync-settings-group > .sync-callout { margin-top: 10px; }
-
-.sync-settings-note {
-  margin-top: 10px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--success-text);
-  font-family: var(--font-sans);
-  font-size: var(--type-xs);
-}
-
 /* ── Reference-style settings footer ───────────── */
 
 @media (max-width: 1040px) {
@@ -4969,6 +4883,9 @@ span.sync-path-crumb {
 .sync-binding-dialog .sync-field-grid label { gap: 5px; }
 .sync-binding-dialog .sync-profile-select-row .btn { min-height: 32px; }
 .sync-draft-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   margin-left: auto;
   padding: 1px 7px;
   border-radius: 999px;
@@ -4980,6 +4897,10 @@ span.sync-path-crumb {
   background: var(--surface-muted);
 }
 .sync-draft-badge.attention { color: var(--warning-text); background: var(--warning-soft); }
+/* The mark takes the badge's ink so a failed draft is not signalled by hue
+   alone — the glyph is the second channel and it has to read as one object
+   with the word beside it. */
+.sync-draft-badge > svg { flex: 0 0 auto; color: currentColor; }
 .sync-sidebar-draft .sidebar-profile-main span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sync-sidebar-draft .sidebar-profile-main .sync-draft-badge {
   min-width: auto;
@@ -5449,38 +5370,6 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   color: var(--text-2);
   font-size: var(--type-md);
 }
-
-.sync-history-error {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.sync-history-error > span {
-  min-width: 0;
-  flex: 1;
-}
-
-.sync-history-continuity {
-  align-items: center;
-}
-
-.sync-history-continuity > svg {
-  flex: 0 0 auto;
-}
-
-.sync-history-continuity-copy {
-  min-width: 0;
-  display: grid;
-  flex: 1;
-  gap: 2px;
-  line-height: 1.45;
-}
-
-.sync-history-continuity .sync-sync-review-recovery-actions .btn {
-  white-space: nowrap;
-}
-
 .sync-history-profile-state {
   justify-content: flex-start;
   border-style: solid;
@@ -6373,19 +6262,6 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   margin: 8px 0 10px;
 }
 .sync-sync-review-scroll .sync-review-banners > * { margin: 0; }
-/* Every banner callout reads as one column of title, sentence, and lineage. */
-.sync-review-banners > .sync-callout > span {
-  min-width: 0;
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 1px;
-}
-.sync-review-banners > .sync-callout > .btn {
-  margin-left: auto;
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
 
 /* A finished sync is a section of the storage card: full width, no outline of
    its own, one divider above, and its tint to say where it starts — the card
@@ -6396,12 +6272,15 @@ button.sync-history-branch-trigger:hover:not(:disabled),
    reads as the first row of the list rather than a differently-scaled header.
    Compounded with .sync-callout because the theme restyles callout corners at
    one class of specificity; the section must win that. */
-.sync-callout.sync-outcome-notice {
+.sync-outcome-notice {
   display: block;
   margin: 0;
   padding: 0;
-  border-width: 1px 0 0;
+  border: 0 solid var(--border);
+  border-top-width: 1px;
   border-radius: 0;
+  color: var(--text-1);
+  font-size: var(--type-sm);
   /* The fold button sizes itself from a history-row token declared only on
      the history lists; left undeclared it is invalid at computed-value time
      and the width falls back to auto. */
@@ -6559,20 +6438,14 @@ button.sync-history-branch-trigger:hover:not(:disabled),
    instead — the block above it clips to the group's inner radius. Compounded
    with .sync-callout because the theme restyles callout corners at one class
    of specificity; this must win that, same as .sync-outcome-notice. */
-.sync-callout.sync-storage-notice {
+.notice.sync-storage-notice {
   max-width: none;
   margin: 0;
   border: 0;
   border-radius: 0;
   align-items: center;
 }
-.sync-storage-notice > span {
-  min-width: 0;
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 1px;
-}
+/* The one-column stack of title and sentence is `.notice-body`'s job now. */
 .sync-storage-notice > svg { flex: 0 0 auto; }
 .sync-storage-notice .sync-sync-review-recovery-actions { margin-left: auto; }
 .sync-storage-notice .sync-sync-review-recovery-actions .btn { white-space: nowrap; }
@@ -6591,44 +6464,6 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 
 /* Footers are buttons only; the actions pin to the right edge. */
 .sync-inline-action-footer.sync-sync-review-footer { justify-content: flex-end; }
-
-.sync-sync-review-remote-missing > svg {
-  flex: 0 0 auto;
-  color: var(--yellow);
-}
-
-/* A destination waiting on a Pull is a step, not a failure: the push is intact
-   and one action clears it. It reads like the other blockers — icon, then one
-   column of text — rather than as a red error.
-   It was a bare three-column row before, which put the sentence and the lineage
-   numbers on the same baseline as the title and left it competing with the
-   Sessions row for the same rhythm. */
-/* Inset by the row gutter so the card sits inside the table rather than butting
-   against the panel edge, and top-aligned (the .sync-callout default) so the
-   icon reads against the title instead of floating beside the second line. */
-.sync-sync-review-pull-required {
-  margin: 8px 12px 10px;
-}
-
-.sync-sync-review-pull-required > span {
-  min-width: 0;
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.sync-sync-review-pull-required > svg {
-  flex: 0 0 auto;
-  color: var(--blue);
-}
-
-.sync-sync-review-pull-required strong {
-  color: var(--text-0);
-  font-size: var(--type-sm);
-  font-weight: var(--weight-semibold);
-}
-
 /* Lineage numbers for support: kept out of the leading sentence and set a step
    down, so a screenshot still carries them without the banner leading on them. */
 .sync-sync-review-pull-detail {
@@ -6935,7 +6770,21 @@ button.sync-project-file-expand { cursor: pointer; }
   font-size: var(--type-2xs);
 }
 
-.sync-project-file-conflict > span { flex: 1; }
+/* The blocked row's marker is a notice, but it is a strip inside a row rather
+   than a box on a page: it keeps the dashed divider and the row's indent and
+   drops the frame, the corners, the fill and the trailing margin. Compounded
+   so it outranks `.notice.warning`, which would otherwise paint a rounded
+   amber capsule with a dashed top edge crossing three solid ones. It stays a
+   strip beside `.sync-project-file-ack`, which shares this rule and is still a
+   plain label. */
+.notice.sync-project-file-conflict {
+  margin: 0;
+  border: 0;
+  border-top: 1px dashed var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-2);
+}
 .sync-project-file-limit { padding: 12px; color: var(--text-3); font-size: var(--type-2xs); text-align: center; }
 
 .sync-project-files-scan-summary {
@@ -7120,28 +6969,83 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   display: inline-flex;
 }
 
-/* ── The inline fork form ────────────────────────────────────────────────── */
+/* ── The fork drawer ─────────────────────────────────────────────────────── */
 
-/* Fork lives on the card: a row-sized form under the card's own lines, the
-   same fields the detail page used to host. */
-.catalog-inline-form {
+/* The card grows a drawer: a full-width row under the card's own lines,
+   parted by the same hairline the card wears — not a nested box. The explicit
+   span is load-bearing on pet cards, whose template opens with an auto-sized
+   preview column that an auto-placed item would join and inflate. */
+.catalog-fork-drawer {
+  min-width: 0;
   display: flex;
-  align-items: end;
-  gap: 8px;
+  grid-column: 1 / -1;
   flex-wrap: wrap;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--bg-2);
+  align-items: center;
+  gap: 7px 8px;
+  margin-top: 3px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
 }
 
-.catalog-inline-form label {
-  display: grid;
-  flex: 1;
-  gap: 5px;
-  min-width: 210px;
+/* The lead-in reads as a sentence: Fork "Maple" as [maple-copy]. */
+.catalog-fork-lead {
+  flex: 0 0 auto;
   color: var(--text-1);
   font-size: var(--type-sm);
+}
+
+.catalog-fork-lead strong {
+  color: var(--text-0);
+  font-weight: var(--weight-semibold);
+}
+
+/* The name becomes the copy's folder, so the field is monospaced like every
+   identifier the app shows. The always-on focus-ring border is the rename
+   row's own signal: this is the active field. */
+.catalog-fork-drawer input {
+  min-width: 170px;
+  height: 30px;
+  flex: 1 1 200px;
+  max-width: 360px;
+  padding: 0 9px;
+  border: 1px solid var(--focus-ring);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text-0);
+  font-family: var(--font-mono);
+  font-size: var(--type-sm);
+}
+
+.catalog-fork-drawer input[aria-invalid="true"] {
+  border-color: var(--red);
+}
+
+/* One line under the row: the hint, or — same slot, same height — the rule
+   refusal while typing and the backend's sentence after a refused submit. */
+.catalog-fork-note {
+  min-width: 0;
+  flex: 1 1 100%;
+  color: var(--text-2);
+  font-size: var(--type-2xs);
+  line-height: 1.5;
+}
+
+.catalog-fork-note.danger {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--danger-text);
+}
+
+.catalog-fork-note.danger > svg {
+  flex: 0 0 auto;
+}
+
+/* The fork button shows pressed while its drawer is open — the crumb and ⓘ
+   contract, applied to the card's action cluster. */
+.catalog-card .sync-history-thread-actions .btn[aria-expanded="true"] {
+  background: var(--button-bg-active);
+  color: var(--text-0);
 }
 
 /* Provider-neutral session detail ---------------------------------------- */
@@ -8208,18 +8112,13 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   gap: 18px;
 }
 
-.session-detail-warnings {
-  display: grid;
-  gap: 6px;
+/* The page's one notice zone: a failed action, a moved snapshot and the
+   backend's notes share a single box under the header. It used to be three
+   stacked amber rows in a grid, and because the box carried `margin: 0 auto`
+   the grid could not stretch them — each row shrank to its own sentence and
+   sat at a different width from the one above it. */
+.session-detail-notices {
   margin: -10px 0 18px;
-}
-
-.session-detail-stale {
-  margin: -10px 0 18px;
-}
-
-.session-detail-stale .btn {
-  margin-left: auto;
 }
 
 @container session-detail-layout (max-width: 720px) {

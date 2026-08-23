@@ -7,15 +7,48 @@
 //! provider commands.
 
 use crate::conversation_codec::CodecLineage;
-use mallard_domain::{ConversationFileRole, ProviderKey};
+use mallard_domain::{ConversationFileRole, NoticeSeverity, ProviderKey};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+/// Maximum UTF-8 bytes returned for one visible timeline message.
+pub(crate) const TIMELINE_MESSAGE_PREVIEW_BYTES: usize = 1024 * 1024;
 /// Maximum UTF-8 bytes returned for either the arguments or result preview of
-/// one timeline tool call. A tool event can contain both fields, so 8 KiB per
-/// field keeps its total preview budget aligned with a 16-KiB message event.
-pub(crate) const TIMELINE_TOOL_PREVIEW_BYTES: usize = 8 * 1024;
+/// one timeline tool call. The fields are bounded independently.
+pub(crate) const TIMELINE_TOOL_PREVIEW_BYTES: usize = 1024 * 1024;
+/// Maximum combined UTF-8 bytes returned by an expanded tool-call detail.
+pub(crate) const TIMELINE_TOOL_DETAIL_BYTES: usize = 1024 * 1024;
+/// Maximum combined message, argument-preview, and result-preview bytes in one
+/// timeline page. A single tool event can use two independently bounded fields.
+pub(crate) const TIMELINE_PAGE_CONTENT_BYTES: usize = 2 * 1024 * 1024;
+
+/// Split the expanded-detail budget evenly, then lend any unused share from a
+/// shorter field to the longer one. A lone field can therefore use the whole
+/// budget without allowing the pair to exceed it.
+pub(crate) fn timeline_tool_detail_budgets(
+    arguments: Option<&str>,
+    result: Option<&str>,
+) -> (usize, usize) {
+    let argument_len = arguments.map_or(0, str::len);
+    let result_len = result.map_or(0, str::len);
+    if argument_len.saturating_add(result_len) <= TIMELINE_TOOL_DETAIL_BYTES {
+        return (argument_len, result_len);
+    }
+
+    let half = TIMELINE_TOOL_DETAIL_BYTES / 2;
+    let mut argument_budget = argument_len.min(half);
+    let mut result_budget = result_len.min(half);
+    let mut remaining = TIMELINE_TOOL_DETAIL_BYTES
+        .saturating_sub(argument_budget)
+        .saturating_sub(result_budget);
+
+    let argument_extra = argument_len.saturating_sub(argument_budget).min(remaining);
+    argument_budget += argument_extra;
+    remaining -= argument_extra;
+    result_budget += result_len.saturating_sub(result_budget).min(remaining);
+    (argument_budget, result_budget)
+}
 
 /// Typed capability ladder. Levels are ordered: each level includes every
 /// weaker level's abilities.
@@ -50,7 +83,7 @@ pub struct ProviderDescriptor {
     pub adapter_version: u32,
 }
 
-/// Bounded metadata scanned from the head of one provider session file.
+/// Bounded provider-authoritative identity metadata from one session file.
 #[derive(Clone, Debug)]
 pub struct SessionFileMetadata {
     pub session_id: String,
@@ -91,16 +124,15 @@ pub struct SessionRewriteRequest<'a> {
 pub struct SessionDiscoveryContext<'a> {
     /// Canonicalized provider home for the selected profile.
     pub provider_home: &'a Path,
-    /// Canonicalized project root.
+    /// Canonicalized project root. Sessions are owned iff their
+    /// authoritative home equals this root exactly — a subdirectory is a
+    /// different project.
     pub project_root: &'a Path,
-    /// Canonical nested registrations owned by other bundles.
-    pub excluded_roots: &'a [PathBuf],
 }
 
 #[derive(Clone, Debug)]
 pub struct DiscoveredSession {
     pub session_id: String,
-    pub relative_cwd: String,
     pub physical_path: PathBuf,
     pub display_name: String,
     pub blocked_reason: Option<String>,
@@ -130,7 +162,6 @@ pub struct DiscoveredProviderState {
     /// Presentation subtype recorded as `provider_resource_type`.
     pub resource_type: String,
     pub display_name: String,
-    pub relative_cwd: Option<String>,
     /// Merge-applied state (memory) versus safe-file state.
     pub merge_apply: bool,
     pub files: Vec<DiscoveredStateFile>,
@@ -301,6 +332,11 @@ pub struct SessionTimelineIndexEntry {
 pub struct SessionDetailWarning {
     pub code: String,
     pub message: String,
+    /// How loudly this reads. A transcript the reader cannot see whole is a
+    /// `Warning`; a note about how the index was built is `Info`. The page
+    /// shows every warning in one box at the loudest rung present, so this is
+    /// what decides that box's tone and title.
+    pub severity: NoticeSeverity,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -566,7 +602,6 @@ pub trait SessionAdapter: Send + Sync {
         &self,
         _provider_home: &Path,
         _project_root: &str,
-        _relative_cwd: Option<&str>,
         _logical_suffix: &str,
     ) -> Result<PathBuf, String> {
         Err("provider has no provider-state resources".to_string())
@@ -604,4 +639,36 @@ pub trait SessionAdapter: Send + Sync {
         &self,
         request: &mut SessionActionRequest<'_>,
     ) -> Result<SessionActionOutcome, String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expanded_tool_detail_shares_one_mib_and_lends_unused_space() {
+        assert_eq!(
+            timeline_tool_detail_budgets(Some("short"), Some("result")),
+            (5, 6)
+        );
+
+        let balanced = "x".repeat(TIMELINE_TOOL_DETAIL_BYTES);
+        assert_eq!(
+            timeline_tool_detail_budgets(Some(&balanced), Some(&balanced)),
+            (
+                TIMELINE_TOOL_DETAIL_BYTES / 2,
+                TIMELINE_TOOL_DETAIL_BYTES / 2,
+            )
+        );
+
+        let small = "x".repeat(100 * 1024);
+        assert_eq!(
+            timeline_tool_detail_budgets(Some(&small), Some(&balanced)),
+            (100 * 1024, TIMELINE_TOOL_DETAIL_BYTES - 100 * 1024)
+        );
+        assert_eq!(
+            timeline_tool_detail_budgets(None, Some(&balanced)),
+            (0, TIMELINE_TOOL_DETAIL_BYTES)
+        );
+    }
 }

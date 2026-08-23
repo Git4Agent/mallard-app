@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { SessionEventDetail, SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
+import Notice from "../../notice/Notice";
 import { writeClipboardText } from "../../sync-review/clipboard";
 import { readableToolPayload, sessionToolDescriptor, toolCommandLabel } from "./sessionDetailModel";
 
@@ -181,11 +182,13 @@ export default function SessionDetailToolCall({
             <span className="status-loader" /> Loading bounded tool detail…
           </div>
         )}
+        {/* The fetch this reports is started by the row being expanded, so the
+            failure is an event and not something the pane renders with — and
+            it leaves the pane with no payload at all, which is blocking rather
+            than advisory. The severity used to be a class name and a glyph;
+            the box prints the word now. */}
         {detailState?.error && (
-          <div className="session-detail-local-state error" role="alert">
-            <Icon name="alert-triangle" size={12} />
-            {detailState.error}
-          </div>
+          <Notice severity="danger" timing="blocking">{detailState.error}</Notice>
         )}
         {!detailState?.loading && !detailState?.error && (
           <ToolPayload

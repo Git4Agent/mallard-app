@@ -82,7 +82,6 @@ const codexSession = {
   started_at: 1_752_800_000,
   ended_at: 1_752_803_600,
   working_directory: "/Users/test/projects/mallard/packages/desktop",
-  relative_cwd: "packages/desktop",
   branch: "main",
   recorded_sha: "a".repeat(40),
   is_active: false,
@@ -1782,10 +1781,11 @@ test("view-only rows keep their badge and copy but never a checkbox", () => {
   assert.match(html, /class="sync-history-branch-state history-only"[^>]*>View only</);
   assert.match(html, /View only — connect a Claude profile to sync this session\./);
   assert.match(html, /View only — this Mallard version has no adapter for mystery sessions\./);
-  // The per-provider notice strip explains the access state once, with the
-  // backend's detail carried along.
-  assert.match(html, /sync-history-provider-notice/);
-  assert.match(html, /<strong>Claude<\/strong> — View only — connect a Claude profile to sync these sessions\. Sessions were published from another machine\./);
+  // The per-provider notice explains the access state once, with the backend's
+  // detail carried along — now as one item in the page's single notice zone
+  // rather than a box of its own.
+  assert.match(html, /class="notice [a-z]+ sync-history-notices"/);
+  assert.match(html, /<strong class="notice-lead">Claude<\/strong> — View only — connect a Claude profile to sync these sessions\. Sessions were published from another machine\./);
   // Review rows and storage-only rows never navigate or download implicitly.
   assert.doesNotMatch(html, /sync-history-session-title-button|aria-label="View session details"/);
 });
@@ -1860,9 +1860,12 @@ test("provider comparison failures render isolated warnings", () => {
     />,
   );
 
-  assert.match(html, /sync-history-provider-error/);
-  assert.match(html, /role="alert"/);
-  assert.match(html, /<strong>Claude<\/strong> comparison failed: The Claude profile is locked by another process\./);
+  // A comparison that failed while the page loaded is standing content: it is
+  // there on first paint, so the zone is a named region. `role="alert"` here
+  // announced a condition the reader had never not had.
+  assert.match(html, /class="notice warning sync-history-notices" role="region" aria-label="Notes about this project activity"/);
+  assert.doesNotMatch(html, /role="alert"/);
+  assert.match(html, /<strong class="notice-lead">Claude<\/strong> comparison failed: The Claude profile is locked by another process\./);
   // The failure is isolated: the healthy provider's rows still render.
   assert.match(html, /Add Git history mapping/);
   assert.doesNotMatch(html, /<strong>Codex<\/strong> comparison failed/);

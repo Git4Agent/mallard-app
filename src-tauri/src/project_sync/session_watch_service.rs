@@ -1032,7 +1032,6 @@ mod tests {
                 (codex_key.clone(), codex.clone()),
                 (claude_key, claude),
             ]),
-            excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: vec![temp.path().join("unrelated-exclusion")],
         };

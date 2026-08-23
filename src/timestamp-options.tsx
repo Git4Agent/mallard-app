@@ -290,7 +290,6 @@ function Shipped({ sample }: { sample: Sample }) {
       }}
       headingRef={{ current: null }}
       actionBusyId={null}
-      actionError={null}
       onAction={() => undefined}
     />
   );

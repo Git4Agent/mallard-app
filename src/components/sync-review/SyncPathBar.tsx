@@ -188,8 +188,13 @@ function PathBarMenu({
         }
       }}
     >
+      {/* No live region here. The banner is prose the menu is built with — it
+          is in the DOM before the menu opens and never changes while it is
+          open — so it is not a status message (WCAG 2.2 SC 4.1.3). It also sat
+          inside `role="menu"`, which admits only the menuitem family, so the
+          status role was an invalid child on top of being the wrong one. */}
       {banner && (
-        <div className="sync-path-menu-banner" role="status">
+        <div className="sync-path-menu-banner">
           <Icon name="refresh" size={14} />
           <span>{banner}</span>
         </div>

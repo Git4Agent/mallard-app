@@ -12,6 +12,7 @@ import type {
   CatalogScopePushPlan,
   CatalogScopeResources,
   CatalogScopeView,
+  CatalogStorageRepository,
   LocalCatalogProfile,
 } from "./types";
 
@@ -60,6 +61,14 @@ export const storageCatalogApi = {
     invoke<CatalogScopeResources>("list_catalog_scope_resources", {
       scopeId,
       storageId: storageId ?? null,
+    }),
+
+  /** The Catalog's kind repositories in one storage — derived ids, one head
+   * read each, refusal rows for anything present but unreadable. Rendered by
+   * the storage page beside the project repositories. */
+  listStorageRepositories: (storageId: string) =>
+    invoke<CatalogStorageRepository[]>("list_catalog_storage_repositories", {
+      storageId,
     }),
 
   /** The preview for a stored-only pet row, fetched from the storage on

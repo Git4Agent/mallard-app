@@ -5,13 +5,15 @@
 
 use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
-    most_specific_project_relative_path, SessionCount, SessionCountQuality, SessionDetailWarning,
-    SessionEventCounts, SessionEventDetail, SessionFileSummary, SessionSourceSpan,
-    SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
-    SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
-    SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
-    SessionTurnToolSummary, TIMELINE_TOOL_PREVIEW_BYTES,
+    most_specific_project_relative_path, timeline_tool_detail_budgets, SessionCount,
+    SessionCountQuality, SessionDetailWarning, SessionEventCounts, SessionEventDetail,
+    SessionFileSummary, SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent,
+    SessionTimelineEventKind, SessionTimelineIndex, SessionTimelineIndexEntry,
+    SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus,
+    SessionToolCategory, SessionToolIndexEntry, SessionTurnToolSummary,
+    TIMELINE_MESSAGE_PREVIEW_BYTES, TIMELINE_PAGE_CONTENT_BYTES, TIMELINE_TOOL_PREVIEW_BYTES,
 };
+use mallard_domain::NoticeSeverity;
 use serde::de::{Deserializer, IgnoredAny, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,8 +27,6 @@ use std::path::{Component, Path, PathBuf};
 /// safety policy can also be indexed and opened by session detail.
 pub(crate) const MAX_LINE_BYTES: usize = mallard_domain::MAX_CONVERSATION_FILE_BYTES as usize;
 const MAX_SUMMARY_CHARS: usize = 180;
-const TIMELINE_MESSAGE_PREVIEW_BYTES: usize = 16 * 1024;
-const TIMELINE_DETAIL_BYTES: usize = 64 * 1024;
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_AFFECTED_PATHS_PER_TOOL: usize = 1_024;
 pub(crate) const TIMELINE_PARSER_VERSION: u32 = 4;
@@ -262,20 +262,6 @@ pub(crate) fn recover_oversized_record<R: BufRead + Seek>(
     serde_json::to_value(parsed?).map_err(|error| error.to_string())
 }
 
-pub(crate) fn extract_user_message(value: &Value) -> Option<String> {
-    let payload = value.get("payload").unwrap_or(value);
-    if payload.get("role").and_then(Value::as_str) != Some("user") {
-        return None;
-    }
-    if let Some(text) = payload.get("text").and_then(Value::as_str) {
-        return Some(text.to_string());
-    }
-    if let Some(content) = payload.get("content") {
-        return extract_text(content);
-    }
-    payload.get("message").and_then(extract_text)
-}
-
 pub(crate) fn extract_text(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
@@ -330,7 +316,6 @@ struct RolloutParser {
     branch: Option<String>,
     recorded_sha: Option<String>,
     summary: Option<String>,
-    fallback_summary: Option<String>,
     user_round_count: u64,
     agent_message_count: u64,
     tool_call_count: u64,
@@ -350,7 +335,6 @@ impl RolloutParser {
             branch: None,
             recorded_sha: None,
             summary: None,
-            fallback_summary: None,
             user_round_count: 0,
             agent_message_count: 0,
             tool_call_count: 0,
@@ -408,15 +392,26 @@ impl RolloutParser {
                         .map(ToOwned::to_owned);
             }
         }
-        if payload_type == "user_message" {
-            if let Some(text) = genuine_user_event(payload) {
-                self.user_round_count = self.user_round_count.saturating_add(1);
-                if self.summary.is_none() {
-                    self.summary = Some(truncate_chars(&text, MAX_SUMMARY_CHARS));
+        if payload_type == "item_completed" {
+            if let Some(item) = payload.get("item") {
+                match item.get("type").and_then(Value::as_str) {
+                    Some("UserMessage") => {
+                        if let Some(text) = canonical_item_text(item)
+                            .map(|text| normalize_summary(&text))
+                            .filter(|text| is_meaningful_user_text(text))
+                        {
+                            self.user_round_count = self.user_round_count.saturating_add(1);
+                            if self.summary.is_none() {
+                                self.summary = Some(truncate_chars(&text, MAX_SUMMARY_CHARS));
+                            }
+                        }
+                    }
+                    Some("AgentMessage") => {
+                        self.agent_message_count = self.agent_message_count.saturating_add(1);
+                    }
+                    _ => {}
                 }
             }
-        } else if payload_type == "agent_message" {
-            self.agent_message_count = self.agent_message_count.saturating_add(1);
         }
         if matches!(payload_type, "function_call" | "custom_tool_call") {
             self.tool_call_count = self.tool_call_count.saturating_add(1);
@@ -431,11 +426,6 @@ impl RolloutParser {
                 self.total_tokens = Some(self.total_tokens.unwrap_or(0).max(total));
             }
         }
-        if self.fallback_summary.is_none() {
-            self.fallback_summary = extract_user_message(value)
-                .map(|text| truncate_chars(&normalize_summary(&text), MAX_SUMMARY_CHARS))
-                .filter(|text| is_meaningful_user_text(text));
-        }
     }
 
     fn finish(self) -> Result<SessionFileSummary, String> {
@@ -445,7 +435,7 @@ impl RolloutParser {
         self.cwd
             .as_ref()
             .ok_or_else(|| "rollout has no cwd metadata".to_string())?;
-        let summary = self.summary.or(self.fallback_summary);
+        let summary = self.summary;
         let mut recorded_branches = std::collections::BTreeSet::new();
         if let Some(branch) = &self.branch {
             recorded_branches.insert(branch.clone());
@@ -579,7 +569,7 @@ pub fn first_codex_user_summary(bytes: &[u8]) -> Option<String> {
             }
         }
     }
-    parser.summary.or(parser.fallback_summary)
+    parser.summary
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -622,26 +612,31 @@ fn merge_affected_paths(target: &mut Vec<String>, incoming: Vec<String>) -> bool
 }
 
 impl TimelineBuilder {
-    fn warning(&mut self, code: &str, message: &str) {
+    fn warning(&mut self, code: &str, message: &str, severity: NoticeSeverity) {
         if self.warnings.iter().any(|warning| warning.code == code) {
             return;
         }
         self.warnings.push(SessionDetailWarning {
             code: code.to_string(),
             message: message.to_string(),
+            severity,
         });
     }
 
+    /// Degrading every count means the reader is provably seeing less than the
+    /// transcript holds, so these always read as `Warning`.
     fn mark_all_lower_bound(&mut self, code: &str, message: &str) {
         self.degraded_all = true;
         self.degraded_tools = true;
         self.truncated = true;
-        self.warning(code, message);
+        self.warning(code, message, NoticeSeverity::Warning);
     }
 
+    /// Tool counts degrade to a floor, so the reader is again seeing less than
+    /// the transcript holds: `Warning`.
     fn mark_tools_lower_bound(&mut self, code: &str, message: &str) {
         self.degraded_tools = true;
-        self.warning(code, message);
+        self.warning(code, message, NoticeSeverity::Warning);
     }
 
     fn next_legacy_turn(&mut self, source: SessionSourceSpan) -> String {
@@ -682,7 +677,8 @@ impl TimelineBuilder {
         let quality = if text.len() > TIMELINE_MESSAGE_PREVIEW_BYTES {
             self.warning(
                 "message_preview_truncated",
-                "At least one Codex message exceeds the 16-KiB timeline display limit and is shown as a truncated preview.",
+                "At least one Codex message exceeds the 1-MiB timeline display limit and is shown as a truncated preview.",
+                NoticeSeverity::Warning,
             );
             SessionCountQuality::LowerBound
         } else {
@@ -945,6 +941,7 @@ impl TimelineBuilder {
             self.warning(
                 "legacy_message_phase_inferred",
                 "This Codex rollout predates authoritative message phases; final and progress placement was inferred from nearby tool calls.",
+                NoticeSeverity::Info,
             );
         }
 
@@ -1368,8 +1365,11 @@ fn canonical_tool(
         category == SessionToolCategory::FileEdit,
     );
     let mut status = canonical_item_status(item);
+    let completed_web_extension =
+        item_type == "extension" && classifier_name.eq_ignore_ascii_case("web.search");
     if status == SessionToolCallStatus::Incomplete
-        && matches!(item_type.as_str(), "websearch" | "imageview" | "filechange")
+        && (matches!(item_type.as_str(), "websearch" | "imageview" | "filechange")
+            || completed_web_extension)
     {
         status = SessionToolCallStatus::Completed;
     }
@@ -2122,6 +2122,71 @@ fn value_as_preview(value: &Value) -> Option<String> {
     }
 }
 
+/// Keys that name a call, richest first. Mirrors the Claude reader's list so
+/// the two providers label an object-shaped argument the same way.
+const TOOL_LABEL_KEYS: &[&str] = &[
+    "command",
+    "cmd",
+    "path",
+    "file_path",
+    "query",
+    "url",
+    "pattern",
+    "prompt",
+    "title",
+    "description",
+    "message",
+    // After the prose: a call that carries both a title and a body is named by
+    // the title, and only a call with nothing else is named by its code.
+    "script",
+    "code",
+    "text",
+];
+
+/// `["/bin/zsh", "-lc", "<script>"]` is named by its script, not by the shell
+/// that ran it: the two elements before it are identical on every row. Tested
+/// by shape rather than by position, because a bare argv like `["rg", "parser"]`
+/// is equally legal and there the command is the whole vector.
+fn shell_script<'a>(parts: &[&'a str]) -> Option<&'a str> {
+    match parts {
+        [shell, flag, script] => {
+            let name = shell.rsplit('/').next().unwrap_or(shell);
+            let shell_name = matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish");
+            let command_flag = flag.strip_prefix('-').is_some_and(|rest| {
+                rest.ends_with('c') && rest.chars().all(|char| char.is_ascii_alphabetic())
+            });
+            (shell_name && command_flag).then_some(*script)
+        }
+        _ => None,
+    }
+}
+
+/// The row's label, read from the argument's structure rather than from its
+/// rendered text. Rendering first and then keeping the opening line names
+/// nothing: a pretty-printed array begins with a bare `[`, and every shell
+/// call this provider records is one.
+fn value_as_label(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) => Some(text.clone()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Array(values) => {
+            let parts = values
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()?;
+            match shell_script(&parts) {
+                Some(script) => Some(script.to_string()),
+                None => Some(parts.join(" ")),
+            }
+        }
+        Value::Object(fields) => TOOL_LABEL_KEYS
+            .iter()
+            .find_map(|key| fields.get(*key).and_then(value_as_label)),
+    }
+}
+
 fn join_outputs(values: impl IntoIterator<Item = Option<String>>) -> Option<String> {
     let parts = values
         .into_iter()
@@ -2131,54 +2196,45 @@ fn join_outputs(values: impl IntoIterator<Item = Option<String>>) -> Option<Stri
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
-fn tool_arguments_from_record(value: &Value, call_id: &str) -> Option<String> {
+/// The argument value itself, not its rendering: the preview and the row's
+/// label are two different readings of it, and flattening here would leave the
+/// label with only the punctuation the pretty-printer emitted first.
+fn tool_arguments_from_record(value: &Value, call_id: &str) -> Option<Value> {
     let payload = value.get("payload").unwrap_or(value);
     let payload_type = normalized_type(payload.get("type").and_then(Value::as_str));
     if matches!(payload_type.as_str(), "itemcompleted" | "itemstarted") {
         let item = payload.get("item")?;
         let item_type = normalized_type(item.get("type").and_then(Value::as_str));
         return match item_type.as_str() {
-            "commandexecution" => item.get("command").and_then(value_as_preview),
+            "commandexecution" => item.get("command").cloned(),
             "filechange" => item
                 .get("changes")
                 .and_then(Value::as_object)
-                .map(|changes| changes.keys().cloned().collect::<Vec<_>>().join("\n")),
-            "dynamictoolcall" | "mcptoolcall" => item.get("arguments").and_then(value_as_preview),
-            "websearch" => item
-                .get("query")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            "imageview" => item
-                .get("path")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            _ => item.get("input").and_then(value_as_preview),
+                .map(joined_keys),
+            "dynamictoolcall" | "mcptoolcall" => item.get("arguments").cloned(),
+            "websearch" => item.get("query").and_then(text_value),
+            "imageview" => item.get("path").and_then(text_value),
+            _ => item.get("input").cloned(),
         };
     }
     match payload_type.as_str() {
-        "functioncall" => payload
-            .get("arguments")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        "customtoolcall" => payload
-            .get("input")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        "localshellcall" => payload.get("action").and_then(value_as_preview),
-        "execcommandbegin" | "execcommandend" => payload.get("command").and_then(value_as_preview),
+        "functioncall" => payload.get("arguments").and_then(text_value),
+        "customtoolcall" => payload.get("input").and_then(text_value),
+        "localshellcall" => payload.get("action").cloned(),
+        "execcommandbegin" | "execcommandend" => payload.get("command").cloned(),
         "patchapplybegin" | "patchapplyend" => payload
             .get("changes")
             .and_then(Value::as_object)
-            .map(|changes| changes.keys().cloned().collect::<Vec<_>>().join("\n")),
+            .map(joined_keys),
         "mcptoolcallbegin" | "mcptoolcallend" => payload
             .get("invocation")
             .and_then(|invocation| invocation.get("arguments"))
-            .and_then(value_as_preview),
-        "dynamictoolcallrequest" => payload.get("arguments").and_then(value_as_preview),
+            .cloned(),
+        "dynamictoolcallrequest" => payload.get("arguments").cloned(),
         "websearchbegin" | "websearchend" => payload
             .get("query")
             .or_else(|| payload.get("search_query"))
-            .and_then(value_as_preview),
+            .cloned(),
         _ => {
             let observed = legacy_call_id(
                 payload,
@@ -2188,10 +2244,20 @@ fn tool_arguments_from_record(value: &Value, call_id: &str) -> Option<String> {
                 },
             );
             (observed == call_id)
-                .then(|| payload.get("arguments").and_then(value_as_preview))
+                .then(|| payload.get("arguments").cloned())
                 .flatten()
         }
     }
+}
+
+/// These fields carried a string or nothing before the argument stayed a
+/// `Value`; a non-string here is not an argument.
+fn text_value(value: &Value) -> Option<Value> {
+    value.as_str().map(|text| Value::String(text.to_string()))
+}
+
+fn joined_keys(changes: &serde_json::Map<String, Value>) -> Value {
+    Value::String(changes.keys().cloned().collect::<Vec<_>>().join("\n"))
 }
 
 fn tool_result_from_record(value: &Value) -> Option<String> {
@@ -2255,7 +2321,7 @@ fn bounded_text(value: Option<String>, limit: usize) -> (Option<String>, bool) {
 fn tool_payloads(
     file: &mut File,
     entry: &SessionTimelineIndexEntry,
-) -> Result<(Option<String>, Option<String>), String> {
+) -> Result<(Option<Value>, Option<String>), String> {
     let tool = entry
         .tool
         .as_ref()
@@ -2326,11 +2392,12 @@ pub(crate) fn read_timeline_page(
         }
     }
     let mut events = Vec::new();
+    let mut page_content_bytes = 0usize;
     let mut position = start;
     while position < index.events.len() && events.len() < limit {
         let entry = &index.events[position];
-        position += 1;
         if !matching_entry(entry, query) {
+            position += 1;
             continue;
         }
         let text = if entry.kind == SessionTimelineEventKind::ToolCall {
@@ -2345,11 +2412,13 @@ pub(crate) fn read_timeline_page(
         };
         let tool = if let Some(tool_index) = &entry.tool {
             let (arguments, result) = tool_payloads(&mut file, entry)?;
-            let (argument_preview, argument_truncated) =
-                bounded_text(arguments, TIMELINE_TOOL_PREVIEW_BYTES);
+            let summary = tool_summary(tool_index, arguments.as_ref());
+            let (argument_preview, argument_truncated) = bounded_text(
+                arguments.as_ref().and_then(value_as_preview),
+                TIMELINE_TOOL_PREVIEW_BYTES,
+            );
             let (result_preview, result_truncated) =
                 bounded_text(result, TIMELINE_TOOL_PREVIEW_BYTES);
-            let summary = tool_summary(tool_index, argument_preview.as_deref());
             Some(SessionToolCallPreview {
                 provider_call_id: tool_index.provider_call_id.clone(),
                 native_name: tool_index.native_name.clone(),
@@ -2365,6 +2434,26 @@ pub(crate) fn read_timeline_page(
         } else {
             None
         };
+        let event_content_bytes = text
+            .as_ref()
+            .map_or(0, String::len)
+            .saturating_add(
+                tool.as_ref()
+                    .and_then(|preview| preview.argument_preview.as_ref())
+                    .map_or(0, String::len),
+            )
+            .saturating_add(
+                tool.as_ref()
+                    .and_then(|preview| preview.result_preview.as_ref())
+                    .map_or(0, String::len),
+            );
+        if !events.is_empty()
+            && page_content_bytes.saturating_add(event_content_bytes) > TIMELINE_PAGE_CONTENT_BYTES
+        {
+            break;
+        }
+        page_content_bytes = page_content_bytes.saturating_add(event_content_bytes);
+        position += 1;
         let mut turn_tool_summary = None;
         if entry.kind != SessionTimelineEventKind::ToolCall {
             if let Some(turn_id) = &entry.turn_id {
@@ -2394,14 +2483,16 @@ pub(crate) fn read_timeline_page(
     Ok(SessionTimelinePageSlice { events, next_index })
 }
 
-fn tool_summary(tool: &SessionToolIndexEntry, argument_preview: Option<&str>) -> String {
+fn tool_summary(tool: &SessionToolIndexEntry, arguments: Option<&Value>) -> String {
     if let Some(path) = tool.affected_paths.first() {
         return path.clone();
     }
-    argument_preview
-        .and_then(|preview| preview.lines().next())
-        .map(|line| truncate_chars(line, 160))
-        .filter(|line| !line.is_empty())
+    // Line breaks survive: the row caps and ellipsizes the label itself, and
+    // the hover title is the better place for the rest of a wrapped command.
+    arguments
+        .and_then(value_as_label)
+        .map(|label| truncate_chars(label.trim(), 160))
+        .filter(|label| !label.is_empty())
         .unwrap_or_else(|| tool.native_name.clone())
 }
 
@@ -2425,10 +2516,12 @@ pub(crate) fn read_event_detail(
     let mut file =
         File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
     let (arguments, result) = tool_payloads(&mut file, entry)?;
-    let argument_budget = TIMELINE_DETAIL_BYTES / 2;
+    // The pane shows the argument as written, pretty-printed; only the row's
+    // one-line label reads its structure.
+    let arguments = arguments.as_ref().and_then(value_as_preview);
+    let (argument_budget, result_budget) =
+        timeline_tool_detail_budgets(arguments.as_deref(), result.as_deref());
     let (arguments, arguments_truncated) = bounded_text(arguments, argument_budget);
-    let used = arguments.as_ref().map_or(0, String::len);
-    let result_budget = TIMELINE_DETAIL_BYTES.saturating_sub(used).max(1);
     let (result, result_truncated) = bounded_text(result, result_budget);
     Ok(SessionEventDetail {
         event_id: event_id.to_string(),
@@ -2469,6 +2562,51 @@ mod tests {
         count.value.expect("supported count")
     }
 
+    /// A shell call is named by the script it ran. Rendering the argument and
+    /// keeping the first line named every such row `[`, because the argument is
+    /// an argv array and that is what a pretty-printed array opens with.
+    #[test]
+    fn a_tool_row_is_named_by_its_command_not_its_punctuation() {
+        fn label(argument: Value) -> String {
+            let tool = SessionToolIndexEntry {
+                provider_call_id: "call-1".to_string(),
+                native_name: "exec_command".to_string(),
+                category: SessionToolCategory::Shell,
+                status: SessionToolCallStatus::Completed,
+                affected_paths: Vec::new(),
+                result_source: None,
+            };
+            tool_summary(&tool, Some(&argument))
+        }
+
+        // The shape every recorded shell call takes: the shell and its flag are
+        // identical on every row, so neither names the call.
+        assert_eq!(
+            label(json!(["/bin/zsh", "-lc", "sed -n '1,260p' SKILL.md"])),
+            "sed -n '1,260p' SKILL.md"
+        );
+        assert_eq!(label(json!(["bash", "-c", "git status"])), "git status");
+        // A bare argv is equally legal, and there the command is the whole
+        // vector — which is why the shell shape is tested, not the last slot.
+        assert_eq!(label(json!(["rg", "parser"])), "rg parser");
+        // A shell name in the first slot is not enough on its own.
+        assert_eq!(
+            label(json!(["zsh", "script.sh", "arg"])),
+            "zsh script.sh arg"
+        );
+        // Objects are read by key, the way the Claude reader reads them.
+        assert_eq!(
+            label(json!({"title": "Inspect the setup page", "code": "print(1)"})),
+            "Inspect the setup page"
+        );
+        // Nothing to say falls back to the tool's own name rather than to a
+        // brace: an empty object used to render as `{`.
+        assert_eq!(label(json!({})), "exec_command");
+        assert_eq!(label(json!([])), "exec_command");
+        // A plain string argument is already its own label.
+        assert_eq!(label(json!("rg -n needle")), "rg -n needle");
+    }
+
     #[test]
     fn session_index_parser_accepts_only_current_field_names() {
         let parsed = parse_session_index_lines([
@@ -2483,6 +2621,133 @@ mod tests {
         assert!(!parsed.contains_key("old-id"));
         assert_eq!(parsed["old-title"].0, None);
         assert_eq!(parsed["old-time"].1, None);
+    }
+
+    #[test]
+    fn current_canonical_items_drive_activity_message_metrics() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({
+                    "timestamp": "2026-08-07T00:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"id": "session-1", "cwd": project_root}
+                }),
+                json!({
+                    "timestamp": "2026-08-07T00:00:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": "Injected instructions"}]
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-07T00:00:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Raw duplicate prompt"}]
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-07T00:00:00Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": "Obsolete duplicate prompt"
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-07T00:00:01Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "item_completed",
+                        "turn_id": "turn-1",
+                        "item": {
+                            "type": "UserMessage",
+                            "id": "user-1",
+                            "content": [{"type": "text", "text": "Canonical prompt"}]
+                        }
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-07T00:00:02Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "item_completed",
+                        "turn_id": "turn-1",
+                        "item": {
+                            "type": "AgentMessage",
+                            "id": "agent-commentary",
+                            "phase": "commentary",
+                            "content": [{"type": "text", "text": "Working on it."}]
+                        }
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-07T00:00:03Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "item_completed",
+                        "turn_id": "turn-1",
+                        "item": {
+                            "type": "AgentMessage",
+                            "id": "agent-final",
+                            "phase": "final_answer",
+                            "content": [{"type": "text", "text": "Done."}]
+                        }
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-07T00:00:03Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "agent_message",
+                        "message": "Obsolete duplicate response"
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-07T00:00:04Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "call_id": "call-1",
+                        "name": "exec_command",
+                        "input": "cargo test"
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-07T00:00:05Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {"total_token_usage": {"total_tokens": 123}}
+                    }
+                }),
+            ],
+        );
+
+        let bytes = fs::read(&transcript).unwrap();
+        let from_file = summarize_rollout_file(&transcript).unwrap();
+        let from_bytes = summarize_rollout_bytes(&bytes).unwrap();
+        assert_eq!(from_file, from_bytes);
+        assert_eq!(from_file.user_rounds, 1);
+        assert_eq!(from_file.agent_messages, 2);
+        assert_eq!(from_file.tool_calls, 1);
+        assert_eq!(from_file.total_tokens, Some(123));
+        assert_eq!(from_file.summary.as_deref(), Some("Canonical prompt"));
+        assert_eq!(from_file.title.as_deref(), Some("Canonical prompt"));
+        assert!(from_file.metrics_complete);
+        assert_eq!(
+            first_codex_user_summary(&bytes).as_deref(),
+            Some("Canonical prompt")
+        );
     }
 
     #[test]
@@ -2537,6 +2802,94 @@ mod tests {
         assert_eq!(tool.provider_call_id, "call-1");
         assert_eq!(tool.category, SessionToolCategory::Shell);
         assert_eq!(tool.status, SessionToolCallStatus::Completed);
+    }
+
+    #[test]
+    fn completed_web_search_extensions_are_not_reported_as_incomplete() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session-1","cwd":project_root}}),
+                json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-1","item":{"type":"UserMessage","id":"user-1","content":[{"type":"text","text":"Search the web"}]}}}),
+                json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-1","completed_at_ms":1786060801000_i64,"item":{"type":"Extension","id":"search-1","kind":"web.search","query":"mallards","results":[{"title":"Mallard"}]}}}),
+                json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-1","completed_at_ms":1786060802000_i64,"item":{"type":"Extension","id":"search-2","kind":"web.search","status":"failed","error":"network unavailable"}}}),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        assert_eq!(count_value(&index.counts.tool_calls), 2);
+        assert_eq!(index.counts.tool_calls.quality, SessionCountQuality::Exact);
+        assert!(!index
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "incomplete_tool_call"));
+        let statuses = index
+            .events
+            .iter()
+            .filter_map(|entry| entry.tool.as_ref())
+            .map(|tool| (tool.provider_call_id.as_str(), tool.status))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(statuses["search-1"], SessionToolCallStatus::Completed);
+        assert_eq!(statuses["search-2"], SessionToolCallStatus::Failed);
+    }
+
+    #[test]
+    fn message_previews_use_the_one_mib_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        let mut prompt_text = "p ".repeat(8 * 1024);
+        prompt_text.push('p');
+        let mut response_text = "r ".repeat(TIMELINE_MESSAGE_PREVIEW_BYTES / 2);
+        response_text.push('r');
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session-1","cwd":project_root}}),
+                json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-1","item":{"type":"UserMessage","id":"user-1","content":[{"type":"text","text":prompt_text}]}}}),
+                json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-1","item":{"type":"AgentMessage","id":"response-1","phase":"final_answer","content":[{"type":"text","text":response_text}]}}}),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        let prompt = index
+            .events
+            .iter()
+            .find(|entry| entry.kind == SessionTimelineEventKind::Prompt)
+            .unwrap();
+        let response = index
+            .events
+            .iter()
+            .find(|entry| entry.kind == SessionTimelineEventKind::Response)
+            .unwrap();
+        assert_eq!(prompt.quality, SessionCountQuality::Exact);
+        assert_eq!(response.quality, SessionCountQuality::LowerBound);
+        assert!(index.warnings.iter().any(|warning| {
+            warning.code == "message_preview_truncated" && warning.message.contains("1-MiB")
+        }));
+
+        let query = SessionTimelineQuery {
+            start_index: None,
+            anchor_event_id: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([
+                SessionTimelineEventKind::Prompt,
+                SessionTimelineEventKind::Response,
+            ]),
+            included_tool_categories: BTreeSet::new(),
+            turn_id: None,
+        };
+        let page = read_timeline_page(&transcript, &index, &query).unwrap();
+        assert_eq!(page.events.len(), 2);
+        assert_eq!(page.events[0].text.as_ref().unwrap().len(), 16 * 1024 + 1);
+        let response_preview = page.events[1].text.as_ref().unwrap();
+        assert!(response_preview.ends_with('…'));
+        assert!(response_preview.len() <= TIMELINE_MESSAGE_PREVIEW_BYTES);
     }
 
     #[test]
@@ -2829,10 +3182,89 @@ mod tests {
         assert!(page.events[0].tool.as_ref().unwrap().result_truncated);
         assert!(preview.ends_with('…'));
         assert!(preview.len() <= TIMELINE_TOOL_PREVIEW_BYTES);
-        assert!(read_event_detail(&transcript, &index, &tool_entry.event_id)
-            .unwrap()
-            .result
-            .is_some());
+        let detail = read_event_detail(&transcript, &index, &tool_entry.event_id).unwrap();
+        let detail_result = detail.result.as_ref().unwrap();
+        assert!(detail.result_truncated);
+        assert!(detail_result.len() > 64 * 1024);
+        assert!(detail_result.len() <= crate::providers::traits::TIMELINE_TOOL_DETAIL_BYTES);
+    }
+
+    #[test]
+    fn large_tool_previews_paginate_without_skipping_the_next_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        let arguments = "a ".repeat(300 * 1024);
+        let result = "r ".repeat(300 * 1024);
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session-1","cwd":project_root}}),
+                json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-1","item":{"type":"UserMessage","id":"user-1","content":[{"type":"text","text":"Run both tools"}]}}}),
+                json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-1","item":{"type":"McpToolCall","id":"tool-1","tool":"large_tool","status":"completed","arguments":arguments.clone(),"result":result.clone()}}}),
+                json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-1","item":{"type":"McpToolCall","id":"tool-2","tool":"large_tool","status":"completed","arguments":arguments.clone(),"result":result.clone()}}}),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        let first_query = SessionTimelineQuery {
+            start_index: None,
+            anchor_event_id: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
+            included_tool_categories: BTreeSet::from([SessionToolCategory::Other]),
+            turn_id: None,
+        };
+        let first_page = read_timeline_page(&transcript, &index, &first_query).unwrap();
+        assert_eq!(first_page.events.len(), 1);
+        let first_tool = first_page.events[0].tool.as_ref().unwrap();
+        assert_eq!(first_tool.provider_call_id, "tool-1");
+        assert_eq!(
+            first_tool.argument_preview.as_ref().unwrap().len(),
+            arguments.len()
+        );
+        assert_eq!(
+            first_tool.result_preview.as_ref().unwrap().len(),
+            result.len()
+        );
+        assert!(!first_tool.argument_truncated);
+        assert!(!first_tool.result_truncated);
+
+        let second_query = SessionTimelineQuery {
+            start_index: first_page.next_index,
+            ..first_query
+        };
+        let second_page = read_timeline_page(&transcript, &index, &second_query).unwrap();
+        assert_eq!(second_page.events.len(), 1);
+        assert_eq!(
+            second_page.events[0]
+                .tool
+                .as_ref()
+                .unwrap()
+                .provider_call_id,
+            "tool-2"
+        );
+        assert_eq!(second_page.next_index, None);
+
+        let first_entry = index
+            .events
+            .iter()
+            .find(|entry| {
+                entry
+                    .tool
+                    .as_ref()
+                    .is_some_and(|tool| tool.provider_call_id == "tool-1")
+            })
+            .unwrap();
+        let detail = read_event_detail(&transcript, &index, &first_entry.event_id).unwrap();
+        let detail_bytes = detail.arguments.as_ref().map_or(0, String::len)
+            + detail.result.as_ref().map_or(0, String::len);
+        assert!(detail.arguments_truncated);
+        assert!(detail.result_truncated);
+        assert!(detail.arguments.as_ref().unwrap().len() > 64 * 1024);
+        assert!(detail.result.as_ref().unwrap().len() > 64 * 1024);
+        assert!(detail_bytes <= crate::providers::traits::TIMELINE_TOOL_DETAIL_BYTES);
     }
 
     #[test]

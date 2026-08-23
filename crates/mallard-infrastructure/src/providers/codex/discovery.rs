@@ -2,7 +2,7 @@
 
 use crate::provider_capture::{
     canonical_existing_dir, filter_codex_session_index_by_ids, inspect_candidate_files_with_limit,
-    owned_relative_cwd, provider_walk_entry,
+    provider_walk_entry, session_home_is_project_root,
 };
 use crate::providers::codex::history::parse_session_index_titles;
 use crate::providers::traits::{DiscoveredSession, SessionDiscovery, SessionDiscoveryContext};
@@ -66,11 +66,9 @@ pub(super) fn discover(
             discovery
                 .profile_session_ids
                 .insert(meta.session_id.clone());
-            let Some(relative_cwd) =
-                owned_relative_cwd(context.project_root, &meta.cwd, context.excluded_roots)?
-            else {
+            if !session_home_is_project_root(context.project_root, &meta.cwd) {
                 continue;
-            };
+            }
             if meta.is_internal_subagent {
                 // TODO(sync-subagent-task): Parent/child rollout graphs need
                 // atomic selection and complete parent-ID rewriting before
@@ -100,7 +98,6 @@ pub(super) fn discover(
             by_session.insert(meta.session_id.clone(), discovery.sessions.len());
             discovery.sessions.push(DiscoveredSession {
                 session_id: meta.session_id.clone(),
-                relative_cwd,
                 physical_path: entry.path().to_path_buf(),
                 display_name: meta.session_id,
                 blocked_reason: inspect_candidate_files_with_limit(

@@ -1,15 +1,16 @@
 //! Claude session, sidecar, and memory discovery under one `CLAUDE_CONFIG_DIR`.
 
+use super::materialization::encode_claude_project_path;
 use crate::provider_capture::{
     canonical_existing_dir, collect_regular_tree_files, inspect_candidate_files,
-    inspect_candidate_files_with_limit, normalized_relative, owned_relative_cwd,
-    provider_walk_entry, relative_cwd_key,
+    inspect_candidate_files_with_limit, normalized_relative, provider_walk_entry,
+    session_home_is_project_root,
 };
 use crate::providers::traits::{
     DiscoveredProviderState, DiscoveredSession, DiscoveredSidecar, DiscoveredStateFile,
     SessionDiscovery, SessionDiscoveryContext,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
@@ -70,7 +71,7 @@ pub(super) fn discover(
         return Ok(discovery);
     }
     let mut session_ids = BTreeSet::new();
-    let mut session_buckets = BTreeMap::<PathBuf, String>::new();
+    let mut root_buckets = BTreeSet::<PathBuf>::new();
     for entry in WalkDir::new(&projects)
         .follow_links(false)
         .min_depth(2)
@@ -95,18 +96,24 @@ pub(super) fn discover(
                 continue;
             }
         };
-        let Some(relative_cwd) =
-            owned_relative_cwd(context.project_root, &meta.cwd, context.excluded_roots)?
-        else {
+        if !session_home_is_project_root(context.project_root, &meta.cwd) {
             continue;
-        };
+        }
         session_ids.insert(meta.session_id.clone());
-        if let Some(parent) = entry.path().parent() {
-            session_buckets.insert(parent.to_path_buf(), relative_cwd.clone());
+        // The root bucket is the munged directory Claude itself uses for
+        // this project: its name must match the munge of the session's own
+        // recorded home. A foreign bucket holding a resumed-into-root
+        // session fails this self-consistency check, and its memory stays
+        // with its own directory-project.
+        if let (Some(parent), Some(cwd_text)) = (entry.path().parent(), meta.cwd.to_str()) {
+            if parent.file_name().and_then(|name| name.to_str())
+                == Some(encode_claude_project_path(cwd_text).as_str())
+            {
+                root_buckets.insert(parent.to_path_buf());
+            }
         }
         discovery.sessions.push(DiscoveredSession {
             session_id: meta.session_id.clone(),
-            relative_cwd,
             physical_path: entry.path().to_path_buf(),
             display_name: meta.session_id,
             blocked_reason: inspect_candidate_files_with_limit(
@@ -162,36 +169,42 @@ pub(super) fn discover(
         }
     }
 
-    // Project memories live within a verified bucket; discovered only when a
-    // session in that bucket proved project ownership.
-    for (bucket, relative_cwd) in session_buckets {
+    // Project memory lives in the canonical root bucket only, and only when
+    // an owned session proved that bucket (the munge is lossy). Distinct
+    // spellings of the same root can each carry a self-consistent bucket;
+    // one memory resource is emitted from the first, the rest are warned.
+    let mut root_buckets = root_buckets.into_iter();
+    if let Some(bucket) = root_buckets.next() {
+        for extra in root_buckets {
+            discovery.warnings.push(format!(
+                "ignored Claude memory in '{}'; using '{}'",
+                extra.display(),
+                bucket.display()
+            ));
+        }
         let memory = bucket.join("memory");
-        if !memory.exists() {
-            continue;
+        if memory.exists() {
+            let files = collect_regular_tree_files(&canonical_home, memory.clone())?;
+            if !files.is_empty() {
+                let state_files = files
+                    .iter()
+                    .map(|path| {
+                        normalized_relative(&memory, path).map(|rel| DiscoveredStateFile {
+                            physical_path: path.clone(),
+                            logical_suffix: format!("memory/{}", rel),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                discovery.state_resources.push(DiscoveredProviderState {
+                    state_component: "root".to_string(),
+                    resource_type: "memory".to_string(),
+                    display_name: "Claude project memory".to_string(),
+                    merge_apply: true,
+                    files: state_files,
+                    blocked_reason: inspect_candidate_files(&canonical_home, &files).err(),
+                });
+            }
         }
-        let files = collect_regular_tree_files(&canonical_home, memory.clone())?;
-        if files.is_empty() {
-            continue;
-        }
-        let relative_key = relative_cwd_key(&relative_cwd);
-        let state_files = files
-            .iter()
-            .map(|path| {
-                normalized_relative(&memory, path).map(|rel| DiscoveredStateFile {
-                    physical_path: path.clone(),
-                    logical_suffix: format!("memory/{}/{}", relative_key, rel),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        discovery.state_resources.push(DiscoveredProviderState {
-            state_component: relative_cwd.clone(),
-            resource_type: "memory".to_string(),
-            display_name: "Claude project memory".to_string(),
-            relative_cwd: Some(relative_cwd),
-            merge_apply: true,
-            files: state_files,
-            blocked_reason: inspect_candidate_files(&canonical_home, &files).err(),
-        });
     }
     Ok(discovery)
 }

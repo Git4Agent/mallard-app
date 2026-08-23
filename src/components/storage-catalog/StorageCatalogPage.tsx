@@ -5,6 +5,7 @@ import Icon, { type IconName } from "../Icons";
 import { clockOptions } from "../../clock";
 import { formatBytes } from "../../format";
 import { storageAccessErrorMessage } from "../../storageError";
+import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import { writeClipboardText } from "../sync-review/clipboard";
 import { focusMenuEdge, moveMenuFocus } from "../sync-review/menuKeyboard";
 import ProviderMark from "../sync-review/ProviderMark";
@@ -74,6 +75,32 @@ function resourceKindPhrase(kind: CatalogResourceKind, scopeLabel?: string | nul
   if (kind === "codex_pet_v2") return "Codex pet v2";
   if (kind === "plugin_install_intent") return "Plugin intent";
   return scopeLabel ? `${scopeLabel} skill` : "Skill";
+}
+
+/** Client-side mirror of the backend's component-name rule: ASCII alphanumeric
+ * start, then letters, digits, dots, dashes, underscores; no trailing dot. The
+ * backend stays the authority — this only catches the obvious while typing. */
+function forkNameRuleBroken(value: string): boolean {
+  if (value === "") return false;
+  return !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) || value.endsWith(".");
+}
+
+const FORK_RULE_MESSAGE =
+  "Letters and digits, plus dots, dashes and underscores after the first character — this becomes the copy’s folder name.";
+
+/** The suggested fork name, seeded the way the backend seeds generated copy
+ * names: from the directory name, valid by construction. Display names are
+ * free text — "Mallard Duck-copy" is not a folder name — so a row that never
+ * captured a path falls back to its display name squeezed into one. */
+function forkSeed(row: CatalogScopeRow): string {
+  const directory = row.local_path?.replace(/\/+$/, "").split("/").pop();
+  if (directory) return `${directory}-copy`;
+  const cleaned = row.display_name
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[^a-z0-9]+/, "")
+    .replace(/-+$/, "");
+  return cleaned ? `${cleaned}-copy` : "";
 }
 
 /** The verb a local action reduces to, for the row's trailing readout. The
@@ -260,6 +287,93 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
   );
 }
 
+/** The card's fork drawer: a full-width row under the card's own lines,
+ * parted by the card's hairline. It reads as one sentence — Fork “Maple” as
+ * [maple-copy] — with the name prefilled and pre-selected, so Enter forks the
+ * suggestion and the first keystroke replaces it. The line under the row is
+ * the hint, or, in the same slot, the rule refusal while typing and the
+ * backend's sentence after a refused submit. */
+function ForkDrawer({
+  displayName,
+  seed,
+  maxLength,
+  busy,
+  error,
+  onEdited,
+  onSubmit,
+  onClose,
+}: {
+  displayName: string;
+  seed: string;
+  maxLength: number;
+  busy: boolean;
+  /** A refusal from prepare or apply, shown where the hint line was. */
+  error: string | null;
+  /** Typing resumes: a stale refusal for the previous name clears. */
+  onEdited: () => void;
+  onSubmit: (name: string) => void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(seed);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    inputRef.current?.select();
+  }, []);
+  const trimmed = name.trim();
+  const broken = forkNameRuleBroken(trimmed);
+  return (
+    <form
+      className="catalog-fork-drawer"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (busy || broken || trimmed === "") return;
+        onSubmit(trimmed);
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || busy) return;
+        /* This layer consumed Escape; nothing above it may also close. */
+        event.stopPropagation();
+        onClose();
+      }}
+    >
+      <span className="catalog-fork-lead">
+        Fork <strong>“{displayName}”</strong> as
+      </span>
+      <input
+        ref={inputRef}
+        value={name}
+        maxLength={maxLength}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        aria-label={`Name for the fork of ${displayName}`}
+        aria-invalid={broken || undefined}
+        readOnly={busy}
+        onChange={(event) => {
+          setName(event.target.value);
+          onEdited();
+        }}
+      />
+      <button type="submit" className="btn btn-primary" disabled={busy || broken || trimmed === ""}>
+        <Icon name="git-fork" size={13} /> Fork
+      </button>
+      <button type="button" className="btn btn-ghost" disabled={busy} onClick={onClose}>
+        Cancel
+      </button>
+      {broken || error ? (
+        <span className="catalog-fork-note danger" role="alert">
+          <Icon name="alert-triangle" size={13} /> {broken ? FORK_RULE_MESSAGE : error}
+        </span>
+      ) : (
+        <span className="catalog-fork-note">
+          An independent copy beside the original, under this name — its own row, only on this
+          computer until you push it.
+        </span>
+      )}
+    </form>
+  );
+}
+
 /** One card per resource, wearing the activity card's grammar. Line one: the
  * badge, the name, the provider mark, Fork, and Reveal in Finder. Line two:
  * files and size, the rule, the ⓘ, and the full stamp. Reviews put the
@@ -274,6 +388,7 @@ function ResourceCard({
   preview,
   onReveal,
   onFork,
+  forkOpen,
   forkTitle,
   selectable,
   selected,
@@ -292,8 +407,10 @@ function ResourceCard({
    * `undefined` (non-pet scopes) draws no tile at all. */
   preview?: string | null;
   onReveal: () => void;
-  /** Fork lives on the card: local rows of forkable kinds grow the button. */
+  /** Fork lives on the card: local rows of forkable kinds grow the button,
+   * and it shows pressed while its drawer is open. */
   onFork?: () => void;
+  forkOpen?: boolean;
   forkTitle?: string;
   selectable?: boolean;
   selected?: boolean;
@@ -404,6 +521,7 @@ function ResourceCard({
               className="btn btn-ghost sync-history-launch-action"
               title={forkTitle}
               aria-label={forkTitle}
+              aria-expanded={!!forkOpen}
               onClick={onFork}
             >
               <Icon name="git-fork" size={14} />
@@ -565,10 +683,11 @@ export default function StorageCatalogPage({
   const [remotePreviews, setRemotePreviews] = useState<Record<string, string>>({});
   const previewAttempts = useRef<Set<string>>(new Set());
 
-  /* Fork lives on the card: the id of the resource whose inline form is
-     open, and the name being typed into it. */
+  /* Fork lives on the card: the id of the resource whose drawer is open, and
+     the refusal that drawer is showing. The name draft belongs to the drawer
+     itself — it reseeds from the row each time one opens. */
   const [forkFor, setForkFor] = useState<string | null>(null);
-  const [forkName, setForkName] = useState("");
+  const [forkError, setForkError] = useState<string | null>(null);
   const epochRef = useRef(0);
 
   /* `onScopeGone` arrives as a fresh arrow on every parent render. Reading it
@@ -905,20 +1024,19 @@ export default function StorageCatalogPage({
     await load();
   };
 
-  const runFork = async (row: CatalogScopeRow) => {
+  /* A refusal lands in the drawer that asked — never in the page banner. */
+  const runFork = async (row: CatalogScopeRow, name: string) => {
     if (!row.resource_id) return;
     setBusy(true);
-    setError(null);
-    setFailures([]);
+    setForkError(null);
     try {
-      const plan = await api.prepareFork(scope.scope.scope_id, row.resource_id, forkName.trim());
+      const plan = await api.prepareFork(scope.scope.scope_id, row.resource_id, name.trim());
       const result = await api.applyFork(scope.scope.scope_id, plan.plan_id);
       setForkFor(null);
-      setForkName("");
       notify(result.message ?? `Created ${result.display_name}`);
       await load();
     } catch (reason) {
-      setError(errorMessage(reason));
+      setForkError(errorMessage(reason));
     } finally {
       setBusy(false);
     }
@@ -1151,20 +1269,34 @@ export default function StorageCatalogPage({
 
   /* Only what has to stay on screen: work in flight, and failures the user
      has to read line by line. Successes go to the shell's notice, which is
-     where every other screen puts them. */
+     where every other screen puts them.
+
+     One zone, spliced into the list and into both reviews. Work in flight,
+     the page's own failure and the per-item failures a half-applied Push or
+     Pull left behind were three sibling boxes; they are three rungs of one
+     ladder, and the box takes the loudest present. The per-item failures keep
+     their own line each — joined into one sentence, five failures read as a
+     run-on — which is what the zone's list is for. */
+  const pageNotices: NoticeItem[] = [];
+  if (progress) {
+    pageNotices.push({ key: "progress", severity: "info", message: progress });
+  }
+  if (error) {
+    pageNotices.push({ key: "error", severity: "danger", message: error });
+  }
+  for (const failure of failures) {
+    pageNotices.push({ key: `failure:${failure}`, severity: "danger", message: failure });
+  }
+  /* Nothing in this zone is standing content: the progress line is written
+     while a Push or Pull runs, and both failure surfaces are written after
+     one. Even the load failure arrives after the page has already drawn its
+     "Loading…" state, so it is an event too — an assertive one, because the
+     thing the user asked for did not happen. Work in flight only advises. */
+  const noticeTiming: NoticeTiming = error || failures.length > 0
+    ? { timing: "blocking" }
+    : { timing: "progress" };
   const notices = (
-    <>
-      {progress && <div className="sync-callout info" role="status">{progress}</div>}
-      {error && <div className="sync-callout error" role="alert">{error}</div>}
-      {failures.length > 0 && (
-        <div className="sync-callout error sync-catalog-failures" role="alert">
-          <Icon name="alert-triangle" size={15} />
-          <ul>
-            {failures.map((failure) => <li key={failure}>{failure}</li>)}
-          </ul>
-        </div>
-      )}
-    </>
+    <NoticeZone items={pageNotices} subject="problems with this sync" {...noticeTiming} />
   );
 
   /* Review cards read the same list rows the page drew; a plan row whose page
@@ -1214,18 +1346,25 @@ export default function StorageCatalogPage({
                 {notices}
                 {heldRows.length > 0 && (
                   <div className="sync-review-banners">
-                    <div className="sync-callout sync-sync-review-pull-holds" role="status">
-                      <ThreadStatusIcon status="divergent" size={16} />
-                      <span>
-                        <strong>
-                          {`${heldRows.length} ${heldRows.length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase()} held for Pull`}
-                        </strong>
-                        {`${storageName ?? "Storage"} has versions this Mac has not reviewed, so their local changes cannot push yet. Selected ${kind.plural.toLowerCase()} still push.`}
-                      </span>
-                      <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void openPull()}>
-                        Open Pull review
-                      </button>
-                    </div>
+                    {/* The held rows are the pinned plan's own facts — on
+                        screen the moment the review opens — so this is a named
+                        region, not something that announces itself. It takes
+                        the warning rung rather than the note one: those local
+                        changes cannot push at all until the reader goes
+                        through Pull, which is action the box is asking for. */}
+                    <Notice
+                      severity="warning"
+                      timing="standing"
+                      label="Notes about this Push review"
+                      title={`${heldRows.length} ${heldRows.length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase()} held for Pull`}
+                      action={(
+                        <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void openPull()}>
+                          Open Pull review
+                        </button>
+                      )}
+                    >
+                      {`${storageName ?? "Storage"} has versions this Mac has not reviewed, so their local changes cannot push yet. Selected ${kind.plural.toLowerCase()} still push.`}
+                    </Notice>
                   </div>
                 )}
                 <div className="sync-history-thread-list">
@@ -1298,7 +1437,11 @@ export default function StorageCatalogPage({
               </div>
             </div>
             <footer className="sync-inline-action-footer sync-sync-review-footer">
-              {unacknowledged && <span role="status"><small>Acknowledge the warnings above before pushing.</small></span>}
+              {/* No live region: this reads off the plan's warnings and the
+                  current selection, and it is on screen beside the button it
+                  explains — the button's own disabled state is what a reader
+                  arrives at. */}
+              {unacknowledged && <span><small>Acknowledge the warnings above before pushing.</small></span>}
               <button
                 type="button"
                 className="btn btn-primary sync-pull-apply-button"
@@ -1370,19 +1513,24 @@ export default function StorageCatalogPage({
                     reviews place plan-derived facts — never a zone per row. */}
                 {claimed.length > 0 && (
                   <div className="sync-review-banners">
-                    {claimed.map((item) => (
-                      <div key={item.item.resource_id} className="sync-callout warning" role="status">
-                        <Icon name="alert-triangle" size={16} />
-                        <span>
-                          <strong>
-                            {`${item.item.display_name} is claimed by ${item.conflicting_claims
-                              .map((claim) => storages.find((storage) => storage.id === claim.storage_id)?.name ?? claim.storage_id)
-                              .join(", ")}`}
-                          </strong>
-                          A different version of this local target is pinned there. Preserve a copy, acknowledge overwrite, or Skip.
-                        </span>
-                      </div>
-                    ))}
+                    {/* Every claim came in with the plan this review pinned,
+                        so the zone is a named region and never announces. One
+                        box holds them all — a box per claimed row was the
+                        stack this zone replaces. */}
+                    <NoticeZone
+                      timing="standing"
+                      label="Notes about this Pull review"
+                      subject={`${kind.plural.toLowerCase()} claimed elsewhere`}
+                      items={claimed.map((item) => ({
+                        key: item.item.resource_id,
+                        severity: "warning" as const,
+                        title: `${item.item.display_name} is claimed by ${item.conflicting_claims
+                          .map((claim) => storages.find((storage) => storage.id === claim.storage_id)?.name ?? claim.storage_id)
+                          .join(", ")}`,
+                        message:
+                          "A different version of this local target is pinned there. Preserve a copy, acknowledge overwrite, or Skip.",
+                      }))}
+                    />
                   </div>
                 )}
                 <div className="sync-history-thread-list" ref={pullListRef}>
@@ -1468,6 +1616,11 @@ export default function StorageCatalogPage({
               </div>
             </div>
             <footer className="sync-inline-action-footer sync-sync-review-footer">
+              {/* It announces: choosing Overwrite from a row's menu is what
+                  makes this appear, and it appears at the same moment the Pull
+                  button goes disabled. A polite region does not announce what
+                  is already present, so the case where the plan opens blocked
+                  costs nothing. */}
               {blocked && <span role="status"><small>Acknowledge the overwrite above before pulling.</small></span>}
               <button
                 type="button"
@@ -1546,24 +1699,41 @@ export default function StorageCatalogPage({
         )}
         {notices}
         {/* Anything a half-finished operation left behind is this page's own
-            news now that no other screen hosts it. */}
-        {(page?.recovery ?? []).map((message) => (
-          <div key={message} className="sync-callout warning" role="status">{message}</div>
-        ))}
+            news now that no other screen hosts it. The loader hands it over
+            with the rest of the page, so it is standing content in a named
+            region — one box however many messages the backend sent. */}
+        <NoticeZone
+          timing="standing"
+          label="Notes about this Catalog row"
+          subject="notes about this Catalog row"
+          items={(page?.recovery ?? []).map((message) => ({
+            key: message,
+            severity: "warning" as const,
+            message,
+          }))}
+        />
         {loading && !page ? (
           <div className="sync-history-state">{`Loading ${label}…`}</div>
         ) : error && !page ? (
           /* "None stored yet" is a fact about the storage. When the request
              that would have listed them failed, we know no such thing — and
-             saying it anyway tells the user their content is gone. */
-          <div className="sync-history-state" role="alert">
-            <Icon name="alert-triangle" size={18} />
-            <strong>{`Couldn’t load ${label}.`}</strong>
-            <span>{error}</span>
-            <button type="button" className="btn" onClick={() => void load()}>
-              <Icon name="refresh" size={14} /> Retry
-            </button>
-          </div>
+             saying it anyway tells the user their content is gone.
+
+             The failure is what happened to the load the page just ran, so it
+             blocks; the empty-state panel is for what the page found, not for
+             what it could not ask. */
+          <Notice
+            severity="danger"
+            timing="blocking"
+            title={`Couldn’t load ${label}.`}
+            action={(
+              <button type="button" className="btn" onClick={() => void load()}>
+                <Icon name="refresh" size={14} /> Retry
+              </button>
+            )}
+          >
+            {error}
+          </Notice>
         ) : rows.length === 0 ? (
           /* Its own container: wrapping one sentence in a list card drew a
              second border around it. Nor does it name the home or the
@@ -1596,39 +1766,25 @@ export default function StorageCatalogPage({
                     preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
                     onReveal={() => reveal(row)}
                     onFork={forkable ? () => {
-                      setForkName("");
+                      setForkError(null);
                       setForkFor(forkOpen ? null : row.resource_id!);
                     } : undefined}
+                    forkOpen={forkOpen}
                     forkTitle={`Fork ${row.display_name} — duplicate this ${kindPhrase} under a new name`}
                     footer={forkOpen && (
-                      <form
-                        className="catalog-inline-form catalog-fork-form"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          void runFork(row);
+                      <ForkDrawer
+                        displayName={row.display_name}
+                        seed={forkSeed(row)}
+                        maxLength={petKind ? 64 : 128}
+                        busy={busy}
+                        error={forkError}
+                        onEdited={() => setForkError(null)}
+                        onSubmit={(name) => void runFork(row, name)}
+                        onClose={() => {
+                          setForkError(null);
+                          setForkFor(null);
                         }}
-                      >
-                        <label>
-                          <span>Fork local resource</span>
-                          <input
-                            placeholder={`${row.display_name}-local-copy`}
-                            value={forkName}
-                            onChange={(event) => setForkName(event.target.value)}
-                            autoFocus
-                          />
-                        </label>
-                        <button type="submit" className="btn btn-ghost" disabled={busy || forkName.trim() === ""}>
-                          <Icon name="git-fork" size={13} /> Fork
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          disabled={busy}
-                          onClick={() => setForkFor(null)}
-                        >
-                          Cancel
-                        </button>
-                      </form>
+                      />
                     )}
                   />
                 );

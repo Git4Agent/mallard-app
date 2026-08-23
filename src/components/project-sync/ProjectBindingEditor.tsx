@@ -6,6 +6,7 @@ import type {
   ProviderProfileSummary,
 } from "../../types";
 import Icon from "../Icons";
+import Notice from "../notice/Notice";
 import { compactProjectPath } from "./model";
 import {
   expandHomePath,
@@ -361,9 +362,15 @@ export default function ProjectBindingEditor({
             )}
           </section>
           {error && (
-            <div className="sync-setup-field-error sync-setup-system-error" role="alert">
-              <Icon name="alert-triangle" size={13} /> {error}
-            </div>
+            /* The dialog's own failure, not a field's — it borrowed the
+               field-error class for the red and describes no control. Both
+               call sites clear the shell's error before opening this dialog,
+               so the prop is null at mount and the only value it can take is a
+               save that failed. That is an event, and the save did not
+               happen. */
+            <Notice severity="danger" timing="blocking" className="sync-setup-system-error">
+              {error}
+            </Notice>
           )}
         </div>
         <footer className="sync-modal-footer">

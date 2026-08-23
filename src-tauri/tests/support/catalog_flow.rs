@@ -1749,6 +1749,34 @@ pub fn run_catalog_flow(inputs: CatalogFlowInputs<'_>) -> CatalogFlowReport {
         assert_kind_repository(&a, &inputs.storage.id, flow);
         assert_kind_repository(&b, &inputs.storage.id, flow);
     }
+    // The storage page's listing sees exactly the three converged kind
+    // repositories — derived ids, readable, with the flows' own facts.
+    for replica in [&a, &b] {
+        let listed = replica
+            .service
+            .list_storage_repositories(&inputs.storage.id)
+            .expect("list Catalog repositories in the storage");
+        let facts: BTreeMap<String, (Option<u64>, usize)> = listed
+            .iter()
+            .map(|repo| {
+                assert!(repo.error.is_none(), "unreadable row: {:?}", repo.error);
+                (
+                    repo.repository_id.clone(),
+                    (repo.revision, repo.resource_names.len()),
+                )
+            })
+            .collect();
+        let expected: BTreeMap<String, (Option<u64>, usize)> = [&skills, &pets_v1, &pets_v2]
+            .into_iter()
+            .map(|flow| {
+                (
+                    flow.repository_id.as_str().to_string(),
+                    (Some(flow.revision), flow.resource_ids.len()),
+                )
+            })
+            .collect();
+        assert_eq!(facts, expected);
+    }
     for replica in [&a, &b] {
         assert_noop_fixed_point(replica, &replica.scopes.skills, &inputs.storage.id);
         assert_noop_fixed_point(replica, &replica.scopes.pets_v1, &inputs.storage.id);

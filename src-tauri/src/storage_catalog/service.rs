@@ -215,6 +215,16 @@ impl StorageCatalogService {
         )
     }
 
+    pub fn list_storage_repositories(
+        &self,
+        storage_id: &StorageId,
+    ) -> Result<Vec<resource_commands::CatalogStorageRepositoryDto>, String> {
+        resource_commands::list_catalog_storage_repositories_with_repository(
+            &self.state,
+            storage_id,
+        )
+    }
+
     pub fn pet_preview(
         &self,
         scope_id: &CatalogScopeId,

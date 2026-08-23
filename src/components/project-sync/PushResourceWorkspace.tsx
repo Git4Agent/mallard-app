@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   BundleFetchProgress,
   BundleRecipe,
@@ -11,6 +11,7 @@ import type {
   ThreadSyncEntry,
 } from "../../types";
 import Icon from "../Icons";
+import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import ProjectActivityPage from "./ProjectActivityPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
 import ResourceInventory from "./ResourceInventory";
@@ -437,6 +438,46 @@ export default function PushResourceWorkspace({
     ...pullHolds.map((entry) => entry.resource_id),
     ...blockers.filter((blocker) => blocker.kind === "storage").map((blocker) => blocker.resourceId),
   ]).size;
+  /* The banner zone that heads the review scroll. Everything in it is derived
+     from the plan, never from the selection: this zone sits above the list, so
+     a banner that appeared on a checkbox click would shove the row out from
+     under the cursor. Selection-driven problems report in the footer, beside
+     the button they block. Being plan-derived is also what makes the zone
+     standing — it is already on screen when the review opens, so it is a named
+     region and not a live one. */
+  const banners: NoticeItem[] = [];
+  if (heldConversationCount > 0) {
+    banners.push({
+      key: "pull-holds",
+      // Nothing is broken here — the selected threads still publish — but the
+      // push is not the whole truth while these are held back, and the Pull
+      // this line offers is the action that clears them. Information that may
+      // require action is a warning, not a note.
+      severity: "warning",
+      // The rows' own divergent mark, not the generic warning triangle: this
+      // banner speaks for the threads carrying that status, and the mark is
+      // what ties it to them. The rung is still named in the text.
+      mark: <ThreadStatusIcon status="divergent" size={16} />,
+      title: `${heldConversationCount} conversation${heldConversationCount === 1 ? "" : "s"} held for Pull`,
+      message: "Storage has newer versions. Selected threads still push.",
+      action: onPull
+        ? (
+          <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>Open Pull review</button>
+        )
+        : undefined,
+    });
+  }
+  /* Plan-derived is not the same as present-at-open. Half of the held count
+     comes from the project-content inventory, which for a project without Git
+     history is null until the reader presses "Scan project files" — so the
+     zone can go from nothing to a banner on a click, and a region would let
+     that happen in silence. Standing only if it was there when the review
+     opened. */
+  const bannersAtOpen = useRef<boolean | null>(null);
+  if (bannersAtOpen.current === null) bannersAtOpen.current = banners.length > 0;
+  const bannerTiming: NoticeTiming = bannersAtOpen.current
+    ? { timing: "standing", label: "Notes about this Push review" }
+    : { timing: "progress" };
   // Selection-driven, so it reports in the footer rather than the banner zone
   // above the list — see the banner comment.
   const localBlockerSentence = localBlockingCount > 0
@@ -563,26 +604,16 @@ export default function PushResourceWorkspace({
         <div
           className="sync-inline-action-scroll sync-sync-review-scroll"
         >
-          {heldConversationCount > 0 && (
-            /* Held threads and storage blockers describe one situation, so one
-               banner speaks for both. Everything here is derived from the plan,
-               never from the selection: this zone sits above the list, so a
-               banner that appeared on a checkbox click would shove the row out
-               from under the cursor. Selection-driven problems report in the
-               footer, beside the button they block. */
+          {banners.length > 0 && (
+            /* The wrapper stays: it owns the zone's spacing and resets the
+               box's own margin, which is the only thing the notice cannot do
+               for itself. */
             <div className="sync-review-banners">
-              <div className="sync-callout sync-sync-review-pull-holds" role="status">
-                <ThreadStatusIcon status="divergent" size={16} />
-                <span>
-                  <strong>
-                    {`${heldConversationCount} conversation${heldConversationCount === 1 ? "" : "s"} held for Pull`}
-                  </strong>
-                  Storage has newer versions. Selected threads still push.
-                </span>
-                {onPull && (
-                  <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>Open Pull review</button>
-                )}
-              </div>
+              <NoticeZone
+                items={banners}
+                subject="notes about this Push review"
+                {...bannerTiming}
+              />
             </div>
           )}
           {activeStep === "history" && (
@@ -667,27 +698,46 @@ export default function PushResourceWorkspace({
         </div>
 
         {error && (
-          <div className="sync-callout error sync-pull-error" role="alert">
-            <Icon name="alert-triangle" size={15} />
-            <span>{error}</span>
-            {isIrrecoverableSyncError(error) && onResetMetadata && (
-              <button type="button" className="btn btn-ghost danger" onClick={onResetMetadata} disabled={busy}>
-                <Icon name="trash" size={13} />
-                Reset local sync state
-              </button>
-            )}
-          </div>
+          /* The push the user just started failed. That is an event — the
+             review rendered without it — and it stops the flow, so the box
+             announces assertively. */
+          <Notice
+            severity="danger"
+            timing="blocking"
+            className="sync-pull-error"
+            action={isIrrecoverableSyncError(error) && onResetMetadata
+              ? (
+                <button type="button" className="btn btn-ghost danger" onClick={onResetMetadata} disabled={busy}>
+                  <Icon name="trash" size={13} />
+                  Reset local sync state
+                </button>
+              )
+              : undefined}
+          >
+            {error}
+          </Notice>
         )}
       </div>
 
       <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">
         {localBlockerSentence && (
+          /* Selection-driven: ticking a row that carries an uncaptured warning
+             is what makes this appear, and it appears at the same moment the
+             Push button silently goes disabled — so it announces, or the
+             button's refusal has no explanation. Harmless in the case where
+             the recommended selection already holds one, because a polite
+             region does not announce what is present at first render. */
           <span role="status"><small>{localBlockerSentence}</small></span>
         )}
         {busy && (
           /* Every exit is sealed while the transfer runs, on purpose: the
              backend has no safe mid-write abort. Saying so beats leaving the
-             user hunting for a cancel that does not exist. */
+             user hunting for a cancel that does not exist. The sentence states
+             a standing contract rather than reporting an event — the event is
+             the push, which the button beside it is already narrating. It
+             still announces: it appears only once `busy` flips, and it is the
+             only thing that explains why Escape has stopped closing the review
+             and the button under the reader's focus has gone dead. */
           <span role="status"><small>A running push finishes or fails whole — it can’t be cancelled midway.</small></span>
         )}
         <button

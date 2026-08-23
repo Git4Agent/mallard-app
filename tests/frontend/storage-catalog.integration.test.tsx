@@ -25,6 +25,7 @@ const commandNames = [
   "list_catalog_resource_profiles",
   "list_catalog_scope_resources",
   "list_catalog_scopes",
+  "list_catalog_storage_repositories",
   "prepare_catalog_resource_fork",
   "prepare_catalog_scope_pull",
   "prepare_catalog_scope_push",
@@ -61,6 +62,10 @@ test("the Catalog API exposes only the scope-level command surface", () => {
   for (const method of ["listScopes", "deleteScope"]) {
     assert.match(shell, new RegExp(`storageCatalogApi\\.${method}\\(`), `${method} has a production caller`);
   }
+  // The storage page's repository listing is the one storage-level read: its
+  // caller is the storage page, not a Catalog screen.
+  const storagePage = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(storagePage, /storageCatalogApi\.listStorageRepositories\(/);
 });
 
 test("a row label derives from the kind and the profile, covering every menu shape", () => {
@@ -314,11 +319,25 @@ test("Unlink is the storage crumb's verb and Fork lives on the card", () => {
   assert.match(page, /label: `Unlink from \$\{label\}…`/);
   assert.match(page, /api\.unlinkScopeStorage\(pageLink\.link_id, pageLink\.revision\)/);
   assert.match(page, /Push and Pull stop for these/);
-  // Fork is the card's own verb: a git-fork button toggling an inline form,
-  // keyed by the scope and the resource — no registration anywhere.
-  assert.match(page, /api\.prepareFork\(scope\.scope\.scope_id, row\.resource_id, forkName\.trim\(\)\)/);
+  // Fork is the card's own verb: a git-fork button toggling the card's
+  // drawer, keyed by the scope and the resource — no registration anywhere.
+  assert.match(page, /api\.prepareFork\(scope\.scope\.scope_id, row\.resource_id, name\.trim\(\)\)/);
   assert.match(page, /api\.applyFork\(scope\.scope\.scope_id, plan\.plan_id\)/);
-  assert.match(page, /catalog-inline-form catalog-fork-form/);
+  // The drawer spans the card — an auto-placed footer joins the pet
+  // template's auto-sized preview column and inflates it — and its name is
+  // prefilled from the directory, never the free-text display name, because
+  // fork names are component names the backend validates.
+  assert.match(page, /className="catalog-fork-drawer"/);
+  assert.match(page, /seed=\{forkSeed\(row\)\}/);
+  assert.match(page, /forkNameRuleBroken/);
+  assert.match(
+    readFileSync("src/App.css", "utf8"),
+    /\.catalog-fork-drawer \{[^}]*grid-column: 1 \/ -1;/,
+  );
+  // A refusal lands in the drawer that asked, not the page banner; the old
+  // boxed form and its placeholder-only suggestion are gone.
+  assert.match(page, /setForkError\(errorMessage\(reason\)\)/);
+  assert.doesNotMatch(page, /catalog-inline-form|Fork local resource|-local-copy/);
   assert.doesNotMatch(page, /forceRevalidate|force_revalidate/);
   assert.doesNotMatch(page, /forkCodexThread|fork_codex_thread|storage-wide|bulk sync/i);
 });

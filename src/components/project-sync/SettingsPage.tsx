@@ -3,6 +3,7 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import type { ActivityLogPolicy, ActivityLogStats, LocalStateSummary } from "../../types";
 import Icon from "../Icons";
+import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import { formatBytes } from "../../format";
 import SyncPathBar, { type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import {
@@ -98,13 +99,24 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [resetError, setResetError] = useState<string | null>(null);
   const [resetPhase, setResetPhase] = useState<"idle" | "working" | "reloading">("idle");
+  /* Which of the two ways a group's box can fill decided what is in it now.
+     The mount loads below are part of rendering this page, so a load that
+     failed is content the view came up with — a named region, not an
+     announcement (WCAG 2.2 SC 4.1.3). Retry, a select, a cleanup, Open folder
+     and Reset are all things the user DID, and the same box has to announce
+     once one of them speaks. Nothing sets these back: after the first
+     interaction every message in that group is the answer to something. */
+  const [logsFromAction, setLogsFromAction] = useState(false);
+  const [localDataFromAction, setLocalDataFromAction] = useState(false);
 
   /* Retryable, because the card below renders plausible defaults when `stats`
      is null — 30 days, 100 MB — and a failed fetch used to leave those on
-     screen looking like the real policy with no way to try again. */
-  const loadStats = useCallback(async () => {
+     screen looking like the real policy with no way to try again. The retry
+     passes `retried` so the box it refills knows to announce. */
+  const loadStats = useCallback(async (retried = false) => {
     setStatsLoading(true);
     setLogsError(null);
+    if (retried) setLogsFromAction(true);
     try {
       setStats(await projectSyncApi.getActivityLogStats());
     } catch (reason) {
@@ -118,9 +130,10 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
 
   /* Same retryable shape as loadStats: the readout is a measurement, and a
      failed walk must not wedge the row it decorates. */
-  const loadLocalSummary = useCallback(async () => {
+  const loadLocalSummary = useCallback(async (retried = false) => {
     setSummaryLoading(true);
     setResetError(null);
+    if (retried) setLocalDataFromAction(true);
     try {
       setLocalSummary(await projectSyncApi.getLocalStateSummary());
     } catch (reason) {
@@ -136,6 +149,7 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
   const applyPolicy = async (patch: Partial<ActivityLogPolicy>) => {
     if (!stats) return;
     setLogsBusy(true);
+    setLogsFromAction(true);
     setLogsError(null);
     setLogsNotice(null);
     try {
@@ -159,6 +173,7 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
     );
     if (!approved) return;
     setLogsBusy(true);
+    setLogsFromAction(true);
     setLogsError(null);
     setLogsNotice(null);
     try {
@@ -180,6 +195,7 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
   };
 
   const openLogsFolder = async () => {
+    setLogsFromAction(true);
     setLogsError(null);
     try {
       await openPath(await projectSyncApi.getActivityLogFolder());
@@ -201,6 +217,7 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
     );
     if (!approved) return;
     setResetPhase("working");
+    setLocalDataFromAction(true);
     setResetError(null);
     try {
       await projectSyncApi.resetLocalState();
@@ -222,6 +239,69 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
   };
 
   const oldest = formatOldest(stats?.oldest_ts);
+
+  /* Each of the two groups below says at most two things — a failure and a
+     receipt — and the two genuinely co-render: neither `loadStats` nor
+     `openLogsFolder` clears the notice, so a failed folder open leaves the
+     last cleanup's receipt standing beside it. One box per group, then, at the
+     loudest rung present, instead of a red row stacked on a green one. */
+  const logsNotices: NoticeItem[] = [];
+  if (logsError) {
+    logsNotices.push({
+      key: "logs-error",
+      severity: "danger",
+      message: stats ? logsError : `Couldn’t read the log policy. ${logsError}`,
+      action: stats ? undefined : (
+        <button type="button" className="btn" disabled={statsLoading} onClick={() => void loadStats(true)}>
+          <Icon name="refresh" size={14} className={statsLoading ? "icon-spin" : undefined} />
+          {statsLoading ? "Retrying…" : "Retry"}
+        </button>
+      ),
+    });
+  }
+  if (logsNotice) {
+    logsNotices.push({ key: "logs-outcome", severity: "success", message: logsNotice });
+  }
+  /* Standing until the user touches the group: the only thing that can be in
+     this box on first paint is the mount load's failure, and content the view
+     renders with is not a status message. After a Retry, a select, a cleanup
+     or an Open folder it is an answer — assertive while the failure stands,
+     polite for a receipt. */
+  const logsTiming: NoticeTiming = !logsFromAction
+    ? { timing: "standing", label: "Problems with activity logs" }
+    : logsError
+      ? { timing: "blocking" }
+      : { timing: "progress" };
+
+  const localDataNotices: NoticeItem[] = [];
+  if (resetError) {
+    localDataNotices.push({
+      key: "local-data-error",
+      severity: "danger",
+      message: resetError,
+      action: localSummary ? undefined : (
+        <button type="button" className="btn" disabled={summaryLoading} onClick={() => void loadLocalSummary(true)}>
+          <Icon name="refresh" size={14} className={summaryLoading ? "icon-spin" : undefined} />
+          {summaryLoading ? "Retrying…" : "Retry"}
+        </button>
+      ),
+    });
+  }
+  if (resetPhase === "reloading") {
+    localDataNotices.push({
+      key: "local-data-reloading",
+      severity: "success",
+      message: "Local data deleted — starting fresh…",
+    });
+  }
+  /* Same reading as the Logs group: the measurement walk runs on mount, so its
+     failure is standing content, while a failed Reset — or a retried walk — is
+     an event this box has to announce. */
+  const localDataTiming: NoticeTiming = !localDataFromAction
+    ? { timing: "standing", label: "Problems with local data" }
+    : resetError
+      ? { timing: "blocking" }
+      : { timing: "progress" };
 
   return (
     <>
@@ -389,25 +469,11 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
                 and cloud data are never touched.
               </SettingsRow>
             </div>
-            {logsError && (
-              <div className="sync-callout error" role="alert">
-                <Icon name="alert-triangle" size={15} />
-                <span>
-                  {stats ? logsError : `Couldn’t read the log policy. ${logsError}`}
-                </span>
-                {!stats && (
-                  <button type="button" className="btn" disabled={statsLoading} onClick={() => void loadStats()}>
-                    <Icon name="refresh" size={14} className={statsLoading ? "icon-spin" : undefined} />
-                    {statsLoading ? "Retrying…" : "Retry"}
-                  </button>
-                )}
-              </div>
-            )}
-            {logsNotice && (
-              <div className="sync-settings-note" role="status">
-                <Icon name="check-circle" size={14} /> {logsNotice}
-              </div>
-            )}
+            <NoticeZone
+              items={logsNotices}
+              subject="notes about activity logs"
+              {...logsTiming}
+            />
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-display">
@@ -456,23 +522,11 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
                 install. Cloud revisions and your project files are not touched.
               </SettingsRow>
             </div>
-            {resetError && (
-              <div className="sync-callout error" role="alert">
-                <Icon name="alert-triangle" size={15} />
-                <span>{resetError}</span>
-                {!localSummary && (
-                  <button type="button" className="btn" disabled={summaryLoading} onClick={() => void loadLocalSummary()}>
-                    <Icon name="refresh" size={14} className={summaryLoading ? "icon-spin" : undefined} />
-                    {summaryLoading ? "Retrying…" : "Retry"}
-                  </button>
-                )}
-              </div>
-            )}
-            {resetPhase === "reloading" && (
-              <div className="sync-settings-note" role="status">
-                <Icon name="check-circle" size={14} /> Local data deleted — starting fresh…
-              </div>
-            )}
+            <NoticeZone
+              items={localDataNotices}
+              subject="notes about local data"
+              {...localDataTiming}
+            />
           </section>
 
         </section>

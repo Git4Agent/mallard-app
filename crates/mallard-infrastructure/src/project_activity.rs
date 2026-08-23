@@ -95,8 +95,6 @@ pub struct ProjectSessionSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relative_cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorded_sha: Option<String>,
@@ -298,7 +296,6 @@ struct ActivityCache {
 pub struct LocalSessionRecord {
     pub provider: ProviderKey,
     pub session_id: String,
-    pub relative_cwd: String,
     pub physical_path: PathBuf,
     pub display_name: String,
     pub summary: SessionFileSummary,
@@ -447,11 +444,6 @@ pub fn scan_local_session_views(
             let record = LocalSessionRecord {
                 provider: provider.clone(),
                 session_id: view.provider_thread_id.clone(),
-                relative_cwd: view
-                    .descriptor
-                    .relative_cwd
-                    .clone()
-                    .unwrap_or_else(|| ".".to_string()),
                 physical_path: view.source_path.clone(),
                 display_name: view.descriptor.display_name.clone(),
                 is_active: now.saturating_sub(modified_secs(&metadata)) < ACTIVE_WINDOW_SECS,
@@ -1005,7 +997,6 @@ fn merge_activity_sessions_with_state(
                 started_at,
                 ended_at,
                 working_directory: Some(resolved.project_root.to_string_lossy().into_owned()),
-                relative_cwd: Some(record.relative_cwd),
                 branch: record.summary.branch.clone(),
                 recorded_sha: record.summary.recorded_sha.clone(),
                 is_active: record.is_active,
@@ -1090,7 +1081,6 @@ fn merge_activity_sessions_with_state(
                 started_at,
                 ended_at,
                 working_directory: None,
-                relative_cwd: record.presentation.relative_cwd.clone(),
                 branch: record.presentation.branch.clone(),
                 recorded_sha: record.presentation.recorded_sha.clone(),
                 is_active: false,
@@ -1365,7 +1355,6 @@ pub fn execute_project_session_action(
     let context = SessionDiscoveryContext {
         provider_home: &home.home,
         project_root: &resolved.project_root,
-        excluded_roots: &[],
     };
     let discovery = adapter.discover(&context)?;
     let mut matched_session = None;
@@ -1428,7 +1417,6 @@ pub fn validate_session_ownership(
     let context = SessionDiscoveryContext {
         provider_home: &home.home,
         project_root: &resolved.project_root,
-        excluded_roots: &[],
     };
     let discovery = adapter.discover(&context)?;
     for session in discovery.sessions {
@@ -1854,7 +1842,6 @@ mod activity_only_tests {
             Ok(crate::providers::SessionDiscovery {
                 sessions: vec![crate::providers::DiscoveredSession {
                     session_id: "session-1".to_string(),
-                    relative_cwd: ".".to_string(),
                     physical_path: self.transcript.clone(),
                     display_name: "Session one (3)".to_string(),
                     blocked_reason: None,
@@ -2461,7 +2448,6 @@ mod activity_only_tests {
                 provider: Some(provider.clone()),
                 provider_resource_type: Some("session".to_string()),
                 display_name: "Session one (3)".to_string(),
-                relative_cwd: Some(".".to_string()),
                 apply_policy: crate::provider_capture::CaptureApplyPolicy::SafeFile,
                 selected_by_default: true,
                 blocked_reason: None,

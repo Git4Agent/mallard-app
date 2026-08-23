@@ -16,6 +16,7 @@ import type {
   StorageConfig,
 } from "../../types";
 import Icon from "../Icons";
+import Notice from "../notice/Notice";
 import { projectSyncApi } from "./api";
 import {
   compactProjectPath,
@@ -567,7 +568,20 @@ export default function ProjectSetupWorkspace({
     return (
       <section className="sync-inline-new-project sync-setup-workspace" role="region" aria-label="Project setup">
         {error
-          ? <div className="sync-callout error"><Icon name="alert-triangle" size={15} /> {error}</div>
+          ? (
+            /* Nothing the user just did can reach this branch: the draft is
+               still null, so the only writer that has run is the mount load.
+               That makes the failure content this view renders with — a named
+               region, not a status message. */
+            <Notice
+              severity="danger"
+              timing="standing"
+              label="Problems with this setup draft"
+              className="sync-setup-system-error"
+            >
+              {error}
+            </Notice>
+          )
           : <div className="sync-storage-repository-state"><span className="status-loader" /> Loading setup draft…</div>}
       </section>
     );
@@ -752,10 +766,18 @@ export default function ProjectSetupWorkspace({
 
       <div className="sync-modal-body">
         {draft.last_error && (
-          <div className="sync-callout warning">
-            <Icon name="alert-triangle" size={15} />
-            <span>The last finish attempt failed: {draft.last_error}</span>
-          </div>
+          /* The draft arrives carrying this from an earlier session — it is
+             loaded with the draft rather than raised by anything the user just
+             did, so it is standing content and must not announce. Nothing is
+             broken now; the reader is being told the last attempt did not
+             land, which is the warning rung. */
+          <Notice
+            severity="warning"
+            timing="standing"
+            label="Notes about this setup draft"
+          >
+            The last finish attempt failed: {draft.last_error}
+          </Notice>
         )}
 
         {/* Project */}
@@ -895,9 +917,13 @@ export default function ProjectSetupWorkspace({
               <div id={repositoryErrorId} className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {repositorySection.message}</div>
             )}
             {bundlesError ? (
-              /* No radiogroup renders alongside this failure, so there is no
-                 field to describe — announce it instead. */
-              <div className="sync-setup-field-error" role="alert"><Icon name="alert-triangle" size={13} /> {bundlesError}</div>
+              /* Not a field error despite the company it keeps: no radiogroup
+                 renders alongside this failure, so there is no control to
+                 describe. Listing the storage's repos is what choosing a
+                 storage kicks off, and this is that request failing — an event
+                 that leaves the section with no choice to offer, so it takes
+                 the blocking rung. */
+              <Notice severity="danger" timing="blocking">{bundlesError}</Notice>
             ) : !chosenStorageId || bundlesLoading ? null : (
               /* An empty storage renders the same option card, alone and
                  selected: the user sees the claim Finish is about to make in
@@ -984,9 +1010,16 @@ export default function ProjectSetupWorkspace({
         )}
 
         {error && (
-          <div className="sync-setup-field-error sync-setup-system-error" role="alert">
-            <Icon name="alert-triangle" size={13} /> {error}
-          </div>
+          /* This box is the whole workspace's, not any one field's — it wore
+             the field-error class only for its colour. What fills it is an
+             autosave or a Finish that failed, so it is an event and it stops
+             the flow: what the user asked for did not happen. The first
+             inspection can write here too, at mount, and a load that failed is
+             worth announcing as well, so the assertive rung reads correctly
+             for every writer. */
+          <Notice severity="danger" timing="blocking" className="sync-setup-system-error">
+            {error}
+          </Notice>
         )}
       </div>
 

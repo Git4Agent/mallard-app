@@ -224,7 +224,7 @@ test("a replacement storage history offers unlinking without gating Pull", () =>
     remote_continuity: { state: "replaced", base_revision: 1, remote_revision: 2 },
   });
 
-  assert.match(html, /<strong>Storage history changed<\/strong>/);
+  assert.match(html, /<strong class="notice-lead">Storage history changed<\/strong>/);
   assert.match(html, /Local storage 1 was reset/);
   assert.match(html, /Unlink storage…/);
   assert.match(html, /sync-pull-apply-button/);

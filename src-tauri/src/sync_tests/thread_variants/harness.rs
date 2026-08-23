@@ -297,7 +297,6 @@ pub fn publish_request(
                 display_name: spec.title.clone(),
                 provenance: Provenance::Unknown,
                 apply_policy: ApplyPolicy::SafeFile,
-                relative_cwd: Some(".".to_string()),
                 codec_version: 1,
                 metadata: BTreeMap::new(),
             },

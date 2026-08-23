@@ -13,8 +13,8 @@ use super::traits::{
     SessionTimelineQuery,
 };
 use crate::provider_capture::{
-    canonical_existing_dir, owned_relative_cwd, provider_walk_entry, scan_session_metadata_with,
-    ParsedSessionMetadata,
+    canonical_existing_dir, provider_walk_entry, scan_session_metadata_with,
+    session_home_is_project_root, ParsedSessionMetadata,
 };
 use mallard_domain::{ConversationFileRole, ProviderKey};
 use serde::Deserialize;
@@ -250,14 +250,11 @@ impl SessionAdapter for TestProviderAdapter {
                     continue;
                 }
             };
-            let Some(relative_cwd) =
-                owned_relative_cwd(context.project_root, &meta.cwd, context.excluded_roots)?
-            else {
+            if !session_home_is_project_root(context.project_root, &meta.cwd) {
                 continue;
-            };
+            }
             discovery.sessions.push(DiscoveredSession {
                 session_id: meta.session_id.clone(),
-                relative_cwd,
                 physical_path: entry.path().to_path_buf(),
                 display_name: meta.session_id,
                 blocked_reason: None,

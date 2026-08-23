@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { ProjectFileSyncEligibility } from "../../types";
 import Icon from "../Icons";
+import Notice from "../notice/Notice";
 import { clockOptions } from "../../clock";
 import { formatBytes } from "../../format";
 import { STORAGE_BLOCKING_STATES } from "./model";
@@ -99,6 +100,35 @@ function formatOptionalBytes(value?: number | null): string | null {
 
 function formatMode(mode?: number | null): string | null {
   return mode == null ? null : `0${mode.toString(8).padStart(3, "0")}`;
+}
+
+/* The same refusal is printed on both faces of this page — the unscanned empty
+   state and the scanned list — so it is written once here. `eligibility` is a
+   prop: the box is on screen the moment the page renders, which makes it
+   standing content and a named region rather than a live one (WCAG 2.2 SC
+   4.1.3). Nothing failed while the user watched; the folder was never eligible.
+   The detected Git root is the one thing that differs between the two sites —
+   the empty state has never printed it — so it stays opt-in rather than
+   quietly appearing on a face that did not ask for it. */
+function ProjectFilesLockedNotice({
+  eligibility,
+  withDetectedRoot = false,
+}: {
+  eligibility: ProjectFileSyncEligibility;
+  withDetectedRoot?: boolean;
+}) {
+  return (
+    <Notice
+      severity="danger"
+      timing="standing"
+      label="Why project files are locked"
+      title="Project files are locked."
+      className="sync-project-files-locked"
+    >
+      {eligibility.reason}
+      {withDetectedRoot && eligibility.detected_root ? ` Git root: ${eligibility.detected_root}` : ""}
+    </Notice>
+  );
 }
 
 function rowIsSelectable(
@@ -217,9 +247,7 @@ export default function ProjectFilesReviewPage({
             {loading ? "Scanning…" : "Scan files"}
           </button>
         </div>
-        {!eligible && (
-          <div className="sync-callout error" role="alert"><Icon name="lock" size={15} /> <span><strong>Project files are locked.</strong>{eligibility.reason}</span></div>
-        )}
+        {!eligible && <ProjectFilesLockedNotice eligibility={eligibility} />}
       </section>
     );
   }
@@ -252,12 +280,7 @@ export default function ProjectFilesReviewPage({
         )}
       </div>
 
-      {!eligible && (
-        <div className="sync-callout error sync-project-files-locked" role="alert">
-          <Icon name="lock" size={15} />
-          <span><strong>Project files are locked.</strong>{eligibility.reason}{eligibility.detected_root ? ` Git root: ${eligibility.detected_root}` : ""}</span>
-        </div>
-      )}
+      {!eligible && <ProjectFilesLockedNotice eligibility={eligibility} withDetectedRoot />}
 
       {rows.length > 0 && (
         <div className="sync-project-files-search">
@@ -358,7 +381,21 @@ export default function ProjectFilesReviewPage({
                   </label>
                 )}
                 {mode === "push" && STORAGE_BLOCKING_STATES.has(row.state) && onReviewPull && (
-                  <div className="sync-project-file-conflict"><span>Pull required</span><button type="button" className="btn btn-ghost" onClick={onReviewPull}>Open Pull review</button></div>
+                  /* Warning, not error: nothing has failed — the push has not
+                     run — the row simply cannot be included until a Pull
+                     settles the storage side, which is action the reader may
+                     need to take. `inline` rather than `standing` because this
+                     marker repeats per row: a blocked scan draws dozens, and a
+                     landmark each would hand a screen-reader user dozens of
+                     regions to step through. The row already names the file. */
+                  <Notice
+                    severity="warning"
+                    timing="inline"
+                    className="sync-project-file-conflict"
+                    action={<button type="button" className="btn btn-ghost" onClick={onReviewPull}>Open Pull review</button>}
+                  >
+                    Pull required
+                  </Notice>
                 )}
               </div>
             );

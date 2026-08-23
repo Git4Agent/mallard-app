@@ -89,7 +89,6 @@ fn third_provider_sessions_flow_through_common_discovery_and_capture() {
     let request = CaptureRequest {
         project_root: project_root.clone(),
         provider_homes: BTreeMap::from([(test_provider::provider_key(), provider_home)]),
-        excluded_project_roots: Vec::new(),
         include_project_content: false,
         excluded_content_roots: Vec::new(),
     };
@@ -183,7 +182,6 @@ fn unregistered_provider_scope_is_carried_unchanged_through_a_publish() {
                     display_name: "Future provider notes".to_string(),
                     provenance: Provenance::Unknown,
                     apply_policy: ApplyPolicy::SafeFile,
-                    relative_cwd: None,
                     codec_version: 1,
                     metadata: BTreeMap::new(),
                 },

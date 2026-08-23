@@ -58,6 +58,12 @@ function formatTime(seconds: number): string {
  * The summary line reads without opening; the rows are lines inside the same
  * box, divided rather than boxed. The fold control is the history table's own
  * toggle — chevron-down closed, chevron-up open.
+ *
+ * Not a `Notice`, because this box is deliberately not a box. The full-bleed
+ * section treatment — no border but the divider above it, no radius, no
+ * padding — is the whole of `.sync-outcome-notice`, and the frame a notice
+ * draws is exactly the second outline the card must not gain. It keeps its own
+ * markup and takes only the notice recipe's ARIA rule.
  */
 export default function SyncOutcomeNotice({
   view,
@@ -82,12 +88,17 @@ export default function SyncOutcomeNotice({
 
   return (
     <div
-      role="status"
-      className={`sync-callout sync-outcome-notice ${view.tone}${open ? "" : " collapsed"}`}
+      className={`sync-outcome-notice ${view.tone}${open ? "" : " collapsed"}`}
     >
       <div className="sync-outcome-head">
         <Icon name={view.tone === "success" ? "check-circle" : "alert-triangle"} size={18} />
-        <span className="sync-outcome-summary">
+        {/* The live region is this line and nothing more. A finished sync IS
+            an event — it follows a Push or a Pull — so it announces; but the
+            box also holds a row per thread, the fold controls and the
+            dismissal, and wrapping all of that made the reader sit through the
+            whole result list every time one landed. The summary sentence is
+            the announcement; the rows are there to be read on demand. */}
+        <span className="sync-outcome-summary" role="status">
           <strong>{view.title}</strong>
           <span className="sync-outcome-stats">
             {view.stats.map((stat) => (

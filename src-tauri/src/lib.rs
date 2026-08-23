@@ -36,6 +36,7 @@ pub use storage_catalog::domain::{
 pub use storage_catalog::resource_commands::{
     CatalogScopeDto, CatalogScopeLinkOutcomeDto, CatalogScopePullOutcomeDto,
     CatalogScopePushOutcomeDto, CatalogScopeResourcesDto, CatalogScopeRowDto,
+    CatalogStorageRepositoryDto,
 };
 pub use storage_catalog::service::{
     CatalogPullApproval, CatalogPushApproval, CatalogRepositoryInspectionDto, StorageCatalogService,
@@ -129,6 +130,7 @@ pub fn run() {
             storage_catalog::resource_commands::create_catalog_scope,
             storage_catalog::resource_commands::delete_catalog_scope,
             storage_catalog::resource_commands::list_catalog_scope_resources,
+            storage_catalog::resource_commands::list_catalog_storage_repositories,
             storage_catalog::resource_commands::get_catalog_pet_preview,
             storage_catalog::resource_commands::link_catalog_scope_storage,
             storage_catalog::resource_commands::unlink_catalog_scope_storage,

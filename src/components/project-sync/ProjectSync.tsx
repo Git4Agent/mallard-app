@@ -42,6 +42,7 @@ import type {
 } from "../../types";
 import { PROJECT_SYNC_SCHEMA } from "../../types";
 import Icon from "../Icons";
+import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import LogPanel, { ACTIVITY_LOG_TYPES } from "../LogPanel";
 import BundleConnectionDialog from "./BundleConnectionDialog";
 import SettingsPage from "./SettingsPage";
@@ -3377,16 +3378,22 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   if (!hostIdentityStatus && hostIdentityError) {
     return (
       <main className="sync-host-recovery" aria-labelledby="sync-host-recovery-title">
-        <section className="sync-empty-state" role="alert">
+        {/* No role here. This whole screen IS the failure — heading, prose,
+            callout and Retry — and it is what the shell renders instead of the
+            app, so it is already there when the view paints. Wrapping a screen
+            in role="alert" made a screen reader read the entire page as one
+            interruption; the heading and the labelled <main> name it. */}
+        <section className="sync-empty-state">
           <div className="sync-empty-illustration" aria-hidden="true">
             <Icon name="alert-triangle" size={24} />
           </div>
           <h1 id="sync-host-recovery-title">Host identity unavailable</h1>
           <p>Mallard could not verify this installation, so sync remains paused.</p>
-          <div className="sync-callout error">
-            <Icon name="alert-triangle" size={15} />
-            <span>{hostIdentityError}</span>
-          </div>
+          {/* `inline`, not `standing`: this box is one paragraph of a screen
+              that is already named by its heading and its labelled <main>, so a
+              region around it would be a landmark inside a landmark saying the
+              same thing. */}
+          <Notice severity="danger" timing="inline">{hostIdentityError}</Notice>
           <button type="button" className="btn btn-primary" onClick={() => void refresh()} disabled={loading}>
             {loading ? "Checking…" : "Retry"}
           </button>
@@ -3398,6 +3405,93 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   if (!hostIdentityShellReady) {
     return <StartupLoadingScreen stage={startupStage} />;
   }
+
+  /* The shell's banner zone. These three used to be three sibling rows — a
+     backend banner, the one generic error string twenty-three handlers write,
+     and a toast — which meant a failed remove could stack a red row under an
+     amber one under a green tick, three boxes deep, above whatever screen was
+     open. One zone, one box, at the loudest rung present. */
+  const shellNotices: NoticeItem[] = [];
+  if (backendError) {
+    shellNotices.push({
+      key: "backend-unavailable",
+      severity: "danger",
+      title: "Project-sync backend unavailable.",
+      message: backendError,
+      action: <button type="button" className="btn" onClick={() => void refresh()}>Retry</button>,
+    });
+  }
+  if (error) {
+    shellNotices.push({
+      key: "shell-error",
+      severity: "danger",
+      message: error,
+      /* This sits outside every early return the shell takes, so whichever
+         screen is open the failure is seen. Before it had a surface only three
+         screens rendered it, and a failed remove, rename or reset changed
+         nothing on screen — so the user re-ran the destructive action. */
+      action: (
+        <>
+          {catalogRemovalErrorTarget?.message === error && (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                setCatalogStorageMenuRequest((current) => ({
+                  requestId: (current?.requestId ?? 0) + 1,
+                  scopeId: catalogRemovalErrorTarget.scopeId,
+                }));
+                setCatalogRemovalErrorTarget(null);
+                openCatalogScope(catalogRemovalErrorTarget.scopeId);
+              }}
+              title={`Open ${catalogRemovalErrorTarget.label}`}
+            >
+              Open storage menu
+            </button>
+          )}
+          <button
+            type="button"
+            className="sync-notice-dismiss"
+            onClick={() => {
+              setError(null);
+              setCatalogRemovalErrorTarget(null);
+            }}
+            title="Dismiss"
+            aria-label="Dismiss error"
+          >
+            <Icon name="x" size={12} />
+          </button>
+        </>
+      ),
+    });
+  }
+  if (notice) {
+    shellNotices.push({
+      key: "shell-notice",
+      /* The tone already said what happened rather than how loud it was: an
+         "attention" notice reports a stop the user has to act on, which is the
+         warning rung, and "ok" is the receipt it always was. */
+      severity: notice.tone === "attention" ? "warning" : "success",
+      message: notice.message,
+      action: (
+        <button type="button" className="sync-notice-dismiss" onClick={() => setNotice(null)}
+          title="Dismiss" aria-label="Dismiss notification">
+          <Icon name="x" size={12} />
+        </button>
+      ),
+    });
+  }
+  /* Every rung of this zone is an event. `error` is a handler reporting that
+     what the user just did did not happen. `backendError` looks like standing
+     content because the startup load writes it, but the same `refresh()` runs
+     behind "Reload app data" and the path-bar overflow, so a backend that
+     falls over on an explicit refresh would go unannounced if this zone were
+     a region — and the shell paints the startup screen until the load
+     settles, so even the startup case arrives as a change. A notice is
+     advisory. The loudest present event re-times the whole box. */
+  const shellNoticeTiming: NoticeTiming = error || backendError
+    ? { timing: "blocking" }
+    : { timing: "progress" };
 
   return (
     <div
@@ -3494,70 +3588,15 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         </header>
         )}
 
-        {backendError && (
-          /* role="alert", like the success notice below it: a failure that
-             screen readers never announce is a silent failure (WCAG 4.1.3). */
-          <div className="sync-backend-banner" role="alert">
-            <Icon name="alert-triangle" size={15} />
-            <span><strong>Project-sync backend unavailable.</strong> {backendError}</span>
-            <button type="button" className="btn" onClick={() => void refresh()}>Retry</button>
-          </div>
-        )}
-        {error && (
-          /* Twenty-three handlers write this one string, and until it had a
-             surface of its own only three screens ever rendered it — so a
-             failed remove, rename or reset changed nothing on screen and the
-             user re-ran the destructive action. This sits beside the backend
-             banner, outside every early return the shell takes, so whichever
-             screen is open the failure is seen. */
-          <div className="sync-backend-banner sync-shell-error" role="alert">
-            <Icon name="alert-triangle" size={15} />
-            <span>{error}</span>
-            {catalogRemovalErrorTarget?.message === error && (
-              <button
-                type="button"
-                className="btn"
-                onClick={() => {
-                  setCatalogStorageMenuRequest((current) => ({
-                    requestId: (current?.requestId ?? 0) + 1,
-                    scopeId: catalogRemovalErrorTarget.scopeId,
-                  }));
-                  setCatalogRemovalErrorTarget(null);
-                  openCatalogScope(catalogRemovalErrorTarget.scopeId);
-                }}
-                title={`Open ${catalogRemovalErrorTarget.label}`}
-              >
-                Open storage menu
-              </button>
-            )}
-            <button
-              type="button"
-              className="sync-notice-dismiss"
-              onClick={() => {
-                setError(null);
-                setCatalogRemovalErrorTarget(null);
-              }}
-              title="Dismiss"
-              aria-label="Dismiss error"
-            >
-              <Icon name="x" size={12} />
-            </button>
-          </div>
-        )}
-        {notice && (
-          <div
-            className={`sync-notice${notice.tone === "attention" ? " is-attention" : ""}`}
-            role="status"
-            aria-live="polite"
-          >
-            <Icon name={notice.tone === "attention" ? "alert-triangle" : "check-circle"} size={14} />
-            <span>{notice.message}</span>
-            <button type="button" className="sync-notice-dismiss" onClick={() => setNotice(null)}
-              title="Dismiss" aria-label="Dismiss notification">
-              <Icon name="x" size={12} />
-            </button>
-          </div>
-        )}
+        {/* Keeps `sync-backend-banner` for the shell's own geometry only: the
+            zone is a sibling of the path bar and the page, and that class is
+            what gives it their width, their frame and the 10px below it. */}
+        <NoticeZone
+          items={shellNotices}
+          subject="messages from Mallard"
+          className="sync-backend-banner"
+          {...shellNoticeTiming}
+        />
 
         {addingCatalogScope ? (
           <AddCatalogScopeWorkspace

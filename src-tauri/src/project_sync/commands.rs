@@ -3777,7 +3777,6 @@ fn build_resource_inventory(
                 display_name: resource_id.to_string(),
                 provenance: Provenance::Unknown,
                 apply_policy: entry.apply_policy,
-                relative_cwd: None,
                 codec_version: 1,
                 metadata: BTreeMap::new(),
             },
@@ -3842,7 +3841,6 @@ fn inventory_from_candidates(
             display_name: candidate.display_name.clone(),
             provenance,
             apply_policy,
-            relative_cwd: candidate.relative_cwd.clone(),
             codec_version: 1,
             metadata: candidate.metadata.clone(),
         };
@@ -6799,7 +6797,6 @@ pub(crate) fn thread_entries(
                         .source_thread_id
                         .clone()
                         .unwrap_or_else(|| resource_id.clone()),
-                    relative_cwd: None,
                     apply_policy: provider_capture::CaptureApplyPolicy::SafeFile,
                     selected_by_default: true,
                     blocked_reason: None,
@@ -13314,7 +13311,10 @@ fn capture_request_for_resolved_binding(
     if resolved_project != binding.canonical_project_root {
         return Err("project binding resolves to a different checkout".to_string());
     }
-    let excluded_project_roots = repository
+    // Nested bound projects are separate directory projects. Exact-home
+    // ownership keeps their sessions out with no exclusion list, but their
+    // trees must still stay out of this project's content capture.
+    let nested_binding_roots: Vec<PathBuf> = repository
         .load_bindings()?
         .bindings
         .into_iter()
@@ -13331,9 +13331,8 @@ fn capture_request_for_resolved_binding(
             .iter()
             .map(|(provider, home)| (provider.clone(), PathBuf::from(home)))
             .collect(),
-        excluded_project_roots,
         include_project_content: false,
-        excluded_content_roots: Vec::new(),
+        excluded_content_roots: nested_binding_roots,
     };
     let config = repository.load_config()?;
     request
@@ -15624,12 +15623,18 @@ fn audit_codex_conversation_paths_with_repository(
         }
     };
 
+    // Desktop evidence only NOMINATES threads; the rollout's authoritative
+    // home classifies them (docs/PLAN_EXACT_HOME_OWNERSHIP.md). Matching is
+    // exact canonical equality everywhere — a subdirectory root is a
+    // different project. Explicit project assignments may lead to a repair;
+    // auxiliary evidence (writable roots, workspace hints naming this root
+    // itself) can only prove a thread matching or surface a warning.
     let mut desktop_project_ids = BTreeSet::new();
     for projects in state_object_maps(&state, "local-projects") {
         for (project_key, project) in projects {
             let owns_root = json_path_values(project, &["rootPaths", "root_paths"])
                 .into_iter()
-                .any(|root| path_belongs_to_project(Path::new(root), &canonical_project_root));
+                .any(|root| path_is_project_root(Path::new(root), &canonical_project_root));
             if !owns_root {
                 continue;
             }
@@ -15653,15 +15658,10 @@ fn audit_codex_conversation_paths_with_repository(
                 .get("projectId")
                 .or_else(|| assignment.get("project_id"))
                 .and_then(serde_json::Value::as_str);
-            let legacy_cwd_matches = assigned_project.is_none()
-                && json_path_values(assignment, &["cwd"])
-                    .into_iter()
-                    .any(|cwd| path_belongs_to_project(Path::new(cwd), &canonical_project_root));
             if local_assignment
-                && (assigned_project
+                && assigned_project
                     .map(|project_id| desktop_project_ids.contains(project_id))
                     .unwrap_or(false)
-                    || legacy_cwd_matches)
             {
                 insert_safe_assigned_thread(
                     thread_id,
@@ -15671,36 +15671,34 @@ fn audit_codex_conversation_paths_with_repository(
             }
         }
     }
+    let mut aux_thread_ids = BTreeSet::new();
     for writable_roots in state_object_maps(&state, "thread-writable-roots") {
         for (thread_id, roots) in writable_roots {
             if json_path_values(roots, &["roots", "rootPaths", "root_paths"])
                 .into_iter()
                 .chain(json_direct_path_values(roots))
-                .any(|root| path_belongs_to_project(Path::new(root), &canonical_project_root))
+                .any(|root| path_is_project_root(Path::new(root), &canonical_project_root))
             {
-                insert_safe_assigned_thread(
-                    thread_id,
-                    &mut assigned_thread_ids,
-                    &mut audit.blockers,
-                );
+                insert_safe_assigned_thread(thread_id, &mut aux_thread_ids, &mut audit.blockers);
             }
         }
     }
     for root_hints in state_object_maps(&state, "thread-workspace-root-hints") {
         for (thread_id, hint) in root_hints {
             if json_direct_path_values(hint)
-                .any(|root| path_belongs_to_project(Path::new(root), &canonical_project_root))
+                .any(|root| path_is_project_root(Path::new(root), &canonical_project_root))
             {
-                insert_safe_assigned_thread(
-                    thread_id,
-                    &mut assigned_thread_ids,
-                    &mut audit.blockers,
-                );
+                insert_safe_assigned_thread(thread_id, &mut aux_thread_ids, &mut audit.blockers);
             }
         }
     }
-    audit.assigned_thread_count = assigned_thread_ids.len();
-    if assigned_thread_ids.is_empty() {
+    aux_thread_ids.retain(|thread_id| !assigned_thread_ids.contains(thread_id));
+    let nominated_thread_ids: BTreeSet<String> = assigned_thread_ids
+        .union(&aux_thread_ids)
+        .cloned()
+        .collect();
+    audit.assigned_thread_count = nominated_thread_ids.len();
+    if nominated_thread_ids.is_empty() {
         return Ok(finalize_conversation_path_audit(audit));
     }
 
@@ -15776,7 +15774,7 @@ fn audit_codex_conversation_paths_with_repository(
             };
             if file_size > MAX_CONVERSATION_FILE_BYTES {
                 oversized_thread_ids.extend(
-                    assigned_thread_ids
+                    nominated_thread_ids
                         .iter()
                         .filter(|thread_id| filename.contains(thread_id.as_str()))
                         .cloned(),
@@ -15799,7 +15797,7 @@ fn audit_codex_conversation_paths_with_repository(
                     continue;
                 }
             };
-            if !assigned_thread_ids.contains(&metadata.session_id) {
+            if !nominated_thread_ids.contains(&metadata.session_id) {
                 continue;
             }
             let canonical_path = match fs_canonicalize(entry.path()) {
@@ -15826,100 +15824,129 @@ fn audit_codex_conversation_paths_with_repository(
         }
     }
 
-    for thread_id in assigned_thread_ids {
-        if oversized_thread_ids.contains(&thread_id) {
-            audit.warnings.push(format!(
-                "Codex thread '{}' was not audited because its session file exceeds the {} MiB per-file sync limit; the conversation remains unavailable for sync",
-                thread_id,
-                MAX_CONVERSATION_FILE_BYTES / (1024 * 1024)
-            ));
+    // One rule per nominated thread, decided by its authoritative home:
+    // equal to the root ⇒ matching; strictly under the root ⇒ a separate
+    // directory project (warned, never flattened); anywhere else ⇒ a repair
+    // for explicitly assigned threads, silence for auxiliary nominations.
+    // Auxiliary threads never block the audit either — a foreign thread
+    // holding a writable grant into this project must not gate its repair.
+    let resolved_project_root = fs::canonicalize(&canonical_project_root)
+        .unwrap_or_else(|_| canonical_project_root.clone());
+    for thread_id in &nominated_thread_ids {
+        let is_assigned = assigned_thread_ids.contains(thread_id);
+        if oversized_thread_ids.contains(thread_id) {
+            if is_assigned {
+                audit.warnings.push(format!(
+                    "Codex thread '{}' was not audited because its session file exceeds the {} MiB per-file sync limit; the conversation remains unavailable for sync",
+                    thread_id,
+                    MAX_CONVERSATION_FILE_BYTES / (1024 * 1024)
+                ));
+            }
             continue;
         }
-        let Some(paths) = transcript_paths.get(&thread_id) else {
-            audit.warnings.push(format!(
-                "Codex Desktop assigns thread '{}' to this project, but its rollout file was not found",
-                thread_id
-            ));
+        let Some(paths) = transcript_paths.get(thread_id) else {
+            if is_assigned {
+                audit.warnings.push(format!(
+                    "Codex Desktop assigns thread '{}' to this project, but its rollout file was not found",
+                    thread_id
+                ));
+            }
             continue;
         };
         if paths.len() != 1 {
-            audit.blockers.push(format!(
-                "Codex thread '{}' has {} rollout files; repair requires manual review",
-                thread_id,
-                paths.len()
-            ));
+            if is_assigned {
+                audit.blockers.push(format!(
+                    "Codex thread '{}' has {} rollout files; repair requires manual review",
+                    thread_id,
+                    paths.len()
+                ));
+            }
             continue;
         }
         let path = &paths[0];
         let transcript_metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) => {
-                audit.blockers.push(format!(
-                    "inspect assigned Codex conversation '{}': {}",
-                    path.display(),
-                    error
-                ));
-                continue;
-            }
-        };
-        if transcript_metadata.len() > MAX_CONVERSATION_FILE_BYTES {
-            audit.warnings.push(format!(
-                "Codex thread '{}' was not audited because its session file exceeds the {} MiB per-file sync limit; the conversation remains unavailable for sync",
-                thread_id,
-                MAX_CONVERSATION_FILE_BYTES / (1024 * 1024)
-            ));
-            continue;
-        }
-        let source = match read_bounded_conversation(path) {
-            Ok(source) => source,
-            Err(error) => {
-                audit.blockers.push(error);
-                continue;
-            }
-        };
-        let stale_cwds =
-            match inspect_codex_structural_cwds(&source, &thread_id, &canonical_project_root) {
-                Ok(cwds) => cwds,
-                Err(error) => {
+                if is_assigned {
                     audit.blockers.push(format!(
                         "inspect assigned Codex conversation '{}': {}",
                         path.display(),
                         error
                     ));
-                    continue;
                 }
-            };
-        // Repair moves exactly one old root to the current root (§6.5); a
-        // thread recording several distinct out-of-project roots is
-        // ambiguous — which one was the project? — and paths outside the
-        // project working directory are never remapped, so it needs manual
-        // review instead of a blanket rewrite.
-        if stale_cwds.len() > 1 {
-            audit.blockers.push(format!(
-                "Codex thread '{}' records {} distinct out-of-project roots; repair requires \
-                 manual review",
-                thread_id,
-                stale_cwds.len()
+                continue;
+            }
+        };
+        if transcript_metadata.len() > MAX_CONVERSATION_FILE_BYTES {
+            if is_assigned {
+                audit.warnings.push(format!(
+                    "Codex thread '{}' was not audited because its session file exceeds the {} MiB per-file sync limit; the conversation remains unavailable for sync",
+                    thread_id,
+                    MAX_CONVERSATION_FILE_BYTES / (1024 * 1024)
+                ));
+            }
+            continue;
+        }
+        let source = match read_bounded_conversation(path) {
+            Ok(source) => source,
+            Err(error) => {
+                if is_assigned {
+                    audit.blockers.push(error);
+                }
+                continue;
+            }
+        };
+        let home = match codex_authoritative_home(&source, thread_id) {
+            Ok(home) => home,
+            Err(error) => {
+                if is_assigned {
+                    audit.blockers.push(format!(
+                        "inspect assigned Codex conversation '{}': {}",
+                        path.display(),
+                        error
+                    ));
+                }
+                continue;
+            }
+        };
+        if validate_absolute_clean_path("Codex thread home", &home).is_err() {
+            if is_assigned {
+                audit.blockers.push(format!(
+                    "Codex thread '{}' records an unsafe home; repair requires manual review",
+                    thread_id
+                ));
+            }
+            continue;
+        }
+        let resolved_home =
+            fs::canonicalize(Path::new(&home)).unwrap_or_else(|_| PathBuf::from(&home));
+        if resolved_home == resolved_project_root {
+            audit.matching_thread_count = audit.matching_thread_count.saturating_add(1);
+            continue;
+        }
+        if resolved_home.starts_with(&resolved_project_root) {
+            audit.warnings.push(format!(
+                "Codex thread '{}' lives in '{}', a subdirectory of this project; bind that directory as its own project to manage it",
+                thread_id, home
             ));
             continue;
         }
-        if let Some(recorded_cwd) = stale_cwds.into_iter().next() {
-            let Some(transcript_path) = path.to_str() else {
-                audit.blockers.push(format!(
-                    "assigned Codex conversation path '{}' is not valid UTF-8",
-                    path.display()
-                ));
-                continue;
-            };
-            audit.issues.push(CodexConversationPathIssue {
-                thread_id,
-                transcript_path: transcript_path.to_string(),
-                recorded_cwd,
-                target_cwd: binding.project_root.clone(),
-            });
-        } else {
-            audit.matching_thread_count = audit.matching_thread_count.saturating_add(1);
+        if !is_assigned {
+            continue;
         }
+        let Some(transcript_path) = path.to_str() else {
+            audit.blockers.push(format!(
+                "assigned Codex conversation path '{}' is not valid UTF-8",
+                path.display()
+            ));
+            continue;
+        };
+        audit.issues.push(CodexConversationPathIssue {
+            thread_id: thread_id.clone(),
+            transcript_path: transcript_path.to_string(),
+            recorded_cwd: home,
+            target_cwd: binding.project_root.clone(),
+        });
     }
 
     Ok(finalize_conversation_path_audit(audit))
@@ -16056,12 +16083,8 @@ fn repair_codex_conversation_paths_with_repository(
                 MAX_CONVERSATION_REPAIR_BYTES
             ));
         }
-        let stale = inspect_codex_structural_cwds(
-            &original,
-            &issue.thread_id,
-            Path::new(&binding.canonical_project_root),
-        )?;
-        if stale.is_empty() {
+        let home = codex_authoritative_home(&original, &issue.thread_id)?;
+        if home != issue.recorded_cwd {
             return Err(format!(
                 "Codex conversation '{}' changed after the audit; refresh and try again",
                 issue.thread_id
@@ -16487,7 +16510,10 @@ fn json_direct_path_values(value: &serde_json::Value) -> impl Iterator<Item = &s
     direct.chain(array)
 }
 
-fn path_belongs_to_project(candidate: &Path, project_root: &Path) -> bool {
+/// Exact canonical equality with the project root. Containment never
+/// matches: a subdirectory is a different project
+/// (docs/PLAN_EXACT_HOME_OWNERSHIP.md).
+fn path_is_project_root(candidate: &Path, project_root: &Path) -> bool {
     let Some(candidate_text) = candidate.to_str() else {
         return false;
     };
@@ -16497,7 +16523,7 @@ fn path_belongs_to_project(candidate: &Path, project_root: &Path) -> bool {
     let candidate = fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
     let project_root =
         fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
-    candidate == project_root || candidate.starts_with(&project_root)
+    candidate == project_root
 }
 
 fn insert_safe_assigned_thread(
@@ -16533,18 +16559,13 @@ fn read_bounded_conversation(path: &Path) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|error| format!("read '{}': {}", path.display(), error))
 }
 
-fn inspect_codex_structural_cwds(
-    source: &[u8],
-    expected_thread_id: &str,
-    project_root: &Path,
-) -> Result<BTreeSet<String>, String> {
+/// The active thread's authoritative home: the cwd of its first
+/// `session_meta` record. Turn-level cwds and copied ancestor metadata are
+/// content, never identity (docs/PLAN_EXACT_HOME_OWNERSHIP.md).
+fn codex_authoritative_home(source: &[u8], expected_thread_id: &str) -> Result<String, String> {
     let structure = analyze_codex_rollout_structure(source, Some(expected_thread_id))
         .map_err(|error| error.to_string())?;
-    Ok(structure
-        .structural_cwds
-        .into_iter()
-        .filter(|cwd| !path_belongs_to_project(Path::new(cwd), project_root))
-        .collect())
+    Ok(structure.current.cwd)
 }
 
 /// §6.5's shared-module rewrite: repair ≡ `decode_new(encode_old(x))` per
@@ -19193,14 +19214,21 @@ mod tests {
         )
         .unwrap();
 
+        let subdir_root = project_root.join("frontend");
+        std::fs::create_dir_all(&subdir_root).unwrap();
         let stale_thread = "019f7500-0000-7000-8000-000000000001";
         let matching_thread = "019f7500-0000-7000-8000-000000000002";
         let unrelated_thread = "019f7500-0000-7000-8000-000000000003";
+        let aux_foreign_thread = "019f7500-0000-7000-8000-000000000004";
+        let subdir_thread = "019f7500-0000-7000-8000-000000000005";
         let stale_path = sessions.join(format!("rollout-{}.jsonl", stale_thread));
         let matching_path = sessions.join(format!("rollout-{}.jsonl", matching_thread));
         let unrelated_path = sessions.join(format!("rollout-{}.jsonl", unrelated_thread));
+        let aux_foreign_path = sessions.join(format!("rollout-{}.jsonl", aux_foreign_thread));
+        let subdir_path = sessions.join(format!("rollout-{}.jsonl", subdir_thread));
         let stale_root_json = serde_json::to_string(stale_root.to_str().unwrap()).unwrap();
         let project_root_json = serde_json::to_string(project_root.to_str().unwrap()).unwrap();
+        let subdir_root_json = serde_json::to_string(subdir_root.to_str().unwrap()).unwrap();
         let message_line = format!(
             "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"id\":\"m-repair\",\"content\":\"keep the literal {} unchanged\"}}}}\n",
             stale_root.display()
@@ -19210,11 +19238,14 @@ mod tests {
             stale_thread, stale_root_json, message_line, stale_root_json
         );
         std::fs::write(&stale_path, stale_source.as_bytes()).unwrap();
+        // A thread whose home IS the root once wandered into a foreign
+        // directory for one turn: turn-level cwds are content, never roots,
+        // so it stays matching and gets no repair offer.
         std::fs::write(
             &matching_path,
             format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n",
-                matching_thread, project_root_json
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":{}}}}}\n",
+                matching_thread, project_root_json, stale_root_json
             ),
         )
         .unwrap();
@@ -19223,6 +19254,27 @@ mod tests {
             unrelated_thread, stale_root_json
         );
         std::fs::write(&unrelated_path, unrelated_source.as_bytes()).unwrap();
+        // Auxiliary evidence (a writable grant into this root) nominates a
+        // thread homed elsewhere: skipped silently, never claimed or
+        // repaired, and never a blocker.
+        std::fs::write(
+            &aux_foreign_path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n",
+                aux_foreign_thread, stale_root_json
+            ),
+        )
+        .unwrap();
+        // An explicitly assigned thread homed in a subdirectory is a
+        // separate directory project: warned, never flattened into the root.
+        std::fs::write(
+            &subdir_path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n",
+                subdir_thread, subdir_root_json
+            ),
+        )
+        .unwrap();
         std::fs::write(
             codex_home.join(".codex-global-state.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
@@ -19233,10 +19285,13 @@ mod tests {
                         "rootPaths": [project_root.to_str().unwrap()]
                     }
                 },
-                "thread-project-assignments": {},
+                "thread-project-assignments": {
+                    (stale_thread): {"projectId": "local-health", "projectKind": "local"},
+                    (subdir_thread): {"projectId": "local-health", "projectKind": "local"}
+                },
                 "thread-writable-roots": {
-                    (stale_thread): [project_root.to_str().unwrap()],
                     (matching_thread): [project_root.to_str().unwrap()],
+                    (aux_foreign_thread): [project_root.to_str().unwrap()],
                     (unrelated_thread): [stale_root.to_str().unwrap()]
                 },
                 "thread-workspace-root-hints": {}
@@ -19340,10 +19395,20 @@ mod tests {
         let audit =
             audit_codex_conversation_paths_with_repository(&repo, &project.local_project_id)
                 .unwrap();
-        assert_eq!(audit.assigned_thread_count, 2);
+        assert_eq!(audit.assigned_thread_count, 4);
         assert_eq!(audit.matching_thread_count, 1);
         assert_eq!(audit.issues.len(), 1);
         assert_eq!(audit.issues[0].thread_id, stale_thread);
+        assert_eq!(audit.issues[0].recorded_cwd, stale_root.to_str().unwrap());
+        assert!(audit.blockers.is_empty(), "{:?}", audit.blockers);
+        assert!(
+            audit
+                .warnings
+                .iter()
+                .any(|warning| warning.contains(subdir_thread) && warning.contains("subdirectory")),
+            "subdir-home assigned thread must be warned, not repaired: {:?}",
+            audit.warnings
+        );
         assert!(audit.can_repair);
         assert!(require_codex_conversation_paths_ready(&repo, &project.local_project_id).is_err());
 
@@ -19378,6 +19443,14 @@ mod tests {
             std::fs::read(&unrelated_path).unwrap(),
             unrelated_source.as_bytes()
         );
+        // Aux-nominated foreign threads and subdirectory projects are never
+        // rewritten by this project's repair.
+        assert!(std::fs::read_to_string(&aux_foreign_path)
+            .unwrap()
+            .contains(stale_root.to_str().unwrap()));
+        assert!(std::fs::read_to_string(&subdir_path)
+            .unwrap()
+            .contains(subdir_root.to_str().unwrap()));
 
         // §6.5 rebase: the wire pin is untouched, the local column is
         // recomputed from the repaired bytes, the generation advanced, and
@@ -19491,8 +19564,14 @@ mod tests {
         std::fs::write(
             codex_home.join(".codex-global-state.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
-                "thread-writable-roots": {
-                    (thread_id): [project_root.to_str().unwrap()]
+                "local-projects": {
+                    "local-big": {
+                        "id": "local-big",
+                        "rootPaths": [project_root.to_str().unwrap()]
+                    }
+                },
+                "thread-project-assignments": {
+                    (thread_id): {"projectId": "local-big", "projectKind": "local"}
                 }
             }))
             .unwrap(),
@@ -19567,9 +19646,9 @@ mod tests {
         .join("\n")
         .into_bytes();
 
-        let stale =
-            inspect_codex_structural_cwds(&source, active, Path::new("/tmp/new-project")).unwrap();
-        assert_eq!(stale.len(), 2);
+        // The audit derives the one repair root from the authoritative
+        // session_meta; the nested frontend turn cwd is content, not a root.
+        assert_eq!(codex_authoritative_home(&source, active).unwrap(), old_root);
         let mapper_old = SessionPathMapper::new(old_root, None, None).unwrap();
         let mapper_new = SessionPathMapper::new("/tmp/new-project", None, None).unwrap();
         let repaired =
@@ -19615,10 +19694,11 @@ mod tests {
             "{error}"
         );
 
-        // Distinct out-of-project roots are an audit blocker, not a blanket
-        // rewrite: the multi-root fixture from the retired flow now reports
-        // ambiguity instead of flattening foreign cwds.
-        let multi_root = [
+        // A fork whose ancestor lived in a different directory is plainly
+        // repairable: the active thread's home is the one repair root, and
+        // the foreign ancestor home is out-of-root content preserved
+        // byte-identically.
+        let cross_directory_fork = [
             serde_json::json!({"type":"session_meta","payload":{"id":active,"forked_from_id":parent,"cwd":"/tmp/old-active"}}),
             serde_json::json!({"type":"session_meta","payload":{"id":parent,"cwd":"/tmp/old-parent"}}),
         ]
@@ -19627,10 +19707,27 @@ mod tests {
         .collect::<Vec<_>>()
         .join("\n")
         .into_bytes();
-        let stale =
-            inspect_codex_structural_cwds(&multi_root, active, Path::new("/tmp/new-project"))
-                .unwrap();
-        assert_eq!(stale.len(), 2);
+        assert_eq!(
+            codex_authoritative_home(&cross_directory_fork, active).unwrap(),
+            "/tmp/old-active"
+        );
+        let mapper_old = SessionPathMapper::new("/tmp/old-active", None, None).unwrap();
+        let repaired = remap_codex_conversation_paths(
+            &cross_directory_fork,
+            active,
+            &mapper_old,
+            &mapper_new,
+            false,
+        )
+        .unwrap();
+        let structure = analyze_codex_rollout_structure(&repaired, Some(active)).unwrap();
+        assert_eq!(
+            structure.structural_cwds,
+            BTreeSet::from([
+                "/tmp/new-project".to_string(),
+                "/tmp/old-parent".to_string()
+            ])
+        );
     }
 
     #[test]
@@ -19644,8 +19741,7 @@ mod tests {
         .collect::<Vec<_>>()
         .join("\n")
         .into_bytes();
-        let error =
-            inspect_codex_structural_cwds(&source, "child", Path::new("/tmp/project")).unwrap_err();
+        let error = codex_authoritative_home(&source, "child").unwrap_err();
         assert!(error.contains("unrelated"));
     }
 
@@ -22892,9 +22988,15 @@ mod tests {
         )
         .unwrap();
         transcript.push(b'\n');
-        let a_session_path = a_claude
-            .join("projects/source")
-            .join(format!("{session_id}.jsonl"));
+        // Memory only rides in the root's canonical bucket (exact-home
+        // ownership): the bucket name must be the munge of the session's own
+        // recorded home.
+        let a_bucket = format!(
+            "projects/{}",
+            mallard_infrastructure::providers::claude::encode_claude_project_path(&a_root_text)
+        );
+        let a_session_path = a_claude.join(&a_bucket).join(format!("{session_id}.jsonl"));
+        std::fs::create_dir_all(a_session_path.parent().unwrap()).unwrap();
         std::fs::write(&a_session_path, &transcript).unwrap();
         // The auxiliary artifacts ride along: a file-history snapshot of an
         // edited .env (the densest secret store we ship), a todos list, and
@@ -22916,7 +23018,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let memory_dir = a_claude.join("projects/source/memory");
+        let memory_dir = a_claude.join(&a_bucket).join("memory");
         std::fs::create_dir_all(&memory_dir).unwrap();
         std::fs::write(
             memory_dir.join("notes.md"),
@@ -26482,7 +26584,7 @@ mod tests {
         let leaf_id = "019f7500-0000-7000-8000-00000000ba02";
         let sessions = fixture.codex_home.join("sessions/2026/08/09");
         std::fs::create_dir_all(&sessions).unwrap();
-        let base_bytes = command_test_transcript(
+        let mut base_bytes = command_test_transcript(
             base_id,
             &fixture.project_dir,
             &[
@@ -26490,6 +26592,43 @@ mod tests {
                 ("base-2", "assistant", "inherited answer"),
             ],
         );
+        for (offset, (item_id, item_type, text, phase)) in [
+            ("base-user-item", "UserMessage", "inherited question", None),
+            (
+                "base-agent-item",
+                "AgentMessage",
+                "inherited answer",
+                Some("final_answer"),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut item = serde_json::json!({
+                "type": item_type,
+                "id": item_id,
+                "content": [{"type": "text", "text": text}],
+            });
+            if let Some(phase) = phase {
+                item["phase"] = serde_json::json!(phase);
+            }
+            serde_json::to_writer(
+                &mut base_bytes,
+                &serde_json::json!({
+                    "timestamp": format!("2026-08-09T00:00:0{}Z", offset + 1),
+                    "ordinal": offset + 3,
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "item_completed",
+                        "thread_id": base_id,
+                        "turn_id": "turn-1",
+                        "item": item,
+                    },
+                }),
+            )
+            .unwrap();
+            base_bytes.push(b'\n');
+        }
         std::fs::write(
             sessions.join(format!("rollout-{base_id}.jsonl")),
             &base_bytes,

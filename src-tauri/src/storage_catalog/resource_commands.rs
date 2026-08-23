@@ -992,6 +992,134 @@ pub async fn get_catalog_pet_preview(
     .await
 }
 
+/// One Catalog kind repository as the storage page lists it: the derived
+/// identity, the head facts when the repository reads, and the refusal when
+/// it does not. Absent repositories produce no entry at all.
+#[derive(Serialize, Clone, Debug)]
+pub struct CatalogStorageRepositoryDto {
+    pub repository_id: String,
+    pub provider: ProviderKey,
+    pub resource_kind: CatalogResourceKindTag,
+    pub revision: Option<u64>,
+    pub updated_at: Option<u64>,
+    /// Display names of everything the set holds, sorted for the fold.
+    pub resource_names: Vec<String>,
+    /// Why the repository cannot be read; the row states it instead of chips.
+    pub error: Option<String>,
+}
+
+/// The storage page's Catalog listing: every kind repository this build can
+/// derive — the (provider, kind) ownership matrix — inspected with one head
+/// read each. Nothing is scanned: a repository is either derivable and read,
+/// or invisible to this build by construction. A derived id that answers but
+/// fails its tag or manifest checks is returned as a refusal row, never
+/// omitted — on a listing, a silent hole reads as "nothing stored".
+pub fn list_catalog_storage_repositories_with_repository(
+    state: &LocalStateRepository,
+    storage_id: &StorageId,
+) -> Result<Vec<CatalogStorageRepositoryDto>, String> {
+    let storage = storage_for(state, storage_id)?;
+    let engine = engine_for(&storage)?;
+    let mut rows = Vec::new();
+    for kind in [
+        CatalogResourceKindTag::AgentSkill,
+        CatalogResourceKindTag::PluginInstallIntent,
+        CatalogResourceKindTag::CodexPetV1,
+        CatalogResourceKindTag::CodexPetV2,
+    ] {
+        for provider in [ProviderKey::Codex, ProviderKey::Claude] {
+            if !provider_owns_kind(provider, kind) {
+                continue;
+            }
+            if let Some(row) = read_storage_repository(&engine, provider, kind) {
+                rows.push(row);
+            }
+        }
+    }
+    Ok(rows)
+}
+
+/// `None` when the repository does not exist in this storage; a refusal row
+/// when something exists under the derived id but cannot be read.
+fn read_storage_repository(
+    engine: &LibraryResourceEngine<ConfiguredObjectStore>,
+    provider: ProviderKey,
+    kind: CatalogResourceKindTag,
+) -> Option<CatalogStorageRepositoryDto> {
+    let repository_id = CatalogResourceRepositoryId::for_kind(provider, kind);
+    let refusal = |message: String| CatalogStorageRepositoryDto {
+        repository_id: repository_id.as_str().to_string(),
+        provider,
+        resource_kind: kind,
+        revision: None,
+        updated_at: None,
+        resource_names: Vec::new(),
+        error: Some(message),
+    };
+    let observed = match engine.read_head(&repository_id) {
+        Ok(observed) => observed,
+        Err(message) => return Some(refusal(message)),
+    };
+    let tag = match engine.read_tag(&repository_id) {
+        Ok(tag) => tag,
+        Err(message) => return Some(refusal(message)),
+    };
+    let Some(observed) = observed else {
+        return tag.map(|_| {
+            // A tag with no head is what a failed first publish leaves
+            // behind; say so rather than passing it off as absent.
+            refusal("the stored kind repository has a discovery tag but no head".to_string())
+        });
+    };
+    let Some((tag, _)) = tag else {
+        return Some(refusal(
+            "the stored kind repository is missing its discovery tag".to_string(),
+        ));
+    };
+    // read_tag already enforced the derivation; this is the same
+    // belt-and-braces identity check the scope workspace keeps.
+    if tag.provider != provider || tag.resource_kind != kind {
+        return Some(refusal(
+            "the stored kind repository belongs to another kind".to_string(),
+        ));
+    }
+    let manifest = match engine.read_manifest(&observed.head) {
+        Ok(manifest) => manifest,
+        Err(message) => return Some(refusal(message)),
+    };
+    let mut resource_names: Vec<String> = manifest
+        .resources
+        .values()
+        .map(|entry| entry.resource.display_name())
+        .collect();
+    resource_names.sort_by(|left, right| {
+        left.to_lowercase()
+            .cmp(&right.to_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+    Some(CatalogStorageRepositoryDto {
+        repository_id: repository_id.as_str().to_string(),
+        provider,
+        resource_kind: kind,
+        revision: Some(observed.head.revision),
+        updated_at: Some(manifest.updated_at),
+        resource_names,
+        error: None,
+    })
+}
+
+#[tauri::command]
+pub async fn list_catalog_storage_repositories(
+    _app: tauri::AppHandle,
+    storage_id: StorageId,
+) -> Result<Vec<CatalogStorageRepositoryDto>, String> {
+    run_blocking(move || {
+        super::service::StorageCatalogService::from_user_home()?
+            .list_storage_repositories(&storage_id)
+    })
+    .await
+}
+
 pub fn link_catalog_scope_storage_with_repositories(
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
@@ -2630,6 +2758,72 @@ mod tests {
         assert!(
             page.contains("does not match its provider and kind derivation"),
             "{page}"
+        );
+    }
+
+    #[test]
+    fn the_storage_listing_derives_repositories_and_never_scans() {
+        let fixture = library_fixture();
+        // An empty storage: no derivable id answers, so nothing is listed.
+        assert!(list_catalog_storage_repositories_with_repository(
+            &fixture.state,
+            &fixture.storage.id,
+        )
+        .unwrap()
+        .is_empty());
+
+        let row = skill_scope(&fixture);
+        link_scope(&fixture, &row.scope.scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &row.scope.scope_id, &fixture.storage.id);
+
+        let listed =
+            list_catalog_storage_repositories_with_repository(&fixture.state, &fixture.storage.id)
+                .unwrap();
+        assert_eq!(listed.len(), 1);
+        let repo = &listed[0];
+        assert_eq!(repo.provider, ProviderKey::Codex);
+        assert_eq!(repo.resource_kind, CatalogResourceKindTag::AgentSkill);
+        assert_eq!(
+            repo.repository_id,
+            CatalogResourceRepositoryId::for_kind(
+                ProviderKey::Codex,
+                CatalogResourceKindTag::AgentSkill,
+            )
+            .as_str()
+        );
+        assert_eq!(repo.revision, Some(1));
+        assert!(repo.updated_at.is_some());
+        assert_eq!(repo.resource_names, vec!["review".to_string()]);
+        assert!(repo.error.is_none());
+    }
+
+    #[test]
+    fn an_unreadable_repository_lists_as_a_refusal_row_not_a_hole() {
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+        link_scope(&fixture, &row.scope.scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &row.scope.scope_id, &fixture.storage.id);
+
+        let library = fixture.storage_path.join(".mallard/v1/library");
+        let repository = fs::read_dir(&library).unwrap().next().unwrap().unwrap();
+        let tag_path = repository.path().join("_tag.json");
+        let tag_text = fs::read_to_string(&tag_path)
+            .unwrap()
+            .replace("agent_skill", "codex_pet_v1");
+        fs::write(&tag_path, tag_text).unwrap();
+
+        let listed =
+            list_catalog_storage_repositories_with_repository(&fixture.state, &fixture.storage.id)
+                .unwrap();
+        assert_eq!(listed.len(), 1);
+        let repo = &listed[0];
+        assert_eq!(repo.resource_kind, CatalogResourceKindTag::AgentSkill);
+        assert!(repo.revision.is_none());
+        assert!(repo.resource_names.is_empty());
+        let error = repo.error.as_deref().unwrap();
+        assert!(
+            error.contains("does not match its provider and kind derivation"),
+            "{error}"
         );
     }
 

@@ -1352,14 +1352,9 @@ impl<S: ObjectStore> BundleEngine<S> {
                 }
                 let target = match (&scope_home, descriptor.kind) {
                     (None, _) => map_project_logical_target(logical_path, binding)?,
-                    (Some((provider, home)), ResourceKind::ProviderState) => provider_state_target(
-                        registry,
-                        provider,
-                        home,
-                        binding,
-                        descriptor,
-                        logical_path,
-                    ),
+                    (Some((provider, home)), ResourceKind::ProviderState) => {
+                        provider_state_target(registry, provider, home, binding, logical_path)
+                    }
                     (Some(_), _) => None,
                 };
                 let Some(target) = target else {
@@ -2998,25 +2993,28 @@ mod tests {
         for directory in [&source, &target, &source_claude, &target_claude] {
             fs::create_dir_all(directory).unwrap();
         }
-        // Memories are only discovered from a bucket a session has proven to
-        // belong to the project, so the fixture needs one transcript beside
-        // the memory directory.
+        // Memory is only discovered from the project root's canonical
+        // bucket, and only once a session in it has proven ownership — the
+        // fixture needs one transcript beside the memory directory.
+        let source_canonical = fs::canonicalize(&source).unwrap();
         let transcript = format!(
             "{{\"type\":\"system\",\"sessionId\":\"session-m\",\"cwd\":{}}}\n",
-            serde_json::to_string(source.to_str().unwrap()).unwrap()
+            serde_json::to_string(source_canonical.to_str().unwrap()).unwrap()
+        );
+        let bucket = crate::providers::claude::encode_claude_project_path(
+            source_canonical.to_str().unwrap(),
         );
         write(
-            &source_claude.join("projects/memory-bucket/session-m.jsonl"),
+            &source_claude.join(format!("projects/{bucket}/session-m.jsonl")),
             transcript.as_bytes(),
         );
         write(
-            &source_claude.join("projects/memory-bucket/memory/MEMORY.md"),
+            &source_claude.join(format!("projects/{bucket}/memory/MEMORY.md")),
             b"remember the ducks",
         );
         let request = CaptureRequest {
             project_root: source.clone(),
             provider_homes: BTreeMap::from([(claude_key(), source_claude)]),
-            excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
         };
@@ -3133,7 +3131,6 @@ mod tests {
         let request = CaptureRequest {
             project_root: source,
             provider_homes: BTreeMap::from([(claude_key(), source_claude)]),
-            excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
         };
@@ -3253,19 +3250,13 @@ fn provider_state_target(
     provider: &ProviderKey,
     provider_home: &str,
     binding: &ProjectBinding,
-    descriptor: &ResourceDescriptor,
     logical_path: &LogicalPath,
 ) -> Option<PathBuf> {
     let prefix = mallard_domain::provider_state_path_prefix(provider);
     let suffix = logical_path.as_str().strip_prefix(prefix.as_str())?;
     let sessions = registry.sessions(provider)?;
     sessions
-        .state_target(
-            Path::new(provider_home),
-            &binding.project_root,
-            descriptor.relative_cwd.as_deref(),
-            suffix,
-        )
+        .state_target(Path::new(provider_home), &binding.project_root, suffix)
         .ok()
 }
 

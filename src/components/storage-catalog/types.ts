@@ -290,3 +290,18 @@ export interface CatalogResourceForkPlan {
   created_at: number;
   expires_at: number;
 }
+
+/** One Catalog kind repository as the storage page lists it: the derived
+ * identity plus its head facts, or — when something answers under the id but
+ * cannot be read — the refusal. Absent repositories are simply not listed. */
+export interface CatalogStorageRepository {
+  repository_id: string;
+  provider: CatalogProviderKey;
+  resource_kind: CatalogResourceKind;
+  revision: number | null;
+  updated_at: number | null;
+  /** Display names of everything the set holds, sorted for the fold. */
+  resource_names: string[];
+  /** Why the repository can't be read; the row states it instead of chips. */
+  error: string | null;
+}

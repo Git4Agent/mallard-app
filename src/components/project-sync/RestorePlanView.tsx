@@ -7,6 +7,7 @@ import type {
   RestoreResult,
 } from "../../types";
 import Icon from "../Icons";
+import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import ProjectActivityPage from "./ProjectActivityPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
 import SyncReviewTabs from "../sync-review/SyncReviewTabs";
@@ -394,6 +395,49 @@ export default function RestorePlanView({
     completedResourceIds,
   );
   const storageReplacedGate = !hasResult && plan.remote_continuity?.state === "replaced";
+  /* The banner zone that heads the review scroll. Both messages can be on
+     screen at once, so they share one box at the loudest rung present. */
+  const banners: NoticeItem[] = [];
+  if (storageReplacedGate) {
+    banners.push({
+      key: "storage-replaced",
+      severity: "warning",
+      title: "Storage history changed",
+      message: `${storageName || "This storage"} was reset. Pulling adopts its new history; local content is backed up first.`,
+      action: onUnlinkStorage
+        ? (
+          <button type="button" className="btn btn-ghost danger" onClick={onUnlinkStorage} disabled={busy}>
+            Unlink storage…
+          </button>
+        )
+        : undefined,
+    });
+  }
+  if (error && !hasResult) {
+    banners.push({
+      key: "pull-failed",
+      severity: "danger",
+      message: error,
+      action: isIrrecoverableSyncError(error) && onResetMetadata
+        ? (
+          <button type="button" className="btn btn-ghost danger" onClick={onResetMetadata} disabled={busy}>
+            <Icon name="trash" size={13} />
+            Reset local sync state
+          </button>
+        )
+        : undefined,
+    });
+  }
+  /* The replaced-history gate is read straight off the plan this view was
+     handed, so it is painted on the first render — standing content, and a
+     named region rather than a live one. The error is the opposite: the review
+     always mounts with `error` null (the host clears it before it plans, and
+     even the supporting-check failure lands after the plan is handed over), so
+     an error that is present arrived after an action and stops the flow. One
+     present error re-times the whole box. */
+  const bannerTiming: NoticeTiming = error && !hasResult
+    ? { timing: "blocking" }
+    : { timing: "standing", label: "Notes about this Pull review" };
   const projectContentRows: ProjectFileReviewRow[] = projectContentItems
     .filter((item) => item.projectContentPath && item.projectContentEntryType)
     .map((item) => {
@@ -478,34 +522,12 @@ export default function RestorePlanView({
         <div
           className="sync-inline-action-scroll sync-sync-review-scroll"
         >
-          {(storageReplacedGate || Boolean(error && !hasResult)) && (
+          {banners.length > 0 && (
+            /* The wrapper stays: it owns the zone's spacing and resets the
+               box's own margin, which is the only thing the notice cannot do
+               for itself. */
             <div className="sync-review-banners">
-              {storageReplacedGate && (
-                <div className="sync-callout warning" role="status">
-                  <Icon name="alert-triangle" size={15} />
-                  <span>
-                    <strong>Storage history changed</strong>
-                    {`${storageName || "This storage"} was reset. Pulling adopts its new history; local content is backed up first.`}
-                  </span>
-                  {onUnlinkStorage && (
-                    <button type="button" className="btn btn-ghost danger" onClick={onUnlinkStorage} disabled={busy}>
-                      Unlink storage…
-                    </button>
-                  )}
-                </div>
-              )}
-              {error && !hasResult && (
-                <div className="sync-callout error sync-pull-error" role="alert">
-                  <Icon name="alert-triangle" size={15} />
-                  <span>{error}</span>
-                  {isIrrecoverableSyncError(error) && onResetMetadata && (
-                    <button type="button" className="btn btn-ghost danger" onClick={onResetMetadata} disabled={busy}>
-                      <Icon name="trash" size={13} />
-                      Reset local sync state
-                    </button>
-                  )}
-                </div>
-              )}
+              <NoticeZone items={banners} subject="notes about this Pull review" {...bannerTiming} />
             </div>
           )}
           {activeStep === "history" && (
@@ -595,7 +617,10 @@ export default function RestorePlanView({
       <footer className={embedded ? "sync-pull-apply-bar sync-inline-action-footer sync-sync-review-footer" : "sync-pull-apply-bar sync-sync-review-footer"}>
         {busy && (
           /* Same contract as Push: no safe mid-write abort exists, so the
-             sealed exits are named instead of leaving a cancel to hunt for. */
+             sealed exits are named instead of leaving a cancel to hunt for.
+             And as on Push it announces, because it appears only once `busy`
+             flips — the one explanation for the button going dead under the
+             reader's focus and Escape no longer closing the review. */
           <span role="status"><small>A running pull finishes or fails whole — it can’t be cancelled midway.</small></span>
         )}
         <button

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Notice — the shipped recipe</title>
+    <style>
+      /* Page chrome only. Everything inside .specimen-frame is the shipped skin. */
+      /* App.css pins html/body/#root to 100% with overflow hidden for the Tauri
+         shell; a specimen is a document and needs to scroll. Vite injects the
+         imported stylesheet after this block, so these out-specify it rather
+         than merely follow it. */
+      html:root { height: auto; overflow: visible; }
+      :root > body { height: auto; min-height: 100%; overflow: visible; }
+      body > #root { height: auto; overflow: visible; }
+      body { margin: 0; background: var(--bg-0, #f4efe8); color: var(--text-1, #333); }
+      .specimen-page { padding: 28px 32px 80px; display: flex; flex-direction: column; gap: 34px;
+        font-family: var(--font, system-ui); }
+      .specimen-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px;
+        border-bottom: 1px solid var(--border, #ccc); padding-bottom: 18px; }
+      .specimen-head h1 { margin: 0 0 6px; font-size: 20px; color: var(--text-0); }
+      .specimen-head p { margin: 0; font-size: 13px; color: var(--text-2); max-width: 68ch; line-height: 1.5; }
+      .specimen-controls { display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--text-2); white-space: nowrap; }
+      section > h2 { margin: 0 0 4px; font-size: 13px; letter-spacing: 1px; text-transform: uppercase;
+        color: var(--text-2); font-weight: 400; }
+      .specimen-lead { margin: 0 0 18px; font-size: 13px; color: var(--text-2); max-width: 74ch; line-height: 1.5; }
+
+      .specimen-rows { display: flex; flex-direction: column; gap: 26px; }
+      /* Two columns of the same width, so a layout that shifts when the flag
+         leaves shifts visibly against its own twin. */
+      .specimen-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+      .specimen-pair-head { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px;
+        margin-bottom: 10px; font-size: 12px; color: var(--text-3); }
+      .specimen-pair-head b { color: var(--text-1); font-weight: 500; }
+      .specimen-pair .specimen-frame { max-width: none; }
+      .specimen-narrow { display: flex; flex-wrap: wrap; gap: 26px; }
+      .specimen-narrow .specimen-frame { width: 440px; }
+      .specimen-row-label { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; font-size: 12px; }
+      .specimen-row-label b { color: var(--text-0); }
+      .specimen-row-label span { color: var(--text-3); }
+      /* The frame stands in for the workspace column the page renders inside. */
+      .specimen-frame { max-width: 860px; padding: 14px 18px 18px; border: 1px solid var(--border);
+        border-radius: 8px; background: var(--bg-0); container-type: inline-size; container-name: session-detail-layout; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/notice-system.tsx"></script>
+  </body>
+</html>

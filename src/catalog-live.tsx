@@ -363,6 +363,8 @@ function stubApi(storageId: string | null, view: "skills" | "pets"): StorageCata
       outcome: "forked",
       message: `Created ${planId.replace(/^fork-resource-/, "")}; local-only until you push it`,
     }),
+    // The storage page's listing; the Catalog page itself never calls it.
+    listStorageRepositories: async () => [],
     listCapabilities: async () => [
       {
         provider: "codex",

@@ -48,15 +48,26 @@ function MarkdownImagePlaceholder({
   detail?: string;
   loading?: boolean;
 }) {
+  /* Which of the two states a chip is in used to be carried by 30% of opacity
+     and, for the reason, by `title` — a tint is not a text alternative, and a
+     tooltip on a non-interactive span is announced by nothing and reachable
+     without a mouse by no one. The state is printed as a word, and because
+     `role="img"` replaces the subtree with the accessible name, the name has to
+     repeat it; the tooltip stays for the pointer. */
+  const state = loading ? "loading…" : "not shown";
+  const accessibleName = detail
+    ? `${label} — image ${state}. ${detail}`
+    : `${label} — image ${state}`;
   return (
     <span
       className={`session-detail-image-placeholder${loading ? " is-loading" : ""}`}
       role="img"
-      aria-label={label}
+      aria-label={accessibleName}
       {...(detail ? { title: detail } : {})}
     >
       <Icon name="file" size={12} />
       <span className="session-detail-image-placeholder-label">{label}</span>
+      <span className="session-detail-image-placeholder-state">{state}</span>
     </span>
   );
 }
@@ -212,8 +223,16 @@ function EventQuality({ event, title }: { event: SessionTimelineEvent; title?: s
     : event.quality === "inferred"
       ? "Inferred"
       : "Unavailable";
+  /* The chip stays a chip — one word on the row, no box. But its explanation
+     lived only in `title`, which on a role-less span is neither an accessible
+     name nor a description: nothing announces it and no keyboard reaches it.
+     The sentence is printed as text and hidden visually, so the chip's meaning
+     survives the pointer being absent while the tooltip keeps working. */
   return (
-    <span className={`session-detail-quality quality-${event.quality}`} title={title}>{label}</span>
+    <span className={`session-detail-quality quality-${event.quality}`} title={title}>
+      {label}
+      {title ? <span className="sync-visually-hidden"> {title}</span> : null}
+    </span>
   );
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { BundleSnapshotSummary, StorageConfig } from "../../types";
 import Icon from "../Icons";
+import Notice, { NoticeZone, type NoticeItem } from "../notice/Notice";
 import { formatRelativeTime } from "./model";
 
 interface Props {
@@ -50,6 +51,41 @@ export default function BundleConnectionDialog({
   const selectedFingerprintUnknown = !!projectFingerprint
     && !!selected
     && !selected.repository_fingerprint;
+
+  /* Everything this dialog has to say about the connection, in one box under
+     the list. It was four stacked callouts, one of them unconditional, so the
+     dialog always drew at least one and a real fingerprint mismatch arrived as
+     a second amber row indistinguishable from the standing reassurance. They
+     are rungs of one ladder now, and the box takes the loudest present.
+     All four are standing content — the reassurance is always true, the two
+     fingerprint lines are read off the selected match, and the failure comes
+     in as a prop — so the box is a named region, never a live one (WCAG 2.2
+     SC 4.1.3). */
+  const notices: NoticeItem[] = [];
+  if (selectedFingerprintDiffers) {
+    notices.push({
+      key: "fingerprint-differs",
+      severity: "warning",
+      message: "This repo has a different Git fingerprint. Connecting will adopt its repository identity.",
+    });
+  }
+  if (selectedFingerprintUnknown) {
+    notices.push({
+      key: "fingerprint-unknown",
+      severity: "warning",
+      message: "This repo has no Git fingerprint, so Mallard cannot verify that it belongs to this checkout.",
+    });
+  }
+  /* `info`, not `warning`: this sentence says what connecting will NOT do. It
+     is reassurance about the operation's blast radius, it asks for nothing,
+     and it is unconditional — at `warning` the dialog printed "Warning ·" over
+     a plain fact every single time it opened, which is also what stopped a
+     real mismatch below from raising the box's rung. */
+  notices.push({
+    key: "metadata-only",
+    severity: "info",
+    message: "Connecting changes only Mallard metadata. It does not move or delete the checkout or provider profile.",
+  });
 
   return (
     <dialog
@@ -118,24 +154,19 @@ export default function BundleConnectionDialog({
             })}
           </div>
 
-          {selectedFingerprintDiffers && (
-            <div className="sync-callout warning">
-              <Icon name="alert-triangle" size={15} />
-              <span>This repo has a different Git fingerprint. Connecting will adopt its repository identity.</span>
-            </div>
-          )}
-          {selectedFingerprintUnknown && (
-            <div className="sync-callout warning">
-              <Icon name="alert-triangle" size={15} />
-              <span>This repo has no Git fingerprint, so Mallard cannot verify that it belongs to this checkout.</span>
-            </div>
-          )}
+          <NoticeZone
+            items={notices}
+            subject="notes about connecting this repo"
+            timing="standing"
+            label="Notes about connecting this repo"
+          />
 
-          <div className="sync-callout warning">
-            <Icon name="alert-triangle" size={15} />
-            <span>Connecting changes only Mallard metadata. It does not move or delete the checkout or provider profile.</span>
-          </div>
-          {error && <div className="sync-callout error"><Icon name="alert-triangle" size={15} /> {error}</div>}
+          {/* The connect failure is its own box, not a rung of the standing
+              one: it is raised by this dialog's own primary button and it is
+              why the dialog is still open, so it has to announce. Appending it
+              to a region would have added a silent bullet under the reassurance
+              the reader had already read. */}
+          {error && <Notice severity="danger" timing="blocking">{error}</Notice>}
         </div>
 
         <footer className="sync-modal-footer">

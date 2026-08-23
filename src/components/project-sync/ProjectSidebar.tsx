@@ -511,7 +511,22 @@ export default function ProjectSidebar({
                 >
                   <Icon name="folder" size={15} />
                   <span>{draft.display_name}</span>
-                  <span className={`sync-draft-badge${draft.status === "attention" ? " attention" : ""}`}>Draft</span>
+                  {/* Attention is the draft that points at a storage or a
+                      profile the machine no longer has, and the only thing
+                      saying so was the badge's tint — the same word, in a
+                      different colour, which is nothing at all to a reader who
+                      cannot separate the two (WCAG 1.4.1). The triangle is the
+                      second channel, the shape the two warnings further down
+                      this rail already use, so the row reads as flagged in
+                      greyscale. The word stays "Draft": it is what marks the
+                      row as a draft at all, and swapping it for the state
+                      would cost more than it bought. */}
+                  <span className={`sync-draft-badge${draft.status === "attention" ? " attention" : ""}`}>
+                    {draft.status === "attention" && (
+                      <Icon name="alert-triangle" size={12} aria-hidden="true" />
+                    )}
+                    Draft
+                  </span>
                 </button>
                 <div className="sidebar-profile-actions">
                   <button
@@ -556,7 +571,16 @@ export default function ProjectSidebar({
                     className="sidebar-profile-main"
                     onClick={() => onSelectProject(project.local_project_id)}
                     disabled={busy}
-                    aria-label={project.is_git_repository === true ? `${label}, Git repository` : label}
+                    /* The triangle below is decorative, and the button was
+                       named by the project label alone, so the warning was
+                       drawn and never spoken — a reader who does not see the
+                       rail learned nothing was wrong. The storage rows further
+                       down already name their issue on the button; this says
+                       the same thing the same way. */
+                    aria-label={[
+                      project.is_git_repository === true ? `${label}, Git repository` : label,
+                      profileRequired ? "Project issue: No agent profile is assigned" : null,
+                    ].filter(Boolean).join(". ")}
                     title={[
                       project.is_git_repository === true ? "Git repository" : null,
                       aliased ? `Repo: ${project.display_name}` : null,
@@ -569,7 +593,14 @@ export default function ProjectSidebar({
                       className={project.is_git_repository === true ? "sync-project-git-icon" : "sync-project-folder-icon"}
                     />
                     <span>{label}</span>
-                    {profileRequired && <Icon name="alert-triangle" size={12} className="sync-sidebar-profile-warning" />}
+                    {profileRequired && (
+                      <Icon
+                        name="alert-triangle"
+                        size={12}
+                        className="sync-sidebar-profile-warning"
+                        aria-hidden="true"
+                      />
+                    )}
                   </button>
                   <div className="sidebar-profile-actions">
                     <button

@@ -1,6 +1,7 @@
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 import Icon from "./components/Icons";
+import { NoticeZone } from "./components/notice/Notice";
 import SyncPathBar, { type PathBarCrumb } from "./components/sync-review/SyncPathBar";
 import "./App.css";
 import "./RetroTheme.css";
@@ -37,14 +38,24 @@ function Harness() {
       </div>
       <div className="sync-app" style={{ flex: 1, minHeight: 0 }}>
         <div className="sync-workspace">
-          <div className="sync-backend-banner sync-shell-error" role="alert">
-            <Icon name="alert-triangle" size={15} />
-            <span>{written ? WRITTEN : RAW}</span>
-            <button type="button" className="btn">Open storage menu</button>
-            <button type="button" className="sync-notice-dismiss" title="Dismiss" aria-label="Dismiss error">
-              <Icon name="x" size={12} />
-            </button>
-          </div>
+          <NoticeZone
+            items={[{
+              key: "shell-error",
+              severity: "danger",
+              message: written ? WRITTEN : RAW,
+              action: (
+                <>
+                  <button type="button" className="btn">Open storage menu</button>
+                  <button type="button" className="sync-notice-dismiss" title="Dismiss" aria-label="Dismiss error">
+                    <Icon name="x" size={12} />
+                  </button>
+                </>
+              ),
+            }]}
+            subject="messages from Mallard"
+            className="sync-backend-banner"
+            timing="blocking"
+          />
           <SyncPathBar crumbs={crumbs} ariaLabel="Catalog path" />
           <main className="sync-main sync-project-links-page">
             <section className="profile-links-section" aria-label="Pets v2">

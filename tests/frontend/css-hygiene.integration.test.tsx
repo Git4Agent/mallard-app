@@ -180,6 +180,45 @@ function contrast(a: string, b: string): number {
   return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
 }
 
+/** Lay a translucent fill over a surface and return the flat colour that
+ *  results — what the eye actually reads the ink against. */
+function composite(fill: string, surface: string): string {
+  const parts = fill.match(/[\d.]+/g)?.map(Number) ?? [];
+  const [fr, fg, fb, fa = 1] = parts;
+  const under = surface.startsWith("#")
+    ? [1, 3, 5].map((i) => parseInt(surface.slice(i, i + 2), 16))
+    : (surface.match(/[\d.]+/g)?.map(Number) ?? [0, 0, 0]);
+  const mix = (f: number, u: number) =>
+    Math.round(f * fa + u * (1 - fa)).toString(16).padStart(2, "0");
+  return `#${mix(fr, under[0])}${mix(fg, under[1])}${mix(fb, under[2])}`;
+}
+
+test("every notice rung reads on its own fill", () => {
+  // A notice prints its ink on its own tint, not on bare paper, and the tint is
+  // translucent — so the ratio that matters is against the composite. Light
+  // `--danger-text` was picked against paper at 4.9 and measured 4.37 here,
+  // which is what this gate exists to catch. The rungs carry the meaning
+  // *twice* (the type name is printed in the text) but the text still has to be
+  // readable, so this is the 4.5 text floor, not the 3:1 non-text one.
+  for (const theme of ["light", "dark"] as const) {
+    const tokens = tokensFor(theme);
+    const paper = resolve("--surface-card", tokens);
+    for (const [ink, fill] of [
+      ["--danger-text", "--danger-soft"],
+      ["--warning-text", "--warning-soft"],
+      ["--info-text", "--info-soft"],
+      ["--success-text", "--success-soft"],
+    ]) {
+      const ground = composite(resolve(fill, tokens), paper);
+      const measured = contrast(resolve(ink, tokens), ground);
+      assert.ok(
+        measured >= 4.5,
+        `${ink} on ${fill} is ${measured.toFixed(2)}:1 on ${theme} — needs 4.5`,
+      );
+    }
+  }
+});
+
 test("every status badge reads on the paper of its own theme", () => {
   // The seven that carry a verdict. Measured against the *hovered* row, the
   // harder of the two surfaces a badge sits on.

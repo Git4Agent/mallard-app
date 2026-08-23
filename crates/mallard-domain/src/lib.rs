@@ -876,8 +876,6 @@ pub struct ResourceDescriptor {
     pub display_name: String,
     pub provenance: Provenance,
     pub apply_policy: ApplyPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relative_cwd: Option<String>,
     pub codec_version: u32,
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
@@ -904,21 +902,6 @@ impl ResourceDescriptor {
                 "resource '{}' has codec version 0",
                 self.resource_id
             ));
-        }
-        if let Some(relative) = &self.relative_cwd {
-            // Provider adapters use `.` as the sole canonical spelling for
-            // the bound project root. Embedded `.` and every `..` remain
-            // forbidden.
-            let invalid_component = relative != "."
-                && Path::new(relative)
-                    .components()
-                    .any(|component| matches!(component, Component::CurDir | Component::ParentDir));
-            if relative.is_empty() || Path::new(relative).is_absolute() || invalid_component {
-                return Err(format!(
-                    "resource '{}' has invalid relative cwd",
-                    self.resource_id
-                ));
-            }
         }
         if self.metadata.len() > 256
             || self.metadata.iter().any(|(key, value)| {
@@ -1401,7 +1384,6 @@ fn validate_project_content_descriptor_identity(
     if descriptor.apply_policy != ApplyPolicy::ExplicitReview
         || descriptor.codec_version != 1
         || descriptor.provider.is_some()
-        || descriptor.relative_cwd.is_some()
     {
         return Err(format!(
             "project-content resource '{}' has invalid descriptor policy",
@@ -2957,8 +2939,6 @@ pub struct SessionPresentation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relative_cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorded_sha: Option<String>,
@@ -2979,19 +2959,6 @@ impl SessionPresentation {
                     .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
             {
                 return Err("session recorded sha must be bounded lowercase hex".to_string());
-            }
-        }
-        if let Some(relative) = &self.relative_cwd {
-            let invalid_component = relative != "."
-                && Path::new(relative)
-                    .components()
-                    .any(|component| matches!(component, Component::CurDir | Component::ParentDir));
-            if relative.is_empty()
-                || relative.len() > 1_024
-                || Path::new(relative).is_absolute()
-                || invalid_component
-            {
-                return Err("session presentation has an invalid relative cwd".to_string());
             }
         }
         Ok(())
@@ -3355,6 +3322,28 @@ pub enum ConversationPlanActionType {
     MaterializeCloud,
     KeepBoth,
     CreateLocal,
+}
+
+/// How loudly a user-facing notice reads.
+///
+/// One ladder for the whole app. The frontend prints the rung's name in the
+/// notice text ("Error ·", "Warning ·", "Note ·", "Done ·") so severity never
+/// rests on a tint or a glyph, and a zone holding several notices takes the
+/// loudest rung present. `Ord` is derived for exactly that comparison, so the
+/// declaration order below IS the ladder: quietest first.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeSeverity {
+    /// Something finished. Reads as a receipt, not a problem.
+    Success,
+    /// A fact about how the data was produced. Nothing is missing and nothing
+    /// is asked of the reader.
+    Info,
+    /// The reader is seeing less than the whole truth, or an action may be
+    /// needed. Not blocking.
+    Warning,
+    /// The thing failed. Whatever the reader was doing did not happen.
+    Danger,
 }
 
 /// A capability or evidence failure that blocks a reviewed direction. Normal

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import type {
   GitBranchSummary,
   LocalProjectSummary,
+  NoticeSeverity,
   ProjectActivity,
   ProjectBinding,
   ProjectSessionSummary,
@@ -11,6 +12,7 @@ import type {
   ThreadSyncEntry,
 } from "../../types";
 import Icon, { type IconName } from "../Icons";
+import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import { clockOptions, formatDuration } from "../../clock";
 import { getPreference } from "../../preferences";
 import { projectSyncApi } from "./api";
@@ -1341,6 +1343,20 @@ function providerNoticeCopy(state: ProviderActivityState): string {
   }
 }
 
+/** How loudly one of those provider notices reads.
+ *
+ * The strip carried no tone class before, so its severity lived entirely in
+ * the glyph: an alert triangle for a profile that cannot be read, a cloud for
+ * everything else. That distinction is real and survives the move. A profile
+ * Mallard cannot reach means the reader is seeing less than the whole truth —
+ * those sessions fail closed until it comes back — which is exactly `warning`.
+ * `view_only` and `unsupported` are facts about how the list was produced,
+ * nothing is missing and nothing is broken, so they stay at the quiet rung.
+ */
+function providerNoticeSeverity(state: ProviderActivityState): NoticeSeverity {
+  return state.access === "bound_unavailable" ? "warning" : "info";
+}
+
 export function ProjectChatHistoryContent({
   project, binding, activity, loading, loadingMore, actionError, loadError, onRetryLoad, actionBusyResourceId, actionBusyActionId = null,
   onLoadMore,
@@ -1470,6 +1486,95 @@ export function ProjectChatHistoryContent({
     });
   };
 
+  /* Everything this page has to say about the list below it, in one box.
+   *
+   * Six sibling callouts used to stack here — a failed row action, a failed
+   * refresh, a replaced storage history, one note per provider whose sessions
+   * are not fully actionable, a failed comparison, and one note per provider
+   * whose comparison failed. They are rungs of one ladder rather than six
+   * banners, so the zone takes the loudest rung present and lists the rest.
+   * The order below is the order they stacked in. */
+  const notices: NoticeItem[] = [];
+  if (actionError) {
+    notices.push({ key: "action-failed", severity: "danger", message: actionError });
+  }
+  /* A refresh that failed on top of an already-loaded page: the stale page
+     stays useful, so the message owns the retry instead of replacing the list.
+     A first load that failed has no list to keep and stays a whole-page state
+     below. */
+  const refreshFailed = Boolean(loadError) && activity != null;
+  if (refreshFailed) {
+    notices.push({
+      key: "refresh-failed",
+      severity: "danger",
+      message: `Couldn't refresh activity: ${loadError}`,
+      action: (
+        <button type="button" className="btn btn-ghost" onClick={onRetryLoad} disabled={loading}>
+          Try again
+        </button>
+      ),
+    });
+  }
+  if (comparison?.remote_continuity?.state === "replaced") {
+    notices.push({
+      key: "continuity-replaced",
+      severity: "warning",
+      title: "Storage history changed",
+      message: `The sync history in ${comparisonStorageName} is different from the one Mallard last synced for this project (revision ${comparison.remote_continuity.base_revision}). This usually means Mallard's sync data in that storage was deleted and created again. The session statuses below use the replacement. Unlink this storage and link it again to start fresh. Unlinking does not delete files, but anything saved only in the previous storage history cannot be recovered from this machine.`,
+      // The recovery is one verb, and only when the host offers it.
+      action: onUnlinkStorage ? (
+        <button type="button" className="btn btn-ghost danger" onClick={onUnlinkStorage} disabled={continuityActionBusy}>
+          Unlink storage
+        </button>
+      ) : undefined,
+    });
+  }
+  /* One note per provider whose rows are visible but not fully actionable,
+     straight from the backend's provider states — the page never derives
+     access from a provider name. */
+  for (const state of providerNotices) {
+    notices.push({
+      key: `provider-notice:${state.provider}`,
+      severity: providerNoticeSeverity(state),
+      title: state.display_name,
+      message: `— ${providerNoticeCopy(state)}${state.detail ? ` ${state.detail}` : ""}`,
+    });
+  }
+  /* The whole comparison failed, as against one provider's failing. It used to
+     be a 24px glyph in the header's corner with the reason on a tooltip; with
+     the header gone it says its piece where the other comparison failures
+     already do. */
+  if (comparisonError) {
+    notices.push({
+      key: "comparison-failed",
+      severity: "warning",
+      title: `Comparison with ${comparisonStorageName} failed`,
+      message: `— ${comparisonError} Every row below falls back to an unknown status.`,
+    });
+  }
+  /* Comparison failures are isolated per provider: one failed provider warns
+     here while every other provider's rows keep their statuses. */
+  for (const [provider, message] of providerErrors) {
+    notices.push({
+      key: `provider-error:${provider}`,
+      severity: "warning",
+      title: providerNames.get(provider) ?? provider,
+      message: `comparison failed: ${message}`,
+    });
+  }
+  /* Only two of those six are events. `actionError` is set in the catch of a
+   * row action the user just ran, and a `loadError` sitting over a loaded page
+   * can only have come from the refresh or the load-more the user asked for;
+   * both are things that HAPPENED and did not finish, so either one re-times
+   * the whole box to assertive. Everything else here is standing content: the
+   * continuity state, the provider access states and both comparison failures
+   * all arrive with the data this view is first rendered from, and WCAG 2.2
+   * SC 4.1.3 says content already present when the view renders is not a
+   * status message. It gets a named region instead. */
+  const noticeTiming: NoticeTiming = actionError || refreshFailed
+    ? { timing: "blocking" }
+    : { timing: "standing", label: "Notes about this project activity" };
+
   const content = (
       <section
         className={embedded ? "sync-history-content" : "profile-links-section"}
@@ -1482,79 +1587,32 @@ export function ProjectChatHistoryContent({
             row with nothing of its own to say. */}
         {refreshStatus && <span className="sync-visually-hidden" role="status">{refreshStatus}</span>}
 
-        {actionError && <div className="sync-callout error sync-history-error" role="alert"><Icon name="alert-triangle" size={15} /><span>{actionError}</span></div>}
-        {loadError && activity != null && (
-          /* A refresh that failed on top of an already-loaded page: the stale
-             page stays useful, the callout owns the retry. */
-          <div className="sync-callout error sync-history-error" role="alert">
-            <Icon name="alert-triangle" size={15} />
-            <span>{`Couldn't refresh activity: ${loadError}`}</span>
-            <button type="button" className="btn btn-ghost" onClick={onRetryLoad} disabled={loading}>
-              Try again
-            </button>
-          </div>
-        )}
-        {comparison?.remote_continuity?.state === "replaced" && (
-          <div className="sync-callout warning sync-history-continuity" role="status">
-            <Icon name="alert-triangle" size={15} />
-            <div className="sync-history-continuity-copy">
-              <strong>Storage history changed</strong>
-              <span>
-                {`The sync history in ${comparisonStorageName} is different from the one Mallard last synced for this project (revision ${comparison.remote_continuity.base_revision}). This usually means Mallard's sync data in that storage was deleted and created again. The session statuses below use the replacement. Unlink this storage and link it again to start fresh. Unlinking does not delete files, but anything saved only in the previous storage history cannot be recovered from this machine.`}
-              </span>
-            </div>
-            {onUnlinkStorage && (
-              <div className="sync-sync-review-recovery-actions">
-                <button type="button" className="btn btn-ghost danger" onClick={onUnlinkStorage} disabled={continuityActionBusy}>
-                  Unlink storage
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-        {/* One notice per provider whose rows are visible but not fully
-            actionable, straight from the backend's provider states — the page
-            never derives access from a provider name. */}
-        {providerNotices.map((state) => (
-          <div key={state.provider} className="sync-callout sync-history-provider-notice" role="status">
-            <Icon name={state.access === "bound_unavailable" ? "alert-triangle" : "cloud"} size={15} />
-            <span>
-              <strong>{state.display_name}</strong>
-              {` — ${providerNoticeCopy(state)}`}
-              {state.detail ? ` ${state.detail}` : ""}
-            </span>
-          </div>
-        ))}
-        {/* The whole comparison failed, as against one provider's failing. It
-            used to be a 24px glyph in the header's corner with the reason on a
-            tooltip; with the header gone it says its piece where the other
-            comparison failures already do. */}
-        {comparisonError && (
-          <div className="sync-callout warning sync-history-comparison-error" role="alert">
-            <Icon name="alert-triangle" size={15} />
-            <span>
-              <strong>{`Comparison with ${comparisonStorageName} failed`}</strong>
-              {` — ${comparisonError} Every row below falls back to an unknown status.`}
-            </span>
-          </div>
-        )}
-        {/* Comparison failures are isolated per provider: one failed provider
-            warns here while every other provider's rows keep their statuses. */}
-        {providerErrors.map(([provider, message]) => (
-          <div key={`provider-error:${provider}`} className="sync-callout warning sync-history-provider-error" role="alert">
-            <Icon name="alert-triangle" size={15} />
-            <span>
-              <strong>{providerNames.get(provider) ?? provider}</strong>
-              {` comparison failed: ${message}`}
-            </span>
-          </div>
-        ))}
+        <NoticeZone
+          items={notices}
+          subject="notes about this project activity"
+          className="sync-history-notices"
+          {...noticeTiming}
+        />
         {!hasBoundProvider ? (
           <div className="sync-history-state sync-history-profile-state"><Icon name="alert-triangle" size={18} /><div><strong>No agent profile is connected.</strong><span>Remove and add the project again to choose a provider profile.</span></div></div>
-        ) : loading && !activity ? <div className="sync-history-state" role="status" aria-live="polite"><span className="status-loader" /> Loading project activity…</div> : !activity ? (
+        ) : loading && !activity ? (
+          /* Not a status message: this placeholder is what the view renders
+             with while its first read is in flight, and on the one path that
+             does reach it from a user action — picking a branch, which drops
+             the list — the visually hidden line above is already announcing
+             the refresh politely. Claiming a live region here only made a
+             screen reader say it twice. */
+          <div className="sync-history-state" role="region" aria-label="Loading project activity"><span className="status-loader" /> Loading project activity…</div>
+        ) : !activity ? (
           /* A failed first load is a page of its own, never a blank one: it
              names what failed and carries its own retry, because the trail's
-             refresh control is not rendered for every project shape. */
+             refresh control is not rendered for every project shape.
+             It announces, because it is never there at first paint: the load
+             runs from a mount effect and clears `loadError` on the way in, so
+             this box replaces the loading line after the fetch settles — on
+             the very first load as much as on a retry or a branch switch. A
+             region here would leave the reader with the polite "Loading…" and
+             then silence, unable to tell a finished retry from a failed one. */
           loadError ? (
             <div className="sync-history-state sync-history-profile-state" role="alert">
               <Icon name="alert-triangle" size={18} />

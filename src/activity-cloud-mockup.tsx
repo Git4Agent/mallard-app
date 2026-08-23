@@ -44,7 +44,6 @@ function session(overrides: Partial<ProjectSessionSummary> & {
     summary: null,
     started_at: overrides.ended_at - 3_600,
     working_directory: "/Users/hequ/Desktop/project/mallard-app",
-    relative_cwd: null,
     branch: "main",
     recorded_sha: null,
     is_active: false,

@@ -16,12 +16,14 @@ import {
 import {
   agentSetupEditorAdoption,
   buildR2AgentSetupInstruction,
+  CatalogStorageRepositoryRow,
   createAgentSetupMarker,
   reconcileAgentSetup,
   reconcileStorageDraft,
   StorageRepositoryDetails,
   StorageRepositoryRow,
 } from "../../src/components/project-sync/ProjectLinksWorkspace";
+import type { CatalogStorageRepository } from "../../src/components/storage-catalog/types";
 import StorageIndexPage from "../../src/components/project-sync/StorageIndexPage";
 import {
   applyStorageDraft,
@@ -477,6 +479,70 @@ test("repository rows spell their chips and fold full details behind the history
   assert.match(html, /aria-label="Show details for mallardInternal"/);
 });
 
+test("Catalog kind repositories join the listing in the project row's grammar", () => {
+  const repo: CatalogStorageRepository = {
+    repository_id: "library-3a91f04c77d2b8e6a5c31f9d04b7e28c",
+    provider: "codex",
+    resource_kind: "agent_skill",
+    revision: 10,
+    updated_at: Math.floor(Date.now() / 1000) - 29 * 60,
+    resource_names: ["changelog-writer", "deploy-checklist", "triage"],
+    error: null,
+  };
+  const html = renderToStaticMarkup(<CatalogStorageRepositoryRow repo={repo} />);
+
+  // Same item, row, chips, and fold affordance as a project repository; the
+  // identity is the kind icon and the scope-label name one level up.
+  assert.match(html, /sync-storage-repository-item/);
+  assert.match(html, /sync-storage-repository-row/);
+  assert.match(html, /Skills · Codex/);
+  assert.match(html, /sync-storage-repo-chip[^>]*><span>Revision<\/span><b>10<\/b>/);
+  assert.match(html, /sync-storage-repo-chip[^>]*><span>Updated<\/span><b>29m ago<\/b>/);
+  assert.match(html, /sync-history-commit-toggle/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /aria-controls="catalog-repo-details-library-3a91f04c77d2b8e6a5c31f9d04b7e28c"/);
+  // The fold is closed until opened; no id stub or contents on the row.
+  assert.doesNotMatch(html, /sync-storage-repository-details/);
+  assert.doesNotMatch(html, /changelog-writer/);
+  assert.doesNotMatch(html, /Can’t be read/);
+
+  // The workspace lists Catalog rows after the project ones, loads them with
+  // the same gate, and keeps the empty line honest.
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /storageCatalogApi\.listStorageRepositories\(storageId\)/);
+  assert.match(workspace, /<CatalogStorageRepositoryRow key=\{repo\.repository_id\} repo=\{repo\} \/>/);
+  // The empty line stays honest, and the two listings stay independent: rows
+  // that loaded still render when their sibling request failed, and a failure
+  // suppresses only the "nothing here" sentence.
+  assert.match(
+    workspace,
+    /orderedRemoteBundles\.length === 0 && orderedCatalogRepos\.length === 0 \? \(/,
+  );
+  assert.match(workspace, /bundleError \|\| catalogRepoError \? null : \(/);
+});
+
+test("an unreadable Catalog repository states its refusal instead of chips", () => {
+  const repo: CatalogStorageRepository = {
+    repository_id: "library-e29a51c8d40b76f3a1c58e02b9d47f61",
+    provider: "codex",
+    resource_kind: "codex_pet_v1",
+    revision: null,
+    updated_at: null,
+    resource_names: [],
+    error: "library tag does not match its provider and kind derivation",
+  };
+  const html = renderToStaticMarkup(<CatalogStorageRepositoryRow repo={repo} />);
+
+  assert.match(html, /Pets v1 · Codex/);
+  assert.match(html, /sync-storage-repo-unreadable[^>]*>Can’t be read/);
+  assert.match(html, /sync-storage-repository-icon danger/);
+  // No chips on a refusal row — the phrase takes their place — and the
+  // backend's sentence waits in the fold.
+  assert.doesNotMatch(html, /<span>Revision<\/span>/);
+  assert.doesNotMatch(html, /<span>Updated<\/span>/);
+  assert.doesNotMatch(html, /provider and kind derivation/);
+});
+
 test("repository rows wear the git folder icon exactly when a fingerprint marks a git remote", () => {
   const bundle: RemoteBundleSummary = {
     bundle_id: "440ed684dbb6034cf32c3bdf04a8f0ea",
@@ -680,5 +746,9 @@ test("the storage page is a rooted trail; the sidebar opens it and removes direc
   assert.match(workspace, /label: "Rename project…"/);
   assert.match(workspace, /label: "Reset local sync state…"/);
   assert.match(workspace, /onResetProjectMetadata\(workspaceProject\.local_project_id\)/);
-  assert.match(workspace, /isIrrecoverableSyncError\(activeNotice\.message\)/);
+  // The failed-action notice still routes an irrecoverable failure to the reset
+  // path rather than to a retry that cannot succeed. It reads the message off a
+  // local now that the notice is one item in the storage card's zone.
+  assert.match(workspace, /const failedMessage = activeNotice\.message;/);
+  assert.match(workspace, /isIrrecoverableSyncError\(failedMessage\)/);
 });

@@ -35,7 +35,6 @@ function descriptor(
     display_name: path.split("/").slice(-1)[0],
     provenance: { kind: "project_local", relative_path: path },
     apply_policy: "explicit_review",
-    relative_cwd: null,
     codec_version: 1,
     metadata: {},
     category: "project_files",

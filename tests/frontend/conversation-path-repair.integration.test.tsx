@@ -41,13 +41,21 @@ test("stale assigned conversations expose a scoped repair action", () => {
     />,
   );
 
+  // The region still names the count, so a reader stepping between landmarks
+  // hears how much is wrong before opening anything.
   assert.match(html, /aria-label="1 conversation path requires repair"/);
   assert.doesNotMatch(html, /healthGame \(hequ-mac\) · Default Codex · ~\/\.codex/);
-  assert.doesNotMatch(html, />1 conversation points to/);
   assert.match(html, /conversation-path-repair-button-icon/);
-  assert.match(html, /conversation-path-repair-help/);
-  assert.match(html, /title="1 conversation points to ~\/Desktop\/project\/game3\. Push and Pull are paused\."/);
   assert.match(html, /Repair 1 conversation path/);
+
+  // The sentence is on the page now. It used to live in a `title` behind an ⓘ,
+  // which is not a text equivalent: a tooltip is unreachable by keyboard, never
+  // shown on touch, and read by no screen reader on a non-interactive element.
+  assert.match(html, /1 conversation points to ~\/Desktop\/project\/game3\. Push and Pull are paused\./);
+  assert.doesNotMatch(html, /conversation-path-repair-help|title="1 conversation points to/);
+
+  // The severity is a word before the tint, not the tint alone.
+  assert.match(html, /Warning ·/);
 });
 
 test("safe conversations do not render the repair callout", () => {
@@ -90,7 +98,6 @@ test("a grouped configuration can omit the repeated scope label", () => {
   );
 
   assert.match(html, /aria-label="1 conversation path requires repair"/);
-  assert.doesNotMatch(html, /<strong>/);
   assert.doesNotMatch(html, /conversation-path-repair-scope/);
   assert.doesNotMatch(html, /Default Codex/);
 });

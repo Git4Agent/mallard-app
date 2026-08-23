@@ -140,7 +140,6 @@ export interface ProjectResourceDescriptor {
   display_name: string;
   provenance: Record<string, unknown>;
   apply_policy: ProjectApplyPolicy;
-  relative_cwd?: string | null;
   codec_version: number;
   metadata: Record<string, string>;
   // Inventory DTO presentation hints; these are not manifest identity.
@@ -976,7 +975,6 @@ export interface ProjectSessionSummary {
   started_at: number;
   ended_at: number;
   working_directory?: string | null;
-  relative_cwd?: string | null;
   branch?: string | null;
   recorded_sha?: string | null;
   is_active: boolean;
@@ -1023,9 +1021,16 @@ export type SessionToolCategory = "file_edit" | "shell" | "read" | "other";
 
 export type SessionToolCallStatus = "completed" | "failed" | "incomplete";
 
+/* How loudly a user-facing notice reads. Mirrors `NoticeSeverity` in
+ * mallard-domain; the ladder is success < info < warning < danger, and the
+ * frontend prints the rung's name in the notice text so severity never rests
+ * on a tint or a glyph. */
+export type NoticeSeverity = "success" | "info" | "warning" | "danger";
+
 export interface SessionDetailWarning {
   code: string;
   message: string;
+  severity: NoticeSeverity;
 }
 
 export interface SessionDetailCapabilities {

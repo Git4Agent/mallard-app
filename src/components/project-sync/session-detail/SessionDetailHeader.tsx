@@ -26,13 +26,11 @@ export default function SessionDetailHeader({
   detail,
   headingRef,
   actionBusyId,
-  actionError,
   onAction,
 }: {
   detail: ProjectSessionDetail;
   headingRef: RefObject<HTMLHeadingElement | null>;
   actionBusyId: string | null;
-  actionError: string | null;
   onAction: (action: SessionActionDescriptor) => void;
 }) {
   // The page's visible title is the path bar's leaf crumb — stated once, and
@@ -129,13 +127,6 @@ export default function SessionDetailHeader({
       </div>
 
       {summary && <p className="session-detail-summary">{summary}</p>}
-
-      {actionError && (
-        <div className="sync-callout error session-detail-action-error" role="alert">
-          <Icon name="alert-triangle" size={12} />
-          <span>{actionError}</span>
-        </div>
-      )}
     </header>
   );
 }

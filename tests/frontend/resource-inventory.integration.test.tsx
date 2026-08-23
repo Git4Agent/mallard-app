@@ -588,11 +588,17 @@ test("held threads and storage blockers share one banner with one way forward", 
   );
   const bannerZone = (markup: string) => markup.match(/<div class="sync-review-banners">[\s\S]*?<\/div><\/div>/)?.[0];
 
-  assert.equal(html.match(/sync-sync-review-pull-holds/g)?.length, 1, "one banner, not two");
+  // One box, structurally: the zone renders a single `.notice` however many
+  // messages it holds, so "one banner, not two" is no longer a thing a call
+  // site can get wrong.
+  assert.equal(html.match(/class="notice /g)?.length, 1, "one banner, not two");
   assert.match(html, />1 conversation held for Pull</);
   assert.match(html, /Storage has newer versions\. Selected threads still push\./);
   assert.equal(html.match(/Open Pull review/g)?.length, 1);
-  assert.match(html, /class="sync-callout sync-sync-review-pull-holds" role="status"/);
+  // Plan-derived content is on screen the moment the review paints, so it is a
+  // named region and not a status message (WCAG 2.2 SC 4.1.3).
+  assert.match(html, /class="notice warning" role="region" aria-label="Notes about this Push review"/);
+  assert.doesNotMatch(html, /role="status"|role="alert"/);
   assert.match(bannerZone(html) ?? "", /data-thread-status="divergent"/);
   assert.doesNotMatch(bannerZone(html) ?? "", /data-icon="git-compare-arrows"/);
   assert.doesNotMatch(html, />Requirements</);

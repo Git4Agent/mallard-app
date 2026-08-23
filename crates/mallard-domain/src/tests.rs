@@ -611,7 +611,6 @@ fn project_content_descriptor(entry_type: &str, relative_path: &str) -> Resource
             relative_path: relative_path.to_string(),
         },
         apply_policy: ApplyPolicy::ExplicitReview,
-        relative_cwd: None,
         codec_version: 1,
         metadata: BTreeMap::new(),
     }
@@ -728,7 +727,6 @@ fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderSco
         presentation: SessionPresentation {
             started_at: Some(1),
             ended_at: Some(2),
-            relative_cwd: Some(".".to_string()),
             branch: Some("main".to_string()),
             recorded_sha: None,
             metrics: SessionMetrics {
@@ -793,7 +791,6 @@ fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderSco
         display_name: "Conversation".to_string(),
         provenance: Provenance::Unknown,
         apply_policy: ApplyPolicy::SafeFile,
-        relative_cwd: Some(".".to_string()),
         codec_version: 1,
         metadata: BTreeMap::new(),
     };
@@ -1045,7 +1042,6 @@ fn duplicate_threads_across_scopes_are_rejected() {
         display_name: "Conversation".to_string(),
         provenance: Provenance::Unknown,
         apply_policy: ApplyPolicy::SafeFile,
-        relative_cwd: None,
         codec_version: 1,
         metadata: BTreeMap::new(),
     };

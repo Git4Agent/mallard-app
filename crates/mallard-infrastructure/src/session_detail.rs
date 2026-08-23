@@ -9,7 +9,10 @@ use crate::path_text_boundary::replace_sensitive_path_occurrences;
 use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
 use crate::project_activity::{discover_github_repository_url, resolve_activity_project};
 use crate::provider_capture::LocalSessionView;
-use crate::providers::traits::TIMELINE_TOOL_PREVIEW_BYTES;
+use crate::providers::traits::{
+    timeline_tool_detail_budgets, TIMELINE_MESSAGE_PREVIEW_BYTES, TIMELINE_PAGE_CONTENT_BYTES,
+    TIMELINE_TOOL_PREVIEW_BYTES,
+};
 use crate::providers::{
     ProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionCheckpoint,
     SessionCount, SessionCountQuality, SessionDetailWarning, SessionEventCounts,
@@ -17,7 +20,7 @@ use crate::providers::{
     SessionTimelineEventKind, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
     SessionToolCategory,
 };
-use mallard_domain::{parse_conversation_resource_id, LocalProjectId, ProviderKey};
+use mallard_domain::{parse_conversation_resource_id, LocalProjectId, NoticeSeverity, ProviderKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,8 +35,9 @@ const MAX_TIMELINE_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TIMELINE_CACHE_ENTRIES: usize = 50_000;
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_TIMELINE_PAGE_EVENTS: usize = 50;
-const MAX_TIMELINE_RESPONSE_BYTES: usize = 1024 * 1024;
-const MAX_EVENT_DETAIL_BYTES: usize = 64 * 1024;
+const MAX_SESSION_DETAIL_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_TIMELINE_PAGE_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_EVENT_DETAIL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 512;
 const MAX_WARNING_BYTES: usize = 2 * 1024;
 const MAX_CHECKPOINT_COMMITS: usize = 10_000;
@@ -636,12 +640,23 @@ fn validate_page_slice(
             "The provider returned an invalid timeline cursor.",
         ));
     }
+    let mut page_content_bytes = 0usize;
     for event in &slice.events {
         ensure_identifier("event id", &event.event_id)?;
         if event.kind == SessionTimelineEventKind::Checkpoint || event.checkpoint.is_some() {
             return Err(SessionDetailError::new(
                 SessionDetailErrorCode::ProviderError,
                 "Provider adapters cannot create Git checkpoint events.",
+            ));
+        }
+        if event
+            .text
+            .as_ref()
+            .is_some_and(|text| text.len() > TIMELINE_MESSAGE_PREVIEW_BYTES)
+        {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider returned an oversized message preview.",
             ));
         }
         if let Some(tool) = &event.tool {
@@ -663,6 +678,28 @@ fn validate_page_slice(
                     "The provider returned an oversized or unsafe tool preview.",
                 ));
             }
+        }
+        page_content_bytes = page_content_bytes
+            .saturating_add(event.text.as_ref().map_or(0, String::len))
+            .saturating_add(
+                event
+                    .tool
+                    .as_ref()
+                    .and_then(|tool| tool.argument_preview.as_ref())
+                    .map_or(0, String::len),
+            )
+            .saturating_add(
+                event
+                    .tool
+                    .as_ref()
+                    .and_then(|tool| tool.result_preview.as_ref())
+                    .map_or(0, String::len),
+            );
+        if page_content_bytes > TIMELINE_PAGE_CONTENT_BYTES {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider returned an oversized timeline page.",
+            ));
         }
     }
     Ok(())
@@ -883,6 +920,7 @@ fn load_timeline_cache(
                 code: "timeline_cache_ignored".to_string(),
                 message: "Mallard rebuilt its local timeline cache because the saved cache was outdated or unreadable."
                     .to_string(),
+                severity: NoticeSeverity::Info,
             }],
         ),
     }
@@ -1037,6 +1075,7 @@ fn load_or_build_index(
             warnings.push(SessionDetailWarning {
                 code: "timeline_cache_reset".to_string(),
                 message: "Mallard reset an over-capacity local timeline cache.".to_string(),
+                severity: NoticeSeverity::Info,
             });
         }
         cache.schema = TIMELINE_CACHE_SCHEMA;
@@ -1051,6 +1090,7 @@ fn load_or_build_index(
             warnings.push(SessionDetailWarning {
                 code: "timeline_cache_write_failed".to_string(),
                 message: "Mallard could not update the local timeline cache.".to_string(),
+                severity: NoticeSeverity::Info,
             });
         }
         return Ok((index, summary, current_snapshot_id, warnings));
@@ -1600,7 +1640,7 @@ pub fn get_project_session_detail(
         snapshot_id,
         warnings,
     };
-    ensure_response_bound(detail, MAX_TIMELINE_RESPONSE_BYTES)
+    ensure_response_bound(detail, MAX_SESSION_DETAIL_RESPONSE_BYTES)
 }
 
 /// Read one filtered, chronological page. The opaque cursor is bound to the
@@ -1741,7 +1781,7 @@ pub fn get_project_session_timeline_page(
         next_cursor,
         warnings,
     };
-    ensure_response_bound(page, MAX_TIMELINE_RESPONSE_BYTES)
+    ensure_response_bound(page, MAX_TIMELINE_PAGE_RESPONSE_BYTES)
 }
 
 fn truncate_to_bytes(value: &mut Option<String>, limit: usize, truncated: &mut bool) {
@@ -1821,13 +1861,19 @@ pub fn get_project_session_event_detail(
     if let Some(result) = detail.result.as_mut() {
         *result = sanitize_boundary_text(result, &session);
     }
+    let (argument_budget, result_budget) =
+        timeline_tool_detail_budgets(detail.arguments.as_deref(), detail.result.as_deref());
     truncate_to_bytes(
         &mut detail.arguments,
-        30 * 1024,
+        argument_budget,
         &mut detail.arguments_truncated,
     );
-    truncate_to_bytes(&mut detail.result, 30 * 1024, &mut detail.result_truncated);
-    ensure_response_bound(detail, MAX_EVENT_DETAIL_BYTES)
+    truncate_to_bytes(
+        &mut detail.result,
+        result_budget,
+        &mut detail.result_truncated,
+    );
+    ensure_response_bound(detail, MAX_EVENT_DETAIL_RESPONSE_BYTES)
 }
 
 #[cfg(test)]
@@ -2021,6 +2067,86 @@ mod tests {
     }
 
     #[test]
+    fn timeline_page_accepts_one_mib_fields_and_enforces_the_aggregate_cap() {
+        let index = index_with_path("src/main.rs");
+        let tool_event = SessionTimelineEvent {
+            event_id: "event-1".to_string(),
+            ordinal: 0,
+            timestamp: Some(1),
+            kind: SessionTimelineEventKind::ToolCall,
+            quality: SessionCountQuality::Exact,
+            turn_id: Some("turn-1".to_string()),
+            turn_tool_summary: None,
+            parent_event_id: None,
+            text: None,
+            tool: Some(crate::providers::SessionToolCallPreview {
+                provider_call_id: "call-1".to_string(),
+                native_name: "Write".to_string(),
+                category: SessionToolCategory::FileEdit,
+                status: SessionToolCallStatus::Completed,
+                summary: "src/main.rs".to_string(),
+                argument_preview: Some("a".repeat(TIMELINE_TOOL_PREVIEW_BYTES)),
+                argument_truncated: false,
+                result_preview: Some("r".repeat(TIMELINE_TOOL_PREVIEW_BYTES)),
+                result_truncated: false,
+                affected_paths: vec!["src/main.rs".to_string()],
+            }),
+            checkpoint: None,
+        };
+        assert!(validate_page_slice(
+            &SessionTimelinePageSlice {
+                events: vec![tool_event.clone()],
+                next_index: None,
+            },
+            &index,
+            1,
+        )
+        .is_ok());
+
+        let mut oversized_tool = tool_event;
+        oversized_tool.tool.as_mut().unwrap().argument_preview =
+            Some("a".repeat(TIMELINE_TOOL_PREVIEW_BYTES + 1));
+        let error = validate_page_slice(
+            &SessionTimelinePageSlice {
+                events: vec![oversized_tool],
+                next_index: None,
+            },
+            &index,
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, SessionDetailErrorCode::ProviderError);
+
+        let message = |event_id: &str, text: String| SessionTimelineEvent {
+            event_id: event_id.to_string(),
+            ordinal: 0,
+            timestamp: None,
+            kind: SessionTimelineEventKind::Prompt,
+            quality: SessionCountQuality::Exact,
+            turn_id: Some("turn-1".to_string()),
+            turn_tool_summary: None,
+            parent_event_id: None,
+            text: Some(text),
+            tool: None,
+            checkpoint: None,
+        };
+        let error = validate_page_slice(
+            &SessionTimelinePageSlice {
+                events: vec![
+                    message("message-1", "m".repeat(TIMELINE_MESSAGE_PREVIEW_BYTES)),
+                    message("message-2", "m".repeat(TIMELINE_MESSAGE_PREVIEW_BYTES)),
+                    message("message-3", "m".to_string()),
+                ],
+                next_index: None,
+            },
+            &index,
+            3,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, SessionDetailErrorCode::ProviderError);
+    }
+
+    #[test]
     fn project_markdown_paths_are_existing_no_follow_descendants() {
         let sandbox = tempfile::tempdir().unwrap();
         let project = sandbox.path().join("project");
@@ -2142,6 +2268,7 @@ mod tests {
         index.warnings.push(SessionDetailWarning {
             code: "oversized_record".to_string(),
             message: "A provider record exceeded its parsing limit.".to_string(),
+            severity: NoticeSeverity::Warning,
         });
 
         let warnings = timeline_warnings(&index, Vec::new());
@@ -2284,7 +2411,6 @@ mod tests {
                 provider: Some(provider.clone()),
                 provider_resource_type: Some("session".to_string()),
                 display_name: "Session one".to_string(),
-                relative_cwd: Some(".".to_string()),
                 apply_policy: crate::provider_capture::CaptureApplyPolicy::SafeFile,
                 selected_by_default: true,
                 blocked_reason: None,

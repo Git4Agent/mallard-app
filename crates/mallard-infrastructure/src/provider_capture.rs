@@ -58,8 +58,6 @@ pub struct ResourceCandidate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_resource_type: Option<String>,
     pub display_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relative_cwd: Option<String>,
     pub apply_policy: CaptureApplyPolicy,
     pub selected_by_default: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -156,14 +154,14 @@ pub struct CaptureRequest {
     pub project_root: PathBuf,
     /// One home per bound provider, resolved from the selected profiles.
     pub provider_homes: BTreeMap<domain::ProviderKey, PathBuf>,
-    /// Canonical nested registrations owned by other bundles. A session whose
-    /// cwd falls below one is excluded from this project's inventory.
-    pub excluded_project_roots: Vec<PathBuf>,
     /// Ordinary project content is intentionally lazy. Normal setup and
     /// provider inventory leave this false; the explicit Project files scan
     /// and a reviewed Push turn it on.
     pub include_project_content: bool,
-    /// Additional canonical roots that generic discovery must not enter.
+    /// Additional canonical roots that generic content discovery must not
+    /// enter (repository state, storage directories, nested bound project
+    /// trees). Session ownership needs no exclusions: a nested project's
+    /// sessions record a different home and are never owned here.
     pub excluded_content_roots: Vec<PathBuf>,
 }
 
@@ -173,7 +171,6 @@ impl CaptureRequest {
         Self {
             project_root: project_root.into(),
             provider_homes: BTreeMap::new(),
-            excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
         }
@@ -538,14 +535,8 @@ fn capture_resource(
             })?;
         let analysis = adapter.analyze(&transcript.bytes);
         let presentation = match adapter.summarize_bytes(&transcript.bytes) {
-            Ok(file_summary) => session_presentation(
-                &file_summary,
-                item.discovered.descriptor.relative_cwd.as_deref(),
-            ),
-            Err(_) => domain::SessionPresentation {
-                relative_cwd: item.discovered.descriptor.relative_cwd.clone(),
-                ..domain::SessionPresentation::default()
-            },
+            Ok(file_summary) => session_presentation(&file_summary),
+            Err(_) => domain::SessionPresentation::default(),
         };
         Some(CapturedConversation {
             provider: conversation_meta.provider.clone(),
@@ -767,7 +758,6 @@ fn capture_from_discovery_with_workers(
 /// portable lowercase-hex contract.
 fn session_presentation(
     file_summary: &crate::providers::SessionFileSummary,
-    relative_cwd: Option<&str>,
 ) -> domain::SessionPresentation {
     let recorded_sha = file_summary.recorded_sha.clone().filter(|sha| {
         !sha.is_empty()
@@ -783,7 +773,6 @@ fn session_presentation(
     domain::SessionPresentation {
         started_at: file_summary.started_at,
         ended_at: file_summary.ended_at,
-        relative_cwd: relative_cwd.map(str::to_string),
         branch,
         recorded_sha,
         metrics: domain::SessionMetrics {
@@ -878,7 +867,6 @@ pub fn domain_resource_descriptor(
         display_name: candidate.display_name.clone(),
         provenance,
         apply_policy: domain_apply_policy(&candidate.apply_policy),
-        relative_cwd: candidate.relative_cwd.clone(),
         codec_version: 1,
         metadata,
     };
@@ -1003,21 +991,6 @@ pub fn discover_full(
     request: &CaptureRequest,
 ) -> Result<Discovery, String> {
     let canonical_project = canonical_existing_dir(&request.project_root, "project root")?;
-    let excluded_roots = request
-        .excluded_project_roots
-        .iter()
-        .map(|path| canonical_existing_dir(path, "nested project root"))
-        .collect::<Result<Vec<_>, _>>()?;
-    for excluded in &excluded_roots {
-        if excluded == &canonical_project || !excluded.starts_with(&canonical_project) {
-            return Err(format!(
-                "nested project root '{}' must be a strict descendant of '{}'",
-                excluded.display(),
-                canonical_project.display()
-            ));
-        }
-    }
-
     let mut discovery = Discovery {
         resources: BTreeMap::new(),
         directories: BTreeMap::new(),
@@ -1029,19 +1002,13 @@ pub fn discover_full(
         excluded_subagent_resource_ids: BTreeSet::new(),
     };
     if request.include_project_content {
-        discover_generic_project_content(
-            request,
-            &canonical_project,
-            &excluded_roots,
-            &mut discovery,
-        )?;
+        discover_generic_project_content(request, &canonical_project, &mut discovery)?;
     }
     for (provider, home) in &request.provider_homes {
         let adapter = registry.require_sessions(provider)?;
         let context = crate::providers::SessionDiscoveryContext {
             provider_home: home,
             project_root: &canonical_project,
-            excluded_roots: &excluded_roots,
         };
         let session_discovery = adapter.discover(&context)?;
         install_provider_discovery(&mut discovery, provider, session_discovery)?;
@@ -1141,7 +1108,6 @@ fn install_provider_discovery(
                     provider: Some(provider.clone()),
                     provider_resource_type: Some("session".to_string()),
                     display_name: session.display_name,
-                    relative_cwd: Some(session.relative_cwd),
                     apply_policy: CaptureApplyPolicy::SafeFile,
                     selected_by_default: true,
                     blocked_reason,
@@ -1191,7 +1157,6 @@ fn install_provider_discovery(
                     provider: Some(provider.clone()),
                     provider_resource_type: Some(state.resource_type),
                     display_name: state.display_name,
-                    relative_cwd: state.relative_cwd,
                     apply_policy: if state.merge_apply {
                         CaptureApplyPolicy::Merge
                     } else {
@@ -1220,11 +1185,10 @@ struct ProjectIgnoreRule {
 fn discover_generic_project_content(
     request: &CaptureRequest,
     root: &Path,
-    excluded_project_roots: &[PathBuf],
     discovery: &mut Discovery,
 ) -> Result<(), String> {
     let ignore_rules = load_project_ignore_rules(root, &mut discovery.warnings)?;
-    let mut excluded_roots = excluded_project_roots.to_vec();
+    let mut excluded_roots = Vec::new();
     for excluded in &request.excluded_content_roots {
         match canonical_existing_dir(excluded, "excluded project-content root") {
             Ok(path) if path.starts_with(root) && path != root => excluded_roots.push(path),
@@ -1395,7 +1359,6 @@ fn add_project_content_directory(
                 provider: None,
                 provider_resource_type: None,
                 display_name: relative.to_string(),
-                relative_cwd: None,
                 apply_policy: CaptureApplyPolicy::Review,
                 selected_by_default: true,
                 blocked_reason: None,
@@ -1478,7 +1441,6 @@ fn add_project_content_file(
                 provider: None,
                 provider_resource_type: None,
                 display_name: relative.to_string(),
-                relative_cwd: None,
                 apply_policy: CaptureApplyPolicy::Review,
                 selected_by_default: true,
                 blocked_reason: None,
@@ -1516,7 +1478,6 @@ fn add_blocked_project_content_candidate(
                 provider: None,
                 provider_resource_type: None,
                 display_name: relative.to_string(),
-                relative_cwd: None,
                 apply_policy: CaptureApplyPolicy::Review,
                 selected_by_default: false,
                 blocked_reason: Some(reason.to_string()),
@@ -1756,7 +1717,7 @@ pub(crate) fn scan_session_metadata_with(
     Err("authoritative session metadata was not found in bounded file head".to_string())
 }
 
-fn validated_session_metadata(
+pub(crate) fn validated_session_metadata(
     id: String,
     cwd: String,
     is_internal_subagent: bool,
@@ -1781,31 +1742,14 @@ fn validated_session_metadata(
     })
 }
 
-pub(crate) fn owned_relative_cwd(
-    project_root: &Path,
-    cwd: &Path,
-    excluded_roots: &[PathBuf],
-) -> Result<Option<String>, String> {
-    let canonical_cwd = match fs::canonicalize(cwd) {
-        Ok(path) => path,
-        Err(_) => return Ok(None),
-    };
-    if canonical_cwd != project_root && !canonical_cwd.starts_with(project_root) {
-        return Ok(None);
-    }
-    if excluded_roots
-        .iter()
-        .any(|excluded| canonical_cwd == *excluded || canonical_cwd.starts_with(excluded))
-    {
-        return Ok(None);
-    }
-    let relative = canonical_cwd
-        .strip_prefix(project_root)
-        .map_err(|_| "session cwd membership changed during discovery".to_string())?;
-    if relative.as_os_str().is_empty() {
-        Ok(Some(".".to_string()))
-    } else {
-        normalized_path(relative).map(Some)
+/// The exact-home ownership predicate: a session belongs to the project
+/// iff its authoritative home canonicalizes to the project root itself.
+/// A subdirectory is a different project; containment never confers
+/// ownership.
+pub(crate) fn session_home_is_project_root(project_root: &Path, cwd: &Path) -> bool {
+    match fs::canonicalize(cwd) {
+        Ok(canonical_cwd) => canonical_cwd == project_root,
+        Err(_) => false,
     }
 }
 
@@ -1973,13 +1917,9 @@ fn validate_source_directory(
     let canonical = fs::canonicalize(path)
         .map_err(|error| format!("resolve directory '{}': {}", path.display(), error))?;
     if !canonical.starts_with(canonical_project)
-        || request
-            .excluded_project_roots
-            .iter()
-            .chain(request.excluded_content_roots.iter())
-            .any(|excluded| {
-                fs::canonicalize(excluded).is_ok_and(|excluded| canonical.starts_with(excluded))
-            })
+        || request.excluded_content_roots.iter().any(|excluded| {
+            fs::canonicalize(excluded).is_ok_and(|excluded| canonical.starts_with(excluded))
+        })
     {
         return Err(format!(
             "resource '{}' directory '{}' is outside approved project content",
@@ -2329,14 +2269,6 @@ pub(crate) fn resource_id_component(value: &str) -> String {
     }
 }
 
-pub(crate) fn relative_cwd_key(relative_cwd: &str) -> String {
-    if relative_cwd == "." {
-        "_root".to_string()
-    } else {
-        format!("cwd-{}", sha256_bytes(relative_cwd.as_bytes()))
-    }
-}
-
 fn sha256_bytes(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     hex_digest(digest.as_slice())
@@ -2433,7 +2365,6 @@ mod tests {
         let request = CaptureRequest {
             project_root: project,
             provider_homes: BTreeMap::from([(codex_key(), codex)]),
-            excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
         };
@@ -2469,7 +2400,6 @@ mod tests {
         let request = CaptureRequest {
             project_root: project,
             provider_homes: BTreeMap::from([(codex_key(), codex)]),
-            excluded_project_roots: Vec::new(),
             include_project_content: true,
             excluded_content_roots: Vec::new(),
         };
@@ -2517,7 +2447,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_and_claude_membership_handles_empty_memory_and_relative_mapping() {
+    fn codex_and_claude_membership_requires_the_exact_home() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("repo");
         let child = project.join("apps/web");
@@ -2532,7 +2462,7 @@ mod tests {
             &codex.join("sessions/2026/07/17/rollout-project.jsonl"),
             format!(
                 "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-a\",\"cwd\":{}}}}}\n",
-                serde_json::to_string(child.to_str().unwrap()).unwrap()
+                serde_json::to_string(project.to_str().unwrap()).unwrap()
             )
             .as_bytes(),
         );
@@ -2541,6 +2471,16 @@ mod tests {
             format!(
                 "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-b\",\"cwd\":{}}}}}\n",
                 serde_json::to_string(other.to_str().unwrap()).unwrap()
+            )
+            .as_bytes(),
+        );
+        // A subdirectory is a different project: its sessions are never
+        // owned here, with no exclusion list involved.
+        write(
+            &codex.join("sessions/2026/07/17/rollout-child.jsonl"),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-c\",\"cwd\":{}}}}}\n",
+                serde_json::to_string(child.to_str().unwrap()).unwrap()
             )
             .as_bytes(),
         );
@@ -2566,27 +2506,28 @@ mod tests {
         let request = CaptureRequest {
             project_root: project,
             provider_homes: BTreeMap::from([(codex_key(), codex), (claude_key(), claude)]),
-            excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
         };
         let inventory = discover_project(registry(), &request).unwrap();
-        let codex = inventory
+        assert!(inventory
             .resources
             .iter()
-            .find(|resource| resource.resource_id == "codex:session:thread-a")
-            .unwrap();
-        assert_eq!(codex.relative_cwd.as_deref(), Some("apps/web"));
-        assert!(!inventory
-            .resources
-            .iter()
-            .any(|resource| resource.resource_id == "codex:session:thread-b"));
+            .any(|resource| resource.resource_id == "codex:session:thread-a"));
+        for foreign in ["codex:session:thread-b", "codex:session:thread-c"] {
+            assert!(
+                !inventory
+                    .resources
+                    .iter()
+                    .any(|resource| resource.resource_id == foreign),
+                "{foreign} must not be owned"
+            );
+        }
         let claude = inventory
             .resources
             .iter()
             .find(|resource| resource.resource_id == "claude:session:session-a")
             .unwrap();
-        assert_eq!(claude.relative_cwd.as_deref(), Some("."));
         assert_eq!(
             claude.logical_paths[0],
             "state/providers/claude/sessions/session-a/transcript.jsonl"
@@ -2600,6 +2541,64 @@ mod tests {
             .unwrap();
         assert_eq!(conversation.record_count, 2);
         assert_eq!(conversation.lineage.chain().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn claude_discovery_follows_the_resumed_leaf_home_not_copied_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let original_cwd = temp.path().join("original");
+        let claude = temp.path().join("claude");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&original_cwd).unwrap();
+        fs::create_dir_all(&claude).unwrap();
+
+        // session-a lives in a foreign directory; session-b copied its
+        // history but was resumed with a leaf inside the project. Ownership
+        // follows each session's own leaf home: the copied foreign record
+        // neither blocks session-b nor pulls session-a in.
+        let copied_record = serde_json::json!({
+            "type": "user",
+            "uuid": "user-original",
+            "parentUuid": null,
+            "sessionId": "session-a",
+            "cwd": original_cwd,
+            "message": {"role": "user", "content": "original"}
+        });
+        write(
+            &claude.join("projects/source/session-a.jsonl"),
+            format!("{}\n", copied_record).as_bytes(),
+        );
+        let resumed_leaf = serde_json::json!({
+            "type": "assistant",
+            "uuid": "assistant-resumed",
+            "parentUuid": "user-original",
+            "sessionId": "session-b",
+            "cwd": project,
+            "message": {"role": "assistant", "content": [{
+                "type": "text", "text": "resumed"
+            }]}
+        });
+        write(
+            &claude.join("projects/source/session-b.jsonl"),
+            format!("{}\n{}\n", copied_record, resumed_leaf).as_bytes(),
+        );
+
+        let request = CaptureRequest {
+            project_root: project,
+            provider_homes: BTreeMap::from([(claude_key(), claude)]),
+            include_project_content: false,
+            excluded_content_roots: Vec::new(),
+        };
+        let inventory = discover_project(registry(), &request).unwrap();
+        let sessions = inventory
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == CaptureResourceKind::Conversation)
+            .map(|resource| resource.resource_id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(sessions, BTreeSet::from(["claude:session:session-b"]));
     }
 
     #[test]
@@ -2640,7 +2639,6 @@ mod tests {
         let request = CaptureRequest {
             project_root: project,
             provider_homes: BTreeMap::from([(codex_key(), codex)]),
-            excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
         };
@@ -2696,7 +2694,6 @@ mod tests {
         let request = CaptureRequest {
             project_root: project,
             provider_homes: BTreeMap::from([(codex_key(), codex)]),
-            excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
         };
@@ -2765,7 +2762,6 @@ mod tests {
         let request = CaptureRequest {
             project_root: project,
             provider_homes: BTreeMap::from([(codex_key(), codex)]),
-            excluded_project_roots: Vec::new(),
             include_project_content: false,
             excluded_content_roots: Vec::new(),
         };
@@ -2885,7 +2881,7 @@ mod tests {
 
         let mut request = CaptureRequest::for_project(&project);
         request.include_project_content = true;
-        request.excluded_project_roots = vec![project.join("child-project")];
+        request.excluded_content_roots = vec![project.join("child-project")];
         let inventory = discover_project(registry(), &request).unwrap();
         let generic = inventory
             .resources
@@ -3027,7 +3023,6 @@ mod tests {
                                 provider: None,
                                 provider_resource_type: None,
                                 display_name: id.to_string(),
-                                relative_cwd: None,
                                 apply_policy: CaptureApplyPolicy::SafeFile,
                                 selected_by_default: true,
                                 blocked_reason: None,
