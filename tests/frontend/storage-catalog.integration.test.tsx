@@ -4,6 +4,7 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import StorageCatalogPage from "../../src/components/storage-catalog/StorageCatalogPage";
 import {
+  CATALOG_KINDS,
   actionLabel,
   catalogScopeLabel,
 } from "../../src/components/storage-catalog/model";
@@ -89,6 +90,35 @@ test("a row label derives from the kind and the profile, covering every menu sha
   assert.equal(catalogScopeLabel(scope("codex_pet_v2", "codex"), profile("Codex home")), "Pets v2 · Codex home");
   // A vanished profile degrades to the kind alone rather than crashing.
   assert.equal(catalogScopeLabel(scope("agent_skill", "codex"), null), "Skills");
+});
+
+test("every kind wears its own mark rather than borrowing one", () => {
+  // All three used to borrow, and all three borrowed badly: `file` said where a
+  // skill was stored rather than what it was, `tool` is the cog a tool call
+  // already spends, and `openai` names the *provider* — which ProviderMark
+  // paints on the same row, so as a kind glyph it said nothing at all.
+  assert.deepEqual(
+    CATALOG_KINDS.map((kind) => [kind.kind, kind.icon]),
+    [
+      ["agent_skill", "lightbulb"],
+      ["plugin_install_intent", "puzzle"],
+      // One glyph for both pet formats: the rows differ by label, not by kind.
+      ["codex_pet_v1", "paw"],
+      ["codex_pet_v2", "paw"],
+    ],
+  );
+  for (const borrowed of ["file", "tool", "openai"]) {
+    assert.ok(
+      !CATALOG_KINDS.some((kind) => kind.icon === borrowed),
+      `no kind may fall back to \`${borrowed}\``,
+    );
+  }
+
+  // The pet card's tile is the kind glyph when a row has no sprite yet, so the
+  // column never collapses and never repeats the provider mark beside it.
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  assert.match(page, /catalog-pet-preview[\s\S]*?<Icon name="paw" size=\{16\} \/>/);
+  assert.doesNotMatch(page, /<Icon name="openai"/);
 });
 
 const scopeView: CatalogScopeView = {
@@ -187,10 +217,33 @@ test("every row is the activity card: badge, name as the door, facts, one ⓘ", 
   assert.match(page, /sync-history-provider-inert/);
   // Acknowledgements are row-sized callouts inside the card that raised them:
   // the warning tint for a scan finding, the danger tint for an overwrite,
-  // and the app's own checkbox rather than the platform's.
-  assert.match(page, /className="catalog-card-ack"/);
-  assert.match(page, /className="catalog-card-ack danger"/);
-  assert.match(page, /Reviewed this warning — /);
+  // and the app's own checkbox rather than the platform's. The chip spans the
+  // card's full row — auto-placement dropped a second chip into the grid's
+  // auto-sized actions track and inflated it to the chip's whole sentence
+  // (the sheared-chips screenshot); the pet template starts the span after
+  // its preview column instead.
+  assert.match(page, /catalog-card-ack\$\{danger \? " danger" : ""\}/);
+  assert.match(
+    readFileSync("src/App.css", "utf8"),
+    /\.catalog-card-ack \{[^}]*grid-column: 1 \/ -1;/,
+  );
+  assert.match(
+    readFileSync("src/RetroTheme.css", "utf8"),
+    /\.catalog-card-pet > \.catalog-card-ack \{[^}]*grid-column: 2 \/ -1;/,
+  );
+  // Payload first: the bold lead derives from warning.code with the raw
+  // backend sentence as the fallback for unknown codes, and the ack verb is
+  // the chip's trailing word — never the old constant preamble, whose text
+  // the accessible name still carries in full.
+  assert.match(page, /WARNING_LEADS/);
+  assert.match(page, /warningParts\(warning\)/);
+  assert.match(page, /aria-label=\{`Reviewed: \$\{warning\.message\}`\}|ariaLabel=\{`Reviewed: \$\{warning\.message\}`\}/);
+  assert.match(page, /verbs=\{\["Mark reviewed", "Reviewed"\]\}/);
+  assert.match(page, /verbs=\{\["Approve", "Approved"\]\}/);
+  assert.doesNotMatch(page, /Reviewed this warning — |I understand this replaces/);
+  // The count rides the verb at the point of commitment.
+  assert.match(page, /Push \{pushSelected\.size\}/);
+  assert.match(page, /Pull \{pullSelected\.size\}/);
 });
 
 test("pet rows wear the preview tile, and stored-only previews arrive lazily", () => {
@@ -232,12 +285,63 @@ test("Push and Pull are page verbs with one review each, and link on the way", (
   assert.match(page, /SyncReviewSelectionBar/);
   assert.match(page, /sync-inline-push-review sync-sync-review-workspace/);
   assert.match(page, /sync-inline-pull-review sync-sync-review-workspace/);
+  // The scroll owns the gutter under the header. A catalog review's first
+  // child is a progress notice, a banner or row one, and only the banner ever
+  // carried a top margin — and only by collapsing out of the scroll — so a
+  // review that opened without one stood its first card's border on the
+  // header's own hairline.
+  const reviewCss = readFileSync("src/App.css", "utf8");
+  assert.match(
+    reviewCss,
+    /\.sync-sync-review-scroll:has\(> \.sync-history-thread-list\) \{[^}]*padding-top: 8px;/,
+  );
+  assert.match(
+    reviewCss,
+    /\.sync-sync-review-scroll:has\(> \.sync-history-thread-list\) > \.sync-review-banners \{[^}]*margin-top: 0;/,
+  );
   // A local action is a readout plus the app's own popover, never a select.
   assert.match(page, /className="sync-path-menu end"\s*\n\s*role="menu"/);
   assert.doesNotMatch(page, /<select/);
   // And the popover keeps the keyboard contract that role implies.
   assert.match(page, /moveMenuFocus\(event\.currentTarget, event\.key\)/);
   assert.match(page, /focusMenuEdge\(node, "first"\)/);
+});
+
+test("the active path-bar Push commits the reviewed selection without rebuilding it", () => {
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+
+  assert.match(
+    page,
+    /onClick=\{\(\) => void \(mode\.kind === "push" \? runPush\(\) : openPush\(\)\)\}/,
+  );
+  assert.match(
+    page,
+    /disabled=\{mode\.kind === "push"\s*\? pushReviewApplyDisabled\s*:\s*syncDisabled \|\| pushRows\.length === 0\}/,
+  );
+  assert.match(
+    page,
+    /const pushReviewApplyDisabled = busy\s*\|\| pushSelected\.size === 0\s*\|\| pushReviewUnacknowledged;/,
+  );
+  assert.match(page, /disabled=\{pushReviewApplyDisabled\}\s*onClick=\{\(\) => void runPush\(\)\}/);
+  assert.match(page, /mode\.kind === "push"[\s\S]*?sync-path-count[\s\S]*?pushSelected\.size/);
+});
+
+test("Push review keeps matching resources visible but outside its selection", () => {
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+
+  assert.match(page, /const selectableRows = pushPlan\.rows\.filter\(\(row\) => row\.row\.selectable\);/);
+  assert.match(
+    page,
+    /const visibleRows = pushPlan\.rows\.filter\(\(row\) => \(\s*row\.row\.selectable \|\| row\.row\.relation === "matching"\s*\)\);/,
+  );
+  assert.match(page, /total=\{selectableRows\.length\}/);
+  assert.match(page, /onRecommended=\{\(\) => setPushSelected\(new Set\(selectableRows\.map/);
+  assert.match(page, /\{visibleRows\.map\(\(planRow\) => \{/);
+  assert.match(page, /selectable=\{planRow\.row\.selectable\}/);
+  assert.match(page, /onToggle=\{planRow\.row\.selectable \? \(\) => setPushSelected/);
+  assert.match(page, /acks=\{planRow\.row\.selectable && pushSelected\.has\(resourceId\)/);
+  assert.match(page, /\{selectableRows\.length === 0 && \(/);
+  assert.match(page, /\{rows\.map\(\(row\) => \{/);
 });
 
 test("Add is Kind then agent profile, and never picks a storage or resource", () => {

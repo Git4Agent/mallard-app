@@ -18,7 +18,7 @@ mod storage_catalog;
 mod sync_tests;
 
 pub use project_sync::service::{
-    CreateSetupDraftResult, ProjectActivityWorkspace, ProjectDetail, ProjectOperationResult,
+    CreateSetupDraftResult, ProjectActivity, ProjectDetail, ProjectOperationResult,
     ProjectSessionDetail, ProjectSessionTimelinePage, ProjectSessionTimelineRequest,
     ProjectSyncService, PushApproval, PushDestinationPullReason, PushDestinationStatus,
     PushReviewContext, RestoreResult, SessionDetailError, SessionDetailErrorCode,
@@ -82,7 +82,7 @@ pub fn run() {
             project_sync::commands::list_project_repository_kinds,
             project_sync::commands::list_agent_providers,
             project_sync::commands::get_project_activity,
-            project_sync::commands::get_project_activity_workspace,
+            project_sync::commands::get_project_thread_sync_comparison,
             project_sync::commands::get_project_session_detail,
             project_sync::commands::get_project_session_timeline_page,
             project_sync::commands::get_project_session_event_detail,

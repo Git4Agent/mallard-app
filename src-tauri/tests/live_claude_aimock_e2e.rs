@@ -37,7 +37,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri_app_lib::{
-    ProjectActivityWorkspace, ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest,
+    ProjectActivity, ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest,
     ProjectSyncService, PushApproval, PushDestinationPullReason, PushDestinationStatus,
     RestoreResult, SessionDetailErrorCode, ThreadSyncComparison, ThreadSyncState,
 };
@@ -1888,24 +1888,44 @@ fn fixed_activity_before_time() -> u64 {
         .saturating_add(60 * 60)
 }
 
+/// The two independent reads the Activity page performs — the session list
+/// and the storage comparison — joined into one value with the exact shape
+/// the retired single workspace command produced, so every assertion over
+/// it is unchanged.
+#[derive(Serialize, Clone)]
+struct ActivityWorkspaceView {
+    activity: ProjectActivity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comparison: Option<ThreadSyncComparison>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comparison_error: Option<String>,
+}
+
 fn activity_workspace(
     service: &ProjectSyncService<'_>,
     project_id: &LocalProjectId,
     storage_id: &StorageId,
     before_time: u64,
-    force_revalidate: bool,
-) -> ProjectActivityWorkspace {
-    redacted(
-        service.get_project_activity_workspace(
+) -> ActivityWorkspaceView {
+    let activity = redacted(
+        service.get_project_activity(
             project_id,
             Some(storage_id),
             None,
             Some(before_time),
             Some(90),
-            force_revalidate,
         ),
-        "cannot load the Claude Activity workspace",
-    )
+        "cannot load the Claude Activity list",
+    );
+    let (comparison, comparison_error) = match service.compare_threads(project_id, storage_id) {
+        Ok(comparison) => (Some(comparison), None),
+        Err(error) => (None, Some(error)),
+    };
+    ActivityWorkspaceView {
+        activity,
+        comparison,
+        comparison_error,
+    }
 }
 
 fn wait_for_activity_workspace(
@@ -1913,11 +1933,11 @@ fn wait_for_activity_workspace(
     project_id: &LocalProjectId,
     storage_id: &StorageId,
     before_time: u64,
-    mut ready: impl FnMut(&ProjectActivityWorkspace) -> bool,
-) -> ProjectActivityWorkspace {
+    mut ready: impl FnMut(&ActivityWorkspaceView) -> bool,
+) -> ActivityWorkspaceView {
     let deadline = Instant::now() + TRANSCRIPT_SETTLE_TIMEOUT;
     loop {
-        let workspace = activity_workspace(service, project_id, storage_id, before_time, false);
+        let workspace = activity_workspace(service, project_id, storage_id, before_time);
         if ready(&workspace) {
             return workspace;
         }
@@ -1947,7 +1967,7 @@ fn remove_volatile_workspace_fields(value: &mut Value) {
     }
 }
 
-fn stable_activity_workspace(workspace: &ProjectActivityWorkspace) -> Value {
+fn stable_activity_workspace(workspace: &ActivityWorkspaceView) -> Value {
     let mut value = serde_json::to_value(workspace).expect("serialize Claude Activity workspace");
     remove_volatile_workspace_fields(&mut value);
     value
@@ -1966,6 +1986,61 @@ fn assert_activity_counts(
         session.metrics_complete,
         "Claude Activity metrics are partial"
     );
+    assert_activity_token_totals(session);
+}
+
+fn assert_activity_token_totals(session: &ProjectSessionSummary) {
+    let total_input_tokens = session
+        .total_input_tokens
+        .expect("Claude Activity total input tokens are unavailable");
+    let total_output_tokens = session
+        .total_output_tokens
+        .expect("Claude Activity total output tokens are unavailable");
+    let total_tokens = session
+        .total_tokens
+        .expect("Claude Activity total tokens are unavailable");
+    assert_eq!(
+        total_tokens,
+        total_input_tokens.saturating_add(total_output_tokens),
+        "Claude Activity total tokens do not match input plus output"
+    );
+    assert!(
+        total_input_tokens > 0 && total_output_tokens > 0,
+        "Claude aimock transcript has no token usage"
+    );
+}
+
+fn assert_activity_matches_session_detail(
+    service: &ProjectSyncService<'_>,
+    project_id: &LocalProjectId,
+    session: &ProjectSessionSummary,
+) {
+    let resource_id =
+        ResourceId::parse(session.resource_id.clone()).expect("parse Claude Activity resource ID");
+    let detail = service
+        .get_project_session_detail(project_id, &resource_id)
+        .expect("cannot load Claude Session Detail for Activity count comparison");
+    let prompts = detail
+        .event_counts
+        .prompts
+        .value
+        .expect("Claude Session Detail prompt count is unavailable");
+    let responses = detail
+        .event_counts
+        .responses
+        .value
+        .expect("Claude Session Detail response count is unavailable");
+    let tool_calls = detail
+        .event_counts
+        .tool_calls
+        .value
+        .expect("Claude Session Detail tool-call count is unavailable");
+
+    assert_eq!(session.user_round_count, prompts);
+    assert_eq!(session.agent_message_count, responses);
+    assert_eq!(session.tool_call_count, tool_calls);
+    assert_activity_token_totals(session);
+    assert!(tool_calls > 0, "Claude aimock transcript has no tool call");
 }
 
 fn marker_history_activity_counts(history: &[HistoryMarker]) -> (u64, u64, u64) {
@@ -1978,10 +2053,9 @@ fn marker_history_activity_counts(history: &[HistoryMarker]) -> (u64, u64, u64) 
         .filter(|marker| marker.role == HistoryRole::Assistant)
         .count() as u64;
     // Every lineage in this fixture inherits R1's one tool-use assistant
-    // record and one user-role tool-result record. Marker histories retain
-    // only human prompts and final assistant text, so account for those two
-    // durable records explicitly.
-    (user_markers + 1, assistant_markers + 1, 1)
+    // record and one user-role tool-result record. Those records remain one
+    // tool call, but neither is a human prompt or terminal assistant reply.
+    (user_markers, assistant_markers, 1)
 }
 
 fn write_foreign_cwd_decoy(source: &[u8], destination: &Path, foreign_project_root: &Path) {
@@ -2687,7 +2761,7 @@ fn assert_cross_replica_topology(
 }
 
 fn assert_final_activity_workspace(
-    workspace: &ProjectActivityWorkspace,
+    workspace: &ActivityWorkspaceView,
     topology: &ReplicaTopology,
     histories: &[(CloudThreadId, Vec<HistoryMarker>)],
     primary_cloud: &CloudThreadId,
@@ -3813,7 +3887,8 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         Some(SOURCE_SESSION_ID)
     );
     assert_eq!(pre_push_session.source, SessionSourceState::LocalOnly);
-    assert_activity_counts(pre_push_session, 2, 2, 1);
+    assert_activity_counts(pre_push_session, 1, 1, 1);
+    assert_activity_matches_session_detail(&service_a, &project_id_a, pre_push_session);
     let pre_push_comparison = pre_push_activity
         .comparison
         .as_ref()
@@ -3838,13 +3913,8 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         cloud_primary.as_str(),
         "replica-A content-revision-2 conversation",
     );
-    let r1_activity = activity_workspace(
-        &service_a,
-        &project_id_a,
-        &storage_id,
-        activity_before_time,
-        false,
-    );
+    let r1_activity =
+        activity_workspace(&service_a, &project_id_a, &storage_id, activity_before_time);
     assert_eq!(r1_activity.activity.sessions.len(), 1);
     assert!(r1_activity.activity.warnings.is_empty());
     let r1_activity_session = &r1_activity.activity.sessions[0];
@@ -3860,7 +3930,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         r1_activity_session.logical_thread_id.as_deref(),
         Some(logical_primary_a.as_str())
     );
-    assert_activity_counts(r1_activity_session, 2, 2, 1);
+    assert_activity_counts(r1_activity_session, 1, 1, 1);
     let r1_comparison = r1_activity
         .comparison
         .as_ref()
@@ -3952,13 +4022,8 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         .clone()
         .expect("replica B setup has no binding");
     let project_id_b = second.project.local_project_id.clone();
-    let before_initial_pull = activity_workspace(
-        &service_b,
-        &project_id_b,
-        &storage_id,
-        activity_before_time,
-        false,
-    );
+    let before_initial_pull =
+        activity_workspace(&service_b, &project_id_b, &storage_id, activity_before_time);
     assert_eq!(before_initial_pull.activity.sessions.len(), 1);
     let remote_only = &before_initial_pull.activity.sessions[0];
     assert_eq!(remote_only.source, SessionSourceState::RemoteOnly);
@@ -3966,7 +4031,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         remote_only.provider_session_id.as_deref(),
         Some(SOURCE_SESSION_ID)
     );
-    assert_activity_counts(remote_only, 2, 2, 1);
+    assert_activity_counts(remote_only, 1, 1, 1);
     let storage_only_comparison = before_initial_pull
         .comparison
         .as_ref()
@@ -4011,7 +4076,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         materialized_activity.logical_thread_id.as_deref(),
         Some(logical_primary_b.as_str())
     );
-    assert_activity_counts(materialized_activity, 2, 2, 1);
+    assert_activity_counts(materialized_activity, 1, 1, 1);
     let materialized_comparison = after_initial_pull
         .comparison
         .as_ref()
@@ -4095,13 +4160,8 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &project_b,
         &read_marker_path,
     );
-    let r2_activity = activity_workspace(
-        &service_b,
-        &project_id_b,
-        &storage_id,
-        activity_before_time,
-        true,
-    );
+    let r2_activity =
+        activity_workspace(&service_b, &project_id_b, &storage_id, activity_before_time);
     let r2_activity_session = r2_activity
         .activity
         .sessions
@@ -4278,13 +4338,8 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &project_b,
         &read_marker_path,
     );
-    let r4_activity = activity_workspace(
-        &service_a,
-        &project_id_a,
-        &storage_id,
-        activity_before_time,
-        true,
-    );
+    let r4_activity =
+        activity_workspace(&service_a, &project_id_a, &storage_id, activity_before_time);
     assert!(r4_activity
         .comparison
         .as_ref()
@@ -4297,13 +4352,8 @@ fn live_claude_aimock_setup_push_pull_divergence() {
                     == Some(first_keep.remote_provider_thread_id.as_str())
                 && entry.state == ThreadSyncState::LocalAhead
         }));
-    let r5_activity = activity_workspace(
-        &service_b,
-        &project_id_b,
-        &storage_id,
-        activity_before_time,
-        true,
-    );
+    let r5_activity =
+        activity_workspace(&service_b, &project_id_b, &storage_id, activity_before_time);
     assert!(r5_activity
         .comparison
         .as_ref()
@@ -4467,39 +4517,17 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         final_history_oracles(),
         "final Claude lineage oracle changed"
     );
-    let final_activity_a_plain = activity_workspace(
-        &service_a,
-        &project_id_a,
-        &storage_id,
-        activity_before_time,
-        false,
-    );
-    let final_activity_a_cached = activity_workspace(
-        &service_a,
-        &project_id_a,
-        &storage_id,
-        activity_before_time,
-        false,
-    );
-    let final_activity_a_forced = activity_workspace(
-        &service_a,
-        &project_id_a,
-        &storage_id,
-        activity_before_time,
-        true,
-    );
+    let final_activity_a_plain =
+        activity_workspace(&service_a, &project_id_a, &storage_id, activity_before_time);
+    let final_activity_a_cached =
+        activity_workspace(&service_a, &project_id_a, &storage_id, activity_before_time);
     assert_eq!(
         stable_activity_workspace(&final_activity_a_plain),
         stable_activity_workspace(&final_activity_a_cached),
         "replica-A plain and cached Activity projections differ"
     );
-    assert_eq!(
-        stable_activity_workspace(&final_activity_a_cached),
-        stable_activity_workspace(&final_activity_a_forced),
-        "replica-A cached and forced Activity projections differ"
-    );
     assert_final_activity_workspace(
-        &final_activity_a_forced,
+        &final_activity_a_cached,
         &topology_a,
         &final_histories,
         &cloud_primary,
@@ -4507,39 +4535,17 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         "replica A",
     );
 
-    let final_activity_b_plain = activity_workspace(
-        &service_b,
-        &project_id_b,
-        &storage_id,
-        activity_before_time,
-        false,
-    );
-    let final_activity_b_cached = activity_workspace(
-        &service_b,
-        &project_id_b,
-        &storage_id,
-        activity_before_time,
-        false,
-    );
-    let final_activity_b_forced = activity_workspace(
-        &service_b,
-        &project_id_b,
-        &storage_id,
-        activity_before_time,
-        true,
-    );
+    let final_activity_b_plain =
+        activity_workspace(&service_b, &project_id_b, &storage_id, activity_before_time);
+    let final_activity_b_cached =
+        activity_workspace(&service_b, &project_id_b, &storage_id, activity_before_time);
     assert_eq!(
         stable_activity_workspace(&final_activity_b_plain),
         stable_activity_workspace(&final_activity_b_cached),
         "replica-B plain and cached Activity projections differ"
     );
-    assert_eq!(
-        stable_activity_workspace(&final_activity_b_cached),
-        stable_activity_workspace(&final_activity_b_forced),
-        "replica-B cached and forced Activity projections differ"
-    );
     assert_final_activity_workspace(
-        &final_activity_b_forced,
+        &final_activity_b_cached,
         &topology_b,
         &final_histories,
         &cloud_primary,
@@ -4610,13 +4616,8 @@ fn live_claude_aimock_setup_push_pull_divergence() {
     let primary_resource_a =
         mallard_domain::conversation_resource_id(&claude_key(), &primary_local_a)
             .expect("derive primary cursor-append Activity resource ID");
-    let activity_before_append = activity_workspace(
-        &service_a,
-        &project_id_a,
-        &storage_id,
-        activity_before_time,
-        false,
-    );
+    let activity_before_append =
+        activity_workspace(&service_a, &project_id_a, &storage_id, activity_before_time);
     let primary_activity_before = activity_before_append
         .activity
         .sessions
@@ -4634,6 +4635,8 @@ fn live_claude_aimock_setup_push_pull_divergence() {
                     session.user_round_count,
                     session.agent_message_count,
                     session.tool_call_count,
+                    session.total_input_tokens,
+                    session.total_output_tokens,
                     session.total_tokens,
                     session.metrics_complete,
                 ),
@@ -4761,6 +4764,19 @@ fn live_claude_aimock_setup_push_pull_divergence() {
             assert_eq!(session.agent_message_count, before.1 + 1);
             assert_eq!(session.tool_call_count, before.2);
             assert!(session.metrics_complete);
+            assert_activity_token_totals(session);
+            assert!(
+                session.total_input_tokens > before.3,
+                "the appended Claude turn did not increase input tokens"
+            );
+            assert!(
+                session.total_output_tokens > before.4,
+                "the appended Claude turn did not increase output tokens"
+            );
+            assert!(
+                session.total_tokens > before.5,
+                "the appended Claude turn did not increase total tokens"
+            );
             assert_eq!(session.source, SessionSourceState::LocalAndRemote);
         } else {
             assert_eq!(
@@ -4768,6 +4784,8 @@ fn live_claude_aimock_setup_push_pull_divergence() {
                     session.user_round_count,
                     session.agent_message_count,
                     session.tool_call_count,
+                    session.total_input_tokens,
+                    session.total_output_tokens,
                     session.total_tokens,
                     session.metrics_complete,
                 ),

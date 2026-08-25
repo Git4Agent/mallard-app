@@ -2110,7 +2110,7 @@ pub async fn apply_catalog_resource_fork(
 
 #[cfg(test)]
 mod tests {
-    use super::super::domain::{AgentSkillScope, CatalogActionOutcome};
+    use super::super::domain::{AgentSkillScope, CatalogActionOutcome, CatalogResourceRelation};
     use super::*;
     use mallard_domain::{StorageKind, SyncConfig};
 
@@ -2711,7 +2711,8 @@ mod tests {
         assert_eq!(manifest.resources.len(), 1);
         assert!(manifest.resources.contains_key(&review_resource_id()));
 
-        // The unselected resource still reads as New on the page.
+        // The selected resource remains visible as InSync while the
+        // unselected resource still reads as New on the same page.
         let page = list_catalog_scope_resources_with_repositories(
             &fixture.state,
             &fixture.catalog,
@@ -2721,12 +2722,62 @@ mod tests {
             &fixture.user_home,
         )
         .unwrap();
+        assert_eq!(
+            page.rows
+                .iter()
+                .map(|row| row.display_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["notes", "review"]
+        );
         let notes = page
             .rows
             .iter()
             .find(|row| row.display_name == "notes")
             .unwrap();
         assert_eq!(notes.state, Some(CatalogLinkState::New));
+        let review = page
+            .rows
+            .iter()
+            .find(|row| row.display_name == "review")
+            .unwrap();
+        assert!(review.local_present && review.remote_present);
+        assert_eq!(review.state, Some(CatalogLinkState::InSync));
+
+        // The next review retains both rows. Its stable display-name order
+        // matches the page; only the outstanding resource is selectable.
+        let next_plan = prepare_push_with_repositories(
+            &fixture.state,
+            &fixture.catalog,
+            &EmptyCodexRunner,
+            &row.scope.scope_id,
+            &fixture.storage.id,
+            &fixture.user_home,
+            now_secs(),
+        )
+        .unwrap();
+        assert_eq!(
+            next_plan
+                .rows
+                .iter()
+                .map(|row| row.row.display_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["notes", "review"]
+        );
+        let notes = next_plan
+            .rows
+            .iter()
+            .find(|row| row.row.display_name == "notes")
+            .unwrap();
+        assert_eq!(notes.row.relation, CatalogResourceRelation::LocalOnly);
+        assert!(notes.row.selectable);
+        let review = next_plan
+            .rows
+            .iter()
+            .find(|row| row.row.display_name == "review")
+            .unwrap();
+        assert_eq!(review.row.relation, CatalogResourceRelation::Matching);
+        assert!(!review.row.selectable);
+        assert!(!review.row.held_for_pull);
     }
 
     /// A repository whose tag disagrees with its own derivation was not

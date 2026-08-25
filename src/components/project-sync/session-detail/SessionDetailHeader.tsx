@@ -38,12 +38,6 @@ export default function SessionDetailHeader({
   // h1 keeps the page's structure: it is what the section labels itself by and
   // where focus lands on open, so it stays in the DOM, visually hidden.
   const title = detail.title || "Untitled session";
-  // For most providers the summary is derived from the opening prompt, which is
-  // also the title — printing both put the same sentence on screen twice before
-  // the transcript printed it a third time.
-  const summary = detail.summary && detail.summary.trim() !== title.trim()
-    ? detail.summary
-    : null;
   const start = formatSessionStart(detail.started_at);
   const length = formatSessionDuration(detail.started_at, detail.ended_at);
   const tokensKnown = detail.tokens.quality !== "unsupported" && detail.tokens.value != null;
@@ -126,7 +120,6 @@ export default function SessionDetailHeader({
         </div>
       </div>
 
-      {summary && <p className="session-detail-summary">{summary}</p>}
     </header>
   );
 }

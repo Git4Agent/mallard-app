@@ -39,7 +39,7 @@ use std::io::{BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri_app_lib::{
     ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSyncService,
     PushApproval, PushDestinationPullReason, PushDestinationStatus, RestoreResult,
@@ -4309,6 +4309,78 @@ fn assert_clean_affected_path(path: &str) {
     );
 }
 
+fn assert_activity_matches_session_detail(
+    service: &ProjectSyncService<'_>,
+    project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    resource_id: &ResourceId,
+) {
+    let before_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock predates the Unix epoch")
+        .as_secs()
+        .saturating_add(60 * 60);
+    let activity = service
+        .get_project_activity(
+            project_id,
+            Some(storage_id),
+            None,
+            Some(before_time),
+            Some(90),
+        )
+        .expect("cannot load Codex Activity for message-count comparison");
+    let session = activity
+        .sessions
+        .iter()
+        .find(|session| session.resource_id == resource_id.as_str())
+        .expect("Codex Activity lacks the message-count fixture session");
+    let detail = service
+        .get_project_session_detail(project_id, resource_id)
+        .expect("cannot load Codex Session Detail for Activity count comparison");
+    let prompts = detail
+        .event_counts
+        .prompts
+        .value
+        .expect("Codex Session Detail prompt count is unavailable");
+    let responses = detail
+        .event_counts
+        .responses
+        .value
+        .expect("Codex Session Detail response count is unavailable");
+    let tool_calls = detail
+        .event_counts
+        .tool_calls
+        .value
+        .expect("Codex Session Detail tool-call count is unavailable");
+
+    assert_eq!(session.user_round_count, prompts);
+    assert_eq!(session.agent_message_count, responses);
+    assert_eq!(session.tool_call_count, tool_calls);
+    assert!(
+        session.metrics_complete,
+        "Codex Activity metrics are partial"
+    );
+    let total_input_tokens = session
+        .total_input_tokens
+        .expect("Codex Activity total input tokens are unavailable");
+    let total_output_tokens = session
+        .total_output_tokens
+        .expect("Codex Activity total output tokens are unavailable");
+    let total_tokens = session
+        .total_tokens
+        .expect("Codex Activity total tokens are unavailable");
+    assert_eq!(
+        total_tokens,
+        total_input_tokens.saturating_add(total_output_tokens),
+        "Codex Activity total tokens do not match input plus output"
+    );
+    assert!(
+        total_input_tokens > 0 && total_output_tokens > 0,
+        "Codex aimock rollout has no token usage"
+    );
+    assert!(tool_calls > 0, "Codex aimock rollout has no tool call");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assert_session_detail_paths(
     service: &ProjectSyncService<'_>,
@@ -6006,6 +6078,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         &provider_thread1,
         &project1_external,
     );
+    assert_activity_matches_session_detail(&service1, &project_id1, &storage_id, &session_resource);
     assert_portable_state_is_safe(
         &service1,
         &storage_id,

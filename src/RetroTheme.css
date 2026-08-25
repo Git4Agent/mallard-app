@@ -1935,8 +1935,9 @@ summary {
 /* A pet card opens a leading column in the card's own template: the same two
    rows, with the preview tile spanning both — the two-line-row-with-artwork
    grammar every list with pictures uses. Everything already placed by area
-   stays where it was; auto-placed extras — the acknowledgement chips — are
-   kept out of the preview column. */
+   stays where it was; the acknowledgement chips, which span the whole card in
+   the base template, start after the preview column here so they keep the
+   text's own x. */
 .catalog-card-pet {
   grid-template-columns: auto minmax(0, 1fr) var(--sync-history-row-actions-column);
   grid-template-areas:
@@ -3074,7 +3075,6 @@ summary {
   font-family: var(--font-sans);
 }
 
-.session-detail-summary,
 .session-detail-event-copy,
 .session-detail-checkpoint-subject,
 .sync-history-session-title-button {

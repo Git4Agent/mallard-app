@@ -92,6 +92,11 @@ pub struct ProjectSessionSummary {
     pub summary: Option<String>,
     pub started_at: u64,
     pub ended_at: u64,
+    /// Machine-local provider transcript selected by discovery. This is
+    /// returned only for a locally present session and never enters a
+    /// portable manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,6 +107,10 @@ pub struct ProjectSessionSummary {
     pub user_round_count: u64,
     pub agent_message_count: u64,
     pub tool_call_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_output_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
     pub metrics_complete: bool,
@@ -364,7 +373,6 @@ pub fn scan_local_session_views(
     registry: &ProviderRegistry,
     resolved: &ResolvedActivityProject,
     views: &[LocalSessionView],
-    force_revalidate: bool,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<LocalSessionRecord>, String> {
     let cache_path = repository.root().join("activity_cache.json");
@@ -409,9 +417,9 @@ pub fn scan_local_session_views(
             );
             seen_cache_keys.insert(cache_key.clone());
             let file_nanos = modified_nanos(&metadata);
-            let cached = (!force_revalidate)
-                .then(|| cache.entries.get(&cache_key))
-                .flatten()
+            let cached = cache
+                .entries
+                .get(&cache_key)
                 .filter(|entry| entry.size == metadata.len() && entry.modified_nanos == file_nanos)
                 .map(|entry| entry.summary.clone());
             let summary = match cached {
@@ -996,6 +1004,7 @@ fn merge_activity_sessions_with_state(
                 summary: record.summary.summary.clone(),
                 started_at,
                 ended_at,
+                transcript_path: Some(record.physical_path.to_string_lossy().into_owned()),
                 working_directory: Some(resolved.project_root.to_string_lossy().into_owned()),
                 branch: record.summary.branch.clone(),
                 recorded_sha: record.summary.recorded_sha.clone(),
@@ -1003,6 +1012,8 @@ fn merge_activity_sessions_with_state(
                 user_round_count: record.summary.user_rounds,
                 agent_message_count: record.summary.agent_messages,
                 tool_call_count: record.summary.tool_calls,
+                total_input_tokens: record.summary.total_input_tokens,
+                total_output_tokens: record.summary.total_output_tokens,
                 total_tokens: record.summary.total_tokens,
                 metrics_complete: record.summary.metrics_complete,
                 actions,
@@ -1080,6 +1091,7 @@ fn merge_activity_sessions_with_state(
                 summary: None,
                 started_at,
                 ended_at,
+                transcript_path: None,
                 working_directory: None,
                 branch: record.presentation.branch.clone(),
                 recorded_sha: record.presentation.recorded_sha.clone(),
@@ -1087,6 +1099,8 @@ fn merge_activity_sessions_with_state(
                 user_round_count: record.presentation.metrics.user_rounds,
                 agent_message_count: record.presentation.metrics.agent_messages,
                 tool_call_count: record.presentation.metrics.tool_calls,
+                total_input_tokens: record.presentation.metrics.total_input_tokens,
+                total_output_tokens: record.presentation.metrics.total_output_tokens,
                 total_tokens: record.presentation.metrics.total_tokens,
                 metrics_complete: record.presentation.metrics.complete,
                 actions: Vec::new(),
@@ -1887,7 +1901,9 @@ mod activity_only_tests {
                 user_rounds: 1,
                 agent_messages: 1,
                 tool_calls: 0,
-                total_tokens: None,
+                total_input_tokens: Some(100),
+                total_output_tokens: Some(23),
+                total_tokens: Some(123),
                 metrics_complete: true,
                 is_internal_subagent: false,
             })
@@ -2356,7 +2372,7 @@ mod activity_only_tests {
     }
 
     #[test]
-    fn activity_cache_fingerprints_and_force_revalidation_control_summary_reuse() {
+    fn activity_cache_fingerprints_control_summary_reuse() {
         let temporary = tempfile::tempdir().unwrap();
         let home = temporary.path().join("provider");
         let project_root = temporary.path().join("project");
@@ -2461,56 +2477,26 @@ mod activity_only_tests {
             source_mtime: modified_secs(&transcript_metadata),
             source_size: transcript_metadata.len(),
         }];
-        let rows = scan_local_session_views(
-            &repository,
-            &registry,
-            &resolved,
-            &views,
-            false,
-            &mut warnings,
-        )
-        .unwrap();
+        let rows =
+            scan_local_session_views(&repository, &registry, &resolved, &views, &mut warnings)
+                .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
 
-        let cached_rows = scan_local_session_views(
-            &repository,
-            &registry,
-            &resolved,
-            &views,
-            false,
-            &mut warnings,
-        )
-        .unwrap();
+        let cached_rows =
+            scan_local_session_views(&repository, &registry, &resolved, &views, &mut warnings)
+                .unwrap();
         assert_eq!(cached_rows[0].summary, rows[0].summary);
         assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
-
-        let forced_rows = scan_local_session_views(
-            &repository,
-            &registry,
-            &resolved,
-            &views,
-            true,
-            &mut warnings,
-        )
-        .unwrap();
-        assert_eq!(forced_rows[0].summary, rows[0].summary);
-        assert_eq!(summary_calls.load(Ordering::SeqCst), 2);
 
         fs::write(&transcript, b"{}\n{}\n").unwrap();
         let size_after_append = fs::metadata(&transcript).unwrap().len();
         assert_ne!(size_after_append, views[0].source_size);
-        let appended_rows = scan_local_session_views(
-            &repository,
-            &registry,
-            &resolved,
-            &views,
-            false,
-            &mut warnings,
-        )
-        .unwrap();
+        let appended_rows =
+            scan_local_session_views(&repository, &registry, &resolved, &views, &mut warnings)
+                .unwrap();
         assert_eq!(appended_rows[0].summary, rows[0].summary);
-        assert_eq!(summary_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(summary_calls.load(Ordering::SeqCst), 2);
 
         let mtime_before_rewrite = modified_nanos(&fs::metadata(&transcript).unwrap());
         fs::write(&transcript, b"[]\n{}\n").unwrap();
@@ -2523,17 +2509,11 @@ mod activity_only_tests {
         assert_ne!(rewritten_metadata.len(), views[0].source_size);
         assert_ne!(modified_secs(&rewritten_metadata), views[0].source_mtime);
         assert_ne!(modified_nanos(&rewritten_metadata), mtime_before_rewrite);
-        let rewritten_rows = scan_local_session_views(
-            &repository,
-            &registry,
-            &resolved,
-            &views,
-            false,
-            &mut warnings,
-        )
-        .unwrap();
+        let rewritten_rows =
+            scan_local_session_views(&repository, &registry, &resolved, &views, &mut warnings)
+                .unwrap();
         assert_eq!(rewritten_rows[0].summary, rows[0].summary);
-        assert_eq!(summary_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(summary_calls.load(Ordering::SeqCst), 3);
 
         let preserved_thread_id = initial_conversation_thread_id(
             &resolved.bundle_id,
@@ -2573,6 +2553,13 @@ mod activity_only_tests {
         .unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "Session one (3)");
+        assert_eq!(sessions[0].total_input_tokens, Some(100));
+        assert_eq!(sessions[0].total_output_tokens, Some(23));
+        assert_eq!(sessions[0].total_tokens, Some(123));
+        assert_eq!(
+            sessions[0].transcript_path.as_deref().map(Path::new),
+            Some(transcript.as_path())
+        );
         assert!(sessions[0].preserved.is_none());
 
         repository
@@ -2612,7 +2599,42 @@ mod activity_only_tests {
                 ordinal: 2,
             })
         );
-        assert_eq!(summary_calls.load(Ordering::SeqCst), 4);
+
+        let remote_only = merge_activity_sessions(
+            &registry,
+            &repository,
+            &resolved,
+            Vec::new(),
+            vec![RemoteSessionRecord {
+                provider,
+                thread_id: CloudThreadId::parse("cloudthread-storage-only").unwrap(),
+                source_thread_id: Some("provider-storage-only".to_string()),
+                display_title: Some("Storage-only session".to_string()),
+                preserved: None,
+                presentation: mallard_domain::SessionPresentation {
+                    metrics: mallard_domain::SessionMetrics {
+                        total_input_tokens: Some(200),
+                        total_output_tokens: Some(50),
+                        total_tokens: Some(250),
+                        complete: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            }],
+            &mut warnings,
+        )
+        .unwrap();
+        assert_eq!(remote_only.len(), 1);
+        assert_eq!(remote_only[0].total_input_tokens, Some(200));
+        assert_eq!(remote_only[0].total_output_tokens, Some(50));
+        assert_eq!(remote_only[0].total_tokens, Some(250));
+        assert!(remote_only[0].transcript_path.is_none());
+        assert!(serde_json::to_value(&remote_only[0])
+            .unwrap()
+            .get("transcript_path")
+            .is_none());
+        assert_eq!(summary_calls.load(Ordering::SeqCst), 3);
         assert_eq!(timeline_calls.load(Ordering::SeqCst), 0);
     }
 }

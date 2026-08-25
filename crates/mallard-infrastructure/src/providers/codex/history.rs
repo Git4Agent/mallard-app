@@ -185,6 +185,10 @@ struct ProjectedGit {
 #[derive(Default, Serialize, Deserialize)]
 struct ProjectedTokenUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     total_tokens: Option<u64>,
 }
 
@@ -318,7 +322,12 @@ struct RolloutParser {
     summary: Option<String>,
     user_round_count: u64,
     agent_message_count: u64,
+    event_summary: Option<String>,
+    event_user_round_count: u64,
+    event_agent_message_count: u64,
     tool_call_count: u64,
+    total_input_tokens: Option<u64>,
+    total_output_tokens: Option<u64>,
     total_tokens: Option<u64>,
     metrics_complete: bool,
     is_internal_subagent: bool,
@@ -337,7 +346,12 @@ impl RolloutParser {
             summary: None,
             user_round_count: 0,
             agent_message_count: 0,
+            event_summary: None,
+            event_user_round_count: 0,
+            event_agent_message_count: 0,
             tool_call_count: 0,
+            total_input_tokens: None,
+            total_output_tokens: None,
             total_tokens: None,
             metrics_complete: true,
             is_internal_subagent: false,
@@ -362,8 +376,10 @@ impl RolloutParser {
             self.last_timestamp = Some(timestamp);
         }
         if event_type == "session_meta" || payload_type == "session_meta" {
-            self.is_internal_subagent |= session_meta_is_internal_subagent(payload);
             if self.thread_id.is_none() {
+                // The first session_meta is the active session. Later records
+                // are copied fork ancestors and must not change its identity.
+                self.is_internal_subagent = session_meta_is_internal_subagent(payload);
                 self.thread_id = string_alias(payload, &["id", "thread_id", "session_id"])
                     .map(ToOwned::to_owned);
             }
@@ -407,23 +423,52 @@ impl RolloutParser {
                         }
                     }
                     Some("AgentMessage") => {
-                        self.agent_message_count = self.agent_message_count.saturating_add(1);
+                        if normalized_type(item.get("phase").and_then(Value::as_str))
+                            == "finalanswer"
+                        {
+                            self.agent_message_count = self.agent_message_count.saturating_add(1);
+                        }
                     }
                     _ => {}
                 }
             }
         }
+        if payload_type == "user_message" {
+            if let Some(text) = genuine_user_event(payload) {
+                self.event_user_round_count = self.event_user_round_count.saturating_add(1);
+                if self.event_summary.is_none() {
+                    self.event_summary = Some(truncate_chars(&text, MAX_SUMMARY_CHARS));
+                }
+            }
+        } else if event_type == "event_msg"
+            && payload_type == "agent_message"
+            && normalized_type(payload.get("phase").and_then(Value::as_str)) == "finalanswer"
+        {
+            // Current response_item/agent_message records are agent-to-agent
+            // coordination. Commentary event messages are visible steps, not
+            // final replies.
+            self.event_agent_message_count = self.event_agent_message_count.saturating_add(1);
+        }
         if matches!(payload_type, "function_call" | "custom_tool_call") {
             self.tool_call_count = self.tool_call_count.saturating_add(1);
         }
         if payload_type == "token_count" {
-            if let Some(total) = payload
+            if let Some(usage) = payload
                 .get("info")
                 .and_then(|info| info.get("total_token_usage"))
-                .and_then(|usage| usage.get("total_tokens"))
-                .and_then(Value::as_u64)
             {
-                self.total_tokens = Some(self.total_tokens.unwrap_or(0).max(total));
+                if let Some(total) = usage.get("total_tokens").and_then(Value::as_u64) {
+                    let should_replace = self
+                        .total_tokens
+                        .is_none_or(|current| total > current);
+                    if should_replace {
+                        self.total_input_tokens =
+                            usage.get("input_tokens").and_then(Value::as_u64);
+                        self.total_output_tokens =
+                            usage.get("output_tokens").and_then(Value::as_u64);
+                        self.total_tokens = Some(total);
+                    }
+                }
             }
         }
     }
@@ -435,7 +480,20 @@ impl RolloutParser {
         self.cwd
             .as_ref()
             .ok_or_else(|| "rollout has no cwd metadata".to_string())?;
-        let summary = self.summary;
+        // Codex Desktop can emit both views or only the event view. Select
+        // one source per role so event-only sessions work without counting
+        // dual-emitted messages twice.
+        let summary = self.summary.or(self.event_summary);
+        let user_round_count = if self.user_round_count > 0 {
+            self.user_round_count
+        } else {
+            self.event_user_round_count
+        };
+        let agent_message_count = if self.agent_message_count > 0 {
+            self.agent_message_count
+        } else {
+            self.event_agent_message_count
+        };
         let mut recorded_branches = std::collections::BTreeSet::new();
         if let Some(branch) = &self.branch {
             recorded_branches.insert(branch.clone());
@@ -452,9 +510,11 @@ impl RolloutParser {
             branch: self.branch,
             recorded_sha: self.recorded_sha,
             recorded_branches,
-            user_rounds: self.user_round_count,
-            agent_messages: self.agent_message_count,
+            user_rounds: user_round_count,
+            agent_messages: agent_message_count,
             tool_calls: self.tool_call_count,
+            total_input_tokens: self.total_input_tokens,
+            total_output_tokens: self.total_output_tokens,
             total_tokens: self.total_tokens,
             metrics_complete: self.metrics_complete
                 && self.first_timestamp.is_some()
@@ -569,7 +629,7 @@ pub fn first_codex_user_summary(bytes: &[u8]) -> Option<String> {
             }
         }
     }
-    parser.summary
+    parser.summary.or(parser.event_summary)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2562,6 +2622,37 @@ mod tests {
         count.value.expect("supported count")
     }
 
+    #[test]
+    fn active_session_metadata_alone_controls_subagent_classification() {
+        let temp = tempfile::tempdir().unwrap();
+        let user_leaf = temp.path().join("user-leaf.jsonl");
+        write_jsonl(
+            &user_leaf,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"leaf-user","cwd":"/tmp/project","thread_source":"user","forked_from_id":"ancestor-subagent"}}),
+                json!({"type":"session_meta","payload":{"id":"ancestor-subagent","cwd":"/tmp/project","thread_source":"subagent","forked_from_id":"root-user"}}),
+                json!({"type":"session_meta","payload":{"id":"root-user","cwd":"/tmp/project","thread_source":"user"}}),
+            ],
+        );
+
+        let user_summary = summarize_rollout_file(&user_leaf).unwrap();
+        assert_eq!(user_summary.session_id, "leaf-user");
+        assert!(!user_summary.is_internal_subagent);
+
+        let subagent_leaf = temp.path().join("subagent-leaf.jsonl");
+        write_jsonl(
+            &subagent_leaf,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"leaf-subagent","cwd":"/tmp/project","thread_source":"subagent","forked_from_id":"ancestor-user"}}),
+                json!({"type":"session_meta","payload":{"id":"ancestor-user","cwd":"/tmp/project","thread_source":"user"}}),
+            ],
+        );
+
+        let subagent_summary = summarize_rollout_file(&subagent_leaf).unwrap();
+        assert_eq!(subagent_summary.session_id, "leaf-subagent");
+        assert!(subagent_summary.is_internal_subagent);
+    }
+
     /// A shell call is named by the script it ran. Rendering the argument and
     /// keeping the first line named every such row `[`, because the argument is
     /// an argv array and that is what a pretty-printed array opens with.
@@ -2723,11 +2814,27 @@ mod tests {
                     }
                 }),
                 json!({
+                    "timestamp": "2026-08-07T00:00:04Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {"total_token_usage": {
+                            "input_tokens": 80,
+                            "output_tokens": 20,
+                            "total_tokens": 100
+                        }}
+                    }
+                }),
+                json!({
                     "timestamp": "2026-08-07T00:00:05Z",
                     "type": "event_msg",
                     "payload": {
                         "type": "token_count",
-                        "info": {"total_token_usage": {"total_tokens": 123}}
+                        "info": {"total_token_usage": {
+                            "input_tokens": 100,
+                            "output_tokens": 23,
+                            "total_tokens": 123
+                        }}
                     }
                 }),
             ],
@@ -2738,8 +2845,10 @@ mod tests {
         let from_bytes = summarize_rollout_bytes(&bytes).unwrap();
         assert_eq!(from_file, from_bytes);
         assert_eq!(from_file.user_rounds, 1);
-        assert_eq!(from_file.agent_messages, 2);
+        assert_eq!(from_file.agent_messages, 1);
         assert_eq!(from_file.tool_calls, 1);
+        assert_eq!(from_file.total_input_tokens, Some(100));
+        assert_eq!(from_file.total_output_tokens, Some(23));
         assert_eq!(from_file.total_tokens, Some(123));
         assert_eq!(from_file.summary.as_deref(), Some("Canonical prompt"));
         assert_eq!(from_file.title.as_deref(), Some("Canonical prompt"));
@@ -2748,6 +2857,120 @@ mod tests {
             first_codex_user_summary(&bytes).as_deref(),
             Some("Canonical prompt")
         );
+    }
+
+    #[test]
+    fn message_events_drive_activity_metrics_when_canonical_items_are_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({
+                    "timestamp": "2026-08-20T00:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"id": "session-1", "cwd": project_root}
+                }),
+                json!({
+                    "timestamp": "2026-08-20T00:00:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Raw duplicate prompt"}]
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-20T00:00:00Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": "Debug the empty message count"
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-20T00:00:01Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "agent_message",
+                        "message": "I will inspect it.",
+                        "phase": "commentary"
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-20T00:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "agent_message",
+                        "id": "inter-agent-1",
+                        "author": "agent-a",
+                        "recipient": "agent-b",
+                        "content": "Coordinate the parser audit"
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-20T00:00:01Z",
+                    "type": "inter_agent_communication_metadata",
+                    "payload": {
+                        "sender": "agent-a",
+                        "recipients": ["agent-b"]
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-20T00:00:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "call_id": "call-1",
+                        "name": "exec",
+                        "input": "inspect records"
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-20T00:00:03Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "agent_message",
+                        "message": "The count is fixed.",
+                        "phase": "final_answer"
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-08-20T00:00:04Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {"total_token_usage": {
+                            "input_tokens": 456000,
+                            "output_tokens": 447,
+                            "total_tokens": 456447
+                        }}
+                    }
+                }),
+            ],
+        );
+
+        let bytes = fs::read(&transcript).unwrap();
+        let from_file = summarize_rollout_file(&transcript).unwrap();
+        let from_bytes = summarize_rollout_bytes(&bytes).unwrap();
+        assert_eq!(from_file, from_bytes);
+        assert_eq!(from_file.user_rounds, 1);
+        assert_eq!(from_file.agent_messages, 1);
+        assert_eq!(from_file.tool_calls, 1);
+        assert_eq!(from_file.total_input_tokens, Some(456000));
+        assert_eq!(from_file.total_output_tokens, Some(447));
+        assert_eq!(from_file.total_tokens, Some(456447));
+        assert_eq!(
+            from_file.summary.as_deref(),
+            Some("Debug the empty message count")
+        );
+        assert_eq!(
+            first_codex_user_summary(&bytes).as_deref(),
+            Some("Debug the empty message count")
+        );
+        assert!(from_file.metrics_complete);
     }
 
     #[test]

@@ -5957,7 +5957,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   width: 100%;
   min-width: 0;
   display: grid;
-  grid-template-columns: 92px minmax(0, 1fr) 38px;
+  grid-template-columns: 108px minmax(0, 1fr) 38px;
   align-items: center;
   gap: 8px;
   padding: 7px 6px;
@@ -6147,6 +6147,24 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-sync-review-scroll {
   max-height: min(62vh, 720px);
   padding-bottom: 6px;
+}
+
+/* A review whose scroll holds a bare row list has nothing to open the space
+   under the header. The embedded pages the project reviews put here carry
+   their own top padding; a row list carries none, and the banner zone's top
+   margin only ever reached the header by collapsing out of this box — so a
+   review that opened without a banner sat its first card's border directly on
+   the header's hairline. The gutter belongs to the scroll, which then has one
+   whatever its first child turns out to be: a progress notice, a banner, or
+   row one. */
+.sync-sync-review-scroll:has(> .sync-history-thread-list) {
+  padding-top: 8px;
+}
+
+/* Padding stops that collapse, so the zone's own top margin would now add to
+   the gutter instead of standing in for it. */
+.sync-sync-review-scroll:has(> .sync-history-thread-list) > .sync-review-banners {
+  margin-top: 0;
 }
 
 /* Keep the review in normal document flow so the project workspace remains
@@ -6929,11 +6947,18 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
    zone wears — warning for a scan finding, danger for an overwrite — and the
    app's own monochrome checkbox, the one the title line already uses. It hugs
    its sentence at line two's x, so it reads as furniture of the card rather
-   than a form under it. */
+   than a form under it.
+
+   The explicit span is load-bearing: the chips are auto-placed children of
+   the card's grid, whose second column is auto-sized — a second chip on one
+   card used to land in that track and inflate it to the chip's whole
+   sentence, crushing the title and shearing the chips into each other. An
+   acknowledgement is a full row of the card, never a column occupant. */
 .catalog-card-ack {
   width: fit-content;
   min-height: 28px;
   display: flex;
+  grid-column: 1 / -1;
   align-items: center;
   gap: 7px;
   margin-left: 26px;
@@ -6960,6 +6985,31 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 
 .catalog-card-ack > svg {
   flex: 0 0 auto;
+}
+
+/* Payload first: the bold lead names the finding, then the flagged paths —
+   free to wrap inside the chip's own row rather than pushing it wider. */
+.catalog-card-ack-copy {
+  min-width: 0;
+}
+
+.catalog-card-ack-copy > strong {
+  font-weight: var(--weight-semibold);
+}
+
+/* The ack verb is the chip's trailing word — Mark reviewed, Approve — taking
+   the chip's own ink once ticked. */
+.catalog-card-ack > small {
+  flex: 0 0 auto;
+  margin-left: 4px;
+  color: var(--text-2);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+
+.catalog-card-ack > small.done {
+  color: inherit;
 }
 
 /* The pill is the popover's anchor. */
@@ -7131,8 +7181,6 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   display: grid;
   gap: 10px;
   margin-bottom: 18px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--border);
 }
 
 .session-detail-strip {
@@ -7204,15 +7252,6 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   min-height: 28px;
   padding: 0;
   border: 0;
-}
-
-/* A summary a provider records beyond the title: a lede over the transcript,
-   not another header row. */
-.session-detail-summary {
-  max-width: 780px;
-  color: var(--text-1);
-  font-size: var(--type-md);
-  line-height: 1.55;
 }
 
 /* One column. The rail this replaces held four controls behind a permanent

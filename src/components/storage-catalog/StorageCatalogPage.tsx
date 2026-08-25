@@ -28,6 +28,7 @@ import type {
   CatalogProviderKey,
   CatalogPullItem,
   CatalogResourceKind,
+  CatalogResourceWarning,
   CatalogScopePullPlan,
   CatalogScopePushPlan,
   CatalogScopeResources,
@@ -101,6 +102,24 @@ function forkSeed(row: CatalogScopeRow): string {
     .replace(/^[^a-z0-9]+/, "")
     .replace(/-+$/, "");
   return cleaned ? `${cleaned}-copy` : "";
+}
+
+/** The acknowledgement chip's lead, keyed by the warning's code — the backend
+ * mints `executable_content` and `secret_shaped` today (inventory.rs) — with
+ * the prefix its message is known to carry. An unknown code, or a message
+ * that stopped matching its prefix, keeps the whole backend sentence: the
+ * backend stays the authority on what a warning says. */
+const WARNING_LEADS: Record<string, { lead: string; prefix: string }> = {
+  executable_content: { lead: "Executable content", prefix: "contains executable content: " },
+  secret_shaped: { lead: "Credential-shaped content", prefix: "contains credential-shaped content: " },
+};
+
+function warningParts(warning: CatalogResourceWarning): { lead: string | null; body: string } {
+  const known = WARNING_LEADS[warning.code];
+  if (known && warning.message.startsWith(known.prefix)) {
+    return { lead: known.lead, body: warning.message.slice(known.prefix.length) };
+  }
+  return { lead: null, body: warning.message };
 }
 
 /** The verb a local action reduces to, for the row's trailing readout. The
@@ -374,6 +393,36 @@ function ForkDrawer({
   );
 }
 
+/** The acknowledgement chip, payload-first: the bold lead names the finding,
+ * the body carries the flagged paths, and the ack verb is the chip's trailing
+ * word — livening once ticked — rather than a constant preamble in front of
+ * every sentence. The chip spans the card's full row; the accessible name
+ * still reads the backend's whole sentence. */
+function AckChip({ danger, lead, body, checked, ariaLabel, verbs, onToggle }: {
+  danger?: boolean;
+  lead: string | null;
+  body: string;
+  checked: boolean;
+  ariaLabel: string;
+  /** The trailing word, unticked then ticked: Mark reviewed → Reviewed for a
+   * scan finding, Approve → Approved for an overwrite. */
+  verbs: [string, string];
+  onToggle: (checked: boolean) => void;
+}) {
+  return (
+    <label className={`catalog-card-ack${danger ? " danger" : ""}`}>
+      <span className="sync-sync-row-choice">
+        <input type="checkbox" checked={checked} aria-label={ariaLabel} onChange={(event) => onToggle(event.target.checked)} />
+      </span>
+      <Icon name="alert-triangle" size={12} />
+      <span className="catalog-card-ack-copy">
+        {lead === null ? body : <><strong>{lead}</strong> — {body}</>}
+      </span>
+      <small className={checked ? "done" : undefined}>{checked ? verbs[1] : verbs[0]}</small>
+    </label>
+  );
+}
+
 /** One card per resource, wearing the activity card's grammar. Line one: the
  * badge, the name, the provider mark, Fork, and Reveal in Finder. Line two:
  * files and size, the rule, the ⓘ, and the full stamp. Reviews put the
@@ -434,7 +483,7 @@ function ResourceCard({
         >
           {preview
             ? <img src={preview} alt={`${row.display_name} preview`} />
-            : <Icon name="openai" size={16} />}
+            : <Icon name="paw" size={16} />}
         </span>
       )}
       <div className="sync-history-thread-topline">
@@ -1196,6 +1245,19 @@ export default function StorageCatalogPage({
   const syncDisabledReason = storageId
     ? undefined
     : `Add a storage to these ${kind.plural.toLowerCase()} before pushing or pulling`;
+  const pushReviewWarnings = pushPlan?.rows
+    .filter((row) => pushSelected.has(row.row.resource_id))
+    .flatMap((row) => row.row.warnings) ?? [];
+  const pushReviewUnacknowledged = pushReviewWarnings
+    .some((warning) => !pushAcks.has(warning.digest));
+  const pushReviewApplyDisabled = busy
+    || pushSelected.size === 0
+    || pushReviewUnacknowledged;
+  const pushReviewDisabledReason = pushSelected.size === 0
+    ? `Select at least one ${kind.label.toLowerCase()} to push`
+    : pushReviewUnacknowledged
+      ? "Acknowledge the selected warnings before pushing"
+      : undefined;
   const bar = (
     <SyncPathBar
       crumbs={crumbs}
@@ -1251,15 +1313,19 @@ export default function StorageCatalogPage({
               type="button"
               className={`sync-path-sync${mode.kind === "push" ? " active" : ""}`}
               aria-expanded={mode.kind === "push"}
-              disabled={syncDisabled || pushRows.length === 0}
-              title={syncDisabledReason}
-              onClick={() => void openPush()}
+              disabled={mode.kind === "push"
+                ? pushReviewApplyDisabled
+                : syncDisabled || pushRows.length === 0}
+              title={mode.kind === "push" ? pushReviewDisabledReason : syncDisabledReason}
+              onClick={() => void (mode.kind === "push" ? runPush() : openPush())}
             >
               <Icon name="upload" size={14} />
               <span className="sync-path-sync-label">Push</span>
-              {counts.push > 0 && mode.kind !== "push" && (
-                <span className="sync-path-count" aria-hidden="true">{counts.push}</span>
-              )}
+              {mode.kind === "push"
+                ? <span className="sync-path-count" aria-hidden="true">{pushSelected.size}</span>
+                : counts.push > 0 && (
+                  <span className="sync-path-count" aria-hidden="true">{counts.push}</span>
+                )}
             </button>
           </div>
         </>
@@ -1315,12 +1381,11 @@ export default function StorageCatalogPage({
   // ---- Push review -------------------------------------------------------
 
   if (mode.kind === "push" && pushPlan) {
-    const reviewRows = pushPlan.rows.filter((row) => row.row.selectable);
+    const selectableRows = pushPlan.rows.filter((row) => row.row.selectable);
+    const visibleRows = pushPlan.rows.filter((row) => (
+      row.row.selectable || row.row.relation === "matching"
+    ));
     const heldRows = pushPlan.rows.filter((row) => row.row.held_for_pull);
-    const warnings = reviewRows
-      .filter((row) => pushSelected.has(row.row.resource_id))
-      .flatMap((row) => row.row.warnings);
-    const unacknowledged = warnings.some((warning) => !pushAcks.has(warning.digest));
     return (
       <>
         {bar}
@@ -1330,12 +1395,12 @@ export default function StorageCatalogPage({
               <div className="sync-sync-review-title"><h2 id="catalog-push-title">Push review</h2></div>
               <SyncReviewSelectionBar
                 count={pushSelected.size}
-                total={reviewRows.length}
+                total={selectableRows.length}
                 busy={busy}
-                recommendedTitle={`Use the recommended selection (${reviewRows.length})`}
-                recommendedAriaLabel={`Use recommended selection (${reviewRows.length})`}
-                recommendedDisabled={pushSelected.size === reviewRows.length}
-                onRecommended={() => setPushSelected(new Set(reviewRows.map((row) => row.row.resource_id)))}
+                recommendedTitle={`Use the recommended selection (${selectableRows.length})`}
+                recommendedAriaLabel={`Use recommended selection (${selectableRows.length})`}
+                recommendedDisabled={pushSelected.size === selectableRows.length}
+                onRecommended={() => setPushSelected(new Set(selectableRows.map((row) => row.row.resource_id)))}
                 clearDisabled={pushSelected.size === 0}
                 onClear={() => setPushSelected(new Set())}
                 close={{ ariaLabel: "Close Push review", onClose: () => setMode({ kind: "list" }) }}
@@ -1368,7 +1433,7 @@ export default function StorageCatalogPage({
                   </div>
                 )}
                 <div className="sync-history-thread-list">
-                  {reviewRows.map((planRow) => {
+                  {visibleRows.map((planRow) => {
                     const resourceId = planRow.row.resource_id;
                     const row = rowByResource.get(resourceId) ?? {
                       row_id: `resource:${resourceId}`,
@@ -1390,41 +1455,41 @@ export default function StorageCatalogPage({
                         providerTitle={markTitle}
                         preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
                         onReveal={() => reveal(row)}
-                        selectable
-                        selected={pushSelected.has(resourceId)}
-                        onToggle={() => setPushSelected((current) => {
+                        selectable={planRow.row.selectable}
+                        selected={planRow.row.selectable && pushSelected.has(resourceId)}
+                        onToggle={planRow.row.selectable ? () => setPushSelected((current) => {
                           const next = new Set(current);
                           if (next.has(resourceId)) next.delete(resourceId);
                           else next.add(resourceId);
                           return next;
-                        })}
-                        acks={pushSelected.has(resourceId) && planRow.row.warnings.map((warning) => (
+                        }) : undefined}
+                        acks={planRow.row.selectable && pushSelected.has(resourceId) && planRow.row.warnings.map((warning) => {
                           /* Inside the card that raised it, as a row-sized
                              callout: a warning collected at the foot of the
                              list makes you count rows to find out who it is
                              about. */
-                          <label key={warning.digest} className="catalog-card-ack">
-                            <span className="sync-sync-row-choice">
-                              <input
-                                type="checkbox"
-                                checked={pushAcks.has(warning.digest)}
-                                aria-label={`Reviewed: ${warning.message}`}
-                                onChange={(event) => setPushAcks((current) => {
-                                  const next = new Set(current);
-                                  if (event.target.checked) next.add(warning.digest);
-                                  else next.delete(warning.digest);
-                                  return next;
-                                })}
-                              />
-                            </span>
-                            <Icon name="alert-triangle" size={12} />
-                            <span>{`Reviewed this warning — ${warning.message}.`}</span>
-                          </label>
-                        ))}
+                          const parts = warningParts(warning);
+                          return (
+                            <AckChip
+                              key={warning.digest}
+                              lead={parts.lead}
+                              body={parts.body}
+                              checked={pushAcks.has(warning.digest)}
+                              ariaLabel={`Reviewed: ${warning.message}`}
+                              verbs={["Mark reviewed", "Reviewed"]}
+                              onToggle={(checked) => setPushAcks((current) => {
+                                const next = new Set(current);
+                                if (checked) next.add(warning.digest);
+                                else next.delete(warning.digest);
+                                return next;
+                              })}
+                            />
+                          );
+                        })}
                       />
                     );
                   })}
-                  {reviewRows.length === 0 && (
+                  {selectableRows.length === 0 && (
                     <div className="sync-pull-empty">
                       <Icon name="check-circle" size={16} />
                       <span>
@@ -1441,15 +1506,17 @@ export default function StorageCatalogPage({
                   current selection, and it is on screen beside the button it
                   explains — the button's own disabled state is what a reader
                   arrives at. */}
-              {unacknowledged && <span><small>Acknowledge the warnings above before pushing.</small></span>}
+              {pushReviewUnacknowledged && <span><small>Acknowledge the warnings above before pushing.</small></span>}
+              {/* The count rides the verb — the number at the point of
+                  commitment, the way a Git client's commit button carries it. */}
               <button
                 type="button"
                 className="btn btn-primary sync-pull-apply-button"
-                disabled={busy || pushSelected.size === 0 || unacknowledged}
+                disabled={pushReviewApplyDisabled}
                 onClick={() => void runPush()}
               >
                 <ThreadStatusIcon status="local-outstanding" size={16} />
-                Push
+                Push {pushSelected.size}
               </button>
             </footer>
           </section>
@@ -1582,23 +1649,20 @@ export default function StorageCatalogPage({
                           /* Part of the card it belongs to, not the footer:
                              the footer says why the button is off, this says
                              which row turned it off. */
-                          <label className="catalog-card-ack danger">
-                            <span className="sync-sync-row-choice">
-                              <input
-                                type="checkbox"
-                                checked={pullAcks.has(resourceId)}
-                                aria-label={`Approve overwriting ${item.item.display_name}`}
-                                onChange={(event) => setPullAcks((current) => {
-                                  const next = new Set(current);
-                                  if (event.target.checked) next.add(resourceId);
-                                  else next.delete(resourceId);
-                                  return next;
-                                })}
-                              />
-                            </span>
-                            <Icon name="alert-triangle" size={12} />
-                            <span>{`I understand this replaces the current ${item.item.display_name} on this Mac.`}</span>
-                          </label>
+                          <AckChip
+                            danger
+                            lead="Overwrites this Mac’s copy"
+                            body={`replaces the current ${item.item.display_name} here with the stored version`}
+                            checked={pullAcks.has(resourceId)}
+                            ariaLabel={`Approve overwriting ${item.item.display_name}`}
+                            verbs={["Approve", "Approved"]}
+                            onToggle={(checked) => setPullAcks((current) => {
+                              const next = new Set(current);
+                              if (checked) next.add(resourceId);
+                              else next.delete(resourceId);
+                              return next;
+                            })}
+                          />
                         )}
                       />
                     );
@@ -1629,7 +1693,7 @@ export default function StorageCatalogPage({
                 onClick={() => void runPull()}
               >
                 <ThreadStatusIcon status="cloud-outstanding" size={16} />
-                Pull
+                Pull {pullSelected.size}
               </button>
             </footer>
           </section>

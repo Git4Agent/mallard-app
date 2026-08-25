@@ -84,7 +84,16 @@ const ROWS: CatalogScopeRow[] = [
     row_id: "changelog-writer", display_name: "changelog-writer", state: "local_changed",
     remote_present: true, remote_updated_at: NOW - 86_400 * 9, local_modified_at: NOW - 7_200,
     local_files: 3, local_bytes: 12_800,
-    warnings: [{ code: "secret_shaped", message: "contains a secret-shaped value", digest: "digest-secret" }],
+    /* The backend's own codes and sentence shapes (inventory.rs), so the
+       chip's lead-split renders here the way it will against real scans —
+       plus one unknown code, deliberately: the chip's fallback (the whole
+       backend sentence, no lead) stays on a live card. Three chips on one
+       pushable card is the exact multi-chip geometry the repair pinned. */
+    warnings: [
+      { code: "executable_content", message: "contains executable content: scripts/release.sh, scripts/changelog.py", digest: "digest-exec" },
+      { code: "secret_shaped", message: "contains credential-shaped content: SKILL.md, scripts/deploy.py", digest: "digest-secret" },
+      { code: "future_finding", message: "flagged by a scanner this build does not know", digest: "digest-future" },
+    ],
   }),
   row({
     row_id: "pdf-filler", display_name: "pdf-filler", state: "new",
@@ -108,7 +117,9 @@ const ROWS: CatalogScopeRow[] = [
     scope_label: "Shared user", local_path: "/Users/hequ/.agents/skills/api-designer",
     remote_present: true, remote_updated_at: NOW - 5_400, local_modified_at: NOW - 3_600,
     local_files: 9, local_bytes: 87_600,
-    warnings: [{ code: "executable", message: "contains an executable file", digest: "digest-exec" }],
+    /* Held for Pull, so this never becomes a chip — it feeds the list card's
+       ⚠ metric only. */
+    warnings: [{ code: "executable_content", message: "contains executable content: scripts/apply_review.py", digest: "digest-exec-api" }],
   }),
   row({
     row_id: "deploy-checklist", display_name: "deploy-checklist", state: "unreviewed_remote",

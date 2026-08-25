@@ -24,18 +24,26 @@ use super::domain::{
 };
 use super::provider_capture::{self, CaptureRequest, Discovery, LocalSessionView};
 use super::sync_metrics;
+use mallard_infrastructure::persistence::write_json_atomic;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Bounded process-local state: past any bound the profile drops to the
 /// bounded path rather than evicting part of its evidence.
 const MAX_WATCHED_PROFILES: usize = 64;
 const MAX_DIRTY_ROOTS: usize = 4_096;
 const MAX_OBSERVATION_ENTRIES: usize = 4_096;
+/// On-disk observation cache: bounded like every other `~/.mallard` file,
+/// versioned so a shape change discards rather than misreads.
+const OBSERVATION_DISK_SCHEMA: u32 = 1;
+const MAX_OBSERVATION_DISK_BYTES: u64 = 16 * 1024 * 1024;
+const OBSERVATION_DISK_FILE: &str = "observation_cache.json";
 const EVENT_QUEUE_DEPTH: usize = 8_192;
 
 enum WatchBackend {
@@ -237,6 +245,150 @@ pub(crate) struct StoredObservation {
     pub(crate) checkpoint_generation: Option<u64>,
     pub(crate) binding_revision: Option<u64>,
     pub(crate) observation: LocalTailObservation,
+    /// Discovery-time stat of `source_path` (whole seconds, bytes). The
+    /// disk layer persists an entry only when the store-time stat still
+    /// matches: a drift means the source changed while the review ran, and
+    /// a pin taken now would vouch for bytes the derivation never read.
+    pub(crate) source_mtime_secs: u64,
+    pub(crate) source_size: u64,
+}
+
+/// One dependency's identity pin for the disk cache: the exact stat of the
+/// file the derivation read. Serving requires every pin to match a fresh
+/// stat, so validity never rests on watcher events that a past process
+/// consumed. Nanosecond mtime plus size is the strongest identity a stat
+/// gives; a same-size same-mtime rewrite is the accepted residual risk, and
+/// review output is a reuse artifact, never a correctness authority.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+struct DiskPathPin {
+    path: PathBuf,
+    size: u64,
+    mtime_nanos: u64,
+}
+
+/// One persisted observation. `checkpoint_generation` and
+/// `binding_revision` repeat the in-memory query pins; `depends_on` carries
+/// stat pins instead of bare paths because the disk cache outlives the
+/// watcher that would otherwise witness quiet.
+#[derive(Serialize, Deserialize, Clone)]
+struct DiskObservationRecord {
+    canonical_home: PathBuf,
+    local_project_id: LocalProjectId,
+    storage_id: StorageId,
+    thread_id: ThreadId,
+    checkpoint_generation: Option<u64>,
+    binding_revision: Option<u64>,
+    depends_on: Vec<DiskPathPin>,
+    observation: LocalTailObservation,
+    stored_at: u64,
+}
+
+impl DiskObservationRecord {
+    fn key(&self) -> ObservationKey {
+        ObservationKey {
+            canonical_home: self.canonical_home.clone(),
+            local_project_id: self.local_project_id.clone(),
+            storage_id: self.storage_id.clone(),
+            thread_id: self.thread_id.clone(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ObservationDiskCache {
+    schema: u32,
+    entries: Vec<DiskObservationRecord>,
+}
+
+fn observation_cache_path(state_root: &Path) -> PathBuf {
+    state_root.join(OBSERVATION_DISK_FILE)
+}
+
+fn modified_nanos(metadata: &std::fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn path_pin(path: &Path) -> Option<DiskPathPin> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    Some(DiskPathPin {
+        path: path.to_path_buf(),
+        size: metadata.len(),
+        mtime_nanos: modified_nanos(&metadata),
+    })
+}
+
+/// A pin holds when a fresh stat reproduces it exactly.
+fn pin_matches(pin: &DiskPathPin) -> bool {
+    path_pin(&pin.path).as_ref() == Some(pin)
+}
+
+fn load_observation_disk_cache(
+    state_root: &Path,
+) -> BTreeMap<ObservationKey, DiskObservationRecord> {
+    let path = observation_cache_path(state_root);
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+        return BTreeMap::new();
+    };
+    if !metadata.is_file() || metadata.len() > MAX_OBSERVATION_DISK_BYTES {
+        return BTreeMap::new();
+    }
+    let Ok(bytes) = std::fs::read(&path) else {
+        return BTreeMap::new();
+    };
+    let Ok(cache) = serde_json::from_slice::<ObservationDiskCache>(&bytes) else {
+        return BTreeMap::new();
+    };
+    if cache.schema != OBSERVATION_DISK_SCHEMA || cache.entries.len() > MAX_OBSERVATION_ENTRIES {
+        return BTreeMap::new();
+    }
+    cache
+        .entries
+        .into_iter()
+        .map(|record| (record.key(), record))
+        .collect()
+}
+
+/// Rewrite the cache file from the mirror, evicting the oldest records past
+/// the entry bound. A failed write only costs the next cold start its reuse.
+fn write_observation_disk_cache(
+    state_root: &Path,
+    entries: &mut BTreeMap<ObservationKey, DiskObservationRecord>,
+) {
+    while entries.len() > MAX_OBSERVATION_ENTRIES {
+        let Some(oldest) = entries
+            .iter()
+            .min_by_key(|(_, record)| record.stored_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        entries.remove(&oldest);
+    }
+    let cache = ObservationDiskCache {
+        schema: OBSERVATION_DISK_SCHEMA,
+        entries: entries.values().cloned().collect(),
+    };
+    let _ = write_json_atomic(
+        state_root,
+        &observation_cache_path(state_root),
+        &cache,
+        MAX_OBSERVATION_DISK_BYTES,
+    );
 }
 
 #[derive(Default)]
@@ -245,6 +397,9 @@ struct ServiceInner {
     inventories: BTreeMap<(ProviderKey, PathBuf, LocalProjectId), CachedInventory>,
     observations: BTreeMap<ObservationKey, CachedObservation>,
     candidate_pins: BTreeMap<(PathBuf, LocalProjectId, String), CachedCandidatePin>,
+    /// Per state-root mirror of the on-disk observation cache, loaded
+    /// lazily on first use and written through on every store.
+    disk: BTreeMap<PathBuf, BTreeMap<ObservationKey, DiskObservationRecord>>,
 }
 
 pub(crate) struct SessionWatchService {
@@ -521,6 +676,15 @@ impl ServiceInner {
 
     /// Drop profiles whose home no longer exists (finished test fixtures,
     /// removed provider setups), then the least recently used ones.
+    fn disk_entries(
+        &mut self,
+        state_root: &Path,
+    ) -> &mut BTreeMap<ObservationKey, DiskObservationRecord> {
+        self.disk
+            .entry(state_root.to_path_buf())
+            .or_insert_with(|| load_observation_disk_cache(state_root))
+    }
+
     fn evict_stale_profiles(&mut self) {
         let stale: Vec<PathBuf> = self
             .profiles
@@ -730,6 +894,7 @@ impl SessionWatchService {
         &self,
         provider: &ProviderKey,
         canonical_home: &Path,
+        state_root: &Path,
         local_project_id: &LocalProjectId,
         storage_id: &StorageId,
         queries: &[ObservationQuery],
@@ -747,6 +912,7 @@ impl SessionWatchService {
             return served;
         };
         let dirty = profile.dirty_roots.clone();
+        let mut misses = Vec::new();
         for query in queries {
             let key = ObservationKey {
                 canonical_home: canonical_home.to_path_buf(),
@@ -755,6 +921,7 @@ impl SessionWatchService {
                 thread_id: query.thread_id.clone(),
             };
             let Some(cached) = inner.observations.get(&key) else {
+                misses.push((key, query));
                 continue;
             };
             if cached.checkpoint_generation != query.checkpoint_generation
@@ -765,6 +932,45 @@ impl SessionWatchService {
             }
             sync_metrics::record_observation_reuse_hit(canonical_home);
             served.insert(query.thread_id.clone(), cached.observation.clone());
+        }
+        // Memory misses fall through to the persisted cache. A disk record
+        // proves itself by stat: every dependency pin must reproduce
+        // exactly, so validity never leans on watcher history this process
+        // does not have. A record that fails its pins is dropped — the stat
+        // can only keep failing until a fresh derivation replaces it.
+        for (key, query) in misses {
+            let Some(record) = inner.disk_entries(state_root).get(&key).cloned() else {
+                continue;
+            };
+            if record.checkpoint_generation != query.checkpoint_generation
+                || record.binding_revision != query.binding_revision
+            {
+                continue;
+            }
+            if record
+                .depends_on
+                .iter()
+                .any(|pin| dirty.contains(&pin.path))
+                || !record.depends_on.iter().all(pin_matches)
+            {
+                inner.disk_entries(state_root).remove(&key);
+                continue;
+            }
+            inner.observations.insert(
+                key,
+                CachedObservation {
+                    depends_on: record
+                        .depends_on
+                        .iter()
+                        .map(|pin| pin.path.clone())
+                        .collect(),
+                    checkpoint_generation: record.checkpoint_generation,
+                    binding_revision: record.binding_revision,
+                    observation: record.observation.clone(),
+                },
+            );
+            sync_metrics::record_observation_reuse_hit(canonical_home);
+            served.insert(query.thread_id.clone(), record.observation);
         }
         served
     }
@@ -871,6 +1077,7 @@ impl SessionWatchService {
     pub(crate) fn store_observations(
         &self,
         canonical_home: &Path,
+        state_root: &Path,
         local_project_id: &LocalProjectId,
         storage_id: &StorageId,
         stored: Vec<StoredObservation>,
@@ -914,7 +1121,36 @@ impl SessionWatchService {
                 .candidate_pins
                 .retain(|_, cached| !cached.depends_on.iter().any(|path| cleared.contains(path)));
         }
-        for (entry, _, depends_on) in prepared {
+        let stored_at = now_secs();
+        let mut disk_records = Vec::new();
+        for (entry, source_path, depends_on) in prepared {
+            // Disk eligibility, decided before the entry moves into the
+            // memory map: every dependency must pin, and the source pin
+            // must still agree with the discovery-time stat — otherwise
+            // the file changed while the review ran and the pin would
+            // vouch for bytes the derivation never read.
+            let pins: Option<Vec<DiskPathPin>> =
+                depends_on.iter().map(|path| path_pin(path)).collect();
+            if let Some(pins) = pins {
+                let quiet_source = pins.iter().any(|pin| {
+                    pin.path == source_path
+                        && pin.size == entry.source_size
+                        && pin.mtime_nanos / 1_000_000_000 == entry.source_mtime_secs
+                });
+                if quiet_source {
+                    disk_records.push(DiskObservationRecord {
+                        canonical_home: canonical_home.to_path_buf(),
+                        local_project_id: local_project_id.clone(),
+                        storage_id: storage_id.clone(),
+                        thread_id: entry.thread_id.clone(),
+                        checkpoint_generation: entry.checkpoint_generation,
+                        binding_revision: entry.binding_revision,
+                        depends_on: pins,
+                        observation: entry.observation.clone(),
+                        stored_at,
+                    });
+                }
+            }
             inner.observations.insert(
                 ObservationKey {
                     canonical_home: canonical_home.to_path_buf(),
@@ -938,6 +1174,13 @@ impl SessionWatchService {
                 let home = canonical_home.to_path_buf();
                 inner.drop_profile_caches(&home);
             }
+        }
+        if !disk_records.is_empty() {
+            let entries = inner.disk_entries(state_root);
+            for record in disk_records {
+                entries.insert(record.key(), record);
+            }
+            write_observation_disk_cache(state_root, entries);
         }
     }
 }
@@ -972,6 +1215,27 @@ mod tests {
             StorageId::parse("watch-test-storage").unwrap(),
             ThreadId::parse("watch-test-thread").unwrap(),
         )
+    }
+
+    /// A StoredObservation whose discovery-time stat is read from the file
+    /// itself, as production reads it from the discovery view.
+    fn stored(thread: &ThreadId, source: &Path, generation: u64) -> StoredObservation {
+        let metadata = std::fs::symlink_metadata(source).unwrap();
+        StoredObservation {
+            thread_id: thread.clone(),
+            source_path: source.to_path_buf(),
+            depends_on: vec![source.to_path_buf()],
+            checkpoint_generation: Some(generation),
+            binding_revision: Some(1),
+            observation: observation(),
+            source_mtime_secs: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0),
+            source_size: metadata.len(),
+        }
     }
 
     #[cfg(unix)]
@@ -1083,27 +1347,37 @@ mod tests {
                 binding_revision: Some(1),
             }]
         };
+        let state_root = temp.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
         // Cold: nothing cached.
         assert!(service
-            .take_reusable_observations(&codex_provider(), &home, &project, &storage, &query())
+            .take_reusable_observations(
+                &codex_provider(),
+                &home,
+                &state_root,
+                &project,
+                &storage,
+                &query()
+            )
             .is_empty());
         service.store_observations(
             &home,
+            &state_root,
             &project,
             &storage,
-            vec![StoredObservation {
-                thread_id: thread.clone(),
-                source_path: rollout.clone(),
-                depends_on: vec![rollout.clone()],
-                checkpoint_generation: Some(3),
-                binding_revision: Some(1),
-                observation: observation(),
-            }],
+            vec![stored(&thread, &rollout, 3)],
         );
         // Quiet watcher: served with no filesystem work.
         assert_eq!(
             service
-                .take_reusable_observations(&codex_provider(), &home, &project, &storage, &query())
+                .take_reusable_observations(
+                    &codex_provider(),
+                    &home,
+                    &state_root,
+                    &project,
+                    &storage,
+                    &query()
+                )
                 .len(),
             1
         );
@@ -1112,23 +1386,24 @@ mod tests {
         std::fs::write(&rollout, b"{\"a\":2}\n").unwrap();
         assert!(
             service
-                .take_reusable_observations(&codex_provider(), &home, &project, &storage, &query())
+                .take_reusable_observations(
+                    &codex_provider(),
+                    &home,
+                    &state_root,
+                    &project,
+                    &storage,
+                    &query()
+                )
                 .is_empty(),
             "a mutated source must never be served"
         );
         // A changed checkpoint generation is a miss even when quiet.
         service.store_observations(
             &home,
+            &state_root,
             &project,
             &storage,
-            vec![StoredObservation {
-                thread_id: thread.clone(),
-                source_path: rollout.clone(),
-                depends_on: vec![rollout.clone()],
-                checkpoint_generation: Some(3),
-                binding_revision: Some(1),
-                observation: observation(),
-            }],
+            vec![stored(&thread, &rollout, 3)],
         );
         let stale_generation = vec![ObservationQuery {
             thread_id: thread.clone(),
@@ -1139,9 +1414,201 @@ mod tests {
             .take_reusable_observations(
                 &codex_provider(),
                 &home,
+                &state_root,
                 &project,
                 &storage,
                 &stale_generation
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn a_disk_record_survives_a_fresh_process_until_its_stat_drifts() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex-home");
+        let sessions = home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let rollout = sessions.join("rollout-a.jsonl");
+        std::fs::write(&rollout, b"{\"a\":1}\n").unwrap();
+        let state_root = temp.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let (project, storage, thread) = ids();
+        let query = || {
+            vec![ObservationQuery {
+                thread_id: thread.clone(),
+                checkpoint_generation: Some(3),
+                binding_revision: Some(1),
+            }]
+        };
+
+        let first_process = service();
+        first_process.take_reusable_observations(
+            &codex_provider(),
+            &home,
+            &state_root,
+            &project,
+            &storage,
+            &[],
+        );
+        first_process.store_observations(
+            &home,
+            &state_root,
+            &project,
+            &storage,
+            vec![stored(&thread, &rollout, 3)],
+        );
+        assert!(
+            observation_cache_path(&state_root).is_file(),
+            "store must persist the observation"
+        );
+
+        // A fresh service instance is a fresh process: no watcher history,
+        // no memory cache. The stat pins alone must serve the entry.
+        let second_process = service();
+        assert_eq!(
+            second_process
+                .take_reusable_observations(
+                    &codex_provider(),
+                    &home,
+                    &state_root,
+                    &project,
+                    &storage,
+                    &query()
+                )
+                .len(),
+            1,
+            "a stat-clean disk record must serve across processes"
+        );
+
+        // Any byte appended between processes drifts size and mtime; the
+        // record must be refused and dropped.
+        let mut bytes = std::fs::read(&rollout).unwrap();
+        bytes.extend_from_slice(b"{\"a\":2}\n");
+        std::fs::write(&rollout, &bytes).unwrap();
+        let third_process = service();
+        assert!(
+            third_process
+                .take_reusable_observations(
+                    &codex_provider(),
+                    &home,
+                    &state_root,
+                    &project,
+                    &storage,
+                    &query()
+                )
+                .is_empty(),
+            "a drifted source must never be served from disk"
+        );
+    }
+
+    #[test]
+    fn disk_records_pin_generation_and_an_unreadable_cache_starts_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex-home");
+        let sessions = home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let rollout = sessions.join("rollout-a.jsonl");
+        std::fs::write(&rollout, b"{\"a\":1}\n").unwrap();
+        let state_root = temp.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let (project, storage, thread) = ids();
+
+        let writer = service();
+        writer.take_reusable_observations(
+            &codex_provider(),
+            &home,
+            &state_root,
+            &project,
+            &storage,
+            &[],
+        );
+        writer.store_observations(
+            &home,
+            &state_root,
+            &project,
+            &storage,
+            vec![stored(&thread, &rollout, 3)],
+        );
+
+        // A moved checkpoint generation refuses the record even though the
+        // stat pins hold.
+        let stale_generation = vec![ObservationQuery {
+            thread_id: thread.clone(),
+            checkpoint_generation: Some(4),
+            binding_revision: Some(1),
+        }];
+        assert!(service()
+            .take_reusable_observations(
+                &codex_provider(),
+                &home,
+                &state_root,
+                &project,
+                &storage,
+                &stale_generation
+            )
+            .is_empty());
+
+        // Corruption is a clean miss, never an error.
+        std::fs::write(observation_cache_path(&state_root), b"not json").unwrap();
+        assert!(service()
+            .take_reusable_observations(
+                &codex_provider(),
+                &home,
+                &state_root,
+                &project,
+                &storage,
+                &[ObservationQuery {
+                    thread_id: thread.clone(),
+                    checkpoint_generation: Some(3),
+                    binding_revision: Some(1),
+                }]
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn a_source_that_moved_during_the_review_is_not_persisted() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex-home");
+        let sessions = home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let rollout = sessions.join("rollout-a.jsonl");
+        std::fs::write(&rollout, b"{\"a\":1}\n").unwrap();
+        let state_root = temp.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let (project, storage, thread) = ids();
+
+        let writer = service();
+        writer.take_reusable_observations(
+            &codex_provider(),
+            &home,
+            &state_root,
+            &project,
+            &storage,
+            &[],
+        );
+        // The discovery-time stat is taken, then the file grows before the
+        // store — exactly an active session appended to mid-review.
+        let mut entry = stored(&thread, &rollout, 3);
+        let mut bytes = std::fs::read(&rollout).unwrap();
+        bytes.extend_from_slice(b"{\"a\":2}\n");
+        std::fs::write(&rollout, &bytes).unwrap();
+        entry.depends_on = vec![rollout.clone()];
+        writer.store_observations(&home, &state_root, &project, &storage, vec![entry]);
+
+        // A fresh process must find nothing on disk for it.
+        assert!(service()
+            .take_reusable_observations(
+                &codex_provider(),
+                &home,
+                &state_root,
+                &project,
+                &storage,
+                &[ObservationQuery {
+                    thread_id: thread.clone(),
+                    checkpoint_generation: Some(3),
+                    binding_revision: Some(1),
+                }]
             )
             .is_empty());
     }
@@ -1157,7 +1624,16 @@ mod tests {
         let (project, storage, _) = ids();
 
         // Arm.
-        service.take_reusable_observations(&codex_provider(), &home, &project, &storage, &[]);
+        let state_root = temp.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+        service.take_reusable_observations(
+            &codex_provider(),
+            &home,
+            &state_root,
+            &project,
+            &storage,
+            &[],
+        );
         {
             let mut inner = service.inner.lock().unwrap();
             assert!(inner.ensure_profile(&codex_provider(), &canonical_home));

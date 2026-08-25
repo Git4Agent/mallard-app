@@ -46,7 +46,7 @@ pub enum TailClassification {
 /// One side's evidence: a complete validated five-field value, a confirmed
 /// absence, or a typed invalidity.  Absence must be proven (no thread entry,
 /// no binding, no pin); anything unproven or unreadable is `Invalid`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum TailSideEvidence {
     Present(PortableConversationTail),
     ConfirmedAbsent,

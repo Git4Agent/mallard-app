@@ -36,6 +36,7 @@ export type IconName =
   | "git-folder"
   | "help-circle"
   | "info"
+  | "lightbulb"
   | "link"
   | "link-off"
   | "lock"
@@ -45,8 +46,10 @@ export type IconName =
   | "octagon-x"
   | "openai"
   | "pause"
+  | "paw"
   | "play"
   | "plus"
+  | "puzzle"
   | "refresh"
   | "settings"
   | "sidebar-collapse"
@@ -202,6 +205,26 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           <path d="M22 9V7h-1V5h-1V4h-1V3h-2V2h-2V1H9v1H7v1H5v1H4v1H3v2H2v2H1v6h1v2h1v2h1v1h1v1h2v1h2v1h6v-1h2v-1h2v-1h1v-1h1v-2h1v-2h1V9h-1Zm-1 6h-1v2h-1v2h-2v1h-2v1H9v-1H7v-1H5v-2H4v-2H3V9h1V7h1V5h2V4h2V3h6v1h2v1h2v2h1v2h1v6Z" />
           <path d="M16 15v1h-1v1h-1v-1h-1v-1h-1v-1h-1V5h2v8h1v1h1v1h1Z" />
         </g>
+      )}
+      {name === "lightbulb" && (
+        /* Skills. The Library's three kind glyphs are the only marks here drawn
+           to a measured brief rather than by eye: the shipped row runs 15-48
+           filled cells of 144 and every mark but the cog is a one-cell outline,
+           so these are outlines too — a solid fill lands at 52-81 and reads as
+           a blot beside its neighbours.
+
+           A bulb because it is the only glyph any shipped developer tool binds
+           to a skill: the Material Icon Theme maps `skill.md` and a `skills/`
+           folder to one. No icon system has a mark for a loadable capability —
+           Material, SF Symbols, Codicons, Octicons and Fluent all return
+           nothing for "skill" — so there was no convention to follow, only a
+           precedent. Nothing else in the set is a dome over a stem. */
+        <path
+          className="icon-pixel-fill icon-mallard-pixel"
+          fill="currentColor"
+          stroke="none"
+          d="M8 2h8v2H8ZM6 4h2v2H6ZM16 4h2v2H16ZM4 6h2v6H4ZM18 6h2v6H18ZM6 12h2v2H6ZM16 12h2v2H16ZM8 14h8v4H8ZM10 18h4v2H10Z"
+        />
       )}
       {name === "link" && (
         <g className="icon-pixel-fill" fill="currentColor" stroke="none">
@@ -368,6 +391,25 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           <path d="M22 2V1h-7v1h-1v20h1v1h7v-1h1V2h-1Zm-1 1v18h-5V3h5Z" />
         </g>
       )}
+      {name === "paw" && (
+        /* Pets, both formats. Four toes on an arc over a pad — `pets` is
+           literally what Material calls this glyph, and `pawprint` is one of
+           exactly two symbols Apple tags "pet friendly".
+
+           The outer pair sits two rows below the inner pair, not one. A paw is
+           five separate elements with four gaps, which is the most a twelve-cell
+           grid will hold, and at a one-row offset the outer toes meet the inner
+           ones at the corner and fuse. Two rows is also Material's own
+           proportion — its `pets` drops the outer toes 160 of 960 units. No
+           pixel-art set ships a paw for exactly this reason, so it is drawn
+           natively here rather than shrunk from a 24-grid original. */
+        <path
+          className="icon-pixel-fill icon-mallard-pixel"
+          fill="currentColor"
+          stroke="none"
+          d="M6 2h4v4H6ZM14 2h4v4H14ZM2 8h4v4H2ZM18 8h4v4H18ZM8 12h8v8H8ZM4 14h4v4H4ZM16 14h4v4H16ZM6 18h2v2H6ZM16 18h2v2H16Z"
+        />
+      )}
       {name === "play" && (
         <path
           className="icon-pixel-fill"
@@ -382,6 +424,27 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           fill="currentColor"
           stroke="none"
           d="M13 11h7v2h-7v7h-2v-7H4v-2h7V4h2v7Z"
+        />
+      )}
+      {name === "puzzle" && (
+        /* Plugins. The jigsaw piece is the one settled mark of the three —
+           Chrome's extensions button, Material `extension` (the only icon
+           Google tags `plugin`), and Fluent's `extension`, which is an alias of
+           its puzzle piece.
+
+           This is Apple's reduced cut, not the four-tabbed toy: one socket
+           bitten out of the left edge, one knob on the right, top and bottom
+           straight. Apple ships exactly that as `puzzlepiece.extension` in the
+           Extensions pane because the four-tabbed form collapses into a blob at
+           11pt. Even reduced it is the tightest fit in the set — a knob is a
+           fifth of the icon's width, which is two cells here — so it is drawn
+           hollow, where the socket and the knob still read as departures from a
+           straight edge. */
+        <path
+          className="icon-pixel-fill icon-mallard-pixel"
+          fill="currentColor"
+          stroke="none"
+          d="M2 2h16v2H2ZM2 4h2v6H2ZM16 4h2v6H16ZM4 8h4v2H4ZM18 8h4v2H18ZM6 10h2v6H6ZM20 10h2v6H20ZM2 14h4v2H2ZM16 14h4v2H16ZM2 16h2v6H2ZM16 16h2v6H16ZM4 20h12v2H4Z"
         />
       )}
       {name === "refresh" && (

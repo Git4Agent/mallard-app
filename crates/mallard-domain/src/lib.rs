@@ -2923,6 +2923,10 @@ pub struct SessionMetrics {
     #[serde(default)]
     pub tool_calls: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
     #[serde(default)]
     pub complete: bool,

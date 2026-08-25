@@ -779,6 +779,8 @@ fn session_presentation(
             user_rounds: file_summary.user_rounds,
             agent_messages: file_summary.agent_messages,
             tool_calls: file_summary.tool_calls,
+            total_input_tokens: file_summary.total_input_tokens,
+            total_output_tokens: file_summary.total_output_tokens,
             total_tokens: file_summary.total_tokens,
             complete: file_summary.metrics_complete,
         },

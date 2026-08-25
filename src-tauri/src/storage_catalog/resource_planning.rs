@@ -374,6 +374,17 @@ pub fn build_scope_push_plan(
         });
     }
 
+    // Keep the review in the same stable order as the scope page. Resource
+    // IDs are content-derived, so their BTree order otherwise makes rows
+    // appear to move when the user leaves the review after a Push.
+    rows.sort_by(|left, right| {
+        left.row
+            .display_name
+            .to_lowercase()
+            .cmp(&right.row.display_name.to_lowercase())
+            .then_with(|| left.row.resource_id.cmp(&right.row.resource_id))
+    });
+
     let plan = CatalogScopePushPlan {
         schema_version: CATALOG_SCHEMA,
         plan_id: CatalogPlanId::generate()?,
@@ -1216,6 +1227,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.rows.len(), 3);
+        assert_eq!(
+            plan.rows
+                .iter()
+                .map(|row| row.row.display_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fresh", "remote", "review"]
+        );
         let by_name = |name: &str| plan.rows.iter().find(|row| row.row.display_name == name);
         let fresh = by_name("fresh").unwrap();
         assert_eq!(fresh.row.relation, CatalogResourceRelation::LocalOnly);

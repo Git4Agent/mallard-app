@@ -16,10 +16,11 @@ use std::path::Path;
 use std::time::Duration;
 
 pub use super::commands::{
-    CreateSetupDraftResult, ProjectActivityWorkspace, ProjectDetail, ProjectOperationResult,
-    PushDestinationPullReason, PushDestinationStatus, PushReviewContext, RestoreResult,
-    SetupDraftInspection, ThreadSyncComparison, ThreadSyncState,
+    CreateSetupDraftResult, ProjectDetail, ProjectOperationResult, PushDestinationPullReason,
+    PushDestinationStatus, PushReviewContext, RestoreResult, SetupDraftInspection,
+    ThreadSyncComparison, ThreadSyncState,
 };
+pub use mallard_infrastructure::project_activity::ProjectActivity;
 pub use mallard_infrastructure::providers::{
     SessionEventDetail, SessionTimelineEventKind, SessionToolCategory,
 };
@@ -264,24 +265,21 @@ impl<'a> ProjectSyncService<'a> {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn get_project_activity_workspace(
+    pub fn get_project_activity(
         &self,
         local_project_id: &LocalProjectId,
         storage_id: Option<&StorageId>,
         branch: Option<&str>,
         before_time: Option<u64>,
         window_days: Option<u64>,
-        force_revalidate: bool,
-    ) -> Result<ProjectActivityWorkspace, String> {
-        commands::get_project_activity_workspace_with_repository(
+    ) -> Result<ProjectActivity, String> {
+        commands::get_project_activity_with_repository(
             self.repository,
             local_project_id,
             storage_id,
             branch,
             before_time,
             window_days,
-            force_revalidate,
         )
     }
 

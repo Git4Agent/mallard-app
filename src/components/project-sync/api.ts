@@ -21,7 +21,6 @@ import type {
   LocalStateSummary,
   LocalStateWipeResult,
   ProjectActivity,
-  ProjectActivityWorkspace,
   ProjectBinding,
   ProjectDetail,
   ProjectContentInventory,
@@ -52,6 +51,7 @@ import type {
   StorageConfig,
   StorageDataClearResult,
   SyncConfig,
+  ThreadSyncComparison,
 } from "../../types";
 
 export function createSingleFlight() {
@@ -272,7 +272,6 @@ export const projectSyncApi = {
     branch?: string | null,
     beforeTime?: number | null,
     windowDays = 30,
-    forceRevalidate = false,
   ) => {
     const request = {
       localProjectId,
@@ -280,7 +279,6 @@ export const projectSyncApi = {
       branch: branch ?? null,
       beforeTime: beforeTime ?? null,
       windowDays,
-      forceRevalidate,
     };
     return projectSyncSingleFlight(
       JSON.stringify(["get_project_activity", request]),
@@ -288,25 +286,11 @@ export const projectSyncApi = {
     );
   },
 
-  getProjectActivityWorkspace: (
-    localProjectId: string,
-    storageId?: string | null,
-    branch?: string | null,
-    beforeTime?: number | null,
-    windowDays = 30,
-    forceRevalidate = false,
-  ) => {
-    const request = {
-      localProjectId,
-      storageId: storageId ?? null,
-      branch: branch ?? null,
-      beforeTime: beforeTime ?? null,
-      windowDays,
-      forceRevalidate,
-    };
+  getProjectThreadSyncComparison: (localProjectId: string, storageId: string) => {
+    const request = { localProjectId, storageId };
     return projectSyncSingleFlight(
-      JSON.stringify(["get_project_activity_workspace", request]),
-      () => invoke<ProjectActivityWorkspace>("get_project_activity_workspace", request),
+      JSON.stringify(["get_project_thread_sync_comparison", request]),
+      () => invoke<ThreadSyncComparison>("get_project_thread_sync_comparison", request),
     );
   },
 

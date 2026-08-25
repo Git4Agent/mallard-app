@@ -974,6 +974,8 @@ export interface ProjectSessionSummary {
   summary?: string | null;
   started_at: number;
   ended_at: number;
+  /** Machine-local provider transcript; absent for storage-only sessions. */
+  transcript_path?: string | null;
   working_directory?: string | null;
   branch?: string | null;
   recorded_sha?: string | null;
@@ -981,6 +983,8 @@ export interface ProjectSessionSummary {
   user_round_count: number;
   agent_message_count: number;
   tool_call_count: number;
+  total_input_tokens?: number | null;
+  total_output_tokens?: number | null;
   total_tokens?: number | null;
   metrics_complete: boolean;
   actions: SessionActionDescriptor[];
@@ -1293,10 +1297,4 @@ export interface ProjectActivity {
   window_end: number;
   next_before?: number | null;
   storage_sync: StorageSyncSummary[];
-}
-
-export interface ProjectActivityWorkspace {
-  activity: ProjectActivity;
-  comparison?: ThreadSyncComparison | null;
-  comparison_error?: string | null;
 }

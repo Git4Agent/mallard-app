@@ -604,17 +604,20 @@ export function SessionMetrics({
   const durationLabel = durationText
     ? `${session.is_active ? "Active for" : "Ran for"} ${durationText}`
     : "";
+  const totalTokens = formatCount(session.total_tokens);
+  const totalInputTokens = formatCount(session.total_input_tokens);
+  const totalOutputTokens = formatCount(session.total_output_tokens);
 
   return <div id={id} className="sync-history-thread-meta" aria-label="Session details">
     {/* Ordered by what the row is about: the exchange first, then the work it
         did, then what it cost, then how long it took. */}
-    {/* One conversation, one number: user turns and agent messages summed
+    {/* One conversation, one number: prompts and final replies summed
         behind the message glyph, where they used to be two readouts whose
         relationship nothing stated. The face answers "how much was said";
         the split lives in the tooltip, each half on its own line. */}
-    <span className="sync-history-thread-metric" data-tooltip={`User turns · ${session.user_round_count}\nAgent messages · ${session.agent_message_count}`} aria-label={`Messages: ${session.user_round_count + session.agent_message_count}. User turns: ${session.user_round_count}. Agent messages: ${session.agent_message_count}`} tabIndex={0}><Icon name="message" size={12} /><b>{session.user_round_count + session.agent_message_count}</b></span>
+    <span className="sync-history-thread-metric" data-tooltip={`Prompts · ${session.user_round_count}\nReplies · ${session.agent_message_count}`} aria-label={`Messages: ${session.user_round_count + session.agent_message_count}. Prompts: ${session.user_round_count}. Replies: ${session.agent_message_count}`} tabIndex={0}><Icon name="message" size={12} /><b>{session.user_round_count + session.agent_message_count}</b></span>
     {session.tool_call_count > 0 && <span className="sync-history-thread-metric" data-tooltip={`Tool calls · ${session.tool_call_count}`} aria-label={`Tool calls: ${session.tool_call_count}`} tabIndex={0}><Icon name="tool" size={12} /><b>{session.tool_call_count}</b></span>}
-    <span className="sync-history-thread-metric" data-tooltip={`Total tokens · ${formatCount(session.total_tokens)}`} aria-label={`Total tokens: ${formatCount(session.total_tokens)}`} tabIndex={0}><Icon name="token" size={12} /><b>{formatCount(session.total_tokens)}</b></span>
+    <span className="sync-history-thread-metric" data-tooltip={`Total input · ${totalInputTokens}\nTotal output · ${totalOutputTokens}`} aria-label={`Total tokens: ${totalTokens}. Total input: ${totalInputTokens}. Total output: ${totalOutputTokens}`} tabIndex={0}><Icon name="token" size={12} /><b>{totalTokens}</b></span>
     {!session.metrics_complete && <span className="sync-history-thread-metric sync-history-partial" data-tooltip="Some session metrics are unavailable" aria-label="Some session metrics are unavailable" tabIndex={0}><Icon name="alert-triangle" size={12} /></span>}
     {durationText && (
       <span className="sync-history-thread-metric sync-history-thread-duration" data-tooltip={durationLabel} aria-label={durationLabel} tabIndex={0}>
@@ -691,28 +694,46 @@ interface SessionCardProps {
 
 interface SessionDebugMenuProps {
   resourceId: string;
+  logicalThreadId: string | null;
   providerSessionId: string | null;
+  transcriptPath: string | null;
   workingDirectory: string;
 }
 
 export function sessionDebugCopyText(
   resourceId: string,
+  logicalThreadId: string | null,
   providerSessionId: string | null,
+  transcriptPath: string | null,
   workingDirectory: string,
 ): string {
   return [
     `Resource ID: ${resourceId}`,
-    `Provider session ID: ${providerSessionId ?? "Not recorded"}`,
+    `Mallard thread ID: ${logicalThreadId ?? "Not recorded"}`,
+    `Native session ID: ${providerSessionId ?? "Not recorded"}`,
+    `Transcript file: ${transcriptPath ?? "Not recorded"}`,
     `Working directory: ${workingDirectory}`,
   ].join("\n");
 }
 
 /** Roughly the panel's rendered height; only used to pick which way it opens. */
-const SESSION_DEBUG_POPOVER_HEIGHT = 220;
+const SESSION_DEBUG_POPOVER_HEIGHT = 300;
 
-type SessionDebugCopyTarget = "resource-id" | "provider-session-id" | "working-directory" | "all";
+type SessionDebugCopyTarget =
+  | "resource-id"
+  | "logical-thread-id"
+  | "provider-session-id"
+  | "transcript-path"
+  | "working-directory"
+  | "all";
 
-function SessionDebugMenu({ resourceId, providerSessionId, workingDirectory }: SessionDebugMenuProps) {
+function SessionDebugMenu({
+  resourceId,
+  logicalThreadId,
+  providerSessionId,
+  transcriptPath,
+  workingDirectory,
+}: SessionDebugMenuProps) {
   const [open, setOpen] = useState(false);
   const [dropUp, setDropUp] = useState(false);
   const [copied, setCopied] = useState<SessionDebugCopyTarget | null>(null);
@@ -722,20 +743,30 @@ function SessionDebugMenu({ resourceId, providerSessionId, workingDirectory }: S
   const menuId = `session-debug-${useId().replace(/:/g, "")}`;
   const rows: Array<{ key: Exclude<SessionDebugCopyTarget, "all">; label: string; value: string }> = [
     { key: "resource-id", label: "Resource ID", value: resourceId },
+    ...(logicalThreadId != null
+      ? [{ key: "logical-thread-id" as const, label: "Mallard thread ID", value: logicalThreadId }]
+      : []),
     ...(providerSessionId != null
-      ? [{ key: "provider-session-id" as const, label: "Provider session ID", value: providerSessionId }]
+      ? [{ key: "provider-session-id" as const, label: "Native session ID", value: providerSessionId }]
+      : []),
+    ...(transcriptPath != null
+      ? [{ key: "transcript-path" as const, label: "Transcript file", value: transcriptPath }]
       : []),
     { key: "working-directory", label: "Working directory", value: workingDirectory },
   ];
   const copiedLabel = copied === "resource-id"
     ? "Resource ID copied."
-    : copied === "provider-session-id"
-      ? "Provider session ID copied."
-      : copied === "working-directory"
-        ? "Working directory copied."
-        : copied === "all"
-          ? "Debug info copied."
-          : "";
+    : copied === "logical-thread-id"
+      ? "Mallard thread ID copied."
+      : copied === "provider-session-id"
+        ? "Native session ID copied."
+        : copied === "transcript-path"
+          ? "Transcript file copied."
+          : copied === "working-directory"
+            ? "Working directory copied."
+            : copied === "all"
+              ? "Debug info copied."
+              : "";
 
   const closeMenu = (restoreFocus = false) => {
     setOpen(false);
@@ -864,7 +895,13 @@ function SessionDebugMenu({ resourceId, providerSessionId, workingDirectory }: S
             className="btn btn-ghost sync-history-debug-copy-all"
             onClick={() => void copyValue(
               "all",
-              sessionDebugCopyText(resourceId, providerSessionId, workingDirectory),
+              sessionDebugCopyText(
+                resourceId,
+                logicalThreadId,
+                providerSessionId,
+                transcriptPath,
+                workingDirectory,
+              ),
             )}
           >
             {copied === "all" ? "Copied all" : "Copy all"}
@@ -1177,7 +1214,9 @@ function SessionCard({
           <div className="sync-history-row-clickables">
             <SessionDebugMenu
               resourceId={session.resource_id}
+              logicalThreadId={session.logical_thread_id ?? null}
               providerSessionId={session.provider_session_id ?? null}
+              transcriptPath={session.transcript_path ?? null}
               workingDirectory={workingDirectory}
             />
             {canOpenDetails && (
@@ -1861,8 +1900,8 @@ export default function ProjectActivityPage({
   const comparisonRequestRef = useRef(0);
   const hasBoundProvider = Object.keys(binding?.profile_ids ?? {}).length > 0;
 
-  const load = async (beforeTime?: number | null, requestedBranch = branch, forceRevalidate = false) => {
-    if (!hasBoundProvider) return;
+  const load = async (beforeTime?: number | null, requestedBranch = branch) => {
+    if (!hasBoundProvider) return false;
     const requestId = ++requestRef.current;
     if (beforeTime) setLoadingMore(true); else setLoading(true);
     setActionError(null);
@@ -1874,9 +1913,8 @@ export default function ProjectActivityPage({
         requestedBranch,
         beforeTime,
         30,
-        forceRevalidate,
       );
-      if (requestId !== requestRef.current) return;
+      if (requestId !== requestRef.current) return false;
       setActivity((current) => beforeTime ? mergePages(current, next) : next);
       setBranch(next.git?.selected_branch ?? null);
     } catch (reason) {
@@ -1886,53 +1924,55 @@ export default function ProjectActivityPage({
     } finally {
       if (requestId === requestRef.current) { setLoading(false); setLoadingMore(false); }
     }
+    return requestId === requestRef.current;
   };
 
-  const loadWorkspace = async (requestedBranch = branch, forceRevalidate = false) => {
+  /* The comparison is its own invoke, deliberately apart from the session
+     list: the list costs a bounded scan while the comparison proves every
+     thread's tail, so one joined read held the whole page on the slower
+     half. Rows wear their "Comparing with …" badge until this lands, and
+     either read failing leaves the other's result standing. */
+  const loadComparison = async () => {
+    if (activeStorageId === null) {
+      comparisonRequestRef.current += 1;
+      setComparison(null);
+      setComparisonLoading(false);
+      setComparisonError(null);
+      return;
+    }
+    const comparisonRequestId = ++comparisonRequestRef.current;
+    setComparisonLoading(true);
+    setComparisonError(null);
+    try {
+      const next = await projectSyncApi.getProjectThreadSyncComparison(
+        project.local_project_id,
+        activeStorageId,
+      );
+      if (comparisonRequestId !== comparisonRequestRef.current) return;
+      setComparison(next);
+    } catch (reason) {
+      if (comparisonRequestId !== comparisonRequestRef.current) return;
+      setComparison(null);
+      setComparisonError(errorMessage(reason));
+    } finally {
+      if (comparisonRequestId === comparisonRequestRef.current) setComparisonLoading(false);
+    }
+  };
+
+  const loadWorkspace = async (requestedBranch = branch) => {
     if (comparisonOverride !== undefined) {
       comparisonRequestRef.current += 1;
       setComparison(comparisonOverride);
       setComparisonLoading(false);
       setComparisonError(null);
-      await load(null, requestedBranch, forceRevalidate);
+      await load(null, requestedBranch);
       return;
     }
     if (!hasBoundProvider) return;
-    const activityRequestId = ++requestRef.current;
-    const comparisonRequestId = ++comparisonRequestRef.current;
-    setLoading(true);
-    setActionError(null);
-    setLoadError(null);
-    setComparisonLoading(activeStorageId !== null);
-    setComparisonError(null);
-    try {
-      const next = await projectSyncApi.getProjectActivityWorkspace(
-        project.local_project_id,
-        activeStorageId,
-        requestedBranch,
-        null,
-        30,
-        forceRevalidate,
-      );
-      if (activityRequestId === requestRef.current) {
-        setActivity(next.activity);
-        setBranch(next.activity.git?.selected_branch ?? null);
-      }
-      if (comparisonRequestId === comparisonRequestRef.current) {
-        setComparison(next.comparison ?? null);
-        setComparisonError(next.comparison_error ?? null);
-      }
-    } catch (reason) {
-      const message = errorMessage(reason);
-      if (activityRequestId === requestRef.current) setLoadError(message);
-      if (comparisonRequestId === comparisonRequestRef.current) {
-        setComparison(null);
-        setComparisonError(activeStorageId ? message : null);
-      }
-    } finally {
-      if (activityRequestId === requestRef.current) setLoading(false);
-      if (comparisonRequestId === comparisonRequestRef.current) setComparisonLoading(false);
-    }
+    // Activity owns the cold provider discovery. Waiting for it here lets the
+    // comparison reuse that inventory instead of racing the same full scan.
+    const activityIsCurrent = await load(null, requestedBranch);
+    if (activityIsCurrent) await loadComparison();
   };
 
   useEffect(() => {
@@ -1966,7 +2006,7 @@ export default function ProjectActivityPage({
     void latest.current.load(null, nextBranch);
   }, []);
   const refreshActivity = useCallback(() => {
-    void latest.current.loadWorkspace(latest.current.branch, true);
+    void latest.current.loadWorkspace(latest.current.branch);
   }, []);
 
   const headerCounts = useMemo(

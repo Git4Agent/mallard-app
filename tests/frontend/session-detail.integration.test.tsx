@@ -262,8 +262,7 @@ test("the header is one strip: hidden h1, facts as chips, verbs on the right", (
 
   assert.doesNotMatch(html, /Back to Activity|session-detail-breadcrumbs/);
   // The visible title is the path bar's leaf crumb; the h1 stays for structure
-  // and as the focus landing, screen-reader-only. With the repeated summary
-  // dropped, the sentence appears exactly once in this DOM.
+  // and as the focus landing, screen-reader-only.
   assert.match(html, /<h1 id="session-detail-heading" class="sync-visually-hidden" tabindex="-1">Build provider-neutral session detail<\/h1>/);
   const titleCount = html.split("Build provider-neutral session detail").length - 1;
   assert.equal(titleCount, 1);
@@ -316,8 +315,8 @@ test("the header is one strip: hidden h1, facts as chips, verbs on the right", (
       onAction={() => undefined}
     />,
   );
-  // A summary that differs from the title is a lede, not a header row.
-  assert.match(distinct, /class="session-detail-summary">Expose the durable conversation/);
+  // Transcript-derived summaries belong in the timeline, not above it.
+  assert.doesNotMatch(distinct, /session-detail-summary|Expose the durable conversation/);
 });
 
 test("the timeline is a rail: tiles for turns, punches for calls, no speaker headings", () => {
@@ -1041,10 +1040,11 @@ test("the stylesheets encode the rail, the punchcard, and the stacked bounded pa
   assert.doesNotMatch(baseCss, /session-detail-heading-row|session-detail-heading-copy|session-detail-provider-|session-detail-active-badge|session-detail-metadata|session-detail-meta-|session-detail-refresh/);
   assert.doesNotMatch(retroCss, /session-detail-heading-copy|session-detail-provider-|session-detail-active-badge|session-detail-meta-/);
 
-  // What replaced it: one wrapping strip of 22px fact chips, and the provider
-  // mark on the leaf crumb with its presence dot.
+  // What replaced it: one wrapping strip of 22px fact chips without its own
+  // divider, and the provider mark on the leaf crumb with its presence dot.
   assert.match(baseCss, /\.session-detail-strip \{[^}]*flex-wrap: wrap/s);
   assert.match(baseCss, /\.session-detail-chip \{[^}]*height: 22px/s);
+  assert.doesNotMatch(baseCss, /\.session-detail-header \{[^}]*(?:border-bottom|padding-bottom)/s);
   assert.match(baseCss, /\.sync-path-leaf-mark\.active::after \{[^}]*background: var\(--green\)/s);
   assert.match(retroCss, /\.session-detail-chip,[\s\S]{0,400}?font-family: var\(--font-mono\)/);
   assert.match(retroCss, /\.session-detail-chip \{[\s\S]{0,200}?border-radius: var\(--r-pill\)/);

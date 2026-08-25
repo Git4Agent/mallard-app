@@ -69,6 +69,25 @@ fn provider_keys_are_a_bounded_lowercase_namespace() {
 }
 
 #[test]
+fn schema_one_session_metrics_round_trip_token_breakdown() {
+    let metrics = SessionMetrics {
+        total_input_tokens: Some(200),
+        total_output_tokens: Some(50),
+        total_tokens: Some(250),
+        complete: true,
+        ..SessionMetrics::default()
+    };
+
+    let encoded = serde_json::to_value(&metrics).unwrap();
+    assert_eq!(encoded["total_input_tokens"], 200);
+    assert_eq!(encoded["total_output_tokens"], 50);
+    assert_eq!(encoded["total_tokens"], 250);
+    assert_eq!(serde_json::from_value::<SessionMetrics>(encoded).unwrap(), metrics);
+    assert_eq!(LOCAL_SCHEMA, 1);
+    assert_eq!(BUNDLE_SCHEMA, 1);
+}
+
+#[test]
 fn sync_scope_keys_have_canonical_string_forms() {
     let project: SyncScopeKey = serde_json::from_str("\"project\"").unwrap();
     assert_eq!(project, SyncScopeKey::Project);
@@ -733,6 +752,8 @@ fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderSco
                 user_rounds: 1,
                 agent_messages: 1,
                 tool_calls: 0,
+                total_input_tokens: None,
+                total_output_tokens: None,
                 total_tokens: None,
                 complete: true,
             },

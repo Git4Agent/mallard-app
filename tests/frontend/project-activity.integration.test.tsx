@@ -47,6 +47,8 @@ const binding = {
 
 const CODEX_SESSION_ID = "019f7798-5437-7632-9dbc-5b589cf68bf0";
 const codexResourceId = `codex:conversation:${CODEX_SESSION_ID}`;
+const CODEX_TRANSCRIPT_PATH = `/Users/test/.codex/sessions/2025/07/18/rollout-${CODEX_SESSION_ID}.jsonl`;
+const CLAUDE_TRANSCRIPT_PATH = `/Users/test/.claude/projects/-Users-test-projects-mallard/${CODEX_SESSION_ID}.jsonl`;
 
 function codexActions(enabled = true) {
   const disabledReason = enabled ? null : "This session is not materialized locally.";
@@ -81,13 +83,18 @@ const codexSession = {
   summary: "Map project-owned sessions onto the first-parent rail.",
   started_at: 1_752_800_000,
   ended_at: 1_752_803_600,
+  transcript_path: CODEX_TRANSCRIPT_PATH,
   working_directory: "/Users/test/projects/mallard/packages/desktop",
   branch: "main",
   recorded_sha: "a".repeat(40),
   is_active: false,
   user_round_count: 3,
   agent_message_count: 5,
-  tool_call_count: 8,
+  // Keep this distinct from 3 prompts + 5 replies so the mock contract
+  // catches tools being folded into the visible message total.
+  tool_call_count: 13,
+  total_input_tokens: 20000,
+  total_output_tokens: 4800,
   total_tokens: 24800,
   metrics_complete: true,
   actions: codexActions(),
@@ -754,7 +761,11 @@ test("Push and Pull reviews use only the outer workspace scroll", () => {
   const css = readFileSync("src/App.css", "utf8");
   const workspaceRule = css.match(/\.sync-main\.sync-sync-review-page\s*\{[^}]+\}/s)?.[0] ?? "";
   const reviewScrollRule = css.match(/\.sync-sync-review-page \.sync-sync-review-scroll\s*\{[^}]+\}/s)?.[0] ?? "";
-  const bannerZoneRule = css.match(/\.sync-review-banners\s*\{[^}]+\}/s)?.[0] ?? "";
+  /* Anchored: scoped overrides of the zone (a review that owns its own top
+     gutter, say) also end in `.sync-review-banners {`, and an unanchored
+     match picked up whichever came first in the file rather than the zone's
+     own definition. */
+  const bannerZoneRule = css.match(/^\.sync-review-banners\s*\{[^}]+\}/ms)?.[0] ?? "";
   const workspaceSource = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   const pushSource = readFileSync("src/components/project-sync/PushResourceWorkspace.tsx", "utf8");
   const pullSource = readFileSync("src/components/project-sync/RestorePlanView.tsx", "utf8");
@@ -904,8 +915,9 @@ test("activity content uses the local alias and renders commit and session rows"
   assert.doesNotMatch(html, /aria-label="Show session details"/);
   // Both endpoints are announced together on the single visible stamp.
   assert.match(html, /aria-label="Started [^"]+\. Ended [^"]+"/);
-  assert.match(html, /aria-label="Messages: 8\. User turns: 3\. Agent messages: 5"/);
-  assert.match(html, /data-tooltip="Total tokens · 25K"/);
+  assert.match(html, /aria-label="Messages: 8\. Prompts: 3\. Replies: 5"/);
+  assert.match(html, /data-tooltip="Total input · 20K\nTotal output · 4,800"/);
+  assert.match(html, /aria-label="Total tokens: 25K\. Total input: 20K\. Total output: 4,800"/);
   assert.match(html, /aria-label="1 session linked to commits"/);
   assert.match(html, /class="sync-history-session-title-button"/);
   assert.match(html, /aria-label="View session details"/);
@@ -923,9 +935,12 @@ test("activity content uses the local alias and renders commit and session rows"
   assert.match(html, /aria-haspopup="dialog"/);
   assert.match(html, /aria-label="Session debug info"/);
   assert.match(html, /aria-label="Copy resource id"/);
-  assert.match(html, /aria-label="Copy provider session id"/);
+  assert.match(html, /aria-label="Copy mallard thread id"/);
+  assert.match(html, /aria-label="Copy native session id"/);
+  assert.match(html, /aria-label="Copy transcript file"/);
   assert.match(html, /aria-label="Copy working directory"/);
   assert.doesNotMatch(html, /aria-label="Copy codex home"/);
+  assert.ok(html.includes(CODEX_TRANSCRIPT_PATH));
   assert.match(html, /\/Users\/test\/projects\/mallard\/packages\/desktop/);
   assert.match(html, new RegExp(`<code>${codexResourceId}</code>`));
   assert.match(html, />Copy all</);
@@ -1033,12 +1048,12 @@ test("permanent session summaries label every metric icon", () => {
   assert.match(html, /data-icon="clock"/);
   // Only one stamp, and none of the old paired-range markup.
   assert.doesNotMatch(html, /sync-history-thread-time-start|sync-history-range-arrow/);
-  assert.match(html, /data-tooltip="Total tokens · 25K"/);
+  assert.match(html, /data-tooltip="Total input · 20K\nTotal output · 4,800"/);
   // Turns are one chip now — the sum on the face, each half named on its own
   // tooltip line — and the user glyph left the row with its readout.
-  assert.match(html, /data-tooltip="User turns · 3\nAgent messages · 5"[\s\S]*?data-icon="message"[\s\S]*?<b>8<\/b>/);
+  assert.match(html, /data-tooltip="Prompts · 3\nReplies · 5"[\s\S]*?data-icon="message"[\s\S]*?<b>8<\/b>/);
   assert.doesNotMatch(html, /sync-history-thread-metric[^>]*>[^<]*<svg[^>]*data-icon="user"/);
-  assert.match(html, /data-tooltip="Tool calls · 8"/);
+  assert.match(html, /data-tooltip="Tool calls · 13"/);
 });
 
 test("a sub-minute session still reports how long it ran", () => {
@@ -1119,26 +1134,40 @@ test("session actions stay compact and trail the readouts", () => {
   assert.doesNotMatch(debugPopoverRule, /100vw/);
 });
 
-test("session debug copy text keeps complete portable identifiers", () => {
+test("session debug copy text keeps complete local diagnostics", () => {
+  const mallardThreadId = "thread-16c2fcc97307015b08a053ec0c8423e9";
+  const resourceId = `codex:conversation:${mallardThreadId}`;
   assert.equal(
     sessionDebugCopyText(
-      codexResourceId,
+      resourceId,
+      mallardThreadId,
       CODEX_SESSION_ID,
+      CODEX_TRANSCRIPT_PATH,
       codexSession.working_directory,
     ),
     [
-      `Resource ID: ${codexResourceId}`,
-      `Provider session ID: ${CODEX_SESSION_ID}`,
+      `Resource ID: ${resourceId}`,
+      `Mallard thread ID: ${mallardThreadId}`,
+      `Native session ID: ${CODEX_SESSION_ID}`,
+      `Transcript file: ${CODEX_TRANSCRIPT_PATH}`,
       `Working directory: ${codexSession.working_directory}`,
     ].join("\n"),
   );
-  // A remote-only row can lack a provider-native id; the copy says so rather
-  // than printing a blank.
+  // A remote-only row can lack both a provider-native id and a local
+  // transcript; the copy says so rather than printing blanks.
   assert.equal(
-    sessionDebugCopyText("claude:conversation:thread-1", null, "/Users/test/projects/mallard"),
+    sessionDebugCopyText(
+      "claude:conversation:thread-1",
+      "thread-1",
+      null,
+      null,
+      "/Users/test/projects/mallard",
+    ),
     [
       "Resource ID: claude:conversation:thread-1",
-      "Provider session ID: Not recorded",
+      "Mallard thread ID: thread-1",
+      "Native session ID: Not recorded",
+      "Transcript file: Not recorded",
       "Working directory: /Users/test/projects/mallard",
     ].join("\n"),
   );
@@ -1156,7 +1185,7 @@ test("browse-mode session titles navigate without retaining the inline preview",
 
   assert.match(html, /class="sync-history-session-title-button"[^>]*>Add Git history mapping</);
   assert.match(html, /aria-label="View session details"/);
-  assert.match(html, /data-tooltip="User turns · 3\nAgent messages · 5"/);
+  assert.match(html, /data-tooltip="Prompts · 3\nReplies · 5"/);
   assert.doesNotMatch(html, /sync-history-chat-details|Load 10 older messages|Nested conversation preview/);
   assert.doesNotMatch(html, /aria-expanded="(?:true|false)"[^>]*View session details/);
 });
@@ -1224,6 +1253,7 @@ test("storage-only sessions leave Uncommitted for their own group above the rail
     resource_id: storedResourceId,
     provider_session_id: null,
     logical_thread_id: storedId,
+    transcript_path: null,
     source: "remote_only" as const,
     title: "Add horror story document",
     working_directory: null,
@@ -1271,6 +1301,7 @@ test("a page whose unmapped rows are all storage-only renders no Uncommitted gro
     resource_id: storedResourceId,
     provider_session_id: null,
     logical_thread_id: storedId,
+    transcript_path: null,
     source: "remote_only" as const,
     title: "Add horror story document",
     working_directory: null,
@@ -1474,6 +1505,7 @@ test("selected storage adds directional indicators and remote-only session rows"
     resource_id: remoteResourceId,
     provider_session_id: null,
     logical_thread_id: remoteId,
+    transcript_path: null,
     source: "remote_only" as const,
     title: "Improve cloud thread titles",
     started_at: 1_752_802_000,
@@ -1632,6 +1664,7 @@ test("mixed-provider rows sort deterministically and never collide on native ids
     provider_display_name: "Claude",
     provider_session_id: nativeId,
     logical_thread_id: nativeId,
+    transcript_path: CLAUDE_TRANSCRIPT_PATH,
     title: "Claude twin",
     actions: [
       {
@@ -1722,6 +1755,8 @@ test("mixed-provider rows sort deterministically and never collide on native ids
   // corresponding desktop app.
   assert.match(html, /aria-label="Open in Codex"><svg[^>]*data-icon="openai"/);
   assert.match(html, /aria-label="Open in Claude"><svg[^>]*data-icon="claude"/);
+  assert.ok(html.includes(CODEX_TRANSCRIPT_PATH));
+  assert.ok(html.includes(CLAUDE_TRANSCRIPT_PATH));
   assert.equal((html.match(/type="checkbox"/g) ?? []).length, 2);
   // Selection is keyed by resource id, so ticking the Claude twin cannot
   // leak onto the Codex twin that shares its native id.
@@ -1739,6 +1774,7 @@ test("view-only rows keep their badge and copy but never a checkbox", () => {
     provider_display_name: "Claude",
     provider_session_id: null,
     logical_thread_id: "claude-thread-1",
+    transcript_path: null,
     source: "remote_only" as const,
     access: "view_only" as const,
     title: "Claude remote session",
@@ -1781,6 +1817,7 @@ test("view-only rows keep their badge and copy but never a checkbox", () => {
   assert.match(html, /class="sync-history-branch-state history-only"[^>]*>View only</);
   assert.match(html, /View only — connect a Claude profile to sync this session\./);
   assert.match(html, /View only — this Mallard version has no adapter for mystery sessions\./);
+  assert.doesNotMatch(html, /aria-label="Copy transcript file"/);
   // The per-provider notice explains the access state once, with the backend's
   // detail carried along — now as one item in the page's single notice zone
   // rather than a box of its own.
@@ -1908,13 +1945,31 @@ test("a project without a bound provider profile stays in the workspace", () => 
 
 test("the page speaks only the provider-neutral activity contracts", () => {
   const source = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
+  const apiSource = readFileSync("src/components/project-sync/api.ts", "utf8");
+  const commandSource = readFileSync("src-tauri/src/project_sync/commands.rs", "utf8");
+  const activitySource = readFileSync(
+    "crates/mallard-infrastructure/src/project_activity.rs",
+    "utf8",
+  );
 
-  // New command surface only.
-  assert.match(source, /getProjectActivityWorkspace\(/);
+  // New command surface only: the session list and the storage comparison
+  // are two independent reads, never one joined workspace fetch.
+  assert.match(source, /getProjectActivity\(/);
+  assert.match(source, /getProjectThreadSyncComparison\(/);
+  assert.doesNotMatch(source, /getProjectActivityWorkspace/);
+  assert.match(
+    source,
+    /if \(!hasBoundProvider\) return;\s*(?:\/\/[^\n]*\n\s*)*const activityIsCurrent = await load\(null, requestedBranch\);\s*if \(activityIsCurrent\) await loadComparison\(\);/,
+    "Activity must finish and prime provider discovery before storage comparison starts",
+  );
+  assert.doesNotMatch(source, /const comparisonTask = loadComparison\(\)/);
   assert.match(source, /executeProjectSessionAction\(/);
   assert.doesNotMatch(source, /getSessionSyncComparison\(/);
   assert.match(source, /onOpenSessionDetail/);
   assert.doesNotMatch(source, /getProjectSessionDetails|getProjectChatHistory|getProjectChatThreadDetails|openCodexThreadInApp|openCodexThreadInTerminal|getThreadSyncComparison/);
+  for (const productionSource of [source, apiSource, commandSource, activitySource]) {
+    assert.doesNotMatch(productionSource, /forceRevalidate|force_revalidate/);
+  }
 
   // Provider launches are reached through generic action descriptors, never
   // through a provider-key comparison in common flow.
@@ -2074,6 +2129,7 @@ test("the shared icon catalog renders as monochrome pixel geometry", () => {
     "git-folder",
     "help-circle",
     "info",
+    "lightbulb",
     "link",
     "lock",
     "message",
@@ -2082,8 +2138,10 @@ test("the shared icon catalog renders as monochrome pixel geometry", () => {
     "octagon-x",
     "openai",
     "pause",
+    "paw",
     "play",
     "plus",
+    "puzzle",
     "refresh",
     "settings",
     "sidebar-collapse",
@@ -2210,17 +2268,20 @@ test("completed projects use their main row for history and only mark Git reposi
   assert.ok(logsNavIndex > settingsNavIndex);
   assert.match(html, /aria-label="Storages"/);
   assert.match(html, />Storages<\/span>/);
+  const catalogPaneIndex = html.indexOf('<section class="sidebar-split-pane sidebar-catalog-pane"');
+  const storagePaneIndex = html.indexOf('<section class="sidebar-split-pane sidebar-storage-pane"');
+  assert.ok(catalogPaneIndex >= 0 && storagePaneIndex > catalogPaneIndex);
   // Every seam down the rail is a handle — each one is the same 3px of frame
   // colour, so any that did nothing read as a handle that was simply broken.
   assert.match(html, /role="separator" aria-label="Resize navigation and Projects sections" aria-orientation="horizontal"/);
   assert.match(html, /aria-valuetext="Navigation height: fits contents"/);
-  assert.match(html, /role="separator" aria-label="Resize Projects and Storages sections" aria-orientation="horizontal"/);
-  assert.match(html, /role="separator" aria-label="Resize Storages and Catalog sections" aria-orientation="horizontal"/);
+  assert.match(html, /role="separator" aria-label="Resize Projects and Catalog sections" aria-orientation="horizontal"/);
+  assert.match(html, /role="separator" aria-label="Resize Catalog and Storages sections" aria-orientation="horizontal"/);
   assert.match(html, /aria-valuenow="56"/);
-  // Catalog is content-sized (capped at 40% of the box), so it reports fitting
+  // Storages is content-sized (capped at 40% of the box), so it reports fitting
   // its contents until the handle pins it to a height rather than carrying a
   // share of the box.
-  assert.match(html, /aria-valuetext="Catalog height: fits contents"/);
+  assert.match(html, /aria-valuetext="Storage height: fits contents"/);
   assert.doesNotMatch(html, /sidebar-section-count/);
   assert.doesNotMatch(html, /Git Based|Non-Git Based/);
   assert.doesNotMatch(html, /Project settings for Mallard local/);
@@ -2348,10 +2409,14 @@ test("the Catalog pane starts empty and lists one row per added scope", () => {
         onRemoveCatalogScope={() => undefined}
       />,
     );
+  const catalogPane = (html: string) => {
+    const start = html.indexOf('aria-label="Catalog"');
+    return html.slice(start, html.indexOf("</section>", start));
+  };
 
   // Fresh state: no permanent Skills/Plugins/Pets rows, just the Add prompt.
   const emptyHtml = render([], null);
-  const emptyPane = emptyHtml.slice(emptyHtml.indexOf('aria-label="Catalog"'));
+  const emptyPane = catalogPane(emptyHtml);
   assert.match(emptyPane, /aria-label="Add Catalog resource"/);
   assert.match(emptyPane, /Add your first resource/);
   assert.doesNotMatch(emptyPane, /<span>Skills<\/span>|<span>Plugins<\/span>|<span>Pets<\/span>/);
@@ -2364,7 +2429,7 @@ test("the Catalog pane starts empty and lists one row per added scope", () => {
     scopeView("catscope-3", "codex_pet_v1", "Codex home"),
     scopeView("catscope-4", "codex_pet_v2", "Codex home"),
   ], "catscope-2");
-  const pane = html.slice(html.indexOf('aria-label="Catalog"'));
+  const pane = catalogPane(html);
   assert.match(pane, /<span>Skills · Codex home<\/span>/);
   assert.match(pane, /<span>Skills · conf2<\/span>/);
   assert.match(pane, /<span>Pets v1 · Codex home<\/span>/);
@@ -2408,10 +2473,10 @@ test("an empty Storages pane prompts the way Projects and Catalog do", () => {
       />,
     );
 
-  const storagePane = (html: string) => html.slice(
-    html.indexOf('aria-label="Storages"'),
-    html.indexOf('aria-label="Catalog"'),
-  );
+  const storagePane = (html: string) => {
+    const start = html.indexOf('aria-label="Storages"');
+    return html.slice(start, html.indexOf("</section>", start));
+  };
 
   // The three panes say the same thing when they are empty, in the same row.
   const empty = storagePane(render([]));

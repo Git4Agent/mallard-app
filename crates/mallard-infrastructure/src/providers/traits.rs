@@ -196,6 +196,8 @@ pub struct SessionFileSummary {
     pub user_rounds: u64,
     pub agent_messages: u64,
     pub tool_calls: u64,
+    pub total_input_tokens: Option<u64>,
+    pub total_output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub metrics_complete: bool,
     pub is_internal_subagent: bool,

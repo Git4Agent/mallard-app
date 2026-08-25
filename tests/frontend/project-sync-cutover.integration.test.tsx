@@ -7,9 +7,9 @@ import { repositoryFingerprintMatches } from "../../src/components/project-sync/
 import { PROJECT_SYNC_SCHEMA } from "../../src/types";
 import {
   MIN_PANE_HEIGHT,
-  catalogHeightRange,
+  storageHeightRange,
   shareHolding,
-  shareHoldingStorages,
+  shareHoldingCatalog,
 } from "../../src/components/project-sync/ProjectSidebar";
 import {
   expandHomePath,
@@ -372,13 +372,13 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /\.sync-titlebar\s*\{[^}]*margin-bottom: var\(--retro-gutter\);/s);
   assert.doesNotMatch(retroCss, /\.sync-titlebar\s*\{[^}]*border-bottom: 1px solid var\(--retro-rule\);/s);
   assert.match(retroCss, /\.sync-sidebar-sections\s*\{[^}]*overflow: visible;[^}]*background: transparent;/s);
-  // Two elastic rows and a Catalog row that fits its contents up to a 40% cap
+  // Two elastic rows and a Storages row that fits its contents up to a 40% cap
   // until the lower handle pins it, parted by two 3px handle tracks. The cap
-  // matters because the row list is unbounded — one row per (provider home ×
-  // kind) — and an uncapped content-sized track would squeeze Projects and
-  // Storages onto their 96px floors.
+  // matters because the configured destination list is unbounded, and an
+  // uncapped content-sized track would squeeze Projects and Catalog onto their
+  // 96px floors.
   const sidebarSource = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
-  assert.match(sidebarSource, /gridTemplateRows: `\$\{elasticRows\(sectionLayout\.projectShare\)\} 3px \$\{sectionLayout\.catalogHeight === null \? "fit-content\(40%\)" : `\$\{sectionLayout\.catalogHeight\}px`\}`/);
+  assert.match(sidebarSource, /gridTemplateRows: `\$\{elasticRows\(sectionLayout\.projectShare\)\} 3px \$\{sectionLayout\.storageHeight === null \? "fit-content\(40%\)" : `\$\{sectionLayout\.storageHeight\}px`\}`/);
   // Shares go out as fr factors scaled to 100, never as the fractions
   // themselves: a track whose flex factor is under 1 is only given that
   // fraction of the leftover space, so once a pane bottoms out on its floor the
@@ -836,43 +836,43 @@ test("refocus reconciles external changes narrowly and the full reload lives in 
 });
 
 // Each handle must move the one gutter it borders. The panes below the head and
-// above Catalog are sized by share, so any change to the box they divide slides
+// above Storages are sized by share, so any change to the box they divide slides
 // their gutters unless the share is re-solved against the new box.
 test("every sidebar handle moves its own gutter and no other", () => {
   const BOX = 700;
-  const CATALOG = 175;
-  const elastic = BOX - 6 - CATALOG;
+  const STORAGE = 175;
+  const elastic = BOX - 6 - STORAGE;
   const projects = 210;
-  const storages = elastic - projects;
+  const catalog = elastic - projects;
 
-  // Head handle: the box shrinks by what the head takes, and Storages must come
+  // Head handle: the box shrinks by what the head takes, and Catalog must come
   // out of it unchanged — Projects, the pane it borders, absorbs the whole move.
   const shrunkBox = BOX - 60;
-  const heldShare = shareHoldingStorages(storages, shrunkBox, CATALOG);
-  const shrunkElastic = shrunkBox - 6 - CATALOG;
-  assert.ok(Math.abs((1 - heldShare) * shrunkElastic - storages) < 0.5, "Storages holds its pixels");
+  const heldShare = shareHoldingCatalog(catalog, shrunkBox, STORAGE);
+  const shrunkElastic = shrunkBox - 6 - STORAGE;
+  assert.ok(Math.abs((1 - heldShare) * shrunkElastic - catalog) < 0.5, "Catalog holds its pixels");
   assert.ok(Math.abs(heldShare * shrunkElastic - (projects - 60)) < 0.5, "Projects absorbs the change");
 
-  // Catalog handle: the elastic space shrinks as Catalog grows, and Projects is
+  // Storages handle: the elastic space shrinks as Storages grows, and Projects is
   // the pane that must not move.
-  const grown = CATALOG + 40;
+  const grown = STORAGE + 40;
   const share = shareHolding(projects, BOX, grown);
   const grownElastic = BOX - 6 - grown;
   assert.ok(Math.abs(share * grownElastic - projects) < 0.5, "Projects holds its pixels");
-  assert.ok(Math.abs((1 - share) * grownElastic - (storages - 40)) < 0.5, "Storages absorbs the change");
+  assert.ok(Math.abs((1 - share) * grownElastic - (catalog - 40)) < 0.5, "Catalog absorbs the change");
 });
 
-test("the Catalog pane floors at the same height as the panes above it", () => {
+test("the Storages pane floors at the same height as the panes above it", () => {
   // It used to floor at its own content height, so the bottom handle refused to
   // move while the two above travelled down to MIN_PANE_HEIGHT.
-  const [min, max] = catalogHeightRange(700, 210);
+  const [min, max] = storageHeightRange(700, 210);
   assert.equal(min, MIN_PANE_HEIGHT);
   assert.equal(max, 700 - 6 - 210 - MIN_PANE_HEIGHT);
   // The list scrolls unconditionally — the unbounded row list needs it past
   // the 40% cap as much as under a pinned height — so the old is-pinned
   // overflow switch stays deleted.
   const css = readFileSync("src/App.css", "utf8");
-  assert.doesNotMatch(css, /\.sidebar-catalog-pane\.is-pinned/);
+  assert.doesNotMatch(css, /\.sidebar-storage-pane\.is-pinned/);
   assert.match(
     css,
     /\.sidebar-split-pane > \.sidebar-profile-list,\s*\.sidebar-split-pane > \.sidebar-links-list\s*\{[^}]*overflow-y: scroll;/s,

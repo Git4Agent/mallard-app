@@ -69,6 +69,13 @@ fn truncate_chars(value: &str, limit: usize) -> String {
     }
 }
 
+fn title_candidate(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| truncate_chars(text, TITLE_CHARS))
+}
+
 fn is_meta_record(object: &serde_json::Map<String, Value>) -> bool {
     object
         .get("isMeta")
@@ -78,6 +85,18 @@ fn is_meta_record(object: &serde_json::Map<String, Value>) -> bool {
             .get("isSidechain")
             .and_then(Value::as_bool)
             .unwrap_or(false)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ClaudeTokenUsage {
+    input: u64,
+    output: u64,
+}
+
+impl ClaudeTokenUsage {
+    fn total(self) -> u64 {
+        self.input.saturating_add(self.output)
+    }
 }
 
 pub(crate) fn summarize_file(path: &Path) -> Result<SessionFileSummary, String> {
@@ -98,6 +117,14 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
     };
     let mut identity = ClaudeSessionIdentityTracker::default();
     let mut first_user_text: Option<String> = None;
+    let mut summary_title: Option<String> = None;
+    let mut ai_title: Option<String> = None;
+    let mut custom_title: Option<String> = None;
+    let mut user_turn_ids = BTreeSet::new();
+    let mut unidentified_user_turns = 0_u64;
+    let mut agent_message_ids = BTreeSet::new();
+    let mut unidentified_agent_messages = 0_u64;
+    let mut token_usage_by_message_id = BTreeMap::<String, ClaudeTokenUsage>::new();
     for raw in bytes.split(|byte| *byte == b'\n') {
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
         if raw.is_empty() {
@@ -128,24 +155,65 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
         }
         match object.get("type").and_then(Value::as_str) {
             Some("summary") => {
-                if let Some(text) = object.get("summary").and_then(Value::as_str) {
-                    if !text.trim().is_empty() {
-                        summary.title = Some(truncate_chars(text, TITLE_CHARS));
-                    }
+                if let Some(title) = title_candidate(object.get("summary")) {
+                    summary_title = Some(title);
+                }
+            }
+            Some("ai-title") => {
+                if let Some(title) = title_candidate(object.get("aiTitle")) {
+                    ai_title = Some(title);
+                }
+            }
+            Some("custom-title") => {
+                if let Some(title) = title_candidate(object.get("customTitle")) {
+                    custom_title = Some(title);
                 }
             }
             Some("user") if !is_meta_record(object) => {
-                summary.user_rounds = summary.user_rounds.saturating_add(1);
-                if first_user_text.is_none() {
-                    if let Some(text) = record_text(&value) {
-                        if !text.trim().is_empty() {
-                            first_user_text = Some(truncate_chars(&text, TITLE_CHARS));
+                if let Some(text) = meaningful_human_prompt(&value) {
+                    let is_new_turn = match object
+                        .get("uuid")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                    {
+                        Some(id) => user_turn_ids.insert(id.to_string()),
+                        None => {
+                            unidentified_user_turns = unidentified_user_turns.saturating_add(1);
+                            true
                         }
+                    };
+                    if is_new_turn && first_user_text.is_none() {
+                        first_user_text = Some(truncate_chars(&text, TITLE_CHARS));
                     }
                 }
             }
             Some("assistant") if !is_meta_record(object) => {
-                summary.agent_messages = summary.agent_messages.saturating_add(1);
+                let stop_reason = normalized_type(
+                    value
+                        .get("message")
+                        .and_then(|message| message.get("stop_reason"))
+                        .and_then(Value::as_str),
+                );
+                if is_terminal_response_stop_reason(&stop_reason)
+                    && assistant_record_is_visible(&value)
+                    && record_text(&value).is_some_and(|text| !text.trim().is_empty())
+                {
+                    match value
+                        .get("message")
+                        .and_then(|message| message.get("id"))
+                        .and_then(Value::as_str)
+                        .or_else(|| object.get("uuid").and_then(Value::as_str))
+                        .filter(|id| !id.is_empty())
+                    {
+                        Some(id) => {
+                            agent_message_ids.insert(id.to_string());
+                        }
+                        None => {
+                            unidentified_agent_messages =
+                                unidentified_agent_messages.saturating_add(1);
+                        }
+                    }
+                }
                 if let Some(Value::Array(items)) = value
                     .get("message")
                     .and_then(|message| message.get("content"))
@@ -160,30 +228,73 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
                     .get("message")
                     .and_then(|message| message.get("usage"))
                 {
-                    let input = usage
-                        .get("input_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
+                    let input = [
+                        "input_tokens",
+                        "cache_creation_input_tokens",
+                        "cache_read_input_tokens",
+                    ]
+                    .into_iter()
+                    .fold(0_u64, |total, field| {
+                        total.saturating_add(
+                            usage.get(field).and_then(Value::as_u64).unwrap_or(0),
+                        )
+                    });
                     let output = usage
                         .get("output_tokens")
                         .and_then(Value::as_u64)
                         .unwrap_or(0);
-                    if input.saturating_add(output) > 0 {
-                        summary.total_tokens = Some(input.saturating_add(output));
+                    let observed = ClaudeTokenUsage { input, output };
+                    if observed.total() > 0 {
+                        let message_id = value
+                            .get("message")
+                            .and_then(|message| message.get("id"))
+                            .and_then(Value::as_str)
+                            .or_else(|| object.get("uuid").and_then(Value::as_str))
+                            .filter(|id| !id.is_empty());
+                        if let Some(message_id) = message_id {
+                            token_usage_by_message_id
+                                .entry(message_id.to_string())
+                                .and_modify(|current| {
+                                    if observed.total() > current.total() {
+                                        *current = observed;
+                                    }
+                                })
+                                .or_insert(observed);
+                        } else {
+                            summary.metrics_complete = false;
+                        }
                     }
                 }
             }
             _ => {}
         }
     }
+    if !token_usage_by_message_id.is_empty() {
+        let (input, output) = token_usage_by_message_id.values().fold(
+            (0_u64, 0_u64),
+            |(input, output), usage| {
+                (
+                    input.saturating_add(usage.input),
+                    output.saturating_add(usage.output),
+                )
+            },
+        );
+        summary.total_input_tokens = Some(input);
+        summary.total_output_tokens = Some(output);
+        summary.total_tokens = Some(input.saturating_add(output));
+    }
     summary.session_id = identity
         .leaf_identity()
         .0
         .ok_or_else(|| "Claude session file has no leaf session ID".to_string())?;
+    summary.user_rounds = (user_turn_ids.len() as u64).saturating_add(unidentified_user_turns);
+    summary.agent_messages =
+        (agent_message_ids.len() as u64).saturating_add(unidentified_agent_messages);
     summary.summary = first_user_text.clone();
-    if summary.title.is_none() {
-        summary.title = first_user_text;
-    }
+    summary.title = custom_title
+        .or(ai_title)
+        .or(summary_title)
+        .or(first_user_text);
     Ok(summary)
 }
 
@@ -1531,14 +1642,18 @@ mod tests {
     use serde_json::json;
     use std::fs;
 
-    fn write_jsonl(path: &Path, values: Vec<Value>) {
+    fn jsonl_bytes(values: Vec<Value>) -> Vec<u8> {
         let mut transcript = values
             .into_iter()
             .map(|value| serde_json::to_string(&value).unwrap())
             .collect::<Vec<_>>()
             .join("\n");
         transcript.push('\n');
-        fs::write(path, transcript).unwrap();
+        transcript.into_bytes()
+    }
+
+    fn write_jsonl(path: &Path, values: Vec<Value>) {
+        fs::write(path, jsonl_bytes(values)).unwrap();
     }
 
     fn context<'a>(project_root: &'a Path) -> SessionTimelineContext<'a> {
@@ -1587,6 +1702,120 @@ mod tests {
     }
 
     #[test]
+    fn activity_summary_prefers_current_claude_titles() {
+        let base_records = || {
+            vec![
+                json!({
+                    "type": "user",
+                    "uuid": "command-1",
+                    "parentUuid": null,
+                    "sessionId": "session-1",
+                    "isSidechain": false,
+                    "message": {
+                        "role": "user",
+                        "content": "<command-name>/autocompact</command-name> <command-message>autocompact</command-message>"
+                    }
+                }),
+                json!({
+                    "type": "user",
+                    "uuid": "tool-result-1",
+                    "parentUuid": "command-1",
+                    "sessionId": "session-1",
+                    "message": {
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": "tool-1",
+                            "content": "ignored"
+                        }]
+                    }
+                }),
+                json!({
+                    "type": "user",
+                    "uuid": "human-1",
+                    "parentUuid": "tool-result-1",
+                    "sessionId": "session-1",
+                    "message": {
+                        "role": "user",
+                        "content": "Investigate path remapping"
+                    }
+                }),
+            ]
+        };
+        let summarize = |title_records: Vec<Value>| {
+            let mut records = base_records();
+            records.extend(title_records);
+            summarize_bytes(&jsonl_bytes(records)).unwrap()
+        };
+
+        let prompt_only = summarize(Vec::new());
+        assert_eq!(
+            prompt_only.title.as_deref(),
+            Some("Investigate path remapping")
+        );
+        assert_eq!(
+            prompt_only.summary.as_deref(),
+            Some("Investigate path remapping")
+        );
+        assert_eq!(prompt_only.user_rounds, 1);
+
+        let existing_summary = summarize(vec![json!({
+            "type": "summary",
+            "sessionId": "session-1",
+            "summary": "Existing summary title"
+        })]);
+        assert_eq!(
+            existing_summary.title.as_deref(),
+            Some("Existing summary title")
+        );
+
+        let generated = summarize(vec![
+            json!({
+                "type": "summary",
+                "sessionId": "session-1",
+                "summary": "Existing summary title"
+            }),
+            json!({
+                "type": "ai-title",
+                "sessionId": "session-1",
+                "aiTitle": "Research path remapping after push/pull across machines"
+            }),
+        ]);
+        assert_eq!(
+            generated.title.as_deref(),
+            Some("Research path remapping after push/pull across machines")
+        );
+
+        let custom = summarize(vec![
+            json!({
+                "type": "ai-title",
+                "sessionId": "session-1",
+                "aiTitle": "Generated title"
+            }),
+            json!({
+                "type": "custom-title",
+                "sessionId": "session-1",
+                "customTitle": "Original title"
+            }),
+            json!({
+                "type": "custom-title",
+                "sessionId": "session-1",
+                "customTitle": "   "
+            }),
+            json!({
+                "type": "custom-title",
+                "sessionId": "session-1",
+                "customTitle": "  Remapping\nworkspace  "
+            }),
+        ]);
+        assert_eq!(custom.title.as_deref(), Some("Remapping workspace"));
+        assert_eq!(
+            custom.summary.as_deref(),
+            Some("Investigate path remapping")
+        );
+    }
+
+    #[test]
     fn human_messages_tools_and_visible_phases_are_normalized_once() {
         let temp = tempfile::tempdir().unwrap();
         let project_root = temp.path().join("project");
@@ -1603,6 +1832,10 @@ mod tests {
                 json!({"type":"assistant","uuid":"a-2","sessionId":"session-1","timestamp":"2026-08-07T00:00:03Z","message":{"id":"msg-2","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"The source is clear."}]}}),
             ],
         );
+
+        let summary = summarize_file(&transcript).unwrap();
+        assert_eq!(summary.user_rounds, 1);
+        assert_eq!(summary.agent_messages, 1);
 
         let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
         assert_eq!(count_value(&index.counts.prompts), 1);
@@ -1662,6 +1895,88 @@ mod tests {
         let detail = read_event_detail(&transcript, &index, &tool_entry.event_id).unwrap();
         assert!(detail.arguments.as_deref().unwrap().contains("src/lib.rs"));
         assert_eq!(detail.result.as_deref(), Some("source contents"));
+    }
+
+    #[test]
+    fn token_usage_sums_unique_messages_and_includes_cached_input() {
+        let summary = summarize_bytes(&jsonl_bytes(vec![
+            json!({
+                "type": "user",
+                "uuid": "u-1",
+                "sessionId": "session-1",
+                "message": {"role": "user", "content": "Count tokens"}
+            }),
+            json!({
+                "type": "assistant",
+                "uuid": "a-1",
+                "sessionId": "session-1",
+                "message": {
+                    "id": "msg-1",
+                    "role": "assistant",
+                    "usage": {
+                        "input_tokens": 2,
+                        "output_tokens": 10,
+                        "cache_creation_input_tokens": 100,
+                        "cache_read_input_tokens": 1000
+                    },
+                    "content": []
+                }
+            }),
+            json!({
+                "type": "assistant",
+                "uuid": "a-1-complete",
+                "sessionId": "session-1",
+                "message": {
+                    "id": "msg-1",
+                    "role": "assistant",
+                    "usage": {
+                        "input_tokens": 2,
+                        "output_tokens": 20,
+                        "cache_creation_input_tokens": 100,
+                        "cache_read_input_tokens": 1000
+                    },
+                    "content": []
+                }
+            }),
+            json!({
+                "type": "assistant",
+                "uuid": "a-1-zero-replay",
+                "sessionId": "session-1",
+                "message": {
+                    "id": "msg-1",
+                    "role": "assistant",
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0
+                    },
+                    "content": []
+                }
+            }),
+            json!({
+                "type": "assistant",
+                "uuid": "a-2",
+                "sessionId": "session-1",
+                "message": {
+                    "id": "msg-2",
+                    "role": "assistant",
+                    "usage": {
+                        "input_tokens": 3,
+                        "output_tokens": 30,
+                        "cache_creation_input_tokens": 200,
+                        "cache_read_input_tokens": 2000
+                    },
+                    "content": []
+                }
+            }),
+        ]))
+        .unwrap();
+
+        assert_eq!(summary.total_input_tokens, Some(3305));
+        assert_eq!(summary.total_output_tokens, Some(50));
+        assert_eq!(summary.total_tokens, Some(3355));
+        assert!(summary.metrics_complete);
     }
 
     #[test]

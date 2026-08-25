@@ -139,24 +139,22 @@ fn provider_supports_tail_cursor(provider: &ProviderKey) -> bool {
 fn claim_history_scan_log_at(
     logged_at: &mut BTreeMap<String, u64>,
     local_project_id: &str,
-    force: bool,
     now: u64,
 ) -> bool {
-    let allowed = force
-        || logged_at
-            .get(local_project_id)
-            .is_none_or(|previous| now.saturating_sub(*previous) >= HISTORY_SCAN_LOG_THROTTLE_SECS);
+    let allowed = logged_at
+        .get(local_project_id)
+        .is_none_or(|previous| now.saturating_sub(*previous) >= HISTORY_SCAN_LOG_THROTTLE_SECS);
     if allowed {
         logged_at.insert(local_project_id.to_string(), now);
     }
     allowed
 }
 
-fn should_log_history_scan(local_project_id: &LocalProjectId, force: bool) -> bool {
+fn should_log_history_scan(local_project_id: &LocalProjectId) -> bool {
     HISTORY_SCAN_LOGGED_AT
         .lock()
         .map(|mut logged_at| {
-            claim_history_scan_log_at(&mut logged_at, local_project_id.as_str(), force, now_secs())
+            claim_history_scan_log_at(&mut logged_at, local_project_id.as_str(), now_secs())
         })
         // A poisoned throttle must not hide operational diagnostics.
         .unwrap_or(true)
@@ -496,18 +494,6 @@ pub struct ThreadSyncComparison {
     /// the observed head (DESIGN_REMOTE_HISTORY_CONTINUITY.md). Explains a
     /// wiped-and-recreated storage wherever the comparison is shown.
     pub remote_continuity: RemoteContinuity,
-}
-
-/// One backend read shared by the Activity and storage-comparison
-/// projections. A comparison failure remains local to that projection so a
-/// temporarily unavailable storage cannot hide local Activity.
-#[derive(Serialize, Clone, Debug)]
-pub struct ProjectActivityWorkspace {
-    pub activity: ProjectActivity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comparison: Option<ThreadSyncComparison>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comparison_error: Option<String>,
 }
 
 /// One sync scope's continuity as shown in Push/Pull review.
@@ -1101,7 +1087,6 @@ fn build_activity_from_local_read(
     branch: Option<&str>,
     before_time: Option<u64>,
     window_days: Option<u64>,
-    force_revalidate: bool,
     mut warnings: Vec<String>,
 ) -> Result<ProjectActivity, String> {
     let local_sessions = project_activity::scan_local_session_views(
@@ -1109,7 +1094,6 @@ fn build_activity_from_local_read(
         provider_registry(),
         &local.activity_project,
         &local.views,
-        force_revalidate,
         &mut warnings,
     )?;
     let remote_sessions = remote_snapshot
@@ -1129,14 +1113,13 @@ fn build_activity_from_local_read(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn get_project_activity_with_repository(
+pub(super) fn get_project_activity_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: Option<&StorageId>,
     branch: Option<&str>,
     before_time: Option<u64>,
     window_days: Option<u64>,
-    force_revalidate: bool,
 ) -> Result<ProjectActivity, String> {
     let local = load_project_local_read(repository, local_project_id)?;
     let mut warnings = Vec::new();
@@ -1164,72 +1147,8 @@ fn get_project_activity_with_repository(
         branch,
         before_time,
         window_days,
-        force_revalidate,
         warnings,
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn get_project_activity_workspace_with_repository(
-    repository: &LocalStateRepository,
-    local_project_id: &LocalProjectId,
-    storage_id: Option<&StorageId>,
-    branch: Option<&str>,
-    before_time: Option<u64>,
-    window_days: Option<u64>,
-    force_revalidate: bool,
-) -> Result<ProjectActivityWorkspace, String> {
-    let local = load_project_local_read(repository, local_project_id)?;
-    let mut warnings = Vec::new();
-    let mut remote_error = None;
-    let remote = match storage_id {
-        Some(storage_id) => {
-            match load_project_remote_read(repository, local_project_id, storage_id) {
-                Ok(remote) => Some(remote),
-                Err(error) => {
-                    warnings.push(format!(
-                        "remote sessions are unavailable from '{}': {}",
-                        storage_id, error
-                    ));
-                    remote_error = Some(error);
-                    None
-                }
-            }
-        }
-        None => None,
-    };
-    let activity = build_activity_from_local_read(
-        repository,
-        &local,
-        remote.as_ref().and_then(|remote| remote.current.as_ref()),
-        branch,
-        before_time,
-        window_days,
-        force_revalidate,
-        warnings,
-    )?;
-    let (comparison, comparison_error) = match (storage_id, remote.as_ref()) {
-        (Some(storage_id), Some(remote)) => {
-            match build_comparison_from_reads(
-                repository,
-                local_project_id,
-                storage_id,
-                &local,
-                remote,
-                &mut |_, _| {},
-            ) {
-                Ok(comparison) => (Some(comparison), None),
-                Err(error) => (None, Some(error)),
-            }
-        }
-        (Some(_), None) => (None, remote_error),
-        (None, _) => (None, None),
-    };
-    Ok(ProjectActivityWorkspace {
-        activity,
-        comparison,
-        comparison_error,
-    })
 }
 
 #[tauri::command]
@@ -1241,12 +1160,10 @@ pub async fn get_project_activity(
     branch: Option<String>,
     before_time: Option<u64>,
     window_days: Option<u64>,
-    force_revalidate: Option<bool>,
 ) -> Result<ProjectActivity, String> {
     let repository = repository(&app)?;
     let log = ActivityLogScope::new(ActivityLogType::History).project(&local_project_id, None);
-    let force_revalidate = force_revalidate.unwrap_or(false);
-    let log_routine_scan = should_log_history_scan(&local_project_id, force_revalidate);
+    let log_routine_scan = should_log_history_scan(&local_project_id);
     if log_routine_scan {
         log.emit(
             &app,
@@ -1263,7 +1180,6 @@ pub async fn get_project_activity(
             branch.as_deref(),
             before_time,
             window_days,
-            force_revalidate,
         )
     })
     .await;
@@ -1295,59 +1211,63 @@ pub async fn get_project_activity(
     result
 }
 
+/// The storage comparison as its own IPC read: the Activity page fires it
+/// beside `get_project_activity` so the session list never waits on the
+/// comparison. Phase timings log through the same throttle the activity
+/// scan uses, under a distinct claim key.
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub async fn get_project_activity_workspace(
+pub async fn get_project_thread_sync_comparison(
     app: tauri::AppHandle,
     local_project_id: LocalProjectId,
-    storage_id: Option<StorageId>,
-    branch: Option<String>,
-    before_time: Option<u64>,
-    window_days: Option<u64>,
-    force_revalidate: Option<bool>,
-) -> Result<ProjectActivityWorkspace, String> {
+    storage_id: StorageId,
+) -> Result<ThreadSyncComparison, String> {
     let repository = repository(&app)?;
     let log = ActivityLogScope::new(ActivityLogType::History).project(&local_project_id, None);
-    let force_revalidate = force_revalidate.unwrap_or(false);
-    let log_routine_scan = should_log_history_scan(&local_project_id, force_revalidate);
-    if log_routine_scan {
-        log.emit(
-            &app,
-            "info",
-            "history.scan_started",
-            &format!("Scanning agent session activity for project {local_project_id}…"),
-        );
-    }
+    let log_routine_compare = HISTORY_SCAN_LOGGED_AT
+        .lock()
+        .map(|mut logged_at| {
+            claim_history_scan_log_at(
+                &mut logged_at,
+                &format!("compare:{local_project_id}"),
+                now_secs(),
+            )
+        })
+        .unwrap_or(true);
+    let phase_app = app.clone();
+    let phase_log = log.clone();
+    let total_started = Instant::now();
     let result = run_blocking(move || {
-        get_project_activity_workspace_with_repository(
+        get_project_thread_sync_comparison_with_progress(
             &repository,
             &local_project_id,
-            storage_id.as_ref(),
-            branch.as_deref(),
-            before_time,
-            window_days,
-            force_revalidate,
+            &storage_id,
+            &mut |phase, elapsed| {
+                if log_routine_compare {
+                    phase_log.emit(
+                        &phase_app,
+                        "info",
+                        "history.compare_phase_timing",
+                        &format!(
+                            "   Storage comparison phase — {phase}: {:.3}s",
+                            elapsed.as_secs_f64()
+                        ),
+                    );
+                }
+            },
         )
     })
     .await;
     match &result {
-        Ok(workspace) => {
-            for warning in &workspace.activity.warnings {
-                log.emit(&app, "warning", "history.scan_warning", warning);
-            }
-            if log_routine_scan {
+        Ok(comparison) => {
+            if log_routine_compare {
                 log.emit(
                     &app,
                     "info",
-                    "history.scan_completed",
+                    "history.compare_completed",
                     &format!(
-                        "Session activity scan complete: {} sessions in this {}-day window",
-                        workspace.activity.sessions.len(),
-                        workspace
-                            .activity
-                            .window_end
-                            .saturating_sub(workspace.activity.window_start)
-                            / (24 * 60 * 60)
+                        "Storage comparison complete: {} threads in {:.3}s",
+                        comparison.entries.len(),
+                        total_started.elapsed().as_secs_f64()
                     ),
                 );
             }
@@ -1355,8 +1275,8 @@ pub async fn get_project_activity_workspace(
         Err(error) => log.emit(
             &app,
             "error",
-            "history.scan_failed",
-            &format!("Session activity scan failed: {error}"),
+            "history.compare_failed",
+            &format!("Storage comparison failed: {error}"),
         ),
     }
     result
@@ -4283,6 +4203,7 @@ pub(crate) struct LocalThreadReview {
     pub(crate) provider_thread_id: String,
     pub(crate) source_path: PathBuf,
     pub(crate) source_mtime: u64,
+    pub(crate) source_size: u64,
     pub(crate) captured: Option<CapturedThread>,
 }
 
@@ -4616,8 +4537,10 @@ fn take_observation_outcome(
     })
 }
 
-/// One reviewed thread's derived local state.
-#[derive(Clone)]
+/// One reviewed thread's derived local state. Serializable because the
+/// watch service persists observations to disk between processes; the
+/// value is a pure function of the session bytes it was derived from.
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct LocalTailObservation {
     evidence: TailSideEvidence,
     /// The checkpoint-format raw range pin for a publishing plan.
@@ -4633,7 +4556,7 @@ pub(crate) struct LocalTailObservation {
 
 /// The §6.4 encode-compare adoption outcome: dual pins for this review only;
 /// the durable pins are written by the Push or Pull the adoption enables.
-#[derive(Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct VerifiedAdoption {
     wire_tail: PortableConversationTail,
     local_tail: PortableConversationTail,
@@ -5489,6 +5412,7 @@ fn provider_thread_review(
                     provider_thread_id,
                     source_path: view.source_path.clone(),
                     source_mtime: view.source_mtime,
+                    source_size: view.source_size,
                     captured: captured_thread,
                 },
             );
@@ -5826,6 +5750,7 @@ fn provider_thread_review(
                 super::session_watch_service::session_watch_service().take_reusable_observations(
                     provider,
                     provider_home,
+                    repository.root(),
                     &binding.local_project_id,
                     storage_id,
                     &queries,
@@ -6035,12 +5960,15 @@ fn provider_thread_review(
                         checkpoint_generation,
                         binding_revision: local_binding.map(|binding| binding.revision),
                         observation: observation.clone(),
+                        source_mtime_secs: local.source_mtime,
+                        source_size: local.source_size,
                     })
                 })
                 .collect();
             if !stored.is_empty() {
                 super::session_watch_service::session_watch_service().store_observations(
                     provider_home,
+                    repository.root(),
                     &binding.local_project_id,
                     storage_id,
                     stored,
@@ -13603,30 +13531,14 @@ fn get_project_with_repository(
     }))
 }
 
-/// Machine-local default nickname for a new project: repo name plus the
-/// provider config it uses ("healthGame (conf2)"). The hostname stands in
-/// when no config is known (registration without a binding), and a counter
-/// is the last resort, so sibling projects stay distinguishable out of the
-/// box.
-fn default_local_alias(
+/// Keep the shared repository name for the first local project and add the
+/// first available numeric suffix only when that visible name is already in
+/// use on this machine.
+fn deduplicated_local_alias(
     display_name: &str,
-    config_qualifier: Option<&str>,
     existing: &[LocalProjectRegistration],
-) -> Option<String> {
-    let qualifier = config_qualifier
-        .map(str::trim)
-        .filter(|qualifier| !qualifier.is_empty())
-        .map(|qualifier| {
-            // Abbreviate generated config names to their distinctive part:
-            // "conf2 · Codex" → "conf2", "Default Codex" → "Codex".
-            // User-chosen names pass through unchanged.
-            let stem = qualifier.split(" · ").next().unwrap_or(qualifier);
-            stem.strip_prefix("Default ")
-                .filter(|rest| !rest.trim().is_empty())
-                .unwrap_or(stem)
-                .to_string()
-        })
-        .unwrap_or_else(default_machine_name);
+) -> Result<Option<String>, String> {
+    let display_name = display_name.trim();
     let taken: BTreeSet<&str> = existing
         .iter()
         .map(|project| {
@@ -13637,16 +13549,27 @@ fn default_local_alias(
                 .trim()
         })
         .collect();
-    let stem = format!("{} ({})", display_name.trim(), qualifier);
-    let mut candidate = stem.clone();
-    let mut counter = 2u64;
-    while taken.contains(candidate.as_str()) {
-        candidate = format!("{} {}", stem, counter);
-        counter += 1;
+
+    if !taken.contains(display_name) {
+        return Ok(None);
     }
-    // Fall back to the bare display name rather than letting a pathological
-    // hostname fail display-text validation and block registration.
-    Some(candidate).filter(|value| value.len() <= 1_024 && !value.chars().any(char::is_control))
+
+    let mut counter = 2u64;
+    loop {
+        let candidate = format!("{display_name} ({counter})");
+        if candidate.len() > 1_024 {
+            return Err(
+                "project name is too long to make unique; shorten it before finishing setup"
+                    .to_string(),
+            );
+        }
+        if !taken.contains(candidate.as_str()) {
+            return Ok(Some(candidate));
+        }
+        counter = counter
+            .checked_add(1)
+            .ok_or_else(|| "too many local projects share this name".to_string())?;
+    }
 }
 
 fn save_project_link_with_repository(
@@ -15177,25 +15100,6 @@ fn apply_setup_transaction(
         Ok(map)
     })?;
 
-    // Alias qualifier: the binding's Codex (else Claude) config name, so a
-    // second project on one checkout defaults to "repo · config (host)".
-    let machine_profiles = repository.load_bindings()?.profiles;
-    let alias_qualifier_keys = provider_registry()
-        .descriptors()
-        .into_iter()
-        .map(|descriptor| descriptor.key)
-        .collect::<Vec<_>>();
-    let alias_qualifier = alias_qualifier_keys
-        .iter()
-        .find_map(|provider| transaction.binding.profile_ids.get(provider))
-        .and_then(|profile_id| {
-            let profile_id = profile_id_map.get(profile_id).unwrap_or(profile_id);
-            machine_profiles
-                .iter()
-                .find(|profile| &profile.profile_id == profile_id)
-                .map(|profile| profile.display_name.clone())
-        });
-
     // 2. Storage, project, and links (one atomic config mutation).
     repository.mutate_config(|config| {
         if let Some(storage) = &transaction.storage {
@@ -15213,11 +15117,8 @@ fn apply_setup_transaction(
         {
             let mut project = transaction.project.clone();
             if project.local_alias.is_none() {
-                project.local_alias = default_local_alias(
-                    &project.display_name,
-                    alias_qualifier.as_deref(),
-                    &config.projects,
-                );
+                project.local_alias =
+                    deduplicated_local_alias(&project.display_name, &config.projects)?;
             }
             config.projects.push(project);
         }
@@ -16688,16 +16589,6 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn default_machine_name() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -17425,39 +17316,27 @@ mod tests {
         assert!(claim_history_scan_log_at(
             &mut logged_at,
             "project-one",
-            false,
             100,
         ));
         assert!(!claim_history_scan_log_at(
             &mut logged_at,
             "project-one",
-            false,
             100 + HISTORY_SCAN_LOG_THROTTLE_SECS - 1,
         ));
         assert!(claim_history_scan_log_at(
             &mut logged_at,
             "project-one",
-            false,
             100 + HISTORY_SCAN_LOG_THROTTLE_SECS,
         ));
         assert!(claim_history_scan_log_at(
             &mut logged_at,
             "project-two",
-            false,
             101,
-        ));
-
-        assert!(claim_history_scan_log_at(
-            &mut logged_at,
-            "project-one",
-            true,
-            100 + HISTORY_SCAN_LOG_THROTTLE_SECS + 1,
         ));
         assert!(!claim_history_scan_log_at(
             &mut logged_at,
             "project-one",
-            false,
-            100 + HISTORY_SCAN_LOG_THROTTLE_SECS + 2,
+            100 + HISTORY_SCAN_LOG_THROTTLE_SECS + 1,
         ));
     }
 
@@ -17543,7 +17422,7 @@ mod tests {
                 return Err("generated local project id collision; try again".to_string());
             }
             project.local_alias =
-                default_local_alias(&project.display_name, None, &config.projects);
+                deduplicated_local_alias(&project.display_name, &config.projects)?;
             project.validate()?;
             config.projects.push(project.clone());
             Ok(project)
@@ -20026,50 +19905,58 @@ mod tests {
     }
 
     #[test]
-    fn default_alias_combines_repo_name_and_hostname_and_deduplicates() {
+    fn default_alias_is_only_added_for_visible_name_collisions() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let first = register(&repo);
-        let base = first
-            .local_alias
-            .clone()
-            .expect("new project gets a default alias");
-        assert!(base.starts_with("Project A ("), "unexpected alias '{base}'");
-        assert!(base.ends_with(')'));
-        // A second checkout of the same repo on this machine gets a counter.
+        assert_eq!(first.display_name, "Project A");
+        assert_eq!(first.local_alias, None);
+
+        let different = register_local_project_with_repository(
+            &repo,
+            RegisterLocalProjectRequest {
+                display_name: "Project B".to_string(),
+                repository_fingerprint: None,
+                bundle_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(different.local_alias, None);
+
         let second = register(&repo);
-        assert_eq!(
-            second.local_alias.as_deref(),
-            Some(format!("{base} 2").as_str())
-        );
+        assert_eq!(second.display_name, "Project A");
+        assert_eq!(second.local_alias.as_deref(), Some("Project A (2)"));
+
         let third = register(&repo);
-        assert_eq!(
-            third.local_alias.as_deref(),
-            Some(format!("{base} 3").as_str())
-        );
+        assert_eq!(third.display_name, "Project A");
+        assert_eq!(third.local_alias.as_deref(), Some("Project A (3)"));
     }
 
     #[test]
-    fn default_alias_prefers_the_config_name_over_the_hostname() {
+    fn duplicate_alias_rejects_a_name_that_cannot_fit_the_suffix() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
-        let first = register(&repo);
-        let taken = first.local_alias.clone().unwrap();
-        let projects = repo.load_config().unwrap().projects;
-        // Generated config names abbreviate to their distinctive part.
-        assert_eq!(
-            default_local_alias("Project A", Some("conf2 · Codex"), &projects).as_deref(),
-            Some("Project A (conf2)")
-        );
-        assert_eq!(
-            default_local_alias("Project A", Some("Default Codex"), &projects).as_deref(),
-            Some("Project A (Codex)")
-        );
-        // Without a config the hostname fallback and counter still apply.
-        assert_eq!(
-            default_local_alias("Project A", None, &projects).as_deref(),
-            Some(format!("{taken} 2").as_str())
-        );
+        let display_name = "x".repeat(1_024);
+        register_local_project_with_repository(
+            &repo,
+            RegisterLocalProjectRequest {
+                display_name: display_name.clone(),
+                repository_fingerprint: None,
+                bundle_id: None,
+            },
+        )
+        .unwrap();
+
+        let error = register_local_project_with_repository(
+            &repo,
+            RegisterLocalProjectRequest {
+                display_name,
+                repository_fingerprint: None,
+                bundle_id: None,
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("too long to make unique"), "{error}");
     }
 
     #[test]
@@ -21476,8 +21363,123 @@ mod tests {
         .unwrap();
     }
 
+    fn write_codex_message_count_session(codex_home: &Path, session_id: &str, project_root: &Path) {
+        let cwd = project_root.to_string_lossy().into_owned();
+        let turn_id = "turn-message-count";
+        let records = [
+            serde_json::json!({
+                "timestamp": "2026-07-22T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": session_id,
+                    "cwd": cwd,
+                    "history_mode": "paginated"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-07-22T00:00:01Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "turn_id": turn_id,
+                    "item": {
+                        "type": "UserMessage",
+                        "id": "user-message-count",
+                        "content": [{"type": "text", "text": "Count only this prompt"}]
+                    },
+                    "completed_at_ms": 1_774_137_601_000_i64
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-07-22T00:00:02Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "turn_id": turn_id,
+                    "item": {
+                        "type": "AgentMessage",
+                        "id": "commentary-message-count",
+                        "phase": "commentary",
+                        "content": [{"type": "text", "text": "Inspecting the fixture."}]
+                    },
+                    "completed_at_ms": 1_774_137_602_000_i64
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-07-22T00:00:03Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "turn_id": turn_id,
+                    "item": {
+                        "type": "CommandExecution",
+                        "id": "tool-message-count",
+                        "command": ["true"],
+                        "status": "completed",
+                        "stdout": "",
+                        "stderr": ""
+                    },
+                    "completed_at_ms": 1_774_137_603_000_i64
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-07-22T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "call_id": "tool-message-count",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"true\"}"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-07-22T00:00:04Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "turn_id": turn_id,
+                    "item": {
+                        "type": "AgentMessage",
+                        "id": "final-message-count",
+                        "phase": "final_answer",
+                        "content": [{"type": "text", "text": "Only this is a reply."}]
+                    },
+                    "completed_at_ms": 1_774_137_604_000_i64
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-07-22T00:00:05Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 120,
+                            "output_tokens": 30,
+                            "total_tokens": 150
+                        }
+                    }
+                }
+            }),
+        ];
+        let mut transcript = Vec::new();
+        for (ordinal, mut record) in records.into_iter().enumerate() {
+            record["ordinal"] = serde_json::json!(ordinal as u64);
+            serde_json::to_writer(&mut transcript, &record).unwrap();
+            transcript.push(b'\n');
+        }
+
+        let sessions = codex_home.join("sessions/2026/07/22");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join(format!("rollout-{session_id}.jsonl")),
+            transcript,
+        )
+        .unwrap();
+    }
+
     #[test]
-    fn activity_workspace_projects_one_local_and_remote_read_into_both_views() {
+    fn activity_and_comparison_reads_project_the_same_session_into_both_views() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("activity-workspace-store").unwrap();
@@ -21488,26 +21490,95 @@ mod tests {
         bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
         let session_id = "019f7500-0000-7000-8000-0000000000ab";
         write_codex_session(&codex_home, session_id, &project_root);
+        let session_path = codex_home
+            .join("sessions/2026/07/22")
+            .join(format!("rollout-{session_id}.jsonl"));
+        let canonical_session_path = std::fs::canonicalize(&session_path).unwrap();
 
+        // The two independent page reads must agree on identity: the same
+        // session appears in Activity and as the comparison's one thread.
         // The fixture transcript is stamped 2026-07-22; pin the window end
         // just past it so the 30-day filter never ages the session out.
-        let workspace = get_project_activity_workspace_with_repository(
+        let activity = get_project_activity_with_repository(
             &repo,
             &project.local_project_id,
             Some(&storage_id),
             None,
             Some(1_784_764_800),
             Some(30),
-            false,
         )
         .unwrap();
-        assert!(workspace.comparison_error.is_none());
-        let comparison = workspace.comparison.unwrap();
-        assert_eq!(workspace.activity.sessions.len(), 1);
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(activity.sessions.len(), 1);
         assert_eq!(comparison.entries.len(), 1);
         assert_eq!(
+            activity.sessions[0]
+                .transcript_path
+                .as_deref()
+                .map(Path::new),
+            Some(canonical_session_path.as_path())
+        );
+        assert_eq!(
             comparison.entries[0].conversation_resource_id.as_str(),
-            workspace.activity.sessions[0].resource_id
+            activity.sessions[0].resource_id
+        );
+    }
+
+    #[test]
+    fn activity_message_counts_exclude_codex_intermediate_steps() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("activity-message-count-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let session_id = "019f7500-0000-7000-8000-0000000000ac";
+        write_codex_message_count_session(&codex_home, session_id, &project_root);
+
+        let activity = get_project_activity_with_repository(
+            &repo,
+            &project.local_project_id,
+            Some(&storage_id),
+            None,
+            Some(1_784_764_800),
+            Some(30),
+        )
+        .unwrap();
+        assert_eq!(activity.sessions.len(), 1);
+        let session = &activity.sessions[0];
+        assert_eq!(session.user_round_count, 1);
+        assert_eq!(session.agent_message_count, 1);
+        assert_eq!(session.tool_call_count, 1);
+        assert_eq!(session.total_input_tokens, Some(120));
+        assert_eq!(session.total_output_tokens, Some(30));
+        assert_eq!(session.total_tokens, Some(150));
+        assert!(session.metrics_complete);
+
+        let resource_id = ResourceId::parse(session.resource_id.clone()).unwrap();
+        let detail = ProjectSyncService::new(&repo)
+            .get_project_session_detail(&project.local_project_id, &resource_id)
+            .unwrap();
+        assert_eq!(detail.event_counts.prompts.value, Some(1));
+        assert_eq!(detail.event_counts.responses.value, Some(1));
+        assert_eq!(detail.event_counts.intermediate_steps.value, Some(1));
+        assert_eq!(detail.event_counts.tool_calls.value, Some(1));
+        assert_eq!(
+            session.user_round_count + session.agent_message_count,
+            detail.event_counts.prompts.value.unwrap()
+                + detail.event_counts.responses.value.unwrap()
+        );
+        assert!(
+            session.agent_message_count
+                < detail.event_counts.responses.value.unwrap()
+                    + detail.event_counts.intermediate_steps.value.unwrap(),
+            "Codex Activity Replies included the commentary step"
         );
     }
 
@@ -22130,8 +22201,11 @@ mod tests {
         assert_eq!(delta.inventory_reuse_hits, 1);
         assert_eq!(delta.observation_reuse_hits, 1);
 
-        // A forced rebaseline (the reliability-signal path) runs the
-        // bounded pipeline and produces identical rows.
+        // A forced rebaseline (the reliability-signal path) rediscovers the
+        // inventory through the bounded pipeline and produces identical
+        // rows. The observation may still serve from the persisted layer:
+        // its validity is a fresh stat of every dependency plus the
+        // checkpoint and binding pins, none of which ride watcher history.
         let canonical = std::fs::canonicalize(&codex_home).unwrap();
         super::super::session_watch_service::session_watch_service().force_rebaseline(&canonical);
         let before_cold = metrics.snapshot();
@@ -22143,7 +22217,8 @@ mod tests {
         .unwrap();
         let delta = metrics.snapshot().delta_since(&before_cold);
         assert_eq!(delta.inventory_reuse_hits, 0);
-        assert_eq!(delta.observation_reuse_hits, 0);
+        assert_eq!(delta.observation_reuse_hits, 1, "stat-proven disk serve");
+        assert_eq!(delta.probe_bytes_read, 0, "no local content re-read");
         assert!(delta.files_head_read > 0, "rebaseline rediscovers");
         assert_eq!(
             serde_json::to_value(&quiet.entries).unwrap(),
@@ -22207,6 +22282,141 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn activity_exposes_claude_path_and_prompt_reply_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("claude-activity-path-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let claude_home = temp.path().join("claude-home");
+        bind_and_link_claude_replica(&repo, &project, &storage_id, &project_root, &claude_home);
+
+        let session_id = "claude-activity-path-session";
+        let session_path = claude_home
+            .join("projects/source")
+            .join(format!("{session_id}.jsonl"));
+        let cwd = project_root.to_string_lossy().into_owned();
+        let records = [
+            serde_json::json!({
+                "type": "user",
+                "uuid": "u-1",
+                "parentUuid": null,
+                "sessionId": session_id,
+                "cwd": cwd,
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Show this session's location"}]
+                }
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "uuid": "a-tool",
+                "parentUuid": "u-1",
+                "sessionId": session_id,
+                "cwd": cwd,
+                "message": {
+                    "id": "message-tool",
+                    "role": "assistant",
+                    "stop_reason": "tool_use",
+                    "usage": {
+                        "input_tokens": 2,
+                        "cache_creation_input_tokens": 10,
+                        "cache_read_input_tokens": 100,
+                        "output_tokens": 10
+                    },
+                    "content": [
+                        {"type": "text", "text": "I will inspect it."},
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "Read",
+                            "input": {"file_path": "src/lib.rs"}
+                        }
+                    ]
+                }
+            }),
+            serde_json::json!({
+                "type": "user",
+                "uuid": "tool-result",
+                "parentUuid": "a-tool",
+                "sessionId": session_id,
+                "cwd": cwd,
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "tool-1",
+                        "content": "source contents"
+                    }]
+                }
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "uuid": "a-final",
+                "parentUuid": "tool-result",
+                "sessionId": session_id,
+                "cwd": cwd,
+                "message": {
+                    "id": "message-final",
+                    "role": "assistant",
+                    "stop_reason": "end_turn",
+                    "usage": {
+                        "input_tokens": 3,
+                        "cache_creation_input_tokens": 20,
+                        "cache_read_input_tokens": 200,
+                        "output_tokens": 30
+                    },
+                    "content": [{"type": "text", "text": "Done"}]
+                }
+            }),
+        ];
+        let mut transcript = Vec::new();
+        for record in records {
+            serde_json::to_writer(&mut transcript, &record).unwrap();
+            transcript.push(b'\n');
+        }
+        std::fs::write(&session_path, transcript).unwrap();
+        let canonical_session_path = std::fs::canonicalize(&session_path).unwrap();
+
+        // This fixture has no provider timestamps, so the explicit [0, 1)
+        // window includes its zero-valued presentation time deterministically.
+        let activity = get_project_activity_with_repository(
+            &repo,
+            &project.local_project_id,
+            None,
+            None,
+            Some(1),
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(activity.sessions.len(), 1);
+        let session = &activity.sessions[0];
+        assert_eq!(session.provider, ProviderKey::parse("claude").unwrap());
+        assert_eq!(session.provider_session_id.as_deref(), Some(session_id));
+        assert_eq!(
+            session.transcript_path.as_deref().map(Path::new),
+            Some(canonical_session_path.as_path())
+        );
+        assert_eq!(session.user_round_count, 1);
+        assert_eq!(session.agent_message_count, 1);
+        assert_eq!(session.tool_call_count, 1);
+        assert_eq!(session.total_input_tokens, Some(335));
+        assert_eq!(session.total_output_tokens, Some(40));
+        assert_eq!(session.total_tokens, Some(375));
+        assert!(session.metrics_complete);
+
+        let resource_id = ResourceId::parse(session.resource_id.clone()).unwrap();
+        let detail = ProjectSyncService::new(&repo)
+            .get_project_session_detail(&project.local_project_id, &resource_id)
+            .unwrap();
+        assert_eq!(detail.event_counts.prompts.value, Some(1));
+        assert_eq!(detail.event_counts.responses.value, Some(1));
+        assert_eq!(detail.event_counts.intermediate_steps.value, Some(1));
+        assert_eq!(detail.event_counts.tool_calls.value, Some(1));
     }
 
     #[test]
@@ -22468,8 +22678,11 @@ mod tests {
         assert_eq!(delta.selected_captures, 0, "candidate pin served frozen");
         assert_eq!(delta.transcript_bytes_read, 0);
 
-        // A forced rebaseline (the reliability-signal path) runs the
-        // bounded pipeline and produces identical rows.
+        // A forced rebaseline (the reliability-signal path) rediscovers the
+        // inventory through the bounded pipeline and produces identical
+        // rows. The observation may still serve from the persisted layer:
+        // its validity is a fresh stat of every dependency plus the
+        // checkpoint and binding pins, none of which ride watcher history.
         super::super::session_watch_service::session_watch_service()
             .force_rebaseline(&canonical_home);
         let before_cold = metrics.snapshot();
@@ -22481,7 +22694,8 @@ mod tests {
         .unwrap();
         let delta = metrics.snapshot().delta_since(&before_cold);
         assert_eq!(delta.inventory_reuse_hits, 0);
-        assert_eq!(delta.observation_reuse_hits, 0);
+        assert_eq!(delta.observation_reuse_hits, 1, "stat-proven disk serve");
+        assert_eq!(delta.probe_bytes_read, 0, "no local content re-read");
         assert!(delta.files_head_read > 0, "rebaseline rediscovers");
         assert_eq!(
             serde_json::to_value(&quiet.entries).unwrap(),
@@ -26340,6 +26554,8 @@ mod tests {
                 .unwrap();
         assert_eq!(detail.project.local_project_id, expected_project_id);
         assert_eq!(detail.project.bundle_id, expected_bundle_id);
+        assert_eq!(detail.project.display_name, "app");
+        assert_eq!(detail.project.local_alias, None);
         assert_eq!(detail.project.recipe, BundleRecipe::default());
         assert_eq!(detail.links.len(), 1);
         assert_eq!(detail.links[0].storage_id.as_str(), "storage-setup-test");
@@ -26910,7 +27126,6 @@ mod tests {
             None,
             None,
             Some(90),
-            true,
         )
         .unwrap();
         assert!(unchanged_activity
@@ -26976,7 +27191,6 @@ mod tests {
             None,
             None,
             Some(90),
-            true,
         )
         .unwrap();
         assert!(activity.sessions.iter().any(|session| {
@@ -27574,8 +27788,8 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("already syncs this folder"), "{error}");
 
-        // A different Codex home is a separate project key: it finalizes, and
-        // the default alias carries the config name instead of a counter.
+        // A different Codex home is a separate project key. Its shared repo
+        // name stays unchanged and its machine-local alias gets a counter.
         let alt_home = fixture._temp.path().join("conf2/.codex");
         std::fs::create_dir_all(&alt_home).unwrap();
         let mut retry = fixture
@@ -27596,7 +27810,8 @@ mod tests {
                 .unwrap();
         assert_eq!(fixture.repo.load_config().unwrap().projects.len(), 2);
         let alias = detail.project.local_alias.clone().unwrap();
-        assert_eq!(alias, "app (conf2)");
+        assert_eq!(detail.project.display_name, "app");
+        assert_eq!(alias, "app (2)");
         let machine = fixture.repo.load_bindings().unwrap();
         assert!(machine
             .active_for(&detail.project.local_project_id)
