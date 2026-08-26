@@ -118,12 +118,6 @@ pub struct FetchProgress {
 }
 
 const OBJECT_CACHE_MAX_STAGED_BYTES: u64 = 256 * 1024 * 1024;
-/// Objects per `stage_many_verified` round in `EngineByteSource::prefetch` — one
-/// concurrent store window per batch, with progress after each object.
-const PREFETCH_BATCH_OBJECTS: usize = 6;
-/// Objects per `put_many` round in `publish_with_progress`; same shape as
-/// the prefetch batching, with progress after each object.
-const UPLOAD_BATCH_OBJECTS: usize = 6;
 
 /// Process-wide LRU for staged verified payload objects, keyed by storage,
 /// bundle, content hash, and exact size. Bundle objects are immutable, so an
@@ -337,7 +331,11 @@ impl<S: ObjectStore> BundleBytes for EngineByteSource<'_, S> {
             .fold(0_u64, |sum, (_, entry)| sum.saturating_add(entry.size));
         let mut fetched_bytes = 0_u64;
         let mut index = 0_usize;
-        for batch in pending.chunks(PREFETCH_BATCH_OBJECTS) {
+        // One concurrent store window per batch, with progress after each
+        // object. The batch size and the store's bulk semaphore read the same
+        // setting: effective parallelism is their minimum, so they only move
+        // together.
+        for batch in pending.chunks(crate::app_settings::cloud_transfer_concurrency()) {
             let requests = batch
                 .iter()
                 .map(|(_, entry)| {
@@ -911,7 +909,8 @@ impl<S: ObjectStore> BundleEngine<S> {
             let pending = pending_uploads.into_iter().collect::<Vec<_>>();
             let mut uploaded_objects = 0;
             let mut uploaded_bytes = 0_u64;
-            for chunk in pending.chunks(UPLOAD_BATCH_OBJECTS) {
+            // Same shape as the prefetch batching, with progress after each object.
+            for chunk in pending.chunks(crate::app_settings::cloud_transfer_concurrency()) {
                 let mut batch = Vec::with_capacity(chunk.len());
                 for (digest, bytes) in chunk {
                     let key = repository_object_key(

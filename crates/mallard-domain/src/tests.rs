@@ -82,7 +82,10 @@ fn schema_one_session_metrics_round_trip_token_breakdown() {
     assert_eq!(encoded["total_input_tokens"], 200);
     assert_eq!(encoded["total_output_tokens"], 50);
     assert_eq!(encoded["total_tokens"], 250);
-    assert_eq!(serde_json::from_value::<SessionMetrics>(encoded).unwrap(), metrics);
+    assert_eq!(
+        serde_json::from_value::<SessionMetrics>(encoded).unwrap(),
+        metrics
+    );
     assert_eq!(LOCAL_SCHEMA, 1);
     assert_eq!(BUNDLE_SCHEMA, 1);
 }

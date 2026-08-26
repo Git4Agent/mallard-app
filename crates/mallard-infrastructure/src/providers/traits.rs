@@ -12,34 +12,25 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Maximum UTF-8 bytes returned for one visible timeline message.
-pub(crate) const TIMELINE_MESSAGE_PREVIEW_BYTES: usize = 1024 * 1024;
-/// Maximum UTF-8 bytes returned for either the arguments or result preview of
-/// one timeline tool call. The fields are bounded independently.
-pub(crate) const TIMELINE_TOOL_PREVIEW_BYTES: usize = 1024 * 1024;
-/// Maximum combined UTF-8 bytes returned by an expanded tool-call detail.
-pub(crate) const TIMELINE_TOOL_DETAIL_BYTES: usize = 1024 * 1024;
-/// Maximum combined message, argument-preview, and result-preview bytes in one
-/// timeline page. A single tool event can use two independently bounded fields.
-pub(crate) const TIMELINE_PAGE_CONTENT_BYTES: usize = 2 * 1024 * 1024;
-
-/// Split the expanded-detail budget evenly, then lend any unused share from a
-/// shorter field to the longer one. A lone field can therefore use the whole
-/// budget without allowing the pair to exceed it.
+/// Split the expanded-detail budget (the installed preview limit) evenly,
+/// then lend any unused share from a shorter field to the longer one. A lone
+/// field can therefore use the whole budget without allowing the pair to
+/// exceed it.
 pub(crate) fn timeline_tool_detail_budgets(
     arguments: Option<&str>,
     result: Option<&str>,
 ) -> (usize, usize) {
+    let detail_budget = crate::app_settings::timeline_tool_detail_bytes();
     let argument_len = arguments.map_or(0, str::len);
     let result_len = result.map_or(0, str::len);
-    if argument_len.saturating_add(result_len) <= TIMELINE_TOOL_DETAIL_BYTES {
+    if argument_len.saturating_add(result_len) <= detail_budget {
         return (argument_len, result_len);
     }
 
-    let half = TIMELINE_TOOL_DETAIL_BYTES / 2;
+    let half = detail_budget / 2;
     let mut argument_budget = argument_len.min(half);
     let mut result_budget = result_len.min(half);
-    let mut remaining = TIMELINE_TOOL_DETAIL_BYTES
+    let mut remaining = detail_budget
         .saturating_sub(argument_budget)
         .saturating_sub(result_budget);
 
@@ -654,23 +645,26 @@ mod tests {
             (5, 6)
         );
 
-        let balanced = "x".repeat(TIMELINE_TOOL_DETAIL_BYTES);
+        let balanced = "x".repeat(crate::app_settings::timeline_tool_detail_bytes());
         assert_eq!(
             timeline_tool_detail_budgets(Some(&balanced), Some(&balanced)),
             (
-                TIMELINE_TOOL_DETAIL_BYTES / 2,
-                TIMELINE_TOOL_DETAIL_BYTES / 2,
+                crate::app_settings::timeline_tool_detail_bytes() / 2,
+                crate::app_settings::timeline_tool_detail_bytes() / 2,
             )
         );
 
         let small = "x".repeat(100 * 1024);
         assert_eq!(
             timeline_tool_detail_budgets(Some(&small), Some(&balanced)),
-            (100 * 1024, TIMELINE_TOOL_DETAIL_BYTES - 100 * 1024)
+            (
+                100 * 1024,
+                crate::app_settings::timeline_tool_detail_bytes() - 100 * 1024
+            )
         );
         assert_eq!(
             timeline_tool_detail_budgets(None, Some(&balanced)),
-            (0, TIMELINE_TOOL_DETAIL_BYTES)
+            (0, crate::app_settings::timeline_tool_detail_bytes())
         );
     }
 }

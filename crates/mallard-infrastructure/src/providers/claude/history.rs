@@ -1,6 +1,10 @@
 //! Bounded Claude session summaries and detail previews for Activity.
 
 use super::codec::ClaudeSessionIdentityTracker;
+use crate::app_settings::{
+    conversation_file_limit_bytes, timeline_message_preview_bytes, timeline_page_content_bytes,
+    timeline_tool_preview_bytes,
+};
 use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
     most_specific_project_relative_path, timeline_tool_detail_budgets, SessionCount,
@@ -9,9 +13,8 @@ use crate::providers::traits::{
     SessionTimelineEventKind, SessionTimelineIndex, SessionTimelineIndexEntry,
     SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus,
     SessionToolCategory, SessionToolIndexEntry, SessionTurnToolSummary,
-    TIMELINE_MESSAGE_PREVIEW_BYTES, TIMELINE_PAGE_CONTENT_BYTES, TIMELINE_TOOL_PREVIEW_BYTES,
 };
-use mallard_domain::{NoticeSeverity, MAX_CONVERSATION_FILE_BYTES};
+use mallard_domain::NoticeSeverity;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -19,18 +22,22 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
 const TITLE_CHARS: usize = 120;
-const MAX_LINE_BYTES: usize = MAX_CONVERSATION_FILE_BYTES as usize;
+/// One record's read bound tracks the transcript bound: every admitted file
+/// can be indexed line by line.
+fn max_line_bytes() -> usize {
+    conversation_file_limit_bytes() as usize
+}
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_CLAUDE_RECORDS: usize = 100_000;
 pub(crate) const TIMELINE_PARSER_VERSION: u32 = 1;
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
     let meta = fs::metadata(path).map_err(|e| format!("inspect '{}': {}", path.display(), e))?;
-    if meta.len() > MAX_CONVERSATION_FILE_BYTES {
+    if meta.len() > conversation_file_limit_bytes() {
         return Err(format!(
             "Claude session '{}' exceeds {} bytes",
             path.display(),
-            MAX_CONVERSATION_FILE_BYTES
+            conversation_file_limit_bytes()
         ));
     }
     fs::read(path).map_err(|e| format!("read '{}': {}", path.display(), e))
@@ -105,10 +112,10 @@ pub(crate) fn summarize_file(path: &Path) -> Result<SessionFileSummary, String> 
 }
 
 pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String> {
-    if bytes.len() as u64 > MAX_CONVERSATION_FILE_BYTES {
+    if bytes.len() as u64 > conversation_file_limit_bytes() {
         return Err(format!(
             "Claude session exceeds {} bytes",
-            MAX_CONVERSATION_FILE_BYTES
+            conversation_file_limit_bytes()
         ));
     }
     let mut summary = SessionFileSummary {
@@ -235,9 +242,7 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
                     ]
                     .into_iter()
                     .fold(0_u64, |total, field| {
-                        total.saturating_add(
-                            usage.get(field).and_then(Value::as_u64).unwrap_or(0),
-                        )
+                        total.saturating_add(usage.get(field).and_then(Value::as_u64).unwrap_or(0))
                     });
                     let output = usage
                         .get("output_tokens")
@@ -270,15 +275,15 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
         }
     }
     if !token_usage_by_message_id.is_empty() {
-        let (input, output) = token_usage_by_message_id.values().fold(
-            (0_u64, 0_u64),
-            |(input, output), usage| {
-                (
-                    input.saturating_add(usage.input),
-                    output.saturating_add(usage.output),
-                )
-            },
-        );
+        let (input, output) =
+            token_usage_by_message_id
+                .values()
+                .fold((0_u64, 0_u64), |(input, output), usage| {
+                    (
+                        input.saturating_add(usage.input),
+                        output.saturating_add(usage.output),
+                    )
+                });
         summary.total_input_tokens = Some(input);
         summary.total_output_tokens = Some(output);
         summary.total_tokens = Some(input.saturating_add(output));
@@ -385,7 +390,7 @@ impl ClaudeTimelineBuilder {
             );
             return;
         }
-        let quality = if text_len > TIMELINE_MESSAGE_PREVIEW_BYTES {
+        let quality = if text_len > timeline_message_preview_bytes() {
             self.warning(
                 "message_preview_truncated",
                 "At least one Claude message exceeds the 1-MiB timeline display limit and is shown as a truncated preview.",
@@ -591,7 +596,7 @@ impl ClaudeTimelineBuilder {
                     SessionCountQuality::Inferred,
                 )
             };
-            if text.len() > TIMELINE_MESSAGE_PREVIEW_BYTES {
+            if text.len() > timeline_message_preview_bytes() {
                 quality = SessionCountQuality::LowerBound;
                 self.warning(
                     "message_preview_truncated",
@@ -1221,11 +1226,11 @@ pub(crate) fn build_timeline_index(
 ) -> Result<SessionTimelineIndex, String> {
     let metadata =
         fs::metadata(path).map_err(|error| format!("inspect '{}': {error}", path.display()))?;
-    if metadata.len() > MAX_CONVERSATION_FILE_BYTES {
+    if metadata.len() > conversation_file_limit_bytes() {
         return Err(format!(
             "Claude session '{}' exceeds {} bytes",
             path.display(),
-            MAX_CONVERSATION_FILE_BYTES
+            conversation_file_limit_bytes()
         ));
     }
     let file = File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
@@ -1237,7 +1242,7 @@ pub(crate) fn build_timeline_index(
         let start = reader
             .stream_position()
             .map_err(|error| format!("read '{}': {error}", path.display()))?;
-        let line = read_bounded_line(&mut reader, &mut bytes, MAX_LINE_BYTES)
+        let line = read_bounded_line(&mut reader, &mut bytes, max_line_bytes())
             .map_err(|error| format!("read '{}': {error}", path.display()))?;
         if line == BoundedLine::Eof {
             break;
@@ -1279,7 +1284,7 @@ pub(crate) fn build_timeline_index(
 }
 
 fn read_source_value(file: &mut File, span: SessionSourceSpan) -> Result<Value, String> {
-    if span.length == 0 || span.length > (MAX_LINE_BYTES as u64).saturating_add(2) {
+    if span.length == 0 || span.length > (max_line_bytes() as u64).saturating_add(2) {
         return Err("timeline source span is outside the bounded record limit".to_string());
     }
     let file_len = file
@@ -1530,14 +1535,14 @@ pub(crate) fn read_timeline_page(
             None
         } else {
             let value = read_source_value(&mut file, entry.source)?;
-            bounded_text(record_text(&value), TIMELINE_MESSAGE_PREVIEW_BYTES).0
+            bounded_text(record_text(&value), timeline_message_preview_bytes()).0
         };
         let tool = if let Some(tool_index) = &entry.tool {
             let (arguments, result, summary) = tool_payloads(&mut file, entry)?;
             let (argument_preview, argument_truncated) =
-                bounded_text(arguments, TIMELINE_TOOL_PREVIEW_BYTES);
+                bounded_text(arguments, timeline_tool_preview_bytes());
             let (result_preview, result_truncated) =
-                bounded_text(result, TIMELINE_TOOL_PREVIEW_BYTES);
+                bounded_text(result, timeline_tool_preview_bytes());
             Some(SessionToolCallPreview {
                 provider_call_id: tool_index.provider_call_id.clone(),
                 native_name: tool_index.native_name.clone(),
@@ -1567,7 +1572,8 @@ pub(crate) fn read_timeline_page(
                     .map_or(0, String::len),
             );
         if !events.is_empty()
-            && page_content_bytes.saturating_add(event_content_bytes) > TIMELINE_PAGE_CONTENT_BYTES
+            && page_content_bytes.saturating_add(event_content_bytes)
+                > timeline_page_content_bytes()
         {
             break;
         }
@@ -2409,7 +2415,7 @@ mod tests {
             ],
         );
 
-        assert_eq!(MAX_LINE_BYTES as u64, MAX_CONVERSATION_FILE_BYTES);
+        assert_eq!(max_line_bytes() as u64, conversation_file_limit_bytes());
         assert!(fs::metadata(&transcript).unwrap().len() > 2 * 1024 * 1024);
         let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
         assert_eq!(index.parser_version, 1);
@@ -2443,7 +2449,7 @@ mod tests {
         assert!(preview.contains(BINARY_PREVIEW_OMISSION));
         assert!(preview.contains("image/png"));
         assert!(!preview.contains(&"A".repeat(512)));
-        assert!(preview.len() <= TIMELINE_TOOL_PREVIEW_BYTES);
+        assert!(preview.len() <= timeline_tool_preview_bytes());
 
         let detail = read_event_detail(&transcript, &index, &tool_entry.event_id).unwrap();
         let result = detail.result.unwrap();
@@ -2529,7 +2535,7 @@ mod tests {
         assert!(detail.result_truncated);
         assert!(detail.arguments.as_ref().unwrap().len() > 64 * 1024);
         assert!(detail.result.as_ref().unwrap().len() > 64 * 1024);
-        assert!(detail_bytes <= crate::providers::traits::TIMELINE_TOOL_DETAIL_BYTES);
+        assert!(detail_bytes <= crate::app_settings::timeline_tool_detail_bytes());
     }
 
     #[test]
@@ -2580,7 +2586,7 @@ mod tests {
         let project_root = temp.path().join("project");
         fs::create_dir_all(&project_root).unwrap();
         let transcript = temp.path().join("session.jsonl");
-        let long_prompt = "x".repeat(TIMELINE_MESSAGE_PREVIEW_BYTES + 100);
+        let long_prompt = "x".repeat(timeline_message_preview_bytes() + 100);
         let mut content = vec![
             json!({"type":"user","uuid":"u-1","sessionId":"session-1","cwd":project_root,"message":{"role":"user","content":long_prompt}}),
             json!({"type":"assistant","uuid":"a-1","sessionId":"session-1","message":{"id":"msg-1","role":"assistant","stop_reason":"tool_use","content":[{"type":"thinking","thinking":"do not show"},{"type":"tool_use","id":"bash-1","name":"Bash","input":{"command":"cargo test"}}]}}),
@@ -2647,13 +2653,13 @@ mod tests {
     #[test]
     fn tool_preview_respects_the_shared_byte_limit() {
         let (preview, truncated) = bounded_text(
-            Some("鹅".repeat(TIMELINE_TOOL_PREVIEW_BYTES)),
-            TIMELINE_TOOL_PREVIEW_BYTES,
+            Some("鹅".repeat(timeline_tool_preview_bytes())),
+            timeline_tool_preview_bytes(),
         );
         let preview = preview.unwrap();
 
         assert!(truncated);
         assert!(preview.ends_with('…'));
-        assert!(preview.len() <= TIMELINE_TOOL_PREVIEW_BYTES);
+        assert!(preview.len() <= timeline_tool_preview_bytes());
     }
 }

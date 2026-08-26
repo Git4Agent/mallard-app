@@ -10,6 +10,8 @@ mod activity_log;
 #[cfg_attr(test, allow(dead_code))]
 mod app_reset;
 #[cfg_attr(test, allow(dead_code))]
+mod app_settings;
+#[cfg_attr(test, allow(dead_code))]
 mod project_sync;
 #[cfg_attr(test, allow(dead_code))]
 mod storage_catalog;
@@ -49,6 +51,17 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // Tuning values must be live before the first command runs. A
+            // corrupt or out-of-range settings file falls back to defaults —
+            // it must never brick the launch; the Settings page surfaces the
+            // load error itself, retryably.
+            mallard_infrastructure::app_settings::install_app_settings(
+                &mallard_infrastructure::persistence::LocalStateRepository::from_user_home()
+                    .and_then(|repository| {
+                        mallard_infrastructure::app_settings::load_app_settings(&repository)
+                    })
+                    .unwrap_or_default(),
+            );
             // A visible process boundary in the activity log: operations that
             // died with the previous process (no terminal event) become
             // explainable instead of mysterious.
@@ -71,6 +84,8 @@ pub fn run() {
             activity_log::get_activity_log_folder,
             app_reset::get_local_state_summary,
             app_reset::reset_local_state,
+            app_settings::get_app_settings,
+            app_settings::update_app_settings,
             project_sync::commands::get_project_sync_config,
             project_sync::commands::connect_r2_storage,
             project_sync::commands::get_mallard_cli_path,

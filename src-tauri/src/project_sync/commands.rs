@@ -61,8 +61,8 @@ use super::domain::{
     RestoreActionType, RestorePlan, ReviewPurpose, RootTailLayout, ScopeBase, ScopeContinuity,
     SetupDraftId, SetupTransaction, StorageConfig, StorageId, StorageKind, SyncConfig,
     SyncScopeKey, TailClassification, TailEvidenceBlocker, TailPartitionKind, TailSideEvidence,
-    TargetExpectation, ThreadId, TombstoneTarget, VerifiedTailEvidence,
-    MAX_CONVERSATION_FILE_BYTES, PUSH_PLAN_SCHEMA, SETUP_DRAFT_SCHEMA, SETUP_TRANSACTION_SCHEMA,
+    TargetExpectation, ThreadId, TombstoneTarget, VerifiedTailEvidence, PUSH_PLAN_SCHEMA,
+    SETUP_DRAFT_SCHEMA, SETUP_TRANSACTION_SCHEMA,
 };
 use super::jsonl_tail_io;
 use super::persistence::{
@@ -95,6 +95,7 @@ use mallard_application::storage_setup::{
     connect_r2_storage as connect_r2_storage_service, validate_r2_storage_destinations,
     ConnectR2StorageRequest, ConnectStorageResult,
 };
+use mallard_infrastructure::app_settings::conversation_file_limit_bytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -794,7 +795,7 @@ fn cached_transcript_analysis(
     bytes: &mut dyn BundleBytes,
     logical_path: &super::domain::LogicalPath,
 ) -> Result<CachedCodexTranscriptAnalysis, String> {
-    if expected_size > MAX_CONVERSATION_FILE_BYTES {
+    if expected_size > conversation_file_limit_bytes() {
         return Err("cloud conversation transcript exceeds its read limit".to_string());
     }
     static ANALYSES: OnceLock<TranscriptAnalysisCache> = OnceLock::new();
@@ -809,7 +810,7 @@ fn cached_transcript_analysis(
     }
     let transcript = bytes.read_bounded(
         logical_path,
-        MAX_CONVERSATION_FILE_BYTES,
+        conversation_file_limit_bytes(),
         "cloud conversation transcript",
     )?;
     let analysis = Arc::new(analyze_codex_transcript(&transcript));
@@ -4117,10 +4118,13 @@ fn thread_capture_unavailable_detail(blocked_reason: Option<&str>) -> String {
     let Some(reason) = blocked_reason else {
         return "Session could not be read safely during this scan.".to_string();
     };
-    if reason.contains(&format!("exceeds {} bytes", MAX_CONVERSATION_FILE_BYTES)) {
+    if reason.contains(&format!(
+        "exceeds {} bytes",
+        conversation_file_limit_bytes()
+    )) {
         return format!(
             "Session file exceeds the {} MiB per-file sync limit.",
-            MAX_CONVERSATION_FILE_BYTES / (1024 * 1024)
+            conversation_file_limit_bytes() / (1024 * 1024)
         );
     }
     if reason.contains("hard-linked") {
@@ -5650,7 +5654,7 @@ fn provider_thread_review(
         }
         let prefetch_paths = offerable_cloud_transcripts
             .values()
-            .filter(|(_, _, size)| *size <= MAX_CONVERSATION_FILE_BYTES)
+            .filter(|(_, _, size)| *size <= conversation_file_limit_bytes())
             .map(|(logical_path, _, _)| logical_path.clone())
             .collect::<Vec<_>>();
         let _ = bytes.prefetch(&prefetch_paths);
@@ -9067,7 +9071,7 @@ fn build_publish_request(
                 })?;
                 encoded_text.push_str(&encoded);
             }
-            if encoded_text.len() as u64 > MAX_CONVERSATION_FILE_BYTES {
+            if encoded_text.len() as u64 > conversation_file_limit_bytes() {
                 return Err(format!(
                     "conversation '{}' exceeds the bounded transcript limit after path \
                      encoding",
@@ -10789,7 +10793,7 @@ fn prepare_pull_conversation_actions(
             snapshot
                 .manifest
                 .find_file(path)
-                .is_some_and(|(_, entry)| entry.size <= MAX_CONVERSATION_FILE_BYTES)
+                .is_some_and(|(_, entry)| entry.size <= conversation_file_limit_bytes())
         })
         .collect::<Vec<_>>();
     let _ = bytes.prefetch(&transcript_paths);
@@ -10835,7 +10839,7 @@ fn prepare_pull_conversation_actions(
             .clone();
         let cloud_transcript = bytes.read_bounded(
             &transcript_ref.logical_path,
-            MAX_CONVERSATION_FILE_BYTES,
+            conversation_file_limit_bytes(),
             "cloud conversation transcript",
         )?;
         let adapter = provider_registry().require_sessions(&action.provider)?;
@@ -15673,7 +15677,7 @@ fn audit_codex_conversation_paths_with_repository(
                     continue;
                 }
             };
-            if file_size > MAX_CONVERSATION_FILE_BYTES {
+            if file_size > conversation_file_limit_bytes() {
                 oversized_thread_ids.extend(
                     nominated_thread_ids
                         .iter()
@@ -15740,7 +15744,7 @@ fn audit_codex_conversation_paths_with_repository(
                 audit.warnings.push(format!(
                     "Codex thread '{}' was not audited because its session file exceeds the {} MiB per-file sync limit; the conversation remains unavailable for sync",
                     thread_id,
-                    MAX_CONVERSATION_FILE_BYTES / (1024 * 1024)
+                    conversation_file_limit_bytes() / (1024 * 1024)
                 ));
             }
             continue;
@@ -15778,12 +15782,12 @@ fn audit_codex_conversation_paths_with_repository(
                 continue;
             }
         };
-        if transcript_metadata.len() > MAX_CONVERSATION_FILE_BYTES {
+        if transcript_metadata.len() > conversation_file_limit_bytes() {
             if is_assigned {
                 audit.warnings.push(format!(
                     "Codex thread '{}' was not audited because its session file exceeds the {} MiB per-file sync limit; the conversation remains unavailable for sync",
                     thread_id,
-                    MAX_CONVERSATION_FILE_BYTES / (1024 * 1024)
+                    conversation_file_limit_bytes() / (1024 * 1024)
                 ));
             }
             continue;
@@ -17351,7 +17355,7 @@ mod tests {
     fn unavailable_thread_state_reports_the_capture_limit() {
         let reason = format!(
             "'/tmp/session.jsonl' exceeds {} bytes",
-            MAX_CONVERSATION_FILE_BYTES
+            conversation_file_limit_bytes()
         );
         assert_eq!(
             thread_capture_unavailable_detail(Some(&reason)),
@@ -19438,7 +19442,7 @@ mod tests {
             .write(true)
             .open(&transcript)
             .unwrap()
-            .set_len(MAX_CONVERSATION_FILE_BYTES + 1)
+            .set_len(conversation_file_limit_bytes() + 1)
             .unwrap();
         std::fs::write(
             codex_home.join(".codex-global-state.json"),
@@ -21771,7 +21775,7 @@ mod tests {
             .write(true)
             .open(&session_path)
             .unwrap()
-            .set_len(MAX_CONVERSATION_FILE_BYTES + 1)
+            .set_len(conversation_file_limit_bytes() + 1)
             .unwrap();
         let cached_path = get_project_thread_sync_comparison_with_repository(
             &repo,
@@ -24820,7 +24824,7 @@ mod tests {
             .files
             .get_mut(&oversized_path)
             .unwrap()
-            .size = MAX_CONVERSATION_FILE_BYTES + 1;
+            .size = conversation_file_limit_bytes() + 1;
         let mut inner = engine.byte_source(&oversized_snapshot, None, None);
         let mut bytes = CountingBytes {
             inner: &mut inner,

@@ -74,10 +74,15 @@ pub async fn reset_local_state(app: tauri::AppHandle) -> Result<LocalStateWipeRe
     if outcome.is_ok() {
         // Everything else backend-side is constructed per call, and the two
         // process-wide content caches are keyed by content coordinates, so
-        // exactly two things hold pre-wipe state: the session watch service
-        // (caches keyed by registrations that no longer exist) and the config
-        // watcher (its directory watch died with the deleted root). Re-arm
-        // both before the promise resolves and the frontend reloads.
+        // three things hold pre-wipe state: the installed tuning snapshot
+        // (settings.json is gone, so live values return to defaults), the
+        // session watch service (caches keyed by registrations that no longer
+        // exist), and the config watcher (its directory watch died with the
+        // deleted root). Re-arm all of them before the promise resolves and
+        // the frontend reloads.
+        mallard_infrastructure::app_settings::install_app_settings(
+            &mallard_infrastructure::app_settings::AppSettings::default(),
+        );
         session_watch_service().reset_all_caches();
         // Starting a fresh watcher recreates the (empty) root — accepted; the
         // boot log entry recreates it on a real fresh launch too.

@@ -213,6 +213,10 @@ function SettingsPage() {
   const [clock24, setClock24] = useState(true);
   const [retention, setRetention] = useState("30");
   const [sizeCap, setSizeCap] = useState("100");
+  const [threadCap, setThreadCap] = useState("100");
+  const [previewCap, setPreviewCap] = useState("1024");
+  const [workers, setWorkers] = useState("4");
+  const [transfers, setTransfers] = useState("6");
 
   useEffect(() => {
     applyChoice(themeChoice);
@@ -310,6 +314,99 @@ function SettingsPage() {
               >
                 Coming back to Mallard after a few seconds away re-reads every project
                 and storage.
+              </SettingsRow>
+            </div>
+          </section>
+
+          <section className="sync-settings-group" aria-labelledby="settings-performance">
+            <h2 id="settings-performance">
+              <Icon name="tool" size={12} /> Performance
+            </h2>
+            <div className="sync-settings-card">
+              <SettingsRow
+                label="Thread size limit"
+                control={(
+                  <div className="sync-select-shell">
+                    <select
+                      value={threadCap}
+                      onChange={(event) => setThreadCap(event.target.value)}
+                      aria-label="Thread size limit"
+                    >
+                      <option value="25">25 MB</option>
+                      <option value="50">50 MB</option>
+                      <option value="100">100 MB</option>
+                      <option value="200">200 MB</option>
+                      <option value="400">400 MB</option>
+                    </select>
+                  </div>
+                )}
+              >
+                The biggest session transcript Mallard will read. Threads over the
+                cap are skipped by compare, Push, and Pull.
+              </SettingsRow>
+              <SettingsRow
+                label="Preview size limit"
+                control={(
+                  <div className="sync-select-shell">
+                    <select
+                      value={previewCap}
+                      onChange={(event) => setPreviewCap(event.target.value)}
+                      aria-label="Preview size limit"
+                    >
+                      <option value="256">256 KB</option>
+                      <option value="512">512 KB</option>
+                      <option value="1024">1 MB</option>
+                      <option value="2048">2 MB</option>
+                    </select>
+                  </div>
+                )}
+              >
+                How much of one long message or tool call the session timeline
+                shows. Longer content is trimmed in the view only; transcripts are
+                never cut.
+              </SettingsRow>
+              <SettingsRow
+                label="Comparison workers"
+                control={(
+                  <div className="sync-select-shell">
+                    <select
+                      value={workers}
+                      onChange={(event) => setWorkers(event.target.value)}
+                      aria-label="Comparison workers"
+                    >
+                      <option value="1">1 worker</option>
+                      <option value="2">2 workers</option>
+                      <option value="4">4 workers</option>
+                      <option value="6">6 workers</option>
+                      <option value="8">8 workers</option>
+                    </select>
+                  </div>
+                )}
+              >
+                Worker threads that scan and compare local sessions. Capped by this
+                machine's cores; the default suits most disks.
+              </SettingsRow>
+              <SettingsRow
+                label="Cloud transfers"
+                control={(
+                  <div className="sync-select-shell">
+                    <select
+                      value={transfers}
+                      onChange={(event) => setTransfers(event.target.value)}
+                      aria-label="Parallel cloud transfers"
+                    >
+                      <option value="1">1 transfer</option>
+                      <option value="2">2 transfers</option>
+                      <option value="4">4 transfers</option>
+                      <option value="6">6 transfers</option>
+                      <option value="8">8 transfers</option>
+                      <option value="12">12 transfers</option>
+                    </select>
+                  </div>
+                )}
+              >
+                Objects moved in parallel during Push and Pull. Lower it on slow or
+                metered connections.
               </SettingsRow>
             </div>
           </section>

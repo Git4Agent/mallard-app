@@ -26,7 +26,7 @@ const MAX_TREE_DEPTH: usize = 32;
 
 fn capture_file_limit(kind: &CaptureResourceKind) -> u64 {
     if matches!(kind, CaptureResourceKind::Conversation) {
-        domain::MAX_CONVERSATION_FILE_BYTES
+        crate::app_settings::conversation_file_limit_bytes()
     } else {
         MAX_FILE_BYTES
     }
@@ -370,14 +370,15 @@ pub fn capture_from_discovery(
 }
 
 /// Bounded worker count for the parallel refresh stages. The per-item work
-/// is CPU-bound (serde and SHA-256), so more than four workers erodes into
-/// the largest-file floor while multiplying transient parse-tree memory;
-/// retained capture bytes are unconditional and do not scale with workers.
+/// is CPU-bound (serde and SHA-256), so past a few workers the wall clock
+/// erodes into the largest-file floor while transient parse-tree memory
+/// multiplies — hence the default cap of four; the Settings page moves it.
+/// Retained capture bytes are unconditional and do not scale with workers.
 pub fn bounded_refresh_workers(items: usize) -> usize {
     std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(1)
-        .min(4)
+        .min(crate::app_settings::comparison_worker_cap())
         .min(items)
         .max(1)
 }

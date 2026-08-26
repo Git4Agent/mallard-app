@@ -34,8 +34,6 @@ const MAX_LIST_PAGE: usize = 10_000;
 const S3_MAX_KEYS: usize = 1_000;
 const MAX_LIST_REQUESTS: usize = MAX_LIST_PAGE + 2;
 const R2_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-const BULK_STAGE_CONCURRENCY: usize = 6;
-const BULK_PUT_CONCURRENCY: usize = 6;
 const R2_SETUP_PROBE_PREFIX: &str = ".mallard/v1/_setup_probes";
 const MAX_R2_SETUP_PROBE_BYTES: u64 = 512;
 
@@ -972,7 +970,9 @@ impl ObjectStore for S3ObjectStore {
                 .map(|(key, expected)| self.stage_verified(key, expected))
                 .collect();
         }
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(BULK_STAGE_CONCURRENCY));
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::app_settings::cloud_transfer_concurrency(),
+        ));
         self.run("bulk verified staging", async {
             let mut join_set = tokio::task::JoinSet::new();
             for (index, (key, expected)) in requests.iter().cloned().enumerate() {
@@ -1041,7 +1041,9 @@ impl ObjectStore for S3ObjectStore {
                 .collect();
         }
         let count = objects.len();
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(BULK_PUT_CONCURRENCY));
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::app_settings::cloud_transfer_concurrency(),
+        ));
         self.run("bulk put", async {
             let mut join_set = tokio::task::JoinSet::new();
             for (index, (key, bytes)) in objects.into_iter().enumerate() {

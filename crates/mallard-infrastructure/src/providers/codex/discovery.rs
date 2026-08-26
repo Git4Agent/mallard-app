@@ -103,7 +103,7 @@ pub(super) fn discover(
                 blocked_reason: inspect_candidate_files_with_limit(
                     &canonical_home,
                     &[entry.path().to_path_buf()],
-                    mallard_domain::MAX_CONVERSATION_FILE_BYTES,
+                    crate::app_settings::conversation_file_limit_bytes(),
                 )
                 .err(),
             });

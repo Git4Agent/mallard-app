@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ActivityLogCleanupRequest,
+  AppSettings,
   ActivityLogCleanupResult,
   ActivityLogPage,
   ActivityLogPolicy,
@@ -98,6 +99,12 @@ export const projectSyncApi = {
 
   resetLocalState: () =>
     invoke<LocalStateWipeResult>("reset_local_state"),
+
+  getAppSettings: () =>
+    invoke<AppSettings>("get_app_settings"),
+
+  updateAppSettings: (settings: AppSettings) =>
+    invoke<AppSettings>("update_app_settings", { settings }),
 
   listAgentProviders: () =>
     invoke<ProviderDescriptor[]>("list_agent_providers"),

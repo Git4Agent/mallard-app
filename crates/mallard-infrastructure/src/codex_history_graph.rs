@@ -12,6 +12,7 @@
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+use crate::app_settings::conversation_file_limit_bytes;
 use crate::codex_rollout::{
     authoritative_session_meta, structural_record_type, CodexSessionMetaRecord,
     CodexStructureAccumulator, MAX_CODEX_FORK_DEPTH,
@@ -25,7 +26,7 @@ use mallard_domain::{
     validate_conversation_chain, CanonicalConversationMessage, ConversationCheckpoint,
     ConversationPrefixWitness, MessageId, PhysicalMappingState, PortableConversationTail,
     RootPhysicalMapping, RootTailLayout, TailAccumulator, TailPartitionKind,
-    MAX_CONVERSATION_FILE_BYTES, PORTABLE_TAIL_CODEC_V1,
+    PORTABLE_TAIL_CODEC_V1,
 };
 
 /// One physical segment of a resolved logical root, base-most first.
@@ -130,7 +131,7 @@ pub fn retained_root_is_byte_identical(
         .map_err(|error| format!("inspect retained Codex rollout: {error}"))?;
     if !before.is_file()
         || before.len() != root_mapping.source_file_size
-        || before.len() > MAX_CONVERSATION_FILE_BYTES
+        || before.len() > conversation_file_limit_bytes()
     {
         return Ok(false);
     }

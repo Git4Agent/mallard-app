@@ -5,14 +5,15 @@
 //! and metadata-index caching, snapshot/cursor validation, Git checkpoint correlation,
 //! response bounds, and DTOs that may cross the Tauri boundary.
 
+use crate::app_settings::{
+    conversation_file_limit_bytes, timeline_message_preview_bytes, timeline_page_content_bytes,
+    timeline_tool_preview_bytes,
+};
 use crate::path_text_boundary::replace_sensitive_path_occurrences;
 use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
 use crate::project_activity::{discover_github_repository_url, resolve_activity_project};
 use crate::provider_capture::LocalSessionView;
-use crate::providers::traits::{
-    timeline_tool_detail_budgets, TIMELINE_MESSAGE_PREVIEW_BYTES, TIMELINE_PAGE_CONTENT_BYTES,
-    TIMELINE_TOOL_PREVIEW_BYTES,
-};
+use crate::providers::traits::timeline_tool_detail_budgets;
 use crate::providers::{
     ProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionCheckpoint,
     SessionCount, SessionCountQuality, SessionDetailWarning, SessionEventCounts,
@@ -156,8 +157,26 @@ struct TimelineCacheEntry {
     size: u64,
     modified_nanos: u64,
     timeline_version: u32,
+    /// The tuning limits the entry was built under. Quality flags bake the
+    /// preview budget in and admission bakes the transcript bound in, so an
+    /// entry only serves while both still hold; the serde defaults make
+    /// pre-stamp entries (zeros) never match instead of failing the parse.
+    #[serde(default)]
+    preview_budget_bytes: u64,
+    #[serde(default)]
+    conversation_limit_bytes: u64,
     summary: SessionFileSummary,
     index: SessionTimelineIndex,
+}
+
+/// True while `entry` was built under exactly the given limits.
+fn entry_matches_limits(
+    entry: &TimelineCacheEntry,
+    preview_budget_bytes: u64,
+    conversation_limit_bytes: u64,
+) -> bool {
+    entry.preview_budget_bytes == preview_budget_bytes
+        && entry.conversation_limit_bytes == conversation_limit_bytes
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -245,13 +264,32 @@ fn hex_sha256(value: impl AsRef<[u8]>) -> String {
 }
 
 fn snapshot_id(session: &ResolvedLocalSession, timeline_version: u32) -> String {
+    snapshot_id_with_limits(
+        session,
+        timeline_version,
+        timeline_message_preview_bytes() as u64,
+        conversation_file_limit_bytes(),
+    )
+}
+
+/// The limits join the snapshot identity: a tuning change invalidates open
+/// cursors through the existing `SnapshotChanged` refresh path, with no
+/// dedicated frontend handling.
+fn snapshot_id_with_limits(
+    session: &ResolvedLocalSession,
+    timeline_version: u32,
+    preview_budget_bytes: u64,
+    conversation_limit_bytes: u64,
+) -> String {
     hex_sha256(format!(
-        "session-detail-v1\0{}\0{}\0{}\0{}\0{}",
+        "session-detail-v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
         session.provider,
         session.resource_id,
         session.file_size,
         session.modified_nanos,
-        timeline_version
+        timeline_version,
+        preview_budget_bytes,
+        conversation_limit_bytes
     ))
 }
 
@@ -652,7 +690,7 @@ fn validate_page_slice(
         if event
             .text
             .as_ref()
-            .is_some_and(|text| text.len() > TIMELINE_MESSAGE_PREVIEW_BYTES)
+            .is_some_and(|text| text.len() > timeline_message_preview_bytes())
         {
             return Err(SessionDetailError::new(
                 SessionDetailErrorCode::ProviderError,
@@ -663,11 +701,11 @@ fn validate_page_slice(
             if tool
                 .argument_preview
                 .as_ref()
-                .is_some_and(|text| text.len() > TIMELINE_TOOL_PREVIEW_BYTES)
+                .is_some_and(|text| text.len() > timeline_tool_preview_bytes())
                 || tool
                     .result_preview
                     .as_ref()
-                    .is_some_and(|text| text.len() > TIMELINE_TOOL_PREVIEW_BYTES)
+                    .is_some_and(|text| text.len() > timeline_tool_preview_bytes())
                 || tool
                     .affected_paths
                     .iter()
@@ -695,7 +733,7 @@ fn validate_page_slice(
                     .and_then(|tool| tool.result_preview.as_ref())
                     .map_or(0, String::len),
             );
-        if page_content_bytes > TIMELINE_PAGE_CONTENT_BYTES {
+        if page_content_bytes > timeline_page_content_bytes() {
             return Err(SessionDetailError::new(
                 SessionDetailErrorCode::ProviderError,
                 "The provider returned an oversized timeline page.",
@@ -996,6 +1034,11 @@ fn load_or_build_index(
                 && entry.size == expected_size
                 && entry.modified_nanos == expected_nanos
                 && entry.timeline_version == timeline_version
+                && entry_matches_limits(
+                    entry,
+                    timeline_message_preview_bytes() as u64,
+                    conversation_file_limit_bytes(),
+                )
                 && entry.summary.session_id == session.provider_session_id
                 && !entry.summary.is_internal_subagent
                 && entry.index.parser_version == timeline_version
@@ -1046,32 +1089,21 @@ fn load_or_build_index(
                 timeline_version,
             )));
         }
-        cache.entries.insert(
-            key.clone(),
-            TimelineCacheEntry {
-                resource_id: session.resource_id.clone(),
-                provider: session.provider.clone(),
-                size: expected_size,
-                modified_nanos: expected_nanos,
-                timeline_version,
-                summary: summary.clone(),
-                index: index.clone(),
-            },
-        );
+        let fresh_entry = TimelineCacheEntry {
+            resource_id: session.resource_id.clone(),
+            provider: session.provider.clone(),
+            size: expected_size,
+            modified_nanos: expected_nanos,
+            timeline_version,
+            preview_budget_bytes: timeline_message_preview_bytes() as u64,
+            conversation_limit_bytes: conversation_file_limit_bytes(),
+            summary: summary.clone(),
+            index: index.clone(),
+        };
+        cache.entries.insert(key.clone(), fresh_entry.clone());
         if cache.entries.len() > MAX_TIMELINE_CACHE_ENTRIES {
             cache.entries.clear();
-            cache.entries.insert(
-                key.clone(),
-                TimelineCacheEntry {
-                    resource_id: session.resource_id.clone(),
-                    provider: session.provider.clone(),
-                    size: expected_size,
-                    modified_nanos: expected_nanos,
-                    timeline_version,
-                    summary: summary.clone(),
-                    index: index.clone(),
-                },
-            );
+            cache.entries.insert(key.clone(), fresh_entry);
             warnings.push(SessionDetailWarning {
                 code: "timeline_cache_reset".to_string(),
                 message: "Mallard reset an over-capacity local timeline cache.".to_string(),
@@ -1952,6 +1984,93 @@ mod tests {
         }
     }
 
+    fn summary_fixture() -> SessionFileSummary {
+        SessionFileSummary {
+            session_id: "thread-1".to_string(),
+            title: None,
+            summary: None,
+            started_at: None,
+            ended_at: None,
+            branch: None,
+            recorded_sha: None,
+            recorded_branches: BTreeSet::new(),
+            user_rounds: 0,
+            agent_messages: 0,
+            tool_calls: 0,
+            total_input_tokens: None,
+            total_output_tokens: None,
+            total_tokens: None,
+            metrics_complete: false,
+            is_internal_subagent: false,
+        }
+    }
+
+    #[test]
+    fn tuning_stamps_gate_reuse_and_join_the_snapshot_identity() {
+        let stamped = TimelineCacheEntry {
+            resource_id: "codex:conversation:thread-1".to_string(),
+            provider: ProviderKey::parse("codex").unwrap(),
+            size: 4,
+            modified_nanos: 9,
+            timeline_version: 1,
+            preview_budget_bytes: 1024 * 1024,
+            conversation_limit_bytes: 100 * 1024 * 1024,
+            summary: summary_fixture(),
+            index: index_with_path("file"),
+        };
+        assert!(entry_matches_limits(
+            &stamped,
+            1024 * 1024,
+            100 * 1024 * 1024
+        ));
+        assert!(!entry_matches_limits(
+            &stamped,
+            512 * 1024,
+            100 * 1024 * 1024
+        ));
+        assert!(!entry_matches_limits(
+            &stamped,
+            1024 * 1024,
+            50 * 1024 * 1024
+        ));
+
+        // Entries persisted before the stamps existed deserialize with zeroed
+        // limits — never a parse failure, never a match.
+        let mut legacy = serde_json::to_value(&stamped)
+            .unwrap()
+            .as_object()
+            .cloned()
+            .unwrap();
+        legacy.remove("preview_budget_bytes");
+        legacy.remove("conversation_limit_bytes");
+        let legacy: TimelineCacheEntry =
+            serde_json::from_value(serde_json::Value::Object(legacy)).unwrap();
+        assert_eq!(legacy.preview_budget_bytes, 0);
+        assert_eq!(legacy.conversation_limit_bytes, 0);
+        assert!(!entry_matches_limits(
+            &legacy,
+            1024 * 1024,
+            100 * 1024 * 1024
+        ));
+
+        // The limits join the snapshot identity, so a tuning change retires
+        // open cursors through the existing SnapshotChanged refresh path.
+        let session = sanitization_session();
+        let base = snapshot_id_with_limits(&session, 1, 1024 * 1024, 100 * 1024 * 1024);
+        assert_eq!(
+            base,
+            snapshot_id_with_limits(&session, 1, 1024 * 1024, 100 * 1024 * 1024)
+        );
+        assert_ne!(
+            base,
+            snapshot_id_with_limits(&session, 1, 512 * 1024, 100 * 1024 * 1024)
+        );
+        assert_ne!(
+            base,
+            snapshot_id_with_limits(&session, 1, 1024 * 1024, 50 * 1024 * 1024)
+        );
+    }
+
     #[test]
     fn session_text_sanitizes_only_boundary_valid_project_root_occurrences() {
         let session = sanitization_session();
@@ -2085,9 +2204,9 @@ mod tests {
                 category: SessionToolCategory::FileEdit,
                 status: SessionToolCallStatus::Completed,
                 summary: "src/main.rs".to_string(),
-                argument_preview: Some("a".repeat(TIMELINE_TOOL_PREVIEW_BYTES)),
+                argument_preview: Some("a".repeat(timeline_tool_preview_bytes())),
                 argument_truncated: false,
-                result_preview: Some("r".repeat(TIMELINE_TOOL_PREVIEW_BYTES)),
+                result_preview: Some("r".repeat(timeline_tool_preview_bytes())),
                 result_truncated: false,
                 affected_paths: vec!["src/main.rs".to_string()],
             }),
@@ -2105,7 +2224,7 @@ mod tests {
 
         let mut oversized_tool = tool_event;
         oversized_tool.tool.as_mut().unwrap().argument_preview =
-            Some("a".repeat(TIMELINE_TOOL_PREVIEW_BYTES + 1));
+            Some("a".repeat(timeline_tool_preview_bytes() + 1));
         let error = validate_page_slice(
             &SessionTimelinePageSlice {
                 events: vec![oversized_tool],
@@ -2133,8 +2252,8 @@ mod tests {
         let error = validate_page_slice(
             &SessionTimelinePageSlice {
                 events: vec![
-                    message("message-1", "m".repeat(TIMELINE_MESSAGE_PREVIEW_BYTES)),
-                    message("message-2", "m".repeat(TIMELINE_MESSAGE_PREVIEW_BYTES)),
+                    message("message-1", "m".repeat(timeline_message_preview_bytes())),
+                    message("message-2", "m".repeat(timeline_message_preview_bytes())),
                     message("message-3", "m".to_string()),
                 ],
                 next_index: None,

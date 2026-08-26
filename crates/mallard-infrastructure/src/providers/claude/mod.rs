@@ -16,8 +16,9 @@ use super::traits::{
     SessionRewriteRequest, SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice,
     SessionTimelineQuery,
 };
+use crate::app_settings::conversation_file_limit_bytes;
 use crate::provider_capture::validated_session_metadata;
-use mallard_domain::{ProviderKey, MAX_CONVERSATION_FILE_BYTES};
+use mallard_domain::ProviderKey;
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -41,10 +42,10 @@ fn scan_claude_session_metadata(path: &Path) -> Result<SessionFileMetadata, Stri
     if !metadata.is_file() {
         return Err("Claude session transcript is not a regular file".to_string());
     }
-    if metadata.len() > MAX_CONVERSATION_FILE_BYTES {
+    if metadata.len() > conversation_file_limit_bytes() {
         return Err(format!(
             "Claude session exceeds {} bytes",
-            MAX_CONVERSATION_FILE_BYTES
+            conversation_file_limit_bytes()
         ));
     }
 
@@ -61,10 +62,10 @@ fn scan_claude_session_metadata(path: &Path) -> Result<SessionFileMetadata, Stri
             break;
         }
         bytes_read = bytes_read.saturating_add(read as u64);
-        if bytes_read > MAX_CONVERSATION_FILE_BYTES {
+        if bytes_read > conversation_file_limit_bytes() {
             return Err(format!(
                 "Claude session exceeds {} bytes",
-                MAX_CONVERSATION_FILE_BYTES
+                conversation_file_limit_bytes()
             ));
         }
         // The provider is allowed to be appending. A non-newline-terminated

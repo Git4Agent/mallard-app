@@ -35,10 +35,10 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   assert.match(html, />Settings<\/span>/);
   assert.match(html, /aria-label="App actions"/);
 
-  // Six groups, in reading order, each heading on the shared chrome class.
+  // Seven groups, in reading order, each heading on the shared chrome class.
   const headings = [...html.matchAll(/class="settings-section-title"[^>]*>.*?<\/svg>([^<]+)</g)]
     .map((match) => match[1].trim());
-  assert.deepEqual(headings, ["Appearance", "Privacy", "Sync", "Logs", "Display", "Local data"]);
+  assert.deepEqual(headings, ["Appearance", "Privacy", "Sync", "Performance", "Logs", "Display", "Local data"]);
 
   // Theme: a radiogroup of the three choices; absence of a stored key means
   // System, so it is the checked one under the test's bare environment.
@@ -63,7 +63,7 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   // the app's select shell, the folder verb, and both cleanup verbs.
   assert.match(html, /aria-label="Keep log events for"/);
   assert.match(html, /aria-label="Log size cap"/);
-  assert.equal((html.match(/class="sync-select-shell"/g) ?? []).length, 2);
+  assert.equal((html.match(/class="sync-select-shell"/g) ?? []).length, 6);
   assert.match(html, /> Open folder</);
   assert.match(html, /> Clean up now</);
   assert.match(html, />Delete all</);
@@ -73,6 +73,18 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   // their defaults rather than inventing values.
   assert.match(html, /<option value="30" selected="">30 days<\/option>/);
   assert.match(html, /<option value="100" selected="">100 MB<\/option>/);
+
+  // The Performance group: four tuning selects on the same shell, each
+  // defaulting to what was hardcoded before the knobs existed. The thread
+  // cap shares its "100 MB" face with the log size cap, so its default is
+  // pinned through its own select; the other three are unambiguous.
+  assert.match(html, /aria-label="Thread size limit"[\s\S]{0,600}<option value="100" selected="">100 MB<\/option>/);
+  assert.match(html, /<option value="400">400 MB<\/option>/);
+  assert.match(html, /aria-label="Preview size limit"/);
+  assert.match(html, /<option value="1024" selected="">1 MB<\/option>/);
+  assert.match(html, /<option value="4" selected="">4 workers<\/option>/);
+  assert.match(html, /aria-label="Parallel cloud transfers"/);
+  assert.match(html, /<option value="6" selected="">6 transfers<\/option>/);
 
   // Local data: the reset row is a danger verb with a size readout. In a
   // static render the summary has not loaded — the readout shows an ellipsis
@@ -216,4 +228,38 @@ test("Reset Mallard wipes ~/.mallard behind a warning confirm and restarts", () 
   assert.doesNotMatch(reset, /local_state_reset_(completed|succeeded)/);
   assert.match(lib, /app_reset::get_local_state_summary,\s*app_reset::reset_local_state,/);
   assert.doesNotMatch(lib, /restart_app/);
+});
+
+test("Performance settings persist through the backend tuning document", () => {
+  const page = readFileSync("src/components/project-sync/SettingsPage.tsx", "utf8");
+  const api = readFileSync("src/components/project-sync/api.ts", "utf8");
+  const commands = readFileSync("src-tauri/src/app_settings.rs", "utf8");
+  const document = readFileSync("crates/mallard-infrastructure/src/app_settings.rs", "utf8");
+  const lib = readFileSync("src-tauri/src/lib.rs", "utf8");
+  const reset = readFileSync("src-tauri/src/app_reset.rs", "utf8");
+
+  // Selects apply on change through one patch-merging handler, like the log
+  // policy's, and state keeps the backend's saved read-back.
+  assert.match(page, /const applyTuning = async \(patch: Partial<AppSettings>\) => \{/);
+  assert.match(page, /projectSyncApi\.updateAppSettings\(\{ \.\.\.tuning, \.\.\.patch \}\)/);
+
+  assert.match(api, /invoke<AppSettings>\("get_app_settings"\)/);
+  assert.match(api, /invoke<AppSettings>\("update_app_settings", \{ settings \}\)/);
+
+  // Rust side: one schema-1 document whose every field carries a serde
+  // default (a partial file parses), hard-reject validation, and an update
+  // that persists, installs, then drops the caches that baked the old
+  // limits in — the watcher hears no filesystem event for a settings change.
+  assert.match(document, /pub const APP_SETTINGS_SCHEMA: u32 = 1;/);
+  assert.match(document, /#\[serde\(default = "default_conversation_file_limit_bytes"\)\]/);
+  assert.match(document, /#\[serde\(default = "default_timeline_preview_limit_bytes"\)\]/);
+  assert.match(commands, /save_app_settings\(repository, settings\)\?;\s*install_app_settings\(settings\);/);
+  assert.match(commands, /reset_all_caches_and_purge_disk\(repository\.root\(\)\)/);
+  assert.match(lib, /app_settings::get_app_settings,\s*app_settings::update_app_settings,/);
+
+  // Startup makes the stored values live before the first command; the
+  // factory reset returns the installed atomics to defaults right after the
+  // wipe deletes settings.json, since the process survives the reset.
+  assert.match(lib, /install_app_settings\(/);
+  assert.match(reset, /install_app_settings\(\s*&mallard_infrastructure::app_settings::AppSettings::default\(\)/);
 });

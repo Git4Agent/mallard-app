@@ -71,6 +71,16 @@ export interface ActivityLogCleanupResult {
   stats: ActivityLogStats;
 }
 
+/** Backend tuning knobs, persisted in ~/.mallard/settings.json. Every field
+ * has a serde default on the Rust side, so a partial file still parses. */
+export interface AppSettings {
+  schema: number;
+  conversation_file_limit_bytes: number;
+  timeline_preview_limit_bytes: number;
+  comparison_workers: number;
+  cloud_transfer_concurrency: number;
+}
+
 /** What lives under ~/.mallard right now; backups called out because a wipe
  * deletes the only local copies of files Pull replaced. */
 export interface LocalStateSummary {

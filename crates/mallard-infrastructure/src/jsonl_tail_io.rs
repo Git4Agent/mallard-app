@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 
-use mallard_domain::{RootPhysicalMapping, MAX_CONVERSATION_FILE_BYTES};
+use crate::app_settings::conversation_file_limit_bytes;
+use mallard_domain::RootPhysicalMapping;
 
 pub const PROBE_WINDOW_BYTES: u64 = 4_096;
 
@@ -57,7 +58,7 @@ pub fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
             path.display()
         ));
     }
-    if before.len() > MAX_CONVERSATION_FILE_BYTES {
+    if before.len() > conversation_file_limit_bytes() {
         return Err(format!(
             "session transcript '{}' exceeds the bounded transcript limit",
             path.display()
@@ -65,7 +66,7 @@ pub fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
     }
     let mut bytes = Vec::with_capacity(before.len() as usize);
     file.by_ref()
-        .take(MAX_CONVERSATION_FILE_BYTES.saturating_add(1))
+        .take(conversation_file_limit_bytes().saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read session transcript '{}': {}", path.display(), error))?;
     let after = file.metadata().map_err(|error| {
@@ -75,7 +76,7 @@ pub fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
             error
         )
     })?;
-    if bytes.len() as u64 > MAX_CONVERSATION_FILE_BYTES {
+    if bytes.len() as u64 > conversation_file_limit_bytes() {
         return Err(format!(
             "session transcript '{}' exceeds the bounded transcript limit",
             path.display()
@@ -118,7 +119,7 @@ pub fn read_tail_window(path: &Path, mapping: &RootPhysicalMapping) -> Result<Ta
             .metadata()
             .map_err(|error| format!("stat session transcript '{}': {}", path.display(), error))?
             .len();
-        if len_before > MAX_CONVERSATION_FILE_BYTES {
+        if len_before > conversation_file_limit_bytes() {
             return Err(format!(
                 "session transcript '{}' exceeds the bounded transcript limit",
                 path.display()
@@ -171,7 +172,7 @@ pub fn read_tail_window(path: &Path, mapping: &RootPhysicalMapping) -> Result<Ta
 /// already trusts.
 pub fn read_range(path: &Path, start: u64, end: u64) -> Result<Vec<u8>, String> {
     use std::io::{Read, Seek, SeekFrom};
-    if end < start || end > MAX_CONVERSATION_FILE_BYTES {
+    if end < start || end > conversation_file_limit_bytes() {
         return Err(format!(
             "session transcript '{}' range request is out of bounds",
             path.display()

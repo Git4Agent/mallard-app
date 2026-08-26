@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import type { ActivityLogPolicy, ActivityLogStats, LocalStateSummary } from "../../types";
+import type { ActivityLogPolicy, ActivityLogStats, AppSettings, LocalStateSummary } from "../../types";
 import Icon from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import { formatBytes } from "../../format";
@@ -20,12 +20,13 @@ import { errorMessage } from "./model";
 
 /**
  * The app-wide Settings page: a primary-nav destination like the Storages
- * index, not a dialog. Six groups of rows — every row one global preference
+ * index, not a dialog. Seven groups of rows — every row one global preference
  * or one maintenance verb. UI preferences write through preferences.ts;
- * the Logs group is a front end to the activity-log policy the Rust side
- * keeps in ~/.mallard/logs/_policy.json, applied on change (this page
- * absorbed LogManagerDialog, whose explicit Save existed only to keep its
- * cleanup button honest against a drafted select).
+ * the Performance group fronts the tuning document the Rust side keeps in
+ * ~/.mallard/settings.json, and the Logs group the activity-log policy in
+ * ~/.mallard/logs/_policy.json, both applied on change (this page absorbed
+ * LogManagerDialog, whose explicit Save existed only to keep its cleanup
+ * button honest against a drafted select).
  */
 
 interface Props {
@@ -37,6 +38,10 @@ interface Props {
 
 const RETENTION_OPTIONS = [7, 30, 90, 180, 365];
 const SIZE_OPTIONS_MB = [25, 100, 250, 500, 1_000];
+const THREAD_CAP_OPTIONS_MB = [25, 50, 100, 200, 400];
+const PREVIEW_OPTIONS_KB = [256, 512, 1_024, 2_048];
+const WORKER_OPTIONS = [1, 2, 4, 6, 8];
+const TRANSFER_OPTIONS = [1, 2, 4, 6, 8, 12];
 
 const THEME_CHOICES: Array<{ value: ThemeChoice; label: string }> = [
   { value: "system", label: "System" },
@@ -95,6 +100,10 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
   const [logsError, setLogsError] = useState<string | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
   const [logsNotice, setLogsNotice] = useState<string | null>(null);
+  const [tuning, setTuning] = useState<AppSettings | null>(null);
+  const [tuningBusy, setTuningBusy] = useState(false);
+  const [tuningError, setTuningError] = useState<string | null>(null);
+  const [tuningLoading, setTuningLoading] = useState(true);
   const [localSummary, setLocalSummary] = useState<LocalStateSummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [resetError, setResetError] = useState<string | null>(null);
@@ -107,6 +116,7 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
      once one of them speaks. Nothing sets these back: after the first
      interaction every message in that group is the answer to something. */
   const [logsFromAction, setLogsFromAction] = useState(false);
+  const [tuningFromAction, setTuningFromAction] = useState(false);
   const [localDataFromAction, setLocalDataFromAction] = useState(false);
 
   /* Retryable, because the card below renders plausible defaults when `stats`
@@ -127,6 +137,23 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
   }, []);
 
   useEffect(() => { void loadStats(); }, [loadStats]);
+
+  /* Same retryable shape as loadStats: the selects render the defaults while
+     `tuning` is null, and those must not pass for the stored values. */
+  const loadTuning = useCallback(async (retried = false) => {
+    setTuningLoading(true);
+    setTuningError(null);
+    if (retried) setTuningFromAction(true);
+    try {
+      setTuning(await projectSyncApi.getAppSettings());
+    } catch (reason) {
+      setTuningError(errorMessage(reason));
+    } finally {
+      setTuningLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadTuning(); }, [loadTuning]);
 
   /* Same retryable shape as loadStats: the readout is a measurement, and a
      failed walk must not wedge the row it decorates. */
@@ -158,6 +185,21 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
       setLogsError(errorMessage(reason));
     } finally {
       setLogsBusy(false);
+    }
+  };
+
+  /** Selects apply on change; the returned settings are the saved truth. */
+  const applyTuning = async (patch: Partial<AppSettings>) => {
+    if (!tuning) return;
+    setTuningBusy(true);
+    setTuningFromAction(true);
+    setTuningError(null);
+    try {
+      setTuning(await projectSyncApi.updateAppSettings({ ...tuning, ...patch }));
+    } catch (reason) {
+      setTuningError(errorMessage(reason));
+    } finally {
+      setTuningBusy(false);
     }
   };
 
@@ -273,6 +315,30 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
       ? { timing: "blocking" }
       : { timing: "progress" };
 
+  /* One thing to say: a load or apply failure. Applies post no receipt, like
+     the Logs selects — the select showing the new value is the receipt. */
+  const tuningNotices: NoticeItem[] = [];
+  if (tuningError) {
+    tuningNotices.push({
+      key: "tuning-error",
+      severity: "danger",
+      message: tuning ? tuningError : `Couldn’t read the performance settings. ${tuningError}`,
+      action: tuning ? undefined : (
+        <button type="button" className="btn" disabled={tuningLoading} onClick={() => void loadTuning(true)}>
+          <Icon name="refresh" size={14} className={tuningLoading ? "icon-spin" : undefined} />
+          {tuningLoading ? "Retrying…" : "Retry"}
+        </button>
+      ),
+    });
+  }
+  /* Same reading as the Logs group: the mount load's failure is standing
+     content; after a Retry or a select it is an answer. */
+  const tuningTiming: NoticeTiming = !tuningFromAction
+    ? { timing: "standing", label: "Problems with performance settings" }
+    : tuningError
+      ? { timing: "blocking" }
+      : { timing: "progress" };
+
   const localDataNotices: NoticeItem[] = [];
   if (resetError) {
     localDataNotices.push({
@@ -378,6 +444,124 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
                 and storage.
               </SettingsRow>
             </div>
+          </section>
+
+          <section className="sync-settings-group" aria-labelledby="settings-performance">
+            <h2 className="settings-section-title" id="settings-performance">
+              <Icon name="tool" size={12} /> Performance
+            </h2>
+            <div className="sync-settings-card">
+              <SettingsRow
+                label="Thread size limit"
+                control={(
+                  <div className="sync-select-shell">
+                    <select
+                      value={tuning ? Math.round(tuning.conversation_file_limit_bytes / (1024 * 1024)) : 100}
+                      disabled={tuningBusy || !tuning}
+                      onChange={(event) => void applyTuning({
+                        conversation_file_limit_bytes: Number(event.target.value) * 1024 * 1024,
+                      })}
+                      aria-label="Thread size limit"
+                    >
+                      {tuning && !THREAD_CAP_OPTIONS_MB.includes(Math.round(tuning.conversation_file_limit_bytes / (1024 * 1024))) && (
+                        <option value={Math.round(tuning.conversation_file_limit_bytes / (1024 * 1024))}>
+                          {formatBytes(tuning.conversation_file_limit_bytes)}
+                        </option>
+                      )}
+                      {THREAD_CAP_OPTIONS_MB.map((size) => <option key={size} value={size}>{size} MB</option>)}
+                    </select>
+                  </div>
+                )}
+              >
+                The biggest session transcript Mallard will read. Threads over the
+                cap are skipped by compare, Push, and Pull.
+              </SettingsRow>
+              <SettingsRow
+                label="Preview size limit"
+                control={(
+                  <div className="sync-select-shell">
+                    <select
+                      value={tuning ? Math.round(tuning.timeline_preview_limit_bytes / 1024) : 1024}
+                      disabled={tuningBusy || !tuning}
+                      onChange={(event) => void applyTuning({
+                        timeline_preview_limit_bytes: Number(event.target.value) * 1024,
+                      })}
+                      aria-label="Preview size limit"
+                    >
+                      {tuning && !PREVIEW_OPTIONS_KB.includes(Math.round(tuning.timeline_preview_limit_bytes / 1024)) && (
+                        <option value={Math.round(tuning.timeline_preview_limit_bytes / 1024)}>
+                          {formatBytes(tuning.timeline_preview_limit_bytes)}
+                        </option>
+                      )}
+                      {PREVIEW_OPTIONS_KB.map((size) => (
+                        <option key={size} value={size}>
+                          {size >= 1_024 ? `${size / 1_024} MB` : `${size} KB`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              >
+                How much of one long message or tool call the session timeline
+                shows. Longer content is trimmed in the view only; transcripts are
+                never cut.
+              </SettingsRow>
+              <SettingsRow
+                label="Comparison workers"
+                control={(
+                  <div className="sync-select-shell">
+                    <select
+                      value={tuning?.comparison_workers ?? 4}
+                      disabled={tuningBusy || !tuning}
+                      onChange={(event) => void applyTuning({ comparison_workers: Number(event.target.value) })}
+                      aria-label="Comparison workers"
+                    >
+                      {tuning && !WORKER_OPTIONS.includes(tuning.comparison_workers) && (
+                        <option value={tuning.comparison_workers}>
+                          {tuning.comparison_workers} worker{tuning.comparison_workers === 1 ? "" : "s"}
+                        </option>
+                      )}
+                      {WORKER_OPTIONS.map((count) => (
+                        <option key={count} value={count}>{count} worker{count === 1 ? "" : "s"}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              >
+                Worker threads that scan and compare local sessions. Capped by this
+                machine's cores; the default suits most disks.
+              </SettingsRow>
+              <SettingsRow
+                label="Cloud transfers"
+                control={(
+                  <div className="sync-select-shell">
+                    <select
+                      value={tuning?.cloud_transfer_concurrency ?? 6}
+                      disabled={tuningBusy || !tuning}
+                      onChange={(event) => void applyTuning({ cloud_transfer_concurrency: Number(event.target.value) })}
+                      aria-label="Parallel cloud transfers"
+                    >
+                      {tuning && !TRANSFER_OPTIONS.includes(tuning.cloud_transfer_concurrency) && (
+                        <option value={tuning.cloud_transfer_concurrency}>
+                          {tuning.cloud_transfer_concurrency} transfer{tuning.cloud_transfer_concurrency === 1 ? "" : "s"}
+                        </option>
+                      )}
+                      {TRANSFER_OPTIONS.map((count) => (
+                        <option key={count} value={count}>{count} transfer{count === 1 ? "" : "s"}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              >
+                Objects moved in parallel during Push and Pull. Lower it on slow or
+                metered connections.
+              </SettingsRow>
+            </div>
+            <NoticeZone
+              items={tuningNotices}
+              subject="notes about performance settings"
+              {...tuningTiming}
+            />
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-logs">

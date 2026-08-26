@@ -8,6 +8,7 @@
 mod path_text_boundary;
 
 pub mod activity_log;
+pub mod app_settings;
 pub mod bundle_engine;
 pub mod claude_history_tail;
 pub mod codex_app_refresh;

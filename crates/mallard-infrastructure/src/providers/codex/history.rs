@@ -3,6 +3,10 @@
 //! Moved out of the old Codex-only chat history module: the neutral activity
 //! engine now reaches this parser only through the Codex adapter.
 
+use crate::app_settings::{
+    conversation_file_limit_bytes, timeline_message_preview_bytes, timeline_page_content_bytes,
+    timeline_tool_preview_bytes,
+};
 use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
     most_specific_project_relative_path, timeline_tool_detail_budgets, SessionCount,
@@ -11,7 +15,6 @@ use crate::providers::traits::{
     SessionTimelineEventKind, SessionTimelineIndex, SessionTimelineIndexEntry,
     SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus,
     SessionToolCategory, SessionToolIndexEntry, SessionTurnToolSummary,
-    TIMELINE_MESSAGE_PREVIEW_BYTES, TIMELINE_PAGE_CONTENT_BYTES, TIMELINE_TOOL_PREVIEW_BYTES,
 };
 use mallard_domain::NoticeSeverity;
 use serde::de::{Deserializer, IgnoredAny, Visitor};
@@ -25,7 +28,9 @@ use std::path::{Component, Path, PathBuf};
 /// A single Codex JSONL record may embed a generated image or a tool result.
 /// Match the transcript bound so every record admitted by the transcript
 /// safety policy can also be indexed and opened by session detail.
-pub(crate) const MAX_LINE_BYTES: usize = mallard_domain::MAX_CONVERSATION_FILE_BYTES as usize;
+pub(crate) fn max_line_bytes() -> usize {
+    conversation_file_limit_bytes() as usize
+}
 const MAX_SUMMARY_CHARS: usize = 180;
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_AFFECTED_PATHS_PER_TOOL: usize = 1_024;
@@ -422,12 +427,11 @@ impl RolloutParser {
                             }
                         }
                     }
-                    Some("AgentMessage") => {
+                    Some("AgentMessage")
                         if normalized_type(item.get("phase").and_then(Value::as_str))
-                            == "finalanswer"
-                        {
-                            self.agent_message_count = self.agent_message_count.saturating_add(1);
-                        }
+                            == "finalanswer" =>
+                    {
+                        self.agent_message_count = self.agent_message_count.saturating_add(1);
                     }
                     _ => {}
                 }
@@ -458,12 +462,9 @@ impl RolloutParser {
                 .and_then(|info| info.get("total_token_usage"))
             {
                 if let Some(total) = usage.get("total_tokens").and_then(Value::as_u64) {
-                    let should_replace = self
-                        .total_tokens
-                        .is_none_or(|current| total > current);
+                    let should_replace = self.total_tokens.is_none_or(|current| total > current);
                     if should_replace {
-                        self.total_input_tokens =
-                            usage.get("input_tokens").and_then(Value::as_u64);
+                        self.total_input_tokens = usage.get("input_tokens").and_then(Value::as_u64);
                         self.total_output_tokens =
                             usage.get("output_tokens").and_then(Value::as_u64);
                         self.total_tokens = Some(total);
@@ -534,7 +535,7 @@ fn summarize_rollout_reader<R: BufRead + Seek>(
         let record_start = reader
             .stream_position()
             .map_err(|error| format!("read {label}: {error}"))?;
-        match read_bounded_line(reader, &mut bytes, MAX_LINE_BYTES)
+        match read_bounded_line(reader, &mut bytes, max_line_bytes())
             .map_err(|error| format!("read {label}: {error}"))?
         {
             BoundedLine::Eof => break,
@@ -608,7 +609,7 @@ pub fn parse_session_index_titles(bytes: &[u8]) -> BTreeMap<String, String> {
     parse_session_index_lines(
         bytes
             .split(|byte| *byte == b'\n')
-            .filter(|line| line.len() <= MAX_LINE_BYTES)
+            .filter(|line| line.len() <= max_line_bytes())
             .filter_map(|line| std::str::from_utf8(line).ok()),
     )
     .into_iter()
@@ -620,7 +621,7 @@ pub fn first_codex_user_summary(bytes: &[u8]) -> Option<String> {
     let mut parser = RolloutParser::new();
     for line in bytes
         .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty() && line.len() <= MAX_LINE_BYTES)
+        .filter(|line| !line.is_empty() && line.len() <= max_line_bytes())
     {
         if let Ok(value) = serde_json::from_slice::<Value>(line) {
             parser.consume(&value);
@@ -734,7 +735,7 @@ impl TimelineBuilder {
         if text.trim().is_empty() || !self.visible_ids.insert(event_id.clone()) {
             return;
         }
-        let quality = if text.len() > TIMELINE_MESSAGE_PREVIEW_BYTES {
+        let quality = if text.len() > timeline_message_preview_bytes() {
             self.warning(
                 "message_preview_truncated",
                 "At least one Codex message exceeds the 1-MiB timeline display limit and is shown as a truncated preview.",
@@ -2012,11 +2013,11 @@ pub(crate) fn build_timeline_index(
 ) -> Result<SessionTimelineIndex, String> {
     let metadata = std::fs::metadata(path)
         .map_err(|error| format!("inspect '{}': {error}", path.display()))?;
-    if metadata.len() > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
+    if metadata.len() > conversation_file_limit_bytes() {
         return Err(format!(
             "Codex transcript '{}' exceeds {} bytes",
             path.display(),
-            mallard_domain::MAX_CONVERSATION_FILE_BYTES
+            conversation_file_limit_bytes()
         ));
     }
     let file = File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
@@ -2029,7 +2030,7 @@ pub(crate) fn build_timeline_index(
         let record_start = reader
             .stream_position()
             .map_err(|error| format!("read '{}': {error}", path.display()))?;
-        let line = read_bounded_line(&mut reader, &mut bytes, MAX_LINE_BYTES)
+        let line = read_bounded_line(&mut reader, &mut bytes, max_line_bytes())
             .map_err(|error| format!("read '{}': {error}", path.display()))?;
         if line == BoundedLine::Eof {
             break;
@@ -2124,7 +2125,7 @@ pub(crate) fn build_timeline_index(
 }
 
 fn read_source_value(file: &mut File, span: SessionSourceSpan) -> Result<Value, String> {
-    if span.length == 0 || span.length > (MAX_LINE_BYTES as u64).saturating_add(2) {
+    if span.length == 0 || span.length > (max_line_bytes() as u64).saturating_add(2) {
         return Err("timeline source span is outside the bounded record limit".to_string());
     }
     let file_len = file
@@ -2466,7 +2467,7 @@ pub(crate) fn read_timeline_page(
             let value = read_source_value(&mut file, entry.source)?;
             bounded_text(
                 timeline_text(&value, entry.kind),
-                TIMELINE_MESSAGE_PREVIEW_BYTES,
+                timeline_message_preview_bytes(),
             )
             .0
         };
@@ -2475,10 +2476,10 @@ pub(crate) fn read_timeline_page(
             let summary = tool_summary(tool_index, arguments.as_ref());
             let (argument_preview, argument_truncated) = bounded_text(
                 arguments.as_ref().and_then(value_as_preview),
-                TIMELINE_TOOL_PREVIEW_BYTES,
+                timeline_tool_preview_bytes(),
             );
             let (result_preview, result_truncated) =
-                bounded_text(result, TIMELINE_TOOL_PREVIEW_BYTES);
+                bounded_text(result, timeline_tool_preview_bytes());
             Some(SessionToolCallPreview {
                 provider_call_id: tool_index.provider_call_id.clone(),
                 native_name: tool_index.native_name.clone(),
@@ -2508,7 +2509,8 @@ pub(crate) fn read_timeline_page(
                     .map_or(0, String::len),
             );
         if !events.is_empty()
-            && page_content_bytes.saturating_add(event_content_bytes) > TIMELINE_PAGE_CONTENT_BYTES
+            && page_content_bytes.saturating_add(event_content_bytes)
+                > timeline_page_content_bytes()
         {
             break;
         }
@@ -3068,7 +3070,7 @@ mod tests {
         let transcript = temp.path().join("rollout.jsonl");
         let mut prompt_text = "p ".repeat(8 * 1024);
         prompt_text.push('p');
-        let mut response_text = "r ".repeat(TIMELINE_MESSAGE_PREVIEW_BYTES / 2);
+        let mut response_text = "r ".repeat(timeline_message_preview_bytes() / 2);
         response_text.push('r');
         write_jsonl(
             &transcript,
@@ -3112,7 +3114,7 @@ mod tests {
         assert_eq!(page.events[0].text.as_ref().unwrap().len(), 16 * 1024 + 1);
         let response_preview = page.events[1].text.as_ref().unwrap();
         assert!(response_preview.ends_with('…'));
-        assert!(response_preview.len() <= TIMELINE_MESSAGE_PREVIEW_BYTES);
+        assert!(response_preview.len() <= timeline_message_preview_bytes());
     }
 
     #[test]
@@ -3366,10 +3368,7 @@ mod tests {
             ],
         );
 
-        assert_eq!(
-            MAX_LINE_BYTES as u64,
-            mallard_domain::MAX_CONVERSATION_FILE_BYTES
-        );
+        assert_eq!(max_line_bytes() as u64, conversation_file_limit_bytes());
         assert!(fs::metadata(&transcript).unwrap().len() > 4 * 1024 * 1024);
         let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
         assert!(!index.truncated);
@@ -3404,12 +3403,12 @@ mod tests {
             .unwrap();
         assert!(page.events[0].tool.as_ref().unwrap().result_truncated);
         assert!(preview.ends_with('…'));
-        assert!(preview.len() <= TIMELINE_TOOL_PREVIEW_BYTES);
+        assert!(preview.len() <= timeline_tool_preview_bytes());
         let detail = read_event_detail(&transcript, &index, &tool_entry.event_id).unwrap();
         let detail_result = detail.result.as_ref().unwrap();
         assert!(detail.result_truncated);
         assert!(detail_result.len() > 64 * 1024);
-        assert!(detail_result.len() <= crate::providers::traits::TIMELINE_TOOL_DETAIL_BYTES);
+        assert!(detail_result.len() <= crate::app_settings::timeline_tool_detail_bytes());
     }
 
     #[test]
@@ -3487,20 +3486,20 @@ mod tests {
         assert!(detail.result_truncated);
         assert!(detail.arguments.as_ref().unwrap().len() > 64 * 1024);
         assert!(detail.result.as_ref().unwrap().len() > 64 * 1024);
-        assert!(detail_bytes <= crate::providers::traits::TIMELINE_TOOL_DETAIL_BYTES);
+        assert!(detail_bytes <= crate::app_settings::timeline_tool_detail_bytes());
     }
 
     #[test]
     fn bounded_text_includes_ellipsis_within_the_byte_limit() {
         let (preview, truncated) = bounded_text(
-            Some("鹅".repeat(TIMELINE_TOOL_PREVIEW_BYTES)),
-            TIMELINE_TOOL_PREVIEW_BYTES,
+            Some("鹅".repeat(timeline_tool_preview_bytes())),
+            timeline_tool_preview_bytes(),
         );
         let preview = preview.unwrap();
 
         assert!(truncated);
         assert!(preview.ends_with('…'));
-        assert!(preview.len() <= TIMELINE_TOOL_PREVIEW_BYTES);
+        assert!(preview.len() <= timeline_tool_preview_bytes());
     }
 
     #[test]

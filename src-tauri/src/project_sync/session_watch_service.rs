@@ -18,10 +18,7 @@
 //! operations is always visible to the second one.
 
 use super::commands::LocalTailObservation;
-use super::domain::{
-    LocalProjectId, ProviderKey, StorageId, TargetExpectation, ThreadId,
-    MAX_CONVERSATION_FILE_BYTES,
-};
+use super::domain::{LocalProjectId, ProviderKey, StorageId, TargetExpectation, ThreadId};
 use super::provider_capture::{self, CaptureRequest, Discovery, LocalSessionView};
 use super::sync_metrics;
 use mallard_infrastructure::persistence::write_json_atomic;
@@ -127,7 +124,7 @@ impl ManualScanner {
                         // compare by length alone — they are blocked rows
                         // either way.
                         let content = match entry.metadata() {
-                            Ok(meta) if meta.len() <= MAX_CONVERSATION_FILE_BYTES => {
+                            Ok(meta) if meta.len() <= mallard_infrastructure::app_settings::conversation_file_limit_bytes() => {
                                 std::fs::read(&path).ok()
                             }
                             Ok(meta) => Some(meta.len().to_le_bytes().to_vec()),
@@ -722,6 +719,30 @@ impl SessionWatchService {
         }
     }
 
+    /// [`Self::reset_all_caches`] plus deleting the persisted observation
+    /// file. A settings change rewrites what an observation would contain and
+    /// announces itself with no filesystem event, so the stat-pinned records
+    /// would otherwise keep re-serving; the service lock is held across the
+    /// unlink so no concurrent observation can reload the pre-change file
+    /// into the fresh mirror and later write those stale rows back out.
+    pub(crate) fn reset_all_caches_and_purge_disk(&self, state_root: &Path) -> Result<(), String> {
+        let mut guard = self.inner.lock();
+        if let Ok(inner) = guard.as_mut() {
+            **inner = ServiceInner::default();
+        }
+        let path = observation_cache_path(state_root);
+        let result = match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "remove observation cache '{}': {error}",
+                path.display()
+            )),
+        };
+        drop(guard);
+        result
+    }
+
     /// The discovery and session views for one capture request, reusing the
     /// cached inventory when the provider-profile watcher proves it clean.
     /// Each provider profile owns an independent cache entry. Multi-provider
@@ -820,7 +841,7 @@ impl SessionWatchService {
                                 // serving a stale unblocked view.
                                 Ok(meta)
                                     if meta.is_file()
-                                        && meta.len() <= MAX_CONVERSATION_FILE_BYTES =>
+                                        && meta.len() <= mallard_infrastructure::app_settings::conversation_file_limit_bytes() =>
                                 {
                                     view.source_mtime = meta
                                         .modified()

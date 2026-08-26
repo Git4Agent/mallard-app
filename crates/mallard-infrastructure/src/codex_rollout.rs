@@ -8,7 +8,7 @@
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-use mallard_domain::MAX_CONVERSATION_FILE_BYTES;
+use crate::app_settings::conversation_file_limit_bytes;
 
 pub const MAX_CODEX_FORK_DEPTH: usize = 256;
 pub const MAX_CODEX_RECORDS: usize = 100_000;
@@ -90,7 +90,7 @@ pub(crate) fn check_rollout_bounds(bytes: &[u8]) -> Result<(), CodexStructureErr
             "Codex rollout is empty",
         ));
     }
-    if bytes.len() > MAX_CONVERSATION_FILE_BYTES as usize {
+    if bytes.len() > conversation_file_limit_bytes() as usize {
         return Err(error(
             CodexStructureErrorKind::OversizedFile,
             "Codex rollout exceeds the bounded transcript limit",
@@ -471,7 +471,7 @@ fn parse_history_base(
     // segment's byte length. The graph resolver proves it against the
     // referenced prefix's contiguous ordinals; only the byte coordinate has
     // a standalone structural bound here.
-    if end_byte_offset > MAX_CONVERSATION_FILE_BYTES {
+    if end_byte_offset > conversation_file_limit_bytes() {
         return Err(malformed_meta("has a history base with impossible cutoffs"));
     }
     Ok(Some(CodexHistoryBase {

@@ -26,6 +26,7 @@
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
+use crate::app_settings::conversation_file_limit_bytes;
 use crate::codex_history_graph::ResolvedCodexRoot;
 use crate::codex_paginated_projection::{
     complete_paginated_item_projection, verify_projection_fixpoint,
@@ -39,8 +40,8 @@ use crate::session_path_map::{
 };
 use mallard_domain::{
     compute_portable_conversation_tail_with_codec, conversation_prefix_witness,
-    ConversationPrefixWitness, PortableConversationTail, MAX_CONVERSATION_FILE_BYTES,
-    PORTABLE_TAIL_CODEC_V1, PORTABLE_TAIL_CODEC_WIRE_V1,
+    ConversationPrefixWitness, PortableConversationTail, PORTABLE_TAIL_CODEC_V1,
+    PORTABLE_TAIL_CODEC_WIRE_V1,
 };
 
 const ARTIFACT_DOMAIN_V1: &[u8] = b"mallard-codex-artifact-v1";
@@ -219,7 +220,7 @@ pub fn build_standalone_codex_root(
     for record in projected {
         next_ordinal = append_output_record(&mut output, record, next_ordinal)?;
     }
-    if output.len() as u64 > MAX_CONVERSATION_FILE_BYTES {
+    if output.len() as u64 > conversation_file_limit_bytes() {
         return Err("standalone Codex output exceeds the bounded transcript limit".to_string());
     }
     validate_standalone_record_layout(&output)?;
