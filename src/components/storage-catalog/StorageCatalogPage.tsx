@@ -6,6 +6,7 @@ import { clockOptions } from "../../clock";
 import { formatBytes } from "../../format";
 import { storageAccessErrorMessage } from "../../storageError";
 import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
+import LoadingScaffold from "../project-sync/LoadingScaffold";
 import { writeClipboardText } from "../sync-review/clipboard";
 import { focusMenuEdge, moveMenuFocus } from "../sync-review/menuKeyboard";
 import ProviderMark from "../sync-review/ProviderMark";
@@ -1777,7 +1778,7 @@ export default function StorageCatalogPage({
           }))}
         />
         {loading && !page ? (
-          <div className="sync-history-state">{`Loading ${label}…`}</div>
+          <LoadingScaffold shape="rows" label={`Loading ${label}`} />
         ) : error && !page ? (
           /* "None stored yet" is a fact about the storage. When the request
              that would have listed them failed, we know no such thing — and

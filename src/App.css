@@ -175,7 +175,8 @@ summary:focus-visible {
   border: 1.5px solid var(--loader-track);
   border-top-color: var(--text-0);
   border-radius: 50%;
-  animation: spin 0.85s linear infinite;
+  /* Half the 1.8s glint clock: every loading motif shares one metronome. */
+  animation: spin 0.9s linear infinite;
 }
 
 .status-loader::after {
@@ -189,6 +190,141 @@ summary:focus-visible {
   background: var(--text-1);
   transform: translate(-50%, -50%);
   opacity: 0.9;
+}
+
+/* ── Loading scaffolds (LoadingScaffold.tsx) ─────────────────────────────
+   A page's first read draws its own layout in bones, so arrival changes
+   pixels, never geometry. The shimmer rides the startup glint's 1.8s
+   clock; the rings above run its half-period. The global reduced-motion
+   block freezes every clock, which leaves a bone holding its two-tone
+   fill — exactly the intended still state. */
+
+.loading-bone {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--r-sm);
+  background: var(--chip-bg);
+}
+
+.loading-bone::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(100deg,
+    transparent 32%,
+    color-mix(in srgb, var(--text-0) 9%, transparent) 50%,
+    transparent 68%);
+  animation: loading-bone-glint 1.8s ease-in-out infinite;
+}
+
+.loading-bone.quiet { background: var(--surface-subtle); }
+.loading-bone.round { border-radius: 50%; }
+.loading-bone.pill { border-radius: var(--r-pill); }
+
+@keyframes loading-bone-glint {
+  to { transform: translateX(100%); }
+}
+
+.loading-scaffold {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* One aria-hidden wrapper covers every bone; layout stays the scaffold's. */
+.loading-scaffold-bones { display: contents; }
+
+.loading-scaffold-caption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+  color: var(--text-2);
+  font-size: var(--type-xs);
+}
+
+/* The bones mirror .sync-history-thread-card exactly — the flat,
+   hairline-separated list family both Activity sessions and the Library's
+   catalog rows land as. Same list gap, card grid gap, and padding. */
+.loading-scaffold-list {
+  display: grid;
+  gap: 6px;
+}
+
+.loading-scaffold-row {
+  display: grid;
+  gap: 6px;
+  padding: 9px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.loading-scaffold-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+}
+
+.loading-scaffold-title {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.loading-scaffold-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.loading-scaffold-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Inside a row it is the meta line, which spaces its chips the way
+   .sync-history-thread-meta does. */
+.loading-scaffold-row .loading-scaffold-chips {
+  gap: 14px;
+}
+
+/* The punchcard band shimmers as one surface, so it composes with
+   .loading-bone and out-declares its fill and radius here. */
+.loading-scaffold-band {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-card);
+}
+
+.loading-scaffold-band i {
+  width: 9px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--chip-bg);
+}
+
+.loading-scaffold-panes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.loading-scaffold-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-card);
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -362,7 +498,7 @@ summary:focus-visible {
 .icon-spin {
   transform-box: view-box;
   transform-origin: center;
-  animation: icon-spin 0.8s linear infinite;
+  animation: icon-spin 0.9s linear infinite;
 }
 
 .icon-spin-frame {
@@ -382,7 +518,7 @@ summary:focus-visible {
 }
 
 .icon-spin-frame.spinning {
-  animation: icon-spin 0.8s linear infinite;
+  animation: icon-spin 0.9s linear infinite;
 }
 
 @keyframes icon-spin {

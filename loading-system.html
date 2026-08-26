@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Loading — one recipe</title>
     <style>
-      /* Page chrome only. Everything inside .specimen-frame is the shipped skin,
-         plus the PROPOSED block below, which is the CSS the cutover would copy
-         into App.css. */
+      /* Page chrome only. Everything inside .specimen-frame is the shipped
+         skin — the recipe's CSS lives in App.css and the scaffolds render
+         through the shipped LoadingScaffold component. */
       html:root { height: auto; overflow: visible; }
       :root > body { height: auto; min-height: 100%; overflow: visible; }
       body > #root { height: auto; overflow: visible; }
@@ -24,7 +24,7 @@
         color: var(--text-2); font-weight: 400; }
       .specimen-lead { margin: 0 0 18px; font-size: 13px; color: var(--text-2); max-width: 78ch; line-height: 1.5; }
       .specimen-rows { display: flex; flex-direction: column; gap: 26px; }
-      .specimen-row-label { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; font-size: 12px; }
+      .specimen-row-label { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; font-size: 12px; max-width: 860px; }
       .specimen-row-label b { color: var(--text-0); }
       .specimen-row-label span { color: var(--text-3); }
       .specimen-frame { max-width: 860px; padding: 14px 18px 18px; border: 1px solid var(--border);
@@ -44,79 +44,14 @@
       /* The startup screen fills a viewport; the frame gives it a stage. */
       .specimen-frame .sync-startup-screen { min-height: 280px; position: relative; display: flex;
         align-items: center; justify-content: center; }
-
-      /* ── PROPOSED — the loading recipe's new CSS, copied into App.css at
-            cutover. Everything below rides shipped tokens only. ─────────── */
-
-      /* R1 — one clock. The startup glint's 1.8s ease-in-out is the shimmer
-         clock; rings and spinning icons run its half-period. (Cutover also
-         retimes .status-loader 0.85s→0.9s and .icon-spin 0.8s→0.9s.) */
-      .ske {
-        position: relative;
-        overflow: hidden;
-        border-radius: var(--r-sm);
-        background: var(--chip-bg);
-      }
-      .ske::after {
-        content: "";
-        position: absolute;
-        inset: 0;
-        transform: translateX(-100%);
-        background: linear-gradient(100deg,
-          transparent 32%,
-          color-mix(in srgb, var(--text-0) 9%, transparent) 50%,
-          transparent 68%);
-        animation: ske-glint 1.8s ease-in-out infinite;
-      }
-      .ske.quiet { background: var(--surface-subtle); }
-      .ske.round { border-radius: 50%; }
-      .ske.pill { border-radius: var(--r-pill); }
-      @keyframes ske-glint { to { transform: translateX(100%); } }
-
-      /* T1 scaffold container: the page's own layout, drawn in bones. The
-         container keeps the region semantics; every bone is aria-hidden. */
-      .loading-scaffold { display: flex; flex-direction: column; gap: 10px; }
-      .loading-scaffold-caption { display: flex; align-items: center; gap: 8px;
-        color: var(--text-2); font-size: var(--type-xs); margin-bottom: 2px; }
-
-      /* rows — activity, log-like lists */
-      .ske-row { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto;
-        align-items: center; gap: 10px; padding: 10px 12px;
-        border: 1px solid var(--border); border-radius: var(--r-sm);
-        background: var(--surface-row); }
-      .ske-row-lines { display: flex; flex-direction: column; gap: 7px; }
-      .ske-row-chips { display: flex; gap: 6px; }
-
-      /* cards — the Library grid */
-      .ske-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
-      .ske-card { display: flex; flex-direction: column; gap: 9px; padding: 12px;
-        border: 1px solid var(--border); border-radius: var(--r);
-        background: var(--surface-card); box-shadow: var(--shadow-card); }
-
-      /* detail — session detail: fact strip, punchcard band, panes */
-      .ske-band { display: flex; flex-wrap: wrap; gap: 3px; padding: 10px 12px;
-        border: 1px solid var(--border); border-radius: var(--r-sm);
-        background: var(--surface-card); }
-      .ske-band i { width: 9px; height: 14px; border-radius: 2px; background: var(--chip-bg); }
-      .ske-pane { border: 1px solid var(--border); border-radius: var(--r-sm);
-        background: var(--surface-card); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-
-      /* form — settings groups */
-      .ske-field { display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 18px;
-        align-items: center; padding: 9px 0; border-bottom: 1px solid var(--border); }
-      .ske-field:last-child { border-bottom: 0; }
-
-      /* R6 — reduced motion: every clock stops; bones freeze to their two-tone
-         fill; the ring keeps its ¾-arc shape so "busy" still reads by form. */
-      @media (prefers-reduced-motion: reduce) {
-        .ske::after { animation: none; display: none; }
-      }
-      .specimen-reduce .ske::after,
+      /* Emulates the app's global prefers-reduced-motion block for the
+         checkbox above, so the still state is reviewable without flipping
+         the OS setting. */
+      .specimen-reduce .loading-bone::after { animation: none; display: none; }
       .specimen-reduce .status-loader::before,
       .specimen-reduce .icon-spin,
       .specimen-reduce .sync-startup-progress-track > span::after,
       .specimen-reduce .sync-startup-mark::after { animation: none !important; }
-      .specimen-reduce .ske::after { display: none; }
     </style>
   </head>
   <body>

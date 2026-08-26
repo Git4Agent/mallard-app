@@ -17,6 +17,7 @@ import { clockOptions, formatDuration } from "../../clock";
 import { getPreference } from "../../preferences";
 import { projectSyncApi } from "./api";
 import { githubCommitUrl, openExternalUrl } from "./externalLink";
+import LoadingScaffold from "./LoadingScaffold";
 import { compactProjectPath, errorMessage, projectLabel } from "./model";
 import ProviderMark from "../sync-review/ProviderMark";
 import { writeClipboardText } from "../sync-review/clipboard";
@@ -1635,13 +1636,14 @@ export function ProjectChatHistoryContent({
         {!hasBoundProvider ? (
           <div className="sync-history-state sync-history-profile-state"><Icon name="alert-triangle" size={18} /><div><strong>No agent profile is connected.</strong><span>Remove and add the project again to choose a provider profile.</span></div></div>
         ) : loading && !activity ? (
-          /* Not a status message: this placeholder is what the view renders
-             with while its first read is in flight, and on the one path that
-             does reach it from a user action — picking a branch, which drops
+          /* Not a status message: the scaffold is what the view renders with
+             while its first read is in flight — the page's own row geometry
+             in bones, so the list lands without a jump. On the one path that
+             reaches it from a user action — picking a branch, which drops
              the list — the visually hidden line above is already announcing
              the refresh politely. Claiming a live region here only made a
              screen reader say it twice. */
-          <div className="sync-history-state" role="region" aria-label="Loading project activity"><span className="status-loader" /> Loading project activity…</div>
+          <LoadingScaffold shape="rows" label="Loading project activity" />
         ) : !activity ? (
           /* A failed first load is a page of its own, never a blank one: it
              names what failed and carries its own retry, because the trail's

@@ -664,7 +664,9 @@ test("refreshing project activity spins in the path bar, and announces from the 
   // disabled button is allowed to keep full opacity.
   assert.match(css, /\.sync-path-icon-action\.loading:disabled\s*\{[^}]*opacity:\s*1;/s);
   assert.match(css, /\.icon-spin-frame\s*\{[^}]*width:\s*16px;[^}]*height:\s*16px;[^}]*transform-origin:\s*8px 8px;/s);
-  assert.match(css, /\.icon-spin-frame\.spinning\s*\{[^}]*animation:\s*icon-spin 0\.8s linear infinite;/s);
+  // Half the loading recipe's 1.8s glint clock: every spinner shares one
+  // metronome (loading-system.html, R1).
+  assert.match(css, /\.icon-spin-frame\.spinning\s*\{[^}]*animation:\s*icon-spin 0\.9s linear infinite;/s);
 });
 
 test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {

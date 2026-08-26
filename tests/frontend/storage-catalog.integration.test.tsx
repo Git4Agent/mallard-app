@@ -169,13 +169,27 @@ test("the scope page wears the project workspace's trail and list", () => {
   assert.doesNotMatch(html, /Storages/);
   assert.match(html, /Skills · conf2/);
   assert.doesNotMatch(html, /<h1>Skills · conf2<\/h1>/);
-  assert.match(html, /Loading Skills · conf2…/);
+  // The first load is the rows scaffold, named with the same wording the
+  // old line carried. Its 150ms gate means a static render shows nothing —
+  // that blank IS the recipe's flash-free warm path, so the named state is
+  // pinned at the source instead of in this markup.
+  assert.doesNotMatch(html, /sync-history-state/);
   assert.doesNotMatch(html, /(?:Library|Catalog) storage:|Choose another storage|Pair a .* profile/);
   assert.doesNotMatch(html, /Add Skill|Add Plugin|Add Pet\b/);
   // Browsing a storage from a select is gone: the storage is the page's outer
   // scope, chosen in the bar.
   assert.doesNotMatch(html, /Browse stored resources|<select/);
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  // `rows`, not a card grid: the landed list is the same thread-card family
+  // Activity lands, and the scaffold must draw the page's own destination.
+  assert.match(page, /<LoadingScaffold shape="rows" label=\{`Loading \$\{label\}`\} \/>/);
+  const scaffold = readFileSync("src/components/project-sync/LoadingScaffold.tsx", "utf8");
+  // The recipe's contract: a quiet named region, bones hidden from
+  // assistive tech, the caption naming the noun, and the 150ms gate.
+  assert.match(scaffold, /role="region"/);
+  assert.match(scaffold, /aria-hidden="true"/);
+  assert.match(scaffold, /\{label\}…/);
+  assert.match(scaffold, /setPastGate\(true\), 150\)/);
   assert.match(page, /api\.listScopeResources\(scope\.scope\.scope_id, chosenStorageId\)/);
   assert.doesNotMatch(page, /CatalogCategory|CATALOG_CATEGORIES|family/);
 });

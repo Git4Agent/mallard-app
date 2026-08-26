@@ -17,6 +17,7 @@ import {
 } from "../../preferences";
 import { projectSyncApi } from "./api";
 import { errorMessage } from "./model";
+import { LoadingBone } from "./LoadingScaffold";
 
 /**
  * The app-wide Settings page: a primary-nav destination like the Storages
@@ -687,7 +688,12 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
                     <span className="sync-settings-readout" title={localSummary?.root_path}>
                       {localSummary
                         ? `${localSummary.file_count} file${localSummary.file_count === 1 ? "" : "s"} · ${formatBytes(localSummary.total_bytes)}`
-                        : "…"}
+                        : summaryLoading
+                          // A bone, not a plausible-looking placeholder: the
+                          // value is being read, and only a failed read shows
+                          // the honest "unknown" ellipsis.
+                          ? <LoadingBone width={110} height={11} />
+                          : "…"}
                     </span>
                     <button
                       type="button"
