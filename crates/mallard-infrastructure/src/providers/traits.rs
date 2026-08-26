@@ -57,6 +57,17 @@ pub enum ProviderCapabilityLevel {
     ResumableWithConflictPreservation,
 }
 
+/// How to open this provider's coding-agent CLI with a prompt, for the R2
+/// setup hand-off. Absent when the provider ships no launchable CLI.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ProviderCliLauncher {
+    /// Executable name, resolved on the user's own login-shell PATH by the
+    /// terminal that runs it — never by the GUI app's environment.
+    pub program: String,
+    /// Human name of the agent CLI, e.g. "Claude Code".
+    pub display_name: String,
+}
+
 /// Serializable provider facts for setup and Activity. The frontend iterates
 /// these; it never holds a fixed provider array.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -70,6 +81,10 @@ pub struct ProviderDescriptor {
     pub default_profile_directory: Option<String>,
     /// May pre-enable this provider for a new draft; never a requirement.
     pub setup_default: bool,
+    /// This provider's coding-agent CLI, when one exists that takes a prompt
+    /// argument at launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_launcher: Option<ProviderCliLauncher>,
     pub capabilities: ProviderCapabilityLevel,
     pub adapter_version: u32,
 }

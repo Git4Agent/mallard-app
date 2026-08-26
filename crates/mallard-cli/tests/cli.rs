@@ -1,6 +1,12 @@
+use mallard_domain::{
+    generated_named_id, StorageConfig, StorageId, StorageKind, StorageSetupDraft,
+    StorageSetupDraftId, STORAGE_SETUP_DRAFT_SCHEMA,
+};
+use mallard_infrastructure::persistence::LocalStateRepository;
 use std::fs;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Command;
+
+const ACTIONABLE_LOCAL_CONFIG_MESSAGE: &str = "Mallard could not access its local storage configuration. If this command is running in a restricted environment, approve read/write access to Mallard's local state and run the same command again.";
 
 fn command(home: &std::path::Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mallard-cli"));
@@ -16,6 +22,33 @@ fn combined_output(output: &std::process::Output) -> String {
     )
 }
 
+fn create_r2_draft(home: &std::path::Path, name: &str) -> StorageSetupDraft {
+    let repository = LocalStateRepository::from_home_dir(home).unwrap();
+    repository
+        .save_storage_setup_draft(StorageSetupDraft {
+            schema: STORAGE_SETUP_DRAFT_SCHEMA,
+            draft_id: StorageSetupDraftId::parse(generated_named_id("storagedraft").unwrap())
+                .unwrap(),
+            storage: StorageConfig {
+                id: StorageId::parse(generated_named_id("storage").unwrap()).unwrap(),
+                name: name.to_string(),
+                kind: StorageKind::S3,
+                bucket: String::new(),
+                access_key_id: String::new(),
+                secret_access_key: String::new(),
+                account_id: String::new(),
+                s3_endpoint: String::new(),
+                region: "auto".to_string(),
+                local_dir: String::new(),
+                supports_conditional_writes: None,
+            },
+            revision: 0,
+            created_at: 1,
+            updated_at: 1,
+        })
+        .unwrap()
+}
+
 fn assert_tree_omits(root: &std::path::Path, canaries: &[&str]) {
     fn visit(path: &std::path::Path, canaries: &[&str]) {
         for entry in fs::read_dir(path).unwrap() {
@@ -29,7 +62,7 @@ fn assert_tree_omits(root: &std::path::Path, canaries: &[&str]) {
                 for canary in canaries {
                     assert!(
                         !content.contains(canary),
-                        "secret canary was persisted in {}",
+                        "canary was persisted in {}",
                         entry.path().display()
                     );
                 }
@@ -43,61 +76,44 @@ fn assert_tree_omits(root: &std::path::Path, canaries: &[&str]) {
 }
 
 #[test]
-fn help_advertises_provision_cleanup_and_safe_secret_input_only() {
+fn help_exposes_only_browser_authorized_r2_setup() {
     let temp = tempfile::tempdir().unwrap();
-    let r2_output = command(temp.path())
+    let output = command(temp.path())
         .args(["storage", "r2", "--help"])
         .output()
         .unwrap();
-    assert!(r2_output.status.success());
-    let r2_help = combined_output(&r2_output);
-    for command in ["connect", "provision", "cleanup"] {
-        assert!(r2_help.contains(command));
-    }
-
-    let connect_output = command(temp.path())
-        .args(["storage", "r2", "connect", "--help"])
-        .output()
-        .unwrap();
-    assert!(connect_output.status.success());
-    let connect_help = combined_output(&connect_output);
-    assert!(connect_help.contains("--secret-stdin"));
-    assert!(!connect_help.contains("--secret-access-key"));
-    assert!(!connect_help.contains("--secret="));
-
-    let provision_output = command(temp.path())
-        .args(["storage", "r2", "provision", "--help"])
-        .output()
-        .unwrap();
-    assert!(provision_output.status.success());
-    let provision_help = combined_output(&provision_output);
-    for flag in [
-        "--name",
+    assert!(output.status.success());
+    let help = combined_output(&output);
+    assert!(help.contains("setup"));
+    for removed in [
+        "connect",
+        "provision",
+        "cleanup",
         "--account-id",
         "--bucket",
         "--jurisdiction",
+        "--access-key-id",
+        "--secret-stdin",
         "--bootstrap-token-stdin",
     ] {
-        assert!(provision_help.contains(flag));
+        assert!(
+            !help.contains(removed),
+            "obsolete help item remained: {removed}"
+        );
     }
-    for jurisdiction in ["default", "eu", "fedramp"] {
-        assert!(provision_help.contains(jurisdiction));
-    }
-    assert!(!provision_help
-        .split_whitespace()
-        .any(|word| word == "--bootstrap-token" || word.starts_with("--bootstrap-token=")));
 
-    let cleanup_output = command(temp.path())
-        .args(["storage", "r2", "cleanup", "--help"])
+    let setup_output = command(temp.path())
+        .args(["storage", "r2", "setup", "--help"])
         .output()
         .unwrap();
-    assert!(cleanup_output.status.success());
-    let cleanup_help = combined_output(&cleanup_output);
-    assert!(cleanup_help.contains("<SETUP_ID>"));
-    assert!(cleanup_help.contains("--bootstrap-token-stdin"));
-    assert!(!cleanup_help
-        .split_whitespace()
-        .any(|word| word == "--bootstrap-token" || word.starts_with("--bootstrap-token=")));
+    assert!(setup_output.status.success());
+    let setup_help = combined_output(&setup_output);
+    assert!(setup_help.contains("--name"));
+    assert!(setup_help.contains("--draft-id"));
+    assert!(setup_help.contains("--expected-revision"));
+    assert!(!setup_help.to_ascii_lowercase().contains("secret"));
+    assert!(!setup_help.contains("--account-id"));
+    assert!(!setup_help.contains("--bucket"));
 }
 
 #[test]
@@ -115,79 +131,28 @@ fn list_uses_a_temporary_home_and_emits_no_local_path() {
 }
 
 #[test]
-fn invalid_connect_never_echoes_or_persists_the_stdin_secret() {
+fn invalid_setup_name_fails_before_wrangler_and_is_never_echoed_or_persisted() {
     let temp = tempfile::tempdir().unwrap();
-    let canary = "stdin-secret-canary-never-print";
-    let access_key_canary = "invalid-access-key-canary\n";
-    let mut child = command(temp.path())
-        .args([
-            "storage",
-            "r2",
-            "connect",
-            "--name",
-            "Team backup",
-            "--api-url",
-            "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/team-backup",
-            "--access-key-id",
-            access_key_canary,
-            "--secret-stdin",
-            "--json",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(format!("{canary}\n").as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    let combined = combined_output(&output);
-    assert!(!combined.contains(canary));
-    assert!(!combined.contains(access_key_canary.trim()));
-    assert_tree_omits(temp.path(), &[canary, access_key_canary.trim()]);
-}
-
-#[test]
-fn invalid_provision_never_echoes_or_persists_inputs_or_bootstrap_token() {
-    let temp = tempfile::tempdir().unwrap();
+    let empty_path = tempfile::tempdir().unwrap();
     let name_canary = "private-name-canary";
     let invalid_name = format!("{name_canary}\nline");
-    let account_canary = "0123456789abcdef0123456789abcdef";
-    let bucket_canary = "private-bucket-canary";
-    let token_canary = "bootstrap-token-canary-never-print";
-    let mut child = command(temp.path())
+    let draft_id = generated_named_id("storagedraft").unwrap();
+    let output = command(temp.path())
+        .env("PATH", empty_path.path())
         .args([
             "storage",
             "r2",
-            "provision",
+            "setup",
             "--name",
             &invalid_name,
-            "--account-id",
-            account_canary,
-            "--bucket",
-            bucket_canary,
-            "--jurisdiction",
-            "default",
-            "--bootstrap-token-stdin",
+            "--draft-id",
+            &draft_id,
+            "--expected-revision",
+            "1",
             "--json",
         ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .output()
         .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(format!("{token_canary}\n").as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
@@ -198,42 +163,35 @@ fn invalid_provision_never_echoes_or_persists_inputs_or_bootstrap_token() {
     assert_eq!(error["code"], "storage_name_invalid");
     assert!(error.get("setup_id").is_none());
     let combined = combined_output(&output);
-    for canary in [name_canary, account_canary, bucket_canary, token_canary] {
-        assert!(!combined.contains(canary));
-    }
+    assert!(!combined.contains(name_canary));
     assert!(!combined.contains(&temp.path().to_string_lossy().to_string()));
-    assert_tree_omits(
-        temp.path(),
-        &[name_canary, account_canary, bucket_canary, token_canary],
-    );
+    assert_tree_omits(temp.path(), &[name_canary]);
 }
 
 #[test]
-fn invalid_cleanup_never_echoes_or_persists_setup_input_or_bootstrap_token() {
+fn valid_setup_without_wrangler_has_a_fixed_sanitized_error() {
     let temp = tempfile::tempdir().unwrap();
-    let setup_id_canary = "invalid-private-setup-id-canary";
-    let token_canary = "cleanup-token-canary-never-print";
-    let mut child = command(temp.path())
+    let empty_path = tempfile::tempdir().unwrap();
+    let name_canary = "Private destination canary";
+    let draft = create_r2_draft(temp.path(), name_canary);
+    let draft_id = draft.draft_id.to_string();
+    let revision = draft.revision.to_string();
+    let output = command(temp.path())
+        .env("PATH", empty_path.path())
         .args([
             "storage",
             "r2",
-            "cleanup",
-            setup_id_canary,
-            "--bootstrap-token-stdin",
+            "setup",
+            "--name",
+            name_canary,
+            "--draft-id",
+            &draft_id,
+            "--expected-revision",
+            &revision,
             "--json",
         ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .output()
         .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(format!("{token_canary}\n").as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
@@ -241,13 +199,142 @@ fn invalid_cleanup_never_echoes_or_persists_setup_input_or_bootstrap_token() {
     assert_eq!(error["schema"], 1);
     assert_eq!(error["status"], "error");
     assert_eq!(error["exit_code"], 2);
-    assert_eq!(error["code"], "r2_setup_id_invalid");
+    assert_eq!(error["code"], "wrangler_not_found");
     assert!(error.get("setup_id").is_none());
     let combined = combined_output(&output);
-    assert!(!combined.contains(setup_id_canary));
-    assert!(!combined.contains(token_canary));
+    assert!(!combined.contains(name_canary));
     assert!(!combined.contains(&temp.path().to_string_lossy().to_string()));
-    assert_tree_omits(temp.path(), &[setup_id_canary, token_canary]);
+}
+
+#[test]
+fn setup_requires_the_exact_existing_draft_before_wrangler() {
+    let temp = tempfile::tempdir().unwrap();
+    let empty_path = tempfile::tempdir().unwrap();
+    let name = "Team backup";
+    let missing_id = generated_named_id("storagedraft").unwrap();
+    let output = command(temp.path())
+        .env("PATH", empty_path.path())
+        .args([
+            "storage",
+            "r2",
+            "setup",
+            "--name",
+            name,
+            "--draft-id",
+            &missing_id,
+            "--expected-revision",
+            "1",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["code"], "storage_setup_draft_not_found");
+    let combined = combined_output(&output);
+    assert!(!combined.contains(name));
+    assert!(!combined.contains(&missing_id));
+}
+
+#[test]
+fn setup_rejects_a_stale_draft_revision_before_wrangler() {
+    let temp = tempfile::tempdir().unwrap();
+    let empty_path = tempfile::tempdir().unwrap();
+    let name = "Team backup";
+    let draft = create_r2_draft(temp.path(), name);
+    let draft_id = draft.draft_id.to_string();
+    let stale_revision = draft.revision.saturating_add(1).to_string();
+    let output = command(temp.path())
+        .env("PATH", empty_path.path())
+        .args([
+            "storage",
+            "r2",
+            "setup",
+            "--name",
+            name,
+            "--draft-id",
+            &draft_id,
+            "--expected-revision",
+            &stale_revision,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["code"], "storage_setup_draft_revision_conflict");
+    let combined = combined_output(&output);
+    assert!(!combined.contains(name));
+    assert!(!combined.contains(&draft_id));
+}
+
+#[test]
+fn removed_r2_commands_use_the_generic_non_echoing_error() {
+    let temp = tempfile::tempdir().unwrap();
+    for removed in ["connect", "provision", "cleanup"] {
+        let canary = "private-argument-canary";
+        let output = command(temp.path())
+            .args(["storage", "r2", removed, canary, "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["code"], "cli_invalid_input");
+        assert!(!combined_output(&output).contains(canary));
+    }
+}
+
+#[test]
+fn inaccessible_local_state_has_an_actionable_sanitized_human_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let state_canary = "private-local-state-canary";
+    fs::write(temp.path().join(".mallard"), state_canary).unwrap();
+
+    let output = command(temp.path())
+        .args(["storage", "list"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!("Error: {ACTIONABLE_LOCAL_CONFIG_MESSAGE}\n")
+    );
+}
+
+#[test]
+fn inaccessible_local_state_has_an_actionable_sanitized_json_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let state_canary = "private-local-state-canary";
+    fs::write(temp.path().join(".mallard"), state_canary).unwrap();
+
+    let output = command(temp.path())
+        .args(["storage", "list", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["schema"], 1);
+    assert_eq!(error["status"], "error");
+    assert_eq!(error["exit_code"], 5);
+    assert_eq!(error["code"], "cli_persistence_failure");
+    assert_eq!(error["message"], ACTIONABLE_LOCAL_CONFIG_MESSAGE);
+    assert!(error.get("setup_id").is_none());
+
+    let combined = combined_output(&output);
+    assert!(!combined.contains(state_canary));
+    assert!(!combined.contains(&temp.path().to_string_lossy().to_string()));
+    assert!(!combined.contains("Operation not permitted"));
+    assert!(!combined.contains("os error"));
+    assert!(!combined.contains("metadata directory"));
 }
 
 #[test]
@@ -268,6 +355,7 @@ fn malformed_local_config_uses_the_stable_persistence_exit_status() {
     assert_eq!(error["status"], "error");
     assert_eq!(error["exit_code"], 5);
     assert_eq!(error["code"], "local_config_unavailable");
+    assert_eq!(error["message"], ACTIONABLE_LOCAL_CONFIG_MESSAGE);
     assert!(error.get("setup_id").is_none());
     assert!(!String::from_utf8_lossy(&output.stderr)
         .contains(&temp.path().to_string_lossy().to_string()));

@@ -3319,3 +3319,53 @@ fn push_plans_reject_duplicate_cloud_claims() {
         .unwrap_err()
         .contains("claims one cloud thread twice"));
 }
+
+#[test]
+fn storage_setup_draft_validate_bounds_credentials_and_half_edited_fields() {
+    let draft = StorageSetupDraft {
+        schema: STORAGE_SETUP_DRAFT_SCHEMA,
+        draft_id: StorageSetupDraftId::parse("storagedraft-0123456789abcdef01234567").unwrap(),
+        storage: StorageConfig {
+            name: String::new(),
+            kind: StorageKind::S3,
+            local_dir: String::new(),
+            ..sample_storage()
+        },
+        revision: 0,
+        created_at: 1,
+        updated_at: 1,
+    };
+    // An all-empty half-edited form is a valid draft; strictness waits for
+    // the verified upsert.
+    draft.validate().unwrap();
+
+    let mut wrong_schema = draft.clone();
+    wrong_schema.schema = 2;
+    assert!(wrong_schema
+        .validate()
+        .unwrap_err()
+        .contains("unsupported storage setup draft schema"));
+
+    // The two credential fields are bounded, unlike the project draft's
+    // pending storage — and the error never echoes the value.
+    for oversized in [
+        |storage: &mut StorageConfig| storage.access_key_id = "a".repeat(4_097),
+        |storage: &mut StorageConfig| storage.secret_access_key = "a".repeat(4_097),
+        |storage: &mut StorageConfig| storage.bucket = "control\u{7}".to_string(),
+    ] {
+        let mut invalid = draft.clone();
+        oversized(&mut invalid.storage);
+        let error = invalid.validate().unwrap_err();
+        assert_eq!(error, "invalid storage draft field");
+    }
+
+    let mut secret_control = draft.clone();
+    secret_control.storage.secret_access_key = "shown-once\u{1b}".to_string();
+    let error = secret_control.validate().unwrap_err();
+    assert!(!error.contains("shown-once"));
+
+    let mut backwards = draft.clone();
+    backwards.created_at = 2;
+    backwards.updated_at = 1;
+    assert!(backwards.validate().unwrap_err().contains("timestamps"));
+}

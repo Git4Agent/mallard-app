@@ -1646,6 +1646,31 @@ test("unavailable sessions explain why they cannot be synced", () => {
   assert.doesNotMatch(html, /can.t tell which copy is newer/);
 });
 
+test("assignment-conflicted sessions stay visible but cannot be selected for sync", () => {
+  const reason = "Codex Desktop assigns this thread here, but its authoritative home belongs to another live Codex Desktop project.";
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      embedded
+      activity={{
+        ...activity,
+        git: null,
+        sessions: [{ ...codexSession, sync_blocked_reason: reason }],
+      }}
+      comparison={emptyComparison()}
+      activeStorageName="Local storage 1"
+      selectionMode="push"
+      selectedResourceIds={new Set()}
+      selectableResourceIds={new Set([codexResourceId])}
+      onToggleResource={() => undefined}
+    />,
+  );
+
+  assert.match(html, /Add Git history mapping/);
+  assert.match(html, new RegExp(`aria-label="Unavailable for sync\\. ${reason.replaceAll(".", "\\.")}"`));
+  assert.doesNotMatch(html, /sync-sync-row-choice/);
+});
+
 test("mixed-provider rows sort deterministically and never collide on native ids", () => {
   // Both providers use the very same provider-native session id: only the
   // resource id — provider-qualified — may key the rows.
@@ -2216,6 +2241,9 @@ test("completed projects use their main row for history and only mark Git reposi
       activeDraftId={null}
       storages={[]}
       storageUsage={{}}
+      storageDrafts={[]}
+      onOpenStorageDraft={() => undefined}
+      onDiscardStorageDraft={() => undefined}
       activeProjectId={project.local_project_id}
       catalogScopes={[]}
       activeCatalogScopeId={null}
@@ -2314,6 +2342,9 @@ test("the project menu accepts multiple bound provider profiles", () => {
       activeDraftId={null}
       storages={[]}
       storageUsage={{}}
+      storageDrafts={[]}
+      onOpenStorageDraft={() => undefined}
+      onDiscardStorageDraft={() => undefined}
       activeProjectId="project-multiple-profiles"
       activeStorageId={null}
       catalogScopes={[]}
@@ -2387,6 +2418,9 @@ test("the Catalog pane starts empty and lists one row per added scope", () => {
         activeDraftId={null}
         storages={[]}
         storageUsage={{}}
+        storageDrafts={[]}
+        onOpenStorageDraft={() => undefined}
+        onDiscardStorageDraft={() => undefined}
         activeProjectId={null}
         activeStorageId={null}
         catalogScopes={scopes}
@@ -2450,6 +2484,9 @@ test("an empty Storages pane prompts the way Projects and Catalog do", () => {
         activeDraftId={null}
         storages={storages}
         storageUsage={{}}
+        storageDrafts={[]}
+        onOpenStorageDraft={() => undefined}
+        onDiscardStorageDraft={() => undefined}
         activeProjectId={null}
         activeStorageId={null}
         catalogScopes={[]}
@@ -2521,6 +2558,9 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
         local_dir: "/tmp/storage",
       }]}
       storageUsage={{ "storage-1": 1 }}
+      storageDrafts={[]}
+      onOpenStorageDraft={() => undefined}
+      onDiscardStorageDraft={() => undefined}
       storageIssues={{ "storage-1": "Storage folder unavailable." }}
       activeProjectId={project.local_project_id}
       activeStorageId={null}

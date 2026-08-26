@@ -2375,8 +2375,6 @@ summary:focus-visible {
 }
 .sync-r2-guide > svg { flex: none; }
 .sync-r2-guide-copy { min-width: 0; flex: 1 1 300px; }
-.sync-r2-guide-copy strong { color: var(--text-1); font-weight: var(--weight-semibold); }
-.sync-r2-token-help { display: inline-flex; align-items: center; gap: 5px; }
 .sync-r2-guide > .btn-link { min-height: 24px; padding: 2px 0; flex: none; white-space: nowrap; }
 /* The agent action at the guide row's tail: a compact button in the accent's
    soft tint — the storage icon's pair — so the route is the loudest thing in
@@ -2422,6 +2420,54 @@ summary:focus-visible {
 .sync-r2-guide-error {
   color: var(--danger-text);
   font-size: var(--type-xs);
+}
+/* The setup draft's two named routes: one quiet row per lane, the agent row
+   in a whisper of the accent tint. Zone labels reuse the field-name voice. */
+.sync-r2-zone-label {
+  color: var(--text-3);
+  font-size: var(--type-3xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.sync-r2-route-row {
+  padding: 8px 14px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 9px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: var(--type-xs);
+}
+.sync-r2-route-row > svg { flex: none; }
+.sync-r2-route-row.agent { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
+.sync-r2-route-row .sync-r2-guide-copy { flex: 1 1 260px; }
+.sync-r2-route-row > .btn-link {
+  min-height: 24px;
+  padding: 2px 0;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+/* The split cluster: the visible half runs the session's preferred agent,
+   the arrow discloses the other launchers and the copy route in the path
+   bar's own menu. */
+.sync-r2-split { position: relative; display: inline-flex; flex: none; }
+.sync-r2-split > .btn + .btn { border-left: 0; }
+.sync-r2-split > .btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.sync-r2-split-arrow { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 2px 6px; }
+.sync-r2-split > .sync-path-menu { top: calc(100% + 5px); }
+.sync-r2-menu-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sync-r2-menu-text small { color: var(--text-3); font-size: var(--type-3xs); }
+/* Copy again's acknowledgment: doubled class so RetroTheme's later .btn
+   repaint cannot take the tint (same trick as .btn.sync-r2-agent-cta). */
+.btn.sync-r2-copied-flash {
+  color: var(--success-text);
+  border-color: color-mix(in srgb, var(--success-text) 40%, transparent);
 }
 .sync-r2-fields {
   gap: 12px 14px;

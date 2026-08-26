@@ -54,9 +54,10 @@ single authoritative record.**
   - **Codex**: the active thread's authoritative `session_meta.cwd` —
     the first `session_meta`, already exposed as
     `CodexRolloutStructure::current.cwd` (codex_rollout.rs:45).
-  - **Claude**: the leaf identity cwd (the in-flight uncommitted work:
-    `identity.leaf_identity()` in providers/claude/mod.rs — resumed
-    sessions are identified by their leaf record, not copied history).
+  - **Claude**: the launch cwd of the active leaf session ID (the in-flight
+    uncommitted work: `identity.leaf_identity()` in providers/claude/mod.rs —
+    copied history is ignored, a new session ID resets the home, and later
+    per-turn cwd changes within that ID do not move it).
 - Everything else is **content, not identity**: `turn_context.cwd`,
   sandbox `writable_roots`, desktop workspace hints, copied ancestor
   `session_meta` records from forks. Content under the owning home
@@ -67,7 +68,7 @@ single authoritative record.**
 This is already the engine's law — `verify_provider_payload` requires
 `analysis.source_cwd` to equal the binding root or its canonical alias
 exactly (conversation_materialization.rs:1299), and the Claude push gate
-keeps exact leaf-cwd equality. Discovery and the Codex Desktop audit are
+keeps exact launch-cwd equality. Discovery and the Codex Desktop audit are
 the two outliers still on containment; this plan brings them in line.
 (Today's incoherence is real: a subdir Codex session is discoverable and
 pushable, but no machine can ever materialize it — the pull gate rejects
@@ -149,13 +150,16 @@ canonicalized when it still exists):
 | Authoritative home | Assigned | Aux only |
 |---|---|---|
 | == binding root | matching | matching |
-| strictly under binding root | warning: separate directory project — bind that directory to manage it; never repaired (no flattening) | same warning |
+| == another live registered Codex Desktop root | visible as unavailable for sync; never captured or repaired | silently skipped — not this project's thread |
+| strictly under binding root, without a registered-root match | warning: separate directory project — bind that directory to manage it; never repaired (no flattening) | same warning |
 | anywhere else | **repair issue**, `recorded_cwd` = home | silently skipped — not this project's thread |
 
-The disjoint-cwd screenshot thread lands in the bottom-right cell:
-skipped, never claimed, never offered a repair. A healthy thread with a
-foreign turn cwd lands in "matching". The nested-frontend transcript from
-the finding is a plain single-home repair.
+An explicitly assigned thread homed at a different live registered Desktop
+root remains visible in Activity with an unavailable-for-sync status, but it
+never enters capture or repair. The observed assigned conflict lands in that
+second row; an auxiliary-only foreign-home thread remains silently skipped. A
+healthy thread with a foreign turn cwd lands in "matching". The
+nested-frontend transcript from the finding is a plain single-home repair.
 
 **Deleted:** `inspect_codex_structural_cwds`, the multi-root blocker and
 its message (commands.rs:15892–15905), `path_belongs_to_project`.
@@ -219,10 +223,11 @@ Retargets (assertions move, cover is conserved —
   unchanged.
 - codex_rollout.rs structural tests keep `structural_cwds` as-is.
 
-New: aux-nominated foreign-home thread is skipped; assigned foreign-home
-thread yields a repair; assigned subdir-home thread yields the warning
-and no issue; matching thread with a foreign `turn_context.cwd` is
-matching and gets no repair offer.
+New: aux-nominated foreign-home thread is skipped; an assigned foreign home
+that is another live Desktop project remains visible but unavailable for sync;
+other assigned foreign homes yield a repair; assigned subdir-home threads
+yield the warning and no issue; matching threads with a foreign
+`turn_context.cwd` are matching and get no repair offer.
 
 ## 7. Sequencing & cutover
 

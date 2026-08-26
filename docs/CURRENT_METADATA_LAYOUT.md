@@ -99,6 +99,8 @@ on demand.
 |
 |-- project_drafts/
 |   `-- <draft-id>.json
+|-- storage_drafts/
+|   `-- <draft-id>.json
 |-- setup_transactions/
 |   `-- <draft-id>.json
 |-- restore_plans/
@@ -289,6 +291,26 @@ Setup has two local layers:
   written before mutating the permanent config and binding documents. It
   makes interrupted finalization idempotently recoverable.
 
+Storage setup has one draft layer of its own: `storage_drafts/<draft-id>.json`
+is the resumable New-storage form (schema 1, revision-guarded, capped at 16
+drafts). It persists the full half-edited connection **including the secret
+access key** at the same owner-only file permissions as `sync_config.json`,
+because Cloudflare shows that key exactly once. Draft list, create, and update
+responses are redacted to a blank secret plus a `secret_present` flag. Only an
+exact get by draft ID returns the selected draft's secret
+to its editable password field so the user can reveal and review it. The
+verified upsert resolves the exact revision-pinned drafted secret server-side
+and discards the draft after a successful commit. It has no finalize
+transaction — commit is the ordinary verified upsert (R2) or generic config
+save (local).
+
+Agent-assisted R2 setup targets the exact open draft by ID and expected
+revision. The CLI may populate that machine-local draft after browser consent,
+but it does not probe the storage or mutate `sync_config.json`. The running app
+uses the redacted watcher listing as a change signal, then exact-loads the
+selected draft into the editable form for review. Only the user's **Finish
+setup** action runs the verified upsert and commits the storage.
+
 The Library needs neither layer: adding a Catalog row records one scope in
 `catalog_scopes.json`, and linking the scope to a storage lands one link in
 `catalog_scope_links.json` in a single locked mutation.
@@ -410,6 +432,7 @@ reactivate them.
 | `sync_config.json` | 8 MiB |
 | `machine_projects.json` | 8 MiB |
 | `project_drafts/<id>.json` | 4 MiB |
+| `storage_drafts/<id>.json` | 128 KiB |
 | `setup_transactions/<id>.json` | 8 MiB |
 | `restore_plans/<id>.json` | 64 MiB |
 | `conversation_push_plans/<id>.json` | 64 MiB |

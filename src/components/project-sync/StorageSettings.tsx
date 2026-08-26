@@ -142,12 +142,7 @@ export function storageNameForKind(name: string, kind: "s3" | "local"): string {
   return `${kind === "local" ? "Local storage" : "R2 storage"} ${defaultName[1]}`;
 }
 
-/**
- * Counts the five rendered fields, not the four stored ones: the URL flips to
- * set exactly when account and bucket both exist, so pasting it moves the
- * counter by three — which is the coupling, stated honestly. Exported because
- * the storage setup page shows the tally in its own commit bar.
- */
+/** Counts the five rendered connection fields, including a typed or stored secret. */
 export function r2FieldsSet(storage: StorageConfig, secretStored: boolean): number {
   return [
     r2S3ApiUrl(storage.account_id ?? "", storage.bucket ?? "", storage.s3_endpoint ?? ""),
@@ -174,17 +169,15 @@ export function StorageEditor({
   onChange: (storage: StorageConfig) => void;
   onRemove?: () => void;
   primaryAction?: ReactNode;
-  /** True once the backend holds this storage's secret. The config it serves
-   *  redacts the value, so the field renders empty and the tally would
-   *  otherwise report a complete storage as one field short. */
+  /** True when the backend holds an R2 secret. Committed configurations stay
+   *  redacted; an exact open setup draft may also carry the value in this
+   *  controlled editor so the user can reveal and review it. */
   secretStored: boolean;
   showNameField?: boolean;
-  /** False when the page hoists the R2 tally into its own commit bar, so the
-   *  card does not end in a band holding a lone readout. */
+  /** False when the setup page hoists the R2 tally into its own footer. */
   showProgress?: boolean;
-  /** The agent-setup action for the R2 guide row's tail — the workspace owns
-   *  the copy verb and its listening/connected lifecycle, the editor only
-   *  seats it. */
+  /** The workspace owns copying the agent instruction and listening for the
+   *  CLI's update to the exact persisted draft; the editor only seats it. */
   agentSlot?: ReactNode;
 }) {
   const set = (patch: Partial<StorageConfig>) => onChange({ ...storage, ...patch });
@@ -231,6 +224,7 @@ export function StorageEditor({
     const picked = await open({ directory: true, multiple: false });
     if (typeof picked === "string" && picked) set({ local_dir: picked });
   };
+  const storageTypeLocked = disabled || secretStored || !showNameField;
 
   return (
     <article className="sync-storage-card">
@@ -250,11 +244,16 @@ export function StorageEditor({
             onClick={() => set({
               name: storageNameForKind(storage.name, "s3"),
               kind: "s3",
+              bucket: "",
+              access_key_id: "",
+              secret_access_key: "",
+              account_id: "",
+              s3_endpoint: "",
               region: "auto",
-              s3_endpoint: storage.s3_endpoint
-                || r2EndpointForAccount(storage.account_id ?? "", jurisdiction.current),
+              local_dir: "",
+              supports_conditional_writes: undefined,
             })}
-            disabled={disabled}
+            disabled={storageTypeLocked}
           >
             Cloudflare R2
           </button>
@@ -266,8 +265,15 @@ export function StorageEditor({
             onClick={() => set({
               name: storageNameForKind(storage.name, "local"),
               kind: "local",
+              bucket: "",
+              access_key_id: "",
+              secret_access_key: "",
+              account_id: "",
+              s3_endpoint: "",
+              region: "",
+              supports_conditional_writes: undefined,
             })}
-            disabled={disabled}
+            disabled={storageTypeLocked}
           >
             Local folder
           </button>
@@ -298,27 +304,38 @@ export function StorageEditor({
         </label>
       ) : (
         <>
-          {/* One line instead of a heading, a sentence, and a numbered list:
-              every doc the list linked is still one click away behind the
-              field it explains. */}
-          <div className="sync-r2-guide" role="note">
-            <Icon name="info" size={13} />
-            <span className="sync-r2-guide-copy">
-              Needs one bucket and an{" "}
-              <span className="sync-r2-token-help">
-                <strong>Object Read &amp; Write</strong> token
-                <HelpButton
-                  url={R2_CREDENTIALS_DOC}
-                  label="How to create an Object Read & Write R2 token"
-                />
-              </span>{" "}
-              scoped to that bucket.
-            </span>
-            <button type="button" className="btn-link" onClick={() => void openHelp(R2_SETUP_DOC)}>Setup guide</button>
-            {agentSlot}
-          </div>
+          {showNameField ? (
+            <>
+              {/* The two routes are named lanes, not one run-on sentence: the
+                  agent lane carries the hand-off cluster and its lifecycle,
+                  the manual lane introduces the fields it sits above. */}
+              <div className="sync-r2-route-row agent" role="note">
+                <Icon name="terminal" size={13} />
+                <span className="sync-r2-zone-label">Agent setup</span>
+                <span className="sync-r2-guide-copy">Fills these values for your review — you complete Cloudflare sign-in, MFA, and consent in the browser, and finish setup yourself.</span>
+                {agentSlot}
+              </div>
+              <div className="sync-r2-route-row" role="note">
+                <Icon name="info" size={13} />
+                <span className="sync-r2-zone-label">Manual setup</span>
+                <span className="sync-r2-guide-copy">Enter an existing R2 connection in the fields below.</span>
+                <button type="button" className="btn-link" onClick={() => void openHelp(R2_SETUP_DOC)}>Setup guide <Icon name="external-link" size={11} /></button>
+              </div>
+            </>
+          ) : (
+            <div className="sync-r2-guide" role="note">
+              <Icon name={secretStored ? "check-circle" : "info"} size={13} />
+              <span className="sync-r2-guide-copy">
+                {secretStored
+                  ? "Configured. You can review or update the connection values below."
+                  : "Enter the R2 connection values below."}
+              </span>
+              <button type="button" className="btn-link" onClick={() => void openHelp(R2_SETUP_DOC)}>Setup guide</button>
+              {agentSlot}
+            </div>
+          )}
 
-          <div className="sync-storage-fields sync-r2-fields">
+          <div className="sync-storage-fields sync-r2-fields" aria-label="Cloudflare R2 connection details">
             <label className="sync-r2-url-field">
               <span className="form-label-row">
                 <span className="sync-field-name">S3 API URL</span>
@@ -404,9 +421,8 @@ export function StorageEditor({
                 <span className="sync-field-name">Secret Access Key</span>
                 <HelpButton url={R2_CREDENTIALS_DOC} label="How to create an R2 Secret Access Key" />
               </span>
-              {/* NIST SP 800-63B §5.1.1.2: the secret can be shown while
-                  entering it. A word, not an eye glyph — the icon alone does
-                  not say which state it puts you in. */}
+              {/* Exact open setup drafts may include the local secret for
+                  review. Committed storage snapshots remain redacted. */}
               <span className="sync-secret-input">
                 <input
                   type={secretVisible ? "text" : "password"}

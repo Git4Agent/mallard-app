@@ -19,7 +19,6 @@ const MAX_R2_SETUP_DIRECTORY_ENTRIES: usize = MAX_R2_SETUP_JOURNAL_ENTRIES * 2;
 const R2_SETUP_ID_PREFIX: &str = "r2setup-";
 const R2_SETUP_ID_HEX_BYTES: usize = 24;
 const ACCOUNT_ID_HEX_BYTES: usize = 32;
-const CREATED_TOKEN_ID_HEX_BYTES: usize = 32;
 const MIN_BUCKET_BYTES: usize = 3;
 const MAX_BUCKET_BYTES: usize = 63;
 const MAX_ERROR_CODE_BYTES: usize = 64;
@@ -82,17 +81,12 @@ pub enum R2SetupJurisdiction {
     Fedramp,
 }
 
-/// Durable provisioning checkpoints. A completed setup has no journal entry;
-/// it is removed only after config commit and all cleanup are confirmed.
+/// Durable capability-probe checkpoints. A completed probe has no journal
+/// entry; it is removed only after the probe and its cleanup are confirmed.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum R2SetupStage {
-    Started,
-    TemporaryTokenCreated,
-    BucketReady,
-    FinalTokenCreated,
     ProbeRunning,
-    ConfigCommitted,
     CleanupRequired,
 }
 
@@ -107,17 +101,9 @@ pub struct R2SetupJournalEntry {
     pub bucket: String,
     pub jurisdiction: R2SetupJurisdiction,
     pub stage: R2SetupStage,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub temporary_token_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub final_token_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cleanup_token_id: Option<String>,
-    pub bucket_created: bool,
     pub created_at: u64,
     pub updated_at: u64,
     pub error_code: Option<String>,
-    pub probe_cleanup_needed: bool,
 }
 
 impl R2SetupJournalEntry {
@@ -132,22 +118,6 @@ impl R2SetupJournalEntry {
         R2SetupId::parse(self.setup_id.as_str())?;
         validate_lower_hex_exact(&self.account_id, ACCOUNT_ID_HEX_BYTES, "R2 account ID")?;
         validate_bucket(&self.bucket)?;
-        let token_ids = [
-            self.temporary_token_id.as_deref(),
-            self.final_token_id.as_deref(),
-            self.cleanup_token_id.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-        for token_id in &token_ids {
-            validate_lower_hex_exact(token_id, CREATED_TOKEN_ID_HEX_BYTES, "created R2 token ID")?;
-        }
-        for (index, token_id) in token_ids.iter().enumerate() {
-            if token_ids[index + 1..].contains(token_id) {
-                return Err("duplicate created R2 token ID roles".to_string());
-            }
-        }
         if self.created_at == 0 {
             return Err("R2 setup journal created_at must be nonzero".to_string());
         }
@@ -157,10 +127,14 @@ impl R2SetupJournalEntry {
         if let Some(error_code) = &self.error_code {
             validate_error_code(error_code)?;
         }
-        if self.probe_cleanup_needed && self.stage != R2SetupStage::CleanupRequired {
-            return Err(
-                "R2 probe cleanup may be requested only at the cleanup-required stage".to_string(),
-            );
+        match (self.stage, self.error_code.is_some()) {
+            (R2SetupStage::ProbeRunning, false) | (R2SetupStage::CleanupRequired, true) => {}
+            (R2SetupStage::ProbeRunning, true) => {
+                return Err("a running R2 probe cannot have an error code".to_string())
+            }
+            (R2SetupStage::CleanupRequired, false) => {
+                return Err("R2 probe cleanup requires a sanitized error code".to_string())
+            }
         }
         Ok(())
     }
@@ -544,8 +518,6 @@ mod tests {
     const SETUP_A: &str = "r2setup-0123456789abcdef01234567";
     const SETUP_B: &str = "r2setup-1123456789abcdef01234567";
     const ACCOUNT: &str = "0123456789abcdef0123456789abcdef";
-    const TOKEN_A: &str = "1123456789abcdef0123456789abcdef";
-
     fn store(temp: &tempfile::TempDir) -> R2SetupJournalStore {
         let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
         R2SetupJournalStore::new(&repository)
@@ -558,15 +530,10 @@ mod tests {
             account_id: ACCOUNT.to_string(),
             bucket: "mallard-backup".to_string(),
             jurisdiction: R2SetupJurisdiction::Eu,
-            stage: R2SetupStage::TemporaryTokenCreated,
-            temporary_token_id: Some(TOKEN_A.to_string()),
-            final_token_id: None,
-            cleanup_token_id: None,
-            bucket_created: false,
+            stage: R2SetupStage::ProbeRunning,
             created_at: 10,
             updated_at: 11,
             error_code: None,
-            probe_cleanup_needed: false,
         }
     }
 
@@ -628,10 +595,15 @@ mod tests {
         document.bucket = "/private/tmp/secret".to_string();
         assert!(document.validate().is_err());
         document.bucket = "mallard-backup".to_string();
-        document.final_token_id = Some(TOKEN_A.to_string());
+        document.error_code = Some("probe_cleanup_failed".to_string());
         assert!(document.validate().is_err());
-        document.final_token_id = None;
         document.error_code = Some("raw response: bearer secret".to_string());
+        assert!(document.validate().is_err());
+
+        document.error_code = Some("probe_cleanup_failed".to_string());
+        document.stage = R2SetupStage::CleanupRequired;
+        document.validate().unwrap();
+        document.error_code = None;
         assert!(document.validate().is_err());
     }
 
@@ -688,6 +660,11 @@ mod tests {
         for forbidden_key in [
             "bootstrap_token",
             "token_value",
+            "temporary_token_id",
+            "final_token_id",
+            "cleanup_token_id",
+            "bucket_created",
+            "probe_cleanup_needed",
             "secret_access_key",
             "authorization",
             "raw_body",

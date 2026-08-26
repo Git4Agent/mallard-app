@@ -1062,6 +1062,13 @@ function SessionCard({
   const visibleTitle = compactThreadTitle(fullTitle);
   const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, syncEntry, selected) : null;
   const holdDetail = selectionMode && syncEntry ? syncHoldDetail(selectionMode, syncEntry) : null;
+  const syncBlockedPresentation: SessionSyncPresentation | null = session.sync_blocked_reason
+    ? {
+        status: "unavailable",
+        className: "unavailable",
+        label: `Unavailable for sync. ${session.sync_blocked_reason}`,
+      }
+    : null;
   // No row-level "uncommitted" mark any more. It existed to hold the slot open
   // when the status badge was absent; the badge is never absent now, and a
   // second glyph beside it pushed those rows' titles 26px right of every other
@@ -1101,7 +1108,9 @@ function SessionCard({
               />
             </label>
           )}
-          {selectionMode && reviewStateLabel && syncEntry ? (
+          {syncBlockedPresentation ? (
+            <SessionSyncIndicator presentation={syncBlockedPresentation} />
+          ) : selectionMode && reviewStateLabel && syncEntry ? (
             <ReviewSyncIndicator
               entry={syncEntry}
               storageName={storageName ?? "storage"}
@@ -1496,6 +1505,7 @@ export function ProjectChatHistoryContent({
       || "Not configured";
     const selectable = !!selectionMode
       && session.access === "bound_ready"
+      && !session.sync_blocked_reason
       && (selectableResourceIds?.has(reviewResourceId) ?? true);
     return (
     <SessionCard key={key} session={session} occurrenceKey={key} workingDirectory={workingDirectory}

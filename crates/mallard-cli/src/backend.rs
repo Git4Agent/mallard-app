@@ -1,16 +1,14 @@
-use mallard_application::cloudflare_r2_setup::{
-    cleanup_r2_setup, provision_r2_storage, CleanupR2SetupRequest, ProvisionR2StorageRequest,
-};
 use mallard_application::storage_setup::{
-    connect_r2_storage, list_storages, verify_storage, ConnectR2StorageRequest, R2Jurisdiction,
-    SecretString,
+    begin_r2_storage_draft_operation, list_storages, prepare_r2_storage_draft_in_operation,
+    verify_storage, PrepareR2StorageDraftRequest,
 };
-use mallard_domain::{StorageId, StorageKind};
+use mallard_domain::{StorageId, StorageKind, StorageSetupDraftId};
 use mallard_infrastructure::persistence::LocalStateRepository;
 use serde::Serialize;
 use tokio::runtime::{Handle, Runtime};
 
 use crate::error::CliError;
+use crate::r2_browser_setup::{authorize_bucket, derive_destination, WranglerClient};
 
 #[derive(Serialize)]
 pub(crate) struct StorageSummary {
@@ -19,17 +17,10 @@ pub(crate) struct StorageSummary {
     pub kind: &'static str,
 }
 
-pub(crate) struct ConnectInput {
+pub(crate) struct SetupInput {
     pub name: String,
-    pub api_url: String,
-    pub access_key_id: String,
-    pub secret_access_key: SecretString,
-}
-
-pub(crate) struct ConnectOutcome {
-    pub storage_id: String,
-    pub config_revision: u64,
-    pub verified: bool,
+    pub draft_id: String,
+    pub expected_revision: u64,
 }
 
 pub(crate) struct VerifyOutcome {
@@ -38,36 +29,9 @@ pub(crate) struct VerifyOutcome {
     pub verified: bool,
 }
 
-pub(crate) struct ProvisionInput {
-    pub name: String,
-    pub account_id: String,
-    pub bucket: String,
-    pub jurisdiction: R2Jurisdiction,
-    pub bootstrap_token: SecretString,
-}
-
-pub(crate) struct ProvisionOutcome {
-    pub storage_id: String,
-    pub config_revision: u64,
-    pub verified: bool,
-    pub bucket_created: bool,
-}
-
-pub(crate) struct CleanupInput {
-    pub setup_id: String,
-    pub bootstrap_token: SecretString,
-}
-
-pub(crate) struct CleanupOutcome {
-    pub setup_id: String,
-    pub cleaned: bool,
-}
-
 pub(crate) trait StorageBackend {
     fn list(&self) -> Result<Vec<StorageSummary>, CliError>;
-    fn connect(&self, input: ConnectInput) -> Result<ConnectOutcome, CliError>;
-    fn provision(&self, input: ProvisionInput) -> Result<ProvisionOutcome, CliError>;
-    fn cleanup(&self, input: CleanupInput) -> Result<CleanupOutcome, CliError>;
+    fn setup(&self, input: SetupInput) -> Result<(), CliError>;
     fn verify(&self, storage_id: &str) -> Result<VerifyOutcome, CliError>;
 }
 
@@ -79,7 +43,9 @@ pub(crate) struct ProductionBackend {
 impl ProductionBackend {
     pub fn from_user_home() -> Result<Self, CliError> {
         let repository = LocalStateRepository::from_user_home().map_err(|_| {
-            CliError::persistence("Mallard local storage configuration is unavailable.")
+            CliError::persistence(
+                "Mallard could not access its local storage configuration. If this command is running in a restricted environment, approve read/write access to Mallard's local state and run the same command again.",
+            )
         })?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -112,62 +78,37 @@ impl StorageBackend for ProductionBackend {
             .collect())
     }
 
-    fn connect(&self, input: ConnectInput) -> Result<ConnectOutcome, CliError> {
-        let result = connect_r2_storage(
+    fn setup(&self, input: SetupInput) -> Result<(), CliError> {
+        let draft_id = StorageSetupDraftId::parse(input.draft_id).map_err(|_| {
+            CliError::invalid_code(
+                "storage_setup_draft_id_invalid",
+                "The Mallard storage setup draft ID is invalid.",
+            )
+        })?;
+        let operation = begin_r2_storage_draft_operation(
             &self.repository,
-            self.runtime_handle(),
-            ConnectR2StorageRequest {
-                name: input.name,
-                api_url: input.api_url,
-                access_key_id: input.access_key_id,
-                secret_access_key: input.secret_access_key,
-                expected_config_revision: None,
-            },
+            &draft_id,
+            input.expected_revision,
+            &input.name,
         )
         .map_err(CliError::from_setup)?;
-        Ok(ConnectOutcome {
-            storage_id: result.storage_id.to_string(),
-            config_revision: result.config_revision,
-            verified: result.verified,
-        })
-    }
+        let wrangler = WranglerClient::new()?;
+        let account_id = wrangler.authenticated_account_id()?;
+        let destination = derive_destination(&account_id, &input.name);
 
-    fn provision(&self, input: ProvisionInput) -> Result<ProvisionOutcome, CliError> {
-        let result = provision_r2_storage(
+        wrangler.ensure_bucket(&destination.account_id, &destination.bucket)?;
+        let credentials = authorize_bucket(&destination.account_id, &destination.bucket)?;
+        prepare_r2_storage_draft_in_operation(
+            &operation,
             &self.repository,
-            self.runtime_handle(),
-            ProvisionR2StorageRequest {
-                name: input.name,
-                account_id: input.account_id,
-                bucket: input.bucket,
-                jurisdiction: input.jurisdiction,
-                bootstrap_token: input.bootstrap_token,
-                expected_config_revision: None,
+            PrepareR2StorageDraftRequest {
+                api_url: destination.api_url,
+                access_key_id: credentials.access_key_id(),
+                secret_access_key: credentials.secret_access_key(),
             },
         )
         .map_err(CliError::from_setup)?;
-        Ok(ProvisionOutcome {
-            storage_id: result.storage_id.to_string(),
-            config_revision: result.config_revision,
-            verified: result.verified,
-            bucket_created: result.bucket_created,
-        })
-    }
-
-    fn cleanup(&self, input: CleanupInput) -> Result<CleanupOutcome, CliError> {
-        let result = cleanup_r2_setup(
-            &self.repository,
-            self.runtime_handle(),
-            CleanupR2SetupRequest {
-                setup_id: input.setup_id,
-                bootstrap_token: input.bootstrap_token,
-            },
-        )
-        .map_err(CliError::from_setup)?;
-        Ok(CleanupOutcome {
-            setup_id: result.setup_id,
-            cleaned: result.cleaned,
-        })
+        Ok(())
     }
 
     fn verify(&self, storage_id: &str) -> Result<VerifyOutcome, CliError> {

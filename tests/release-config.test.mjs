@@ -125,6 +125,8 @@ test("Mallard CLI is built and staged as a target-specific external binary", asy
   assert.equal(tauriConfig.bundle.externalBin, undefined);
   assert.match(cliCargoSource, /^clap = \{ version = "4\.5", features = \["derive"\] \}$/m);
   assert.match(cliCargoSource, /^mallard-application = \{ path = "\.\.\/mallard-application" \}$/m);
+  assert.match(buildScript, /command !== "build" && command !== "dev"/);
+  assert.match(buildScript, /if \(command === "dev"\) return/);
   assert.match(buildScript, /\["build", "--locked", "-p", "mallard-cli"\]/);
   assert.match(buildScript, /cargoArgs\.push\("--target", explicitTarget\)/);
   assert.match(buildScript, /`mallard-cli-\$\{target\}\$\{extension\}`/);

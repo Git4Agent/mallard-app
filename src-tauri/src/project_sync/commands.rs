@@ -59,10 +59,11 @@ use super::domain::{
     PullJournalPhase, PushJournalPhase, RawRangePin, RecipeEntry, RemoteContinuity, ReplicaId,
     RepositoryBase, ResourceDescriptor, ResourceId, ResourceKind, RestoreActionKind,
     RestoreActionType, RestorePlan, ReviewPurpose, RootTailLayout, ScopeBase, ScopeContinuity,
-    SetupDraftId, SetupTransaction, StorageConfig, StorageId, StorageKind, SyncConfig,
-    SyncScopeKey, TailClassification, TailEvidenceBlocker, TailPartitionKind, TailSideEvidence,
-    TargetExpectation, ThreadId, TombstoneTarget, VerifiedTailEvidence, PUSH_PLAN_SCHEMA,
-    SETUP_DRAFT_SCHEMA, SETUP_TRANSACTION_SCHEMA,
+    SetupDraftId, SetupTransaction, StorageConfig, StorageId, StorageKind, StorageSetupDraft,
+    StorageSetupDraftId, SyncConfig, SyncScopeKey, TailClassification, TailEvidenceBlocker,
+    TailPartitionKind, TailSideEvidence, TargetExpectation, ThreadId, TombstoneTarget,
+    VerifiedTailEvidence, PUSH_PLAN_SCHEMA, SETUP_DRAFT_SCHEMA, SETUP_TRANSACTION_SCHEMA,
+    STORAGE_SETUP_DRAFT_SCHEMA,
 };
 use super::jsonl_tail_io;
 use super::persistence::{
@@ -92,8 +93,9 @@ use super::storage_core::{
 use crate::activity_log::{emit_typed_log, ActivityLogScope, ActivityLogType};
 use chrono::{TimeZone, Utc};
 use mallard_application::storage_setup::{
-    connect_r2_storage as connect_r2_storage_service, validate_r2_storage_destinations,
-    ConnectR2StorageRequest, ConnectStorageResult,
+    test_r2_storage as test_r2_storage_service, upsert_r2_storage as upsert_r2_storage_service,
+    validate_r2_storage_destinations, SecretString, TestR2StorageResult,
+    UpsertR2StorageRequest as ApplicationUpsertR2StorageRequest, UpsertR2StorageResult,
 };
 use mallard_infrastructure::app_settings::conversation_file_limit_bytes;
 use serde::{Deserialize, Serialize};
@@ -106,6 +108,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::Emitter as _;
 use tokio::time::Duration;
 use walkdir::WalkDir;
+use zeroize::Zeroize;
 
 const PLAN_LIFETIME_SECS: u64 = 24 * 60 * 60;
 const MAX_CODEX_GLOBAL_STATE_BYTES: u64 = 32 * 1024 * 1024;
@@ -235,6 +238,14 @@ pub struct CodexConversationPathIssue {
     pub target_cwd: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodexConversationAssignmentConflict {
+    thread_id: String,
+    transcript_path: String,
+    authoritative_home: String,
+    reason: String,
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CodexConversationPathAudit {
     pub local_project_id: LocalProjectId,
@@ -251,6 +262,8 @@ pub struct CodexConversationPathAudit {
     pub blockers: Vec<String>,
     #[serde(default)]
     pub warnings: Vec<String>,
+    #[serde(skip)]
+    assignment_conflicts: Vec<CodexConversationAssignmentConflict>,
     pub ready: bool,
     pub can_repair: bool,
 }
@@ -752,6 +765,17 @@ fn storage_change_summary(
     Some((event, message, primary.id.clone(), name))
 }
 
+fn r2_upsert_success_summary(existing: bool, storage_name: &str) -> (&'static str, String) {
+    if existing {
+        (
+            "storage.settings_updated",
+            format!("Storage settings updated — {storage_name}"),
+        )
+    } else {
+        ("storage.added", format!("Storage added — {storage_name}"))
+    }
+}
+
 async fn run_blocking<T: Send + 'static>(
     operation: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
@@ -824,10 +848,11 @@ fn cached_transcript_analysis(
 }
 
 /// The webview never receives a stored storage secret. It is the one field in
-/// the config that grants bucket access on its own, and the frontend has no
-/// use for its value: every command that reaches a bucket takes a storage id
-/// and resolves the credentials here, server-side. The settings form only ever
-/// writes this field, never reads it back.
+/// the config that grants bucket access on its own. The settings form may hold
+/// a replacement only while the user is actively typing it, but stored values
+/// never travel back into the webview: every bucket command takes a storage id
+/// and resolves credentials here, server-side. The browser CLI and focused R2
+/// upsert are the only verified writers for this field.
 fn redact_storage_secrets(mut config: SyncConfig) -> SyncConfig {
     for storage in &mut config.storages {
         storage.secret_access_key.clear();
@@ -854,8 +879,9 @@ fn require_s3_storage_secrets(config: &SyncConfig) -> Result<(), String> {
 
 /// The counterpart of [`redact_storage_secrets`]: a blank incoming secret on a
 /// storage that already exists means "keep the stored one", because the UI was
-/// never given a value it could echo back. Only a non-empty secret replaces
-/// one, so a round trip through the settings form cannot erase credentials.
+/// never given a value it could echo back. The verified-R2 guard below rejects
+/// connection replacements, so a generic config round trip cannot erase or
+/// change credentials without the focused capability probe.
 fn restore_redacted_storage_secrets(config: &mut SyncConfig, previous: Option<&SyncConfig>) {
     let Some(previous) = previous else {
         return;
@@ -876,25 +902,389 @@ fn restore_redacted_storage_secrets(config: &mut SyncConfig, previous: Option<&S
     }
 }
 
+const VERIFIED_R2_MESSAGE: &str =
+    "Cloudflare R2 connection changes must be verified before saving.";
+
+fn same_verified_r2_settings(previous: &StorageConfig, next: &StorageConfig) -> bool {
+    previous.kind == next.kind
+        && previous.bucket == next.bucket
+        && previous.access_key_id == next.access_key_id
+        && previous.secret_access_key == next.secret_access_key
+        && previous.account_id == next.account_id
+        && previous.s3_endpoint == next.s3_endpoint
+        && previous.region == next.region
+        && previous.local_dir == next.local_dir
+        && previous.supports_conditional_writes == next.supports_conditional_writes
+}
+
+/// R2 destinations and credentials enter the schema-1 config only through a
+/// focused operation that completes the exact capability probe. The generic
+/// config save may rename or remove R2, but it cannot create, replace, or
+/// convert an R2 connection and bypass verification.
+fn require_verified_r2_changes(
+    config: &SyncConfig,
+    previous: Option<&SyncConfig>,
+) -> Result<(), String> {
+    for storage in config
+        .storages
+        .iter()
+        .filter(|storage| storage.kind == StorageKind::S3)
+    {
+        let Some(stored) = previous.and_then(|previous| {
+            previous
+                .storages
+                .iter()
+                .find(|candidate| candidate.id == storage.id)
+        }) else {
+            return Err(VERIFIED_R2_MESSAGE.to_string());
+        };
+        if stored.kind != StorageKind::S3 || !same_verified_r2_settings(stored, storage) {
+            return Err(VERIFIED_R2_MESSAGE.to_string());
+        }
+    }
+
+    if let Some(previous) = previous {
+        for stored in previous
+            .storages
+            .iter()
+            .filter(|storage| storage.kind == StorageKind::S3)
+        {
+            if config
+                .storages
+                .iter()
+                .find(|candidate| candidate.id == stored.id)
+                .is_some_and(|candidate| candidate.kind != StorageKind::S3)
+            {
+                return Err(VERIFIED_R2_MESSAGE.to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn get_project_sync_config(app: tauri::AppHandle) -> Result<SyncConfig, String> {
     repository(&app)?.load_config().map(redact_storage_secrets)
 }
 
-/// Focused R2 creation path shared with `mallard-cli`. The secret-bearing
-/// request cannot be debugged or serialized back out, and every returned
-/// service error is fixed, typed, and credential-free.
+/// Local webview adapter for manual R2 Create/Save. The secret is converted
+/// immediately into the application's zeroizing type and never appears in a
+/// response, log message, or config snapshot returned to JavaScript.
+#[derive(Deserialize)]
+pub struct UpsertR2StorageRequest {
+    #[serde(default)]
+    pub storage_id: Option<StorageId>,
+    /// Setup draft to resolve a blank secret from; a successful upsert also
+    /// discards it. The three draft fields are all-or-none and mutually
+    /// exclusive with `storage_id`.
+    #[serde(default)]
+    pub draft_id: Option<StorageSetupDraftId>,
+    #[serde(default)]
+    pub draft_revision: Option<u64>,
+    #[serde(default)]
+    pub draft_storage_id: Option<StorageId>,
+    pub name: String,
+    pub api_url: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub expected_config_revision: u64,
+}
+
+fn application_r2_request(request: UpsertR2StorageRequest) -> ApplicationUpsertR2StorageRequest {
+    ApplicationUpsertR2StorageRequest {
+        storage_id: request.storage_id,
+        draft_id: request.draft_id,
+        draft_revision: request.draft_revision,
+        draft_storage_id: request.draft_storage_id,
+        name: request.name,
+        api_url: request.api_url,
+        access_key_id: request.access_key_id,
+        secret_access_key: if request.secret_access_key.is_empty() {
+            None
+        } else {
+            Some(SecretString::new(request.secret_access_key))
+        },
+        expected_config_revision: request.expected_config_revision,
+    }
+}
+
 #[tauri::command]
-pub async fn connect_r2_storage(
+pub async fn upsert_r2_storage(
     app: tauri::AppHandle,
-    request: ConnectR2StorageRequest,
-) -> Result<ConnectStorageResult, String> {
+    request: UpsertR2StorageRequest,
+) -> Result<UpsertR2StorageResult, String> {
     let repository = repository(&app)?;
     let runtime = tokio::runtime::Handle::current();
+    let existing_storage_id = request.storage_id.clone();
+    let storage_name = request.name.clone();
+    let request = application_r2_request(request);
+    let result = run_blocking(move || {
+        upsert_r2_storage_service(&repository, runtime, request).map_err(|error| error.to_string())
+    })
+    .await;
+
+    match &result {
+        Ok(outcome) => {
+            let (event, message) =
+                r2_upsert_success_summary(existing_storage_id.is_some(), &storage_name);
+            ActivityLogScope::new(ActivityLogType::Storage)
+                .storage(&outcome.storage_id, Some(&storage_name))
+                .emit(&app, "ok", event, &message);
+        }
+        Err(_) => {
+            let log = match existing_storage_id.as_ref() {
+                Some(storage_id) => ActivityLogScope::new(ActivityLogType::Storage)
+                    .storage(storage_id, Some(&storage_name)),
+                None => ActivityLogScope::new(ActivityLogType::Storage),
+            };
+            // Keep the activity record fixed and credential-free even if the
+            // worker itself failed rather than returning a typed setup error.
+            log.emit(
+                &app,
+                "error",
+                "storage.settings_update_failed",
+                "R2 storage settings could not be saved.",
+            );
+        }
+    }
+
+    result
+}
+
+/// Commit-free probe of form-entered R2 settings — the upsert pipeline minus
+/// the config transaction. Deliberately emits no activity-log entry: a test
+/// changes nothing (contrast [`upsert_r2_storage`], the committing twin).
+#[tauri::command]
+pub async fn test_r2_storage(
+    app: tauri::AppHandle,
+    request: UpsertR2StorageRequest,
+) -> Result<TestR2StorageResult, String> {
+    let repository = repository(&app)?;
+    let runtime = tokio::runtime::Handle::current();
+    let request = application_r2_request(request);
     run_blocking(move || {
-        connect_r2_storage_service(&repository, runtime, request).map_err(|error| error.to_string())
+        test_r2_storage_service(&repository, runtime, request).map_err(|error| error.to_string())
     })
     .await
+}
+
+/// Client-editable storage form fields — [`StorageConfig`] minus its id, so
+/// the webview never invents a storage identity. An empty secret means "no
+/// secret typed this session".
+#[derive(Deserialize)]
+pub struct StorageSetupDraftPayload {
+    #[serde(default)]
+    pub name: String,
+    pub kind: StorageKind,
+    #[serde(default)]
+    pub bucket: String,
+    #[serde(default)]
+    pub access_key_id: String,
+    #[serde(default)]
+    pub secret_access_key: String,
+    #[serde(default)]
+    pub account_id: String,
+    #[serde(default)]
+    pub s3_endpoint: String,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub local_dir: String,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateStorageSetupDraftRequest {
+    pub draft_id: StorageSetupDraftId,
+    pub revision: u64,
+    pub storage: StorageSetupDraftPayload,
+}
+
+/// Storage-draft shape crossing IPC. List/create/update responses are
+/// redacted. The exact get command deliberately returns the secret-bearing
+/// form so the user can review the one draft they explicitly opened. This
+/// type has no `Debug` or `Clone` implementation to avoid accidental logging
+/// or duplication of that exact-get response.
+#[derive(Serialize)]
+pub struct StorageSetupDraftView {
+    pub draft_id: StorageSetupDraftId,
+    pub secret_present: bool,
+    pub storage: StorageConfig,
+    pub revision: u64,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl Drop for StorageSetupDraftView {
+    fn drop(&mut self) {
+        self.storage.secret_access_key.zeroize();
+    }
+}
+
+#[derive(Serialize)]
+pub struct StorageSetupDraftList {
+    pub drafts: Vec<StorageSetupDraftView>,
+    /// Fixed value-free sentences from the repository — a raw parse error
+    /// could echo file content, and every draft file may hold a secret.
+    pub warnings: Vec<String>,
+}
+
+fn redact_storage_setup_draft(mut draft: StorageSetupDraft) -> StorageSetupDraftView {
+    let secret_present = !draft.storage.secret_access_key.is_empty();
+    draft.storage.secret_access_key.zeroize();
+    StorageSetupDraftView {
+        draft_id: draft.draft_id,
+        secret_present,
+        storage: draft.storage,
+        revision: draft.revision,
+        created_at: draft.created_at,
+        updated_at: draft.updated_at,
+    }
+}
+
+fn expose_exact_storage_setup_draft(draft: StorageSetupDraft) -> StorageSetupDraftView {
+    let secret_present = !draft.storage.secret_access_key.is_empty();
+    StorageSetupDraftView {
+        draft_id: draft.draft_id,
+        secret_present,
+        storage: draft.storage,
+        revision: draft.revision,
+        created_at: draft.created_at,
+        updated_at: draft.updated_at,
+    }
+}
+
+fn payload_storage(payload: StorageSetupDraftPayload, id: StorageId) -> StorageConfig {
+    StorageConfig {
+        id,
+        name: payload.name,
+        kind: payload.kind,
+        bucket: payload.bucket,
+        access_key_id: payload.access_key_id,
+        secret_access_key: payload.secret_access_key,
+        account_id: payload.account_id,
+        s3_endpoint: payload.s3_endpoint,
+        region: payload.region,
+        local_dir: payload.local_dir,
+        supports_conditional_writes: None,
+    }
+}
+
+pub(super) fn create_storage_setup_draft_with_repository(
+    repository: &LocalStateRepository,
+    storage: StorageSetupDraftPayload,
+) -> Result<StorageSetupDraft, String> {
+    let draft_id = StorageSetupDraftId::parse(generated_named_id("storagedraft")?)?;
+    // The inert restore-only storage identity; committing a draft goes
+    // through the verified upsert, which mints the real one.
+    let storage_id = StorageId::parse(generated_named_id("storage")?)?;
+    let timestamp = now_secs();
+    repository.save_storage_setup_draft(StorageSetupDraft {
+        schema: STORAGE_SETUP_DRAFT_SCHEMA,
+        draft_id,
+        storage: payload_storage(storage, storage_id),
+        revision: 0,
+        created_at: timestamp,
+        updated_at: timestamp,
+    })
+}
+
+pub(super) fn update_storage_setup_draft_with_repository(
+    repository: &LocalStateRepository,
+    request: UpdateStorageSetupDraftRequest,
+) -> Result<StorageSetupDraft, String> {
+    let mut stored = repository
+        .load_storage_setup_draft(&request.draft_id)?
+        .ok_or_else(|| format!("storage draft '{}' does not exist", request.draft_id))?;
+    let storage_id = stored.storage.id.clone();
+    // A blank incoming secret keeps the drafted one. This is how pinned
+    // Test/Finish requests ask the backend to consume the exact saved draft
+    // instead of echoing its secret back through a second request. Move,
+    // don't clone: the stored draft is dropped right after and must not retain
+    // a second copy.
+    let mut drafted_secret = std::mem::take(&mut stored.storage.secret_access_key);
+    let mut next_storage = payload_storage(request.storage, storage_id);
+    if next_storage.secret_access_key.is_empty() {
+        next_storage.secret_access_key = drafted_secret;
+    } else {
+        drafted_secret.zeroize();
+    }
+    repository.save_storage_setup_draft(StorageSetupDraft {
+        schema: STORAGE_SETUP_DRAFT_SCHEMA,
+        draft_id: stored.draft_id,
+        storage: next_storage,
+        revision: request.revision,
+        created_at: stored.created_at,
+        updated_at: now_secs(),
+    })
+}
+
+fn list_storage_setup_drafts_with_repository(
+    repository: &LocalStateRepository,
+) -> Result<StorageSetupDraftList, String> {
+    let (drafts, warnings) = repository.list_storage_setup_drafts()?;
+    Ok(StorageSetupDraftList {
+        drafts: drafts.into_iter().map(redact_storage_setup_draft).collect(),
+        warnings,
+    })
+}
+
+fn get_storage_setup_draft_with_repository(
+    repository: &LocalStateRepository,
+    draft_id: &StorageSetupDraftId,
+) -> Result<Option<StorageSetupDraftView>, String> {
+    Ok(repository
+        .load_storage_setup_draft(draft_id)?
+        .map(expose_exact_storage_setup_draft))
+}
+
+#[tauri::command]
+pub async fn list_storage_setup_drafts(
+    app: tauri::AppHandle,
+) -> Result<StorageSetupDraftList, String> {
+    list_storage_setup_drafts_with_repository(&repository(&app)?)
+}
+
+#[tauri::command]
+pub async fn create_storage_setup_draft(
+    app: tauri::AppHandle,
+    storage: StorageSetupDraftPayload,
+) -> Result<StorageSetupDraftView, String> {
+    let repository = repository(&app)?;
+    run_blocking(move || {
+        create_storage_setup_draft_with_repository(&repository, storage)
+            .map(redact_storage_setup_draft)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn get_storage_setup_draft(
+    app: tauri::AppHandle,
+    draft_id: StorageSetupDraftId,
+) -> Result<Option<StorageSetupDraftView>, String> {
+    get_storage_setup_draft_with_repository(&repository(&app)?, &draft_id)
+}
+
+#[tauri::command]
+pub async fn update_storage_setup_draft(
+    app: tauri::AppHandle,
+    request: UpdateStorageSetupDraftRequest,
+) -> Result<StorageSetupDraftView, String> {
+    let repository = repository(&app)?;
+    run_blocking(move || {
+        update_storage_setup_draft_with_repository(&repository, request)
+            .map(redact_storage_setup_draft)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn discard_storage_setup_draft(
+    app: tauri::AppHandle,
+    draft_id: StorageSetupDraftId,
+) -> Result<bool, String> {
+    repository(&app)?.delete_storage_setup_draft(&draft_id)
 }
 
 fn packaged_cli_path(current_executable: &Path) -> Result<PathBuf, String> {
@@ -937,6 +1327,76 @@ pub fn get_mallard_cli_path() -> Result<String, String> {
         .ok_or_else(|| "Mallard cannot represent its packaged CLI path.".to_string())
 }
 
+fn shell_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// The terminal hand-off script: a login-shell runnable that resolves the
+/// agent CLI on the user's own PATH (the GUI app's environment routinely
+/// lacks Homebrew paths) and replaces itself with the agent, prompt attached.
+/// A missing CLI reports inside the same window the user is already watching.
+fn agent_launch_script(program: &str, display_name: &str, instruction: &str) -> String {
+    let quoted_program = shell_single_quoted(program);
+    let missing = shell_single_quoted(&format!(
+        "Mallard: the {display_name} CLI ({program}) was not found on this shell's PATH."
+    ));
+    let fallback =
+        shell_single_quoted("Install it, or use \"Copy agent instruction\" in Mallard instead.");
+    let quoted_instruction = shell_single_quoted(instruction);
+    format!(
+        "#!/bin/zsh\nif ! command -v {quoted_program} >/dev/null 2>&1; then\n  echo {missing} >&2\n  echo {fallback} >&2\n  exit 127\nfi\nexec {quoted_program} {quoted_instruction}\n"
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn open_agent_launch_script_in_terminal(script: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let path = std::env::temp_dir().join("mallard-r2-agent-setup.command");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o700)
+        .open(&path)
+        .map_err(|error| format!("Mallard could not write the terminal launch script: {error}"))?;
+    file.write_all(script.as_bytes())
+        .map_err(|error| format!("Mallard could not write the terminal launch script: {error}"))?;
+    drop(file);
+    // A file surviving from an earlier launch keeps its old mode; re-assert it.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("Mallard could not write the terminal launch script: {error}"))?;
+    let status = std::process::Command::new("/usr/bin/open")
+        .args(["-b", "com.apple.Terminal"])
+        .arg(&path)
+        .status()
+        .map_err(|error| format!("Mallard could not open Terminal: {error}"))?;
+    if !status.success() {
+        return Err("Mallard could not open Terminal.".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_agent_launch_script_in_terminal(_script: &str) -> Result<(), String> {
+    Err("Launching a terminal window is only supported on macOS in this build.".to_string())
+}
+
+/// Open a visible terminal window running the named provider's agent CLI with
+/// the R2 setup instruction as its prompt. The window is the user's seat: the
+/// agent asks its approval questions there while this page keeps listening
+/// for the draft the CLI hand-off fills.
+#[tauri::command]
+pub fn launch_r2_agent_setup(provider: String, instruction: String) -> Result<(), String> {
+    let provider = ProviderKey::parse(provider)?;
+    let descriptor = provider_descriptor(&provider)?;
+    let launcher = descriptor
+        .cli_launcher
+        .ok_or_else(|| format!("{} has no launchable agent CLI.", descriptor.display_name))?;
+    let script = agent_launch_script(&launcher.program, &launcher.display_name, &instruction);
+    open_agent_launch_script_in_terminal(&script)
+}
+
 fn host_identity_status(identity: super::domain::HostIdentity) -> HostIdentityStatus {
     HostIdentityStatus {
         host_id: identity.host_id,
@@ -966,6 +1426,7 @@ pub async fn save_project_sync_config(
     // secrets the read path withheld — otherwise every save wipes them, and
     // every save looks like a credential change to the activity log.
     restore_redacted_storage_secrets(&mut config, previous.as_ref());
+    require_verified_r2_changes(&config, previous.as_ref())?;
     require_s3_storage_secrets(&config)?;
     if let Some(previous) = &previous {
         for storage in &previous.storages {
@@ -1084,23 +1545,59 @@ pub async fn list_agent_providers(
 fn build_activity_from_local_read(
     repository: &LocalStateRepository,
     local: &ProjectLocalRead,
+    assignment_conflicts: &[CodexConversationAssignmentConflict],
     remote_snapshot: Option<&BundleSnapshot>,
     branch: Option<&str>,
     before_time: Option<u64>,
     window_days: Option<u64>,
     mut warnings: Vec<String>,
 ) -> Result<ProjectActivity, String> {
+    let mut activity_views = local.views.clone();
+    for conflict in assignment_conflicts {
+        let transcript_logical_path = format!(
+            "state/providers/codex/sessions/{}/transcript.jsonl",
+            conflict.thread_id
+        );
+        let metadata = fs::metadata(&conflict.transcript_path).ok();
+        activity_views.push(LocalSessionView {
+            descriptor: ResourceCandidate {
+                resource_id: format!("codex:session:{}", conflict.thread_id),
+                kind: CaptureResourceKind::Conversation,
+                provider: Some(codex_key()),
+                provider_resource_type: Some("session".to_string()),
+                display_name: conflict.thread_id.clone(),
+                apply_policy: CaptureApplyPolicy::SafeFile,
+                selected_by_default: false,
+                // This view exists only in the Activity projection. The real
+                // discovery remains unchanged, so capture can never select it.
+                blocked_reason: None,
+                logical_paths: vec![transcript_logical_path.clone()],
+                metadata: BTreeMap::new(),
+            },
+            provider: codex_key(),
+            provider_thread_id: conflict.thread_id.clone(),
+            transcript_logical_path,
+            source_path: PathBuf::from(&conflict.transcript_path),
+            source_mtime: metadata
+                .as_ref()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0),
+            source_size: metadata.map(|metadata| metadata.len()).unwrap_or(0),
+        });
+    }
     let local_sessions = project_activity::scan_local_session_views(
         repository,
         provider_registry(),
         &local.activity_project,
-        &local.views,
+        &activity_views,
         &mut warnings,
     )?;
     let remote_sessions = remote_snapshot
         .map(project_activity::remote_sessions_from_snapshot)
         .unwrap_or_default();
-    project_activity::build_project_activity(
+    let mut activity = project_activity::build_project_activity(
         repository,
         provider_registry(),
         &local.activity_project,
@@ -1110,7 +1607,17 @@ fn build_activity_from_local_read(
         before_time,
         window_days,
         warnings,
-    )
+    )?;
+    for conflict in assignment_conflicts {
+        if let Some(session) = activity.sessions.iter_mut().find(|session| {
+            session.provider == codex_key()
+                && session.provider_session_id.as_deref() == Some(conflict.thread_id.as_str())
+        }) {
+            session.sync_blocked_reason = Some(conflict.reason.clone());
+            session.working_directory = Some(conflict.authoritative_home.clone());
+        }
+    }
+    Ok(activity)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1123,6 +1630,9 @@ pub(super) fn get_project_activity_with_repository(
     window_days: Option<u64>,
 ) -> Result<ProjectActivity, String> {
     let local = load_project_local_read(repository, local_project_id)?;
+    let assignment_conflicts =
+        audit_codex_conversation_paths_with_repository(repository, local_project_id)?
+            .assignment_conflicts;
     let mut warnings = Vec::new();
     let remote = match storage_id {
         Some(storage_id) => match project_activity::fetch_activity_snapshot(
@@ -1144,6 +1654,7 @@ pub(super) fn get_project_activity_with_repository(
     build_activity_from_local_read(
         repository,
         &local,
+        &assignment_conflicts,
         remote.as_ref(),
         branch,
         before_time,
@@ -15457,6 +15968,7 @@ fn audit_codex_conversation_paths_with_repository(
         issues: Vec::new(),
         blockers: Vec::new(),
         warnings: Vec::new(),
+        assignment_conflicts: Vec::new(),
         ready: true,
         can_repair: false,
     };
@@ -15535,9 +16047,21 @@ fn audit_codex_conversation_paths_with_repository(
     // auxiliary evidence (writable roots, workspace hints naming this root
     // itself) can only prove a thread matching or surface a warning.
     let mut desktop_project_ids = BTreeSet::new();
+    let mut live_desktop_project_roots = BTreeSet::new();
     for projects in state_object_maps(&state, "local-projects") {
         for (project_key, project) in projects {
-            let owns_root = json_path_values(project, &["rootPaths", "root_paths"])
+            let roots = json_path_values(project, &["rootPaths", "root_paths"]);
+            for root in roots.iter().copied() {
+                if validate_absolute_clean_path("Codex project path", root).is_err() {
+                    continue;
+                }
+                if let Ok(canonical_root) = fs::canonicalize(root) {
+                    if canonical_root.is_dir() {
+                        live_desktop_project_roots.insert(canonical_root);
+                    }
+                }
+            }
+            let owns_root = roots
                 .into_iter()
                 .any(|root| path_is_project_root(Path::new(root), &canonical_project_root));
             if !owns_root {
@@ -15730,7 +16254,8 @@ fn audit_codex_conversation_paths_with_repository(
     }
 
     // One rule per nominated thread, decided by its authoritative home:
-    // equal to the root ⇒ matching; strictly under the root ⇒ a separate
+    // equal to the root ⇒ matching; equal to another live Desktop project ⇒
+    // excluded from this project; strictly under the root ⇒ a separate
     // directory project (warned, never flattened); anywhere else ⇒ a repair
     // for explicitly assigned threads, silence for auxiliary nominations.
     // Auxiliary threads never block the audit either — a foreign thread
@@ -15823,10 +16348,39 @@ fn audit_codex_conversation_paths_with_repository(
             }
             continue;
         }
-        let resolved_home =
-            fs::canonicalize(Path::new(&home)).unwrap_or_else(|_| PathBuf::from(&home));
+        let canonical_home = fs::canonicalize(Path::new(&home)).ok();
+        let resolved_home = canonical_home
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(&home));
         if resolved_home == resolved_project_root {
             audit.matching_thread_count = audit.matching_thread_count.saturating_add(1);
+            continue;
+        }
+        if is_assigned
+            && canonical_home
+                .as_ref()
+                .is_some_and(|root| live_desktop_project_roots.contains(root))
+        {
+            let Some(transcript_path) = path.to_str() else {
+                audit.blockers.push(format!(
+                    "assigned Codex conversation path '{}' is not valid UTF-8",
+                    path.display()
+                ));
+                continue;
+            };
+            let reason = "Codex Desktop assigns this thread here, but its authoritative home belongs to another live Codex Desktop project.".to_string();
+            audit
+                .assignment_conflicts
+                .push(CodexConversationAssignmentConflict {
+                    thread_id: thread_id.clone(),
+                    transcript_path: transcript_path.to_string(),
+                    authoritative_home: home.clone(),
+                    reason,
+                });
+            audit.warnings.push(format!(
+                "Codex Desktop assigns thread '{}' to this project, but its authoritative home '{}' is another live Codex Desktop project; the thread remains visible but is unavailable for sync",
+                thread_id, home
+            ));
             continue;
         }
         if resolved_home.starts_with(&resolved_project_root) {
@@ -16369,6 +16923,12 @@ fn finalize_conversation_path_audit(
     audit
         .issues
         .sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+    audit
+        .assignment_conflicts
+        .sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+    audit
+        .assignment_conflicts
+        .dedup_by(|left, right| left.thread_id == right.thread_id);
     audit.blockers.sort();
     audit.blockers.dedup();
     audit.warnings.sort();
@@ -16727,6 +17287,58 @@ mod tests {
         assert!(packaged_cli_path(&desktop)
             .unwrap_err()
             .contains("not available"));
+    }
+
+    #[test]
+    fn agent_launch_script_quotes_the_prompt_for_the_shell() {
+        let script = agent_launch_script(
+            "claude",
+            "Claude Code",
+            "Set up 'R2 storage' — don't finish; run `wrangler --version` and \"stop\".",
+        );
+        assert!(script.starts_with("#!/bin/zsh\n"));
+        // The CLI is resolved by the opened login shell, not the GUI app.
+        assert!(script.contains("if ! command -v 'claude' >/dev/null 2>&1; then"));
+        assert!(script.contains("the Claude Code CLI (claude) was not found"));
+        assert!(script.contains("Copy agent instruction"));
+        // Single quotes inside the prompt survive the shell round-trip; the
+        // whole prompt travels as one literal argument.
+        assert!(script.ends_with(
+            "exec 'claude' 'Set up '\\''R2 storage'\\'' — don'\\''t finish; run `wrangler --version` and \"stop\".'\n"
+        ));
+    }
+
+    #[test]
+    fn every_registered_cli_launcher_is_terminal_safe() {
+        // Both shipped agents launch; anything registered stays a bare
+        // program name the login shell resolves, never a path or shell text.
+        let mut launchable = 0;
+        for descriptor in provider_registry().descriptors() {
+            let Some(launcher) = descriptor.cli_launcher else {
+                continue;
+            };
+            launchable += 1;
+            assert!(
+                launcher
+                    .program
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "{}: program {:?}",
+                descriptor.display_name,
+                launcher.program,
+            );
+            assert!(!launcher.display_name.trim().is_empty());
+        }
+        assert!(launchable >= 2, "claude and codex both ship launchers");
+        for key in ["claude", "codex"] {
+            let key = ProviderKey::parse(key).expect("static provider key");
+            assert!(provider_registry()
+                .require(&key)
+                .unwrap()
+                .descriptor()
+                .cli_launcher
+                .is_some());
+        }
     }
 
     #[test]
@@ -19073,6 +19685,147 @@ mod tests {
     }
 
     #[test]
+    fn live_registered_foreign_home_is_visible_but_not_syncable() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo =
+            LocalStateRepository::from_home_dir(temp.path().join("agent-sync-home")).unwrap();
+        let project = register(&repo);
+        let project_root = temp.path().join("mallardInternal");
+        let foreign_root = temp.path().join("mallard-ai-web");
+        let codex_home = temp.path().join(".codex");
+        let sessions = codex_home.join("sessions/2026/07/19");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&foreign_root).unwrap();
+        std::fs::create_dir_all(&sessions).unwrap();
+        let profile_id = add_profile(&repo, &codex_key(), &codex_home);
+        save_project_binding_with_repository(
+            &repo,
+            SaveProjectBindingRequest {
+                local_project_id: project.local_project_id.clone(),
+                project_root: project_root.to_string_lossy().into_owned(),
+                profile_ids: BTreeMap::from([(codex_key(), profile_id)]),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+
+        let matching_thread = "019f7500-0000-7000-8000-000000000010";
+        let foreign_thread = "019f7500-0000-7000-8000-000000000011";
+        let matching_path = sessions.join(format!("rollout-{}.jsonl", matching_thread));
+        let foreign_path = sessions.join(format!("rollout-{}.jsonl", foreign_thread));
+        let project_root_json = serde_json::to_string(project_root.to_str().unwrap()).unwrap();
+        let foreign_root_json = serde_json::to_string(foreign_root.to_str().unwrap()).unwrap();
+        std::fs::write(
+            &matching_path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n",
+                matching_thread, project_root_json
+            ),
+        )
+        .unwrap();
+        let foreign_source = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":{}}}}}\n",
+            foreign_thread, foreign_root_json, project_root_json
+        );
+        std::fs::write(&foreign_path, foreign_source.as_bytes()).unwrap();
+        std::fs::write(
+            codex_home.join(".codex-global-state.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "local-projects": {
+                    "local-current": {
+                        "id": "local-current",
+                        "name": "mallardInternal",
+                        "rootPaths": [project_root.to_str().unwrap()]
+                    },
+                    "local-foreign": {
+                        "id": "local-foreign",
+                        "name": "mallard-ai-web",
+                        "rootPaths": [foreign_root.to_str().unwrap()]
+                    }
+                },
+                "thread-project-assignments": {
+                    (matching_thread): {
+                        "projectId": "local-current",
+                        "projectKind": "local"
+                    },
+                    (foreign_thread): {
+                        "projectId": "local-current",
+                        "projectKind": "local"
+                    }
+                },
+                "thread-writable-roots": {},
+                "thread-workspace-root-hints": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let audit =
+            audit_codex_conversation_paths_with_repository(&repo, &project.local_project_id)
+                .unwrap();
+        assert_eq!(audit.assigned_thread_count, 2);
+        assert_eq!(audit.matching_thread_count, 1);
+        assert!(audit.issues.is_empty(), "{:?}", audit.issues);
+        assert!(audit.blockers.is_empty(), "{:?}", audit.blockers);
+        assert!(audit.ready);
+        assert!(!audit.can_repair);
+        assert_eq!(audit.warnings.len(), 1);
+        assert_eq!(audit.assignment_conflicts.len(), 1);
+        assert!(
+            audit.warnings[0].contains(foreign_thread)
+                && audit.warnings[0].contains("another live Codex Desktop project")
+                && audit.warnings[0].contains("unavailable for sync"),
+            "{:?}",
+            audit.warnings
+        );
+        let local = load_project_local_read(&repo, &project.local_project_id).unwrap();
+        assert!(local
+            .views
+            .iter()
+            .all(|view| view.provider_thread_id != foreign_thread));
+        assert!(local
+            .discovery
+            .project_inventory()
+            .resources
+            .iter()
+            .all(|resource| !resource.resource_id.contains(foreign_thread)));
+        let activity = get_project_activity_with_repository(
+            &repo,
+            &project.local_project_id,
+            None,
+            None,
+            Some(1),
+            Some(90),
+        )
+        .unwrap();
+        assert_eq!(activity.sessions.len(), 2, "{:?}", activity.sessions);
+        let matching = activity
+            .sessions
+            .iter()
+            .find(|session| session.provider_session_id.as_deref() == Some(matching_thread))
+            .unwrap();
+        assert!(matching.sync_blocked_reason.is_none());
+        let foreign = activity
+            .sessions
+            .iter()
+            .find(|session| session.provider_session_id.as_deref() == Some(foreign_thread))
+            .unwrap();
+        assert_eq!(
+            foreign.sync_blocked_reason.as_deref(),
+            Some(
+                "Codex Desktop assigns this thread here, but its authoritative home belongs to another live Codex Desktop project."
+            )
+        );
+        assert_eq!(foreign.working_directory.as_deref(), foreign_root.to_str());
+        assert_eq!(
+            std::fs::read(&foreign_path).unwrap(),
+            foreign_source.as_bytes(),
+            "ownership audit must never rewrite the excluded rollout"
+        );
+        require_codex_conversation_paths_ready(&repo, &project.local_project_id).unwrap();
+    }
+
+    #[test]
     fn conversation_path_repair_only_rewrites_desktop_assigned_threads() {
         let temp = tempfile::tempdir().unwrap();
         let repo =
@@ -20098,29 +20851,242 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_secret_replaces_the_stored_one() {
-        let mut stored = SyncConfig::default();
-        stored.storages.push(r2_storage("old-secret"));
-        let mut incoming = stored.clone();
-        incoming.storages[0].secret_access_key = "new-secret".to_string();
-
-        restore_redacted_storage_secrets(&mut incoming, Some(&stored));
-
-        assert_eq!(incoming.storages[0].secret_access_key, "new-secret");
+    fn focused_r2_upserts_keep_the_existing_storage_activity_vocabulary() {
+        assert_eq!(
+            r2_upsert_success_summary(false, "Cloud"),
+            ("storage.added", "Storage added — Cloud".to_string()),
+        );
+        assert_eq!(
+            r2_upsert_success_summary(true, "Cloud"),
+            (
+                "storage.settings_updated",
+                "Storage settings updated — Cloud".to_string(),
+            ),
+        );
     }
 
     #[test]
-    fn a_new_storage_keeps_its_blank_secret_and_is_refused() {
+    fn generic_config_save_cannot_bypass_verified_r2_connection_changes() {
+        let mut stored = SyncConfig::default();
+        stored.storages.push(r2_storage("stored-secret"));
+
+        let mut renamed = stored.clone();
+        renamed.storages[0].name = "Renamed".to_string();
+        require_verified_r2_changes(&renamed, Some(&stored)).unwrap();
+
+        let mut removed = stored.clone();
+        removed.storages.clear();
+        require_verified_r2_changes(&removed, Some(&stored)).unwrap();
+
+        let mut changed_destination = stored.clone();
+        changed_destination.storages[0].bucket = "other-bucket".to_string();
+        assert_eq!(
+            require_verified_r2_changes(&changed_destination, Some(&stored)).unwrap_err(),
+            VERIFIED_R2_MESSAGE,
+        );
+
+        let mut changed_credentials = stored.clone();
+        changed_credentials.storages[0].secret_access_key = "replacement-secret".to_string();
+        assert_eq!(
+            require_verified_r2_changes(&changed_credentials, Some(&stored)).unwrap_err(),
+            VERIFIED_R2_MESSAGE,
+        );
+
+        let mut converted = stored.clone();
+        converted.storages[0].kind = StorageKind::Local;
+        converted.storages[0].local_dir = "/tmp/storage".to_string();
+        assert_eq!(
+            require_verified_r2_changes(&converted, Some(&stored)).unwrap_err(),
+            VERIFIED_R2_MESSAGE,
+        );
+    }
+
+    fn r2_draft_payload(secret: &str) -> StorageSetupDraftPayload {
+        StorageSetupDraftPayload {
+            name: "Half-typed R2".to_string(),
+            kind: StorageKind::S3,
+            bucket: "drafted-bucket".to_string(),
+            access_key_id: "drafted-access".to_string(),
+            secret_access_key: secret.to_string(),
+            account_id: String::new(),
+            s3_endpoint: String::new(),
+            region: "auto".to_string(),
+            local_dir: String::new(),
+        }
+    }
+
+    #[test]
+    fn storage_setup_drafts_cross_ipc_redacted_with_secret_present() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        let with_secret =
+            create_storage_setup_draft_with_repository(&repo, r2_draft_payload("draft-canary"))
+                .unwrap();
+
+        let view = redact_storage_setup_draft(with_secret);
+        assert!(view.secret_present);
+        assert_eq!(view.storage.secret_access_key, "");
+        let serialized = serde_json::to_string(&view).unwrap();
+        assert!(!serialized.contains("draft-canary"));
+        // Everything else the settings form renders survives redaction.
+        assert_eq!(view.storage.access_key_id, "drafted-access");
+        assert_eq!(view.storage.bucket, "drafted-bucket");
+
+        let secretless =
+            create_storage_setup_draft_with_repository(&repo, r2_draft_payload("")).unwrap();
+        assert!(!redact_storage_setup_draft(secretless).secret_present);
+    }
+
+    #[test]
+    fn only_exact_storage_setup_draft_get_exposes_its_secret_for_review() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        let created =
+            create_storage_setup_draft_with_repository(&repo, r2_draft_payload("draft-canary"))
+                .unwrap();
+
+        let exact = get_storage_setup_draft_with_repository(&repo, &created.draft_id)
+            .unwrap()
+            .unwrap();
+        assert!(exact.secret_present);
+        assert_eq!(exact.storage.secret_access_key, "draft-canary");
+        assert!(serde_json::to_string(&exact)
+            .unwrap()
+            .contains("draft-canary"));
+
+        let listed = list_storage_setup_drafts_with_repository(&repo).unwrap();
+        assert_eq!(listed.drafts.len(), 1);
+        assert_eq!(listed.drafts[0].storage.secret_access_key, "");
+        assert!(!serde_json::to_string(&listed)
+            .unwrap()
+            .contains("draft-canary"));
+    }
+
+    #[test]
+    fn updating_a_draft_with_a_blank_secret_preserves_the_persisted_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        let created =
+            create_storage_setup_draft_with_repository(&repo, r2_draft_payload("draft-canary"))
+                .unwrap();
+
+        // A redacted summary client may autosave its own edits with a blank
+        // secret. That blank must preserve the persisted value.
+        let mut resumed = r2_draft_payload("");
+        resumed.name = "Renamed while resumed".to_string();
+        let updated = update_storage_setup_draft_with_repository(
+            &repo,
+            UpdateStorageSetupDraftRequest {
+                draft_id: created.draft_id.clone(),
+                revision: created.revision,
+                storage: resumed,
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.storage.secret_access_key, "draft-canary");
+        assert_eq!(updated.storage.name, "Renamed while resumed");
+
+        // A typed replacement wins.
+        let replaced = update_storage_setup_draft_with_repository(
+            &repo,
+            UpdateStorageSetupDraftRequest {
+                draft_id: created.draft_id.clone(),
+                revision: updated.revision,
+                storage: r2_draft_payload("replacement-secret"),
+            },
+        )
+        .unwrap();
+        assert_eq!(replaced.storage.secret_access_key, "replacement-secret");
+    }
+
+    #[test]
+    fn draft_updates_are_revision_guarded_and_keep_server_owned_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        let created =
+            create_storage_setup_draft_with_repository(&repo, r2_draft_payload("")).unwrap();
+
+        let stale = update_storage_setup_draft_with_repository(
+            &repo,
+            UpdateStorageSetupDraftRequest {
+                draft_id: created.draft_id.clone(),
+                revision: created.revision + 7,
+                storage: r2_draft_payload(""),
+            },
+        )
+        .unwrap_err();
+        assert!(stale.contains("storage draft changed"), "{stale}");
+
+        let updated = update_storage_setup_draft_with_repository(
+            &repo,
+            UpdateStorageSetupDraftRequest {
+                draft_id: created.draft_id.clone(),
+                revision: created.revision,
+                storage: r2_draft_payload(""),
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.draft_id, created.draft_id);
+        assert_eq!(updated.created_at, created.created_at);
+        assert_eq!(updated.storage.id, created.storage.id);
+        assert_eq!(updated.revision, created.revision + 1);
+
+        let missing = update_storage_setup_draft_with_repository(
+            &repo,
+            UpdateStorageSetupDraftRequest {
+                draft_id: StorageSetupDraftId::parse(generated_named_id("storagedraft").unwrap())
+                    .unwrap(),
+                revision: 1,
+                storage: r2_draft_payload(""),
+            },
+        )
+        .unwrap_err();
+        assert!(missing.contains("does not exist"), "{missing}");
+    }
+
+    #[test]
+    fn list_storage_setup_drafts_returns_redacted_views() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        create_storage_setup_draft_with_repository(&repo, r2_draft_payload("list-canary")).unwrap();
+        create_storage_setup_draft_with_repository(&repo, r2_draft_payload("")).unwrap();
+
+        let list = list_storage_setup_drafts_with_repository(&repo).unwrap();
+        assert_eq!(list.drafts.len(), 2);
+        assert!(list.warnings.is_empty());
+        let serialized = serde_json::to_string(&list).unwrap();
+        assert!(!serialized.contains("list-canary"));
+        assert!(list
+            .drafts
+            .iter()
+            .all(|draft| draft.storage.secret_access_key.is_empty()));
+    }
+
+    #[test]
+    fn generic_config_save_rejects_new_r2_but_allows_new_local_storage() {
         let stored = SyncConfig::default();
         let mut incoming = SyncConfig::default();
-        incoming.storages.push(r2_storage(""));
+        incoming.storages.push(r2_storage("stored-secret"));
 
-        // Nothing to merge from: there is no previous storage with this id.
-        restore_redacted_storage_secrets(&mut incoming, Some(&stored));
+        assert_eq!(
+            require_verified_r2_changes(&incoming, Some(&stored)).unwrap_err(),
+            VERIFIED_R2_MESSAGE,
+        );
 
-        assert_eq!(incoming.storages[0].secret_access_key, "");
-        let error = require_s3_storage_secrets(&incoming).unwrap_err();
-        assert!(error.contains("needs a secret access key"), "{error}");
+        incoming.storages[0] = StorageConfig {
+            id: StorageId::parse("disk").unwrap(),
+            name: "Disk".to_string(),
+            kind: StorageKind::Local,
+            bucket: String::new(),
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            account_id: String::new(),
+            s3_endpoint: String::new(),
+            region: String::new(),
+            local_dir: "/tmp/storage".to_string(),
+            supports_conditional_writes: None,
+        };
+        require_verified_r2_changes(&incoming, Some(&stored)).unwrap();
     }
 
     #[test]

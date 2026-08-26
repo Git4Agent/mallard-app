@@ -141,13 +141,14 @@ struct ChainRecord {
     fingerprint: String,
 }
 
-/// The provider identity carried by a Claude transcript's active leaf.
+/// The provider identity carried by a Claude transcript's active session.
 ///
 /// Claude resume/fork files copy historical records without restamping their
-/// `sessionId` or `cwd`, so the first record is not authoritative. The last
-/// projected chain record is the provider leaf; when that record omits one
-/// identity field, the codec's established rule falls back field-by-field to
-/// the last projected record carrying it.
+/// `sessionId` or `cwd`, so the last projected chain record selects the active
+/// session ID. Within one session ID, however, `cwd` is per-turn shell state;
+/// the authoritative home is the first non-empty cwd in that session's current
+/// chain-record segment. A new session ID resets the home, while later records
+/// for the same session cannot move it.
 #[derive(Default)]
 pub(crate) struct ClaudeSessionIdentityTracker {
     last_session_id: Option<String>,
@@ -155,6 +156,8 @@ pub(crate) struct ClaudeSessionIdentityTracker {
     last_metadata_identity: Option<(String, String)>,
     leaf_session_id: Option<String>,
     leaf_cwd: Option<String>,
+    leaf_home_session_id: Option<String>,
+    leaf_session_home: Option<String>,
     saw_chain_record: bool,
 }
 
@@ -203,6 +206,15 @@ impl ClaudeSessionIdentityTracker {
         }
         if is_chain_record(object) {
             self.saw_chain_record = true;
+            let effective_session_id = session_id.clone().or_else(|| self.last_session_id.clone());
+            if self.leaf_home_session_id != effective_session_id {
+                self.leaf_home_session_id = effective_session_id;
+                self.leaf_session_home = cwd.clone();
+            } else if self.leaf_session_home.is_none() {
+                self.leaf_session_home = cwd.clone();
+            }
+            // Preserve the established leaf field-fallback behavior while the
+            // separate session-home state above ignores same-session cwd drift.
             self.leaf_session_id = session_id;
             self.leaf_cwd = cwd;
         }
@@ -221,12 +233,17 @@ impl ClaudeSessionIdentityTracker {
                     (Some(session_id), Some(cwd))
                 });
         }
-        (
-            self.leaf_session_id
-                .clone()
-                .or_else(|| self.last_session_id.clone()),
-            self.leaf_cwd.clone().or_else(|| self.last_cwd.clone()),
-        )
+        let session_id = self
+            .leaf_session_id
+            .clone()
+            .or_else(|| self.last_session_id.clone());
+        let cwd =
+            if session_id.is_some() && self.leaf_home_session_id.as_ref() == session_id.as_ref() {
+                self.leaf_session_home.clone()
+            } else {
+                self.leaf_cwd.clone().or_else(|| self.last_cwd.clone())
+            };
+        (session_id, cwd)
     }
 }
 
@@ -349,8 +366,9 @@ pub fn analyze_claude_transcript(bytes: &[u8]) -> SessionAnalysis {
     }
     path.reverse();
 
-    // Leaf-wins identity: resume-copied history legitimately mixes ids, and
-    // the leaf record carries the identity Claude itself resumes under.
+    // The leaf selects the active session ID. Resume-copied history may carry
+    // older IDs, while cwd changes within the active ID are only shell state;
+    // the tracker therefore pairs that ID with its segment's launch cwd.
     let (session_id, source_cwd) = identity.leaf_identity();
     if session_id.is_none() {
         return unknown(
@@ -759,8 +777,9 @@ mod tests {
 
     #[test]
     fn claude_codec_takes_the_leaf_identity_over_copied_history() {
-        // Resume-copied history keeps its original sessionId and cwd; the
-        // leaf record's identity wins and the mix is tolerated.
+        // Resume-copied history keeps its original sessionId and cwd. The new
+        // session ID wins, while later cwd changes inside that ID do not move
+        // its authoritative launch home.
         let mut mixed = transcript(
             "11111111-1111-4111-8111-111111111111",
             "/tmp/p",
@@ -779,6 +798,19 @@ mod tests {
             .as_bytes(),
         );
         mixed.push(b'\n');
+        mixed.extend_from_slice(
+            serde_json::to_string(&json!({
+                "type": "user",
+                "uuid": "u-2",
+                "parentUuid": "a-1",
+                "sessionId": "22222222-2222-4222-8222-222222222222",
+                "cwd": "/tmp/q/src-tauri",
+                "message": {"role": "user", "content": "continue"}
+            }))
+            .unwrap()
+            .as_bytes(),
+        );
+        mixed.push(b'\n');
         let analysis = analyze_claude_transcript(&mixed);
         assert!(analysis.is_resumable(), "{:?}", analysis.lineage);
         assert_eq!(
@@ -786,7 +818,7 @@ mod tests {
             Some("22222222-2222-4222-8222-222222222222")
         );
         assert_eq!(analysis.source_cwd.as_deref(), Some("/tmp/q"));
-        assert_eq!(chain_ids(&analysis), ["u-1", "a-1"]);
+        assert_eq!(chain_ids(&analysis), ["u-1", "a-1", "u-2"]);
     }
 
     #[test]

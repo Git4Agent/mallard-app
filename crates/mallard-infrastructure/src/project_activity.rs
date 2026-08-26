@@ -99,6 +99,9 @@ pub struct ProjectSessionSummary {
     pub transcript_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
+    /// Machine-local reason this visible session cannot participate in sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_blocked_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1006,6 +1009,7 @@ fn merge_activity_sessions_with_state(
                 ended_at,
                 transcript_path: Some(record.physical_path.to_string_lossy().into_owned()),
                 working_directory: Some(resolved.project_root.to_string_lossy().into_owned()),
+                sync_blocked_reason: None,
                 branch: record.summary.branch.clone(),
                 recorded_sha: record.summary.recorded_sha.clone(),
                 is_active: record.is_active,
@@ -1093,6 +1097,7 @@ fn merge_activity_sessions_with_state(
                 ended_at,
                 transcript_path: None,
                 working_directory: None,
+                sync_blocked_reason: None,
                 branch: record.presentation.branch.clone(),
                 recorded_sha: record.presentation.recorded_sha.clone(),
                 is_active: false,
@@ -1826,6 +1831,7 @@ mod activity_only_tests {
                 profile_label: "Instrumented profile".to_string(),
                 default_profile_directory: None,
                 setup_default: false,
+                cli_launcher: None,
                 capabilities: ProviderCapabilityLevel::ActivityOnly,
                 adapter_version: 1,
             }

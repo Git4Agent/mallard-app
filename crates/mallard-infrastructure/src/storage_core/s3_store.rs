@@ -22,7 +22,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 use tempfile::NamedTempFile;
 use tokio::runtime::Handle;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 use super::{
     CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix,
@@ -36,6 +36,8 @@ const MAX_LIST_REQUESTS: usize = MAX_LIST_PAGE + 2;
 const R2_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const R2_SETUP_PROBE_PREFIX: &str = ".mallard/v1/_setup_probes";
 const MAX_R2_SETUP_PROBE_BYTES: u64 = 512;
+const R2_CREDENTIAL_READINESS_ATTEMPTS: usize = 10;
+const R2_CREDENTIAL_READINESS_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum R2CapabilityProbeErrorKind {
@@ -246,7 +248,16 @@ impl S3ObjectStore {
             R2CapabilityProbeError::remote(R2CapabilityProbeStage::Validate, setup_id)
         })?;
         match catch_unwind(AssertUnwindSafe(|| {
-            self.runtime.block_on(self.cleanup_probe_async(&key))
+            self.runtime.block_on(async {
+                if self
+                    .probe_key_is_absent_from_list_async(&key)
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+                self.cleanup_probe_async(&key).await
+            })
         })) {
             Ok(true) => Ok(()),
             Ok(false) | Err(_) => Err(R2CapabilityProbeError::cleanup_required(setup_id)),
@@ -358,21 +369,31 @@ impl S3ObjectStore {
     }
 
     async fn probe_key_is_absent_from_list_async(&self, key: &str) -> Result<bool, ()> {
-        let request = self
-            .client
-            .list_objects_v2()
-            .bucket(&self.bucket)
-            .prefix(key)
-            .max_keys(2)
-            .send();
-        let response = timeout(self.request_timeout, request)
-            .await
-            .map_err(|_| ())?
-            .map_err(|_| ())?;
-        if response.is_truncated() == Some(true) || response.contents().len() > 2 {
-            return Err(());
+        for attempt in 0..R2_CREDENTIAL_READINESS_ATTEMPTS {
+            let request = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(key)
+                .max_keys(2)
+                .send();
+            let response = match timeout(self.request_timeout, request).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(error))
+                    if attempt + 1 < R2_CREDENTIAL_READINESS_ATTEMPTS
+                        && matches!(sdk_status(&error), Some(401) | Some(403)) =>
+                {
+                    sleep(R2_CREDENTIAL_READINESS_DELAY).await;
+                    continue;
+                }
+                Ok(Err(_)) | Err(_) => return Err(()),
+            };
+            if response.is_truncated() == Some(true) || response.contents().len() > 2 {
+                return Err(());
+            }
+            return Ok(response.contents().is_empty());
         }
-        Ok(response.contents().is_empty())
+        Err(())
     }
 
     async fn probe_conditional_put_async(
@@ -1317,7 +1338,7 @@ mod tests {
     use std::collections::{BTreeMap, VecDeque};
     use std::convert::Infallible;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
 
@@ -1329,6 +1350,7 @@ mod tests {
         get_behaviors: Arc<Mutex<BTreeMap<String, GetBehavior>>>,
         honor_conditions: Arc<AtomicBool>,
         fail_delete: Arc<AtomicBool>,
+        list_authorization_failures: Arc<AtomicUsize>,
         server: tokio::task::JoinHandle<()>,
     }
 
@@ -1397,10 +1419,12 @@ mod tests {
             let get_behaviors = Arc::new(Mutex::new(BTreeMap::new()));
             let honor_conditions = Arc::new(AtomicBool::new(true));
             let fail_delete = Arc::new(AtomicBool::new(false));
+            let list_authorization_failures = Arc::new(AtomicUsize::new(0));
             let server_objects = objects.clone();
             let server_get_behaviors = get_behaviors.clone();
             let server_honor_conditions = honor_conditions.clone();
             let server_fail_delete = fail_delete.clone();
+            let server_list_authorization_failures = list_authorization_failures.clone();
             let server = tokio::spawn(async move {
                 loop {
                     let Ok((stream, _)) = listener.accept().await else {
@@ -1410,6 +1434,7 @@ mod tests {
                     let get_behaviors = server_get_behaviors.clone();
                     let honor_conditions = server_honor_conditions.clone();
                     let fail_delete = server_fail_delete.clone();
+                    let list_authorization_failures = server_list_authorization_failures.clone();
                     tokio::spawn(async move {
                         let service = service_fn(move |request| {
                             test_s3_request(
@@ -1418,6 +1443,7 @@ mod tests {
                                 get_behaviors.clone(),
                                 honor_conditions.clone(),
                                 fail_delete.clone(),
+                                list_authorization_failures.clone(),
                             )
                         });
                         let _ = http1::Builder::new()
@@ -1432,6 +1458,7 @@ mod tests {
                 get_behaviors,
                 honor_conditions,
                 fail_delete,
+                list_authorization_failures,
                 server,
             }
         }
@@ -1486,6 +1513,11 @@ mod tests {
 
         fn fail_delete(&self) {
             self.fail_delete.store(true, Ordering::SeqCst);
+        }
+
+        fn fail_list_authorization(&self, attempts: usize) {
+            self.list_authorization_failures
+                .store(attempts, Ordering::SeqCst);
         }
     }
 
@@ -2014,6 +2046,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn r2_capability_probe_waits_for_fresh_credentials_before_writing() {
+        let server = TestS3::start().await;
+        server.fail_list_authorization(2);
+        let store = server.store();
+        let receipt =
+            blocking(move || store.probe_r2_capabilities("r2setup-0923456789abcdef01234567"))
+                .await
+                .unwrap();
+
+        assert_eq!(receipt.setup_id(), "r2setup-0923456789abcdef01234567");
+        assert_eq!(server.list_authorization_failures.load(Ordering::SeqCst), 0);
+        assert!(server.objects.lock().expect("test S3 lock").is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn r2_capability_probe_rejects_stores_that_accept_stale_etags() {
         let server = TestS3::start().await;
         server.ignore_conditions();
@@ -2057,6 +2104,7 @@ mod tests {
         let unrelated = ".mallard/v1/_setup_probes/r2setup-4123456789abcdef01234567";
         server.seed(probe_key, b"stale probe".to_vec());
         server.seed(unrelated.to_string(), b"keep".to_vec());
+        server.fail_list_authorization(2);
         let store = server.store();
         blocking(move || store.reconcile_r2_capability_probe(setup_id))
             .await
@@ -2111,6 +2159,7 @@ mod tests {
         get_behaviors: Arc<Mutex<BTreeMap<String, GetBehavior>>>,
         honor_conditions: Arc<AtomicBool>,
         fail_delete: Arc<AtomicBool>,
+        list_authorization_failures: Arc<AtomicUsize>,
     ) -> Result<Response<TestBody>, Infallible> {
         let method = request.method().clone();
         let path = request.uri().path().trim_start_matches('/').to_string();
@@ -2138,6 +2187,14 @@ mod tests {
         }
 
         if method == Method::GET && key.is_empty() && query.contains("list-type=2") {
+            if list_authorization_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Ok(xml_error(StatusCode::FORBIDDEN, "AccessDenied"));
+            }
             return Ok(list_response(&query, &objects));
         }
         if method == Method::GET {

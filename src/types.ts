@@ -113,12 +113,21 @@ export type ProviderCapabilityLevel =
   | "resumable"
   | "resumable_with_conflict_preservation";
 
+export interface ProviderCliLauncher {
+  /** Executable name resolved by the opened terminal's login shell. */
+  program: string;
+  /** Human name of the agent CLI, e.g. "Claude Code". */
+  display_name: string;
+}
+
 export interface ProviderDescriptor {
   key: ProviderKey;
   display_name: string;
   profile_label: string;
   default_profile_directory?: string | null;
   setup_default: boolean;
+  /** Present when the provider ships an agent CLI that takes a prompt. */
+  cli_launcher?: ProviderCliLauncher | null;
   capabilities: ProviderCapabilityLevel;
   adapter_version: number;
 }
@@ -546,25 +555,77 @@ export interface SyncConfig {
 }
 
 /** Secret-bearing request sent only across the local Tauri IPC boundary. */
-export interface ConnectR2StorageRequest {
+export interface UpsertR2StorageRequest {
+  storage_id?: string | null;
+  /** Setup draft to resolve a blank secret from; a successful save also
+   *  discards it. The three draft fields are all-or-none and mutually
+   *  exclusive with `storage_id`. */
+  draft_id?: string | null;
+  /** Exact draft revision whose settings were reviewed by the user. */
+  draft_revision?: number | null;
+  /** Exact inert draft storage identity whose settings were reviewed. */
+  draft_storage_id?: string | null;
   name: string;
   api_url: string;
   access_key_id: string;
+  /** Blank preserves the backend-held secret for an existing R2 storage
+   *  (or the drafted one when `draft_id` is set). */
   secret_access_key: string;
-  expected_config_revision?: number | null;
+  expected_config_revision: number;
 }
 
 /** Sanitized result: destination and credential fields are intentionally absent. */
-export interface ConnectStorageResult {
+export interface UpsertR2StorageResult {
   storage_id: string;
   config_revision: number;
   verified: boolean;
+}
+
+/** Sanitized result of a commit-free R2 connection test. */
+export interface TestR2StorageResult {
+  /** The revision the request was checked against — nothing was committed. */
+  config_revision: number;
+  verified: boolean;
+}
+
+/** Schema of `~/.mallard/storage_drafts/*.json`. */
+export const STORAGE_SETUP_DRAFT_SCHEMA = 1;
+
+/** The client-editable storage form fields — `StorageConfig` minus its id.
+ *  A blank `secret_access_key` means "no secret typed this session"; an
+ *  update then keeps the drafted one. */
+export type StorageSetupDraftPayload = Omit<StorageConfig, "id" | "supports_conditional_writes">;
+
+/** A storage setup draft summary. List/create/update responses redact
+ *  `storage.secret_access_key`; `secret_present` says whether persistence
+ *  holds one. */
+export interface StorageSetupDraft {
+  draft_id: string;
+  secret_present: boolean;
+  storage: StorageConfig;
+  revision: number;
+  created_at: number;
+  updated_at: number;
+}
+
+/** The exact draft opened by ID. Its shape is unchanged, but unlike summary
+ *  responses its `storage.secret_access_key` contains the machine-local
+ *  draft secret so the user can review it in Mallard. */
+export type StorageSetupDraftDetail = StorageSetupDraft;
+
+export interface StorageSetupDraftList {
+  drafts: StorageSetupDraft[];
+  /** Fixed value-free sentences — a draft file may hold a secret. */
+  warnings: string[];
 }
 
 /** Filesystem watcher events contain no credential-bearing config fields. */
 export interface ProjectSyncConfigChangedEvent {
   revision: number;
 }
+
+/** Value-free signal; draft contents are reloaded through the redacting IPC. */
+export type StorageSetupDraftsChangedEvent = Record<string, never>;
 
 export interface StorageConfig {
   id: string;
@@ -987,6 +1048,8 @@ export interface ProjectSessionSummary {
   /** Machine-local provider transcript; absent for storage-only sessions. */
   transcript_path?: string | null;
   working_directory?: string | null;
+  /** Machine-local reason this visible session cannot participate in sync. */
+  sync_blocked_reason?: string | null;
   branch?: string | null;
   recorded_sha?: string | null;
   is_active: boolean;

@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -48,70 +48,23 @@ pub(crate) struct R2Args {
 
 #[derive(Subcommand)]
 pub(crate) enum R2Command {
-    /// Connect an existing Cloudflare R2 bucket.
-    Connect(ConnectR2Args),
-    /// Provision and connect a Cloudflare R2 bucket.
-    Provision(ProvisionR2Args),
-    /// Clean up a recoverable Cloudflare R2 setup.
-    Cleanup(CleanupR2Args),
+    /// Fill an open R2 setup draft through browser authorization.
+    Setup(SetupR2Args),
 }
 
 #[derive(Args)]
-pub(crate) struct ConnectR2Args {
+pub(crate) struct SetupR2Args {
+    /// Exact open Mallard storage setup draft to fill.
+    #[arg(long)]
+    pub draft_id: String,
+
+    /// Draft revision copied from Mallard; concurrent form edits fail closed.
+    #[arg(long)]
+    pub expected_revision: u64,
+
+    /// Exact storage name shown in the open Mallard form.
     #[arg(long)]
     pub name: String,
-
-    #[arg(long, value_name = "HTTPS_URL")]
-    pub api_url: String,
-
-    #[arg(long, value_name = "ID")]
-    pub access_key_id: String,
-
-    #[arg(
-        long,
-        help = "Read the Secret Access Key from standard input instead of a hidden terminal prompt"
-    )]
-    pub secret_stdin: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum JurisdictionArg {
-    Default,
-    Eu,
-    Fedramp,
-}
-
-#[derive(Args)]
-pub(crate) struct ProvisionR2Args {
-    #[arg(long)]
-    pub name: String,
-
-    #[arg(long, value_name = "32_HEX_ACCOUNT_ID")]
-    pub account_id: String,
-
-    #[arg(long)]
-    pub bucket: String,
-
-    #[arg(long, value_enum)]
-    pub jurisdiction: JurisdictionArg,
-
-    #[arg(
-        long,
-        help = "Read the Cloudflare bootstrap token from standard input instead of a hidden terminal prompt"
-    )]
-    pub bootstrap_token_stdin: bool,
-}
-
-#[derive(Args)]
-pub(crate) struct CleanupR2Args {
-    /// Recoverable Mallard R2 setup ID.
-    pub setup_id: String,
-
-    #[arg(
-        long,
-        help = "Read the Cloudflare bootstrap token from standard input instead of a hidden terminal prompt"
-    )]
-    pub bootstrap_token_stdin: bool,
 }
 
 #[derive(Args)]

@@ -9,8 +9,9 @@ use mallard_domain::{
     generated_named_id, BundleId, ConversationBindings, ConversationPushPlan,
     ConversationSyncJournal, HostId, HostIdentity, LocalProjectId, MachineProjectState,
     Materializations, OriginHostToken, OriginReplicaToken, PlanId, ProjectSetupDraft, ReplicaId,
-    RestorePlan, SetupDraftId, SetupTransaction, StorageConfig, StorageId, SyncConfig,
-    CONVERSATION_BINDINGS_SCHEMA, HOST_IDENTITY_SCHEMA, MACHINE_PROJECT_SCHEMA, MAX_SETUP_DRAFTS,
+    RestorePlan, SetupDraftId, SetupTransaction, StorageConfig, StorageId, StorageSetupDraft,
+    StorageSetupDraftId, SyncConfig, CONVERSATION_BINDINGS_SCHEMA, HOST_IDENTITY_SCHEMA,
+    MACHINE_PROJECT_SCHEMA, MAX_SETUP_DRAFTS, MAX_STORAGE_SETUP_DRAFTS,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -21,18 +22,36 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use zeroize::Zeroize;
 
 const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_BINDINGS_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_MATERIALIZATIONS_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RESTORE_PLAN_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SETUP_DRAFT_BYTES: u64 = 4 * 1024 * 1024;
+// A storage draft is a handful of ≤4096-byte validated strings; 128 KiB
+// never rejects a valid draft while bounding read amplification for
+// corrupt files far below the project-draft cap.
+const MAX_STORAGE_SETUP_DRAFT_BYTES: u64 = 128 * 1024;
 const MAX_SETUP_TRANSACTION_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_HOST_IDENTITY_BYTES: u64 = 16 * 1024;
 // Rotation journals embed every bounded host-scoped document. They are stored
 // as compact JSON to avoid nested pretty-print expansion; the additional
 // headroom covers wrapper fields and bounded default growth.
 const MAX_HOST_ROTATION_BYTES: u64 = 192 * 1024 * 1024;
+
+fn zeroize_storage_setup_draft_secret(draft: &mut StorageSetupDraft) {
+    draft.storage.secret_access_key.zeroize();
+    #[cfg(test)]
+    STORAGE_SETUP_DRAFT_SECRET_ZEROIZE_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+thread_local! {
+    static STORAGE_SETUP_DRAFT_SECRET_ZEROIZE_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
 const MAX_CONVERSATION_BINDINGS_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CONVERSATION_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CONVERSATION_PUSH_PLAN_BYTES: u64 = 64 * 1024 * 1024;
@@ -1366,6 +1385,199 @@ impl LocalStateRepository {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(format!("remove setup draft '{}': {}", draft_id, error)),
+        }
+    }
+
+    pub fn storage_setup_draft_path(&self, draft_id: &StorageSetupDraftId) -> PathBuf {
+        self.root
+            .join("storage_drafts")
+            .join(format!("{}.json", draft_id.as_str()))
+    }
+
+    /// Load every storage setup draft.  A malformed draft file becomes a
+    /// warning instead of hiding the readable drafts behind one error.
+    /// Unlike the project-draft listing, warnings here are fixed sentences:
+    /// serde's parse errors can embed string values from the file, and every
+    /// storage draft file may hold a secret.
+    pub fn list_storage_setup_drafts(
+        &self,
+    ) -> Result<(Vec<StorageSetupDraft>, Vec<String>), String> {
+        let _guard = persistence_guard(&self.root)?;
+        let directory = self.root.join("storage_drafts");
+        match fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            }
+            Ok(_) => return Err(format!("'{}' is not a real directory", directory.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Vec::new(), Vec::new()))
+            }
+            Err(error) => return Err(format!("inspect '{}': {}", directory.display(), error)),
+        }
+        let entries = fs::read_dir(&directory)
+            .map_err(|error| format!("list '{}': {}", directory.display(), error))?;
+        let mut drafts = Vec::new();
+        let mut warnings = Vec::new();
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| format!("list '{}': {}", directory.display(), error))?;
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            let label = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown");
+            match read_json_bounded::<StorageSetupDraft>(
+                &self.root,
+                &path,
+                MAX_STORAGE_SETUP_DRAFT_BYTES,
+            ) {
+                Ok(Some(draft)) => match draft.validate() {
+                    Ok(()) => drafts.push(draft),
+                    Err(_) => warnings.push(format!("invalid storage draft '{}'", label)),
+                },
+                Ok(None) => {}
+                Err(_) => warnings.push(format!("unreadable storage draft '{}'", label)),
+            }
+        }
+        drafts.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| left.draft_id.cmp(&right.draft_id))
+        });
+        Ok((drafts, warnings))
+    }
+
+    pub fn load_storage_setup_draft(
+        &self,
+        draft_id: &StorageSetupDraftId,
+    ) -> Result<Option<StorageSetupDraft>, String> {
+        let _guard = persistence_guard(&self.root)?;
+        self.load_storage_setup_draft_unlocked(draft_id)
+    }
+
+    fn load_storage_setup_draft_unlocked(
+        &self,
+        draft_id: &StorageSetupDraftId,
+    ) -> Result<Option<StorageSetupDraft>, String> {
+        // Read and parse failures collapse to one fixed sentence: the raw
+        // error can quote file content, and this file holds a secret.
+        let draft: Option<StorageSetupDraft> = read_json_bounded(
+            &self.root,
+            &self.storage_setup_draft_path(draft_id),
+            MAX_STORAGE_SETUP_DRAFT_BYTES,
+        )
+        .map_err(|_| format!("storage draft '{}' is unreadable", draft_id))?;
+        if let Some(draft) = &draft {
+            draft
+                .validate()
+                .map_err(|_| format!("storage draft '{}' is unreadable", draft_id))?;
+            if &draft.draft_id != draft_id {
+                return Err(format!(
+                    "storage draft file '{}' contains draft '{}'",
+                    draft_id, draft.draft_id
+                ));
+            }
+        }
+        Ok(draft)
+    }
+
+    /// Revision-guarded storage draft save.  Creation submits revision 0
+    /// against a missing file (and is bounded by the draft cap); updates must
+    /// submit the revision they read.  The stored document gets the next
+    /// revision, which is also returned.
+    pub fn save_storage_setup_draft(
+        &self,
+        mut draft: StorageSetupDraft,
+    ) -> Result<StorageSetupDraft, String> {
+        // Keep every fallible step inside this closure. If anything fails,
+        // the caller-owned secret allocation is scrubbed before the error is
+        // returned; on success it remains intact in the returned draft.
+        let result = (|| -> Result<(), String> {
+            let _guard = persistence_guard(&self.root)?;
+            let path = self.storage_setup_draft_path(&draft.draft_id);
+            let current_revision = self
+                .load_storage_setup_draft_unlocked(&draft.draft_id)?
+                .map(|mut existing| {
+                    let revision = existing.revision;
+                    zeroize_storage_setup_draft_secret(&mut existing);
+                    revision
+                });
+            match current_revision {
+                Some(current_revision) => {
+                    if draft.revision != current_revision {
+                        return Err(format!(
+                            "storage draft changed (expected revision {}, current {})",
+                            draft.revision, current_revision
+                        ));
+                    }
+                }
+                None => {
+                    if draft.revision != 0 {
+                        return Err("new storage draft must start at revision 0".to_string());
+                    }
+                    let existing = self.list_storage_setup_drafts_unlocked()?;
+                    if existing >= MAX_STORAGE_SETUP_DRAFTS {
+                        return Err(format!(
+                            "too many storage drafts (limit {}); discard one first",
+                            MAX_STORAGE_SETUP_DRAFTS
+                        ));
+                    }
+                }
+            }
+            draft.revision = draft.revision.saturating_add(1);
+            draft.validate()?;
+            self.ensure_directory(path.parent().ok_or("storage draft has no parent")?)?;
+            write_json_atomic(&self.root, &path, &draft, MAX_STORAGE_SETUP_DRAFT_BYTES)
+        })();
+        if let Err(error) = result {
+            zeroize_storage_setup_draft_secret(&mut draft);
+            return Err(error);
+        }
+        Ok(draft)
+    }
+
+    /// Count every draft file, readable or not — an unreadable file still
+    /// occupies its slot until discarded, so corruption cannot widen the cap.
+    fn list_storage_setup_drafts_unlocked(&self) -> Result<usize, String> {
+        let directory = self.root.join("storage_drafts");
+        match fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            }
+            Ok(_) => return Err(format!("'{}' is not a real directory", directory.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(format!("inspect '{}': {}", directory.display(), error)),
+        }
+        let entries = fs::read_dir(&directory)
+            .map_err(|error| format!("list '{}': {}", directory.display(), error))?;
+        let mut count = 0;
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| format!("list '{}': {}", directory.display(), error))?;
+            if entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    pub fn delete_storage_setup_draft(
+        &self,
+        draft_id: &StorageSetupDraftId,
+    ) -> Result<bool, String> {
+        let _guard = persistence_guard(&self.root)?;
+        let path = self.storage_setup_draft_path(draft_id);
+        ensure_no_symlinks(&self.root, &path)?;
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(format!("remove storage draft '{}': {}", draft_id, error)),
         }
     }
 
@@ -3971,5 +4183,183 @@ mod tests {
             Some(identity)
         );
         assert!(!repo.root().join("host_recovery_quarantine").exists());
+    }
+
+    fn storage_setup_draft(secret: &str) -> mallard_domain::StorageSetupDraft {
+        mallard_domain::StorageSetupDraft {
+            schema: mallard_domain::STORAGE_SETUP_DRAFT_SCHEMA,
+            draft_id: mallard_domain::StorageSetupDraftId::parse(
+                generated_named_id("storagedraft").unwrap(),
+            )
+            .unwrap(),
+            storage: StorageConfig {
+                id: StorageId::parse(generated_named_id("storage").unwrap()).unwrap(),
+                name: "Half-typed R2".to_string(),
+                kind: StorageKind::S3,
+                bucket: "drafted-bucket".to_string(),
+                access_key_id: "drafted-access".to_string(),
+                secret_access_key: secret.to_string(),
+                account_id: String::new(),
+                s3_endpoint: String::new(),
+                region: "auto".to_string(),
+                local_dir: String::new(),
+                supports_conditional_writes: None,
+            },
+            revision: 0,
+            created_at: 7,
+            updated_at: 7,
+        }
+    }
+
+    #[test]
+    fn storage_setup_drafts_roundtrip_with_revision_guard_and_private_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let draft = storage_setup_draft("draft-secret-canary");
+
+        let saved = repo.save_storage_setup_draft(draft.clone()).unwrap();
+        assert_eq!(saved.revision, 1);
+        let path = repo.storage_setup_draft_path(&saved.draft_id);
+        assert!(path.starts_with(repo.root().join("storage_drafts")));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        let loaded = repo
+            .load_storage_setup_draft(&saved.draft_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded, saved);
+        // The secret is persisted on disk — the draft is the only copy of a
+        // key Cloudflare shows once.  Redaction is the adapter's job.
+        assert_eq!(loaded.storage.secret_access_key, "draft-secret-canary");
+
+        let stale = repo.save_storage_setup_draft(loaded.clone()).unwrap();
+        assert_eq!(stale.revision, 2);
+        let error = repo.save_storage_setup_draft(loaded).unwrap_err();
+        assert!(error.contains("storage draft changed"));
+
+        let mut not_new = storage_setup_draft("");
+        not_new.revision = 3;
+        assert!(repo
+            .save_storage_setup_draft(not_new)
+            .unwrap_err()
+            .contains("must start at revision 0"));
+    }
+
+    #[test]
+    fn storage_setup_draft_cas_failure_scrubs_the_submitted_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let saved = repo
+            .save_storage_setup_draft(storage_setup_draft("failed-save-secret-canary"))
+            .unwrap();
+        let stale = saved.clone();
+        repo.save_storage_setup_draft(saved).unwrap();
+
+        STORAGE_SETUP_DRAFT_SECRET_ZEROIZE_COUNT.with(|count| count.set(0));
+        assert!(repo
+            .save_storage_setup_draft(stale)
+            .unwrap_err()
+            .contains("storage draft changed"));
+        // One scrub is the loaded current draft; the second is the submitted
+        // stale draft that the error path owns. Removing the latter would
+        // leave the caller-provided secret allocation unscrubbed.
+        STORAGE_SETUP_DRAFT_SECRET_ZEROIZE_COUNT.with(|count| assert_eq!(count.get(), 2));
+    }
+
+    #[test]
+    fn storage_setup_draft_creation_is_capped_but_updates_are_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let mut first = None;
+        for _ in 0..mallard_domain::MAX_STORAGE_SETUP_DRAFTS {
+            let saved = repo
+                .save_storage_setup_draft(storage_setup_draft(""))
+                .unwrap();
+            first.get_or_insert(saved);
+        }
+        let error = repo
+            .save_storage_setup_draft(storage_setup_draft(""))
+            .unwrap_err();
+        assert!(error.contains("too many storage drafts"));
+
+        let mut update = first.unwrap();
+        update.storage.name = "renamed at the cap".to_string();
+        assert_eq!(repo.save_storage_setup_draft(update).unwrap().revision, 2);
+    }
+
+    #[test]
+    fn storage_setup_draft_discard_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let saved = repo
+            .save_storage_setup_draft(storage_setup_draft(""))
+            .unwrap();
+        assert!(repo.delete_storage_setup_draft(&saved.draft_id).unwrap());
+        assert!(!repo.delete_storage_setup_draft(&saved.draft_id).unwrap());
+        let unknown =
+            mallard_domain::StorageSetupDraftId::parse(generated_named_id("storagedraft").unwrap())
+                .unwrap();
+        assert!(!repo.delete_storage_setup_draft(&unknown).unwrap());
+    }
+
+    #[test]
+    fn storage_setup_draft_listing_reports_value_free_warnings_for_unreadable_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let readable = repo
+            .save_storage_setup_draft(storage_setup_draft("kept-secret"))
+            .unwrap();
+        let mut older = storage_setup_draft("");
+        older.created_at = 1;
+        older.updated_at = 1;
+        let older = repo.save_storage_setup_draft(older).unwrap();
+        // A wrong-typed field makes serde echo the value in its message;
+        // the listing must never forward that text.
+        fs::write(
+            repo.root()
+                .join("storage_drafts")
+                .join("storagedraft-000000000000000000000000.json"),
+            br#"{"schema":1,"draft_id":"storagedraft-000000000000000000000000","revision":"leaked-secret-canary","storage":{},"created_at":1,"updated_at":1}"#,
+        )
+        .unwrap();
+
+        let (drafts, warnings) = repo.list_storage_setup_drafts().unwrap();
+        assert_eq!(
+            drafts
+                .iter()
+                .map(|draft| draft.draft_id.clone())
+                .collect::<Vec<_>>(),
+            vec![readable.draft_id, older.draft_id],
+            "readable drafts stay listed, newest first"
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("unreadable storage draft"));
+        for warning in &warnings {
+            assert!(!warning.contains("leaked-secret-canary"));
+        }
+    }
+
+    #[test]
+    fn storage_setup_draft_file_identity_must_match_its_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let saved = repo
+            .save_storage_setup_draft(storage_setup_draft(""))
+            .unwrap();
+        let imposter =
+            mallard_domain::StorageSetupDraftId::parse(generated_named_id("storagedraft").unwrap())
+                .unwrap();
+        fs::copy(
+            repo.storage_setup_draft_path(&saved.draft_id),
+            repo.storage_setup_draft_path(&imposter),
+        )
+        .unwrap();
+        let error = repo.load_storage_setup_draft(&imposter).unwrap_err();
+        assert!(error.contains("contains draft"));
     }
 }

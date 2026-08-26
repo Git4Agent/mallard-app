@@ -79,14 +79,38 @@ filesystem and storage backend used by these test flows.
 
 ### 2. Connect the shared Cloudflare R2 storage
 
-The bucket location and credentials are included in the private submission
-details. Do not add them to this repository, a project file, or an issue.
+Install Cloudflare Wrangler and make sure `wrangler` is available on `PATH`.
+The copied agent instruction checks this first. If Wrangler is missing, it
+stops, asks for approval, and shows `npm install --global wrangler@latest`;
+it never installs the dependency without explicit approval. Mallard invokes
+`wrangler` directly, so a project-local-only install is not sufficient.
+Mallard uses Wrangler's authenticated Cloudflare session; the setup flow can
+open the system browser if sign-in or consent is required.
 
 1. In Mallard, open storage settings and add a **Cloudflare R2** storage.
-2. Paste the supplied **S3 API URL**. Mallard derives the R2 account, endpoint,
-   and bucket location from this URL; confirm the populated values.
-3. Enter the supplied **Access Key ID** and **Secret Access Key**.
-4. Save the storage.
+2. Either enter the five connection fields directly, or choose a storage name,
+   select **Set up with an agent**, and paste the copied instruction into the
+   agent.
+3. For agent setup, the agent may need separate one-time execution approval
+   before it starts the exact Mallard CLI setup command. This approval lets
+   that command write the current user's `~/.mallard` state and launch the
+   system browser; it does not authorize a shell, a broader command prefix,
+   or browser control. If approval is declined, setup stops instead of using
+   another home, temporary state, `sudo`, or direct configuration edits.
+4. In the system browser, personally review and complete Cloudflare login,
+   MFA, and consent. The agent does not control or inspect the browser and
+   never receives credentials.
+5. Wait for the CLI to fill the open Mallard setup draft. Review or edit the
+   populated connection values in Mallard, optionally choose **Test
+   connection**, and then personally choose **Finish setup**. The CLI does not
+   test or commit the storage. Mallard loads the Secret Access Key only for the
+   exact draft opened in the editor, where the existing **Show** control lets
+   you review it; background draft listings and committed storage snapshots
+   remain redacted.
+
+Manual **Finish setup** and **Save storage** use the same exact R2 capability
+probe before committing connection changes. Leaving the Secret Access Key
+blank while editing an existing storage preserves the backend-held value.
 
 Credentials and machine-specific paths are stored only in Mallard's local
 metadata under `~/.mallard/`; they are never uploaded inside a portable
@@ -99,22 +123,34 @@ macOS app and the Windows per-user installer. In **New storage → Cloudflare
 R2**, **Set up with an agent** copies the exact packaged executable path and a
 credential-free instruction. The installer does not modify PATH.
 
-The CLI can connect existing credentials, provision a new bucket and
-exact-bucket credential, verify a configured storage, and explicitly recover
-an interrupted setup:
+R2 has one setup command. The copied instruction first saves the exact open
+schema-1 setup draft and includes its non-secret ID and expected revision in
+the command. The CLI uses the current Wrangler login, selects the only
+available account, creates or reuses a deterministic bucket with a readable
+slug derived from the storage name, opens Cloudflare Pipelines' hosted
+credential-consent broker in the system browser,
+receives the callback on loopback, and revision-safely fills that same draft:
 
 ```sh
 mallard-cli storage r2 --help
-mallard-cli storage list
-mallard-cli storage verify <storage-id>
-mallard-cli storage r2 cleanup <setup-id>
+mallard-cli storage r2 setup --name "Team backup" \
+  --draft-id "storagedraft-…" --expected-revision 3
 ```
 
-Secret Access Keys and Cloudflare bootstrap tokens are accepted only through
-a hidden prompt or a bounded stdin option, never through command arguments or
-environment variables. See
-[PLAN_AGENT_ASSISTED_R2_SETUP.md](./docs/PLAN_AGENT_ASSISTED_R2_SETUP.md) for
-the security, recovery, and packaging contracts.
+The user—not the agent—reviews browser login, MFA, and consent. Credentials
+never appear in a command argument or environment variable, and the CLI does
+not print them. If Wrangler exposes multiple accounts, setup stops instead of
+guessing which account to use. When the command succeeds, the running app
+uses the redacted background update only as a signal, exact-loads that one
+draft into the editor, and leaves every field—including the revealable Secret
+Access Key—editable. The user may test the connection and is the only person
+who finishes the setup; that final in-app action performs the capability probe
+and commits the storage. The agent stops at the CLI success or failure result;
+it does not invoke Computer Use, take screenshots, automate the browser, or
+inspect Mallard's window to verify the draft.
+Discarding the Mallard draft removes only the local draft. It does not revoke
+an R2 access key or delete a bucket that the user approved in Cloudflare; if
+the setup is abandoned, remove those resources from the Cloudflare dashboard.
 
 ### Test Flow 1: Pull the public demo project
 
@@ -535,10 +571,10 @@ implementation notes, and safety contract.
   review, project files, and status UI.
 - `src/components/project-sync/api.ts` and `src/types.ts` — Tauri command and
   DTO contracts.
-- `crates/mallard-application/` — storage setup and Cloudflare provisioning
-  use cases shared by desktop and CLI adapters.
-- `crates/mallard-cli/` — the packaged storage CLI, hidden-input handling,
-  stable output schema, and process exit contract.
+- `crates/mallard-application/` — the verified, atomic storage setup use case
+  shared by the desktop state and CLI adapter.
+- `crates/mallard-cli/` — the packaged storage CLI, Wrangler/browser R2
+  onboarding, stable output schema, and process exit contract.
 - `crates/mallard-infrastructure/src/providers/` — the compile-time provider
   registry and the Codex and Claude adapters (profiles, discovery, history,
   codecs, materialization, and session actions).
@@ -551,7 +587,7 @@ implementation notes, and safety contract.
 - `crates/mallard-infrastructure/src/storage_core/` — the shared object-store
   transport, including the local-folder and S3/R2 stores.
 - `crates/mallard-infrastructure/src/r2_setup_journal.rs` — bounded,
-  non-secret recovery state for interrupted R2 probes and token cleanup.
+  non-secret recovery state for interrupted R2 capability probes.
 - `src/components/storage-catalog/` and `src-tauri/src/storage_catalog/` — the
   independent scope-rowed Library UI, provider adapters, plans, persistence,
   per-resource remote protocol, and journaled apply behavior.

@@ -85,7 +85,8 @@ async function macosDmgPath(buildArgs) {
 }
 
 async function stageCliBinary(buildArgs) {
-  if (buildArgs[0] !== "build") return;
+  const command = buildArgs[0];
+  if (command !== "build" && command !== "dev") return;
 
   const explicitTarget = buildTarget(buildArgs);
   const configuredTarget = explicitTarget || process.env.CARGO_BUILD_TARGET;
@@ -93,12 +94,19 @@ async function stageCliBinary(buildArgs) {
   if (target === "universal-apple-darwin") {
     throw new Error("Universal macOS CLI staging is not supported; build one concrete Apple target at a time.");
   }
-  const debug = buildArgs.includes("--debug") || buildArgs.includes("-d");
-  const profile = debug ? "debug" : "release";
+  const release = command === "build"
+    ? !buildArgs.includes("--debug") && !buildArgs.includes("-d")
+    : buildArgs.includes("--release");
+  const profile = release ? "release" : "debug";
   const cargoArgs = ["build", "--locked", "-p", "mallard-cli"];
-  if (!debug) cargoArgs.push("--release");
+  if (release) cargoArgs.push("--release");
   if (explicitTarget) cargoArgs.push("--target", explicitTarget);
   await runChecked("cargo", cargoArgs);
+
+  // In development Cargo places both binaries in the same target/profile
+  // directory, which is exactly where `get_mallard_cli_path` resolves the
+  // CLI. Packaging additionally needs Tauri's target-suffixed staging copy.
+  if (command === "dev") return;
 
   const windows = target.includes("windows");
   const extension = windows ? ".exe" : "";

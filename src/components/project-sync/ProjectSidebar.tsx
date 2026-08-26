@@ -4,7 +4,12 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from "react";
 import packageMetadata from "../../../package.json";
-import type { LocalProjectSummary, SetupDraftSummary, StorageConfig } from "../../types";
+import type {
+  LocalProjectSummary,
+  SetupDraftSummary,
+  StorageConfig,
+  StorageSetupDraft,
+} from "../../types";
 import Icon from "../Icons";
 import { catalogKindMeta, catalogScopeLabel } from "../storage-catalog/model";
 import type { CatalogScopeView } from "../storage-catalog/types";
@@ -132,6 +137,8 @@ interface Props {
   drafts: SetupDraftSummary[];
   activeDraftId: string | null;
   storages: StorageConfig[];
+  /** Persisted New-storage forms; rows the same way project drafts are. */
+  storageDrafts: StorageSetupDraft[];
   storageUsage: Record<string, number>;
   storageIssues?: Record<string, string>;
   activeProjectId: string | null;
@@ -151,6 +158,8 @@ interface Props {
   onToggleActivity: () => void;
   onAddProject: () => void;
   onOpenStorage: (storageId: string, settingsExpanded: boolean) => void;
+  onOpenStorageDraft: (draftId: string) => void;
+  onDiscardStorageDraft: (draftId: string) => void;
   onRemoveStorage: (storageId: string) => void;
   onAddStorage: () => void;
   onOpenCatalogMenu: () => void;
@@ -165,6 +174,7 @@ export default function ProjectSidebar({
   drafts,
   activeDraftId,
   storages,
+  storageDrafts,
   storageUsage,
   storageIssues = {},
   activeProjectId,
@@ -184,6 +194,8 @@ export default function ProjectSidebar({
   onToggleActivity,
   onAddProject,
   onOpenStorage,
+  onOpenStorageDraft,
+  onDiscardStorageDraft,
   onRemoveStorage,
   onAddStorage,
   onOpenCatalogMenu,
@@ -715,7 +727,7 @@ export default function ProjectSidebar({
             </button>
           </div>
           <div className="sidebar-links-list">
-            {storages.length === 0 ? (
+            {storages.length === 0 && storageDrafts.length === 0 ? (
               <button type="button" className="sync-sidebar-empty" onClick={onAddStorage} disabled={busy}>
                 <Icon name="plus" size={15} /> Add your first storage
               </button>
@@ -759,6 +771,47 @@ export default function ProjectSidebar({
                         ? `${storageName} is linked to ${usage} project${usage === 1 ? "" : "s"}; unlink it before removing`
                         : `Remove ${storageName}; synced files stay in storage`}
                       aria-label={`Remove ${storageName} from Mallard`}
+                    >
+                      <Icon name="trash" size={13} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+            {/* A storage that was never created rides the same rail as the
+                ones that were, the way project drafts ride the Projects pane:
+                open resumes the form, the trash discards only the draft. The
+                workspace reports the draft's storage id as the open editor,
+                so the active marker needs no extra state. */}
+            {storageDrafts.map((draft) => {
+              const draftName = draft.storage.name || "(unnamed)";
+              return (
+                <div
+                  key={draft.draft_id}
+                  className={`sidebar-profile-item sync-sidebar-draft${activeStorageId === draft.storage.id ? " active" : ""}`}
+                >
+                  <button
+                    type="button"
+                    className="sidebar-profile-main"
+                    onClick={() => onOpenStorageDraft(draft.draft_id)}
+                    disabled={busy}
+                    title={`Continue setting up ${draftName}`}
+                    aria-label={`Continue setting up ${draftName} — resumable storage draft`}
+                  >
+                    <Icon name={draft.storage.kind === "local" ? "drive" : "cloud"} size={16} />
+                    <span>{draftName}</span>
+                    <span className="sync-draft-badge">Draft</span>
+                  </button>
+                  <div className="sidebar-profile-actions">
+                    <button
+                      type="button"
+                      className="sidebar-profile-remove"
+                      onClick={() => onDiscardStorageDraft(draft.draft_id)}
+                      disabled={busy}
+                      title={draft.storage.kind === "s3"
+                        ? `Discard the local draft for ${draftName}; Cloudflare bucket and access-key resources are kept`
+                        : `Discard the local draft for ${draftName}; the selected folder and its contents are kept`}
+                      aria-label={`Discard the storage draft for ${draftName}`}
                     >
                       <Icon name="trash" size={13} />
                     </button>

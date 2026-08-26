@@ -1,8 +1,10 @@
-//! Watch the machine-local project-sync document and announce newer revisions.
+//! Watch machine-local project-sync state and announce externally visible changes.
 //!
 //! Persistence replaces `sync_config.json` atomically, so the parent directory
-//! is watched instead of a file inode.  The event payload deliberately carries
-//! only a revision; storage credentials remain behind the command boundary.
+//! is watched instead of a file inode. Storage setup drafts live one directory
+//! below that root and may be created after application startup, so the root is
+//! watched recursively. Event payloads deliberately carry no configuration or
+//! draft values; storage credentials remain behind the command boundary.
 
 use super::persistence::LocalStateRepository;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -14,11 +16,34 @@ use std::time::Duration;
 use tauri::Emitter as _;
 
 pub const CONFIG_CHANGED_EVENT: &str = "project-sync-config-changed";
+pub const STORAGE_SETUP_DRAFTS_CHANGED_EVENT: &str = "project-sync-storage-setup-drafts-changed";
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 pub struct ProjectSyncConfigChangedEvent {
     pub revision: u64,
+}
+
+/// A value-free signal. The frontend reloads drafts through the existing
+/// redacting command boundary instead of receiving draft contents in an event.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub struct StorageSetupDraftsChangedEvent {}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WatchChanges {
+    config: bool,
+    storage_setup_drafts: bool,
+}
+
+impl WatchChanges {
+    fn merge(&mut self, other: Self) {
+        self.config |= other.config;
+        self.storage_setup_drafts |= other.storage_setup_drafts;
+    }
+
+    fn is_empty(self) -> bool {
+        !self.config && !self.storage_setup_drafts
+    }
 }
 
 /// Kept as managed Tauri state so the native watcher remains alive for the
@@ -33,18 +58,25 @@ impl ConfigWatcher {
         let repository = LocalStateRepository::from_user_home()
             .map_err(|_| "Mallard could not initialize live configuration refresh.".to_string())?;
         let config_path = repository.config_path();
+        let storage_setup_drafts_path = repository.root().join("storage_drafts");
         // A malformed document is surfaced by the normal shell load. It must
         // not prevent the desktop process from starting, and it must not seed
         // an event until a later valid revision can be loaded.
         let initial_revision = repository.load_config().ok().map(|config| config.revision);
-        let (sender, receiver) = mpsc::channel::<()>();
+        let (sender, receiver) = mpsc::channel::<WatchChanges>();
 
         let watched_config_path = config_path.clone();
+        let watched_storage_setup_drafts_path = storage_setup_drafts_path.clone();
         let mut watcher = RecommendedWatcher::new(
             move |result: notify::Result<Event>| {
                 if let Ok(event) = result {
-                    if event_is_relevant(&event, &watched_config_path) {
-                        let _ = sender.send(());
+                    let changes = event_changes(
+                        &event,
+                        &watched_config_path,
+                        &watched_storage_setup_drafts_path,
+                    );
+                    if !changes.is_empty() {
+                        let _ = sender.send(changes);
                     }
                 }
             },
@@ -52,38 +84,46 @@ impl ConfigWatcher {
         )
         .map_err(|_| "Mallard could not initialize live configuration refresh.".to_string())?;
         watcher
-            .watch(repository.root(), RecursiveMode::NonRecursive)
+            .watch(repository.root(), RecursiveMode::Recursive)
             .map_err(|_| "Mallard could not start live configuration refresh.".to_string())?;
 
         let worker = thread::Builder::new()
             .name("mallard-config-watcher".to_string())
             .spawn(move || {
                 let mut last_emitted_revision = initial_revision;
-                while receiver.recv().is_ok() {
+                while let Ok(mut changes) = receiver.recv() {
                     loop {
                         match receiver.recv_timeout(DEBOUNCE) {
-                            Ok(()) => continue,
+                            Ok(next) => changes.merge(next),
                             Err(RecvTimeoutError::Timeout) => break,
                             Err(RecvTimeoutError::Disconnected) => return,
                         }
                     }
 
-                    // `load_config` takes the normal cross-process lock and
-                    // validates the bounded document.  A partial, malformed,
-                    // or older external write produces no frontend event.
-                    let Ok(config) = repository.load_config() else {
-                        continue;
-                    };
-                    if last_emitted_revision.is_some_and(|revision| config.revision <= revision) {
-                        continue;
+                    if changes.config {
+                        // `load_config` takes the normal cross-process lock and
+                        // validates the bounded document. A partial, malformed,
+                        // or older external write produces no config event.
+                        if let Ok(config) = repository.load_config() {
+                            if last_emitted_revision
+                                .is_none_or(|revision| config.revision > revision)
+                            {
+                                last_emitted_revision = Some(config.revision);
+                                let _ = app.emit(
+                                    CONFIG_CHANGED_EVENT,
+                                    ProjectSyncConfigChangedEvent {
+                                        revision: config.revision,
+                                    },
+                                );
+                            }
+                        }
                     }
-                    last_emitted_revision = Some(config.revision);
-                    let _ = app.emit(
-                        CONFIG_CHANGED_EVENT,
-                        ProjectSyncConfigChangedEvent {
-                            revision: config.revision,
-                        },
-                    );
+                    if changes.storage_setup_drafts {
+                        let _ = app.emit(
+                            STORAGE_SETUP_DRAFTS_CHANGED_EVENT,
+                            StorageSetupDraftsChangedEvent {},
+                        );
+                    }
                 }
             })
             .map_err(|_| "Mallard could not start live configuration refresh.".to_string())?;
@@ -95,17 +135,32 @@ impl ConfigWatcher {
     }
 }
 
-fn event_is_relevant(event: &Event, config_path: &Path) -> bool {
+fn event_changes(
+    event: &Event,
+    config_path: &Path,
+    storage_setup_drafts_path: &Path,
+) -> WatchChanges {
     if !matches!(
         event.kind,
         EventKind::Any | EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
     ) {
-        return false;
+        return WatchChanges::default();
     }
-    event
-        .paths
-        .iter()
-        .any(|path| same_config_filename(path, config_path))
+    WatchChanges {
+        config: event
+            .paths
+            .iter()
+            .any(|path| same_config_filename(path, config_path)),
+        // Include the directory itself and its direct children. Named
+        // temporary files are part of an atomic save; the eventual rename is
+        // debounced into the same value-free refresh signal.
+        storage_setup_drafts: event.paths.iter().any(|path| {
+            path == storage_setup_drafts_path
+                || path
+                    .parent()
+                    .is_some_and(|parent| parent == storage_setup_drafts_path)
+        }),
+    }
 }
 
 fn same_config_filename(path: &Path, config_path: &Path) -> bool {
@@ -123,35 +178,112 @@ mod tests {
     }
 
     #[test]
-    fn accepts_atomic_replace_shapes_for_only_the_config_file() {
+    fn storage_draft_change_event_payload_is_value_free() {
+        assert_eq!(
+            serde_json::to_value(StorageSetupDraftsChangedEvent {}).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn classifies_atomic_replace_shapes_for_only_the_config_file() {
         let config_path = Path::new("/tmp/.mallard/sync_config.json");
-        assert!(event_is_relevant(
-            &event(
-                EventKind::Create(CreateKind::File),
-                "/tmp/.mallard/sync_config.json"
+        let drafts_path = Path::new("/tmp/.mallard/storage_drafts");
+        assert_eq!(
+            event_changes(
+                &event(
+                    EventKind::Create(CreateKind::File),
+                    "/tmp/.mallard/sync_config.json"
+                ),
+                config_path,
+                drafts_path,
             ),
-            config_path
-        ));
-        assert!(event_is_relevant(
-            &event(
-                EventKind::Modify(ModifyKind::Any),
-                "/tmp/.mallard/sync_config.json"
+            WatchChanges {
+                config: true,
+                storage_setup_drafts: false
+            }
+        );
+        assert_eq!(
+            event_changes(
+                &event(
+                    EventKind::Modify(ModifyKind::Any),
+                    "/tmp/.mallard/sync_config.json"
+                ),
+                config_path,
+                drafts_path,
             ),
-            config_path
-        ));
-        assert!(event_is_relevant(
-            &event(
-                EventKind::Remove(RemoveKind::File),
-                "/tmp/.mallard/sync_config.json"
+            WatchChanges {
+                config: true,
+                storage_setup_drafts: false
+            }
+        );
+        assert_eq!(
+            event_changes(
+                &event(
+                    EventKind::Remove(RemoveKind::File),
+                    "/tmp/.mallard/sync_config.json"
+                ),
+                config_path,
+                drafts_path,
             ),
-            config_path
-        ));
-        assert!(!event_is_relevant(
-            &event(
-                EventKind::Modify(ModifyKind::Any),
-                "/tmp/.mallard/other.json"
+            WatchChanges {
+                config: true,
+                storage_setup_drafts: false
+            }
+        );
+        assert_eq!(
+            event_changes(
+                &event(
+                    EventKind::Modify(ModifyKind::Any),
+                    "/tmp/.mallard/other.json"
+                ),
+                config_path,
+                drafts_path,
             ),
-            config_path
-        ));
+            WatchChanges::default()
+        );
+    }
+
+    #[test]
+    fn classifies_storage_draft_directory_and_atomic_file_events() {
+        let config_path = Path::new("/tmp/.mallard/sync_config.json");
+        let drafts_path = Path::new("/tmp/.mallard/storage_drafts");
+        for path in [
+            "/tmp/.mallard/storage_drafts",
+            "/tmp/.mallard/storage_drafts/.tmpAbCd",
+            "/tmp/.mallard/storage_drafts/storage-draft-123.json",
+        ] {
+            assert_eq!(
+                event_changes(
+                    &event(EventKind::Modify(ModifyKind::Any), path),
+                    config_path,
+                    drafts_path,
+                ),
+                WatchChanges {
+                    config: false,
+                    storage_setup_drafts: true,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_nested_and_unrelated_machine_state() {
+        let config_path = Path::new("/tmp/.mallard/sync_config.json");
+        let drafts_path = Path::new("/tmp/.mallard/storage_drafts");
+        for path in [
+            "/tmp/.mallard/logs/activity.jsonl",
+            "/tmp/.mallard/storage_drafts/nested/draft.json",
+            "/tmp/.mallard/project_drafts/project-draft-123.json",
+        ] {
+            assert_eq!(
+                event_changes(
+                    &event(EventKind::Modify(ModifyKind::Any), path),
+                    config_path,
+                    drafts_path,
+                ),
+                WatchChanges::default(),
+            );
+        }
     }
 }

@@ -2550,16 +2550,18 @@ mod tests {
     fn claude_discovery_follows_the_resumed_leaf_home_not_copied_history() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
+        let project_child = project.join("src-tauri");
         let original_cwd = temp.path().join("original");
         let claude = temp.path().join("claude");
-        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&project_child).unwrap();
         fs::create_dir_all(&original_cwd).unwrap();
         fs::create_dir_all(&claude).unwrap();
 
         // session-a lives in a foreign directory; session-b copied its
-        // history but was resumed with a leaf inside the project. Ownership
-        // follows each session's own leaf home: the copied foreign record
-        // neither blocks session-b nor pulls session-a in.
+        // history but was resumed inside the project. A later turn changes its
+        // cwd to a child directory without changing the session ID. Ownership
+        // follows the resumed session's launch home: neither copied history nor
+        // per-turn shell state moves it.
         let copied_record = serde_json::json!({
             "type": "user",
             "uuid": "user-original",
@@ -2582,9 +2584,21 @@ mod tests {
                 "type": "text", "text": "resumed"
             }]}
         });
+        let resumed_child_turn = serde_json::json!({
+            "type": "user",
+            "uuid": "user-after-cd",
+            "parentUuid": "assistant-resumed",
+            "sessionId": "session-b",
+            "cwd": project_child,
+            "message": {"role": "user", "content": "continue"}
+        });
         write(
             &claude.join("projects/source/session-b.jsonl"),
-            format!("{}\n{}\n", copied_record, resumed_leaf).as_bytes(),
+            format!(
+                "{}\n{}\n{}\n",
+                copied_record, resumed_leaf, resumed_child_turn
+            )
+            .as_bytes(),
         );
 
         let request = CaptureRequest {

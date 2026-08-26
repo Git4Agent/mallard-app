@@ -24,6 +24,8 @@ pub const RESTORE_PLAN_SCHEMA: u32 = 1;
 pub const SETUP_DRAFT_SCHEMA: u32 = 1;
 pub const SETUP_TRANSACTION_SCHEMA: u32 = 1;
 pub const MAX_SETUP_DRAFTS: usize = 64;
+pub const STORAGE_SETUP_DRAFT_SCHEMA: u32 = 1;
+pub const MAX_STORAGE_SETUP_DRAFTS: usize = 16;
 /// Bound on provider scopes in one manifest (the project scope is separate).
 pub const MAX_PROVIDER_SCOPES: usize = 64;
 
@@ -188,6 +190,7 @@ named_id!(MaterializationId, "materialization id");
 named_id!(ConversationOperationId, "conversation operation id");
 named_id!(LocalProviderProfileId, "local provider profile id");
 named_id!(SetupDraftId, "setup draft id");
+named_id!(StorageSetupDraftId, "storage setup draft id");
 
 impl CloudThreadId {
     /// Mint a fresh cloud thread identity. Called only at push apply — plans
@@ -2785,6 +2788,60 @@ impl ProjectSetupDraft {
         }
         if self.created_at > self.updated_at {
             return Err(format!("draft '{}' has invalid timestamps", self.draft_id));
+        }
+        Ok(())
+    }
+}
+
+/// A resumable, machine-local storage setup draft.  It persists the full
+/// (possibly half-edited) `StorageConfig`, including the secret access key,
+/// so drafts require the same private file permissions as the config itself.
+/// Adapters must redact the secret before a draft crosses any IPC boundary.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StorageSetupDraft {
+    pub schema: u32,
+    pub draft_id: StorageSetupDraftId,
+    /// The draft's `storage.id` is inert restore metadata: committing a draft
+    /// goes through the verified upsert, which mints or resolves storage
+    /// identities itself and never trusts this one.
+    pub storage: StorageConfig,
+    pub revision: u64,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl StorageSetupDraft {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != STORAGE_SETUP_DRAFT_SCHEMA {
+            return Err(format!(
+                "unsupported storage setup draft schema {} (expected {})",
+                self.schema, STORAGE_SETUP_DRAFT_SCHEMA
+            ));
+        }
+        // A draft holds a half-edited form; bound the text instead of
+        // demanding completeness.  The verified upsert runs the strict
+        // validation.  Unlike the project draft's pending storage, the two
+        // credential fields are bounded here too.  Error strings never carry
+        // field values — every draft may hold a secret.
+        validate_display_text("draft storage name", &self.storage.name, true)?;
+        for value in [
+            &self.storage.bucket,
+            &self.storage.access_key_id,
+            &self.storage.secret_access_key,
+            &self.storage.account_id,
+            &self.storage.s3_endpoint,
+            &self.storage.region,
+            &self.storage.local_dir,
+        ] {
+            if value.len() > 4_096 || value.chars().any(char::is_control) {
+                return Err("invalid storage draft field".to_string());
+            }
+        }
+        if self.created_at > self.updated_at {
+            return Err(format!(
+                "storage draft '{}' has invalid timestamps",
+                self.draft_id
+            ));
         }
         Ok(())
     }

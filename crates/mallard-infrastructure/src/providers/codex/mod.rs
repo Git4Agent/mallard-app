@@ -9,11 +9,11 @@ pub mod materialization;
 
 use super::traits::{
     AgentProviderAdapter, MaterializationTargetRequest, PlannedProviderTarget,
-    ProviderCapabilityLevel, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
-    SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
-    SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
-    SessionRewriteRequest, SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice,
-    SessionTimelineQuery,
+    ProviderCapabilityLevel, ProviderCliLauncher, ProviderDescriptor, SessionActionContext,
+    SessionActionDescriptor, SessionActionOutcome, SessionActionRequest, SessionAdapter,
+    SessionAnalysis, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
+    SessionFileMetadata, SessionFileSummary, SessionRewriteRequest, SessionTimelineContext,
+    SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::conversation_codec::{
     analyze_codex_transcript, CODEX_CODEC_VERSION, CODEX_LINEAGE_CODEC_KEY,
@@ -96,6 +96,10 @@ impl AgentProviderAdapter for CodexAdapter {
             profile_label: ".codex profile".to_string(),
             default_profile_directory: Some(".codex".to_string()),
             setup_default: true,
+            cli_launcher: Some(ProviderCliLauncher {
+                program: "codex".to_string(),
+                display_name: "Codex".to_string(),
+            }),
             capabilities: ProviderCapabilityLevel::ResumableWithConflictPreservation,
             adapter_version: 1,
         }

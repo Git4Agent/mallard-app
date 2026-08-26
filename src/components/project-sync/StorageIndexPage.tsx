@@ -1,5 +1,5 @@
 import Icon from "../Icons";
-import type { ProjectStorageLink, StorageConfig } from "../../types";
+import type { ProjectStorageLink, StorageConfig, StorageSetupDraft } from "../../types";
 import SyncPathBar, { type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import { storageSubtitle } from "./ProjectLinksWorkspace";
 
@@ -17,10 +17,14 @@ interface Props {
   storages: StorageConfig[];
   links: ProjectStorageLink[];
   storageIssues: Record<string, string>;
+  /** Persisted setup drafts — storages that were never created. A row only
+      reopens its draft; discard lives on the setup page, like every verb. */
+  drafts: StorageSetupDraft[];
   busy: boolean;
   /** Theme and app-wide commands; the bar here is the window's only chrome. */
   appActions: PathBarMenuGroup[];
   onOpenStorage: (storageId: string) => void;
+  onOpenStorageDraft: (draftId: string) => void;
   onAddStorage: () => void;
 }
 
@@ -28,9 +32,11 @@ export default function StorageIndexPage({
   storages,
   links,
   storageIssues,
+  drafts,
   busy,
   appActions,
   onOpenStorage,
+  onOpenStorageDraft,
   onAddStorage,
 }: Props) {
   return (
@@ -54,7 +60,7 @@ export default function StorageIndexPage({
       />
       <main className="sync-main sync-project-links-page sync-storage-index-page">
         <section className="profile-links-section" aria-label="Storages">
-          {storages.length === 0 ? (
+          {storages.length === 0 && drafts.length === 0 ? (
             <div className="profile-links-empty">
               <Icon name="drive" size={24} />
               <span>Add a storage to choose where projects sync.</span>
@@ -106,6 +112,30 @@ export default function StorageIndexPage({
                       <span>Projects</span>
                       <b>{linked}</b>
                     </span>
+                    <Icon name="chevron-right" size={12} className="sync-storage-index-open" aria-hidden="true" />
+                  </button>
+                );
+              })}
+              {drafts.map((draft) => {
+                const name = draft.storage.name || "(unnamed)";
+                return (
+                  <button
+                    key={draft.draft_id}
+                    type="button"
+                    className="sync-storage-index-row"
+                    disabled={busy}
+                    onClick={() => onOpenStorageDraft(draft.draft_id)}
+                    title={`Continue setting up ${name}`}
+                    aria-label={`Continue setting up ${name} — resumable storage draft`}
+                  >
+                    <span className="sync-storage-repository-icon">
+                      <Icon name={draft.storage.kind === "local" ? "drive" : "cloud"} size={14} />
+                    </span>
+                    <span className="sync-storage-index-copy">
+                      <strong>{name}</strong>
+                      <small>Setup not finished — not connected to Mallard yet</small>
+                    </span>
+                    <span className="sync-draft-badge">Draft</span>
                     <Icon name="chevron-right" size={12} className="sync-storage-index-open" aria-hidden="true" />
                   </button>
                 );

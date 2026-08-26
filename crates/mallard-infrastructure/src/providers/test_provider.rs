@@ -195,6 +195,7 @@ impl AgentProviderAdapter for TestProviderAdapter {
             profile_label: ".testprov profile".to_string(),
             default_profile_directory: Some(".testprov".to_string()),
             setup_default: false,
+            cli_launcher: None,
             capabilities: ProviderCapabilityLevel::Resumable,
             adapter_version: 1,
         }

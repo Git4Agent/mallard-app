@@ -21,6 +21,9 @@ function Harness() {
         activeDraftId={null}
         storages={[]}
         storageUsage={{}}
+        storageDrafts={[]}
+        onOpenStorageDraft={() => undefined}
+        onDiscardStorageDraft={() => undefined}
         activeProjectId={null}
         activeStorageId={null}
         catalogScopes={[]}

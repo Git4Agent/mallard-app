@@ -37,6 +37,8 @@ import type {
   SetupDraftSummary,
   SiblingBundleStatus,
   StorageConfig,
+  StorageSetupDraft,
+  StorageSetupDraftsChangedEvent,
   SyncConfig,
   ThreadSyncComparison,
 } from "../../types";
@@ -134,6 +136,17 @@ function sameStorageConfig(left: SyncConfig["storages"][number], right: SyncConf
     && left.region === right.region
     && left.local_dir === right.local_dir
     && left.supports_conditional_writes === right.supports_conditional_writes;
+}
+
+function sameR2Connection(left: SyncConfig["storages"][number], right: SyncConfig["storages"][number]): boolean {
+  return left.kind === "s3"
+    && right.kind === "s3"
+    && left.bucket === right.bucket
+    && left.access_key_id === right.access_key_id
+    && left.secret_access_key === right.secret_access_key
+    && left.account_id === right.account_id
+    && left.s3_endpoint === right.s3_endpoint
+    && left.region === right.region;
 }
 
 export function applyStorageDraft(
@@ -363,6 +376,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [storageEditorRequest, setStorageEditorRequest] = useState<
     | { mode: "open"; storageId: string; settingsExpanded: boolean; requestId: number }
     | { mode: "create"; storageKind: "local" | "s3"; requestId: number }
+    | { mode: "resume-draft"; draft: StorageSetupDraft; requestId: number }
     | { mode: "close"; requestId: number }
     | null
   >(null);
@@ -431,6 +445,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const sidebarResizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
 
   const [setupDrafts, setSetupDrafts] = useState<SetupDraftSummary[]>([]);
+  const [storageSetupDrafts, setStorageSetupDrafts] = useState<StorageSetupDraft[]>([]);
   const [setupDraftId, setSetupDraftId] = useState<string | null>(null);
   const [editingBinding, setEditingBinding] = useState<ProjectBindingDraft | null>(null);
 
@@ -460,6 +475,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const configRef = useRef<SyncConfig>(EMPTY_CONFIG);
   const configSnapshotValidRef = useRef(false);
   const configEventRequest = useRef(0);
+  const storageSetupDraftRequest = useRef(0);
   const readyHostIdentity = useRef<{ hostId: string; revision: number } | null>(null);
 
   const adoptConfigSnapshot = useCallback((saved: SyncConfig) => {
@@ -944,6 +960,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setAddingCatalogScope(false);
     setCatalogScopeId(null);
     setSetupDrafts([]);
+    setStorageSetupDrafts([]);
     setCatalogScopes([]);
     setActiveProjectSubview({ kind: "overview" });
     setActiveProjectId(null);
@@ -1098,6 +1115,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       setRegistrations([]);
     }
     await refreshSetupDrafts(requestId);
+    if (shellRequest.current !== requestId) return unavailableResult();
+    await refreshStorageSetupDrafts(requestId);
     if (shellRequest.current !== requestId) return unavailableResult();
     await refreshCatalogScopes(requestId);
     if (shellRequest.current !== requestId) return unavailableResult();
@@ -1464,6 +1483,41 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
+  const refreshStorageSetupDrafts = async (shellRequestId?: number, workflowEpoch?: number) => {
+    const requestedWorkflowEpoch = workflowEpoch ?? hostWorkflowEpoch.current;
+    if (
+      (shellRequestId !== undefined && shellRequest.current !== shellRequestId)
+      || hostWorkflowEpoch.current !== requestedWorkflowEpoch
+    ) return;
+    const requestId = ++storageSetupDraftRequest.current;
+    try {
+      const listed = await projectSyncApi.listStorageSetupDrafts();
+      if (
+        requestId !== storageSetupDraftRequest.current
+        || (shellRequestId !== undefined && shellRequest.current !== shellRequestId)
+        || hostWorkflowEpoch.current !== requestedWorkflowEpoch
+      ) return;
+      setStorageSetupDrafts(listed.drafts);
+    } catch {
+      // Drafts are a convenience surface; the storages index stays usable.
+    }
+  };
+
+  useEffect(() => {
+    const unlisten = listen<StorageSetupDraftsChangedEvent>(
+      "project-sync-storage-setup-drafts-changed",
+      () => {
+        // The native event is intentionally value-free. Reload through the
+        // command that redacts `secret_access_key` and exposes only
+        // `secret_present` to the webview.
+        void refreshStorageSetupDrafts();
+      },
+    );
+    return () => {
+      void unlisten.then((dispose) => dispose());
+    };
+  }, []);
+
   const closeWorkspaceSettings = () => {
     closeProjectSubview();
     setPendingPush(null);
@@ -1646,6 +1700,43 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       await refreshSetupDrafts(undefined, workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       notify("Draft discarded — no files touched.");
+    } catch (reason) {
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
+    } finally {
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
+    }
+  };
+
+  /** Discard a storage setup draft from the rail. If that draft's form is
+      open (the workspace reports its storage id as the active editor), the
+      editor closes too — its state describes a draft that no longer exists. */
+  const discardStorageSetupDraft = async (draftId: string) => {
+    const workflowEpoch = hostWorkflowEpoch.current;
+    const draft = storageSetupDrafts.find((candidate) => candidate.draft_id === draftId);
+    const discardImpact = draft?.storage.kind === "s3"
+      ? "This removes only Mallard’s local setup draft. It does not delete any Cloudflare bucket or access key that may have been created during preparation."
+      : draft?.storage.kind === "local"
+        ? "This removes only Mallard’s local setup draft. The selected folder and its contents are not changed."
+        : "This removes only Mallard’s local setup draft; external storage resources are not changed.";
+    const approved = await confirm(
+      `Discard the storage draft for “${draft?.storage.name || "(unnamed)"}”?\n\n${discardImpact}`,
+      { title: "Discard storage draft" },
+    );
+    if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await projectSyncApi.discardStorageSetupDraft(draftId);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
+      if (draft && activeStorageSettingsId === draft.storage.id) {
+        setStorageEditorRequest((current) => ({
+          mode: "close",
+          requestId: (current?.requestId ?? 0) + 1,
+        }));
+      }
+      await refreshStorageSetupDrafts(undefined, workflowEpoch);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
+      notify("Storage draft discarded.");
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
@@ -3054,10 +3145,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const saveInlineStorage = async (
     storage: SyncConfig["storages"][number],
     expectedBaseline: SyncConfig["storages"][number] | null,
+    setupDraftId?: string | null,
+    setupDraftRevision?: number | null,
+    setupDraftStorageId?: string | null,
   ) => {
-    const isNewR2 = storage.kind === "s3"
-      && !configRef.current.storages.some((candidate) => candidate.id === storage.id);
-    if (isNewR2) {
+    const needsVerifiedR2Save = storage.kind === "s3"
+      && (!expectedBaseline || !sameR2Connection(storage, expectedBaseline));
+    if (needsVerifiedR2Save) {
       const apiUrl = r2S3ApiUrl(storage.account_id, storage.bucket, storage.s3_endpoint);
       if (!apiUrl) {
         setError("Enter a valid Cloudflare R2 S3 API URL before connecting.");
@@ -3067,12 +3161,47 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       setBusy(true);
       setError(null);
       try {
-        const result = await projectSyncApi.connectR2Storage({
+        const current = await projectSyncApi.getConfig();
+        if (hostWorkflowEpoch.current !== workflowEpoch) return false;
+        const currentStorage = current.storages.find((candidate) => candidate.id === storage.id) ?? null;
+        if (expectedBaseline) {
+          if (!currentStorage || !sameStorageConfig(currentStorage, expectedBaseline)) {
+            throw new Error("Storage settings changed outside this editor. Reload them before saving.");
+          }
+        } else if (currentStorage) {
+          throw new Error("A storage with this identity already exists. Start a new storage draft.");
+        }
+
+        const hasAnyDraftPin = setupDraftId != null
+          || setupDraftRevision != null
+          || setupDraftStorageId != null;
+        const usesPinnedDraft = !expectedBaseline
+          && !!setupDraftId
+          && setupDraftRevision != null
+          && !!setupDraftStorageId;
+        if (
+          hasAnyDraftPin
+          && !usesPinnedDraft
+        ) {
+          throw new Error("The reviewed R2 draft could not be pinned. Review the form and try Finish setup again.");
+        }
+        if (!expectedBaseline && !usesPinnedDraft && storage.secret_access_key.length === 0) {
+          throw new Error("Enter a Secret Access Key or save a complete R2 draft before finishing setup.");
+        }
+        const result = await projectSyncApi.upsertR2Storage({
+          storage_id: expectedBaseline ? storage.id : null,
+          // A blank secret may be resolved only from the exact revision and
+          // inert identity that the form persisted immediately before this
+          // user action. An explicitly typed secret does not reference the
+          // backend-held draft at all.
+          draft_id: usesPinnedDraft ? setupDraftId : null,
+          draft_revision: usesPinnedDraft ? setupDraftRevision : null,
+          draft_storage_id: usesPinnedDraft ? setupDraftStorageId : null,
           name: storage.name,
           api_url: apiUrl,
           access_key_id: storage.access_key_id,
-          secret_access_key: storage.secret_access_key,
-          expected_config_revision: configRef.current.revision,
+          secret_access_key: usesPinnedDraft ? "" : storage.secret_access_key,
+          expected_config_revision: current.revision,
         });
         if (hostWorkflowEpoch.current !== workflowEpoch) return false;
         const saved = await projectSyncApi.getConfig();
@@ -3081,11 +3210,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           || saved.revision < result.config_revision
           || !saved.storages.some((candidate) => candidate.id === result.storage_id)
         ) {
-          throw new Error("R2 connected, but its committed configuration could not be refreshed.");
+          throw new Error("R2 was verified, but its committed configuration could not be refreshed.");
         }
         if (hostWorkflowEpoch.current !== workflowEpoch) return false;
         adoptConfigSnapshot(saved);
-        notify(`Connected ${storage.name || "Cloudflare R2"}.`);
+        notify(`${expectedBaseline ? "Updated" : "Connected"} ${storage.name || "Cloudflare R2"}.`);
+        await refreshStorageSetupDrafts(undefined, workflowEpoch);
         return true;
       } catch (reason) {
         if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
@@ -3094,12 +3224,78 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
       }
     }
-    return saveStorageConfig((current) => {
+    const saved = await saveStorageConfig((current) => {
       return {
         ...current,
         storages: applyStorageDraft(current.storages, storage, expectedBaseline),
       };
     });
+    if (saved && setupDraftId) {
+      // The local-kind path has no backend draft consumer, so the frontend
+      // retires the draft after a successful create.
+      try {
+        await projectSyncApi.discardStorageSetupDraft(setupDraftId);
+      } catch {
+        // A leftover draft row is harmless; the user can discard it.
+      }
+      await refreshStorageSetupDrafts();
+    }
+    return saved;
+  };
+
+  /** Commit-free probe of the New-storage form against R2. Failures surface
+      exactly where save failures do; success is the caller's verdict to
+      render. */
+  const testInlineStorage = async (
+    storage: SyncConfig["storages"][number],
+    setupDraftId?: string | null,
+    setupDraftRevision?: number | null,
+    setupDraftStorageId?: string | null,
+  ) => {
+    const apiUrl = r2S3ApiUrl(storage.account_id, storage.bucket, storage.s3_endpoint);
+    if (!apiUrl) {
+      setError("Enter a valid Cloudflare R2 S3 API URL before testing.");
+      return false;
+    }
+    const workflowEpoch = hostWorkflowEpoch.current;
+    setBusy(true);
+    setError(null);
+    try {
+      const current = await projectSyncApi.getConfig();
+      if (hostWorkflowEpoch.current !== workflowEpoch) return false;
+      const hasAnyDraftPin = setupDraftId != null
+        || setupDraftRevision != null
+        || setupDraftStorageId != null;
+      const usesPinnedDraft = !!setupDraftId
+        && setupDraftRevision != null
+        && !!setupDraftStorageId;
+      if (
+        hasAnyDraftPin
+        && !usesPinnedDraft
+      ) {
+        throw new Error("The reviewed R2 draft could not be pinned. Review the form and try Test connection again.");
+      }
+      if (!usesPinnedDraft && storage.secret_access_key.length === 0) {
+        throw new Error("Enter a Secret Access Key or save a complete R2 draft before testing the connection.");
+      }
+      const result = await projectSyncApi.testR2Storage({
+        storage_id: null,
+        draft_id: usesPinnedDraft ? setupDraftId : null,
+        draft_revision: usesPinnedDraft ? setupDraftRevision : null,
+        draft_storage_id: usesPinnedDraft ? setupDraftStorageId : null,
+        name: storage.name,
+        api_url: apiUrl,
+        access_key_id: storage.access_key_id,
+        secret_access_key: usesPinnedDraft ? "" : storage.secret_access_key,
+        expected_config_revision: current.revision,
+      });
+      return hostWorkflowEpoch.current === workflowEpoch && result.verified;
+    } catch (reason) {
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
+      return false;
+    } finally {
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
+    }
   };
 
   const clearStorageData = async (storageId: string) => {
@@ -3196,6 +3392,42 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setStorageEditorRequest((current) => ({
       mode: "create",
       storageKind: "local",
+      requestId: (current?.requestId ?? 0) + 1,
+    }));
+  };
+
+  /** Reopen a persisted storage setup draft in the New-storage form. The
+      draft is fetched here so the workspace's request handler stays
+      synchronous, like every other editor request. */
+  const openStorageSetupDraft = async (draftId: string) => {
+    const workflowEpoch = hostWorkflowEpoch.current;
+    setError(null);
+    let draft: StorageSetupDraft | null = null;
+    try {
+      draft = await projectSyncApi.getStorageSetupDraft(draftId);
+    } catch (reason) {
+      setError(errorMessage(reason));
+      return;
+    }
+    if (hostWorkflowEpoch.current !== workflowEpoch) return;
+    if (!draft) {
+      setError("This storage draft no longer exists.");
+      await refreshStorageSetupDrafts(undefined, workflowEpoch);
+      return;
+    }
+    closeProjectSubview();
+    setSetupDraftId(null);
+    setAddingCatalogScope(false);
+    setCatalogScopeId(null);
+    setStorageIndexOpen(false);
+    setSettingsOpen(false);
+    setPendingPush(null);
+    setPushError(null);
+    if (restorePlan) closePullReview();
+    const loaded = draft;
+    setStorageEditorRequest((current) => ({
+      mode: "resume-draft",
+      draft: loaded,
       requestId: (current?.requestId ?? 0) + 1,
     }));
   };
@@ -3518,6 +3750,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         onSelectDraft={(draftId) => openSetupDraft(draftId)}
         onDiscardDraft={(draftId) => void discardSetupDraft(draftId)}
         storages={config.storages}
+        storageDrafts={storageSetupDrafts}
+        onOpenStorageDraft={(draftId) => void openStorageSetupDraft(draftId)}
+        onDiscardStorageDraft={(draftId) => void discardStorageSetupDraft(draftId)}
         storageUsage={Object.fromEntries(config.storages.map((storage) => [
           storage.id,
           config.links.filter((link) => link.storage_id === storage.id).length,
@@ -3638,9 +3873,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             storages={config.storages}
             links={config.links}
             storageIssues={storageIssues}
+            drafts={storageSetupDrafts}
             busy={busy}
             appActions={appActions}
             onOpenStorage={(storageId) => openStorageWorkspace(storageId, false)}
+            onOpenStorageDraft={(draftId) => void openStorageSetupDraft(draftId)}
             onAddStorage={openNewStorageConfiguration}
           />
         ) : (
@@ -3651,7 +3888,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             activeProjectSubview={activeProjectSubview}
             bindings={bindings}
             profiles={profiles}
+            providers={agentProviders}
             storages={config.storages}
+            storageSetupDrafts={storageSetupDrafts}
             links={config.links}
             loading={loading}
             busy={busy}
@@ -3685,6 +3924,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             onClearStorage={(storageId) => void clearStorageData(storageId)}
             onRemoveStorage={(storageId) => void removeStorage(storageId)}
             onSaveStorage={saveInlineStorage}
+            onTestStorage={testInlineStorage}
+            onStorageDraftsChanged={() => void refreshStorageSetupDrafts()}
             storageEditorRequest={storageEditorRequest}
             onStorageEditorRequestHandled={() => setStorageEditorRequest(null)}
             onStorageEditorChange={setActiveStorageSettingsId}

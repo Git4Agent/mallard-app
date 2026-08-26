@@ -8,11 +8,7 @@ description = "Mallard use cases shared by desktop and command-line adapters"
 [dependencies]
 mallard-domain = { path = "../mallard-domain" }
 mallard-infrastructure = { path = "../mallard-infrastructure" }
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "query", "rustls"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
 tokio = { version = "1", features = ["rt"] }
 url = "2"
 zeroize = "1"

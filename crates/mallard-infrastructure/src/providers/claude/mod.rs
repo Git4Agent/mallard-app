@@ -10,11 +10,11 @@ pub mod materialization;
 
 use super::traits::{
     AgentProviderAdapter, MaterializationTargetRequest, PlannedProviderTarget,
-    ProviderCapabilityLevel, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
-    SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
-    SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
-    SessionRewriteRequest, SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice,
-    SessionTimelineQuery,
+    ProviderCapabilityLevel, ProviderCliLauncher, ProviderDescriptor, SessionActionContext,
+    SessionActionDescriptor, SessionActionOutcome, SessionActionRequest, SessionAdapter,
+    SessionAnalysis, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
+    SessionFileMetadata, SessionFileSummary, SessionRewriteRequest, SessionTimelineContext,
+    SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::app_settings::conversation_file_limit_bytes;
 use crate::provider_capture::validated_session_metadata;
@@ -126,6 +126,10 @@ impl AgentProviderAdapter for ClaudeAdapter {
             profile_label: ".claude profile".to_string(),
             default_profile_directory: Some(".claude".to_string()),
             setup_default: true,
+            cli_launcher: Some(ProviderCliLauncher {
+                program: "claude".to_string(),
+                display_name: "Claude Code".to_string(),
+            }),
             capabilities: ProviderCapabilityLevel::ResumableWithConflictPreservation,
             adapter_version: 1,
         }
@@ -321,8 +325,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let original_cwd = temp.path().join("original");
         let resumed_cwd = temp.path().join("resumed");
+        let resumed_turn_cwd = resumed_cwd.join("src-tauri");
         fs::create_dir_all(&original_cwd).unwrap();
-        fs::create_dir_all(&resumed_cwd).unwrap();
+        fs::create_dir_all(&resumed_turn_cwd).unwrap();
         let path = temp.path().join("resumed-session.jsonl");
         fs::write(
             &path,
@@ -344,6 +349,14 @@ mod tests {
                     "message": {"role": "assistant", "content": [{
                         "type": "text", "text": "resumed"
                     }]}
+                }),
+                serde_json::json!({
+                    "type": "user",
+                    "uuid": "user-after-cd",
+                    "parentUuid": "assistant-resumed",
+                    "sessionId": "resumed-session",
+                    "cwd": resumed_turn_cwd,
+                    "message": {"role": "user", "content": "continue"}
                 }),
             ]),
         )

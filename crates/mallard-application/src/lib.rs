@@ -4,5 +4,4 @@
 //! remain in `mallard-domain`; persistence, remote stores, and platform
 //! mechanics remain in `mallard-infrastructure`.
 
-pub mod cloudflare_r2_setup;
 pub mod storage_setup;

@@ -14,8 +14,6 @@ import type {
   CodexConversationPathAudit,
   CodexConversationPathRepairResult,
   ConnectProjectBundleRequest,
-  ConnectR2StorageRequest,
-  ConnectStorageResult,
   CreateSetupDraftResult,
   HostIdentityStatus,
   LocalProjectRegistration,
@@ -50,6 +48,13 @@ import type {
   SessionEventDetail,
   SiblingBundleStatus,
   StorageConfig,
+  StorageSetupDraft,
+  StorageSetupDraftDetail,
+  StorageSetupDraftList,
+  StorageSetupDraftPayload,
+  TestR2StorageResult,
+  UpsertR2StorageRequest,
+  UpsertR2StorageResult,
   StorageDataClearResult,
   SyncConfig,
   ThreadSyncComparison,
@@ -155,11 +160,19 @@ export const projectSyncApi = {
   saveConfig: (config: SyncConfig) =>
     invoke<SyncConfig>("save_project_sync_config", { config }),
 
-  connectR2Storage: (request: ConnectR2StorageRequest) =>
-    invoke<ConnectStorageResult>("connect_r2_storage", { request }),
+  upsertR2Storage: (request: UpsertR2StorageRequest) =>
+    invoke<UpsertR2StorageResult>("upsert_r2_storage", { request }),
+
+  testR2Storage: (request: UpsertR2StorageRequest) =>
+    invoke<TestR2StorageResult>("test_r2_storage", { request }),
 
   getMallardCliPath: () =>
     invoke<string>("get_mallard_cli_path"),
+
+  /** Open a terminal window running the provider's agent CLI with the R2
+   *  setup instruction as its prompt. */
+  launchR2AgentSetup: (provider: ProviderKey, instruction: string) =>
+    invoke<void>("launch_r2_agent_setup", { provider, instruction }),
 
   getHostIdentityStatus: () =>
     invoke<HostIdentityStatus>("get_host_identity_status"),
@@ -272,6 +285,23 @@ export const projectSyncApi = {
 
   finalizeProjectSetup: (draftId: string, expectedRevision: number) =>
     invoke<ProjectDetail>("finalize_project_setup", { draftId, expectedRevision }),
+
+  listStorageSetupDrafts: () =>
+    invoke<StorageSetupDraftList>("list_storage_setup_drafts"),
+
+  createStorageSetupDraft: (storage: StorageSetupDraftPayload) =>
+    invoke<StorageSetupDraft>("create_storage_setup_draft", { storage }),
+
+  getStorageSetupDraft: (draftId: string) =>
+    invoke<StorageSetupDraftDetail | null>("get_storage_setup_draft", { draftId }),
+
+  updateStorageSetupDraft: (draftId: string, revision: number, storage: StorageSetupDraftPayload) =>
+    invoke<StorageSetupDraft>("update_storage_setup_draft", {
+      request: { draft_id: draftId, revision, storage },
+    }),
+
+  discardStorageSetupDraft: (draftId: string) =>
+    invoke<boolean>("discard_storage_setup_draft", { draftId }),
 
   getProjectActivity: (
     localProjectId: string,

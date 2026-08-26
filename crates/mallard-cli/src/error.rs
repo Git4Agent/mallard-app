@@ -28,6 +28,14 @@ impl CliError {
         )
     }
 
+    pub fn invalid_code(code: &'static str, message: &'static str) -> Self {
+        Self::new(EXIT_INVALID_INPUT, code, message, None)
+    }
+
+    pub fn remote(code: &'static str, message: &'static str) -> Self {
+        Self::new(EXIT_REMOTE_FAILURE, code, message, None)
+    }
+
     pub fn from_setup(error: mallard_application::storage_setup::StorageSetupError) -> Self {
         let exit_code = error.kind().exit_code();
         let code = error.code();
@@ -49,16 +57,6 @@ impl CliError {
 
     pub fn setup_id(&self) -> Option<&str> {
         self.setup_id.as_deref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(
-        exit_code: i32,
-        code: &'static str,
-        message: impl Into<String>,
-        setup_id: Option<&str>,
-    ) -> Self {
-        Self::new(exit_code, code, message, setup_id.map(str::to_string))
     }
 
     fn new(
