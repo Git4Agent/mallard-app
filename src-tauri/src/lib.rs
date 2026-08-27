@@ -41,7 +41,7 @@ pub use storage_catalog::resource_commands::{
     CatalogStorageRepositoryDto,
 };
 pub use storage_catalog::service::{
-    CatalogPullApproval, CatalogPushApproval, CatalogRepositoryInspectionDto, StorageCatalogService,
+    CatalogPullApproval, CatalogPushApproval, StorageCatalogService,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

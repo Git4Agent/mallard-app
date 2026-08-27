@@ -1491,33 +1491,24 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
     )
 }
 
-fn assert_kind_repository(replica: &Replica, storage_id: &StorageId, flow: &KindFlow) {
-    let inspection = replica
-        .service
-        .inspect_repository(storage_id, &flow.repository_id)
-        .expect("inspect kind Library repository");
-    let tag = inspection.tag.expect("published repository has a tag");
-    let head = inspection.head.expect("published repository has a head");
-    assert_eq!(tag.schema_version, CATALOG_SCHEMA);
-    assert_eq!(tag.repository_id, flow.repository_id);
-    assert_eq!(head.repository_id, flow.repository_id);
-    assert_eq!(head.revision, flow.revision);
-    assert_eq!(
-        inspection
-            .resources
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>(),
-        flow.resource_ids,
-        "kind repository holds exactly the converged resource set"
-    );
-}
-
-fn assert_noop_fixed_point(replica: &Replica, scope_id: &CatalogScopeId, storage_id: &StorageId) {
+fn assert_noop_fixed_point(
+    replica: &Replica,
+    scope_id: &CatalogScopeId,
+    storage_id: &StorageId,
+    expected_resource_ids: &BTreeSet<CatalogResourceId>,
+) {
     let push = replica
         .service
         .prepare_push(scope_id, storage_id)
         .expect("prepare fixed-point Push");
+    assert_eq!(
+        push.rows
+            .iter()
+            .map(|row| row.row.resource_id.clone())
+            .collect::<BTreeSet<_>>(),
+        *expected_resource_ids,
+        "kind repository holds exactly the converged resource set"
+    );
     for row in &push.rows {
         assert_eq!(row.row.relation, CatalogResourceRelation::Matching);
         assert!(!row.row.selectable);
@@ -1745,12 +1736,9 @@ pub fn run_catalog_flow(inputs: CatalogFlowInputs<'_>) -> CatalogFlowReport {
     assert_final_local_trees(&a, &b);
     let local_before_noops = final_local_tree_inventory(&a, &b);
     let before_noops = storage_snapshot(storage_root);
-    for flow in [&skills, &pets_v1, &pets_v2] {
-        assert_kind_repository(&a, &inputs.storage.id, flow);
-        assert_kind_repository(&b, &inputs.storage.id, flow);
-    }
     // The storage page's listing sees exactly the three converged kind
-    // repositories — derived ids, readable, with the flows' own facts.
+    // repositories. Each row has passed the production engine's tag, head,
+    // and manifest validation before its facts are exposed here.
     for replica in [&a, &b] {
         let listed = replica
             .service
@@ -1778,9 +1766,13 @@ pub fn run_catalog_flow(inputs: CatalogFlowInputs<'_>) -> CatalogFlowReport {
         assert_eq!(facts, expected);
     }
     for replica in [&a, &b] {
-        assert_noop_fixed_point(replica, &replica.scopes.skills, &inputs.storage.id);
-        assert_noop_fixed_point(replica, &replica.scopes.pets_v1, &inputs.storage.id);
-        assert_noop_fixed_point(replica, &replica.scopes.pets_v2, &inputs.storage.id);
+        for (scope_id, flow) in [
+            (&replica.scopes.skills, &skills),
+            (&replica.scopes.pets_v1, &pets_v1),
+            (&replica.scopes.pets_v2, &pets_v2),
+        ] {
+            assert_noop_fixed_point(replica, scope_id, &inputs.storage.id, &flow.resource_ids);
+        }
     }
     assert_eq!(
         storage_snapshot(storage_root),

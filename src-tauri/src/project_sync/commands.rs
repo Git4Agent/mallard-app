@@ -10965,23 +10965,6 @@ pub(super) fn push_bundle_reviewed_with_progress(
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-fn plan_bundle_restore_with_repository(
-    repository: &LocalStateRepository,
-    storage_id: &StorageId,
-    bundle_id: &BundleId,
-    binding: &ProjectBinding,
-) -> Result<RestorePlan, String> {
-    plan_bundle_restore_with_progress(
-        repository,
-        storage_id,
-        bundle_id,
-        binding,
-        &mut |_| {},
-        &mut |_, _| {},
-    )
-}
-
 pub(super) fn plan_bundle_restore_with_progress(
     repository: &LocalStateRepository,
     storage_id: &StorageId,
@@ -11147,21 +11130,6 @@ pub(super) fn plan_bundle_restore_with_progress(
     repository.save_restore_plan(&plan)?;
     on_phase("finalize and save review", phase_started.elapsed());
     Ok(plan)
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn apply_bundle_restore_with_repository(
-    repository: &LocalStateRepository,
-    plan_id: &PlanId,
-    approved_action_ids: Vec<ActionId>,
-) -> Result<RestoreResult, String> {
-    apply_bundle_restore_with_progress(
-        repository,
-        plan_id,
-        approved_action_ids,
-        &mut |_| {},
-        &mut |_, _| {},
-    )
 }
 
 struct PreparedPullConversation {
@@ -19255,13 +19223,9 @@ mod tests {
             &git_race_root,
             &temp.path().join("machine-git-race/codex"),
         );
-        let git_race_plan = plan_bundle_restore_with_repository(
-            &repo,
-            &storage_id,
-            &git_race_target.bundle_id,
-            &git_race_binding,
-        )
-        .unwrap();
+        let git_race_plan = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &git_race_target.bundle_id, &git_race_binding)
+            .unwrap();
         assert_eq!(
             git_race_plan
                 .project_content_eligibility
@@ -19276,16 +19240,16 @@ mod tests {
             .output()
             .unwrap();
         assert!(git.status.success());
-        let error = apply_bundle_restore_with_repository(
-            &repo,
-            &git_race_plan.plan_id,
-            git_race_plan
-                .actions
-                .iter()
-                .map(|action| action.action_id.clone())
-                .collect(),
-        )
-        .unwrap_err();
+        let error = ProjectSyncService::new(&repo)
+            .apply_bundle_restore(
+                &git_race_plan.plan_id,
+                git_race_plan
+                    .actions
+                    .iter()
+                    .map(|action| action.action_id.clone())
+                    .collect(),
+            )
+            .unwrap_err();
         assert!(error.contains("Git"), "{error}");
         assert!(!git_race_root.join("docs/specs/a.md").exists());
 
@@ -19298,13 +19262,9 @@ mod tests {
             &target_root,
             &temp.path().join("machine-b/codex"),
         );
-        let restore = plan_bundle_restore_with_repository(
-            &repo,
-            &storage_id,
-            &target.bundle_id,
-            &target_binding,
-        )
-        .unwrap();
+        let restore = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &target.bundle_id, &target_binding)
+            .unwrap();
         assert_eq!(
             restore
                 .actions
@@ -19333,8 +19293,9 @@ mod tests {
             .iter()
             .map(|action| action.action_id.clone())
             .collect();
-        let applied =
-            apply_bundle_restore_with_repository(&repo, &restore.plan_id, approved).unwrap();
+        let applied = ProjectSyncService::new(&repo)
+            .apply_bundle_restore(&restore.plan_id, approved)
+            .unwrap();
         assert!(applied.success, "{}", applied.message);
         assert_eq!(
             std::fs::read(target_root.join("docs/specs/a.md")).unwrap(),
@@ -19414,13 +19375,9 @@ mod tests {
             3
         );
 
-        let deletion_plan = plan_bundle_restore_with_repository(
-            &repo,
-            &storage_id,
-            &target.bundle_id,
-            &target_binding,
-        )
-        .unwrap();
+        let deletion_plan = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &target.bundle_id, &target_binding)
+            .unwrap();
         assert_eq!(
             deletion_plan
                 .actions
@@ -19446,8 +19403,9 @@ mod tests {
             .map(|action| action.action_id.clone())
             .collect();
         std::fs::write(target_root.join("docs/file_b.md"), b"locally changed b\n").unwrap();
-        let deleted =
-            apply_bundle_restore_with_repository(&repo, &deletion_plan.plan_id, approved).unwrap();
+        let deleted = ProjectSyncService::new(&repo)
+            .apply_bundle_restore(&deletion_plan.plan_id, approved)
+            .unwrap();
         assert!(
             !deleted.success,
             "a changed local file or non-empty directory was removed"
@@ -19469,13 +19427,9 @@ mod tests {
         );
 
         std::fs::remove_file(target_root.join("docs/file_b.md")).unwrap();
-        let retry = plan_bundle_restore_with_repository(
-            &repo,
-            &storage_id,
-            &target.bundle_id,
-            &target_binding,
-        )
-        .unwrap();
+        let retry = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &target.bundle_id, &target_binding)
+            .unwrap();
         let retry_approved = retry
             .actions
             .iter()
@@ -19487,8 +19441,9 @@ mod tests {
             })
             .map(|action| action.action_id.clone())
             .collect();
-        let retried =
-            apply_bundle_restore_with_repository(&repo, &retry.plan_id, retry_approved).unwrap();
+        let retried = ProjectSyncService::new(&repo)
+            .apply_bundle_restore(&retry.plan_id, retry_approved)
+            .unwrap();
         assert!(retried.success, "{}", retried.message);
         assert!(!target_root.join("docs").exists());
     }
@@ -21825,13 +21780,9 @@ mod tests {
             .active_for(&project.local_project_id)
             .cloned()
             .unwrap();
-        let restore = plan_bundle_restore_with_repository(
-            &repo,
-            &selected_storage_id,
-            &project.bundle_id,
-            &binding,
-        )
-        .unwrap();
+        let restore = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&selected_storage_id, &project.bundle_id, &binding)
+            .unwrap();
 
         assert_eq!(restore.storage_id, selected_storage_id);
         assert_eq!(restore.revision, 4);
@@ -22129,9 +22080,9 @@ mod tests {
             .active_for(&project.local_project_id)
             .cloned()
             .unwrap();
-        let plan =
-            plan_bundle_restore_with_repository(&repo, &storage_id, &project.bundle_id, &binding)
-                .unwrap();
+        let plan = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &project.bundle_id, &binding)
+            .unwrap();
         assert_eq!(
             plan.remote_continuity,
             Some(RemoteContinuity::Replaced {
@@ -22139,15 +22090,15 @@ mod tests {
                 remote_revision: 2
             })
         );
-        apply_bundle_restore_with_repository(
-            &repo,
-            &plan.plan_id,
-            plan.actions
-                .iter()
-                .map(|action| action.action_id.clone())
-                .collect(),
-        )
-        .unwrap();
+        ProjectSyncService::new(&repo)
+            .apply_bundle_restore(
+                &plan.plan_id,
+                plan.actions
+                    .iter()
+                    .map(|action| action.action_id.clone())
+                    .collect(),
+            )
+            .unwrap();
         assert_eq!(
             get_push_destination_status_with_repository(
                 &repo,
@@ -24329,9 +24280,9 @@ mod tests {
             .active_for(&machine_b.local_project_id)
             .cloned()
             .unwrap();
-        let restore =
-            plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &b_binding)
-                .unwrap();
+        let restore = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &b_binding)
+            .unwrap();
         let create_local = restore
             .conversation_actions
             .iter()
@@ -24340,17 +24291,17 @@ mod tests {
             .expect("stored thread offers CreateLocal");
         // B adopts the whole bundle — the conversation plus the generic
         // provider-state memory — so its own later push reviews clean.
-        let applied = apply_bundle_restore_with_repository(
-            &repo,
-            &restore.plan_id,
-            restore
-                .actions
-                .iter()
-                .map(|action| action.action_id.clone())
-                .chain(std::iter::once(create_local.action_id.clone()))
-                .collect(),
-        )
-        .unwrap();
+        let applied = ProjectSyncService::new(&repo)
+            .apply_bundle_restore(
+                &restore.plan_id,
+                restore
+                    .actions
+                    .iter()
+                    .map(|action| action.action_id.clone())
+                    .chain(std::iter::once(create_local.action_id.clone()))
+                    .collect(),
+            )
+            .unwrap();
         assert!(
             applied.success,
             "{} — failed: {:?}",
@@ -24468,21 +24419,18 @@ mod tests {
             .active_for(&machine_a.local_project_id)
             .cloned()
             .unwrap();
-        let restore =
-            plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &a_binding)
-                .unwrap();
+        let restore = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &a_binding)
+            .unwrap();
         let materialize = restore
             .conversation_actions
             .iter()
             .find(|action| action.action == ConversationPlanActionType::MaterializeCloud)
             .cloned()
             .expect("cloud-ahead thread offers MaterializeCloud");
-        let applied = apply_bundle_restore_with_repository(
-            &repo,
-            &restore.plan_id,
-            vec![materialize.action_id.clone()],
-        )
-        .unwrap();
+        let applied = ProjectSyncService::new(&repo)
+            .apply_bundle_restore(&restore.plan_id, vec![materialize.action_id.clone()])
+            .unwrap();
         assert!(
             applied.success,
             "{} — failed: {:?}",
@@ -24606,7 +24554,8 @@ mod tests {
             "control: the extended rollout publishes while the stamps agree"
         );
         assert!(
-            plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &b_binding)
+            ProjectSyncService::new(&repo)
+                .plan_bundle_restore(&storage_id, &bundle_id, &b_binding)
                 .unwrap()
                 .conversation_actions
                 .iter()
@@ -24714,8 +24663,9 @@ mod tests {
             .active_for(&machine_a.local_project_id)
             .cloned()
             .unwrap();
-        let restore =
-            plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &binding).unwrap();
+        let restore = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &binding)
+            .unwrap();
         assert!(
             restore.conversation_actions.is_empty(),
             "blocked rows are never planned: {:?}",
@@ -24735,9 +24685,9 @@ mod tests {
         );
 
         // Pull planning: likewise for the replica the control just adopted.
-        let b_restore =
-            plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &b_binding)
-                .unwrap();
+        let b_restore = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &b_binding)
+            .unwrap();
         assert!(
             b_restore.conversation_actions.is_empty(),
             "a blocked row is never offered to a fresh replica: {:?}",
@@ -25597,9 +25547,9 @@ mod tests {
             ]
         );
 
-        let restore =
-            plan_bundle_restore_with_repository(&repo, &storage_id, &project.bundle_id, &binding)
-                .unwrap();
+        let restore = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &project.bundle_id, &binding)
+            .unwrap();
         assert!(restore.actions.is_empty());
         assert_eq!(restore.conversation_actions.len(), 1);
         // CreateLocal carries no local identity at plan time; the reviewed
@@ -26246,9 +26196,9 @@ mod tests {
             "title lookup must not apply the stored session index"
         );
 
-        let restore =
-            plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &target_binding)
-                .unwrap();
+        let restore = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &target_binding)
+            .unwrap();
         assert!(
             restore.actions.is_empty(),
             "typed conversations do not use generic file actions"
@@ -26269,16 +26219,16 @@ mod tests {
         let before = readiness_for_binding(&repo, &storage_id, &bundle_id, &target_binding);
         assert_eq!(before.state, "needs_setup");
 
-        let applied = apply_bundle_restore_with_repository(
-            &repo,
-            &restore.plan_id,
-            restore
-                .conversation_actions
-                .iter()
-                .map(|action| action.action_id.clone())
-                .collect(),
-        )
-        .unwrap();
+        let applied = ProjectSyncService::new(&repo)
+            .apply_bundle_restore(
+                &restore.plan_id,
+                restore
+                    .conversation_actions
+                    .iter()
+                    .map(|action| action.action_id.clone())
+                    .collect(),
+            )
+            .unwrap();
         assert!(
             applied.success,
             "{} — failed: {:?}",
@@ -26470,9 +26420,9 @@ mod tests {
             .active_for(&source.local_project_id)
             .cloned()
             .unwrap();
-        let source_pull =
-            plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &source_binding)
-                .unwrap();
+        let source_pull = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &source_binding)
+            .unwrap();
         let update = source_pull
             .conversation_actions
             .iter()
@@ -26483,12 +26433,9 @@ mod tests {
         // destination exist only at apply, which asserts the destination
         // Absent itself.
         let source_bytes_before_update = std::fs::read(&source_session).unwrap();
-        let source_applied = apply_bundle_restore_with_repository(
-            &repo,
-            &source_pull.plan_id,
-            vec![update.action_id.clone()],
-        )
-        .unwrap();
+        let source_applied = ProjectSyncService::new(&repo)
+            .apply_bundle_restore(&source_pull.plan_id, vec![update.action_id.clone()])
+            .unwrap();
         assert!(
             source_applied.success,
             "{:?}",
@@ -26612,9 +26559,9 @@ mod tests {
             Some("Machine A".to_string()),
         )
         .unwrap();
-        let divergent_pull =
-            plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &source_binding)
-                .unwrap();
+        let divergent_pull = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &source_binding)
+            .unwrap();
         let divergent_action = divergent_pull
             .conversation_actions
             .iter()
@@ -26625,12 +26572,12 @@ mod tests {
             ConversationPlanActionType::KeepBoth
         );
         let marker_title = "Change glb color to yellow (Preserved 1 · Machine A)";
-        let divergent_result = apply_bundle_restore_with_repository(
-            &repo,
-            &divergent_pull.plan_id,
-            vec![divergent_action.action_id.clone()],
-        )
-        .unwrap();
+        let divergent_result = ProjectSyncService::new(&repo)
+            .apply_bundle_restore(
+                &divergent_pull.plan_id,
+                vec![divergent_action.action_id.clone()],
+            )
+            .unwrap();
         assert!(
             divergent_result.success,
             "{:?}",
@@ -26777,9 +26724,9 @@ mod tests {
             .active_for(&target.local_project_id)
             .cloned()
             .unwrap();
-        let target_pull =
-            plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &target_binding)
-                .unwrap();
+        let target_pull = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &target_binding)
+            .unwrap();
         let preserved_action = target_pull
             .conversation_actions
             .iter()
@@ -26789,12 +26736,12 @@ mod tests {
             preserved_action.action,
             ConversationPlanActionType::CreateLocal
         );
-        let target_applied = apply_bundle_restore_with_repository(
-            &repo,
-            &target_pull.plan_id,
-            vec![preserved_action.action_id.clone()],
-        )
-        .unwrap();
+        let target_applied = ProjectSyncService::new(&repo)
+            .apply_bundle_restore(
+                &target_pull.plan_id,
+                vec![preserved_action.action_id.clone()],
+            )
+            .unwrap();
         assert!(
             target_applied.success,
             "{:?}",
@@ -26892,9 +26839,9 @@ mod tests {
             .active_for(&source.local_project_id)
             .cloned()
             .unwrap();
-        let second_divergent =
-            plan_bundle_restore_with_repository(&repo, &storage_id, &bundle_id, &source_binding)
-                .unwrap();
+        let second_divergent = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &source_binding)
+            .unwrap();
         let second_action = second_divergent
             .conversation_actions
             .iter()
@@ -26903,12 +26850,12 @@ mod tests {
         assert_eq!(second_action.action, ConversationPlanActionType::KeepBoth);
         // Ordinal and marker compose at apply: max+1 over cloud and binding
         // provenance in the cloud id space, never a count of copies.
-        let second_result = apply_bundle_restore_with_repository(
-            &repo,
-            &second_divergent.plan_id,
-            vec![second_action.action_id.clone()],
-        )
-        .unwrap();
+        let second_result = ProjectSyncService::new(&repo)
+            .apply_bundle_restore(
+                &second_divergent.plan_id,
+                vec![second_action.action_id.clone()],
+            )
+            .unwrap();
         assert!(second_result.success, "{:?}", second_result.failed_actions);
         assert_eq!(second_result.preserved_threads.len(), 1);
         assert_eq!(
@@ -27999,9 +27946,9 @@ mod tests {
             .active_for(&project_id)
             .cloned()
             .unwrap();
-        let pull =
-            plan_bundle_restore_with_repository(&fixture.repo, &storage_id, &bundle_id, &binding)
-                .unwrap();
+        let pull = ProjectSyncService::new(&fixture.repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &binding)
+            .unwrap();
         let action = pull
             .conversation_actions
             .iter()
@@ -28009,12 +27956,9 @@ mod tests {
             .expect("cloud-advanced base is materializable");
         assert_eq!(action.action, ConversationPlanActionType::MaterializeCloud);
 
-        let applied = apply_bundle_restore_with_repository(
-            &fixture.repo,
-            &pull.plan_id,
-            vec![action.action_id.clone()],
-        )
-        .unwrap();
+        let applied = ProjectSyncService::new(&fixture.repo)
+            .apply_bundle_restore(&pull.plan_id, vec![action.action_id.clone()])
+            .unwrap();
         assert!(applied.success, "{:?}", applied.failed_actions);
         assert_eq!(std::fs::read(&base_rollout).unwrap(), base_before);
         let moved = fixture
@@ -28100,13 +28044,9 @@ mod tests {
             .active_for(&project_id)
             .cloned()
             .unwrap();
-        let fixed_point = plan_bundle_restore_with_repository(
-            &fixture.repo,
-            &storage_id,
-            &bundle_id,
-            &current_binding,
-        )
-        .unwrap();
+        let fixed_point = ProjectSyncService::new(&fixture.repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &current_binding)
+            .unwrap();
         assert!(fixed_point.conversation_actions.is_empty());
         let unchanged_activity = get_project_activity_with_repository(
             &fixture.repo,
@@ -28254,13 +28194,9 @@ mod tests {
             .active_for(&project_id)
             .cloned()
             .unwrap();
-        let second_pull = plan_bundle_restore_with_repository(
-            &fixture.repo,
-            &storage_id,
-            &bundle_id,
-            &current_binding,
-        )
-        .unwrap();
+        let second_pull = ProjectSyncService::new(&fixture.repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &current_binding)
+            .unwrap();
         let retained_action = second_pull
             .conversation_actions
             .iter()
@@ -28271,12 +28207,9 @@ mod tests {
             retained_action.action,
             ConversationPlanActionType::MaterializeCloud
         );
-        let second_applied = apply_bundle_restore_with_repository(
-            &fixture.repo,
-            &second_pull.plan_id,
-            vec![retained_action.action_id],
-        )
-        .unwrap();
+        let second_applied = ProjectSyncService::new(&fixture.repo)
+            .apply_bundle_restore(&second_pull.plan_id, vec![retained_action.action_id])
+            .unwrap();
         assert!(
             second_applied.success,
             "{:?}",
@@ -28416,9 +28349,9 @@ mod tests {
             .active_for(&project_id)
             .cloned()
             .unwrap();
-        let pull =
-            plan_bundle_restore_with_repository(&fixture.repo, &storage_id, &bundle_id, &binding)
-                .unwrap();
+        let pull = ProjectSyncService::new(&fixture.repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &binding)
+            .unwrap();
         let action = pull
             .conversation_actions
             .iter()
@@ -28470,12 +28403,9 @@ mod tests {
         )
         .unwrap();
 
-        let applied = apply_bundle_restore_with_repository(
-            &fixture.repo,
-            &pull.plan_id,
-            vec![action.action_id.clone()],
-        )
-        .unwrap();
+        let applied = ProjectSyncService::new(&fixture.repo)
+            .apply_bundle_restore(&pull.plan_id, vec![action.action_id.clone()])
+            .unwrap();
         assert!(applied.success, "{:?}", applied.failed_actions);
         assert_eq!(std::fs::read(&base_rollout).unwrap(), base_before);
         let moved = fixture

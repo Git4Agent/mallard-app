@@ -788,10 +788,8 @@ fn session_presentation(
     }
 }
 
-/// Domain-facing capture entry point. The recipe remains the sole selection
-/// authority; no transient UI filter is accepted here.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn capture_recipe(
+#[cfg(test)]
+pub(crate) fn capture_recipe(
     registry: &crate::providers::ProviderRegistry,
     request: &CaptureRequest,
     recipe: &domain::BundleRecipe,
@@ -800,8 +798,8 @@ pub fn capture_recipe(
     capture_recipe_from_discovery(registry, request, &discovery, recipe)
 }
 
-/// `capture_recipe` over an existing Discovery, sharing one walk between
-/// selection persistence, freshness checks, and the byte capture.
+/// Capture a recipe from an existing Discovery, sharing one walk between
+/// selection persistence, freshness checks, and byte capture.
 pub fn capture_recipe_from_discovery(
     registry: &crate::providers::ProviderRegistry,
     request: &CaptureRequest,

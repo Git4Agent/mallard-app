@@ -15,9 +15,8 @@ use mallard_infrastructure::persistence::LocalStateRepository;
 
 use super::adapters::{NativeProcessRunner, PluginProcessRunner};
 use super::domain::{
-    CatalogPlanActionId, CatalogPlanId, CatalogResource, CatalogResourceId, CatalogResourceKindTag,
-    CatalogResourceRepositoryId, CatalogScopeId, CatalogScopePullPlan, CatalogScopePushPlan,
-    LibraryHeadCoordinate, LibraryResourceTag, LocalCatalogProfile, LocalCatalogProfileId,
+    CatalogPlanActionId, CatalogPlanId, CatalogResourceId, CatalogResourceKindTag, CatalogScopeId,
+    CatalogScopePullPlan, CatalogScopePushPlan, LocalCatalogProfile, LocalCatalogProfileId,
     ProviderKey,
 };
 use super::persistence::CatalogStateRepository;
@@ -86,16 +85,6 @@ impl CatalogPullApproval {
             destructive_acknowledged: Vec::new(),
         }
     }
-}
-
-/// Verified current state of one kind repository.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CatalogRepositoryInspectionDto {
-    pub storage_id: StorageId,
-    pub repository_id: CatalogResourceRepositoryId,
-    pub tag: Option<LibraryResourceTag>,
-    pub head: Option<LibraryHeadCoordinate>,
-    pub resources: BTreeMap<CatalogResourceId, CatalogResource>,
 }
 
 /// Production Library use cases with explicitly selected machine state,
@@ -313,46 +302,6 @@ impl StorageCatalogService {
             &self.user_home,
             now_secs(),
         )
-    }
-
-    pub fn inspect_repository(
-        &self,
-        storage_id: &StorageId,
-        repository_id: &CatalogResourceRepositoryId,
-    ) -> Result<CatalogRepositoryInspectionDto, String> {
-        let storage = resource_commands::storage_for(&self.state, storage_id)?;
-        let engine = resource_commands::engine_for(&storage)?;
-        let tag = engine.read_tag(repository_id)?.map(|(tag, _)| tag);
-        let inspected = engine.inspect(repository_id)?;
-        let (head, resources) = match inspected {
-            Some((observed, manifest)) => {
-                if tag.is_none() {
-                    return Err(
-                        "the Library repository has a head but no discovery tag".to_string()
-                    );
-                }
-                (
-                    Some(super::resource_engine::head_coordinate(
-                        &observed.head,
-                        &super::resource_engine::storage_identity_for_config(&storage),
-                    )),
-                    manifest.resource_map(),
-                )
-            }
-            None => {
-                if tag.is_some() {
-                    return Err("the Library repository has a tag but no head".to_string());
-                }
-                (None, BTreeMap::new())
-            }
-        };
-        Ok(CatalogRepositoryInspectionDto {
-            storage_id: storage_id.clone(),
-            repository_id: repository_id.clone(),
-            tag,
-            head,
-            resources,
-        })
     }
 }
 
