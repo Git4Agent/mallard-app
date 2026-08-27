@@ -22,7 +22,9 @@ use mallard_domain::{LocalProjectId, ProviderKey, StorageId, TargetExpectation, 
 use mallard_infrastructure::persistence::write_json_atomic;
 use mallard_infrastructure::provider_capture::{self, CaptureRequest, Discovery, LocalSessionView};
 use mallard_infrastructure::sync_metrics;
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+#[cfg(not(test))]
+use notify::{Config, RecommendedWatcher, Watcher};
+use notify::{Event, EventKind, RecursiveMode};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -44,7 +46,9 @@ const OBSERVATION_DISK_FILE: &str = "observation_cache.json";
 const EVENT_QUEUE_DEPTH: usize = 8_192;
 
 enum WatchBackend {
+    #[cfg(not(test))]
     Recommended(RecommendedWatcher),
+    #[cfg(test)]
     /// Deterministic test backend: a synchronous scanner that diffs full
     /// file contents on every drain, so a mutation between two operations
     /// — same-size, same-second included — is always visible to the second
@@ -55,7 +59,9 @@ enum WatchBackend {
 impl WatchBackend {
     fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
         match self {
+            #[cfg(not(test))]
             WatchBackend::Recommended(watcher) => watcher.watch(path, mode),
+            #[cfg(test)]
             WatchBackend::Manual(scanner) => {
                 scanner.watch(path, mode);
                 Ok(())
@@ -65,7 +71,9 @@ impl WatchBackend {
 
     fn poll(&mut self) -> notify::Result<()> {
         match self {
+            #[cfg(not(test))]
             WatchBackend::Recommended(_) => Ok(()),
+            #[cfg(test)]
             WatchBackend::Manual(scanner) => {
                 scanner.poll();
                 Ok(())
@@ -75,12 +83,14 @@ impl WatchBackend {
 }
 
 /// The deterministic test scanner behind `WatchBackend::Manual`.
+#[cfg(test)]
 struct ManualScanner {
     sender: SyncSender<notify::Result<Event>>,
     roots: Vec<(PathBuf, RecursiveMode)>,
     baseline: BTreeMap<PathBuf, Option<Vec<u8>>>,
 }
 
+#[cfg(test)]
 impl ManualScanner {
     fn new(sender: SyncSender<notify::Result<Event>>) -> Self {
         Self {
@@ -414,20 +424,25 @@ fn arm_backend(
     sender: SyncSender<notify::Result<Event>>,
     overflowed: Arc<AtomicBool>,
 ) -> notify::Result<WatchBackend> {
-    if cfg!(test) {
-        return Ok(WatchBackend::Manual(ManualScanner::new(sender)));
+    #[cfg(test)]
+    {
+        let _ = overflowed;
+        Ok(WatchBackend::Manual(ManualScanner::new(sender)))
     }
-    let handler = move |event: notify::Result<Event>| {
-        // The callback only forwards: no filesystem work, no parsing, no
-        // classification. A full queue is a reliability signal.
-        if sender.try_send(event).is_err() {
-            overflowed.store(true, Ordering::Relaxed);
-        }
-    };
-    Ok(WatchBackend::Recommended(RecommendedWatcher::new(
-        handler,
-        Config::default(),
-    )?))
+    #[cfg(not(test))]
+    {
+        let handler = move |event: notify::Result<Event>| {
+            // The callback only forwards: no filesystem work, no parsing, no
+            // classification. A full queue is a reliability signal.
+            if sender.try_send(event).is_err() {
+                overflowed.store(true, Ordering::Relaxed);
+            }
+        };
+        Ok(WatchBackend::Recommended(RecommendedWatcher::new(
+            handler,
+            Config::default(),
+        )?))
+    }
 }
 
 /// The exact canonical home every cache key, watch root, and dirty path

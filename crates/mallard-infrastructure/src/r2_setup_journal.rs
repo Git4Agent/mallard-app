@@ -165,10 +165,6 @@ impl R2SetupJournalStore {
         }
     }
 
-    pub fn directory(&self) -> &Path {
-        &self.directory
-    }
-
     pub fn load(&self, setup_id: &R2SetupId) -> Result<Option<R2SetupJournalEntry>, String> {
         let _guard = journal_guard(&self.root)?;
         self.load_unlocked(setup_id)
@@ -612,7 +608,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = store(&temp);
         let setup_id = R2SetupId::parse(SETUP_A).unwrap();
-        ensure_journal_directory(&store.root, store.directory()).unwrap();
+        ensure_journal_directory(&store.root, &store.directory).unwrap();
         let path = store.entry_path(&setup_id);
 
         fs::write(&path, b"{not json}\n").unwrap();
@@ -633,12 +629,12 @@ mod tests {
         let store = store(&temp);
         let outside = temp.path().join("outside");
         fs::create_dir(&outside).unwrap();
-        symlink(&outside, store.directory()).unwrap();
+        symlink(&outside, &store.directory).unwrap();
         assert!(store.save(&entry(SETUP_A)).is_err());
         assert!(store.list().is_err());
-        fs::remove_file(store.directory()).unwrap();
+        fs::remove_file(&store.directory).unwrap();
 
-        ensure_journal_directory(&store.root, store.directory()).unwrap();
+        ensure_journal_directory(&store.root, &store.directory).unwrap();
         let outside_file = outside.join("entry.json");
         fs::write(&outside_file, serde_json::to_vec(&entry(SETUP_A)).unwrap()).unwrap();
         let setup_id = R2SetupId::parse(SETUP_A).unwrap();

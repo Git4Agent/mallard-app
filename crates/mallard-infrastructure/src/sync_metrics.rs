@@ -5,15 +5,17 @@
 //! claims ("a warm no-change refresh reads no transcript bytes") and so
 //! a benchmark run can print where the bytes went.
 //!
-//! Counters are attributed by path: a caller registers a root (a provider
-//! home or project root) and receives an isolated counter set that only
-//! work under that root increments. Registration keeps parallel test runs
-//! from observing each other's work. One process-global set additionally
-//! counts everything for the `MALLARD_SYNC_METRICS=1` benchmark log.
+//! Test-support builds can attribute counters by path so parallel tests do not
+//! observe each other's work. The process-global counters back the
+//! `MALLARD_SYNC_METRICS=1` benchmark log in every build.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(test, feature = "test-support"))]
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::OnceLock;
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::{Arc, RwLock};
 
 #[derive(Default)]
 struct Counters {
@@ -88,8 +90,10 @@ fn global() -> &'static Counters {
     GLOBAL.get_or_init(Counters::default)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 type RegisteredRoots = RwLock<Vec<(PathBuf, Arc<Counters>)>>;
 
+#[cfg(any(test, feature = "test-support"))]
 fn roots() -> &'static RegisteredRoots {
     static ROOTS: OnceLock<RegisteredRoots> = OnceLock::new();
     ROOTS.get_or_init(|| RwLock::new(Vec::new()))
@@ -97,17 +101,20 @@ fn roots() -> &'static RegisteredRoots {
 
 /// A registered attribution root. Work on paths under the root increments
 /// this handle's counters until it is dropped.
+#[cfg(any(test, feature = "test-support"))]
 pub struct RegisteredRoot {
     root: PathBuf,
     counters: Arc<Counters>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl RegisteredRoot {
     pub fn snapshot(&self) -> MetricsSnapshot {
         self.counters.snapshot()
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for RegisteredRoot {
     fn drop(&mut self) {
         let mut roots = roots().write().unwrap_or_else(|e| e.into_inner());
@@ -122,6 +129,7 @@ impl Drop for RegisteredRoot {
 /// Register one attribution root (a canonical provider home or project
 /// root). Registering the same root twice yields independent counter sets
 /// that both observe its work.
+#[cfg(any(test, feature = "test-support"))]
 pub fn register_root(root: &Path) -> RegisteredRoot {
     let counters = Arc::new(Counters::default());
     roots()
@@ -141,12 +149,17 @@ pub fn global_snapshot() -> MetricsSnapshot {
 
 fn record(path: &Path, apply: impl Fn(&Counters)) {
     apply(global());
-    let roots = roots().read().unwrap_or_else(|e| e.into_inner());
-    for (root, counters) in roots.iter() {
-        if path.starts_with(root) {
-            apply(counters);
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        let roots = roots().read().unwrap_or_else(|e| e.into_inner());
+        for (root, counters) in roots.iter() {
+            if path.starts_with(root) {
+                apply(counters);
+            }
         }
     }
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = path;
 }
 
 pub fn record_directory_visited(path: &Path) {
