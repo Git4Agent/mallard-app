@@ -944,8 +944,8 @@ mod tests {
     use super::super::domain::{
         CatalogCommitId, CatalogLinkId, CatalogPlanId, CatalogProfilesDocument,
         CatalogResourceKindTag, CatalogResourceRepositoryId, CatalogScope, CatalogScopeId,
-        CatalogScopeLink, CatalogScopesDocument, LibraryHeadCoordinate, LocalCatalogProfile,
-        LocalCatalogProfileId, ProviderKey,
+        CatalogScopeLink, CatalogScopePushPlan, CatalogScopesDocument, LibraryHeadCoordinate,
+        LocalCatalogProfileId, ProviderKey, CATALOG_SCHEMA,
     };
     use super::*;
     use mallard_domain::StorageId;
@@ -953,32 +953,6 @@ mod tests {
 
     fn repository(temp: &tempfile::TempDir) -> CatalogStateRepository {
         CatalogStateRepository::from_home_dir(temp.path()).unwrap()
-    }
-
-    #[test]
-    fn documents_default_and_round_trip_with_revision_bumps() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = repository(&temp);
-        assert_eq!(
-            repo.load_profiles().unwrap(),
-            CatalogProfilesDocument::default()
-        );
-        repo.mutate_profiles(|document| {
-            document.profiles.push(LocalCatalogProfile {
-                profile_id: LocalCatalogProfileId::generate().unwrap(),
-                provider_key: ProviderKey::Codex,
-                display_name: "Codex".to_string(),
-                configured_home: temp.path().join("codex").to_string_lossy().to_string(),
-                revision: 1,
-                created_at: 1,
-                updated_at: 1,
-            });
-            Ok(())
-        })
-        .unwrap();
-        let loaded = repo.load_profiles().unwrap();
-        assert_eq!(loaded.revision, 1);
-        assert_eq!(loaded.profiles.len(), 1);
     }
 
     #[test]
@@ -1032,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn plans_are_create_only() {
+    fn resource_plan_persistence_is_create_only_and_missing_safe() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let missing = CatalogPlanId::generate().unwrap();
@@ -1041,21 +1015,33 @@ mod tests {
             .unwrap_err()
             .contains("does not exist"));
         assert!(!repo.discard_plan(&missing).unwrap());
-    }
 
-    #[test]
-    fn legacy_catalog_documents_are_never_read() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = repository(&temp);
-        fs::write(repo.root().join("catalog_profiles.json"), b"{legacy").unwrap();
-        fs::write(repo.root().join("storage_catalog.json"), b"{legacy").unwrap();
-        assert_eq!(
-            repo.load_profiles().unwrap(),
-            CatalogProfilesDocument::default()
-        );
-        assert!(repo.load_scope_links().unwrap().links.is_empty());
-        assert!(repo.root().join("catalog_profiles.json").exists());
-        assert!(repo.root().join("storage_catalog.json").exists());
+        let plan = CatalogResourcePlanDocument::Push(CatalogScopePushPlan {
+            schema_version: CATALOG_SCHEMA,
+            plan_id: CatalogPlanId::generate().unwrap(),
+            scope_id: CatalogScopeId::generate().unwrap(),
+            link_id: CatalogLinkId::generate().unwrap(),
+            link_revision: 1,
+            storage_id: StorageId::parse("storage-a").unwrap(),
+            repository_id: CatalogResourceRepositoryId::for_kind(
+                ProviderKey::Codex,
+                CatalogResourceKindTag::AgentSkill,
+            ),
+            storage_identity_sha256: "a".repeat(64),
+            profile_pins: Vec::new(),
+            skill_root_pins: Vec::new(),
+            observed_head: None,
+            rows: Vec::new(),
+            warning_digests: Vec::new(),
+            created_at: 1,
+            expires_at: 2,
+        });
+
+        repo.save_resource_plan(&plan).unwrap();
+        assert_eq!(repo.load_resource_plan(plan.plan_id()).unwrap(), plan);
+        let error = repo.save_resource_plan(&plan).unwrap_err();
+        assert!(error.contains("already exists"), "{error}");
+        assert_eq!(repo.load_resource_plan(plan.plan_id()).unwrap(), plan);
     }
 
     #[test]

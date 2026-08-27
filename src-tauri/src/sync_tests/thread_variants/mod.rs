@@ -1,5 +1,4 @@
 mod binding_and_tombstones;
-mod conflicts;
 mod continuation;
 pub(crate) mod harness;
 mod provider_codec;

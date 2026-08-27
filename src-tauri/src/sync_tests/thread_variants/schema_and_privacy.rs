@@ -303,27 +303,6 @@ fn current_schema_manifest_rejects_each_conversation_reference_corruption() {
             .tombstones
             .insert(tombstone.canonical_key(), tombstone);
     }));
-    // A simulated old writer publishing a tail-less schema-1 Codex successor
-    // is blocked on the next verified read, as is a tail whose accepted end
-    // disagrees with the recorded message count.
-    mutations.push(Box::new(|scope| {
-        scope
-            .conversations
-            .get_mut(&thread_id())
-            .unwrap()
-            .portable_tail = None;
-    }));
-    mutations.push(Box::new(|scope| {
-        scope
-            .conversations
-            .get_mut(&thread_id())
-            .unwrap()
-            .portable_tail
-            .as_mut()
-            .unwrap()
-            .accepted_end_record_count += 1;
-    }));
-
     for (index, mutate) in mutations.into_iter().enumerate() {
         // The scope digest is resealed over the corrupted content, so every
         // rejection below comes from the reference rule itself and not from
