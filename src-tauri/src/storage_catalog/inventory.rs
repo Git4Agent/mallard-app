@@ -410,73 +410,12 @@ fn scan_pets(
     Ok(())
 }
 
-/// Which portion of the local surface one inventory call observes. Narrowing
-/// is a cost gate, not a security boundary: a pets inventory must not shell
-/// out to the plugin CLIs, while a skills inventory still runs plugin
-/// discovery because plugin ownership classifies (excludes) plugin-owned
-/// skill directories — that exclusion is not optional.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CatalogInventoryFilter {
-    #[cfg(test)]
-    Everything,
-    Kind(CatalogResourceKindTag),
-}
-
-impl CatalogInventoryFilter {
-    fn selected_kind(&self) -> Option<CatalogResourceKindTag> {
-        match self {
-            #[cfg(test)]
-            CatalogInventoryFilter::Everything => None,
-            CatalogInventoryFilter::Kind(kind) => Some(*kind),
-        }
-    }
-
-    fn wants_plugin_discovery(&self) -> bool {
-        match self {
-            #[cfg(test)]
-            CatalogInventoryFilter::Everything => true,
-            CatalogInventoryFilter::Kind(kind) => {
-                matches!(
-                    kind,
-                    CatalogResourceKindTag::AgentSkill
-                        | CatalogResourceKindTag::PluginInstallIntent
-                )
-            }
-        }
-    }
-
-    fn wants_skill_roots(&self) -> bool {
-        self.selected_kind()
-            .is_none_or(|kind| kind == CatalogResourceKindTag::AgentSkill)
-    }
-
-    fn wants_pets(&self) -> bool {
-        self.selected_kind()
-            .is_none_or(|kind| kind.pet_format().is_some())
-    }
-
-    fn keeps(&self, record: &LocalResourceRecord) -> bool {
-        match self {
-            #[cfg(test)]
-            CatalogInventoryFilter::Everything => true,
-            // A kind inventory keeps cross-format pet occupants because the
-            // formats share a directory: conflict handling must see the v1
-            // pet sitting where a v2 pull wants to land. Scope rows filter
-            // back down to their own kind through `scope_local_records`.
-            CatalogInventoryFilter::Kind(kind) => {
-                *kind == record.resource.kind_tag()
-                    || kind.pet_format().is_some()
-                        && record.resource.kind_tag().pet_format().is_some()
-            }
-        }
-    }
-}
-
 /// Run one ownership-ordered inventory over the resolved context, observing
-/// only the surface the filter selects.
+/// only the surface for the requested scope kind. Pet inventories retain
+/// both formats because v1 and v2 packages share the same target directory.
 pub fn inventory_local(
     context: &ResolvedCatalogContext,
-    filter: CatalogInventoryFilter,
+    kind: CatalogResourceKindTag,
     runner: &dyn PluginProcessRunner,
 ) -> Result<CatalogLocalInventory, CatalogBlocker> {
     let mut inventory = CatalogLocalInventory {
@@ -491,7 +430,10 @@ pub fn inventory_local(
     // classification.
     let mut ownership_roots: Vec<PathBuf> = Vec::new();
     let mut owner_labels: BTreeMap<PathBuf, String> = BTreeMap::new();
-    let discovery_providers: &[ProviderKey] = if filter.wants_plugin_discovery() {
+    let discovery_providers: &[ProviderKey] = if matches!(
+        kind,
+        CatalogResourceKindTag::AgentSkill | CatalogResourceKindTag::PluginInstallIntent
+    ) {
         &[ProviderKey::Codex, ProviderKey::Claude]
     } else {
         &[]
@@ -561,7 +503,7 @@ pub fn inventory_local(
     }
 
     // 3-6. Skills from the fixed roots, then pets.
-    if filter.wants_skill_roots() {
+    if kind == CatalogResourceKindTag::AgentSkill {
         for root in &context.skill_roots {
             scan_skill_root(
                 root.scope,
@@ -574,17 +516,21 @@ pub fn inventory_local(
             .map_err(|detail| CatalogBlocker::InventoryFailed { detail })?;
         }
     }
-    if filter.wants_pets() {
+    if kind.pet_format().is_some() {
         if let Some(codex) = &context.codex {
             scan_pets(&codex.canonical_home, None, &mut inventory)
                 .map_err(|detail| CatalogBlocker::InventoryFailed { detail })?;
         }
     }
 
-    // A narrowed inventory serves exactly one kind: pet scanning yields both
-    // formats and plugin discovery yields intents during a skills pass, so
-    // drop every record the filter did not ask for.
-    inventory.resources.retain(|_, record| filter.keeps(record));
+    // A pet inventory keeps cross-format occupants because the formats share
+    // a directory: conflict handling must see the v1 pet sitting where a v2
+    // pull wants to land. Scope rows filter back down through
+    // `scope_local_records`.
+    inventory.resources.retain(|_, record| {
+        kind == record.resource.kind_tag()
+            || kind.pet_format().is_some() && record.resource.kind_tag().pet_format().is_some()
+    });
 
     // Equal names across the two Codex roots stay distinct resources; the
     // duplication is reported for review labels.
@@ -706,7 +652,7 @@ mod tests {
         }
 
         let inventory =
-            inventory_local(&context, CatalogInventoryFilter::Everything, &EmptyRunner).unwrap();
+            inventory_local(&context, CatalogResourceKindTag::AgentSkill, &EmptyRunner).unwrap();
         let ids: BTreeSet<_> = inventory.resources.keys().cloned().collect();
         // Equal names across the two Codex roots stay two resources.
         assert!(ids.contains(&skill_resource_id(
@@ -738,7 +684,7 @@ mod tests {
         );
         write(&codex_home.join("pets/duck/spritesheet.webp"), &atlas);
         let inventory =
-            inventory_local(&context, CatalogInventoryFilter::Everything, &EmptyRunner).unwrap();
+            inventory_local(&context, CatalogResourceKindTag::CodexPetV1, &EmptyRunner).unwrap();
         assert!(inventory
             .resources
             .contains_key(&pet_resource_id(CodexPetFormat::V1, "duck")));
@@ -762,7 +708,7 @@ mod tests {
         );
         // "Review" vs declared "review" collide case-folded in one root.
         let inventory =
-            inventory_local(&context, CatalogInventoryFilter::Everything, &EmptyRunner).unwrap();
+            inventory_local(&context, CatalogResourceKindTag::AgentSkill, &EmptyRunner).unwrap();
         assert_eq!(inventory.blocked.len(), 2);
         assert!(inventory
             .blocked
@@ -771,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pets_inventory_never_launches_provider_clis() {
+    fn a_pets_inventory_skips_provider_clis_and_keeps_cross_format_occupants() {
         struct PanicRunner;
         impl PluginProcessRunner for PanicRunner {
             fn run(
@@ -796,7 +742,7 @@ mod tests {
         );
         write(
             &codex_home.join("pets/drake/pet.json"),
-            br#"{"id":"drake","displayName":"Drake","description":"A drake.","spritesheetPath":"spritesheet.webp"}"#,
+            br#"{"id":"drake","displayName":"Drake","description":"A drake.","spriteVersionNumber":2,"spritesheetPath":"spritesheet.webp"}"#,
         );
         write(
             &codex_home.join("pets/drake/spritesheet.webp"),
@@ -807,17 +753,15 @@ mod tests {
             &codex_home.join("skills/review/SKILL.md"),
             b"---\nname: review\n---\n",
         );
-        let inventory = inventory_local(
-            &context,
-            CatalogInventoryFilter::Kind(CatalogResourceKindTag::CodexPetV1),
-            &PanicRunner,
-        )
-        .unwrap();
-        // One kind means exactly one format: the v2 drake is dropped.
+        let inventory =
+            inventory_local(&context, CatalogResourceKindTag::CodexPetV1, &PanicRunner).unwrap();
         assert!(inventory
             .resources
             .contains_key(&pet_resource_id(CodexPetFormat::V1, "duck")));
-        assert_eq!(inventory.resources.len(), 1, "only the v1 pet survives");
+        assert!(inventory
+            .resources
+            .contains_key(&pet_resource_id(CodexPetFormat::V2, "drake")));
+        assert_eq!(inventory.resources.len(), 2);
     }
 
     #[test]
@@ -861,7 +805,7 @@ mod tests {
         );
         let inventory = inventory_local(
             &context,
-            CatalogInventoryFilter::Kind(CatalogResourceKindTag::AgentSkill),
+            CatalogResourceKindTag::AgentSkill,
             &OwningRunner {
                 owned_root: codex_home.join("skills/owned"),
             },

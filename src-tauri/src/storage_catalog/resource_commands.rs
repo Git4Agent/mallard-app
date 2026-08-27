@@ -30,9 +30,7 @@ use super::domain::{
     LibraryResourceManifest, LibraryResourceTag, LocalCatalogProfile, LocalCatalogProfileId,
     LocalCatalogTargetId, ProviderKey, PublishedResourceEntry, CATALOG_SCHEMA, MAX_PET_ATLAS_BYTES,
 };
-use super::inventory::{
-    inventory_local, CatalogInventoryFilter, CatalogLocalInventory, LocalResourceRecord,
-};
+use super::inventory::{inventory_local, CatalogLocalInventory, LocalResourceRecord};
 use super::persistence::CatalogStateRepository;
 use super::profiles::{
     default_profile_home, resolve_profile_context, validate_new_profile_home,
@@ -658,12 +656,8 @@ fn resolve_scope_workspace(
         user_home,
     )
     .map_err(|blocker| blocker.to_string())?;
-    let inventory = inventory_local(
-        &context,
-        CatalogInventoryFilter::Kind(scope.resource_kind),
-        runner,
-    )
-    .map_err(|blocker| blocker.to_string())?;
+    let inventory = inventory_local(&context, scope.resource_kind, runner)
+        .map_err(|blocker| blocker.to_string())?;
 
     let links = catalog.load_scope_links()?;
     let config = state.load_config()?;
@@ -2022,12 +2016,8 @@ fn prepare_fork_with_repositories(
         user_home,
     )
     .map_err(|blocker| blocker.to_string())?;
-    let inventory = inventory_local(
-        &context,
-        CatalogInventoryFilter::Kind(scope.resource_kind),
-        runner,
-    )
-    .map_err(|blocker| blocker.to_string())?;
+    let inventory = inventory_local(&context, scope.resource_kind, runner)
+        .map_err(|blocker| blocker.to_string())?;
     let name_taken = name_taken_index(&inventory);
     let plan = build_resource_fork_plan(ScopeForkPlanInputs {
         scope: &scope,
