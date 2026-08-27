@@ -357,11 +357,6 @@ pub fn publish_request(
 
 #[derive(Clone, Debug)]
 pub struct TranscriptBuilder {
-    // Retained on the builder for suites that re-derive expectations from it.
-    #[allow(dead_code)]
-    thread_id: String,
-    #[allow(dead_code)]
-    cwd: String,
     records: Vec<Value>,
     last_message_id: Option<String>,
 }
@@ -369,8 +364,6 @@ pub struct TranscriptBuilder {
 impl TranscriptBuilder {
     pub fn new(thread_id: &str, cwd: &str) -> Self {
         Self {
-            thread_id: thread_id.to_string(),
-            cwd: cwd.to_string(),
             records: vec![json!({
                 "timestamp": "2026-07-22T00:00:00Z",
                 "type": "session_meta",
@@ -433,12 +426,9 @@ impl TranscriptBuilder {
     }
 }
 
-/// Test-fixture identity retarget: rewrite the authoritative session id and
-/// the structural cwd fields of a fabricated transcript. This reproduces
-/// the retired structural rewrite for fixture setup only — production pulls
-/// materialize exclusively through the standalone Decode build, and these
-/// fixtures carry no in-cwd content paths, so their canonical digests are
-/// unchanged by the retarget.
+/// Rewrite the authoritative session id and structural cwd fields in a
+/// fabricated transcript. These fixtures contain no in-cwd content paths,
+/// so their canonical digests remain unchanged.
 pub fn rewrite_transcript_identity(
     bytes: &[u8],
     source_thread_id: &str,

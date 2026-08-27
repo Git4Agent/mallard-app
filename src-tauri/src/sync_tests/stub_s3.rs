@@ -18,9 +18,7 @@ use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -31,44 +29,16 @@ fn sha256_bytes(bytes: &[u8]) -> String {
         .collect()
 }
 
-// The hook and request-record surfaces are fault-injection scaffolding;
-// individual suites use different subsets of them.
-#[allow(dead_code)]
-pub enum HookAction {
-    /// Run before the precondition is evaluated — e.g. publish a competing
-    /// commit so the CAS fails exactly like a lost race.
-    RunBefore(Box<dyn FnMut(&Path) + Send>),
-    /// Apply the write, then stall the response past the client timeout —
-    /// the caller observes an ambiguous outcome for a write that landed.
-    StallAfterWrite(Duration),
-}
-
-struct CondPutHook {
-    key_suffix: String,
-    remaining: usize,
-    action: HookAction,
-}
-
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct RequestRecord {
     pub method: String,
     pub key: String,
     pub conditional: bool,
-    pub status: u16,
-}
-
-#[derive(Default)]
-struct Inner {
-    hooks: Vec<CondPutHook>,
-    log: Vec<RequestRecord>,
 }
 
 #[derive(Default)]
 struct StubState {
-    /// Simulates a store that accepts conditional headers but ignores them.
-    ignore_conditions: AtomicBool,
-    inner: Mutex<Inner>,
+    log: Mutex<Vec<RequestRecord>>,
 }
 
 pub struct StubS3 {
@@ -119,24 +89,8 @@ impl StubS3 {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn set_ignore_conditions(&self, value: bool) {
-        self.state.ignore_conditions.store(value, Ordering::SeqCst);
-    }
-
-    /// Arm a hook on the next `remaining` conditional PUTs whose key ends
-    /// with `key_suffix`.
-    #[allow(dead_code)]
-    pub fn add_conditional_put_hook(&self, key_suffix: &str, remaining: usize, action: HookAction) {
-        self.state.inner.lock().unwrap().hooks.push(CondPutHook {
-            key_suffix: key_suffix.to_string(),
-            remaining,
-            action,
-        });
-    }
-
     pub fn requests(&self) -> Vec<RequestRecord> {
-        self.state.inner.lock().unwrap().log.clone()
+        self.state.log.lock().unwrap().clone()
     }
 }
 
@@ -322,25 +276,8 @@ async fn handle(
     let object_path = bucket_dir.join(&key);
     let conditional = if_match.is_some() || if_none_match.is_some();
 
-    // Everything below is synchronous under one lock; an optional stall
-    // happens after the lock is released.
-    let mut stall: Option<Duration> = None;
     let response = {
-        let mut inner = state.inner.lock().unwrap();
-
-        if method == Method::PUT && conditional {
-            if let Some(hook) = inner
-                .hooks
-                .iter_mut()
-                .find(|hook| hook.remaining > 0 && key.ends_with(&hook.key_suffix))
-            {
-                hook.remaining -= 1;
-                match &mut hook.action {
-                    HookAction::RunBefore(callback) => callback(&root),
-                    HookAction::StallAfterWrite(duration) => stall = Some(*duration),
-                }
-            }
-        }
+        let mut log = state.log.lock().unwrap();
 
         let response = match (&method, key.is_empty()) {
             (&Method::GET, true) if query.contains("list-type=2") => {
@@ -362,7 +299,7 @@ async fn handle(
             (&Method::PUT, false) => {
                 let mut fail = false;
                 let current = fs::read(&object_path).ok();
-                if !fail && conditional && !state.ignore_conditions.load(Ordering::SeqCst) {
+                if conditional {
                     if let Some(expected) = &if_match {
                         let expected = expected.trim().trim_matches('"');
                         fail = current
@@ -374,7 +311,6 @@ async fn handle(
                     }
                 }
                 if fail {
-                    stall = None;
                     xml_error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed")
                 } else {
                     if let Some(parent) = object_path.parent() {
@@ -392,17 +328,13 @@ async fn handle(
             _ => xml_error(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed"),
         };
 
-        inner.log.push(RequestRecord {
+        log.push(RequestRecord {
             method: method.to_string(),
             key: key.clone(),
             conditional,
-            status: response.status().as_u16(),
         });
         response
     };
 
-    if let Some(duration) = stall {
-        tokio::time::sleep(duration).await;
-    }
     Ok(response)
 }
