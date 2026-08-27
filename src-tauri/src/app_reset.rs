@@ -9,10 +9,11 @@
 //! then loads `devUrl` from a dead port: a white window). The frontend
 //! finishes the cutover with `window.location.reload()` instead.
 
-use crate::activity_log::{ActivityLogScope, ActivityLogType};
+use crate::activity_log::ActivityLogScope;
 use crate::project_sync::config_watcher::ConfigWatcher;
 use crate::project_sync::session_watch_service::session_watch_service;
 use crate::storage_catalog::persistence::CatalogStateRepository;
+use mallard_infrastructure::activity_log::ActivityLogType;
 use mallard_infrastructure::persistence::{
     LocalStateRepository, LocalStateSummary, LocalStateWipeResult,
 };

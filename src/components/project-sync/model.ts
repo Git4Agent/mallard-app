@@ -55,7 +55,7 @@ export const RESOURCE_GROUPS: Array<{
 /* Wire enums never reach the screen raw: a resource's kind and apply policy
    are backend vocabulary ("manual_only", "explicit_review"), and the field
    that tells a user what will happen to their file must say so in words. */
-export const KIND_LABELS: Record<ProjectResourceKind, string> = {
+const KIND_LABELS: Record<ProjectResourceKind, string> = {
   conversation: "Session",
   provider_state: "Provider state",
   project_content_file: "Project file",
@@ -63,7 +63,7 @@ export const KIND_LABELS: Record<ProjectResourceKind, string> = {
   requirement: "Requirement",
 };
 
-export const APPLY_POLICY_LABELS: Record<string, string> = {
+const APPLY_POLICY_LABELS: Record<string, string> = {
   safe_file: "Applied when safe",
   merge: "Merged on Pull",
   explicit_review: "Applied after review",
@@ -148,7 +148,3 @@ export function formatRelativeTime(epoch?: number): string {
   if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h ago`;
   return new Date(milliseconds).toLocaleDateString();
 }
-
-// Both now live in src/storageError.ts so storage-catalog can use the same
-// translation without importing from this module.
-export { errorMessage, storageAccessErrorMessage } from "../../storageError";

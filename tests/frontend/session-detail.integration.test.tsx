@@ -304,7 +304,6 @@ test("the header is one strip: hidden h1, facts as chips, verbs on the right", (
   assert.match(html, /session-detail-launch[^>]*title="Open in Codex"[^>]*aria-label="Open in Codex"/);
   assert.match(html, /session-detail-launch[^>]*>.*data-icon="openai"/);
   assert.doesNotMatch(html, />Open in Codex</);
-  assert.doesNotMatch(html, /data-icon="play"/);
   assert.doesNotMatch(html, /session-detail-provider-badge|session-detail-active-badge|session-detail-refresh|Refresh session detail/);
 
   const distinct = renderToStaticMarkup(
@@ -943,15 +942,10 @@ test("a session opened from its commit row starts at the first event", () => {
   const workspaceSource = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   const types = readFileSync("src/types.ts", "utf8");
 
-  // The checkpoint is synthesized as the timeline's terminal event and a
-  // session holds exactly one, so anchoring the first page at it always
-  // started one past the last indexed event: the reader landed on the commit
-  // marker alone, with no cursor to page forward from. Opening a session now
-  // means opening it at the beginning, whichever row was clicked.
+  // Opening a session means opening it at the beginning, whichever row was clicked.
   for (const source of [pageSource, modelSource, activitySource, syncSource, workspaceSource]) {
     assert.doesNotMatch(source, /initialCheckpointId|findCheckpointJump|checkpoint_jumps/);
   }
-  assert.doesNotMatch(pageSource, /anchor_event_id|anchorEventId|pendingAnchorRef/);
   assert.doesNotMatch(activitySource, /renderSession\([^)]*commit\.sha\)/);
   assert.doesNotMatch(types, /checkpoint_jumps|SessionCheckpointJump/);
 });

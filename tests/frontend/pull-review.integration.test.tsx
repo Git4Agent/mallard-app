@@ -19,10 +19,10 @@ import RestorePlanView, {
 import SyncOutcomeNotice from "../../src/components/sync-review/SyncOutcomeNotice";
 import {
   buildPullOutcome,
-  isIrrecoverableSyncError,
   syncOutcomeView,
   type SyncOutcome,
 } from "../../src/components/project-sync/syncOutcome";
+import { isIrrecoverableSyncError } from "../../src/components/project-sync/syncError";
 import {
   buildPullReviewItems,
   buildPullReviewSelection,

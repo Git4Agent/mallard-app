@@ -15,8 +15,8 @@ import {
   type BooleanPreferenceName,
   type ThemeChoice,
 } from "../../preferences";
+import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
-import { errorMessage } from "./model";
 import { LoadingBone } from "./LoadingScaffold";
 
 /**

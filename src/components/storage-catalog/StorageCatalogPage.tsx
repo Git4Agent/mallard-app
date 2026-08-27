@@ -4,7 +4,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import Icon, { type IconName } from "../Icons";
 import { clockOptions } from "../../clock";
 import { formatBytes } from "../../format";
-import { storageAccessErrorMessage } from "../../storageError";
+import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import LoadingScaffold from "../project-sync/LoadingScaffold";
 import { writeClipboardText } from "../sync-review/clipboard";
@@ -13,12 +13,11 @@ import ProviderMark from "../sync-review/ProviderMark";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
-import { storageCatalogApi, type StorageCatalogApi } from "./api";
+import { storageCatalogApi } from "./api";
 import {
   actionLabel,
   catalogKindMeta,
   catalogScopeLabel,
-  errorMessage,
   rowPullable,
   rowPushable,
   rowStamp,
@@ -658,7 +657,6 @@ export default function StorageCatalogPage({
   openStorageMenuRequestId,
   onScopeGone,
   notify,
-  api = storageCatalogApi,
 }: {
   scope: CatalogScopeView;
   /** The other Catalog rows, for this row's Switch-to menu. */
@@ -682,7 +680,6 @@ export default function StorageCatalogPage({
    * screen reports them — not to a block that pushes the list down. The tone
    * union is declared locally: this module may not import from project-sync. */
   notify: (message: string, tone?: CatalogNoticeTone) => void;
-  api?: StorageCatalogApi;
 }) {
   const label = catalogScopeLabel(scope.scope, scope.profile);
   const kind = catalogKindMeta(scope.scope.resource_kind);
@@ -763,7 +760,7 @@ export default function StorageCatalogPage({
     setError(null);
     setFailures([]);
     try {
-      const next = await api.listScopeResources(scope.scope.scope_id, chosenStorageId);
+      const next = await storageCatalogApi.listScopeResources(scope.scope.scope_id, chosenStorageId);
       if (epoch !== epochRef.current) return;
       setPage(next);
     } catch (reason) {
@@ -776,7 +773,7 @@ export default function StorageCatalogPage({
     } finally {
       if (epoch === epochRef.current) setLoading(false);
     }
-  }, [api, chosenStorageId, scope.scope.scope_id]);
+  }, [chosenStorageId, scope.scope.scope_id]);
 
   useEffect(() => {
     void load();
@@ -822,7 +819,7 @@ export default function StorageCatalogPage({
     setBusy(true);
     setRenameError(null);
     try {
-      await api.renameProfile(profile.profile_id, profileNameDraft.trim(), profile.revision);
+      await storageCatalogApi.renameProfile(profile.profile_id, profileNameDraft.trim(), profile.revision);
       setRenamingProfile(false);
       onProfileRenamed();
       await load();
@@ -897,7 +894,7 @@ export default function StorageCatalogPage({
       for (const row of targets) {
         previewAttempts.current.add(row.row_id);
         try {
-          const preview = await api.getPetPreview(scopeId, storageId, row.resource_id!);
+          const preview = await storageCatalogApi.getPetPreview(scopeId, storageId, row.resource_id!);
           if (cancelled) return;
           setRemotePreviews((current) => ({ ...current, [row.row_id]: preview }));
         } catch {
@@ -909,7 +906,7 @@ export default function StorageCatalogPage({
     return () => {
       cancelled = true;
     };
-  }, [api, petKind, rows, scope.scope.scope_id, storageId]);
+  }, [petKind, rows, scope.scope.scope_id, storageId]);
 
   /** The card's one launch verb. Failures land on the page's own error
    * surface, the same place every other verb reports. */
@@ -925,8 +922,8 @@ export default function StorageCatalogPage({
   const ensureLink = useCallback(async (): Promise<void> => {
     if (page?.link) return;
     if (!storageId) throw new Error("choose a storage first");
-    await api.linkScopeStorage(scope.scope.scope_id, storageId);
-  }, [api, page, scope.scope.scope_id, storageId]);
+    await storageCatalogApi.linkScopeStorage(scope.scope.scope_id, storageId);
+  }, [page, scope.scope.scope_id, storageId]);
 
   const openPush = async () => {
     if (!storageId) return;
@@ -935,7 +932,7 @@ export default function StorageCatalogPage({
     setFailures([]);
     try {
       await ensureLink();
-      const plan = await api.preparePush(scope.scope.scope_id, storageId);
+      const plan = await storageCatalogApi.preparePush(scope.scope.scope_id, storageId);
       setPushPlan(plan);
       setPushSelected(new Set(plan.rows
         .filter((row) => row.row.selected_by_default)
@@ -957,7 +954,7 @@ export default function StorageCatalogPage({
     setFailures([]);
     setProgress(`Pushing ${selected.length} ${selected.length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase()}…`);
     try {
-      const outcome = await api.applyPush(pushPlan.plan_id, selected, [...pushAcks]);
+      const outcome = await storageCatalogApi.applyPush(pushPlan.plan_id, selected, [...pushAcks]);
       setMode({ kind: "list" });
       setPushPlan(null);
       await load();
@@ -988,7 +985,7 @@ export default function StorageCatalogPage({
     setFailures([]);
     try {
       await ensureLink();
-      const plan = await api.preparePull(scope.scope.scope_id, storageId, null);
+      const plan = await storageCatalogApi.preparePull(scope.scope.scope_id, storageId, null);
       setPullPlan(plan);
       setPullSelected(new Set(plan.items
         .filter((item) => item.item.default_action_id)
@@ -1017,7 +1014,7 @@ export default function StorageCatalogPage({
     setFailures([]);
     setProgress(`Pulling ${Object.keys(choices).length} ${Object.keys(choices).length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase()}…`);
     try {
-      const outcome = await api.applyPull(pullPlan.plan_id, choices, [...pullAcks]);
+      const outcome = await storageCatalogApi.applyPull(pullPlan.plan_id, choices, [...pullAcks]);
       setMode({ kind: "list" });
       setPullPlan(null);
       await load();
@@ -1064,7 +1061,7 @@ export default function StorageCatalogPage({
     setError(null);
     setFailures([]);
     try {
-      await api.unlinkScopeStorage(pageLink.link_id, pageLink.revision);
+      await storageCatalogApi.unlinkScopeStorage(pageLink.link_id, pageLink.revision);
       notify("Storage link removed. Local and stored content were left untouched.");
     } catch (reason) {
       setError(errorMessage(reason));
@@ -1080,8 +1077,8 @@ export default function StorageCatalogPage({
     setBusy(true);
     setForkError(null);
     try {
-      const plan = await api.prepareFork(scope.scope.scope_id, row.resource_id, name.trim());
-      const result = await api.applyFork(scope.scope.scope_id, plan.plan_id);
+      const plan = await storageCatalogApi.prepareFork(scope.scope.scope_id, row.resource_id, name.trim());
+      const result = await storageCatalogApi.applyFork(scope.scope.scope_id, plan.plan_id);
       setForkFor(null);
       notify(result.message ?? `Created ${result.display_name}`);
       await load();

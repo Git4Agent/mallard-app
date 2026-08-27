@@ -7,10 +7,8 @@ import type { AppTheme } from "./types";
  * namespace, every read carries a hardcoded fallback, and every write
  * notifies subscribers — components stay live through the hooks below.
  *
- * Theme lives here too (this module absorbed theme.ts). The legacy
- * `agent-sync-theme` key is abandoned, not migrated: absence now means
- * System, so a fresh install — and the first launch after this cutover —
- * follows the OS instead of forcing dark.
+ * Theme lives here too. Absence means System, so a fresh install follows the
+ * OS instead of forcing dark.
  */
 
 export type ThemeChoice = "system" | AppTheme;
@@ -99,7 +97,7 @@ export function setPreference(name: BooleanPreferenceName, value: boolean) {
 /**
  * Factory reset: drop every `mallard.*` key — a prefix sweep, not a list,
  * because keys live in three modules and future ones must be covered without
- * remembering this function exists — plus the abandoned legacy theme key.
+ * remembering this function exists.
  * Called by the Settings page after a successful `~/.mallard` wipe, right
  * before the app restarts.
  */
@@ -110,7 +108,6 @@ export function clearStoredUiState() {
       const key = window.localStorage.key(index);
       if (key?.startsWith("mallard.")) doomed.push(key);
     }
-    doomed.push("agent-sync-theme");
     for (const key of doomed) window.localStorage.removeItem(key);
   } catch {
     // A locked-down webview can reject storage; the restart still lands on

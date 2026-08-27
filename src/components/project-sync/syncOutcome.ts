@@ -15,8 +15,6 @@ import { pushReviewPullHolds } from "./PushResourceWorkspace";
 import type { PullReviewItem } from "./pullReviewModel";
 import { isIrrecoverableSyncError } from "./syncError";
 
-export { isIrrecoverableSyncError } from "./syncError";
-
 /** A finished operation rendered on the storage card after its review closes. */
 export type SyncOutcomeRowStatus = "synced" | "held" | "preserved" | "failed";
 

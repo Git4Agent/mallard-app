@@ -119,11 +119,6 @@ test("preferences default on, live under the mallard.* keys, and notify", () => 
   assert.match(source, /"mallard\.open-logs-on-sync"/);
   assert.match(source, /"mallard\.refresh-on-focus"/);
   assert.match(source, /"mallard\.clock-24h"/);
-  // The legacy theme store is gone, module and key alike — the old key may
-  // be named in prose, but no code path reads or writes it.
-  assert.doesNotMatch(source, /(getItem|setItem)\("agent-sync-theme"/);
-  assert.equal(existsSync("src/theme.ts"), false);
-
   // Factory reset is a prefix sweep, not an enumerated key list — future
   // mallard.* keys must be covered without anyone remembering this function.
   assert.match(source, /export function clearStoredUiState\(/);

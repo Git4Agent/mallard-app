@@ -4,18 +4,18 @@
 //! valid scope of a provider this binary has never registered survives a
 //! common publish byte-identical.
 
-use crate::project_sync::bundle_engine::{self, CapturedBundleFile, PublishExpectation};
-use crate::project_sync::domain::{provider_state_path_prefix, ApplyPolicy, BundleRecipe};
-use crate::project_sync::provider_capture::{self, CaptureRequest, CaptureResourceKind};
-use crate::project_sync::providers::{test_provider, ProviderRegistry};
 use crate::sync_tests::thread_variants::harness::{
     codex_scope_key, harness_captured_with, publish_request, publish_with_head, ThreadSpec,
     TranscriptBuilder, VariantWorld,
 };
+use mallard_domain::{provider_state_path_prefix, ApplyPolicy, BundleRecipe};
 use mallard_domain::{
     LogicalPath, Provenance, ProviderKey, RecipeEntry, ResourceDescriptor, ResourceId,
     ResourceKind, ResourceTypeKey, SyncScopeKey,
 };
+use mallard_infrastructure::bundle_engine::{self, CapturedBundleFile, PublishExpectation};
+use mallard_infrastructure::provider_capture::{self, CaptureRequest, CaptureResourceKind};
+use mallard_infrastructure::providers::{test_provider, ProviderRegistry};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 

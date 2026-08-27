@@ -6,7 +6,7 @@
 //! watched recursively. Event payloads deliberately carry no configuration or
 //! draft values; storage credentials remain behind the command boundary.
 
-use super::persistence::LocalStateRepository;
+use mallard_infrastructure::persistence::LocalStateRepository;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::path::{Path, PathBuf};

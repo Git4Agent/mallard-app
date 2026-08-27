@@ -464,7 +464,7 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.doesNotMatch(retroCss, /--sync-history-commit-thread-rail-x|--sync-history-commit-child-offset|--sync-history-commit-branch-length/);
   assert.doesNotMatch(retroCss, /\.sync-history-commit-heading:has\(\+ \.sync-history-thread-list\)::after/);
   assert.match(retroCss, /\.sync-history-commit > \.sync-history-thread-list::after\s*\{[^}]*display: none;/s);
-  assert.match(retroCss, /\.sync-history-commit > \.sync-history-thread-list \.sync-thread-sync-indicator,[^{]*\{[^}]*background: transparent;[^}]*box-shadow: none;/s);
+  assert.match(retroCss, /\.sync-history-commit > \.sync-history-thread-list \.sync-thread-sync-indicator\s*\{[^}]*background: transparent;[^}]*box-shadow: none;/s);
   // Titles are human text, so they read in the sans.
   assert.match(retroCss, /\.sync-history-commit-title > strong,[^}]*font-family: var\(--font-sans\);[^}]*font-size: var\(--type-sm\);[^}]*font-weight: var\(--weight-semibold\);[^}]*letter-spacing: 0;/s);
   // A date is scanned as a column, so it takes the identifier face and figures

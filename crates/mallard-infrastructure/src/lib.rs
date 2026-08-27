@@ -1,9 +1,5 @@
 //! Mallard infrastructure adapters: local state persistence, object stores,
 //! provider integrations, and platform mechanics.
-//!
-//! Extracted mechanically from the desktop crate by
-//! `docs/PLAN_PROJECT_STRUCTURE_REORGANIZATION.md`; the module layout mirrors
-//! the original file names so behavior and history stay traceable.
 
 mod path_text_boundary;
 

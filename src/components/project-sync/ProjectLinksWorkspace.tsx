@@ -29,6 +29,7 @@ import type {
 import Icon from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import { clockOptions } from "../../clock";
+import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import ProjectActivityPage, { BranchPicker, type ActivityHeaderModel } from "./ProjectActivityPage";
 import type {
   ActiveProjectSubview,
@@ -55,10 +56,8 @@ import { projectSyncApi } from "./api";
 import {
   compactProjectPath,
   formatRelativeTime,
-  errorMessage,
   projectLabel,
   providerLabel,
-  storageAccessErrorMessage,
   type RenameResult,
 } from "./model";
 

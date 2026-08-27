@@ -1,11 +1,4 @@
-use crate::project_sync::bundle_engine::{
-    self, BundleBytes, BundleEngine, CapturedBundleFile, HeadToken, PublishBundleRequest,
-    PublishExpectation, ScopePublishInput,
-};
-use crate::project_sync::conversation_codec::{
-    analyze_codex_transcript, CodecLineage, CODEX_LINEAGE_CODEC_KEY,
-};
-use crate::project_sync::domain::{
+use mallard_domain::{
     cloud_conversation_resource_id, cloud_conversation_transcript_path, ApplyPolicy, BundleId,
     BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleScope, BundleSnapshot,
     CapturedWith, CloudThreadId, ConversationFileRef, ConversationFileRole,
@@ -13,8 +6,15 @@ use crate::project_sync::domain::{
     ProviderKey, RecipeEntry, ReplicaId, ResourceDescriptor, ResourceKind, SessionPresentation,
     StorageId, SyncScopeKey,
 };
-use crate::project_sync::persistence::LocalStateRepository;
-use crate::project_sync::storage_core::{LocalObjectStore, ObjectStore};
+use mallard_infrastructure::bundle_engine::{
+    self, BundleBytes, BundleEngine, CapturedBundleFile, HeadToken, PublishBundleRequest,
+    PublishExpectation, ScopePublishInput,
+};
+use mallard_infrastructure::conversation_codec::{
+    analyze_codex_transcript, CodecLineage, CODEX_LINEAGE_CODEC_KEY,
+};
+use mallard_infrastructure::persistence::LocalStateRepository;
+use mallard_infrastructure::storage_core::{LocalObjectStore, ObjectStore};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
@@ -275,7 +275,7 @@ pub fn publish_request(
             ),
             // The real binary stamp: harness rows flow through the real
             // pull gates, which require fingerprint equality.
-            wire_redaction: Some(crate::project_sync::credential_redaction::shared().stamp()),
+            wire_redaction: Some(mallard_infrastructure::credential_redaction::shared().stamp()),
             // Codex declares its path map in-band; the out-of-band stamp is
             // claude-only and forbidden here.
             wire_path_map: None,
@@ -505,9 +505,7 @@ pub fn chain(thread_id: &str, suffix: &[(&str, &str)]) -> Vec<u8> {
     builder.build()
 }
 
-pub fn analyzed_chain(
-    bytes: &[u8],
-) -> Vec<crate::project_sync::domain::CanonicalConversationMessage> {
+pub fn analyzed_chain(bytes: &[u8]) -> Vec<mallard_domain::CanonicalConversationMessage> {
     analyze_codex_transcript(bytes)
         .lineage
         .chain()

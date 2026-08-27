@@ -1,34 +1,22 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const testDirectory = join(projectRoot, "tests", "frontend");
+const entries = (await readdir(testDirectory, { withFileTypes: true }))
+  .filter((entry) => entry.isFile() && entry.name.endsWith(".integration.test.tsx"))
+  .map((entry) => join("tests", "frontend", entry.name))
+  .sort();
 const outputDirectory = await mkdtemp(join(tmpdir(), "agent-sync-frontend-tests-"));
-const entries = [
-  "tests/frontend/activity-log.integration.test.tsx",
-  "tests/frontend/catalog-scope-removal.integration.test.tsx",
-  "tests/frontend/conversation-path-repair.integration.test.tsx",
-  "tests/frontend/css-hygiene.integration.test.tsx",
-  "tests/frontend/pull-review.integration.test.tsx",
-  "tests/frontend/project-activity.integration.test.tsx",
-  "tests/frontend/project-files.integration.test.tsx",
-  "tests/frontend/project-sync-cutover.integration.test.tsx",
-  "tests/frontend/repo-bundle-convergence.integration.test.tsx",
-  "tests/frontend/resource-inventory.integration.test.tsx",
-  "tests/frontend/session-detail.integration.test.tsx",
-  "tests/frontend/settings-page.integration.test.tsx",
-  "tests/frontend/storage-catalog.integration.test.tsx",
-  "tests/frontend/storage-settings.integration.test.tsx",
-  "tests/frontend/thread-variants.integration.test.tsx",
-];
 
 try {
   const outputs = [];
   for (const entry of entries) {
-    const outputFile = join(outputDirectory, `${entry.split("/").at(-1).replace(/\.tsx$/, "")}.cjs`);
+    const outputFile = join(outputDirectory, `${basename(entry, ".tsx")}.cjs`);
     await build({
       absWorkingDir: projectRoot,
       entryPoints: [entry],

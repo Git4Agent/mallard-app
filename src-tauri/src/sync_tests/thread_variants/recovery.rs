@@ -1,17 +1,6 @@
 use super::harness::{codex, rewrite_transcript_identity, sha256, TranscriptBuilder, VariantWorld};
 use super::relation_matrix::reviewed_action;
-use crate::project_sync::conversation_codec::{analyze_codex_transcript, CodecLineage};
-use crate::project_sync::conversation_materialization::{
-    apply_conversation_cloud_publication, apply_conversation_materialization,
-    recover_conversation_cloud_publications, recover_conversation_materializations,
-    ConversationCloudPublication, ConversationFailpoint, ConversationFailpoints,
-    ConversationMaterializationRequest, ConversationTargetPayload, NoConversationFailpoints,
-};
-use crate::project_sync::conversation_sync::{
-    validate_conversation_action_pins, ConversationContextPin, ConversationRevisionPin,
-    ConversationStalePin, ConversationTailPin, ConversationTargetPin,
-};
-use crate::project_sync::domain::{
+use mallard_domain::{
     compute_portable_conversation_tail, BindingState, BundleId, BundleRecipe, CloudThreadId,
     ConversationCloudAnchor, ConversationFileRole, ConversationJournalTarget,
     ConversationMaterializationOperation, ConversationMaterializationState,
@@ -23,8 +12,21 @@ use crate::project_sync::domain::{
     StorageId, SyncConfig, SyncCurrency, TailClassification, TailPartitionKind, TargetExpectation,
     ThreadId, PORTABLE_TAIL_CODEC_V1, PUSH_PLAN_SCHEMA,
 };
-use crate::project_sync::persistence::LocalStateRepository;
-use crate::project_sync::provider_capture::{capture_selected, discover_project, CaptureRequest};
+use mallard_infrastructure::conversation_codec::{analyze_codex_transcript, CodecLineage};
+use mallard_infrastructure::conversation_materialization::{
+    apply_conversation_cloud_publication, apply_conversation_materialization,
+    recover_conversation_cloud_publications, recover_conversation_materializations,
+    ConversationCloudPublication, ConversationFailpoint, ConversationFailpoints,
+    ConversationMaterializationRequest, ConversationTargetPayload, NoConversationFailpoints,
+};
+use mallard_infrastructure::conversation_sync::{
+    validate_conversation_action_pins, ConversationContextPin, ConversationRevisionPin,
+    ConversationStalePin, ConversationTailPin, ConversationTargetPin,
+};
+use mallard_infrastructure::persistence::LocalStateRepository;
+use mallard_infrastructure::provider_capture::{
+    capture_selected, discover_project, CaptureRequest,
+};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
@@ -38,7 +40,7 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
     );
     type StaleCase = (
         ConversationStalePin,
-        Box<dyn Fn(&mut crate::project_sync::conversation_sync::ConversationApplyContext)>,
+        Box<dyn Fn(&mut mallard_infrastructure::conversation_sync::ConversationApplyContext)>,
     );
     let cases: Vec<StaleCase> = vec![
         (
@@ -49,15 +51,14 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
             ConversationStalePin::Context(ConversationContextPin::Host),
             Box::new(|value| {
                 value.pins.context.host_id =
-                    crate::project_sync::domain::HostId::parse("22222222222222222222222222222222")
-                        .unwrap()
+                    mallard_domain::HostId::parse("22222222222222222222222222222222").unwrap()
             }),
         ),
         (
             ConversationStalePin::Context(ConversationContextPin::Replica),
             Box::new(|value| {
                 value.pins.context.replica_id =
-                    crate::project_sync::domain::ReplicaId::parse("replica-other").unwrap()
+                    mallard_domain::ReplicaId::parse("replica-other").unwrap()
             }),
         ),
         (
@@ -145,7 +146,7 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
         (
             ConversationStalePin::Tail(ConversationTailPin::RawRange),
             Box::new(|value| {
-                value.pins.tail.raw_range = Some(crate::project_sync::domain::RawRangePin {
+                value.pins.tail.raw_range = Some(mallard_domain::RawRangePin {
                     start_byte_offset: 0,
                     end_byte_offset: 1,
                     range_sha256: "e".repeat(64),
@@ -159,12 +160,14 @@ fn every_reviewed_pin_rejects_independently_before_mutation() {
         (
             ConversationStalePin::Target(ConversationTargetPin::ProviderState),
             Box::new(|value| {
-                value.pins.target.provider_state.push(
-                    crate::project_sync::domain::ProviderStateExpectation {
+                value
+                    .pins
+                    .target
+                    .provider_state
+                    .push(mallard_domain::ProviderStateExpectation {
                         target_path: "/tmp/provider/occupied.jsonl".to_string(),
                         expectation: TargetExpectation::Absent,
-                    },
-                );
+                    });
             }),
         ),
         (
@@ -291,12 +294,9 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
             manifest_sha256: "a".repeat(64),
         },
         host_id: identity.host_id,
-        replica_id: crate::project_sync::domain::ReplicaId::parse("replica-a").unwrap(),
-        local_project_id: crate::project_sync::domain::LocalProjectId::parse("project-a").unwrap(),
-        provider_profile_id: crate::project_sync::domain::LocalProviderProfileId::parse(
-            "profile-a",
-        )
-        .unwrap(),
+        replica_id: mallard_domain::ReplicaId::parse("replica-a").unwrap(),
+        local_project_id: mallard_domain::LocalProjectId::parse("project-a").unwrap(),
+        provider_profile_id: mallard_domain::LocalProviderProfileId::parse("profile-a").unwrap(),
         provider: codex(),
         thread_id: ThreadId::parse("thread-journal").unwrap(),
         cloud_thread_id: CloudThreadId::parse("cloudthread-journal").unwrap(),
@@ -310,7 +310,7 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
         expected_project_binding_revision: 0,
         targets: vec![ConversationJournalTarget {
             target_path: "/tmp/provider/thread-a.jsonl".to_string(),
-            role: crate::project_sync::domain::ConversationFileRole::Transcript,
+            role: mallard_domain::ConversationFileRole::Transcript,
             expected: TargetExpectation::Absent,
             staged_path: Some("/tmp/staging/thread-a.jsonl".to_string()),
             backup_path: None,
@@ -330,7 +330,7 @@ fn conversation_journal_is_revisioned_bounded_and_restart_readable() {
             Ok(())
         })
         .unwrap();
-    let reopened = crate::project_sync::persistence::LocalStateRepository::from_home_dir(
+    let reopened = mallard_infrastructure::persistence::LocalStateRepository::from_home_dir(
         world.repo_a.root().parent().unwrap(),
     )
     .unwrap();
@@ -358,12 +358,9 @@ fn journal_rejects_duplicate_operation_ids() {
             manifest_sha256: "a".repeat(64),
         },
         host_id: identity.host_id,
-        replica_id: crate::project_sync::domain::ReplicaId::parse("replica-a").unwrap(),
-        local_project_id: crate::project_sync::domain::LocalProjectId::parse("project-a").unwrap(),
-        provider_profile_id: crate::project_sync::domain::LocalProviderProfileId::parse(
-            "profile-a",
-        )
-        .unwrap(),
+        replica_id: mallard_domain::ReplicaId::parse("replica-a").unwrap(),
+        local_project_id: mallard_domain::LocalProjectId::parse("project-a").unwrap(),
+        provider_profile_id: mallard_domain::LocalProviderProfileId::parse("profile-a").unwrap(),
         provider: codex(),
         thread_id: ThreadId::parse("thread-journal").unwrap(),
         cloud_thread_id: CloudThreadId::parse("cloudthread-journal").unwrap(),
@@ -1107,7 +1104,7 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
             origin,
             20,
             Some(&initial.snapshot.manifest),
-            crate::project_sync::bundle_engine::PublishExpectation::Match(initial.head_token),
+            mallard_infrastructure::bundle_engine::PublishExpectation::Match(initial.head_token),
         );
         let mut operation = push_operation(
             &world,
@@ -1317,7 +1314,7 @@ fn committed_codex_provider_files_materialize_resume_and_rebind_one_variant() {
     assert_eq!(committed_sidecar["thread_id"], "destination-thread");
     assert_eq!(committed_sidecar["cwd"], project_root);
 
-    let registry = crate::project_sync::providers::ProviderRegistry::production();
+    let registry = mallard_infrastructure::providers::ProviderRegistry::production();
     let mut capture_request = CaptureRequest::for_project(PathBuf::from(&project_root));
     capture_request
         .provider_homes
@@ -1451,7 +1448,7 @@ struct MaterializationFixture {
 }
 
 pub(super) struct InstalledScope {
-    pub(super) host_id: crate::project_sync::domain::HostId,
+    pub(super) host_id: mallard_domain::HostId,
     pub(super) host_identity_revision: u64,
     pub(super) replica_id: ReplicaId,
     pub(super) project_id: LocalProjectId,
@@ -1593,12 +1590,8 @@ fn push_operation(
                 planned_relation: TailClassification::MissingCloud,
                 sync_config_before: SyncConfig::default(),
                 sync_config_after: SyncConfig::default(),
-                bindings_before: crate::project_sync::domain::ConversationBindings::empty(
-                    scope.host_id.clone(),
-                ),
-                bindings_after: crate::project_sync::domain::ConversationBindings::empty(
-                    scope.host_id.clone(),
-                ),
+                bindings_before: mallard_domain::ConversationBindings::empty(scope.host_id.clone()),
+                bindings_after: mallard_domain::ConversationBindings::empty(scope.host_id.clone()),
             },
         ),
         provider_thread_id: Some("source-thread".to_string()),
@@ -1615,7 +1608,7 @@ fn push_operation(
 }
 
 fn cloud_publication(
-    outcome: crate::project_sync::bundle_engine::PublishedBundle,
+    outcome: mallard_infrastructure::bundle_engine::PublishedBundle,
 ) -> ConversationCloudPublication {
     ConversationCloudPublication {
         revision: outcome.snapshot.head.revision,
@@ -1746,8 +1739,7 @@ impl MaterializationFixture {
             plan_id: Some(PlanId::parse("plan-materialize").unwrap()),
             plan_action_id: None,
             cloud: ConversationCloudAnchor {
-                storage_id: crate::project_sync::domain::StorageId::parse("storage-materialize")
-                    .unwrap(),
+                storage_id: mallard_domain::StorageId::parse("storage-materialize").unwrap(),
                 bundle_id,
                 revision: 7,
                 commit_id: "commit-materialize".to_string(),
@@ -1770,12 +1762,10 @@ impl MaterializationFixture {
                     keep_both: None,
                     sync_config_before: SyncConfig::default(),
                     sync_config_after: SyncConfig::default(),
-                    bindings_before: crate::project_sync::domain::ConversationBindings::empty(
+                    bindings_before: mallard_domain::ConversationBindings::empty(
                         identity.host_id.clone(),
                     ),
-                    bindings_after: crate::project_sync::domain::ConversationBindings::empty(
-                        identity.host_id,
-                    ),
+                    bindings_after: mallard_domain::ConversationBindings::empty(identity.host_id),
                 },
             ),
             provider_thread_id: Some(thread_id.to_string()),
@@ -1917,11 +1907,11 @@ fn canned_publication() -> ConversationSyncOperationKind {
         planned_relation: TailClassification::MissingCloud,
         sync_config_before: SyncConfig::default(),
         sync_config_after: SyncConfig::default(),
-        bindings_before: crate::project_sync::domain::ConversationBindings::empty(
-            crate::project_sync::domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+        bindings_before: mallard_domain::ConversationBindings::empty(
+            mallard_domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         ),
-        bindings_after: crate::project_sync::domain::ConversationBindings::empty(
-            crate::project_sync::domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+        bindings_after: mallard_domain::ConversationBindings::empty(
+            mallard_domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         ),
     })
 }
@@ -1936,11 +1926,11 @@ fn canned_materialization(relation: TailClassification) -> ConversationSyncOpera
         keep_both: None,
         sync_config_before: SyncConfig::default(),
         sync_config_after: SyncConfig::default(),
-        bindings_before: crate::project_sync::domain::ConversationBindings::empty(
-            crate::project_sync::domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+        bindings_before: mallard_domain::ConversationBindings::empty(
+            mallard_domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         ),
-        bindings_after: crate::project_sync::domain::ConversationBindings::empty(
-            crate::project_sync::domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+        bindings_after: mallard_domain::ConversationBindings::empty(
+            mallard_domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         ),
     })
 }
@@ -1954,8 +1944,7 @@ fn interrupted_create_local_retry_cannot_journal_a_second_identity() {
     // any second identity is journaled, and recovery settles the original
     // operation alone.
     let fixture = MaterializationFixture::new();
-    let plan_action_id =
-        crate::project_sync::domain::ActionId::parse("action-materialize").unwrap();
+    let plan_action_id = mallard_domain::ActionId::parse("action-materialize").unwrap();
     let mut first = fixture.request();
     first.operation.plan_action_id = Some(plan_action_id.clone());
     let mut fail_after_journal = FailOnce::new(ConversationFailpoint::AfterJournal);
@@ -1997,7 +1986,7 @@ fn interrupted_create_local_retry_cannot_journal_a_second_identity() {
     same_action.operation.thread_id = ThreadId::parse("thread-materialize-retry2").unwrap();
     same_action.operation.provider_thread_id = Some("destination-thread-retry2".to_string());
     same_action.operation.cloud_thread_id =
-        crate::project_sync::domain::CloudThreadId::parse("cloudthread-materialize-retry").unwrap();
+        mallard_domain::CloudThreadId::parse("cloudthread-materialize-retry").unwrap();
     let error = apply_conversation_materialization(
         &fixture.repository,
         same_action,

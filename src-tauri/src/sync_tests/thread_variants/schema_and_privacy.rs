@@ -1,11 +1,11 @@
 use super::harness::{chain, codex_scope, codex_scope_key, ThreadSpec, VariantWorld};
-use crate::project_sync::domain::{
+use mallard_domain::{
     BundleId, BundleManifest, BundleScope, CloudThreadId, ConversationFileRef,
     ConversationFileRole, ConversationLineageStatus, ConversationMaterializationState,
     ConversationPlanActionType, LocalConversationBinding, LogicalPath, OriginHostAlias,
     PreservedProvenance, ProviderKey, ReplicaId, ThreadId, Tombstone, TombstoneTarget,
 };
-use crate::project_sync::storage_core::ObjectStore;
+use mallard_infrastructure::storage_core::ObjectStore;
 use std::fs;
 
 #[test]
@@ -85,13 +85,13 @@ fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
 
     let (mut action, mut current) = super::relation_matrix::reviewed_action(
         ConversationPlanActionType::Publish,
-        crate::project_sync::domain::TailClassification::LocalOutstanding,
+        mallard_domain::TailClassification::LocalOutstanding,
     );
     action.pins.context.host_id = identity_a.host_id.clone();
     action.pins.context.host_identity_revision = identity_a.revision;
     current.pins.context.host_id = identity_a.host_id.clone();
     current.pins.context.host_identity_revision = identity_a.revision;
-    crate::project_sync::conversation_sync::validate_conversation_action_pins(&action, &current)
+    mallard_infrastructure::conversation_sync::validate_conversation_action_pins(&action, &current)
         .unwrap();
     let rotated = world
         .repo_a
@@ -112,12 +112,12 @@ fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
     current.pins.context.host_id = rotated.host_id;
     current.pins.context.host_identity_revision = rotated.revision;
     assert_eq!(
-        crate::project_sync::conversation_sync::validate_conversation_action_pins(
+        mallard_infrastructure::conversation_sync::validate_conversation_action_pins(
             &action, &current,
         ),
         Err(
-            crate::project_sync::conversation_sync::ConversationStalePin::Context(
-                crate::project_sync::conversation_sync::ConversationContextPin::Host,
+            mallard_infrastructure::conversation_sync::ConversationStalePin::Context(
+                mallard_infrastructure::conversation_sync::ConversationContextPin::Host,
             )
         )
     );

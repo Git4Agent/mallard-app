@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 
 /**
- * The loading recipe's T1 tier (specimen: loading-system.html): a page's
- * first read draws its own layout in bones, so arrival changes pixels,
+ * The loading recipe's T1 tier draws a page's first layout in bones, so
+ * arrival changes pixels,
  * never geometry. Two shapes cover the first-load pages — `rows` (the
  * thread-card list family Activity and the Library both land) and
  * `detail` (session detail).

@@ -49,6 +49,7 @@ import LogPanel, { ACTIVITY_LOG_TYPES } from "../LogPanel";
 import BundleConnectionDialog from "./BundleConnectionDialog";
 import SettingsPage from "./SettingsPage";
 import { getPreference } from "../../preferences";
+import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import ProjectBindingEditor, {
   type BindingProfileSelection,
   type ProjectBindingDraft,
@@ -102,12 +103,10 @@ import {
   type PullReviewSelection,
 } from "./pullReviewFlow";
 import {
-  errorMessage,
   inventoryResources,
   projectLabel,
   recipeSelection,
   recipeWithSelection,
-  storageAccessErrorMessage,
   type RenameResult,
 } from "./model";
 

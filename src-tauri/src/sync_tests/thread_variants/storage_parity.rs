@@ -2,17 +2,17 @@ use super::harness::{
     assert_snapshot_consistent, chain, codex_scope, codex_scope_key, harness_captured_with,
     publish_request, publish_with_head, scope_pin, ThreadSpec, VariantWorld,
 };
-use crate::project_sync::bundle_engine::{
-    BundleEngine, PublishBundleRequest, PublishExpectation, ScopePublishInput,
-};
-use crate::project_sync::domain::{
+use crate::sync_tests::stub_s3::StubS3;
+use mallard_domain::{
     BundleRecipe, CloudThreadId, StorageConfig, StorageKind, Tombstone, TombstoneTarget,
 };
-use crate::project_sync::storage_core::{
+use mallard_infrastructure::bundle_engine::{
+    BundleEngine, PublishBundleRequest, PublishExpectation, ScopePublishInput,
+};
+use mallard_infrastructure::storage_core::{
     CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix,
     ObjectStore, S3ObjectStore, StageOutcome, StoreListPage, StoredMetadata,
 };
-use crate::sync_tests::stub_s3::StubS3;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -89,10 +89,10 @@ fn local_store_rejects_unreviewed_remote_thread_loss_and_stale_cas() {
 fn local_store_immutable_and_head_failures_leave_a_retryable_fixed_point() {
     let temp = tempfile::tempdir().unwrap();
     let inner =
-        crate::project_sync::storage_core::LocalObjectStore::open(temp.path().join("store"))
+        mallard_infrastructure::storage_core::LocalObjectStore::open(temp.path().join("store"))
             .unwrap();
     let store = FailingStore::new(inner);
-    let storage_id = crate::project_sync::domain::StorageId::parse("failure-store").unwrap();
+    let storage_id = mallard_domain::StorageId::parse("failure-store").unwrap();
     let engine = BundleEngine::open(store.clone(), storage_id.clone()).unwrap();
     let world = VariantWorld::new();
     let origin = world.origin(&world.repo_a, "replica-a");
@@ -155,7 +155,7 @@ async fn stub_s3_current_schema_noop_and_fast_forward_match_local_protocol() {
         origin.clone(),
         10,
     );
-    let storage_id = crate::project_sync::domain::StorageId::parse("s3-variant-store").unwrap();
+    let storage_id = mallard_domain::StorageId::parse("s3-variant-store").unwrap();
     let config = StorageConfig {
         id: storage_id.clone(),
         name: "Thread stub S3".to_string(),
@@ -275,7 +275,7 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
         origin_b.clone(),
         10,
     );
-    let storage_id = crate::project_sync::domain::StorageId::parse("s3-cas-store").unwrap();
+    let storage_id = mallard_domain::StorageId::parse("s3-cas-store").unwrap();
     let config = StorageConfig {
         id: storage_id.clone(),
         name: "Thread CAS stub S3".to_string(),
@@ -462,7 +462,7 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
         20,
     );
     forked_thread.forked_from = Some(cloud_id.clone());
-    let storage_id = crate::project_sync::domain::StorageId::parse("s3-divergence-store").unwrap();
+    let storage_id = mallard_domain::StorageId::parse("s3-divergence-store").unwrap();
     let config = StorageConfig {
         id: storage_id.clone(),
         name: "Thread divergence stub S3".to_string(),
@@ -676,7 +676,7 @@ async fn stub_s3_fork_and_tombstone_resurrection_match_local() {
         .all(|request| request.conditional));
 }
 
-fn second_thread(origin: &crate::project_sync::domain::PortableOrigin) -> ThreadSpec {
+fn second_thread(origin: &mallard_domain::PortableOrigin) -> ThreadSpec {
     ThreadSpec::new(
         "cloudthread-v2",
         "source-thread-v2",
@@ -694,12 +694,12 @@ enum StoreFailure {
 
 #[derive(Clone)]
 struct FailingStore {
-    inner: crate::project_sync::storage_core::LocalObjectStore,
+    inner: mallard_infrastructure::storage_core::LocalObjectStore,
     next_failure: Arc<Mutex<Option<StoreFailure>>>,
 }
 
 impl FailingStore {
-    fn new(inner: crate::project_sync::storage_core::LocalObjectStore) -> Self {
+    fn new(inner: mallard_infrastructure::storage_core::LocalObjectStore) -> Self {
         Self {
             inner,
             next_failure: Arc::new(Mutex::new(None)),

@@ -17,10 +17,10 @@ import type {
 } from "../../types";
 import Icon from "../Icons";
 import Notice from "../notice/Notice";
+import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import {
   compactProjectPath,
-  errorMessage,
   formatRelativeTime,
   projectLabel,
   repositoryFingerprintMatches,

@@ -1,5 +1,5 @@
 use super::harness::{analyzed_chain, chain};
-use crate::project_sync::domain::{
+use mallard_domain::{
     compare_conversation_tail, compute_portable_conversation_tail, default_conversation_decision,
     ConversationCapabilities, ConversationPlanDirection, ConversationReviewAction, SyncCurrency,
     TailClassification, TailPartitionKind, TailSideEvidence, VerifiedTailEvidence,

@@ -208,9 +208,6 @@ pub struct LocalStateRepository {
 
 impl LocalStateRepository {
     /// Resolve the machine-global metadata directory from the user's home.
-    /// The desktop crate's Tauri command layer calls this; `from_app` lived
-    /// here before the workspace reorganization moved this module out of the
-    /// Tauri crate.
     pub fn from_user_home() -> Result<Self, String> {
         let home = dirs::home_dir().ok_or_else(|| "cannot find home directory".to_string())?;
         Self::from_home_dir(home)

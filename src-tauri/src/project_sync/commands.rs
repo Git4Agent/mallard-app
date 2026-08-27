@@ -4,35 +4,15 @@
 //! persistence. Local-folder and S3-compatible storage use the same immutable
 //! bundle publication and head-CAS protocol.
 
-use super::bundle_engine::{
-    absent_scope_pin, write_immutable_backup, write_target_atomic, BundleBytes, BundleEngine,
-    CapturedBundleFile, FetchProgress, ObjectCache, PublishBundleRequest, PublishExpectation,
-    ScopePublishInput,
+use super::service::{ProjectSyncService, PushApproval};
+use crate::activity_log::{emit_typed_log, ActivityLogScope};
+use chrono::{TimeZone, Utc};
+use mallard_application::storage_setup::{
+    test_r2_storage as test_r2_storage_service, upsert_r2_storage as upsert_r2_storage_service,
+    validate_r2_storage_destinations, SecretString, TestR2StorageResult,
+    UpsertR2StorageRequest as ApplicationUpsertR2StorageRequest, UpsertR2StorageResult,
 };
-use super::claude_history_tail;
-use super::codex_app_refresh::{
-    refresh_offer as codex_app_refresh_offer, restart_after_pull, CodexAppKind,
-    CodexAppRefreshOffer, CodexAppRefreshState, CodexAppRestartResult,
-};
-use super::codex_history_graph;
-use super::codex_history_graph::CodexSeededRoot;
-use super::codex_rollout::analyze_codex_rollout_structure;
-use super::codex_standalone_builder::{
-    build_standalone_codex_root, StandaloneBuildMode, StandaloneConversationArtifact,
-};
-use super::codex_thread_allocator;
-use super::conversation_codec::{analyze_codex_transcript, CodecLineage};
-use super::conversation_materialization::{
-    apply_conversation_cloud_publications_locked, apply_conversation_materialization_locked,
-    recover_conversation_materializations, ConversationCloudPublication,
-    ConversationMaterializationRequest, ConversationTargetPayload, NoConversationFailpoints,
-};
-use super::conversation_sync::{
-    build_conversation_plan_action, validate_conversation_action_pins, ConversationApplyContext,
-    ConversationPlanActionRequest,
-};
-use super::credential_redaction;
-use super::domain::{
+use mallard_domain::{
     absent_bundle_head_pin, classify_remote_continuity, classify_scope_continuity,
     cloud_conversation_resource_id, cloud_conversation_transcript_path, compare_conversation_tail,
     compose_preserved_title, conversation_resource_id, fallback_origin_host_label,
@@ -65,39 +45,60 @@ use super::domain::{
     VerifiedTailEvidence, PUSH_PLAN_SCHEMA, SETUP_DRAFT_SCHEMA, SETUP_TRANSACTION_SCHEMA,
     STORAGE_SETUP_DRAFT_SCHEMA,
 };
-use super::jsonl_tail_io;
-use super::persistence::{
+use mallard_infrastructure::activity_log::ActivityLogType;
+use mallard_infrastructure::app_settings::conversation_file_limit_bytes;
+use mallard_infrastructure::bundle_engine::{
+    absent_scope_pin, write_immutable_backup, write_target_atomic, BundleBytes, BundleEngine,
+    CapturedBundleFile, FetchProgress, ObjectCache, PublishBundleRequest, PublishExpectation,
+    ScopePublishInput,
+};
+use mallard_infrastructure::claude_history_tail;
+use mallard_infrastructure::codex_app_refresh::{
+    refresh_offer as codex_app_refresh_offer, restart_after_pull, CodexAppKind,
+    CodexAppRefreshOffer, CodexAppRefreshState, CodexAppRestartResult,
+};
+use mallard_infrastructure::codex_history_graph;
+use mallard_infrastructure::codex_history_graph::CodexSeededRoot;
+use mallard_infrastructure::codex_rollout::analyze_codex_rollout_structure;
+use mallard_infrastructure::codex_standalone_builder::{
+    build_standalone_codex_root, StandaloneBuildMode, StandaloneConversationArtifact,
+};
+use mallard_infrastructure::codex_thread_allocator;
+use mallard_infrastructure::conversation_codec::{analyze_codex_transcript, CodecLineage};
+use mallard_infrastructure::conversation_materialization::{
+    apply_conversation_cloud_publications_locked, apply_conversation_materialization_locked,
+    recover_conversation_materializations, ConversationCloudPublication,
+    ConversationMaterializationRequest, ConversationTargetPayload, NoConversationFailpoints,
+};
+use mallard_infrastructure::conversation_sync::{
+    build_conversation_plan_action, validate_conversation_action_pins, ConversationApplyContext,
+    ConversationPlanActionRequest,
+};
+use mallard_infrastructure::credential_redaction;
+use mallard_infrastructure::jsonl_tail_io;
+use mallard_infrastructure::persistence::{
     LocalStateRepository, ProjectSyncMetadataResetResult, StorageSyncMetadataResetResult,
 };
-use super::project_activity::{
+use mallard_infrastructure::project_activity::{
     self, ProjectActivity, ProviderAccessState, ResolvedActivityProject,
 };
-use super::provider_capture::{
+use mallard_infrastructure::provider_capture::{
     self, CaptureApplyPolicy, CaptureRequest, CaptureResourceKind, Discovery, LocalSessionView,
     ResourceCandidate,
 };
-use super::providers::codex::first_codex_user_summary;
-use super::providers::{
+use mallard_infrastructure::providers::codex::first_codex_user_summary;
+use mallard_infrastructure::providers::{
     ProviderDescriptor, ProviderRegistry, SessionEventDetail, SessionTimelineEventKind,
     SessionToolCategory,
 };
-use super::service::{ProjectSyncService, PushApproval};
-use super::session_detail::{
+use mallard_infrastructure::session_detail::{
     self, ProjectSessionDetail, ProjectSessionTimelinePage, ProjectSessionTimelineRequest,
     SessionDetailError, SessionDetailErrorCode,
 };
-use super::session_path_map::{validate_pathmap_root, SessionPathMapper};
-use super::storage_core::{
+use mallard_infrastructure::session_path_map::{validate_pathmap_root, SessionPathMapper};
+use mallard_infrastructure::storage_core::{
     clear_managed_storage_data, ConfiguredObjectStore, ManagedStorageClearResult, VerifiedBody,
 };
-use crate::activity_log::{emit_typed_log, ActivityLogScope, ActivityLogType};
-use chrono::{TimeZone, Utc};
-use mallard_application::storage_setup::{
-    test_r2_storage as test_r2_storage_service, upsert_r2_storage as upsert_r2_storage_service,
-    validate_r2_storage_destinations, SecretString, TestR2StorageResult,
-    UpsertR2StorageRequest as ApplicationUpsertR2StorageRequest, UpsertR2StorageResult,
-};
-use mallard_infrastructure::app_settings::conversation_file_limit_bytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -806,7 +807,8 @@ fn object_cache() -> Arc<ObjectCache> {
         .clone()
 }
 
-type CachedCodexTranscriptAnalysis = Arc<super::conversation_codec::CodexTranscriptAnalysis>;
+type CachedCodexTranscriptAnalysis =
+    Arc<mallard_infrastructure::conversation_codec::CodexTranscriptAnalysis>;
 type TranscriptAnalysisCache = Mutex<HashMap<(String, u64), CachedCodexTranscriptAnalysis>>;
 
 /// Codex transcript analyses keyed by the exact transcript size/hash
@@ -817,7 +819,7 @@ fn cached_transcript_analysis(
     sha256: &str,
     expected_size: u64,
     bytes: &mut dyn BundleBytes,
-    logical_path: &super::domain::LogicalPath,
+    logical_path: &mallard_domain::LogicalPath,
 ) -> Result<CachedCodexTranscriptAnalysis, String> {
     if expected_size > conversation_file_limit_bytes() {
         return Err("cloud conversation transcript exceeds its read limit".to_string());
@@ -1397,7 +1399,7 @@ pub fn launch_r2_agent_setup(provider: String, instruction: String) -> Result<()
     open_agent_launch_script_in_terminal(&script)
 }
 
-fn host_identity_status(identity: super::domain::HostIdentity) -> HostIdentityStatus {
+fn host_identity_status(identity: mallard_domain::HostIdentity) -> HostIdentityStatus {
     HostIdentityStatus {
         host_id: identity.host_id,
         revision: identity.revision,
@@ -1976,7 +1978,6 @@ pub async fn get_project_session_timeline_page(
     resource_id: String,
     snapshot_id: String,
     cursor: Option<String>,
-    anchor_event_id: Option<String>,
     limit: Option<usize>,
     included_event_kinds: Vec<SessionTimelineEventKind>,
     included_tool_categories: Vec<SessionToolCategory>,
@@ -1995,7 +1996,6 @@ pub async fn get_project_session_timeline_page(
             ProjectSessionTimelineRequest {
                 snapshot_id,
                 cursor,
-                anchor_event_id,
                 limit,
                 included_event_kinds: included_event_kinds.into_iter().collect(),
                 included_tool_categories: included_tool_categories.into_iter().collect(),
@@ -3948,7 +3948,7 @@ fn project_content_versions(
 }
 
 fn project_content_relative_path(
-    logical_path: &super::domain::LogicalPath,
+    logical_path: &mallard_domain::LogicalPath,
 ) -> Result<String, String> {
     logical_path
         .as_str()
@@ -4250,7 +4250,7 @@ fn inventory_from_candidates(
         let provider_resource_type = candidate
             .provider_resource_type
             .as_deref()
-            .map(super::domain::ResourceTypeKey::parse)
+            .map(mallard_domain::ResourceTypeKey::parse)
             .transpose()?;
         let provenance = candidate
             .logical_paths
@@ -5282,7 +5282,10 @@ fn observe_codex_local(
                             }
                             range
                         };
-                        super::sync_metrics::record_bytes_hashed(&source, range_bytes.len() as u64);
+                        mallard_infrastructure::sync_metrics::record_bytes_hashed(
+                            &source,
+                            range_bytes.len() as u64,
+                        );
                         let pin = RawRangePin {
                             start_byte_offset: range_start,
                             end_byte_offset: mapping.consumed_byte_offset,
@@ -5579,7 +5582,7 @@ fn observe_claude_local(
                                 }
                             };
                             if let Some(range_bytes) = range_bytes {
-                                super::sync_metrics::record_bytes_hashed(
+                                mallard_infrastructure::sync_metrics::record_bytes_hashed(
                                     &source,
                                     range_bytes.len() as u64,
                                 );
@@ -5619,7 +5622,7 @@ fn observe_claude_local(
     // Full path: one bounded read plus one full analyze of the complete
     // records — one Claude file is the whole root, so there is no graph to
     // resolve.
-    super::sync_metrics::record_full_graph_resolve(&source);
+    mallard_infrastructure::sync_metrics::record_full_graph_resolve(&source);
     let Ok(bytes) = jsonl_tail_io::read_bounded(&source) else {
         return Ok(invalid());
     };
@@ -5627,7 +5630,8 @@ fn observe_claude_local(
     if consumed == 0 {
         return Ok(invalid());
     }
-    let analysis = super::providers::claude::analyze_claude_transcript(&bytes[..consumed]);
+    let analysis =
+        mallard_infrastructure::providers::claude::analyze_claude_transcript(&bytes[..consumed]);
     let CodecLineage::Complete { chain, .. } = &analysis.lineage else {
         return Ok(invalid());
     };
@@ -5668,8 +5672,9 @@ fn observe_claude_local(
         let (redacted, _changed_lines) = credential_redaction::shared()
             .redact_jsonl_text(&encoded)
             .ok()?;
-        let wire_analysis =
-            super::providers::claude::analyze_claude_transcript(redacted.as_bytes());
+        let wire_analysis = mallard_infrastructure::providers::claude::analyze_claude_transcript(
+            redacted.as_bytes(),
+        );
         let wire_chain = wire_analysis.lineage.chain()?;
         adopt_claude_acceptance(chain, wire_chain, probe)
     });
@@ -5984,8 +5989,9 @@ fn provider_thread_review(
                 if consumed == 0 {
                     continue;
                 }
-                let analysis =
-                    super::providers::claude::analyze_claude_transcript(&bytes[..consumed]);
+                let analysis = mallard_infrastructure::providers::claude::analyze_claude_transcript(
+                    &bytes[..consumed],
+                );
                 let Ok(Some(seeded)) =
                     claude_history_tail::seed_claude_root(&source, &bytes[..consumed], &analysis)
                 else {
@@ -6698,7 +6704,7 @@ fn provider_thread_review(
                 if stamp.codec != credential_redaction::REDACTION_CODEC_V1
                     || stamp.fingerprint != credential_redaction::shared().fingerprint() =>
             {
-                let blocked = super::domain::blocked_conversation_decision(
+                let blocked = mallard_domain::blocked_conversation_decision(
                     ConversationBlocker::RedactionRulesetMismatch,
                 );
                 (blocked.clone(), blocked)
@@ -6711,8 +6717,10 @@ fn provider_thread_review(
         // the stamp mandatory for claude rows, so only a foreign value can
         // reach this check.
         let (push, pull) = match thread.and_then(|thread| thread.wire_path_map.as_ref()) {
-            Some(stamp) if stamp.codec != super::session_path_map::PATH_MAP_CODEC_V1 => {
-                let blocked = super::domain::blocked_conversation_decision(
+            Some(stamp)
+                if stamp.codec != mallard_infrastructure::session_path_map::PATH_MAP_CODEC_V1 =>
+            {
+                let blocked = mallard_domain::blocked_conversation_decision(
                     ConversationBlocker::PathMapCodecMismatch,
                 );
                 (blocked.clone(), blocked)
@@ -6977,7 +6985,7 @@ fn provider_thread_review(
                             .transpose()?
                             .unwrap_or_default();
                         let targets = adapter.materialization_targets(
-                            &super::providers::MaterializationTargetRequest {
+                            &mallard_infrastructure::providers::MaterializationTargetRequest {
                                 provider_home,
                                 project_root: &binding.project_root,
                                 provider_session_id: &local.provider_thread_id,
@@ -7396,7 +7404,7 @@ pub(super) fn get_project_thread_sync_comparison_with_progress(
     storage_id: &StorageId,
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<ThreadSyncComparison, String> {
-    let metrics_before = super::sync_metrics::global_snapshot();
+    let metrics_before = mallard_infrastructure::sync_metrics::global_snapshot();
     let phase_started = Instant::now();
     let local = load_project_local_read(repository, local_project_id)?;
     on_phase(
@@ -7414,7 +7422,7 @@ pub(super) fn get_project_thread_sync_comparison_with_progress(
         &remote,
         on_phase,
     )?;
-    super::sync_metrics::log_operation_delta("refresh", &metrics_before);
+    mallard_infrastructure::sync_metrics::log_operation_delta("refresh", &metrics_before);
     Ok(comparison)
 }
 
@@ -8978,8 +8986,8 @@ fn conversation_thread_from_capture(
         wire_redaction: Some(credential_redaction::shared().stamp()),
         // Claude's path-map declaration is this out-of-band stamp; Codex
         // carries its declaration in-band and must not repeat it here.
-        wire_path_map: claude_wire.map(|_| super::domain::ConversationWirePathMap {
-            codec: super::session_path_map::PATH_MAP_CODEC_V1.to_string(),
+        wire_path_map: claude_wire.map(|_| mallard_domain::ConversationWirePathMap {
+            codec: mallard_infrastructure::session_path_map::PATH_MAP_CODEC_V1.to_string(),
         }),
         forked_from,
         preserved,
@@ -9179,7 +9187,7 @@ fn build_publish_request(
             .map(|(resource_id, descriptor)| (resource_id.clone(), descriptor.clone()))
             .collect::<BTreeMap<_, _>>();
         let (mut resources, mut retained_files, mut directories, mut tombstones) =
-            super::bundle_engine::reconcile_scope_content(
+            mallard_infrastructure::bundle_engine::reconcile_scope_content(
                 &scope_recipe,
                 &scope_descriptors,
                 captured,
@@ -9453,14 +9461,14 @@ fn build_publish_request(
             .as_ref()
             .and_then(|thread| thread.wire_path_map.as_ref())
         {
-            if stamp.codec != super::session_path_map::PATH_MAP_CODEC_V1 {
+            if stamp.codec != mallard_infrastructure::session_path_map::PATH_MAP_CODEC_V1 {
                 return Err(format!(
                     "path_map_codec_mismatch: conversation '{}' was published under \
                      path-map codec '{}'; this app carries '{}'. Align app versions \
                      before pushing.",
                     result_thread_id,
                     stamp.codec,
-                    super::session_path_map::PATH_MAP_CODEC_V1
+                    mallard_infrastructure::session_path_map::PATH_MAP_CODEC_V1
                 ));
             }
         }
@@ -9525,7 +9533,7 @@ fn build_publish_request(
             // checked before any transcript bytes are parsed.
             validate_pathmap_root("project root", &binding.project_root)?;
             let source = captured_transcript_source(conversation)?;
-            let analysis = super::providers::SessionAnalysis {
+            let analysis = mallard_infrastructure::providers::SessionAnalysis {
                 source_provider_session_id: conversation.source_thread_id.clone(),
                 source_cwd: conversation.source_cwd.clone(),
                 is_internal_subagent: false,
@@ -9620,7 +9628,9 @@ fn build_publish_request(
                 .certify_wire_document(redacted_text.into_bytes())
                 .map_err(|error| format!("conversation '{}': {error}", result_thread_id))?;
             let wire_analysis =
-                super::providers::claude::analyze_claude_transcript(redacted.as_bytes());
+                mallard_infrastructure::providers::claude::analyze_claude_transcript(
+                    redacted.as_bytes(),
+                );
             let wire_seeded = claude_history_tail::seed_claude_root(
                 &source,
                 redacted.as_bytes(),
@@ -10185,7 +10195,10 @@ fn publish_reviewed(
     binding: &ProjectBinding,
     recipe: &BundleRecipe,
     captured: &provider_capture::CapturedResources,
-    observed: Option<(BundleSnapshot, super::bundle_engine::HeadToken)>,
+    observed: Option<(
+        BundleSnapshot,
+        mallard_infrastructure::bundle_engine::HeadToken,
+    )>,
     conversation_push_plan_id: Option<&PlanId>,
     approved_conversation_action_ids: &[ActionId],
     updated_at: u64,
@@ -10572,7 +10585,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
                 .entries
                 .iter()
                 .filter(|(resource_id, _)| {
-                    super::domain::is_project_content_resource_id(resource_id)
+                    mallard_domain::is_project_content_resource_id(resource_id)
                 })
                 .map(|(resource_id, entry)| (resource_id.clone(), entry.clone()))
                 .collect::<BTreeMap<_, _>>()
@@ -10605,7 +10618,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
     let requested_generic_ids = push_recipe
         .entries
         .keys()
-        .filter(|resource_id| super::domain::is_project_content_resource_id(resource_id))
+        .filter(|resource_id| mallard_domain::is_project_content_resource_id(resource_id))
         .cloned()
         .collect::<BTreeSet<_>>();
     let generic_selection_changed = requested_generic_ids
@@ -11164,8 +11177,8 @@ struct PreparedPullConversation {
     cloud_forked_from: Option<CloudThreadId>,
     cloud_preserved: Option<PreservedProvenance>,
     cloud_display_title: Option<String>,
-    cloud_wire_redaction: Option<super::domain::ConversationWireRedaction>,
-    cloud_wire_path_map: Option<super::domain::ConversationWirePathMap>,
+    cloud_wire_redaction: Option<mallard_domain::ConversationWireRedaction>,
+    cloud_wire_path_map: Option<mallard_domain::ConversationWirePathMap>,
     cloud_updated_at: u64,
     /// Sidecar references of the cloud row, for apply-time target
     /// computation under the minted destination identity.
@@ -11212,7 +11225,7 @@ fn capture_all_local_conversations(
 fn local_target_expectation_for_action(
     action: &ConversationPlanAction,
     binding: &ProjectBinding,
-    document: &super::domain::ConversationBindings,
+    document: &mallard_domain::ConversationBindings,
     captured: &provider_capture::CapturedResources,
 ) -> TargetExpectation {
     // Metadata-only actions neither read nor write the local transcript:
@@ -11881,7 +11894,9 @@ fn apply_prepared_pull_conversation(
         // marker inside the standalone decode).
         if !is_codex {
             match &prepared.cloud_wire_path_map {
-                Some(stamp) if stamp.codec == super::session_path_map::PATH_MAP_CODEC_V1 => {}
+                Some(stamp)
+                    if stamp.codec
+                        == mallard_infrastructure::session_path_map::PATH_MAP_CODEC_V1 => {}
                 Some(stamp) => {
                     return Err(format!(
                         "path_map_codec_mismatch: conversation '{}' was published under \
@@ -11915,7 +11930,7 @@ fn apply_prepared_pull_conversation(
         // coordinates come from the verified cloud value, the codec is the
         // local fold's.
         let imported_layout = RootTailLayout {
-            codec: super::domain::PORTABLE_TAIL_CODEC_V1.to_string(),
+            codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
             partition_kind: cloud_tail.partition_kind,
             start_record_count: cloud_tail.start_record_count,
         };
@@ -11924,7 +11939,7 @@ fn apply_prepared_pull_conversation(
         }
         // Wire-form verification ends here: the staged wire chain must
         // refold to the pinned cloud tail.
-        let refolded = super::domain::compute_conversation_tail_state(
+        let refolded = mallard_domain::compute_conversation_tail_state(
             cloud_tail.partition_kind,
             cloud_tail.start_record_count,
             cloud_tail.accepted_end_record_count,
@@ -11986,14 +12001,15 @@ fn apply_prepared_pull_conversation(
         credential_redaction::shared()
             .certify_wire_document(prepared.cloud_transcript.clone())
             .map_err(|error| format!("conversation '{}': {error}", cloud_thread_id))?;
-        if cloud_tail.codec != super::domain::CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1
+        if cloud_tail.codec != mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1
             || cloud_tail.partition_kind != TailPartitionKind::WholeThread
             || cloud_tail.start_record_count != 0
         {
             return Err("accepted cloud tail is not a Claude wire value".to_string());
         }
-        let wire_analysis =
-            super::providers::claude::analyze_claude_transcript(&prepared.cloud_transcript);
+        let wire_analysis = mallard_infrastructure::providers::claude::analyze_claude_transcript(
+            &prepared.cloud_transcript,
+        );
         let CodecLineage::Complete {
             chain: wire_chain, ..
         } = &wire_analysis.lineage
@@ -12006,7 +12022,7 @@ fn apply_prepared_pull_conversation(
         {
             return Err("cloud conversation does not match its reviewed wire identity".to_string());
         }
-        let refolded = super::domain::compute_conversation_tail_state(
+        let refolded = mallard_domain::compute_conversation_tail_state(
             TailPartitionKind::WholeThread,
             0,
             cloud_tail.accepted_end_record_count,
@@ -12062,7 +12078,8 @@ fn apply_prepared_pull_conversation(
             decoded_text.push_str(&serialized);
         }
         let rewritten = decoded_text.into_bytes();
-        let staged = super::providers::claude::analyze_claude_transcript(&rewritten);
+        let staged =
+            mallard_infrastructure::providers::claude::analyze_claude_transcript(&rewritten);
         let CodecLineage::Complete {
             chain,
             lineage_digest,
@@ -12080,20 +12097,20 @@ fn apply_prepared_pull_conversation(
             );
         }
         let layout = RootTailLayout {
-            codec: super::domain::CLAUDE_PORTABLE_TAIL_CODEC_V1.to_string(),
+            codec: mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_V1.to_string(),
             partition_kind: TailPartitionKind::WholeThread,
             start_record_count: 0,
         };
         // The genuine local fold of the installed bytes: the twin pin the
         // form ledger requires, never a relabel of the wire state.
-        let accepted_local_state = super::domain::compute_conversation_tail_state(
+        let accepted_local_state = mallard_domain::compute_conversation_tail_state(
             TailPartitionKind::WholeThread,
             0,
             cloud_tail.accepted_end_record_count,
             chain,
         )?;
         let accepted_local_tail = PortableConversationTail {
-            codec: super::domain::CLAUDE_PORTABLE_TAIL_CODEC_V1.to_string(),
+            codec: mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_V1.to_string(),
             partition_kind: TailPartitionKind::WholeThread,
             start_record_count: 0,
             accepted_end_record_count: cloud_tail.accepted_end_record_count,
@@ -12118,13 +12135,14 @@ fn apply_prepared_pull_conversation(
             ),
         )
     } else {
-        let rewritten = adapter.rewrite(&super::providers::SessionRewriteRequest {
-            bytes: &prepared.cloud_transcript,
-            expected_source_session_id: Some(&prepared.cloud_provider_thread_id),
-            destination_session_id: &destination_provider_thread_id,
-            expected_source_cwd: Some(&prepared.cloud_cwd),
-            destination_cwd: &binding.project_root,
-        })?;
+        let rewritten =
+            adapter.rewrite(&mallard_infrastructure::providers::SessionRewriteRequest {
+                bytes: &prepared.cloud_transcript,
+                expected_source_session_id: Some(&prepared.cloud_provider_thread_id),
+                destination_session_id: &destination_provider_thread_id,
+                expected_source_cwd: Some(&prepared.cloud_cwd),
+                destination_cwd: &binding.project_root,
+            })?;
         let layout = RootTailLayout {
             codec: cloud_tail.codec.clone(),
             partition_kind: cloud_tail.partition_kind,
@@ -12200,8 +12218,8 @@ fn apply_prepared_pull_conversation(
             .ok_or_else(|| "conversation Pull action lacks a transcript target".to_string())?
     } else {
         let provider_home = resolved.home(&action.provider)?;
-        let planned =
-            adapter.materialization_targets(&super::providers::MaterializationTargetRequest {
+        let planned = adapter.materialization_targets(
+            &mallard_infrastructure::providers::MaterializationTargetRequest {
                 provider_home: Path::new(provider_home),
                 project_root: &binding.project_root,
                 provider_session_id: &destination_provider_thread_id,
@@ -12209,7 +12227,8 @@ fn apply_prepared_pull_conversation(
                 existing_transcript_path: None,
                 sidecars: &prepared.cloud_sidecars,
                 planned_at: applied_at,
-            })?;
+            },
+        )?;
         let mut transcript_target = None;
         for target in &planned {
             if bounded_file_expectation(&target.target_path)? != TargetExpectation::Absent {
@@ -13182,7 +13201,7 @@ fn adopt_cloud_metadata_action(
 fn committed_conversation_receipt(
     repository: &LocalStateRepository,
     operation_id: &ConversationOperationId,
-) -> Result<super::domain::ConversationApplyReceipt, String> {
+) -> Result<mallard_domain::ConversationApplyReceipt, String> {
     if repository
         .load_conversation_sync_journal()?
         .operations
@@ -13626,10 +13645,12 @@ fn project_open_commands(resolved: &ResolvedBinding) -> Vec<(&'static str, Strin
         // The desktop app is launched through a deep link, not the CLI, so it
         // needs its own line rather than a variation on the two above.
         #[cfg(target_os = "macos")]
-        if let Some(command) = super::providers::codex::codex_app_project_open_command(
-            Path::new(codex_home),
-            Path::new(&resolved.binding.project_root),
-        ) {
+        if let Some(command) =
+            mallard_infrastructure::providers::codex::codex_app_project_open_command(
+                Path::new(codex_home),
+                Path::new(&resolved.binding.project_root),
+            )
+        {
             commands.push(("Codex app — new", command));
         }
     }
@@ -14556,7 +14577,7 @@ fn validate_binding_request(
     let local_stores = config
         .storages
         .iter()
-        .filter(|storage| storage.kind == super::domain::StorageKind::Local)
+        .filter(|storage| storage.kind == mallard_domain::StorageKind::Local)
         .map(|storage| {
             prospective_canonical(Path::new(&storage.local_dir))
                 .map(|path| (storage.name.as_str(), path))
@@ -16719,7 +16740,7 @@ fn repair_codex_conversation_paths_with_repository(
     // column the same way.
     struct RebasedThread {
         seeded: CodexSeededRoot,
-        chain: Vec<super::domain::CanonicalConversationMessage>,
+        chain: Vec<mallard_domain::CanonicalConversationMessage>,
         consumed_prefix_sha256: String,
     }
     let mut rebased: BTreeMap<ThreadId, RebasedThread> = BTreeMap::new();
@@ -16805,14 +16826,14 @@ fn repair_codex_conversation_paths_with_repository(
                                         .to_string(),
                                 );
                             }
-                            let state = super::domain::compute_conversation_tail_state(
+                            let state = mallard_domain::compute_conversation_tail_state(
                                 thread.seeded.layout.partition_kind,
                                 thread.seeded.layout.start_record_count,
                                 end,
                                 &thread.chain,
                             )?;
                             let local_twin = PortableConversationTail {
-                                codec: super::domain::PORTABLE_TAIL_CODEC_V1.to_string(),
+                                codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
                                 partition_kind: thread.seeded.layout.partition_kind,
                                 start_record_count: thread.seeded.layout.start_record_count,
                                 accepted_end_record_count: end,
@@ -17159,17 +17180,17 @@ mod tests {
 
     type ContinuityProbe = Box<dyn FnMut(&RepositoryBase) -> Result<bool, String>>;
 
-    use crate::project_sync::domain::{
-        BundleHead, BundleScope, OriginHostToken, OriginReplicaToken, ProjectContentPreferences,
-        RestoreActionKind, StorageConfig, StorageKind, TombstoneTarget,
-    };
-    use crate::project_sync::storage_core::{
-        library_object_key, repository_object_key, LocalObjectStore, ObjectStore,
-        STORAGE_MARKER_KEY,
-    };
     use crate::storage_catalog::persistence::CatalogStateRepository;
     use crate::sync_tests::thread_variants::harness::{
         publish_request, ThreadSpec, TranscriptBuilder,
+    };
+    use mallard_domain::{
+        BundleHead, BundleScope, OriginHostToken, OriginReplicaToken, ProjectContentPreferences,
+        RestoreActionKind, StorageConfig, StorageKind, TombstoneTarget,
+    };
+    use mallard_infrastructure::storage_core::{
+        library_object_key, repository_object_key, LocalObjectStore, ObjectStore,
+        STORAGE_MARKER_KEY,
     };
 
     #[test]
@@ -17483,7 +17504,7 @@ mod tests {
 
     fn continuity_head(revision: u64, manifest_sha256: &str) -> BundleHead {
         BundleHead {
-            schema_version: crate::project_sync::domain::BUNDLE_SCHEMA,
+            schema_version: mallard_domain::BUNDLE_SCHEMA,
             bundle_id: BundleId::parse("0123456789abcdef0123456789abcdef").unwrap(),
             kind: BundleKind::Project,
             revision,
@@ -17564,7 +17585,7 @@ mod tests {
         scopes: Vec<(SyncScopeKey, u64, &str)>,
     ) -> BundleSnapshot {
         let manifest = BundleManifest {
-            schema_version: crate::project_sync::domain::BUNDLE_SCHEMA,
+            schema_version: mallard_domain::BUNDLE_SCHEMA,
             revision: head.revision,
             commit_id: head.commit_id.clone(),
             updated_at: head.updated_at,
@@ -18416,7 +18437,6 @@ mod tests {
         let request = ProjectSessionTimelineRequest {
             snapshot_id: detail.snapshot_id.clone(),
             cursor: None,
-            anchor_event_id: None,
             limit: Some(1),
             included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
             included_tool_categories: BTreeSet::from([SessionToolCategory::Read]),
@@ -18660,8 +18680,8 @@ mod tests {
                 forked_from: logical_parent,
                 preserved: None,
                 root_tail_layout: Some(RootTailLayout {
-                    codec: crate::project_sync::domain::PORTABLE_TAIL_CODEC_V1.to_string(),
-                    partition_kind: crate::project_sync::domain::TailPartitionKind::WholeThread,
+                    codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
+                    partition_kind: mallard_domain::TailPartitionKind::WholeThread,
                     start_record_count: 0,
                 }),
                 provider_thread_id: Some(provider_thread_id.to_string()),
@@ -19158,16 +19178,16 @@ mod tests {
             .manifest
             .scope(&SyncScopeKey::Project)
             .unwrap();
-        assert!(first_project_scope.files.contains_key(
-            &super::super::domain::LogicalPath::parse("project/docs/specs/a.md").unwrap()
-        ));
-        assert!(!first_project_scope.files.contains_key(
-            &super::super::domain::LogicalPath::parse("project/excluded.txt").unwrap()
-        ));
+        assert!(first_project_scope
+            .files
+            .contains_key(&mallard_domain::LogicalPath::parse("project/docs/specs/a.md").unwrap()));
+        assert!(!first_project_scope
+            .files
+            .contains_key(&mallard_domain::LogicalPath::parse("project/excluded.txt").unwrap()));
         for directory in ["project/docs", "project/docs/specs", "project/docs/empty"] {
             assert!(first_project_scope
                 .directories
-                .contains_key(&super::super::domain::LogicalPath::parse(directory).unwrap()));
+                .contains_key(&mallard_domain::LogicalPath::parse(directory).unwrap()));
         }
         let config_after_push = repo.load_config().unwrap();
         let source_link = config_after_push
@@ -20498,10 +20518,7 @@ mod tests {
         assert!(pushed.success);
         let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
         let snapshot = engine.inspect(&project.bundle_id).unwrap();
-        assert_eq!(
-            snapshot.head.schema_version,
-            crate::project_sync::domain::BUNDLE_SCHEMA
-        );
+        assert_eq!(snapshot.head.schema_version, mallard_domain::BUNDLE_SCHEMA);
         snapshot.manifest.published_by_origin.validate().unwrap();
         let portable_conversation_ids = snapshot
             .manifest
@@ -22836,7 +22853,7 @@ mod tests {
         std::fs::write(&local_only_path, &local_only).unwrap();
 
         let canonical_home = std::fs::canonicalize(&codex_home).unwrap();
-        let metrics = super::super::sync_metrics::register_root(&canonical_home);
+        let metrics = mallard_infrastructure::sync_metrics::register_root(&canonical_home);
         let service = ProjectSyncService::new(&repo);
         let review = service
             .prepare_push_review(&project.local_project_id, &storage_id)
@@ -23083,7 +23100,7 @@ mod tests {
         // head scan runs either. The applied push moved the checkpoint
         // generation, so the cursor revalidates through one probe window.
         let canonical_home = std::fs::canonicalize(&codex_home).unwrap();
-        let metrics = super::super::sync_metrics::register_root(&canonical_home);
+        let metrics = mallard_infrastructure::sync_metrics::register_root(&canonical_home);
         let comparison = get_project_thread_sync_comparison_with_repository(
             &repo,
             &project.local_project_id,
@@ -23505,14 +23522,14 @@ mod tests {
         assert_eq!(root_mapping.consumed_byte_offset, base.len() as u64);
         assert_eq!(
             applied_checkpoint.observed_tail.codec,
-            super::super::domain::CLAUDE_PORTABLE_TAIL_CODEC_V1
+            mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_V1
         );
         assert_eq!(
             applied_checkpoint
                 .accepted
                 .as_ref()
                 .map(|accepted| accepted.portable_tail.codec.as_str()),
-            Some(super::super::domain::CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1)
+            Some(mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1)
         );
 
         // Warm no-change comparison: no capture, no full resolve, no
@@ -23520,7 +23537,7 @@ mod tests {
         // head scan runs either. The applied push moved the checkpoint
         // generation, so the cursor revalidates through one probe window.
         let canonical_home = std::fs::canonicalize(&claude_home).unwrap();
-        let metrics = super::super::sync_metrics::register_root(&canonical_home);
+        let metrics = mallard_infrastructure::sync_metrics::register_root(&canonical_home);
         let comparison = get_project_thread_sync_comparison_with_repository(
             &repo,
             &project.local_project_id,
@@ -23741,7 +23758,7 @@ mod tests {
         std::fs::write(&session_path, &rewound).unwrap();
 
         let canonical_home = std::fs::canonicalize(&claude_home).unwrap();
-        let metrics = super::super::sync_metrics::register_root(&canonical_home);
+        let metrics = mallard_infrastructure::sync_metrics::register_root(&canonical_home);
         let comparison = get_project_thread_sync_comparison_with_repository(
             &repo,
             &project.local_project_id,
@@ -23823,7 +23840,9 @@ mod tests {
                 continue;
             }
             let value: serde_json::Value = serde_json::from_slice(raw).unwrap();
-            if let Some(projected) = super::super::providers::claude::project_claude_record(value) {
+            if let Some(projected) =
+                mallard_infrastructure::providers::claude::project_claude_record(value)
+            {
                 serde_json::to_writer(&mut out, &projected).unwrap();
                 out.push(b'\n');
             }
@@ -23902,7 +23921,7 @@ mod tests {
         std::fs::write(&session_path, &imported).unwrap();
 
         let canonical_home = std::fs::canonicalize(&claude_home).unwrap();
-        let metrics = super::super::sync_metrics::register_root(&canonical_home);
+        let metrics = mallard_infrastructure::sync_metrics::register_root(&canonical_home);
         let comparison = get_project_thread_sync_comparison_with_repository(
             &repo,
             &project.local_project_id,
@@ -24025,7 +24044,7 @@ mod tests {
 
         // Equivalence at the analysis layer: the imported bytes and the
         // never-imported twin derive identical digests.
-        let analyze = super::super::providers::claude::analyze_claude_transcript;
+        let analyze = mallard_infrastructure::providers::claude::analyze_claude_transcript;
         let twin = analyze(&original);
         let analysis = analyze(&imported);
         let digests =
@@ -24387,7 +24406,7 @@ mod tests {
         let index = claude_sessions
             .build_timeline_index(
                 &b_session_path,
-                &crate::project_sync::providers::SessionTimelineContext {
+                &mallard_infrastructure::providers::SessionTimelineContext {
                     resource_id: "res-remap-b",
                     provider_session_id: &minted_session_id,
                     project_root: &b_root,
@@ -24615,53 +24634,55 @@ mod tests {
         let mut conversations = scope.conversations.clone();
         assert_eq!(conversations.len(), 1);
         for thread in conversations.values_mut() {
-            thread.wire_redaction = Some(crate::project_sync::domain::ConversationWireRedaction {
+            thread.wire_redaction = Some(mallard_domain::ConversationWireRedaction {
                 codec: credential_redaction::REDACTION_CODEC_V1.to_string(),
                 fingerprint: "f".repeat(64),
             });
         }
         let (_, head_token) = engine.read_head(&bundle_id).unwrap().unwrap();
         engine
-            .publish(crate::project_sync::bundle_engine::PublishBundleRequest {
-                identity: BundleIdentity {
-                    bundle_id: bundle_id.clone(),
-                    display_name: "redactMismatch".to_string(),
-                    kind: BundleKind::Project,
-                    repository_fingerprint: Some("a".repeat(64)),
-                },
-                published_by_origin: snapshot
-                    .manifest
-                    .scope(&scope_key)
-                    .unwrap()
-                    .conversations
-                    .values()
-                    .next()
-                    .unwrap()
-                    .last_updated_by_origin
-                    .clone()
-                    .unwrap(),
-                writable_scopes: BTreeMap::from([(
-                    scope_key.clone(),
-                    crate::project_sync::bundle_engine::ScopePublishInput {
-                        recipe: scope.recipe.clone(),
-                        captured_with: scope.captured_with.clone(),
-                        conversations,
-                        resources: scope.resources.clone(),
-                        retained_files: scope.files.clone(),
-                        captured_files: BTreeMap::new(),
-                        directories: scope.directories.clone(),
-                        tombstones: scope.tombstones.clone(),
+            .publish(
+                mallard_infrastructure::bundle_engine::PublishBundleRequest {
+                    identity: BundleIdentity {
+                        bundle_id: bundle_id.clone(),
+                        display_name: "redactMismatch".to_string(),
+                        kind: BundleKind::Project,
+                        repository_fingerprint: Some("a".repeat(64)),
                     },
-                )]),
-                reviewed_scope_pins: BTreeMap::from([(
-                    scope_key.clone(),
-                    (scope.revision, scope.content_sha256.clone()),
-                )]),
-                expected_head: crate::project_sync::bundle_engine::PublishExpectation::Match(
-                    head_token,
-                ),
-                updated_at: 99,
-            })
+                    published_by_origin: snapshot
+                        .manifest
+                        .scope(&scope_key)
+                        .unwrap()
+                        .conversations
+                        .values()
+                        .next()
+                        .unwrap()
+                        .last_updated_by_origin
+                        .clone()
+                        .unwrap(),
+                    writable_scopes: BTreeMap::from([(
+                        scope_key.clone(),
+                        mallard_infrastructure::bundle_engine::ScopePublishInput {
+                            recipe: scope.recipe.clone(),
+                            captured_with: scope.captured_with.clone(),
+                            conversations,
+                            resources: scope.resources.clone(),
+                            retained_files: scope.files.clone(),
+                            captured_files: BTreeMap::new(),
+                            directories: scope.directories.clone(),
+                            tombstones: scope.tombstones.clone(),
+                        },
+                    )]),
+                    reviewed_scope_pins: BTreeMap::from([(
+                        scope_key.clone(),
+                        (scope.revision, scope.content_sha256.clone()),
+                    )]),
+                    expected_head: mallard_infrastructure::bundle_engine::PublishExpectation::Match(
+                        head_token,
+                    ),
+                    updated_at: 99,
+                },
+            )
             .unwrap();
 
         // Review: both directions carry the typed blocker.
@@ -24788,52 +24809,54 @@ mod tests {
                     .wire_path_map
                     .as_ref()
                     .map(|stamp| stamp.codec.as_str()),
-                Some(crate::project_sync::session_path_map::PATH_MAP_CODEC_V1),
+                Some(mallard_infrastructure::session_path_map::PATH_MAP_CODEC_V1),
                 "push stamps the compiled-in path-map codec"
             );
-            thread.wire_path_map = Some(crate::project_sync::domain::ConversationWirePathMap {
+            thread.wire_path_map = Some(mallard_domain::ConversationWirePathMap {
                 codec: "mallard.pathmap.v9".to_string(),
             });
         }
         let (_, head_token) = engine.read_head(&bundle_id).unwrap().unwrap();
         engine
-            .publish(crate::project_sync::bundle_engine::PublishBundleRequest {
-                identity: BundleIdentity {
-                    bundle_id: bundle_id.clone(),
-                    display_name: "pathmapMismatch".to_string(),
-                    kind: BundleKind::Project,
-                    repository_fingerprint: Some("a".repeat(64)),
-                },
-                published_by_origin: scope
-                    .conversations
-                    .values()
-                    .next()
-                    .unwrap()
-                    .last_updated_by_origin
-                    .clone()
-                    .unwrap(),
-                writable_scopes: BTreeMap::from([(
-                    scope_key.clone(),
-                    crate::project_sync::bundle_engine::ScopePublishInput {
-                        recipe: scope.recipe.clone(),
-                        captured_with: scope.captured_with.clone(),
-                        conversations,
-                        resources: scope.resources.clone(),
-                        retained_files: scope.files.clone(),
-                        captured_files: BTreeMap::new(),
-                        directories: scope.directories.clone(),
-                        tombstones: scope.tombstones.clone(),
+            .publish(
+                mallard_infrastructure::bundle_engine::PublishBundleRequest {
+                    identity: BundleIdentity {
+                        bundle_id: bundle_id.clone(),
+                        display_name: "pathmapMismatch".to_string(),
+                        kind: BundleKind::Project,
+                        repository_fingerprint: Some("a".repeat(64)),
                     },
-                )]),
-                reviewed_scope_pins: BTreeMap::from([(
-                    scope_key.clone(),
-                    (scope.revision, scope.content_sha256.clone()),
-                )]),
-                expected_head: crate::project_sync::bundle_engine::PublishExpectation::Match(
-                    head_token,
-                ),
-                updated_at: 99,
-            })
+                    published_by_origin: scope
+                        .conversations
+                        .values()
+                        .next()
+                        .unwrap()
+                        .last_updated_by_origin
+                        .clone()
+                        .unwrap(),
+                    writable_scopes: BTreeMap::from([(
+                        scope_key.clone(),
+                        mallard_infrastructure::bundle_engine::ScopePublishInput {
+                            recipe: scope.recipe.clone(),
+                            captured_with: scope.captured_with.clone(),
+                            conversations,
+                            resources: scope.resources.clone(),
+                            retained_files: scope.files.clone(),
+                            captured_files: BTreeMap::new(),
+                            directories: scope.directories.clone(),
+                            tombstones: scope.tombstones.clone(),
+                        },
+                    )]),
+                    reviewed_scope_pins: BTreeMap::from([(
+                        scope_key.clone(),
+                        (scope.revision, scope.content_sha256.clone()),
+                    )]),
+                    expected_head: mallard_infrastructure::bundle_engine::PublishExpectation::Match(
+                        head_token,
+                    ),
+                    updated_at: 99,
+                },
+            )
             .unwrap();
 
         let comparison = get_project_thread_sync_comparison_with_repository(
@@ -26018,8 +26041,8 @@ mod tests {
                 forked_from: None,
                 preserved: None,
                 root_tail_layout: Some(RootTailLayout {
-                    codec: crate::project_sync::domain::PORTABLE_TAIL_CODEC_V1.to_string(),
-                    partition_kind: crate::project_sync::domain::TailPartitionKind::WholeThread,
+                    codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
+                    partition_kind: mallard_domain::TailPartitionKind::WholeThread,
                     start_record_count: 0,
                 }),
                 provider_thread_id: Some("019f7500-0000-7000-8000-0000000000a1".to_string()),
@@ -28643,8 +28666,8 @@ mod tests {
                     artifact_sha256: "a".repeat(64),
                     tail_before: None,
                     tail_after: PortableConversationTail {
-                        codec: crate::project_sync::domain::PORTABLE_TAIL_CODEC_V1.to_string(),
-                        partition_kind: crate::project_sync::domain::TailPartitionKind::WholeThread,
+                        codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
+                        partition_kind: mallard_domain::TailPartitionKind::WholeThread,
                         start_record_count: 0,
                         accepted_end_record_count: 1,
                         accepted_tail_state: "e".repeat(64),
@@ -28652,12 +28675,8 @@ mod tests {
                     planned_relation: TailClassification::MissingCloud,
                     sync_config_before: SyncConfig::default(),
                     sync_config_after: SyncConfig::default(),
-                    bindings_before: crate::project_sync::domain::ConversationBindings::empty(
-                        host_id.clone(),
-                    ),
-                    bindings_after: crate::project_sync::domain::ConversationBindings::empty(
-                        host_id.clone(),
-                    ),
+                    bindings_before: mallard_domain::ConversationBindings::empty(host_id.clone()),
+                    bindings_after: mallard_domain::ConversationBindings::empty(host_id.clone()),
                 },
             ),
             provider_thread_id: Some(provider_thread_id.to_string()),
@@ -28681,8 +28700,8 @@ mod tests {
             forked_from: None,
             preserved: None,
             root_tail_layout: Some(RootTailLayout {
-                codec: crate::project_sync::domain::PORTABLE_TAIL_CODEC_V1.to_string(),
-                partition_kind: crate::project_sync::domain::TailPartitionKind::WholeThread,
+                codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
+                partition_kind: mallard_domain::TailPartitionKind::WholeThread,
                 start_record_count: 0,
             }),
             provider_thread_id: Some(provider_thread_id.to_string()),

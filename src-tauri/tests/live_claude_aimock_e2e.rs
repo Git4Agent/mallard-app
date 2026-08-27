@@ -2943,7 +2943,6 @@ fn timeline_history(
                 &index,
                 &SessionTimelineQuery {
                     start_index,
-                    anchor_event_id: None,
                     limit: 2,
                     included_event_kinds: included.clone(),
                     included_tool_categories: BTreeSet::new(),
@@ -3140,7 +3139,6 @@ fn session_detail_history(
                 ProjectSessionTimelineRequest {
                     snapshot_id: header.snapshot_id.clone(),
                     cursor: cursor.clone(),
-                    anchor_event_id: None,
                     limit: Some(2),
                     included_event_kinds: included.clone(),
                     included_tool_categories: BTreeSet::new(),
@@ -3178,7 +3176,6 @@ fn session_detail_history(
             ProjectSessionTimelineRequest {
                 snapshot_id: header.snapshot_id.clone(),
                 cursor: None,
-                anchor_event_id: None,
                 limit: Some(2),
                 included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
                 included_tool_categories: BTreeSet::from([SessionToolCategory::Read]),
@@ -3387,7 +3384,6 @@ fn session_detail_text_history(
                 ProjectSessionTimelineRequest {
                     snapshot_id: header.snapshot_id.clone(),
                     cursor: cursor.clone(),
-                    anchor_event_id: None,
                     limit: Some(2),
                     included_event_kinds: included.clone(),
                     included_tool_categories: BTreeSet::new(),
@@ -3425,7 +3421,6 @@ fn session_detail_text_history(
             ProjectSessionTimelineRequest {
                 snapshot_id: header.snapshot_id,
                 cursor: None,
-                anchor_event_id: None,
                 limit: Some(8),
                 included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
                 included_tool_categories: BTreeSet::from([
@@ -4835,7 +4830,6 @@ fn live_claude_aimock_setup_push_pull_divergence() {
             ProjectSessionTimelineRequest {
                 snapshot_id: detail_before_append.snapshot_id.clone(),
                 cursor: None,
-                anchor_event_id: None,
                 limit: Some(1),
                 included_event_kinds: BTreeSet::from([SessionTimelineEventKind::Prompt]),
                 included_tool_categories: BTreeSet::new(),

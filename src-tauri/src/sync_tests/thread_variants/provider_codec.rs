@@ -1,16 +1,16 @@
 use super::harness::TranscriptBuilder;
-use crate::project_sync::codex_history_graph::resolve_codex_root;
-use crate::project_sync::codex_standalone_builder::{
-    build_standalone_codex_root, StandaloneBuildMode,
-};
-use crate::project_sync::conversation_codec::{
-    analyze_codex_transcript, CodecLineage, CodecUnknownReason,
-};
-use crate::project_sync::domain::{
+use mallard_domain::{
     compare_conversation_tail, compute_portable_conversation_tail, default_conversation_decision,
     ConversationCapabilities, ConversationPlanDirection, ConversationReviewAction, SyncCurrency,
     TailClassification, TailPartitionKind, TailSideEvidence, VerifiedTailEvidence,
     MAX_CONVERSATION_FILE_BYTES,
+};
+use mallard_infrastructure::codex_history_graph::resolve_codex_root;
+use mallard_infrastructure::codex_standalone_builder::{
+    build_standalone_codex_root, StandaloneBuildMode,
+};
+use mallard_infrastructure::conversation_codec::{
+    analyze_codex_transcript, CodecLineage, CodecUnknownReason,
 };
 use serde_json::{json, Value};
 
@@ -333,7 +333,7 @@ fn every_codex_unknown_reason_is_bounded_and_never_resumable() {
 }
 
 fn lineage_digests(
-    analysis: &crate::project_sync::conversation_codec::CodexTranscriptAnalysis,
+    analysis: &mallard_infrastructure::conversation_codec::CodexTranscriptAnalysis,
 ) -> (&str, &str) {
     match &analysis.lineage {
         CodecLineage::Complete {

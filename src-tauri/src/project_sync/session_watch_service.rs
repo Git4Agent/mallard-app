@@ -18,10 +18,10 @@
 //! operations is always visible to the second one.
 
 use super::commands::LocalTailObservation;
-use super::domain::{LocalProjectId, ProviderKey, StorageId, TargetExpectation, ThreadId};
-use super::provider_capture::{self, CaptureRequest, Discovery, LocalSessionView};
-use super::sync_metrics;
+use mallard_domain::{LocalProjectId, ProviderKey, StorageId, TargetExpectation, ThreadId};
 use mallard_infrastructure::persistence::write_json_atomic;
+use mallard_infrastructure::provider_capture::{self, CaptureRequest, Discovery, LocalSessionView};
+use mallard_infrastructure::sync_metrics;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -750,7 +750,7 @@ impl SessionWatchService {
     /// all reuse the same profile-scoped discovery.
     pub(crate) fn discovery_for(
         &self,
-        registry: &'static super::providers::ProviderRegistry,
+        registry: &'static mallard_infrastructure::providers::ProviderRegistry,
         local_project_id: &LocalProjectId,
         request: &CaptureRequest,
     ) -> Result<(Discovery, Vec<LocalSessionView>), String> {
@@ -1209,7 +1209,7 @@ impl SessionWatchService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_sync::domain::TailSideEvidence;
+    use mallard_domain::TailSideEvidence;
 
     fn write(path: &Path, bytes: &[u8]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1323,7 +1323,7 @@ mod tests {
         let service = service();
         let (_, views) = service
             .discovery_for(
-                super::super::providers::ProviderRegistry::production(),
+                mallard_infrastructure::providers::ProviderRegistry::production(),
                 &project_id,
                 &request,
             )
@@ -1339,7 +1339,7 @@ mod tests {
         detail_request.excluded_content_roots = vec![project];
         let (_, detail_views) = service
             .discovery_for(
-                super::super::providers::ProviderRegistry::production(),
+                mallard_infrastructure::providers::ProviderRegistry::production(),
                 &project_id,
                 &detail_request,
             )

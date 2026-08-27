@@ -665,7 +665,7 @@ test("refreshing project activity spins in the path bar, and announces from the 
   assert.match(css, /\.sync-path-icon-action\.loading:disabled\s*\{[^}]*opacity:\s*1;/s);
   assert.match(css, /\.icon-spin-frame\s*\{[^}]*width:\s*16px;[^}]*height:\s*16px;[^}]*transform-origin:\s*8px 8px;/s);
   // Half the loading recipe's 1.8s glint clock: every spinner shares one
-  // metronome (loading-system.html, R1).
+  // metronome.
   assert.match(css, /\.icon-spin-frame\.spinning\s*\{[^}]*animation:\s*icon-spin 0\.9s linear infinite;/s);
 });
 
@@ -698,7 +698,7 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
   // the reveals and lets chevrons rotate instantly.
   const retroCssMotion = readFileSync("src/RetroTheme.css", "utf8");
   const revealsOff = retroCssMotion.match(/\.sync-history-branch-menu,[\s\S]*?\{[^}]*animation: none;[^}]*\}/)?.[0] ?? "";
-  for (const selector of ["\\.storage-link-menu", "\\.storage-link-actions-menu", "\\.sync-capability-details", "\\.sync-project-tab-panel"]) {
+  for (const selector of ["\\.storage-link-menu", "\\.storage-link-actions-menu", "\\.sync-project-tab-panel"]) {
     assert.match(revealsOff, new RegExp(selector), `${selector} reveal must be disabled`);
   }
   const chevrons = retroCssMotion.match(/\.sync-history-branch-chevron,[\s\S]*?\{[^}]*\}/)?.[0] ?? "";
@@ -755,7 +755,7 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
   assert.match(css, /\.sync-main\s*\{[^}]*overflow: auto;[^}]*scrollbar-gutter: stable;/s);
   assert.doesNotMatch(
     css,
-    /\.sync-thread-sync-indicator:hover,\s*\n\.sync-thread-sync-indicator:focus-visible,\s*\n\.sync-thread-sync-error:hover/,
+    /\.sync-thread-sync-indicator:hover,\s*\n\.sync-thread-sync-indicator:focus-visible/,
   );
 });
 
@@ -1882,7 +1882,6 @@ test("session actions render from backend descriptors with disabled reasons", ()
   const openButton = browseHtml.match(/<button[^>]*aria-label="Open in Codex"[^>]*>[\s\S]*?<\/button>/g) ?? [];
   assert.equal(openButton.length, 2);
   assert.match(openButton[0] ?? "", /data-icon="openai"/);
-  assert.doesNotMatch(browseHtml, /data-icon="play"/);
   assert.doesNotMatch(openButton[0] ?? "", /disabled=""/);
   assert.match(openButton[1] ?? "", /disabled=""/);
   // A disabled action explains itself in its title.
@@ -2090,7 +2089,7 @@ test("theme controls use the compact Pixelarticons sun and moon pair", () => {
 });
 
 test("history launch actions share one pixel construction", () => {
-  for (const name of ["git-fork", "terminal", "play"] as const) {
+  for (const name of ["git-fork", "terminal"] as const) {
     const html = renderToStaticMarkup(<Icon name={name} size={14} />);
     assert.match(html, /icon-pixel-fill/, `${name} must match the history launch action family`);
     assert.match(html, /fill="currentColor"/);
@@ -2132,7 +2131,6 @@ test("the shared icon catalog renders as monochrome pixel geometry", () => {
   const pixelIconNames = [
     "activity",
     "alert-triangle",
-    "badge-check",
     "ban",
     "chevron-down",
     "chevron-left",
@@ -2140,7 +2138,6 @@ test("the shared icon catalog renders as monochrome pixel geometry", () => {
     "chevron-up",
     "clock",
     "cloud",
-    "cloud-off",
     "computer",
     "check-circle",
     "download",
@@ -2154,7 +2151,6 @@ test("the shared icon catalog renders as monochrome pixel geometry", () => {
     "git-compare-arrows",
     "git-fork",
     "git-folder",
-    "help-circle",
     "info",
     "lightbulb",
     "link",
@@ -2164,9 +2160,7 @@ test("the shared icon catalog renders as monochrome pixel geometry", () => {
     "more",
     "octagon-x",
     "openai",
-    "pause",
     "paw",
-    "play",
     "plus",
     "puzzle",
     "refresh",

@@ -65,7 +65,10 @@ pub fn run() {
             // A visible process boundary in the activity log: operations that
             // died with the previous process (no terminal event) become
             // explainable instead of mysterious.
-            activity_log::ActivityLogScope::new(activity_log::ActivityLogType::System).emit(
+            activity_log::ActivityLogScope::new(
+                mallard_infrastructure::activity_log::ActivityLogType::System,
+            )
+            .emit(
                 app.handle(),
                 "info",
                 "system.app_started",

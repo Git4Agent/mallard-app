@@ -31,7 +31,7 @@ import {
   applyStorageDraft,
   shouldReloadConfigRevision,
 } from "../../src/components/project-sync/ProjectSync";
-import { storageAccessErrorMessage } from "../../src/components/project-sync/model";
+import { storageAccessErrorMessage } from "../../src/storageError";
 import type { RemoteBundleSummary, StorageConfig, StorageSetupDraft } from "../../src/types";
 
 const R2_ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
@@ -565,24 +565,6 @@ test("a hoisted R2 tally leaves the editor without its own footer", () => {
 
   assert.doesNotMatch(html, /of 5 set/);
   assert.doesNotMatch(html, /sync-storage-editor-footer/);
-});
-
-test("the live R2 setup preview fills an editable secret that the user can reveal", () => {
-  const preview = readFileSync("src/storage-setup-live.tsx", "utf8");
-  const styles = readFileSync("src/App.css", "utf8");
-
-  assert.match(preview, /secretStored=\{secretStored\}/);
-  assert.match(preview, /r2FieldsSet\(draft, secretStored\)/);
-  assert.match(preview, /setSecretStored\(true\)/);
-  assert.match(preview, /bucket: "mallard-r2-storage-2"/);
-  assert.match(preview, /access_key_id: "prepared-access-key-id"/);
-  assert.match(preview, /secret_access_key: "prepared-secret-access-key"/);
-  assert.match(preview, /R2 settings filled in\. Review or edit them, then finish setup yourself\./);
-  assert.match(preview, />\s*Finish setup\s*</);
-  assert.match(preview, /<button type="button" className="btn btn-primary" disabled=\{!ready\}/);
-  assert.match(styles, /\.sync-secret-input \{ position: relative; display: block; \}/);
-  assert.match(styles, /\.sync-secret-reveal \{/);
-  assert.doesNotMatch(styles, /\.sync-r2-fields input\[readonly\]/);
 });
 
 test("configured storage can move name editing into its page heading", () => {

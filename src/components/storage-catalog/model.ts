@@ -44,10 +44,6 @@ export function catalogScopeLabel(
   return profile ? `${meta.plural} · ${profile.display_name}` : meta.plural;
 }
 
-// The Library used to carry its own copy, which skipped both the R2
-// translation and the Bundle -> Repo wording pass the rest of the app applies.
-export { errorMessage, storageAccessErrorMessage } from "../../storageError";
-
 const CATALOG_SCOPE_LINKS_STORAGES = "still links storages";
 
 export function catalogScopeRemovalRequiresCleanup(reason: unknown): boolean {

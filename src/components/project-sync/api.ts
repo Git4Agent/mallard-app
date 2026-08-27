@@ -349,10 +349,6 @@ export const projectSyncApi = {
       resourceId,
       snapshotId: query.snapshot_id,
       cursor: query.cursor ?? null,
-      // Checkpoint-jump was removed; the query type no longer carries an
-      // anchor, so the frontend cannot reach this. The key stays on the wire
-      // until the Rust parameter goes with it, in one deliberate change.
-      anchorEventId: null,
       limit: query.limit,
       includedEventKinds: query.included_event_kinds,
       includedToolCategories: query.included_tool_categories,

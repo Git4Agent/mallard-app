@@ -2894,8 +2894,6 @@ dependencies = [
 name = "mallard"
 version = "0.1.2"
 dependencies = [
- "aws-sdk-s3",
- "aws-smithy-http-client",
  "aws-smithy-types",
  "bytes",
  "chrono",
@@ -2911,7 +2909,6 @@ dependencies = [
  "mallard-domain",
  "mallard-infrastructure",
  "notify",
- "plist",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2922,7 +2919,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "walkdir",
- "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -2982,13 +2978,11 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "getrandom 0.3.4",
- "hmac 0.12.1",
  "http-body-util",
  "hyper 1.10.1",
  "hyper-util",
  "libc",
  "mallard-domain",
- "notify",
  "plist",
  "regex",
  "serde",

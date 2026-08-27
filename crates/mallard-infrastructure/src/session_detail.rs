@@ -143,7 +143,6 @@ pub struct ProjectSessionTimelinePage {
 pub struct ProjectSessionTimelineRequest {
     pub snapshot_id: String,
     pub cursor: Option<String>,
-    pub anchor_event_id: Option<String>,
     pub limit: Option<usize>,
     pub included_event_kinds: BTreeSet<SessionTimelineEventKind>,
     pub included_tool_categories: BTreeSet<SessionToolCategory>,
@@ -1687,16 +1686,8 @@ pub fn get_project_session_timeline_page(
     views: &[LocalSessionView],
 ) -> SessionDetailResult<ProjectSessionTimelinePage> {
     ensure_identifier("snapshot id", &request.snapshot_id)?;
-    if request.cursor.is_some() && request.anchor_event_id.is_some() {
-        return Err(invalid_request(
-            "Use either a timeline cursor or an anchor event, not both.",
-        ));
-    }
     if let Some(turn_id) = &request.turn_id {
         ensure_identifier("turn id", turn_id)?;
-    }
-    if let Some(anchor) = &request.anchor_event_id {
-        ensure_identifier("anchor event id", anchor)?;
     }
     let mut session =
         resolve_local_session(repository, registry, local_project_id, resource_id, views)?;
@@ -1706,8 +1697,7 @@ pub fn get_project_session_timeline_page(
         return Err(SessionDetailError::snapshot_changed(current_snapshot_id));
     }
     let fingerprint = filter_fingerprint(&request)?;
-    let mut start_index = None;
-    if let Some(cursor) = &request.cursor {
+    let start_index = if let Some(cursor) = &request.cursor {
         let cursor = decode_cursor(cursor)?;
         if cursor.provider != session.provider
             || cursor.resource_id != session.resource_id
@@ -1718,8 +1708,10 @@ pub fn get_project_session_timeline_page(
                 "The timeline cursor does not match this session, snapshot, or filter set.",
             ));
         }
-        start_index = Some(cursor.next_index);
-    }
+        cursor.next_index
+    } else {
+        0
+    };
     let checkpoint = checkpoint_support(
         &session.project_root,
         summary.branch.as_deref(),
@@ -1730,16 +1722,6 @@ pub fn get_project_session_timeline_page(
         CheckpointSupport::Supported(checkpoint) => checkpoint,
         CheckpointSupport::Unsupported => None,
     };
-    if let Some(anchor) = &request.anchor_event_id {
-        start_index = Some(
-            index
-                .events
-                .iter()
-                .position(|event| event.event_id == *anchor)
-                .ok_or_else(|| invalid_request("The timeline anchor does not exist."))?,
-        );
-    }
-    let start_index = start_index.unwrap_or(0);
     if start_index > index.events.len() {
         return Err(invalid_request("The timeline cursor position is invalid."));
     }
@@ -1755,7 +1737,6 @@ pub fn get_project_session_timeline_page(
     })?;
     let query = SessionTimelineQuery {
         start_index: Some(start_index),
-        anchor_event_id: request.anchor_event_id.clone(),
         limit,
         included_event_kinds: request.included_event_kinds.clone(),
         included_tool_categories: request.included_tool_categories.clone(),
@@ -2593,7 +2574,6 @@ mod tests {
             ProjectSessionTimelineRequest {
                 snapshot_id: before_snapshot_id.clone(),
                 cursor: None,
-                anchor_event_id: None,
                 limit: Some(10),
                 included_event_kinds: BTreeSet::from([
                     SessionTimelineEventKind::Prompt,

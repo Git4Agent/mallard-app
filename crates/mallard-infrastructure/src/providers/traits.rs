@@ -401,7 +401,6 @@ pub struct SessionTimelineQuery {
     /// Index position after common-layer cursor validation. `None` starts at
     /// the earliest matching event.
     pub start_index: Option<usize>,
-    pub anchor_event_id: Option<String>,
     pub limit: usize,
     pub included_event_kinds: BTreeSet<SessionTimelineEventKind>,
     pub included_tool_categories: BTreeSet<SessionToolCategory>,

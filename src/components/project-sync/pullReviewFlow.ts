@@ -4,7 +4,7 @@ import type {
   RestorePlan,
   RestoreResult,
 } from "../../types";
-import { errorMessage } from "./model";
+import { errorMessage } from "../../storageError";
 
 export interface PullReviewApi {
   planRestore: (storageId: string, bundleId: string, binding: ProjectBinding) => Promise<RestorePlan>;

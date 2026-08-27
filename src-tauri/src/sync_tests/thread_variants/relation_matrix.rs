@@ -1,9 +1,5 @@
 use super::harness::{analyzed_chain, chain, codex};
-use crate::project_sync::conversation_sync::{
-    build_conversation_plan_action, validate_conversation_action_pins, ConversationApplyContext,
-    ConversationPlanActionRequest,
-};
-use crate::project_sync::domain::{
+use mallard_domain::{
     compare_conversation_tail, compute_portable_conversation_tail, default_conversation_decision,
     ActionId, ClassifiedThread, CloudThreadId, ConversationActionPins, ConversationCapabilities,
     ConversationContextPins, ConversationPlanAction, ConversationPlanActionType,
@@ -12,6 +8,10 @@ use crate::project_sync::domain::{
     PortableConversationTail, ProviderStateExpectation, RawRangePin, ReplicaId, ResourceId,
     SyncCurrency, TailClassification, TailEvidenceBlocker, TailPartitionKind, TailSideEvidence,
     TargetExpectation, ThreadId, VerifiedTailEvidence,
+};
+use mallard_infrastructure::conversation_sync::{
+    build_conversation_plan_action, validate_conversation_action_pins, ConversationApplyContext,
+    ConversationPlanActionRequest,
 };
 
 fn whole_tail(ids: &[(&str, &str)]) -> PortableConversationTail {

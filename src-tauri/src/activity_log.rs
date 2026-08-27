@@ -1,23 +1,21 @@
-//! Tauri-facing activity logging: frontend event emission and the
-//! activity-log commands. The JSONL store itself lives in
-//! `mallard_infrastructure::activity_log` and is re-exported here so
-//! existing `crate::activity_log::` paths keep working.
+//! Tauri-facing activity-log emission and commands.
 
 use mallard_domain::generated_named_id;
+use mallard_infrastructure::activity_log::{
+    normalized_level_name, ActivityLogCleanupRequest, ActivityLogCleanupResult, ActivityLogContext,
+    ActivityLogEntry, ActivityLogPage, ActivityLogPolicy, ActivityLogQuery, ActivityLogStats,
+    ActivityLogStore, ActivityLogType,
+};
 use mallard_infrastructure::persistence::LocalStateRepository;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
 
 #[cfg(not(test))]
 use mallard_infrastructure::activity_log::day_for_timestamp;
-use mallard_infrastructure::activity_log::normalized_level_name;
-pub use mallard_infrastructure::activity_log::*;
 
 static PERSISTENCE_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
-/// Resolve the activity log store below the machine-global metadata
-/// directory. `ActivityLogStore::from_app` lived on the store before the
-/// workspace reorganization moved it out of the Tauri crate.
+/// Resolve the activity log store below the machine-global metadata directory.
 fn store_from_app<R: tauri::Runtime>(
     _app: &tauri::AppHandle<R>,
 ) -> Result<ActivityLogStore, String> {

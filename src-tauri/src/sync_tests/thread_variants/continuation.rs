@@ -4,12 +4,14 @@ use super::harness::{
 };
 use super::recovery::install_scope;
 use crate::project_sync::commands::ThreadSyncState;
-use crate::project_sync::conversation_codec::{analyze_codex_transcript, CODEX_LINEAGE_CODEC_KEY};
-use crate::project_sync::domain::{
+use mallard_domain::{
     ConversationBlocker, ConversationMaterializationState, ConversationReviewAction,
     LocalConversationBinding, SessionPresentation, ThreadId,
 };
-use crate::project_sync::provider_capture::{
+use mallard_infrastructure::conversation_codec::{
+    analyze_codex_transcript, CODEX_LINEAGE_CODEC_KEY,
+};
+use mallard_infrastructure::provider_capture::{
     CapturedConversation, CapturedFile, CapturedResources,
 };
 use std::fs;
@@ -393,7 +395,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
     let reopened_b =
         LocalStateRepository::from_home_dir(world.repo_b.root().parent().unwrap()).unwrap();
     assert!(
-        crate::project_sync::conversation_materialization::recover_conversation_materializations(
+        mallard_infrastructure::conversation_materialization::recover_conversation_materializations(
             &reopened_a
         )
         .unwrap()
@@ -401,7 +403,7 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         .is_empty()
     );
     assert!(
-        crate::project_sync::conversation_materialization::recover_conversation_materializations(
+        mallard_infrastructure::conversation_materialization::recover_conversation_materializations(
             &reopened_b
         )
         .unwrap()
@@ -736,7 +738,7 @@ fn append_message(bytes: &[u8], id: &str, text: &str) -> Vec<u8> {
 }
 
 fn digests(
-    analysis: &crate::project_sync::conversation_codec::CodexTranscriptAnalysis,
+    analysis: &mallard_infrastructure::conversation_codec::CodexTranscriptAnalysis,
 ) -> (&str, &str) {
     match &analysis.lineage {
         CodecLineage::Complete {
@@ -750,20 +752,20 @@ fn digests(
 
 use super::harness::{sha256, PublishedFixture};
 use super::recovery::InstalledScope;
-use crate::project_sync::conversation_codec::CodecLineage;
-use crate::project_sync::conversation_materialization::{
-    apply_conversation_cloud_publication, apply_conversation_materialization,
-    ConversationCloudPublication, ConversationMaterializationRequest, ConversationTargetPayload,
-    NoConversationFailpoints,
-};
-use crate::project_sync::domain::{
+use mallard_domain::{
     compute_portable_conversation_tail, CloudThreadId, ConversationCloudAnchor,
     ConversationFileRole, ConversationMaterializationOperation, ConversationOperationId,
     ConversationPublicationOperation, ConversationSyncOperation, ConversationSyncOperationKind,
     PlanId, PortableConversationTail, PullJournalPhase, PushJournalPhase, RootTailLayout,
     TailPartitionKind, TargetExpectation, PORTABLE_TAIL_CODEC_V1,
 };
-use crate::project_sync::persistence::LocalStateRepository;
+use mallard_infrastructure::conversation_codec::CodecLineage;
+use mallard_infrastructure::conversation_materialization::{
+    apply_conversation_cloud_publication, apply_conversation_materialization,
+    ConversationCloudPublication, ConversationMaterializationRequest, ConversationTargetPayload,
+    NoConversationFailpoints,
+};
+use mallard_infrastructure::persistence::LocalStateRepository;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -845,10 +847,10 @@ fn publish_bound_thread(
     cloud_thread_id: &CloudThreadId,
     provider_thread_id: &str,
     local_transcript: &[u8],
-    publisher: crate::project_sync::domain::PortableOrigin,
+    publisher: mallard_domain::PortableOrigin,
     operation_id: &str,
     updated_at: u64,
-) -> crate::project_sync::domain::BundleSnapshot {
+) -> mallard_domain::BundleSnapshot {
     let engine = world.engine();
     let current = engine.inspect(&world.bundle_id).unwrap();
     let head_token = world.current_head().unwrap();
@@ -858,7 +860,7 @@ fn publish_bound_thread(
         publisher,
         updated_at,
         Some(&current.manifest),
-        crate::project_sync::bundle_engine::PublishExpectation::Match(head_token),
+        mallard_infrastructure::bundle_engine::PublishExpectation::Match(head_token),
     );
     let bindings = repository.load_conversation_bindings().unwrap();
     let binding = bindings
@@ -878,9 +880,9 @@ fn publish_bound_thread(
         .find_conversation(cloud_thread_id)
         .and_then(|(_, thread)| thread.portable_tail.clone());
     let planned_relation = if tail_before.is_some() {
-        crate::project_sync::domain::TailClassification::LocalOutstanding
+        mallard_domain::TailClassification::LocalOutstanding
     } else {
-        crate::project_sync::domain::TailClassification::MissingCloud
+        mallard_domain::TailClassification::MissingCloud
     };
     let config_before = repository.load_config().unwrap();
     let mut config_after = config_before.clone();
@@ -1007,9 +1009,9 @@ fn materialize_thread(
             && binding.thread_id == *thread_id
     });
     let planned_relation = if existing_binding.is_some() {
-        crate::project_sync::domain::TailClassification::CloudOutstanding
+        mallard_domain::TailClassification::CloudOutstanding
     } else {
-        crate::project_sync::domain::TailClassification::MissingLocal
+        mallard_domain::TailClassification::MissingLocal
     };
     match bindings_after.bindings.iter_mut().find(|binding| {
         binding.host_id == scope.host_id

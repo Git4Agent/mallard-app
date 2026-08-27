@@ -2,10 +2,10 @@ use super::harness::{
     chain, codex_scope, codex_scope_key, harness_captured_with, publish_request, publish_with_head,
     scope_pin, sha256, ThreadSpec, VariantWorld,
 };
-use crate::project_sync::bundle_engine::{
+use mallard_domain::{BundleRecipe, CloudThreadId, Tombstone, TombstoneTarget};
+use mallard_infrastructure::bundle_engine::{
     PublishBundleRequest, PublishExpectation, ScopePublishInput,
 };
-use crate::project_sync::domain::{BundleRecipe, CloudThreadId, Tombstone, TombstoneTarget};
 use std::collections::BTreeMap;
 
 #[test]

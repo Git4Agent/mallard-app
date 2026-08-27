@@ -7,7 +7,6 @@ export type CatalogResourceKind =
   | "plugin_install_intent"
   | "codex_pet_v1"
   | "codex_pet_v2";
-export type CatalogPetFormat = "v1" | "v2";
 export type CatalogLinkState =
   | "new"
   | "in_sync"

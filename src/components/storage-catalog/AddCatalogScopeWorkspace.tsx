@@ -3,8 +3,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icons";
 import Notice from "../notice/Notice";
-import { storageCatalogApi, type StorageCatalogApi } from "./api";
-import { CATALOG_KINDS, errorMessage } from "./model";
+import { errorMessage } from "../../storageError";
+import { storageCatalogApi } from "./api";
+import { CATALOG_KINDS } from "./model";
 import type {
   CatalogCapability,
   CatalogProviderKey,
@@ -19,7 +20,6 @@ interface Props {
   busy: boolean;
   onClose: () => void;
   onCreated: (scope: CatalogScopeView, workflowEpoch: number) => void;
-  api?: StorageCatalogApi;
 }
 
 function providerLabel(provider: CatalogProviderKey): string {
@@ -65,7 +65,6 @@ export default function AddCatalogScopeWorkspace({
   busy,
   onClose,
   onCreated,
-  api = storageCatalogApi,
 }: Props) {
   const [kind, setKind] = useState<CatalogResourceKind | null>(null);
   const [provider, setProvider] = useState<CatalogProviderKey | null>(null);
@@ -94,8 +93,8 @@ export default function AddCatalogScopeWorkspace({
     void (async () => {
       try {
         const [nextProfiles, nextCapabilities] = await Promise.all([
-          api.listProfiles(),
-          api.listCapabilities(),
+          storageCatalogApi.listProfiles(),
+          storageCatalogApi.listCapabilities(),
         ]);
         if (cancelled || !mountedRef.current) return;
         setProfiles(nextProfiles);
@@ -107,7 +106,7 @@ export default function AddCatalogScopeWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [api]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -186,7 +185,7 @@ export default function AddCatalogScopeWorkspace({
       let chosenProfileId = profileId;
       if (chosenProfileId === null) {
         if (!customPathReady) return;
-        const saved = await api.saveProfile(provider, expandedProfilePath);
+        const saved = await storageCatalogApi.saveProfile(provider, expandedProfilePath);
         if (!workflowIsActive()) return;
         setProfiles((current) => (
           current.some((profile) => profile.profile_id === saved.profile_id)
@@ -197,7 +196,7 @@ export default function AddCatalogScopeWorkspace({
         setProfileId(saved.profile_id);
         chosenProfileId = saved.profile_id;
       }
-      const created = await api.createScope(provider, chosenProfileId, kind);
+      const created = await storageCatalogApi.createScope(provider, chosenProfileId, kind);
       if (!workflowIsActive()) return;
       onCreated(created, workflowEpoch);
     } catch (reason) {

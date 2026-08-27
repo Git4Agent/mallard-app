@@ -2586,7 +2586,6 @@ fn timeline_history_from_standalone(
                 &index,
                 &SessionTimelineQuery {
                     start_index,
-                    anchor_event_id: None,
                     limit: HISTORY_TIMELINE_PAGE_LIMIT,
                     included_event_kinds: included_event_kinds.clone(),
                     included_tool_categories: BTreeSet::new(),
@@ -3585,7 +3584,6 @@ fn assert_session_detail_paths(
                 ProjectSessionTimelineRequest {
                     snapshot_id: header.snapshot_id.clone(),
                     cursor: cursor.clone(),
-                    anchor_event_id: None,
                     limit: Some(1),
                     included_event_kinds: included_event_kinds.clone(),
                     included_tool_categories: included_tool_categories.clone(),
@@ -4411,7 +4409,6 @@ fn assert_offline_path_timeline(
             &index,
             &SessionTimelineQuery {
                 start_index: None,
-                anchor_event_id: None,
                 limit: 1,
                 included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
                 included_tool_categories: BTreeSet::from([

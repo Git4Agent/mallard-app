@@ -1500,15 +1500,7 @@ pub(crate) fn read_timeline_page(
     let mut file =
         File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
     let limit = query.limit.clamp(1, 50);
-    let start = if let Some(anchor) = &query.anchor_event_id {
-        index
-            .events
-            .iter()
-            .position(|entry| &entry.event_id == anchor)
-            .ok_or_else(|| "timeline anchor is not present in this snapshot".to_string())?
-    } else {
-        query.start_index.unwrap_or(0).min(index.events.len())
-    };
+    let start = query.start_index.unwrap_or(0).min(index.events.len());
     let summaries = index
         .events
         .iter()
@@ -1881,7 +1873,6 @@ mod tests {
 
         let response_query = SessionTimelineQuery {
             start_index: None,
-            anchor_event_id: None,
             limit: 50,
             included_event_kinds: BTreeSet::from([SessionTimelineEventKind::Response]),
             included_tool_categories: BTreeSet::new(),
@@ -2229,7 +2220,6 @@ mod tests {
         let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
         let query = SessionTimelineQuery {
             start_index: None,
-            anchor_event_id: None,
             limit: 50,
             included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
             included_tool_categories: BTreeSet::from([
@@ -2371,7 +2361,6 @@ mod tests {
         let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
         let query = SessionTimelineQuery {
             start_index: None,
-            anchor_event_id: None,
             limit: 50,
             included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
             included_tool_categories: BTreeSet::from([SessionToolCategory::Other]),
@@ -2434,7 +2423,6 @@ mod tests {
 
         let query = SessionTimelineQuery {
             start_index: None,
-            anchor_event_id: None,
             limit: 50,
             included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
             included_tool_categories: BTreeSet::from([SessionToolCategory::Read]),
@@ -2484,7 +2472,6 @@ mod tests {
         let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
         let first_query = SessionTimelineQuery {
             start_index: None,
-            anchor_event_id: None,
             limit: 50,
             included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
             included_tool_categories: BTreeSet::from([SessionToolCategory::Other]),

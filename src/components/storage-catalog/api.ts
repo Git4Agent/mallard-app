@@ -138,5 +138,3 @@ export const storageCatalogApi = {
       planId,
     }),
 };
-
-export type StorageCatalogApi = typeof storageCatalogApi;

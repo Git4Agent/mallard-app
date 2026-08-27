@@ -400,7 +400,6 @@ body {
 .sync-history-section-heading h2,
 .sync-history-branch-state,
 .sync-history-preserved-badge,
-.sync-history-continuity-copy > strong,
 .sync-sync-review-tabs > button,
 .sync-modal-header h1,
 .log-panel-title,
@@ -410,9 +409,7 @@ body {
 .log-filter-control > span,
 .sync-setup-section > .sync-card-heading strong,
 .sync-setup-workspace .sync-field-grid label > span,
-.sync-setup-workspace .sync-agent-choice button strong,
 .sync-bundle-recommended,
-.sync-divergence-choice button,
 .sync-storage-editor-title,
 .sync-storage-repositories-heading h2,
 .sync-field-name,
@@ -525,26 +522,9 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* Recovery copy is prose, not chrome. Keep it in the clean reading face even
-   though the surrounding review controls use the pixel label face. */
-.sync-sync-review-pull-required > span {
-  font-family: var(--font-sans);
-  font-size: var(--type-sm);
-  line-height: var(--leading-prose);
-}
-
-.sync-sync-review-pull-required > span > strong {
-  font-family: var(--font-sans);
-  font-size: var(--type-md);
-  font-weight: var(--weight-semibold);
-  line-height: var(--leading-snug);
-  letter-spacing: 0;
-}
-
 .profile-links-subtitle,
 .sync-empty-state p,
 .sync-empty-state > span,
-.sync-pane-message,
 .notice,
 .sync-modal-footer span {
   font-family: var(--font-sans);
@@ -1694,8 +1674,7 @@ summary {
    the slot and shifts every following item in the row. Pin the box so the
    swap stays paint-only. */
 .sync-history-commit-icon,
-.sync-history-thread-title > .sync-thread-sync-indicator,
-.sync-history-thread-title > .sync-thread-sync-error {
+.sync-history-thread-title > .sync-thread-sync-indicator {
   position: relative;
   z-index: 3;
   width: var(--sync-history-row-icon-size, 18px);
@@ -1711,9 +1690,7 @@ summary {
    own z-index — cannot rise above the badge of the row beneath it. Lift the
    whole badge while it is hovered or focused so its tooltip clears the rows. */
 .sync-history-thread-title > .sync-thread-sync-indicator:hover,
-.sync-history-thread-title > .sync-thread-sync-indicator:focus-visible,
-.sync-history-thread-title > .sync-thread-sync-error:hover,
-.sync-history-thread-title > .sync-thread-sync-error:focus-visible {
+.sync-history-thread-title > .sync-thread-sync-indicator:focus-visible {
   z-index: 46;
 }
 
@@ -1726,7 +1703,6 @@ summary {
 
 .sync-history-commit-icon > svg,
 .sync-history-commit-link > svg,
-.sync-history-thread-title > .sync-thread-sync-error > svg,
 .sync-history-thread-meta > span > svg,
 .sync-history-debug-trigger > svg {
   width: 12px;
@@ -2013,14 +1989,12 @@ summary {
   border-radius: 0 0 3px 3px;
 }
 
-.sync-history-commit > .sync-history-thread-list .sync-thread-sync-indicator,
-.sync-history-commit > .sync-history-thread-list .sync-thread-sync-error {
+.sync-history-commit > .sync-history-thread-list .sync-thread-sync-indicator {
   background: transparent;
   box-shadow: none;
 }
 
-.sync-history-commit > .sync-history-thread-list .sync-history-thread-card:hover .sync-thread-sync-indicator,
-.sync-history-commit > .sync-history-thread-list .sync-history-thread-card:hover .sync-thread-sync-error {
+.sync-history-commit > .sync-history-thread-list .sync-history-thread-card:hover .sync-thread-sync-indicator {
   background: transparent;
   box-shadow: none;
 }
@@ -2210,9 +2184,7 @@ summary {
 }
 
 /* Sentences read in the clean face even when the app wrote them. */
-.sync-history-state,
-.sync-history-continuity-copy > span,
-.sync-history-detail-state {
+.sync-history-state {
   font-family: var(--font-sans);
   line-height: var(--leading-prose);
 }
@@ -2286,11 +2258,9 @@ summary {
 .sync-history-branch-menu,
 .storage-link-menu,
 .storage-link-actions-menu,
-.sync-inline-new-project.sync-profile-picker-dialog,
 .sync-combined-settings-panel,
 .profile-link-card,
-.sync-project-tab-panel,
-.sync-capability-details {
+.sync-project-tab-panel {
   animation: none;
 }
 
@@ -2301,10 +2271,7 @@ summary {
    still happens; it just lands immediately instead of being animated. Same
    reason the status and metric tooltips are unanimated. */
 .sync-history-branch-chevron,
-.sync-capability-chevron,
-.log-type-filter > summary svg,
-.sync-resource-details > summary > svg,
-.exclusion-summary::before {
+.log-type-filter > summary svg {
   transition: color 120ms ease;
 }
 
@@ -2399,7 +2366,6 @@ summary {
 
 .sync-history-debug-popover,
 .sync-thread-sync-indicator::after,
-.sync-thread-sync-error::after,
 .sync-history-thread-metric::after {
   border-color: var(--border-strong);
   border-radius: 4px;
@@ -2415,7 +2381,6 @@ summary {
 
 .sync-history-debug-popover,
 .sync-thread-sync-indicator::after,
-.sync-thread-sync-error::after,
 .sync-history-thread-metric::after {
   border-color: var(--border-strong);
   border-radius: 4px;
@@ -2429,20 +2394,13 @@ summary {
   border-radius: 4px;
 }
 
-.sync-pull-outcome li {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
 /* Setup, storage, review, and resource surfaces */
 
 .sync-storage-card,
 .sync-resource-group,
 .sync-storage-details-panel,
 .sync-storage-repositories,
-.sync-storage-index-list,
-.sync-project-files-panel {
+.sync-storage-index-list {
   border-color: var(--border-mid);
   border-radius: 5px;
   background: var(--surface-card);
@@ -2488,15 +2446,7 @@ summary {
   box-shadow: none;
 }
 
-.sync-agent-choice,
 .sync-segmented,
-/* These tabs are an underline strip, not a segmented control. They used to be
-   given both at once: a raised pill here on aria-selected, and the 2px
-   underline App.css draws on .active. The pill also inherited the underline
-   design's 2px side padding, so it closed to within two pixels of the label and
-   read as a box clipping the text. The segmented treatment belongs to
-   .sync-segmented and .sync-agent-choice, which are actual segmented controls;
-   this strip keeps the underline and just takes the theme's border colour. */
 .sync-project-tabs {
   border-color: var(--border-mid);
 }
@@ -2507,15 +2457,11 @@ summary {
   padding: 0 10px;
 }
 
-.sync-agent-choice button,
-.sync-segmented button,
-.sync-divergence-choice button {
+.sync-segmented button {
   border-radius: 3px;
 }
 
-.sync-agent-choice button.active,
-.sync-segmented button.active,
-.sync-divergence-choice button.active {
+.sync-segmented button.active {
   background: var(--surface-card);
   box-shadow: 1px 1px 0 color-mix(in srgb, var(--border-strong) 18%, transparent);
   color: var(--accent);
@@ -2595,16 +2541,6 @@ summary {
 .sync-setup-workspace .sync-agent-profile-row input,
 .sync-binding-dialog .sync-agent-profile-row select,
 .sync-binding-dialog .sync-agent-profile-row input {
-  font-size: var(--type-sm);
-}
-
-.sync-setup-workspace .sync-agent-choice {
-  padding: 2px;
-  gap: 2px;
-  border-radius: 5px;
-}
-
-.sync-setup-workspace .sync-agent-choice button strong {
   font-size: var(--type-sm);
 }
 
@@ -2724,22 +2660,17 @@ summary {
    the only tinted things left are the banner and the footer, which is what
    makes each of them read as a distinct band. */
 
-.sync-sync-review-stepper button,
 .sync-sync-review-tabs button {
   border-radius: 3px;
 }
 
-.sync-folder-field,
-.sync-storage-checks label {
+.sync-folder-field {
   border-color: var(--border-mid);
   border-radius: 4px;
   background: var(--surface-row);
 }
 
-.sync-result-summary,
-.sync-fact-grid,
-.sync-scope-strip,
-.sync-project-summary {
+.sync-fact-grid {
   border-color: var(--border-mid);
   border-radius: 4px;
 }
@@ -2929,8 +2860,7 @@ summary {
 }
 
 .sync-empty-state,
-.sync-history-state,
-.sync-pane-message {
+.sync-history-state {
   border-color: var(--border-mid);
   border-radius: 5px;
   background:

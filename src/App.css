@@ -21,9 +21,7 @@ body {
 }
 
 body,
-.app,
-.app-sidebar,
-.sync-panel {
+.app {
   transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease;
 }
 
@@ -343,10 +341,7 @@ summary:focus-visible {
 /* ── Buttons — restrained shared system ─────────── */
 
 .btn,
-.status-btn,
-.composer-action,
-.editor-btn,
-.sync-link-save {
+.status-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -367,36 +362,25 @@ summary:focus-visible {
 }
 
 .btn:hover:not(:disabled),
-.status-btn:hover:not(:disabled),
-.composer-action:hover:not(:disabled),
-.editor-btn:hover:not(:disabled),
-.sync-link-save:hover:not(:disabled) {
+.status-btn:hover:not(:disabled) {
   background: var(--button-bg-hover);
   border-color: var(--border-strong);
   color: var(--text-0);
 }
 
 .btn:active:not(:disabled),
-.status-btn:active:not(:disabled),
-.composer-action:active:not(:disabled),
-.editor-btn:active:not(:disabled),
-.sync-link-save:active:not(:disabled) {
+.status-btn:active:not(:disabled) {
   background: var(--button-bg-active);
 }
 
 .btn:disabled,
-.status-btn:disabled,
-.composer-action:disabled,
-.editor-btn:disabled,
-.sync-link-save:disabled {
+.status-btn:disabled {
   opacity: var(--button-disabled-opacity);
   cursor: not-allowed;
 }
 
 .btn-primary,
-.status-btn-primary,
-.composer-action-primary,
-.editor-btn-primary {
+.status-btn-primary {
   background: var(--button-primary-bg);
   color: var(--text-0);
   border-color: var(--button-primary-border);
@@ -404,9 +388,7 @@ summary:focus-visible {
 }
 
 .btn-primary:hover:not(:disabled),
-.status-btn-primary:hover:not(:disabled),
-.composer-action-primary:hover:not(:disabled),
-.editor-btn-primary:hover:not(:disabled) {
+.status-btn-primary:hover:not(:disabled) {
   background: var(--button-primary-hover);
   border-color: var(--border-strong);
 }
@@ -537,9 +519,6 @@ summary:focus-visible {
 
   .icon-spin,
   .icon-spin-frame.spinning,
-  .exclusion-summary::before,
-  .exclusion-switch,
-  .exclusion-switch::before,
   .sync-settings-switch,
   .sync-settings-switch::before { transition: none; animation: none; }
 }
@@ -1053,8 +1032,7 @@ summary:focus-visible {
 .sync-primary-nav button > span { margin-left: auto; color: var(--text-3); font-size: var(--type-xs); }
 .sync-primary-nav button:disabled,
 .sidebar-profile-main:disabled,
-.sync-sidebar-empty:disabled,
-.sync-sidebar-footer button:disabled {
+.sync-sidebar-empty:disabled {
   opacity: var(--button-disabled-opacity);
   cursor: not-allowed;
 }
@@ -1718,7 +1696,6 @@ summary:focus-visible {
 .sync-modal-footer > div { margin-left: auto; display: flex; gap: 7px; }
 
 .sync-field-grid,
-.sync-provider-home-grid,
 .sync-storage-fields {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1762,11 +1739,9 @@ summary:focus-visible {
 .sync-provider-name span { color: var(--text-3); font-size: var(--type-2xs); }
 .sync-provider-card > small code { font-family: var(--font-mono); font-size: var(--type-2xs); }
 .sync-field-grid label,
-.sync-provider-home-grid label,
 .sync-storage-fields label,
 .sync-folder-field { min-width: 0; display: flex; flex-direction: column; gap: 4px; color: var(--text-2); font-size: var(--type-xs); }
 .sync-field-grid label > span,
-.sync-provider-home-grid label > span,
 .sync-folder-field > span { color: var(--text-1); font-weight: var(--weight-semibold); }
 .sync-profile-select-row { min-width: 0; display: flex; gap: 7px; }
 /* The field fills the row. Without this an input sits at the browser's
@@ -1805,8 +1780,7 @@ summary:focus-visible {
   flex: 1;
   height: 32px;
 }
-.sync-inline-new-project,
-.sync-inline-new-project.sync-profile-picker-dialog {
+.sync-inline-new-project {
   width: 100%;
   margin: 18px 0;
   display: flex;
@@ -1840,7 +1814,6 @@ summary:focus-visible {
   background: transparent;
 }
 .sync-field-grid input,
-.sync-provider-home-grid input,
 .sync-storage-fields input,
 .sync-folder-field input,
 .sync-storage-card header > input {
@@ -2129,8 +2102,7 @@ summary:focus-visible {
 .sync-pull-item-status.restored,
 .sync-pull-item-status.installed { color: var(--text-2); }
 .sync-pull-item-status.restoring,
-.sync-pull-item-status.installing,
-.sync-pull-item-status.preparing-installer { color: var(--text-0); }
+.sync-pull-item-status.installing { color: var(--text-0); }
 .sync-pull-item-status.failed { color: var(--danger-text); }
 
 .sync-pull-item-detail {
@@ -2224,8 +2196,7 @@ summary:focus-visible {
 
 .sync-inline-action-heading > div { min-width: 0; }
 .sync-inline-action-heading h2 { color: var(--text-0); font-size: var(--type-lg); font-weight: var(--weight-semibold); }
-.sync-inline-action-heading p,
-.sync-inline-action-intro { color: var(--text-2); font-size: var(--type-xs); }
+.sync-inline-action-heading p { color: var(--text-2); font-size: var(--type-xs); }
 .sync-inline-action-heading p { margin-top: 3px; }
 .sync-inline-action-close {
   position: relative;
@@ -3860,8 +3831,7 @@ span.sync-path-crumb {
   gap: 8px;
 }
 
-.profile-add-profile,
-.profile-add-link {
+.profile-add-profile {
   min-height: 43px;
   padding: 0 17px;
   color: var(--text-0);
@@ -5723,8 +5693,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   white-space: nowrap;
 }
 
-.sync-thread-sync-indicator,
-.sync-thread-sync-error {
+.sync-thread-sync-indicator {
   position: relative;
   width: 24px;
   height: 24px;
@@ -5739,8 +5708,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   outline: none;
 }
 
-.sync-thread-sync-indicator > svg,
-.sync-thread-sync-error > svg {
+.sync-thread-sync-indicator > svg {
   display: block;
   flex: 0 0 auto;
 }
@@ -5767,8 +5735,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-thread-sync-indicator.pending { color: var(--thread-status-pending); }
 .sync-thread-sync-indicator.conflict { color: var(--thread-status-conflict); }
 .sync-thread-sync-indicator.unavailable { color: var(--thread-status-unavailable); }
-.sync-thread-sync-indicator::after,
-.sync-thread-sync-error::after {
+.sync-thread-sync-indicator::after {
   /* Keep hover paint-only; WebKit can jitter sibling SVGs when this flex item changes compositing geometry. */
   content: attr(data-tooltip);
   position: absolute;
@@ -5804,15 +5771,12 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 }
 
 .sync-thread-sync-indicator:hover::after,
-.sync-thread-sync-indicator:focus-visible::after,
-.sync-thread-sync-error:hover::after,
-.sync-thread-sync-error:focus-visible::after {
+.sync-thread-sync-indicator:focus-visible::after {
   opacity: 1;
   visibility: visible;
 }
 
-.sync-thread-sync-indicator:focus-visible,
-.sync-thread-sync-error:focus-visible {
+.sync-thread-sync-indicator:focus-visible {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
@@ -6371,8 +6335,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   scrollbar-gutter: auto;
 }
 
-.sync-sync-review-scroll > .sync-history-embedded,
-.sync-sync-review-scroll > .sync-capability-page {
+.sync-sync-review-scroll > .sync-history-embedded {
   margin-top: 0;
   padding-top: 10px;
   border-top: 0;
@@ -6779,8 +6742,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   opacity: .35;
 }
 
-.sync-sync-selectable-row.selected,
-.sync-capability-row.sync-capability-selectable.selected {
+.sync-sync-selectable-row.selected {
   background: var(--surface-subtle);
 }
 

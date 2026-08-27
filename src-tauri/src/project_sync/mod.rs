@@ -8,30 +8,3 @@ pub mod config_watcher;
 pub mod service;
 #[cfg_attr(test, allow(dead_code))]
 pub mod session_watch_service;
-
-// Temporary reorganization shims (PLAN_PROJECT_STRUCTURE_REORGANIZATION.md
-// §3.2): these modules now live in the mallard-domain and
-// mallard-infrastructure crates; the re-exports keep existing
-// `super::` / `crate::project_sync::` paths compiling until Phase 5
-// removes them.
-pub use mallard_domain as domain;
-pub use mallard_infrastructure::bundle_engine;
-pub use mallard_infrastructure::claude_history_tail;
-pub use mallard_infrastructure::codex_app_refresh;
-pub use mallard_infrastructure::codex_history_graph;
-pub use mallard_infrastructure::codex_rollout;
-pub use mallard_infrastructure::codex_standalone_builder;
-pub use mallard_infrastructure::codex_thread_allocator;
-pub use mallard_infrastructure::conversation_codec;
-pub use mallard_infrastructure::conversation_materialization;
-pub use mallard_infrastructure::conversation_sync;
-pub use mallard_infrastructure::credential_redaction;
-pub use mallard_infrastructure::jsonl_tail_io;
-pub use mallard_infrastructure::persistence;
-pub use mallard_infrastructure::project_activity;
-pub use mallard_infrastructure::provider_capture;
-pub use mallard_infrastructure::providers;
-pub use mallard_infrastructure::session_detail;
-pub use mallard_infrastructure::session_path_map;
-pub use mallard_infrastructure::storage_core;
-pub use mallard_infrastructure::sync_metrics;

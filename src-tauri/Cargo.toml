@@ -26,9 +26,7 @@ dirs = "5"
 walkdir = "2"
 zeroize = "1"
 tokio = { version = "1", features = ["full"] }
-aws-sdk-s3 = "1"
-aws-smithy-http-client = { version = "1", features = ["rustls-aws-lc"] }
-# Base64 for x-amz-checksum-sha256 values; already in the tree via aws-sdk-s3.
+# Base64 for x-amz-checksum-sha256 values in S3 tests.
 aws-smithy-types = "1"
 bytes = "1"
 # Pet preview derivation: decode PNG/WebP atlases, encode the cached PNG
@@ -42,12 +40,6 @@ getrandom = "0.3"
 chrono = "0.4"
 notify = "8.2"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-plist = "1"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
-
 [dev-dependencies]
 # Test-only domain and infrastructure helpers (compiled out of production
 # builds).
@@ -56,7 +48,7 @@ mallard-infrastructure = { path = "../crates/mallard-infrastructure", features =
 # `test` enables tauri::test::{mock_builder, MockRuntime} for the headless
 # integration tests in src/sync_tests/.
 tauri = { version = "2", features = ["test"] }
-# Stub S3 server (already in the dependency tree via aws-smithy-http-client).
+# Stub S3 server.
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"

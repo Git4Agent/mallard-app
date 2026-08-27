@@ -588,9 +588,6 @@ export interface TestR2StorageResult {
   verified: boolean;
 }
 
-/** Schema of `~/.mallard/storage_drafts/*.json`. */
-export const STORAGE_SETUP_DRAFT_SCHEMA = 1;
-
 /** The client-editable storage form fields — `StorageConfig` minus its id.
  *  A blank `secret_access_key` means "no secret typed this session"; an
  *  update then keeps the drafted one. */
