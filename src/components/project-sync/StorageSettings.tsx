@@ -1,8 +1,8 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { StorageConfig } from "../../types";
 import Icon from "../Icons";
+import { openExternalUrl } from "./externalLink";
 
 const R2_SETUP_DOC = "https://developers.cloudflare.com/r2/get-started/s3/";
 const R2_BUCKET_DOC = "https://developers.cloudflare.com/r2/buckets/create-buckets/";
@@ -16,20 +16,12 @@ const R2_BUCKET_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/;
 const R2_ENDPOINT_PATTERN = /^https:\/\/([0-9a-f]{32})(?:\.(eu|fedramp))?\.r2\.cloudflarestorage\.com$/i;
 const R2_S3_API_URL_PATTERN = /^https:\/\/([0-9a-f]{32})(?:\.(eu|fedramp))?\.r2\.cloudflarestorage\.com\/([^/?#%]+)$/i;
 
-async function openHelp(url: string) {
-  try {
-    await openUrl(url);
-  } catch {
-    window.open(url, "_blank", "noopener,noreferrer");
-  }
-}
-
 function HelpButton({ url, label }: { url: string; label: string }) {
   return (
     <button
       type="button"
       className="field-help"
-      onClick={() => void openHelp(url)}
+      onClick={() => void openExternalUrl(url)}
       title={label}
       aria-label={label}
     >
@@ -319,7 +311,7 @@ export function StorageEditor({
                 <Icon name="info" size={13} />
                 <span className="sync-r2-zone-label">Manual setup</span>
                 <span className="sync-r2-guide-copy">Enter an existing R2 connection in the fields below.</span>
-                <button type="button" className="btn-link" onClick={() => void openHelp(R2_SETUP_DOC)}>Setup guide <Icon name="external-link" size={11} /></button>
+                <button type="button" className="btn-link" onClick={() => void openExternalUrl(R2_SETUP_DOC)}>Setup guide <Icon name="external-link" size={11} /></button>
               </div>
             </>
           ) : (
@@ -330,7 +322,7 @@ export function StorageEditor({
                   ? "Configured. You can review or update the connection values below."
                   : "Enter the R2 connection values below."}
               </span>
-              <button type="button" className="btn-link" onClick={() => void openHelp(R2_SETUP_DOC)}>Setup guide</button>
+              <button type="button" className="btn-link" onClick={() => void openExternalUrl(R2_SETUP_DOC)}>Setup guide</button>
               {agentSlot}
             </div>
           )}

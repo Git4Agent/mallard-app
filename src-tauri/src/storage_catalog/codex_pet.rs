@@ -8,13 +8,12 @@
 //! or conversion.
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
 
 use super::domain::{
-    validate_component_name, validate_display_text, validate_pet_id, CatalogFileEntry,
+    sha256_hex, validate_component_name, validate_display_text, validate_pet_id, CatalogFileEntry,
     CodexPetDescriptor, CodexPetFormat, CodexPetResource, MAX_PET_ATLAS_BYTES,
     MAX_PET_DECODED_BYTES, MAX_PET_MANIFEST_BYTES,
 };
@@ -49,19 +48,6 @@ pub struct CapturedPet {
     /// Files in the package directory beyond the manifest and atlas; they are
     /// excluded from capture and reported.
     pub extra_files: Vec<String>,
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut output, "{:02x}", byte);
-    }
-    output
-}
-
-fn sha256(bytes: &[u8]) -> String {
-    hex_lower(&Sha256::digest(bytes))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,7 +253,7 @@ pub fn capture_pet(directory: &Path) -> Result<CapturedPet, String> {
 
 /// Build the portable resource for a captured pet.
 pub fn pet_resource_from_capture(captured: &CapturedPet) -> Result<CodexPetResource, String> {
-    let digest = sha256(&captured.atlas_bytes);
+    let digest = sha256_hex(&captured.atlas_bytes);
     let mut resource = CodexPetResource {
         descriptor: CodexPetDescriptor {
             pet_id: captured.pet_id.clone(),

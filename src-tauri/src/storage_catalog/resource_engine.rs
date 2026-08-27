@@ -11,28 +11,18 @@ use mallard_infrastructure::storage_core::{
     ensure_storage_marker, library_object_key, CasExpectation, CasOutcome, ExpectedObject,
     ImmutablePutOutcome, ObjectStore, StageOutcome, HEAD_FILE, TAG_FILE,
 };
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 use super::domain::{
-    library_commit_relative_key, library_manifest_relative_key, CatalogCommitId, CatalogResource,
-    CatalogResourceId, CatalogResourceRepositoryId, LibraryHeadCoordinate, LibraryResourceCommit,
-    LibraryResourceHead, LibraryResourceManifest, LibraryResourceTag, PortableCatalogOrigin,
-    PublishedResourceEntry, CATALOG_SCHEMA, MAX_REVISION_PAYLOAD_BYTES,
+    library_commit_relative_key, library_manifest_relative_key, sha256_hex, CatalogCommitId,
+    CatalogResource, CatalogResourceId, CatalogResourceRepositoryId, LibraryHeadCoordinate,
+    LibraryResourceCommit, LibraryResourceHead, LibraryResourceManifest, LibraryResourceTag,
+    PortableCatalogOrigin, PublishedResourceEntry, CATALOG_SCHEMA, MAX_REVISION_PAYLOAD_BYTES,
 };
 
 const MAX_TAG_BYTES: u64 = 64 * 1024;
 const MAX_HEAD_BYTES: u64 = 64 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        use std::fmt::Write as _;
-        let _ = write!(&mut output, "{:02x}", byte);
-    }
-    output
-}
 
 fn referenced_payloads(resource: &CatalogResource) -> BTreeMap<String, u64> {
     match resource {

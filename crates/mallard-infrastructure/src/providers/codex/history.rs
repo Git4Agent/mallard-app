@@ -1316,7 +1316,6 @@ fn safe_project_relative_path(
             .components()
             .filter_map(|component| match component {
                 Component::Normal(value) => Some(value.to_string_lossy()),
-                Component::CurDir => None,
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -2108,12 +2107,6 @@ pub(crate) fn build_timeline_index(
             "responseitem" => {
                 consume_legacy_response_item(&mut legacy, payload, source, timestamp, context)
             }
-            "sessionmeta"
-            | "turncontext"
-            | "worldstate"
-            | "compacted"
-            | "interagentcommunication"
-            | "interagentcommunicationmetadata" => {}
             _ => {}
         }
     }

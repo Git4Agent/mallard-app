@@ -6,7 +6,7 @@ import { clockOptions } from "../../clock";
 import { formatBytes } from "../../format";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
-import LoadingScaffold from "../project-sync/LoadingScaffold";
+import LoadingScaffold from "../LoadingScaffold";
 import { writeClipboardText } from "../sync-review/clipboard";
 import { focusMenuEdge, moveMenuFocus } from "../sync-review/menuKeyboard";
 import ProviderMark from "../sync-review/ProviderMark";
@@ -17,6 +17,7 @@ import { storageCatalogApi } from "./api";
 import {
   actionLabel,
   catalogKindMeta,
+  providerLabel,
   catalogScopeLabel,
   rowPullable,
   rowPushable,
@@ -64,10 +65,6 @@ type Mode = { kind: "list" } | { kind: "push" } | { kind: "pull" };
 /** Mirrors the shell's notice tones without importing them: storage-catalog
  *  may not depend on project-sync. */
 type CatalogNoticeTone = "ok" | "attention";
-
-function providerLabel(provider: CatalogProviderKey): string {
-  return provider === "codex" ? "Codex" : "Claude";
-}
 
 /** "Codex pet v1", "Plugin intent", "Codex home skill" — the phrase the fork
  * button carries so the copy names exactly what it duplicates. */

@@ -4,11 +4,16 @@ import { errorMessage } from "../../storageError";
 import type { ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 import type {
   CatalogPullAction,
+  CatalogProviderKey,
   CatalogResourceKind,
   CatalogScope,
   CatalogScopeRow,
   LocalCatalogProfile,
 } from "./types";
+
+export function providerLabel(provider: CatalogProviderKey): string {
+  return provider === "codex" ? "Codex" : "Claude";
+}
 
 /** The four addable resource kinds. Pet v1 and v2 are distinct rows because
  * the portable format is the discriminator; there is no conversion — so they

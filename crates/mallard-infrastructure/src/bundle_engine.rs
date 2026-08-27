@@ -670,18 +670,17 @@ impl<S: ObjectStore> BundleEngine<S> {
         }
 
         let mut current = self.read_head(&request.identity.bundle_id)?;
+        // A moved head is not by itself fatal: disjoint-scope publishers may
+        // land between review and push. The per-scope firewall below decides
+        // whether this publication can graft onto the winner.
         match (&request.expected_head, &current) {
-            (PublishExpectation::Absent, None) => {}
             (PublishExpectation::Absent, Some(_)) => {
                 return Err("bundle head changed: expected an absent head".to_string())
             }
             (PublishExpectation::Match(_), None) => {
                 return Err("bundle head is missing; the remote repository was removed".to_string())
             }
-            // A moved head is not by itself fatal: disjoint-scope publishers
-            // may land between review and push. The per-scope firewall below
-            // decides whether this publication can graft onto the winner.
-            (PublishExpectation::Match(_), Some(_)) => {}
+            (PublishExpectation::Absent, None) | (PublishExpectation::Match(_), Some(_)) => {}
         }
         on_phase("publish: read head", phase_started.elapsed());
 
@@ -4052,14 +4051,10 @@ pub fn reconcile_scope_content(
 
     tombstones.retain(|_, tombstone| match &tombstone.target {
         TombstoneTarget::Resource { resource_id } => !resources.contains_key(resource_id),
-        TombstoneTarget::File {
-            resource_id: _,
-            logical_path,
-        } => !files.contains_key(logical_path) && !captured_file_paths.contains(logical_path),
-        TombstoneTarget::ProjectContentFile {
-            resource_id: _,
-            logical_path,
-        } => !files.contains_key(logical_path) && !captured_file_paths.contains(logical_path),
+        TombstoneTarget::File { logical_path, .. }
+        | TombstoneTarget::ProjectContentFile { logical_path, .. } => {
+            !files.contains_key(logical_path) && !captured_file_paths.contains(logical_path)
+        }
         TombstoneTarget::ProjectContentDirectory {
             resource_id: _,
             logical_path,

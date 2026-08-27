@@ -965,7 +965,6 @@ fn safe_project_relative_path(
             .components()
             .filter_map(|component| match component {
                 Component::Normal(value) => Some(value.to_string_lossy()),
-                Component::CurDir => None,
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -1159,15 +1158,6 @@ fn consume_claude_record(
                 }
             }
         }
-        "assistant" => {}
-        "summary"
-        | "system"
-        | "result"
-        | "progress"
-        | "compactboundary"
-        | "filehistorysnapshot"
-        | "queueoperation"
-        | "lastprompt" => {}
         _ => {}
     }
 }

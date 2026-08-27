@@ -27,7 +27,7 @@ pub const CATALOG_RESOURCE_PLAN_LIFETIME_SECS: u64 = 24 * 60 * 60;
 pub fn relation_for_state(state: CatalogLinkState) -> super::domain::CatalogResourceRelation {
     use super::domain::CatalogResourceRelation as Relation;
     match state {
-        CatalogLinkState::New => Relation::LocalOnly,
+        CatalogLinkState::New | CatalogLinkState::RemoteMissing => Relation::LocalOnly,
         CatalogLinkState::InSync => Relation::Matching,
         CatalogLinkState::LocalChanged => Relation::LocalChanged,
         CatalogLinkState::StorageChanged => Relation::StorageChanged,
@@ -35,7 +35,6 @@ pub fn relation_for_state(state: CatalogLinkState) -> super::domain::CatalogReso
         CatalogLinkState::LocalMissing | CatalogLinkState::UnreviewedRemote => {
             Relation::StorageOnly
         }
-        CatalogLinkState::RemoteMissing => Relation::LocalOnly,
         CatalogLinkState::Blocked => Relation::Blocked,
     }
 }
@@ -52,7 +51,7 @@ pub fn derive_link_state(
         remote_content_sha256,
     ) {
         (None, Some(_), None) => CatalogLinkState::New,
-        (None, None, None) => CatalogLinkState::LocalMissing,
+        (None, None, None) | (Some(_), None, Some(_)) => CatalogLinkState::LocalMissing,
         (None, local, Some(remote)) => {
             if local == Some(remote) {
                 CatalogLinkState::InSync
@@ -60,7 +59,6 @@ pub fn derive_link_state(
                 CatalogLinkState::UnreviewedRemote
             }
         }
-        (Some(_), None, Some(_)) => CatalogLinkState::LocalMissing,
         (Some(_), Some(_), None) | (Some(_), None, None) => {
             if remote_was_accepted {
                 CatalogLinkState::RemoteMissing
@@ -95,7 +93,7 @@ pub fn scope_resource_state(
     )
 }
 
-fn scope_label(resource: &CatalogResource) -> Option<String> {
+pub(crate) fn scope_label(resource: &CatalogResource) -> Option<String> {
     match resource {
         CatalogResource::AgentSkill(skill) => {
             Some(skill.descriptor.scope.display_label().to_string())
@@ -1003,7 +1001,7 @@ pub fn build_resource_fork_plan(
 #[cfg(test)]
 mod tests {
     use super::super::domain::{
-        skill_resource_id, AgentSkillDescriptor, AgentSkillResource, AgentSkillScope,
+        sha256_hex, skill_resource_id, AgentSkillDescriptor, AgentSkillResource, AgentSkillScope,
         CatalogActionOutcome, CatalogFileEntry, CatalogResourceKindTag, CatalogResourceRelation,
         CatalogResourceRepositoryId, CatalogScopeId, LocalCatalogProfileId, ProviderKey,
     };
@@ -1011,16 +1009,6 @@ mod tests {
     use super::super::skill_tree::{CapturedSkillFile, CapturedSkillTree};
     use super::*;
     use std::path::Path;
-
-    fn sha256_hex(bytes: &[u8]) -> String {
-        use sha2::{Digest, Sha256};
-        let mut output = String::with_capacity(64);
-        for byte in Sha256::digest(bytes) {
-            use std::fmt::Write as _;
-            let _ = write!(&mut output, "{:02x}", byte);
-        }
-        output
-    }
 
     const SKILL_ROOT: &str = "/tmp/planning/codex-home/skills";
 

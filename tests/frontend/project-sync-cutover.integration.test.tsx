@@ -4,6 +4,7 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import StartupLoadingScreen from "../../src/components/project-sync/StartupLoadingScreen";
 import { repositoryFingerprintMatches } from "../../src/components/project-sync/model";
+import { expandHomePath } from "../../src/profilePath";
 import { PROJECT_SYNC_SCHEMA } from "../../src/types";
 import {
   MIN_PANE_HEIGHT,
@@ -12,7 +13,6 @@ import {
   shareHoldingCatalog,
 } from "../../src/components/project-sync/ProjectSidebar";
 import {
-  expandHomePath,
   profilePathHint,
   type ProfilePathProbeState,
 } from "../../src/components/project-sync/ProjectSetupWorkspace";

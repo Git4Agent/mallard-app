@@ -9,9 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
-use super::domain::{CodexPetFormat, MAX_PET_ATLAS_BYTES};
+use super::domain::{sha256_hex, CodexPetFormat, MAX_PET_ATLAS_BYTES};
 
 /// 2x the 44x48 tile the card draws, at the atlas cell's own 192:208.
 const PREVIEW_WIDTH: u32 = 96;
@@ -25,15 +23,6 @@ const MAX_PREVIEW_BYTES: u64 = 262_144;
 /// and every entry can be re-derived from its source.
 pub fn preview_cache_dir(user_home: &Path) -> PathBuf {
     user_home.join(".mallard").join("pet_preview_cache")
-}
-
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        output.push_str(&format!("{:02x}", byte));
-    }
-    output
 }
 
 fn data_uri(png: &[u8]) -> String {

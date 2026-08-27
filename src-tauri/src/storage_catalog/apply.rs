@@ -1207,13 +1207,8 @@ fn execute_one_action(
                     now,
                 },
             )?;
-            let outcome = match (&action.kind, &action.expected_target_state) {
-                (_, CatalogTargetExpectation::Absent) => CatalogActionOutcome::Installed,
-                (
-                    CatalogPullActionKind::OverwriteSkillWithStorage
-                    | CatalogPullActionKind::OverwritePetWithStorage,
-                    _,
-                ) => CatalogActionOutcome::Updated,
+            let outcome = match &action.expected_target_state {
+                CatalogTargetExpectation::Absent => CatalogActionOutcome::Installed,
                 _ => CatalogActionOutcome::Updated,
             };
             record_claim(

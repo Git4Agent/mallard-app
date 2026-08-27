@@ -5,7 +5,7 @@ import react from "@vitejs/plugin-react";
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
-export default defineConfig(async () => ({
+export default defineConfig(() => ({
   plugins: [react()],
 
   // The only consumer is the Tauri webview, so the browser baseline is the one

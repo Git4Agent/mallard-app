@@ -115,7 +115,6 @@ pub fn refresh_offer(
                         ),
                     });
                 }
-                Ok(false) => {}
                 Err(_) if manual_offer.is_none() => {
                     manual_offer = Some(CodexAppRefreshOffer {
                         operation_id: operation_id.clone(),
@@ -128,7 +127,7 @@ pub fn refresh_offer(
                         ),
                     });
                 }
-                Err(_) => {}
+                Ok(false) | Err(_) => {}
             }
         }
         manual_offer

@@ -7021,7 +7021,6 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     ] {
         let mut node = graph.nodes[name].clone();
         node.expected = match name {
-            "p0" => graph.nodes[name].expected.clone(),
             "p1" => graph.nodes[name]
                 .expected
                 .iter()

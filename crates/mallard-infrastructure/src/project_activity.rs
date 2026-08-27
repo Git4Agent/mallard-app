@@ -347,11 +347,7 @@ fn load_activity_cache(root: &Path, path: &Path, warnings: &mut Vec<String>) -> 
         {
             cache
         }
-        Ok(Some(_)) => ActivityCache {
-            schema: ACTIVITY_CACHE_SCHEMA,
-            entries: BTreeMap::new(),
-        },
-        Ok(None) => ActivityCache {
+        Ok(Some(_)) | Ok(None) => ActivityCache {
             schema: ACTIVITY_CACHE_SCHEMA,
             entries: BTreeMap::new(),
         },

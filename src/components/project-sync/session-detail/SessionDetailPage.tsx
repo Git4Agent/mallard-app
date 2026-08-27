@@ -13,7 +13,7 @@ import type {
 import Icon from "../../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../../notice/Notice";
 import { projectSyncApi } from "../api";
-import LoadingScaffold from "../LoadingScaffold";
+import LoadingScaffold from "../../LoadingScaffold";
 import SessionDetailHeader from "./SessionDetailHeader";
 import SessionDetailTimeline from "./SessionDetailTimeline";
 import SessionDetailToolbar from "./SessionDetailToolbar";
@@ -72,16 +72,12 @@ function mergeWarnings(...groups: SessionDetailWarning[][]): SessionDetailWarnin
   return [...warnings.values()];
 }
 
-function SessionDetailEntryState({
-  loading,
-  error,
-  onRetry,
-}: {
-  loading: boolean;
-  error: string | null;
-  onRetry: () => void;
-}) {
-  if (loading && !error) {
+type SessionDetailEntryStateProps =
+  | { state: "loading" }
+  | { state: "failed"; error: string; onRetry: () => void };
+
+function SessionDetailEntryState(props: SessionDetailEntryStateProps) {
+  if (props.state === "loading") {
     // The page's own bones — fact-chip strip, punchcard band, panes — so
     // the loaded detail lands without a jump. The scaffold is a quiet named
     // region; the old subline's promise is carried by the geometry now.
@@ -93,11 +89,11 @@ function SessionDetailEntryState({
   }
   return (
     <section className="session-detail-page session-detail-entry-state" aria-labelledby="session-detail-entry-heading">
-      <div className={`session-detail-state${error ? " error" : ""}`} role={error ? "alert" : "status"}>
+      <div className="session-detail-state error" role="alert">
         <Icon name="alert-triangle" size={24} />
         <h1 id="session-detail-entry-heading">Session detail unavailable</h1>
-        <span>{error ?? "The timeline could not be prepared."}</span>
-        {error && <button type="button" className="btn btn-ghost" onClick={onRetry}>Try again</button>}
+        <span>{props.error}</span>
+        <button type="button" className="btn btn-ghost" onClick={props.onRetry}>Try again</button>
       </div>
     </section>
   );
@@ -398,13 +394,13 @@ export default function SessionDetailPage({
   };
 
   if (!detail) {
-    return (
+    return detailError ? (
       <SessionDetailEntryState
-        loading={detailLoading}
+        state="failed"
         error={detailError}
         onRetry={() => void loadDetail(false)}
       />
-    );
+    ) : <SessionDetailEntryState state="loading" />;
   }
 
   const warnings = mergeWarnings(detail.warnings, timelineWarnings);

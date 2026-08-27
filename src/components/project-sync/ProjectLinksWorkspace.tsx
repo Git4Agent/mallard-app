@@ -28,7 +28,7 @@ import type {
 } from "../../types";
 import Icon from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
-import { clockOptions } from "../../clock";
+import { clockOptions, toEpochMilliseconds } from "../../clock";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import ProjectActivityPage, { BranchPicker, type ActivityHeaderModel } from "./ProjectActivityPage";
 import type {
@@ -404,10 +404,7 @@ export function buildR2AgentSetupInstruction({
 }
 
 function absoluteTime(epoch: number): string {
-  // Same second/millisecond tolerance as formatRelativeTime, since the fold's
-  // absolute stamp expands the very value the chip shows relatively.
-  const milliseconds = epoch > 10_000_000_000 ? epoch : epoch * 1000;
-  return new Date(milliseconds).toLocaleString(undefined, {
+  return new Date(toEpochMilliseconds(epoch)).toLocaleString(undefined, {
     month: "short",
     day: "numeric",
     year: "numeric",

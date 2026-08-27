@@ -17,7 +17,7 @@ import {
 } from "../../preferences";
 import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
-import { LoadingBone } from "./LoadingScaffold";
+import { LoadingBone } from "../LoadingScaffold";
 
 /**
  * The app-wide Settings page: a primary-nav destination like the Storages

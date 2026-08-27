@@ -9,7 +9,6 @@
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -17,7 +16,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::domain::{
-    CatalogMaterializationsDocument, CatalogOperationsDocument, CatalogPlanId,
+    sha256_hex, CatalogMaterializationsDocument, CatalogOperationsDocument, CatalogPlanId,
     CatalogPreservationsDocument, CatalogProfilesDocument, CatalogResourcePlanDocument,
     CatalogScopeLinksDocument, CatalogScopesDocument,
 };
@@ -139,13 +138,8 @@ impl CatalogStateRepository {
     pub fn acquire_target_lock(&self, canonical_path: &Path) -> Result<CatalogTargetLock, String> {
         let locks_dir = self.root.join("locks");
         ensure_restricted_directory(&locks_dir)?;
-        let digest = Sha256::digest(canonical_path.to_string_lossy().as_bytes());
-        let mut name = String::from("provider-");
-        for byte in digest {
-            use std::fmt::Write as _;
-            let _ = write!(&mut name, "{:02x}", byte);
-        }
-        name.push_str(".lock");
+        let digest = sha256_hex(canonical_path.to_string_lossy().as_bytes());
+        let name = format!("provider-{}.lock", digest);
         let file = open_lock_file(&locks_dir.join(name))?;
         file.lock()
             .map_err(|error| format!("lock provider target: {}", error))?;

@@ -7,15 +7,15 @@
 //! frontmatter `name` together so the copy stays a valid, independently
 //! addressable Agent Skill.
 
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
 
 use super::domain::{
-    validate_skill_name, validate_skill_relative_path, AgentSkillDescriptor, AgentSkillResource,
-    AgentSkillScope, CatalogFileEntry, MAX_SKILL_FILES, MAX_SKILL_FILE_BYTES, MAX_SKILL_TREE_BYTES,
+    sha256_hex, validate_skill_name, validate_skill_relative_path, AgentSkillDescriptor,
+    AgentSkillResource, AgentSkillScope, CatalogFileEntry, MAX_SKILL_FILES, MAX_SKILL_FILE_BYTES,
+    MAX_SKILL_TREE_BYTES,
 };
 
 pub const MAX_SKILL_MD_BYTES: u64 = 256 * 1024;
@@ -38,19 +38,6 @@ pub struct CapturedSkillTree {
     pub files: BTreeMap<String, CapturedSkillFile>,
     pub declared_name: Option<String>,
     pub warnings: SkillTreeWarnings,
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut output, "{:02x}", byte);
-    }
-    output
-}
-
-fn sha256(bytes: &[u8]) -> String {
-    hex_lower(&Sha256::digest(bytes))
 }
 
 /// The `name:` declaration in SKILL.md's leading YAML frontmatter block.
@@ -237,7 +224,7 @@ pub fn skill_resource_from_tree(
 ) -> Result<AgentSkillResource, String> {
     let mut entries = BTreeMap::new();
     for (path, file) in files {
-        let digest = sha256(&file.bytes);
+        let digest = sha256_hex(&file.bytes);
         entries.insert(
             path.clone(),
             CatalogFileEntry {

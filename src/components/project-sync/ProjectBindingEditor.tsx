@@ -7,10 +7,9 @@ import type {
 } from "../../types";
 import Icon from "../Icons";
 import Notice from "../notice/Notice";
+import { expandHomePath, isAbsoluteProfilePath } from "../../profilePath";
 import { compactProjectPath } from "./model";
 import {
-  expandHomePath,
-  isAbsoluteProfilePath,
   profilePathHint,
   useHomePath,
   useProfilePathProbes,

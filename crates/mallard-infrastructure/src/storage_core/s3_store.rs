@@ -25,8 +25,9 @@ use tokio::runtime::Handle;
 use tokio::time::{sleep, timeout};
 
 use super::{
-    CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix,
-    ObjectStore, StageOutcome, StoreListPage, StoredMetadata, VerifiedBody,
+    hex_lower, sha256 as sha256_bytes, CasExpectation, CasOutcome, ExpectedObject,
+    ImmutablePutOutcome, ObjectKey, ObjectPrefix, ObjectStore, StageOutcome, StoreListPage,
+    StoredMetadata, VerifiedBody,
 };
 use mallard_domain::{self as domain, StorageConfig, StorageKind};
 
@@ -437,10 +438,9 @@ impl S3ObjectStore {
             .key(key)
             .send();
         let response = match timeout(self.request_timeout, request).await {
-            Err(_) => return Err(()),
             Ok(Ok(response)) => response,
             Ok(Err(error)) if sdk_status(&error) == Some(404) => return Ok(None),
-            Ok(Err(_)) => return Err(()),
+            Err(_) | Ok(Err(_)) => return Err(()),
         };
         if response
             .content_length()
@@ -761,7 +761,9 @@ impl S3ObjectStore {
             .await?
         {
             PutAttempt::Written(Some(etag)) => Ok(CasOutcome::Written { etag }),
-            PutAttempt::Written(None) => self.resolve_cas_write(key, &bytes).await,
+            PutAttempt::Written(None) | PutAttempt::Ambiguous(_) => {
+                self.resolve_cas_write(key, &bytes).await
+            }
             PutAttempt::PreconditionFailed => {
                 let current = self
                     .stage_verified_async(key, &expected_object(&bytes)?)
@@ -770,7 +772,6 @@ impl S3ObjectStore {
                     current_etag: current.etag().map(str::to_string),
                 })
             }
-            PutAttempt::Ambiguous(_) => self.resolve_cas_write(key, &bytes).await,
         }
     }
 
@@ -1284,14 +1285,6 @@ fn sdk_status<E>(error: &SdkError<E>) -> Option<u16> {
 
 fn normalize_etag(etag: &str) -> String {
     etag.trim_matches('"').to_string()
-}
-
-fn sha256_bytes(bytes: &[u8]) -> String {
-    hex_lower(&Sha256::digest(bytes))
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn validated_service_etag(raw: &str, key: &str) -> Result<String, String> {

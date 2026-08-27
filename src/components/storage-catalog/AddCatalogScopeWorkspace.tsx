@@ -3,9 +3,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icons";
 import Notice from "../notice/Notice";
+import { expandHomePath, isAbsoluteProfilePath } from "../../profilePath";
 import { errorMessage } from "../../storageError";
 import { storageCatalogApi } from "./api";
-import { CATALOG_KINDS } from "./model";
+import { CATALOG_KINDS, providerLabel } from "./model";
 import type {
   CatalogCapability,
   CatalogProviderKey,
@@ -20,31 +21,6 @@ interface Props {
   busy: boolean;
   onClose: () => void;
   onCreated: (scope: CatalogScopeView, workflowEpoch: number) => void;
-}
-
-function providerLabel(provider: CatalogProviderKey): string {
-  return provider === "codex" ? "Codex" : "Claude";
-}
-
-// The two path helpers below are deliberately duplicated rather than imported
-// from project-sync: this module may not depend on that one, and a dozen lines
-// are the price of that boundary. Keep them in step with the originals in
-// ProjectSetupWorkspace.tsx.
-function expandHomePath(value: string, home: string | null): string {
-  const trimmed = value.trim();
-  if (!home || !trimmed.startsWith("~")) return trimmed;
-  if (trimmed === "~") return home;
-  if (trimmed.startsWith("~/")) {
-    const separator = home.includes("\\") ? "\\" : "/";
-    return `${home.replace(/[\\/]+$/, "")}${separator}${trimmed.slice(2)}`;
-  }
-  return trimmed;
-}
-
-function isAbsoluteProfilePath(value: string): boolean {
-  return value.startsWith("/")
-    || /^[A-Za-z]:[\\/]/.test(value)
-    || value.startsWith("\\\\");
 }
 
 function attentionBadge(show: boolean) {

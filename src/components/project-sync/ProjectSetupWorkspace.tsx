@@ -17,6 +17,7 @@ import type {
 } from "../../types";
 import Icon from "../Icons";
 import Notice from "../notice/Notice";
+import { expandHomePath, isAbsoluteProfilePath } from "../../profilePath";
 import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import {
@@ -131,34 +132,6 @@ export function useProfilePathProbes(
     return () => window.clearTimeout(timer);
   }, [fingerprint]);
   return probes;
-}
-
-/**
- * The backend takes absolute clean paths only, so a typed `~` has to be
- * resolved here before it can be probed at all. The home path arrives from the
- * OS, so it carries that OS's separator: strip and rejoin with whichever one
- * it uses rather than assuming `/`.
- */
-export function expandHomePath(value: string, home: string | null): string {
-  const trimmed = value.trim();
-  if (!home || !trimmed.startsWith("~")) return trimmed;
-  if (trimmed === "~") return home;
-  if (trimmed.startsWith("~/")) {
-    const separator = home.includes("\\") ? "\\" : "/";
-    return `${home.replace(/[\\/]+$/, "")}${separator}${trimmed.slice(2)}`;
-  }
-  return trimmed;
-}
-
-/**
- * Absolute in the sense every supported host means it: a POSIX root, a Windows
- * drive letter, or a UNC share. A bare `startsWith("/")` disables every custom
- * profile path on Windows, which ships an installer of its own.
- */
-export function isAbsoluteProfilePath(value: string): boolean {
-  return value.startsWith("/")
-    || /^[A-Za-z]:[\\/]/.test(value)
-    || value.startsWith("\\\\");
 }
 
 /**

@@ -107,12 +107,10 @@ const SHAPES = {
 export default function LoadingScaffold({
   shape,
   label,
-  className,
 }: {
   shape: keyof typeof SHAPES;
   /** The concrete noun phrase, without the ellipsis: "Loading project activity". */
   label: string;
-  className?: string;
 }) {
   const [pastGate, setPastGate] = useState(false);
   useEffect(() => {
@@ -123,7 +121,7 @@ export default function LoadingScaffold({
   const Bones = SHAPES[shape];
   return (
     <div
-      className={`loading-scaffold${className ? ` ${className}` : ""}`}
+      className="loading-scaffold"
       role="region"
       aria-label={label}
     >

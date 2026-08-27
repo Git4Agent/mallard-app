@@ -183,7 +183,7 @@ test("the scope page wears the project workspace's trail and list", () => {
   // `rows`, not a card grid: the landed list is the same thread-card family
   // Activity lands, and the scaffold must draw the page's own destination.
   assert.match(page, /<LoadingScaffold shape="rows" label=\{`Loading \$\{label\}`\} \/>/);
-  const scaffold = readFileSync("src/components/project-sync/LoadingScaffold.tsx", "utf8");
+  const scaffold = readFileSync("src/components/LoadingScaffold.tsx", "utf8");
   // The recipe's contract: a quiet named region, bones hidden from
   // assistive tech, the caption naming the noun, and the 150ms gate.
   assert.match(scaffold, /role="region"/);

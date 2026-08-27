@@ -47,6 +47,10 @@ fn hex_lower(bytes: &[u8]) -> String {
     output
 }
 
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    hex_lower(&Sha256::digest(bytes))
+}
+
 fn random_hex(byte_count: usize) -> Result<String, String> {
     let mut bytes = vec![0_u8; byte_count];
     getrandom::fill(&mut bytes).map_err(|error| format!("gather randomness: {}", error))?;

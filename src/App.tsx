@@ -3,20 +3,16 @@ import ProjectSync from "./components/project-sync/ProjectSync";
 import type { AppTheme } from "./types";
 import {
   applyResolvedTheme,
-  getThemeChoice,
   setThemeChoice,
-  subscribePreferences,
   systemTheme,
-  type ThemeChoice,
+  useThemeChoice,
 } from "./preferences";
 import "./App.css";
 import "./RetroTheme.css";
 
 export default function App() {
-  const [choice, setChoice] = useState<ThemeChoice>(getThemeChoice);
+  const choice = useThemeChoice();
   const [osTheme, setOsTheme] = useState<AppTheme>(systemTheme);
-
-  useEffect(() => subscribePreferences(() => setChoice(getThemeChoice())), []);
 
   // Follow the OS while the choice is System; an explicit choice ignores it.
   useEffect(() => {

@@ -11,7 +11,6 @@ use mallard_domain::{StorageConfig, StorageId, SyncConfig};
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::storage_core::ConfiguredObjectStore;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,11 +21,11 @@ use super::apply::{
     apply_resource_fork, execute_scope_pull_item, recover_catalog_operations, PullApplyEnvironment,
 };
 use super::domain::{
-    pet_resource_id, provider_owns_kind, CatalogActionResult, CatalogCapturedWith, CatalogLinkId,
-    CatalogLinkState, CatalogPlanActionId, CatalogPlanId, CatalogResource, CatalogResourceForkPlan,
-    CatalogResourceId, CatalogResourceKindTag, CatalogResourcePlanDocument,
-    CatalogResourceRepositoryId, CatalogResourceWarning, CatalogScope, CatalogScopeId,
-    CatalogScopeLink, CatalogScopePullPlan, CatalogScopePushPlan, CodexPetFormat,
+    pet_resource_id, provider_owns_kind, sha256_hex, CatalogActionResult, CatalogCapturedWith,
+    CatalogLinkId, CatalogLinkState, CatalogPlanActionId, CatalogPlanId, CatalogResource,
+    CatalogResourceForkPlan, CatalogResourceId, CatalogResourceKindTag,
+    CatalogResourcePlanDocument, CatalogResourceRepositoryId, CatalogResourceWarning, CatalogScope,
+    CatalogScopeId, CatalogScopeLink, CatalogScopePullPlan, CatalogScopePushPlan, CodexPetFormat,
     LibraryResourceManifest, LibraryResourceTag, LocalCatalogProfile, LocalCatalogProfileId,
     LocalCatalogTargetId, ProviderKey, PublishedResourceEntry, CATALOG_SCHEMA, MAX_PET_ATLAS_BYTES,
 };
@@ -42,8 +41,8 @@ use super::resource_engine::{
 };
 use super::resource_planning::{
     build_resource_fork_plan, build_scope_pull_plan, build_scope_push_plan, conflicting_claim_pins,
-    scope_local_records, scope_resource_state, validate_scope_pull_selection, ScopeForkPlanInputs,
-    ScopePullPlanInputs, ScopePushPlanInputs,
+    scope_label, scope_local_records, scope_resource_state, validate_scope_pull_selection,
+    ScopeForkPlanInputs, ScopePullPlanInputs, ScopePushPlanInputs,
 };
 
 fn now_secs() -> u64 {
@@ -95,26 +94,6 @@ pub(crate) fn engine_for(
     Ok(LibraryResourceEngine::new(
         ConfiguredObjectStore::from_config(storage)?,
     ))
-}
-
-fn scope_label(resource: &CatalogResource) -> Option<String> {
-    match resource {
-        CatalogResource::AgentSkill(skill) => {
-            Some(skill.descriptor.scope.display_label().to_string())
-        }
-        CatalogResource::CodexPetV1(_) => Some("v1".to_string()),
-        CatalogResource::CodexPetV2(_) => Some("v2".to_string()),
-        CatalogResource::PluginInstallIntent(_) => None,
-    }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        use std::fmt::Write as _;
-        let _ = write!(&mut output, "{:02x}", byte);
-    }
-    output
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -951,8 +930,8 @@ pub fn get_catalog_pet_preview_with_repositories(
         .map(|entry| &entry.resource)
         .ok_or("the stored resource disappeared")?;
     let pet = match (resource, format) {
-        (CatalogResource::CodexPetV1(pet), CodexPetFormat::V1) => pet,
-        (CatalogResource::CodexPetV2(pet), CodexPetFormat::V2) => pet,
+        (CatalogResource::CodexPetV1(pet), CodexPetFormat::V1)
+        | (CatalogResource::CodexPetV2(pet), CodexPetFormat::V2) => pet,
         _ => return Err("the stored resource is not a pet of this row's kind".to_string()),
     };
     let atlas = pet.descriptor.atlas.clone();
@@ -3154,7 +3133,7 @@ mod tests {
         assert!(preview.starts_with("data:image/png;base64,"), "{}", preview);
         // Derived once, cached by the atlas digest under `~/.mallard`.
         let cache = super::super::pet_preview::preview_cache_dir(&fixture.user_home);
-        let digest = super::super::pet_preview::sha256_hex(&atlas);
+        let digest = super::super::domain::sha256_hex(&atlas);
         assert!(cache.join(format!("{}.png", digest)).is_file());
     }
 
@@ -3166,7 +3145,7 @@ mod tests {
 
         let fixture = library_fixture();
         let atlas = decodable_png_atlas(CodexPetFormat::V2);
-        let atlas_sha = super::super::pet_preview::sha256_hex(&atlas);
+        let atlas_sha = super::super::domain::sha256_hex(&atlas);
         let descriptor = CodexPetDescriptor {
             pet_id: "biscuit".to_string(),
             display_name: "Biscuit".to_string(),

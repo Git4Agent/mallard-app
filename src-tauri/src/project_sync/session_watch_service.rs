@@ -602,15 +602,11 @@ impl ProfileWatch {
         loop {
             match self.receiver.try_recv() {
                 Ok(Ok(event)) => self.classify(&event),
-                Ok(Err(_)) => {
+                Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
                     self.healthy = false;
                     return;
                 }
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.healthy = false;
-                    return;
-                }
             }
         }
         if self.overflowed.swap(false, Ordering::Relaxed) {

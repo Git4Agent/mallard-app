@@ -3999,12 +3999,10 @@ fn classify_project_content_state(
         (Some(local), Some(storage), Some(base)) if local == base && storage != base => {
             "storage_ahead"
         }
-        (Some(_), Some(_), _) => "diverged",
-        (None, Some(storage), Some(base)) if storage == base => "missing",
-        (None, Some(_), Some(_)) => "storage_ahead",
         (Some(local), None, Some(base)) if local == base => "storage_ahead",
-        (Some(_), None, Some(_)) => "diverged",
-        (None, None, Some(_)) => "storage_ahead",
+        (None, Some(storage), Some(base)) if storage == base => "missing",
+        (Some(_), Some(_), _) | (Some(_), None, Some(_)) => "diverged",
+        (None, _, Some(_)) => "storage_ahead",
         (None, None, None) => "unknown",
     }
 }
@@ -12614,16 +12612,12 @@ fn apply_prepared_pull_conversation(
         ConversationMaterializationRequest { operation, targets },
         &mut failpoints,
     )?;
-    let action_type = match action.action {
-        ConversationPlanActionType::KeepBoth => RestoreActionType::MaterializeConversation,
-        _ => RestoreActionType::MaterializeConversation,
-    };
     Ok(ApplyReceipt {
         action_id: action.action_id.clone(),
         // Receipts stay in the local id space: the operation's resolved
         // local thread, minted above for CreateLocal.
         resource_id: conversation_resource_id(&action.provider, &local_thread_id)?,
-        action_type,
+        action_type: RestoreActionType::MaterializeConversation,
         logical_path: None,
         source_sha256: Some(prepared.cloud_file_sha256.clone()),
         target_path: Some(transcript_target.target_path.clone()),

@@ -18,7 +18,7 @@ import { getPreference } from "../../preferences";
 import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { githubCommitUrl, openExternalUrl } from "./externalLink";
-import LoadingScaffold from "./LoadingScaffold";
+import LoadingScaffold from "../LoadingScaffold";
 import { compactProjectPath, projectLabel } from "./model";
 import ProviderMark from "../sync-review/ProviderMark";
 import { writeClipboardText } from "../sync-review/clipboard";

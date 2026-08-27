@@ -125,7 +125,9 @@ test("the session-detail page says everything it has to say in one box", () => {
   // ladder now, and the page renders the zone exactly once.
   assert.equal(page.match(/<NoticeZone/g)?.length, 1);
   assert.doesNotMatch(page, /sync-callout|session-detail-warnings|session-detail-stale/);
-  assert.doesNotMatch(page, /role="status"|role="alert"/);
+  // A failed initial load is the one blocking state outside that zone.
+  assert.equal(page.match(/role="alert"/g)?.length, 1);
+  assert.doesNotMatch(page, /role="status"/);
 
   const header = readFileSync(
     "src/components/project-sync/session-detail/SessionDetailHeader.tsx",
