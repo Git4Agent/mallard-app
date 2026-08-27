@@ -219,10 +219,6 @@ impl SessionAdapter for TestProviderAdapter {
         super::claude::history::TIMELINE_PARSER_VERSION
     }
 
-    fn capability(&self) -> ProviderCapabilityLevel {
-        ProviderCapabilityLevel::Resumable
-    }
-
     fn discover(&self, context: &SessionDiscoveryContext<'_>) -> Result<SessionDiscovery, String> {
         let canonical_home = canonical_existing_dir(context.provider_home, "test provider home")?;
         let mut discovery = SessionDiscovery::default();

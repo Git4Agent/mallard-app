@@ -1851,10 +1851,6 @@ mod activity_only_tests {
             1
         }
 
-        fn capability(&self) -> ProviderCapabilityLevel {
-            ProviderCapabilityLevel::ActivityOnly
-        }
-
         fn discover(
             &self,
             _context: &SessionDiscoveryContext<'_>,

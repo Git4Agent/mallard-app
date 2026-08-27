@@ -10077,10 +10077,6 @@ fn build_publish_request(
     ))
 }
 
-fn conversation_raw_fallback(transcript: &provider_capture::CapturedFile) -> Vec<u8> {
-    transcript.bytes.clone()
-}
-
 fn cloud_publication_from_snapshot(snapshot: &BundleSnapshot) -> ConversationCloudPublication {
     ConversationCloudPublication {
         revision: snapshot.head.revision,
@@ -10291,7 +10287,7 @@ fn publish_reviewed(
             Some(pin) => {
                 let source = captured_transcript_source(conversation)?;
                 let bytes = jsonl_tail_io::read_bounded(&source)
-                    .unwrap_or_else(|_| conversation_raw_fallback(transcript));
+                    .unwrap_or_else(|_| transcript.bytes.clone());
                 if pin.end_byte_offset > bytes.len() as u64 {
                     None
                 } else {

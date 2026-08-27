@@ -257,18 +257,14 @@ fn resolve_scope(
     Ok(ResolvedScope { scope, profile })
 }
 
-pub fn list_catalog_capabilities_core() -> Vec<CatalogCapabilityDto> {
-    capability_matrix()
-        .into_iter()
-        .map(|(provider, kinds)| CatalogCapabilityDto { provider, kinds })
-        .collect()
-}
-
 #[tauri::command]
 pub async fn list_catalog_capabilities(
     _app: tauri::AppHandle,
 ) -> Result<Vec<CatalogCapabilityDto>, String> {
-    Ok(list_catalog_capabilities_core())
+    Ok(capability_matrix()
+        .into_iter()
+        .map(|(provider, kinds)| CatalogCapabilityDto { provider, kinds })
+        .collect())
 }
 
 #[tauri::command]

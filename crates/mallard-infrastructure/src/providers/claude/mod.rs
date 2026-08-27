@@ -153,10 +153,6 @@ impl SessionAdapter for ClaudeAdapter {
         history::TIMELINE_PARSER_VERSION
     }
 
-    fn capability(&self) -> ProviderCapabilityLevel {
-        ProviderCapabilityLevel::ResumableWithConflictPreservation
-    }
-
     fn supports_tail_cursor(&self) -> bool {
         true
     }

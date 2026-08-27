@@ -74,10 +74,6 @@ impl ProviderRegistry {
         self.adapters.contains_key(key)
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = &ProviderKey> {
-        self.adapters.keys()
-    }
-
     /// Descriptors in deterministic key order, for setup and Activity.
     pub fn descriptors(&self) -> Vec<ProviderDescriptor> {
         self.adapters

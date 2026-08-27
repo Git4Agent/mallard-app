@@ -123,10 +123,6 @@ impl SessionAdapter for CodexAdapter {
         history::TIMELINE_PARSER_VERSION
     }
 
-    fn capability(&self) -> ProviderCapabilityLevel {
-        ProviderCapabilityLevel::ResumableWithConflictPreservation
-    }
-
     fn index_fragment_limit(&self) -> usize {
         1
     }

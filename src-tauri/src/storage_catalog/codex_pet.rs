@@ -290,7 +290,7 @@ pub fn pet_resource_from_capture(captured: &CapturedPet) -> Result<CodexPetResou
 
 /// Canonical local manifest bytes for one format: v1 omits the
 /// version marker entirely; v2 pins `spriteVersionNumber: 2`.
-pub fn canonical_manifest_bytes(
+fn canonical_manifest_bytes(
     format: CodexPetFormat,
     descriptor: &CodexPetDescriptor,
 ) -> Result<Vec<u8>, String> {

@@ -564,7 +564,6 @@ pub trait SessionAdapter: Send + Sync {
     fn timeline_version(&self) -> u32 {
         self.codec_version()
     }
-    fn capability(&self) -> ProviderCapabilityLevel;
     /// How many provider index fragments one conversation operation may
     /// carry (Codex maintains `session_index.jsonl`; most providers none).
     fn index_fragment_limit(&self) -> usize {

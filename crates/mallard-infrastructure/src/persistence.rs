@@ -134,15 +134,6 @@ pub struct LocalStateWipeResult {
     pub bytes_removed: u64,
 }
 
-impl<E> ConfigTransactionError<E> {
-    pub fn into_persistence(self) -> Option<String> {
-        match self {
-            Self::Mutation(_) => None,
-            Self::Persistence(message) => Some(message),
-        }
-    }
-}
-
 struct PersistenceGuard {
     _process: std::sync::MutexGuard<'static, ()>,
     _file: fs::File,

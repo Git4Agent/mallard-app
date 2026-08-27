@@ -7,7 +7,7 @@
 //! runner; no operation needs to redirect the process-wide user home.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mallard_domain::StorageId;
@@ -15,10 +15,10 @@ use mallard_infrastructure::persistence::LocalStateRepository;
 
 use super::adapters::{NativeProcessRunner, PluginProcessRunner};
 use super::domain::{
-    CatalogLinkId, CatalogPlanActionId, CatalogPlanId, CatalogResource, CatalogResourceId,
-    CatalogResourceKindTag, CatalogResourceRepositoryId, CatalogScopeId, CatalogScopePullPlan,
-    CatalogScopePushPlan, LibraryHeadCoordinate, LibraryResourceTag, LocalCatalogProfile,
-    LocalCatalogProfileId, ProviderKey,
+    CatalogPlanActionId, CatalogPlanId, CatalogResource, CatalogResourceId, CatalogResourceKindTag,
+    CatalogResourceRepositoryId, CatalogScopeId, CatalogScopePullPlan, CatalogScopePushPlan,
+    LibraryHeadCoordinate, LibraryResourceTag, LocalCatalogProfile, LocalCatalogProfileId,
+    ProviderKey,
 };
 use super::persistence::CatalogStateRepository;
 use super::resource_commands::{
@@ -149,14 +149,6 @@ impl StorageCatalogService {
         })
     }
 
-    pub fn state_repository(&self) -> &LocalStateRepository {
-        &self.state
-    }
-
-    pub fn user_home(&self) -> &Path {
-        &self.user_home
-    }
-
     pub fn save_profile(
         &self,
         provider: ProviderKey,
@@ -254,19 +246,6 @@ impl StorageCatalogService {
             storage_id,
             &self.user_home,
             now_secs(),
-        )
-    }
-
-    pub fn unlink_scope_storage(
-        &self,
-        link_id: &CatalogLinkId,
-        expected_revision: u64,
-    ) -> Result<bool, String> {
-        resource_commands::unlink_catalog_scope_storage_with_repositories(
-            &self.catalog,
-            link_id,
-            expected_revision,
-            &self.user_home,
         )
     }
 
@@ -433,10 +412,6 @@ mod tests {
             .list_scope_resources(&scope.scope.scope_id, None)
             .expect("list resources");
 
-        assert_eq!(
-            service.state_repository().root(),
-            machine_home.join(".mallard")
-        );
         assert_eq!(resources.rows.len(), 1);
         assert_eq!(resources.rows[0].display_name, "mallard-alpha");
         assert!(resources.rows[0].local_present);
