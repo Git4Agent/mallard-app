@@ -88,11 +88,7 @@ const CATEGORY_BY_KIND: Record<ProjectResourceKind, ProjectResourceCategory> = {
 };
 
 export function categoryFor(resource: ProjectResourceDescriptor): ProjectResourceCategory {
-  const explicit = resource.category;
-  if (explicit === "conversations" || explicit === "project_files" || explicit === "tools") {
-    return explicit;
-  }
-  return CATEGORY_BY_KIND[resource.kind];
+  return resource.category ?? CATEGORY_BY_KIND[resource.kind];
 }
 
 export function inventoryResources(inventory: ResourceInventory | null): ProjectResourceDescriptor[] {

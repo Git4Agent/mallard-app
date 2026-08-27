@@ -469,6 +469,7 @@ function ResourceCard({
   footer?: ReactNode;
 }) {
   const seconds = stampSeconds(row);
+  const stamp = rowStamp(row);
   return (
     <article className={`sync-history-thread-card catalog-card${preview !== undefined ? " catalog-card-pet" : ""}`}>
       {preview !== undefined && (
@@ -624,8 +625,8 @@ function ResourceCard({
               modification or the storage update. */}
           <span
             className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end"
-            data-tooltip={rowStamp(row)?.detail}
-            aria-label={rowStamp(row)?.detail}
+            data-tooltip={stamp ?? undefined}
+            aria-label={stamp ?? undefined}
             tabIndex={0}
           >
             <time dateTime={seconds == null ? undefined : new Date(seconds * 1_000).toISOString()}>

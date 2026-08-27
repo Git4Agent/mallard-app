@@ -142,23 +142,15 @@ export function rowPullable(row: CatalogScopeRow): boolean {
     || row.state === "unreviewed_remote";
 }
 
-/** The date a row last moved, and which side moved it. Local time wins when
- * the resource is on this Mac, because that is the copy you can edit. */
-export function rowStamp(row: CatalogScopeRow): { short: string; detail: string } | null {
+/** The exact time a row last moved, and which side moved it. Local time wins
+ * when the resource is on this Mac, because that is the copy you can edit. */
+export function rowStamp(row: CatalogScopeRow): string | null {
   const local = row.local_present ? row.local_modified_at ?? null : null;
   const seconds = local ?? row.remote_updated_at ?? null;
   if (seconds == null) return null;
   const when = new Date(seconds * 1000);
-  const elapsed = Date.now() - when.getTime();
-  const short = elapsed < 60_000
-    ? "just now"
-    : elapsed < 3_600_000
-      ? `${Math.floor(elapsed / 60_000)}m ago`
-      : elapsed < 86_400_000
-        ? `${Math.floor(elapsed / 3_600_000)}h ago`
-        : when.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   const exact = `${when.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })} · ${when.toLocaleTimeString(undefined, clockOptions())}`;
-  return { short, detail: `${local == null ? "Stored" : "Edited"} ${exact}` };
+  return `${local == null ? "Stored" : "Edited"} ${exact}`;
 }
 
 export function actionLabel(action: CatalogPullAction): string {

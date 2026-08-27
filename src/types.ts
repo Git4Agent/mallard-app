@@ -162,7 +162,7 @@ export interface ProjectResourceDescriptor {
   codec_version: number;
   metadata: Record<string, string>;
   // Inventory DTO presentation hints; these are not manifest identity.
-  category?: ProjectResourceCategory | string;
+  category?: ProjectResourceCategory;
   description?: string | null;
   logical_paths?: string[];
   /** Always emitted (`InventoryResource.default_selected`, no serde skip). */
@@ -456,7 +456,7 @@ export interface SetupDraftSummary {
   project_root: string;
   updated_at: number;
   revision: number;
-  status: "draft" | "attention" | string;
+  status: "draft" | "attention";
   last_error?: string | null;
 }
 
@@ -471,8 +471,8 @@ export interface CreateSetupDraftResult {
 }
 
 export interface SetupSectionStatus {
-  section: "project" | "profiles" | "storage" | "repository" | string;
-  state: "ready" | "attention" | "blocked" | string;
+  section: "project" | "profiles" | "storage" | "repository";
+  state: "ready" | "attention" | "blocked";
   message?: string | null;
 }
 
@@ -645,9 +645,9 @@ export type ResourceSyncState =
   | "storage_only"
   | "storage_ahead"
   | "diverged"
+  | "missing"
   | "blocked"
-  | "unknown"
-  | "not_compared";
+  | "unknown";
 
 export type ProjectFileSyncEligibilityState = "eligible" | "git_managed" | "unknown";
 
@@ -667,7 +667,7 @@ export interface ProjectContentEntry {
   size?: number | null;
   mode?: number | null;
   source_mtime?: number | null;
-  state: ResourceSyncState | string;
+  state: ResourceSyncState;
   local_present: boolean;
   storage_present: boolean;
   base_present: boolean;
@@ -989,10 +989,10 @@ export interface CodexAppRestartResult {
 
 export interface BundleReadinessIssue {
   issue_id: string;
-  category: ProjectResourceCategory | string;
+  category: "conversations" | "project_files" | "sessions";
   title: string;
   detail?: string | null;
-  severity?: "info" | "warning" | "error" | string;
+  severity: "warning" | "error";
   provider?: ProviderKey | null;
   resource_id?: string | null;
   action?: string | null;
@@ -1000,7 +1000,7 @@ export interface BundleReadinessIssue {
 
 export interface BundleReadiness {
   bundle_id: string;
-  state: "ready" | "needs_setup" | "blocked" | string;
+  state: "ready" | "needs_setup" | "blocked";
   issues: BundleReadinessIssue[];
   generated_at?: number;
 }
