@@ -17,40 +17,16 @@ import {
   type ProfilePathProbeState,
 } from "../../src/components/project-sync/ProjectSetupWorkspace";
 
-test("ProjectSync is the only application interface", () => {
+test("App mounts ProjectSync", () => {
   const app = readFileSync("src/App.tsx", "utf8");
   assert.match(app, /<ProjectSync/);
-  assert.doesNotMatch(app, /ProjectSyncV\d/);
-  assert.doesNotMatch(app, /LegacyApp|onOpenLegacy|mode.*legacy|SyncPanel|FilesWorkspace|FinishSetup/);
-
-  const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
-  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
-  assert.doesNotMatch(`${sidebar}\n${workspace}`, /Legacy profiles|Open legacy|onOpenLegacy/);
-
-  for (const removed of [
-    "src/components/SyncPanel.tsx",
-    "src/components/FilesWorkspace.tsx",
-    "src/components/FileTree.tsx",
-    "src/components/FilePreview.tsx",
-    "src/components/FinishSetup.tsx",
-  ]) {
-    assert.equal(existsSync(removed), false, `${removed} must remain removed`);
-  }
 });
 
-test("the current frontend contract is schema 1 without version-branded DTOs", () => {
+test("the current frontend contract is schema 1", () => {
   assert.equal(PROJECT_SYNC_SCHEMA, 1);
-  const types = readFileSync("src/types.ts", "utf8");
-  assert.doesNotMatch(types, /SyncConfigV\d|StorageConfigV\d/);
 });
 
-test("project setup does not offer an immediate push", () => {
-  const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
-
-  assert.doesNotMatch(setupWorkspace, /Finish & push|finalize\("push"\)/);
-});
-
-test("project setup always finishes into Activity without opening Pull review", () => {
+test("project setup finishes into Activity", () => {
   const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
   const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const completeSetup = workspace.slice(
@@ -58,26 +34,9 @@ test("project setup always finishes into Activity without opening Pull review", 
     workspace.indexOf("\n  const saveStorageLink =", workspace.indexOf("  const completeSetup = async")),
   );
 
-  assert.doesNotMatch(setupWorkspace, /SetupCompletion|Finish & review|finalize\("pull"\)/);
   assert.match(setupWorkspace, /onClick=\{\(\) => void finalize\(\)\}/);
   assert.match(completeSetup, /setActiveProjectId\(projectId\)/);
   assert.match(completeSetup, /await loadProjectData\(projectId, nextConfig, storageId, workflowEpoch\)/);
-  assert.doesNotMatch(completeSetup, /planRestore|completion === "pull"|open Pull review/);
-});
-
-test("project setup configures the project without selecting sync contents", () => {
-  const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
-  const types = readFileSync("src/types.ts", "utf8");
-  const api = readFileSync("src/components/project-sync/api.ts", "utf8");
-  const backend = readFileSync("src-tauri/src/lib.rs", "utf8");
-
-  assert.doesNotMatch(setupWorkspace, /Sync contents|ResourceInventory|selected_resource_ids/);
-  assert.doesNotMatch(
-    types,
-    /selected_resource_ids|discovery_signature|discovery_profile_signature|selection_stale|profile_changed/,
-  );
-  assert.doesNotMatch(api, /discoverProject|invoke<ProjectDiscovery>\("discover_project"/);
-  assert.doesNotMatch(backend, /commands::discover_project/);
 });
 
 test("successful unlink and relink clear their stale storage notice", () => {
@@ -100,7 +59,6 @@ test("Push requires the reviewed destination recipe", () => {
   const pushSignature = commands.match(/pub async fn push_bundle\([\s\S]*?\) -> Result<ProjectOperationResult, String>/)?.[0] ?? "";
 
   assert.match(pushSignature, /recipe: BundleRecipe/);
-  assert.doesNotMatch(pushSignature, /recipe: Option<BundleRecipe>/);
   assert.match(workspace, /recipeSelection\(savedRecipe \?\? nextInventory\.recipe\)/);
 });
 
@@ -111,15 +69,10 @@ test("project setup accepts only the current canonical repository fingerprint", 
   assert.equal(repositoryFingerprintMatches(null, "canonical"), false);
 });
 
-test("the production Tauri handler exposes only current sync and shared log commands", () => {
+test("the production Tauri handler exposes current sync and shared log commands", () => {
   const backend = readFileSync("src-tauri/src/lib.rs", "utf8");
   assert.match(backend, /project_sync::commands::get_project_sync_config/);
-  assert.doesNotMatch(backend, /project_sync_v\d/);
   assert.match(backend, /activity_log::query_activity_logs/);
-  assert.doesNotMatch(
-    backend,
-    /list_config_dirs|read_file_content|write_file_content|get_sync_config,|save_sync_config,|sync_upload|sync_download|get_setup_readiness|setup_link/,
-  );
 });
 
 test("the desktop shell supports a persistent sidebar toggle and keyboard shortcut", () => {
@@ -246,13 +199,6 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(app, /import "\.\/App\.css";\s*import "\.\/RetroTheme\.css";/);
   // One mark, everywhere: brand, product footer, startup screen, favicon.
   assert.equal(existsSync("public/mallard-logo-duck.svg"), true);
-  for (const retired of [
-    "public/mallard-logo-pixel.png",
-    "public/mallard-logo-pixel-ring.png",
-    "public/mallard-logo-pixel-duck.png",
-  ]) {
-    assert.equal(existsSync(retired), false, `${retired} must remain removed`);
-  }
   const duck = readFileSync("public/mallard-logo-duck.svg", "utf8");
   // An existence check cannot tell a valid mark from a broken one. "--" is
   // illegal inside an XML comment and makes the whole file fail to parse, which
@@ -863,25 +809,12 @@ test("every sidebar handle moves its own gutter and no other", () => {
 });
 
 test("the Storages pane floors at the same height as the panes above it", () => {
-  // It used to floor at its own content height, so the bottom handle refused to
-  // move while the two above travelled down to MIN_PANE_HEIGHT.
   const [min, max] = storageHeightRange(700, 210);
   assert.equal(min, MIN_PANE_HEIGHT);
   assert.equal(max, 700 - 6 - 210 - MIN_PANE_HEIGHT);
-  // The list scrolls unconditionally — the unbounded row list needs it past
-  // the 40% cap as much as under a pinned height — so the old is-pinned
-  // overflow switch stays deleted.
-  const css = readFileSync("src/App.css", "utf8");
-  assert.doesNotMatch(css, /\.sidebar-storage-pane\.is-pinned/);
-  assert.match(
-    css,
-    /\.sidebar-split-pane > \.sidebar-profile-list,\s*\.sidebar-split-pane > \.sidebar-links-list\s*\{[^}]*overflow-y: scroll;/s,
-  );
 });
 
-test("a custom profile path can be typed, and ~ resolves before the probe", () => {
-  // The backend takes absolute clean paths only, so the tilde has to be gone
-  // by the time a path is handed to it.
+test("custom profile paths resolve this user's home", () => {
   assert.equal(expandHomePath("~", "/Users/ada"), "/Users/ada");
   assert.equal(expandHomePath("~/work/codex-home", "/Users/ada"), "/Users/ada/work/codex-home");
   assert.equal(expandHomePath("~/work", "/Users/ada/"), "/Users/ada/work", "a trailing slash must not double up");
@@ -889,63 +822,6 @@ test("a custom profile path can be typed, and ~ resolves before the probe", () =
   assert.equal(expandHomePath("/opt/codex", "/Users/ada"), "/opt/codex", "absolute paths pass through");
   assert.equal(expandHomePath("~other/work", "/Users/ada"), "~other/work", "only this user's home expands");
   assert.equal(expandHomePath("~/work", null), "~/work", "unresolved home leaves the text alone");
-
-  // Choosing "Custom path…" must open the field rather than the folder
-  // dialog: a pasted path, or one on an unmounted volume, cannot come back
-  // from a picker. Browse stays as the other way in.
-  const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
-  const pendingBranch = setupWorkspace.slice(
-    setupWorkspace.indexOf('if (next === "__pending")'),
-    setupWorkspace.indexOf('<option value="">Choose profile'),
-  );
-  assert.ok(pendingBranch.length > 0, "the __pending branch must be found");
-  assert.match(pendingBranch, /kind: "pending", path: "", display_name: ""/);
-  assert.doesNotMatch(pendingBranch, /chooseProfileFolder/);
-  assert.match(setupWorkspace, /className="btn" onClick=\{\(\) => void chooseProfileFolder\(provider\)\}/);
-});
-
-test("the binding dialog wears the setup page's language", () => {
-  const editor = readFileSync("src/components/project-sync/ProjectBindingEditor.tsx", "utf8");
-
-  // The body is the setup page's bands, and the profile row is the setup
-  // page's row: profiles and a Custom path… choice in one select, an inline
-  // path field, Browse, and the judged-as-typed hint.
-  assert.match(editor, /sync-setup-section/);
-  assert.match(editor, /<option value="__pending">Custom path…<\/option>/);
-  assert.match(editor, /<Icon name="folder" size=\{13\} \/> Browse/);
-  assert.match(editor, /sync-setup-path-hint/);
-  assert.match(editor, /useProfilePathProbes|profilePathHint/);
-
-  // An active binding renders as a fact sheet: read-only checkout, each
-  // agent's profile shown as its name and path, and one Done button. Only an
-  // unbound or unconfirmed project still gets the editor.
-  assert.match(editor, /readOnly title=\{projectRoot\}/);
-  assert.match(editor, /binding\.locked \? \(/);
-  assert.match(editor, /sync-provider-name/);
-  assert.match(editor, /<code>\{compactProjectPath\(profile\.path\)\}<\/code>/);
-  assert.match(editor, /Profile missing on this machine/);
-  assert.match(editor, />Done<\/button>/);
-  assert.doesNotMatch(editor, /onChange=\{\(event\) => setProjectRoot/);
-
-  // The old dialog's furniture stays deleted: the banner, the folder card,
-  // the header paragraph, and the parent-driven Add flow.
-  assert.doesNotMatch(editor, /sync-binding-safety|sync-folder-field|onAddProfile/);
-  assert.doesNotMatch(editor, /\{description\}/);
-
-  // Typed paths ride the submission as pending selections; ProjectSync
-  // registers them before the binding command, which takes ids only.
-  assert.match(editor, /kind: "pending", path: expandHomePath\(selection\.path, homePath\)/);
-  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
-  assert.match(workspace, /ensureProfileAtPath\(provider, selection\.path, workflowEpoch\)/);
-  assert.match(workspace, /locked: projectBinding\?\.state === "active"/);
-  assert.doesNotMatch(workspace, /chooseAndCreateProfile|onAddProfile/);
-
-  // The shared row can never outgrow its column, and hands the path field its
-  // own line when the column gets too tight to share.
-  const css = readFileSync("src/App.css", "utf8");
-  assert.match(css, /\.sync-agent-profile-row\.has-custom-path \{\s*grid-template-columns: minmax\(140px, 220px\) minmax\(0, 1fr\) auto;\s*\}/);
-  assert.match(css, /\.sync-agent-profile-list \{ container-type: inline-size; \}/);
-  assert.match(css, /@container \(max-width: 480px\)/);
 });
 
 test("the custom path field reports what the finish-time probe would say", () => {

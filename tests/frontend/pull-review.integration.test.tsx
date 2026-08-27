@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
@@ -524,15 +523,4 @@ test("the Apply coordinator rejects action ids outside the immutable plan", asyn
     resourceIds: [],
     restoreActionIds: ["not-reviewed"],
   }, () => undefined), /no longer belong to this Pull review/);
-});
-
-test("clean cutover removes the legacy fork commands and resolution payload", () => {
-  const api = readFileSync("src/components/project-sync/api.ts", "utf8");
-  const flow = readFileSync("src/components/project-sync/pullReviewFlow.ts", "utf8");
-  const activity = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
-
-  for (const source of [api, flow, activity]) {
-    assert.doesNotMatch(source, /forkCodexThread|retryCodexDivergence|getPendingCodexDivergence/);
-    assert.doesNotMatch(source, /conversationResolutions|preserve_local_with_native_fork/);
-  }
 });

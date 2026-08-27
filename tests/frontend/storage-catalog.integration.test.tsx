@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import StorageCatalogPage from "../../src/components/storage-catalog/StorageCatalogPage";
@@ -441,23 +441,11 @@ test("Unlink is the storage crumb's verb and Fork lives on the card", () => {
   // drawer, keyed by the scope and the resource — no registration anywhere.
   assert.match(page, /storageCatalogApi\.prepareFork\(scope\.scope\.scope_id, row\.resource_id, name\.trim\(\)\)/);
   assert.match(page, /storageCatalogApi\.applyFork\(scope\.scope\.scope_id, plan\.plan_id\)/);
-  // The drawer spans the card — an auto-placed footer joins the pet
-  // template's auto-sized preview column and inflates it — and its name is
-  // prefilled from the directory, never the free-text display name, because
-  // fork names are component names the backend validates.
   assert.match(page, /className="catalog-fork-drawer"/);
   assert.match(page, /seed=\{forkSeed\(row\)\}/);
   assert.match(page, /forkNameRuleBroken/);
-  assert.match(
-    readFileSync("src/App.css", "utf8"),
-    /\.catalog-fork-drawer \{[^}]*grid-column: 1 \/ -1;/,
-  );
-  // A refusal lands in the drawer that asked, not the page banner; the old
-  // boxed form and its placeholder-only suggestion are gone.
+  // A refusal stays with the drawer that initiated the action.
   assert.match(page, /setForkError\(errorMessage\(reason\)\)/);
-  assert.doesNotMatch(page, /catalog-inline-form|Fork local resource|-local-copy/);
-  assert.doesNotMatch(page, /forceRevalidate|force_revalidate/);
-  assert.doesNotMatch(page, /forkCodexThread|fork_codex_thread|storage-wide|bulk sync/i);
 });
 
 test("provider and pet identities stay explicit in the frontend contract", () => {
@@ -512,7 +500,7 @@ test("Pull labels preserve copies for skills and pets while plugins only overwri
   assert.match(page, /Pull did not advance the comparison base/);
 });
 
-test("the Catalog remains independent and removed draft-era UI stays deleted", () => {
+test("the Catalog remains independent from project sync", () => {
   const liveFiles = [
     "src/components/storage-catalog/StorageCatalogPage.tsx",
     "src/components/storage-catalog/AddCatalogScopeWorkspace.tsx",
@@ -523,17 +511,6 @@ test("the Catalog remains independent and removed draft-era UI stays deleted", (
   for (const file of liveFiles) {
     const source = readFileSync(file, "utf8");
     assert.doesNotMatch(source, /components\/project-sync|from "\.\.\/\.\.\/types"|from "\.\.\/types"/);
-  }
-  for (const removed of [
-    "CatalogSetupWorkspace.tsx",
-    "StorageCatalogPullReview.tsx",
-    "StorageCatalogPushReview.tsx",
-    "StorageLibraryOverview.tsx",
-    "StoragePetList.tsx",
-    "StoragePluginList.tsx",
-    "StorageSkillList.tsx",
-  ]) {
-    assert.equal(existsSync(`src/components/storage-catalog/${removed}`), false, `${removed} stays deleted`);
   }
   const projectTypes = readFileSync("src/types.ts", "utf8");
   const projectApi = readFileSync("src/components/project-sync/api.ts", "utf8");

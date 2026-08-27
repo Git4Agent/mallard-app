@@ -179,7 +179,7 @@ test("Project file controls stay on the dedicated page", () => {
       projectContentInventory={inventory}
       projectContentScanned
       showProjectFiles
-      initialStep="review"
+      initialStep="history"
       onToggle={() => undefined}
       onUseProjectDefaults={() => undefined}
       onClear={() => undefined}
@@ -299,7 +299,7 @@ test("Pull project content starts as keep-local and selecting a nested file requ
   const selected = includeRequiredPullProjectDirectories(items, new Set(["file-a"]));
   assert.deepEqual([...selected].sort(), ["dir-docs", "dir-specs", "file-a"]);
 
-  const render = (initialStep: "review" | "project_files") => renderToStaticMarkup(
+  const render = (initialStep: "history" | "project_files") => renderToStaticMarkup(
     <RestorePlanView
       projectName="Project B"
       profileLabel="Profile"
@@ -321,8 +321,7 @@ test("Pull project content starts as keep-local and selecting a nested file requ
     />,
   );
 
-  // The retired "review" step falls back to history inside the two-tab strip.
-  const html = render("review");
+  const html = render("history");
   assert.equal((html.match(/role="tab"/g) ?? []).length, 2);
   const history = html.indexOf(">Git &amp; sessions<");
   const projectFiles = html.indexOf(">Project files<");

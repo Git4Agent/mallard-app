@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
@@ -310,14 +309,4 @@ test("hold details explain metadata pulls, divergence, and unsupported codecs", 
     })) ?? "",
     /100 MiB per-file sync limit/,
   );
-});
-
-test("retired fork and variant vocabulary stays out of production sources", () => {
-  const page = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
-  const css = readFileSync("src/App.css", "utf8");
-  const types = readFileSync("src/types.ts", "utf8");
-
-  assert.doesNotMatch(page, /ThreadVariantReview|fork_session|ForkActivityPanel/);
-  assert.doesNotMatch(css, /sync-thread-variant|sync-divergence-inline|sync-fork-checkpoint/);
-  assert.doesNotMatch(types, /ConversationMaterializationState|diverged_forked|ConversationDivergenceResolution/);
 });

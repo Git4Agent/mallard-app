@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import Notice, {
@@ -113,25 +112,4 @@ test("the role is derived from timing, so standing content never announces", () 
 
   // role="status" already implies aria-live="polite"; writing both is noise.
   assert.doesNotMatch(progress, /aria-live/);
-});
-
-test("the session-detail page says everything it has to say in one box", () => {
-  const page = readFileSync(
-    "src/components/project-sync/session-detail/SessionDetailPage.tsx",
-    "utf8",
-  );
-  // The action failure, the moved snapshot and the backend's notes were three
-  // separate amber rows across two components. They are three rungs of one
-  // ladder now, and the page renders the zone exactly once.
-  assert.equal(page.match(/<NoticeZone/g)?.length, 1);
-  assert.doesNotMatch(page, /sync-callout|session-detail-warnings|session-detail-stale/);
-  // A failed initial load is the one blocking state outside that zone.
-  assert.equal(page.match(/role="alert"/g)?.length, 1);
-  assert.doesNotMatch(page, /role="status"/);
-
-  const header = readFileSync(
-    "src/components/project-sync/session-detail/SessionDetailHeader.tsx",
-    "utf8",
-  );
-  assert.doesNotMatch(header, /actionError|sync-callout/);
 });

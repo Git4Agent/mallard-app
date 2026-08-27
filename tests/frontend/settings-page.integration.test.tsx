@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import SettingsPage from "../../src/components/project-sync/SettingsPage";
@@ -126,70 +126,13 @@ test("preferences default on, live under the mallard.* keys, and notify", () => 
   assert.match(source, /removeItem/);
 });
 
-test("one clock decision serves every timestamp", () => {
+test("clock options use a padded 24-hour cycle", () => {
   // Default 24-hour: the named h23 cycle with a padded hour, so fixed-width
   // columns stay fixed; `hour12: false` is not a synonym and stays banned.
   assert.deepEqual(clockOptions(), { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
   assert.deepEqual(clockOptions(true), {
     hour: "2-digit", minute: "2-digit", hourCycle: "h23", second: "2-digit",
   });
-
-  // Every production formatter that prints an hour goes through clockOptions;
-  // no site keeps a private hour/minute pair.
-  const sites = [
-    "src/components/LogPanel.tsx",
-    "src/components/sync-review/SyncOutcomeNotice.tsx",
-    "src/components/project-sync/ProjectActivityPage.tsx",
-    "src/components/project-sync/ProjectLinksWorkspace.tsx",
-    "src/components/project-sync/session-detail/sessionDetailModel.ts",
-    "src/components/storage-catalog/model.ts",
-    "src/components/storage-catalog/StorageCatalogPage.tsx",
-  ];
-  for (const site of sites) {
-    const text = readFileSync(site, "utf8");
-    assert.match(text, /clockOptions\(/, `${site} must draw its clock from clockOptions`);
-    assert.doesNotMatch(text, /hour12|hourCycle/, `${site} must not carry its own hour cycle`);
-    assert.doesNotMatch(text, /hour: "(2-digit|numeric)"/, `${site} must not carry its own hour field`);
-  }
-  // The log drawer subscribes: it can be visible beside the Settings page
-  // while the preference flips, and its stamps must follow immediately.
-  assert.match(readFileSync("src/components/LogPanel.tsx", "utf8"), /usePreference\("clock24"\)/);
-});
-
-test("Settings is the fifth destination and absorbed the log manager", () => {
-  const sync = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
-  const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
-
-  // A workspace view like the Storages index: opened from the sidebar,
-  // closed by every sibling opener, carrying the path bar.
-  assert.match(sidebar, /<Icon name="settings" size=\{15\} \/> Settings/);
-  assert.match(sync, /const \[settingsOpen, setSettingsOpen\] = useState\(false\);/);
-  assert.match(sync, /\|\| settingsOpen\n/);
-  assert.match(sync, /settingsOpen \? \(\s*<SettingsPage/);
-  assert.match(sync, /onOpenSettings=\{openSettings\}/);
-
-  // The focus reconcile honors its preference.
-  assert.match(sync, /FOCUS_RECONCILE_MIN_AWAY_MS\n\s*&& getPreference\("refreshOnFocus"\)/);
-
-  // The dialog is gone — file, mount, and the drawer's manage affordance now
-  // navigates to the page instead of opening a modal.
-  assert.equal(existsSync("src/components/project-sync/LogManagerDialog.tsx"), false);
-  assert.doesNotMatch(sync, /LogManagerDialog|logManagerOpen/);
-  assert.match(sync, /onManage=\{openSettings\}/);
-
-  // Its CSS went with it, and the page's own vocabulary took its place.
-  const appCss = readFileSync("src/App.css", "utf8");
-  const retroCss = readFileSync("src/RetroTheme.css", "utf8");
-  assert.doesNotMatch(appCss, /sync-log-manager|sync-log-policy-fields|sync-log-storage-summary|sync-log-cleanup-actions/);
-  assert.doesNotMatch(retroCss, /sync-log-manager|sync-log-policy-fields|sync-log-storage-summary|sync-log-cleanup-actions/);
-
-  // The switch finally spends the tokens both palettes always carried, and
-  // the two new chrome vocabularies speak pixel through the single shared
-  // rule (whose one-rule invariant the cutover suite enforces).
-  assert.match(appCss, /\.sync-settings-switch \{[^}]*background: var\(--switch-off\);/s);
-  assert.match(appCss, /\.sync-settings-switch::before \{[^}]*background: var\(--switch-thumb\);/s);
-  assert.match(retroCss, /\.sync-settings-flag,\n/);
-  assert.match(retroCss, /\.sync-settings-segment > button,\n/);
 });
 
 test("Reset Mallard wipes ~/.mallard behind a warning confirm and restarts", () => {

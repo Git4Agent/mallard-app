@@ -14,30 +14,19 @@ const LINKS_STORAGES = "this row still links storages; unlink them first";
 const ROW_CHANGED = "this Catalog row changed; refresh first";
 const LABEL = "Pets v2 · Default Codex";
 
-test("a row that still links storages gives the ordered cleanup", () => {
-  const message = catalogScopeRemovalMessage(LABEL, new Error(LINKS_STORAGES));
-
+test("Catalog scope removal errors use actionable messages", () => {
   assert.equal(
-    message,
+    catalogScopeRemovalMessage(LABEL, new Error(LINKS_STORAGES)),
     "Unlink every storage from “Pets v2 · Default Codex”, then remove it again.",
   );
-  // The backend's wording is replaced by the actual UI action.
-  assert.doesNotMatch(message, /\brow still links\b/);
-  assert.match(message, /Unlink every storage/);
-});
-
-test("a stale row names the row and the one action that clears it", () => {
-  const message = catalogScopeRemovalMessage(LABEL, new Error(ROW_CHANGED));
-
   assert.equal(
-    message,
+    catalogScopeRemovalMessage(LABEL, new Error(ROW_CHANGED)),
     "“Pets v2 · Default Codex” changed somewhere else. Refresh the Catalog, then try removing it again.",
   );
-});
-
-test("anything else passes through rather than being guessed at", () => {
-  const message = catalogScopeRemovalMessage(LABEL, new Error("the catalog store is unreadable"));
-  assert.equal(message, "the catalog store is unreadable");
+  assert.equal(
+    catalogScopeRemovalMessage(LABEL, new Error("the catalog store is unreadable")),
+    "the catalog store is unreadable",
+  );
 });
 
 test("a failed removal opens the affected row's storage menu", () => {

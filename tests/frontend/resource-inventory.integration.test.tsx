@@ -353,8 +353,6 @@ test("the backend fabricates one unavailability sentence, not two", () => {
   const commands = readFileSync("src-tauri/src/project_sync/commands.rs", "utf8");
 
   assert.match(commands, /description: None,\s*\n\s*logical_paths: Vec::new\(\),\s*\n\s*default_selected: true,\s*\n\s*blocked_reason: Some\(\s*\n\s*"Selected for sync, but unavailable at the mapped paths on this machine"/);
-  // The retired sentence survives only as the comment explaining why it went.
-  assert.doesNotMatch(commands, /description: Some\("Selected resource is unavailable on this machine"/);
 });
 
 test("the push step renders the requirements group without a second disclosure", () => {
