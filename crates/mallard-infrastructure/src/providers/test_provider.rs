@@ -1,7 +1,7 @@
-//! A minimal third provider used only by tests to prove the common setup,
-//! Activity, continuity, and review layers are registration-driven. Its
-//! transcript format reuses the Claude JSONL shape under its own codec key
-//! and home layout (`<home>/sessions/*.jsonl`).
+//! A minimal third provider used only to test registry-driven descriptors,
+//! discovery, capture, and codec analysis. Its transcript format reuses the
+//! Claude JSONL shape under its own codec key and home layout
+//! (`<home>/sessions/*.jsonl`).
 
 use super::claude::codec::analyze_claude_transcript;
 use super::traits::{
@@ -9,8 +9,7 @@ use super::traits::{
     ProviderCapabilityLevel, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
     SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
     SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
-    SessionRewriteRequest, SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice,
-    SessionTimelineQuery,
+    SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::provider_capture::{
     canonical_existing_dir, provider_walk_entry, scan_session_metadata_with,
@@ -62,115 +61,6 @@ fn parse_test_session_metadata(line: &[u8]) -> Option<ParsedSessionMetadata> {
         cwd: record.cwd,
         is_internal_subagent: false,
     })
-}
-
-/// The generic structural rewrite the non-cursor pull branch exercises:
-/// restamp `sessionId`/`cwd` occurrences equal to the reviewed source
-/// identity and prove the result round-trips with identical lineage and
-/// semantics. This moved here from the Claude codec when Claude cut over to
-/// the wire decode — real providers materialize through their wire forms,
-/// and only this registration-driven test adapter still rewrites.
-fn structural_session_rewrite(
-    bytes: &[u8],
-    expected_source_session_id: &str,
-    destination_session_id: &str,
-    expected_source_cwd: &str,
-    destination_cwd: &str,
-) -> Result<Vec<u8>, String> {
-    use serde_json::{Map, Value};
-
-    fn rewrite_matching_string(
-        object: &mut Map<String, Value>,
-        key: &str,
-        expected: &str,
-        replacement: &str,
-    ) -> Result<(), String> {
-        let Some(value) = object.get_mut(key) else {
-            return Ok(());
-        };
-        let observed = value
-            .as_str()
-            .ok_or_else(|| format!("structural field '{key}' is not a string"))?;
-        if observed == expected {
-            *value = Value::String(replacement.to_string());
-        }
-        Ok(())
-    }
-
-    fn validate_rewrite_value(label: &str, value: &str, max: usize) -> Result<(), String> {
-        if value.is_empty() || value.len() > max || value.chars().any(char::is_control) {
-            Err(format!("invalid rewrite {label}"))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn lineage_digests(analysis: &SessionAnalysis) -> Option<(String, String)> {
-        match &analysis.lineage {
-            crate::conversation_codec::CodecLineage::Complete {
-                lineage_digest,
-                semantic_digest,
-                ..
-            } => Some((lineage_digest.clone(), semantic_digest.clone())),
-            crate::conversation_codec::CodecLineage::Unknown { .. } => None,
-        }
-    }
-
-    validate_rewrite_value("source session id", expected_source_session_id, 128)?;
-    validate_rewrite_value("destination session id", destination_session_id, 128)?;
-    validate_rewrite_value("source cwd", expected_source_cwd, 4096)?;
-    validate_rewrite_value("destination cwd", destination_cwd, 4096)?;
-    let before = analyze_claude_transcript(bytes);
-    if !before.is_resumable()
-        || before.source_provider_session_id.as_deref() != Some(expected_source_session_id)
-        || before.source_cwd.as_deref() != Some(expected_source_cwd)
-    {
-        return Err("transcript does not match the reviewed source identity".to_string());
-    }
-
-    let final_newline = bytes.ends_with(b"\n");
-    let mut lines = Vec::new();
-    for raw in bytes.split(|byte| *byte == b'\n') {
-        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-        if raw.is_empty() {
-            continue;
-        }
-        let mut value: Value = serde_json::from_slice(raw)
-            .map_err(|_| "transcript contains malformed JSON".to_string())?;
-        if let Some(object) = value.as_object_mut() {
-            rewrite_matching_string(
-                object,
-                "sessionId",
-                expected_source_session_id,
-                destination_session_id,
-            )?;
-            rewrite_matching_string(object, "cwd", expected_source_cwd, destination_cwd)?;
-        }
-        lines.push(
-            serde_json::to_vec(&value)
-                .map_err(|error| format!("serialize rewritten record: {error}"))?,
-        );
-    }
-    let mut rewritten = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        if index > 0 {
-            rewritten.push(b'\n');
-        }
-        rewritten.extend_from_slice(line);
-    }
-    if final_newline {
-        rewritten.push(b'\n');
-    }
-
-    let after = analyze_claude_transcript(&rewritten);
-    if !after.is_resumable()
-        || after.source_provider_session_id.as_deref() != Some(destination_session_id)
-        || after.source_cwd.as_deref() != Some(destination_cwd)
-        || lineage_digests(&before) != lineage_digests(&after)
-    {
-        return Err("rewritten transcript failed semantic round-trip validation".to_string());
-    }
-    Ok(rewritten)
 }
 
 pub struct TestProviderAdapter;
@@ -266,22 +156,6 @@ impl SessionAdapter for TestProviderAdapter {
 
     fn analyze(&self, bytes: &[u8]) -> SessionAnalysis {
         analyze_claude_transcript(bytes)
-    }
-
-    fn rewrite(&self, request: &SessionRewriteRequest<'_>) -> Result<Vec<u8>, String> {
-        let source_id = request
-            .expected_source_session_id
-            .ok_or_else(|| "test provider rewrite requires a source session id".to_string())?;
-        let source_cwd = request
-            .expected_source_cwd
-            .ok_or_else(|| "test provider rewrite requires a source cwd".to_string())?;
-        structural_session_rewrite(
-            request.bytes,
-            source_id,
-            request.destination_session_id,
-            source_cwd,
-            request.destination_cwd,
-        )
     }
 
     fn materialization_targets(

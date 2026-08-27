@@ -1,4 +1,4 @@
-use super::harness::{codex, rewrite_transcript_identity, sha256, TranscriptBuilder, VariantWorld};
+use super::harness::{codex, sha256, TranscriptBuilder, VariantWorld};
 use super::relation_matrix::reviewed_action;
 use mallard_domain::{
     compute_portable_conversation_tail, BindingState, BundleId, BundleRecipe, CloudThreadId,
@@ -11,6 +11,10 @@ use mallard_domain::{
     ProviderKey, ProviderProfile, PullJournalPhase, PushJournalPhase, ReplicaId, RootTailLayout,
     StorageId, SyncConfig, SyncCurrency, TailClassification, TailPartitionKind, TargetExpectation,
     ThreadId, PORTABLE_TAIL_CODEC_V1, PUSH_PLAN_SCHEMA,
+};
+use mallard_infrastructure::codex_history_graph::resolve_codex_root;
+use mallard_infrastructure::codex_standalone_builder::{
+    build_standalone_codex_root, StandaloneBuildMode,
 };
 use mallard_infrastructure::conversation_codec::{analyze_codex_transcript, CodecLineage};
 use mallard_infrastructure::conversation_materialization::{
@@ -1231,14 +1235,34 @@ fn committed_codex_provider_files_materialize_resume_and_rebind_one_variant() {
         .find(|profile| profile.profile_id == fixture.operation.provider_profile_id)
         .unwrap();
     let provider_root = PathBuf::from(&profile.canonical_path);
-    let rewritten = rewrite_transcript_identity(
-        TRANSCRIPT,
-        "thread-fixture",
-        "destination-thread",
-        "/fixture/project",
-        &project_root,
+    let codec_directory = tempfile::tempdir().unwrap();
+    let source_path = codec_directory.path().join("source.jsonl");
+    fs::write(&source_path, TRANSCRIPT).unwrap();
+    let no_bases = |_: &str| Ok(None);
+    let resolved = resolve_codex_root(&source_path, &no_bases).unwrap();
+    let wire = build_standalone_codex_root(
+        &resolved,
+        &StandaloneBuildMode::Encode {
+            root: "/fixture/project".to_string(),
+            canonical_root: None,
+        },
+        None,
     )
     .unwrap();
+    let staged_path = codec_directory.path().join("staged.jsonl");
+    fs::write(&staged_path, &wire.root_bytes).unwrap();
+    let staged = resolve_codex_root(&staged_path, &no_bases).unwrap();
+    let rewritten = build_standalone_codex_root(
+        &staged,
+        &StandaloneBuildMode::Decode {
+            root_provider_thread_id: "destination-thread".to_string(),
+            target_root: project_root.clone(),
+            canonical_target_root: None,
+        },
+        None,
+    )
+    .unwrap()
+    .root_bytes;
     let source = analyze_codex_transcript(TRANSCRIPT);
     let rewritten_analysis = analyze_codex_transcript(&rewritten);
     let (lineage_digest, semantic_digest) = match &rewritten_analysis.lineage {
@@ -1250,9 +1274,22 @@ fn committed_codex_provider_files_materialize_resume_and_rebind_one_variant() {
         other => panic!("rewritten committed fixture is not resumable: {other:?}"),
     };
     assert_eq!(
-        source.lineage.chain().unwrap(),
-        rewritten_analysis.lineage.chain().unwrap()
+        source
+            .lineage
+            .chain()
+            .unwrap()
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<Vec<_>>(),
+        rewritten_analysis
+            .lineage
+            .chain()
+            .unwrap()
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<Vec<_>>()
     );
+    assert!(String::from_utf8_lossy(&rewritten).contains(&project_root));
     if let ConversationSyncOperationKind::ProviderMaterialization(payload) =
         &mut fixture.operation.operation
     {

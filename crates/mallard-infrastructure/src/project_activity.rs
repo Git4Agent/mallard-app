@@ -1798,8 +1798,8 @@ mod activity_only_tests {
     use crate::providers::{
         AgentProviderAdapter, MaterializationTargetRequest, PlannedProviderTarget,
         ProviderCapabilityLevel, ProviderDescriptor, SessionActionOutcome, SessionAnalysis,
-        SessionEventDetail, SessionFileMetadata, SessionRewriteRequest, SessionTimelineContext,
-        SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
+        SessionEventDetail, SessionFileMetadata, SessionTimelineContext, SessionTimelineIndex,
+        SessionTimelinePageSlice, SessionTimelineQuery,
     };
     use mallard_domain::{
         ActionId, ApplyReceipt, BundleId, BundleRecipe, ConversationApplyReceipt,
@@ -1872,10 +1872,6 @@ mod activity_only_tests {
 
         fn analyze(&self, _bytes: &[u8]) -> SessionAnalysis {
             panic!("Activity must not analyze transcript bytes")
-        }
-
-        fn rewrite(&self, _request: &SessionRewriteRequest<'_>) -> Result<Vec<u8>, String> {
-            panic!("Activity must not rewrite transcript bytes")
         }
 
         fn materialization_targets(

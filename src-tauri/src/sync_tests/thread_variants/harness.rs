@@ -426,69 +426,12 @@ impl TranscriptBuilder {
     }
 }
 
-/// Rewrite the authoritative session id and structural cwd fields in a
-/// fabricated transcript. These fixtures contain no in-cwd content paths,
-/// so their canonical digests remain unchanged.
-pub fn rewrite_transcript_identity(
-    bytes: &[u8],
-    source_thread_id: &str,
-    destination_thread_id: &str,
-    _source_cwd: &str,
-    destination_cwd: &str,
-) -> Result<Vec<u8>, String> {
-    let mut output = Vec::with_capacity(bytes.len());
-    for raw in bytes.split(|byte| *byte == b'\n') {
-        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-        if raw.is_empty() {
-            continue;
-        }
-        let mut value: serde_json::Value = serde_json::from_slice(raw)
-            .map_err(|_| "fixture transcript contains malformed JSON".to_string())?;
-        let record_type = value
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
-        if let Some(payload) = value
-            .get_mut("payload")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            if record_type.as_deref() == Some("session_meta") {
-                for key in ["id", "thread_id", "threadId", "session_id", "sessionId"] {
-                    if payload.get(key).and_then(serde_json::Value::as_str)
-                        == Some(source_thread_id)
-                    {
-                        payload.insert(
-                            key.to_string(),
-                            serde_json::Value::String(destination_thread_id.to_string()),
-                        );
-                    }
-                }
-            }
-            if matches!(
-                record_type.as_deref(),
-                Some("session_meta") | Some("turn_context")
-            ) {
-                for key in ["cwd", "working_directory", "workingDirectory"] {
-                    if payload.contains_key(key) {
-                        payload.insert(
-                            key.to_string(),
-                            serde_json::Value::String(destination_cwd.to_string()),
-                        );
-                    }
-                }
-            }
-        }
-        output.extend_from_slice(
-            &serde_json::to_vec(&value)
-                .map_err(|error| format!("serialize fixture record: {error}"))?,
-        );
-        output.push(b'\n');
-    }
-    Ok(output)
+pub fn chain(thread_id: &str, suffix: &[(&str, &str)]) -> Vec<u8> {
+    chain_at(thread_id, "/tmp/project", suffix)
 }
 
-pub fn chain(thread_id: &str, suffix: &[(&str, &str)]) -> Vec<u8> {
-    let mut builder = TranscriptBuilder::new(thread_id, "/tmp/project");
+pub fn chain_at(thread_id: &str, cwd: &str, suffix: &[(&str, &str)]) -> Vec<u8> {
+    let mut builder = TranscriptBuilder::new(thread_id, cwd);
     for (index, (id, text)) in suffix.iter().enumerate() {
         builder = builder.message(id, if index % 2 == 0 { "user" } else { "assistant" }, text);
     }

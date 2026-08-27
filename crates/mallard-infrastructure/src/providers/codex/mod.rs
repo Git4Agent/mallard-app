@@ -12,8 +12,8 @@ use super::traits::{
     ProviderCapabilityLevel, ProviderCliLauncher, ProviderDescriptor, SessionActionContext,
     SessionActionDescriptor, SessionActionOutcome, SessionActionRequest, SessionAdapter,
     SessionAnalysis, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
-    SessionFileMetadata, SessionFileSummary, SessionRewriteRequest, SessionTimelineContext,
-    SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
+    SessionFileMetadata, SessionFileSummary, SessionTimelineContext, SessionTimelineIndex,
+    SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::conversation_codec::{
     analyze_codex_transcript, CODEX_CODEC_VERSION, CODEX_LINEAGE_CODEC_KEY,
@@ -148,14 +148,6 @@ impl SessionAdapter for CodexAdapter {
             record_count: analysis.record_count,
             lineage: analysis.lineage,
         }
-    }
-
-    fn rewrite(&self, _request: &SessionRewriteRequest<'_>) -> Result<Vec<u8>, String> {
-        // Codex conversations materialize exclusively through the standalone
-        // Decode build (wire-form gate + path decode + fresh identity); the
-        // generic structural rewrite has no correct meaning for token-form
-        // cloud objects and was removed with the canonical wire cutover.
-        Err("Codex conversations materialize through the standalone decode build".to_string())
     }
 
     fn verify_index_fragment(&self, bytes: &[u8], expected_session_id: &str) -> Result<(), String> {

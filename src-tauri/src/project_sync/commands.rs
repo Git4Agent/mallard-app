@@ -11830,49 +11830,46 @@ fn apply_prepared_pull_conversation(
     // build's re-analysis of the final materialized local bytes.
     // Pull gate: the cloud row's redaction stamp must name this binary's
     // ruleset before any staged bytes are trusted or materialized.
-    if provider_supports_tail_cursor(&action.provider) {
-        let ruleset = credential_redaction::shared();
-        match &prepared.cloud_wire_redaction {
+    let ruleset = credential_redaction::shared();
+    match &prepared.cloud_wire_redaction {
+        Some(stamp)
+            if stamp.codec == credential_redaction::REDACTION_CODEC_V1
+                && stamp.fingerprint == ruleset.fingerprint() => {}
+        Some(stamp) => {
+            return Err(format!(
+                "redaction_ruleset_mismatch: conversation '{}' was published under \
+                 redaction ruleset '{}'; align app versions before pulling",
+                cloud_thread_id, stamp.codec
+            ));
+        }
+        None => {
+            return Err(format!(
+                "redaction_ruleset_mismatch: conversation '{}' carries no redaction \
+                 stamp and cannot be materialized",
+                cloud_thread_id
+            ));
+        }
+    }
+    // Claude wire objects decode under the declared path-map codec; the
+    // out-of-band stamp is the declaration (Codex validates its in-band
+    // marker inside the standalone decode).
+    if !is_codex {
+        match &prepared.cloud_wire_path_map {
             Some(stamp)
-                if stamp.codec == credential_redaction::REDACTION_CODEC_V1
-                    && stamp.fingerprint == ruleset.fingerprint() => {}
+                if stamp.codec == mallard_infrastructure::session_path_map::PATH_MAP_CODEC_V1 => {}
             Some(stamp) => {
                 return Err(format!(
-                    "redaction_ruleset_mismatch: conversation '{}' was published under \
-                     redaction ruleset '{}'; align app versions before pulling",
+                    "path_map_codec_mismatch: conversation '{}' was published under \
+                     path-map codec '{}'; align app versions before pulling",
                     cloud_thread_id, stamp.codec
                 ));
             }
             None => {
                 return Err(format!(
-                    "redaction_ruleset_mismatch: conversation '{}' carries no redaction \
+                    "path_map_codec_mismatch: conversation '{}' carries no path-map \
                      stamp and cannot be materialized",
                     cloud_thread_id
                 ));
-            }
-        }
-        // Claude wire objects decode under the declared path-map codec; the
-        // out-of-band stamp is the declaration (Codex validates its in-band
-        // marker inside the standalone decode).
-        if !is_codex {
-            match &prepared.cloud_wire_path_map {
-                Some(stamp)
-                    if stamp.codec
-                        == mallard_infrastructure::session_path_map::PATH_MAP_CODEC_V1 => {}
-                Some(stamp) => {
-                    return Err(format!(
-                        "path_map_codec_mismatch: conversation '{}' was published under \
-                         path-map codec '{}'; align app versions before pulling",
-                        cloud_thread_id, stamp.codec
-                    ));
-                }
-                None => {
-                    return Err(format!(
-                        "path_map_codec_mismatch: conversation '{}' carries no path-map \
-                         stamp and cannot be materialized",
-                        cloud_thread_id
-                    ));
-                }
             }
         }
     }
@@ -11948,7 +11945,7 @@ fn apply_prepared_pull_conversation(
                 artifact.next_synthetic_turn_ordinal,
             ),
         )
-    } else if provider_supports_tail_cursor(&action.provider) {
+    } else {
         // Claude: wire-form verification ends before any decode. The
         // downloaded wire object must be a redaction fixpoint (the
         // pull-side leak/tamper certificate) and must refold to the
@@ -12092,41 +12089,6 @@ fn apply_prepared_pull_conversation(
                 lineage_digest.clone(),
                 semantic_digest.clone(),
                 leaf,
-                None,
-                0,
-            ),
-        )
-    } else {
-        let rewritten =
-            adapter.rewrite(&mallard_infrastructure::providers::SessionRewriteRequest {
-                bytes: &prepared.cloud_transcript,
-                expected_source_session_id: Some(&prepared.cloud_provider_thread_id),
-                destination_session_id: &destination_provider_thread_id,
-                expected_source_cwd: Some(&prepared.cloud_cwd),
-                destination_cwd: &binding.project_root,
-            })?;
-        let layout = RootTailLayout {
-            codec: cloud_tail.codec.clone(),
-            partition_kind: cloud_tail.partition_kind,
-            start_record_count: cloud_tail.start_record_count,
-        };
-        let sha = hex_digest(Sha256::digest(&rewritten).as_slice());
-        let lineage_digest = action.pins.tail.lineage_digest.clone().ok_or_else(|| {
-            "conversation Pull action lacks its pinned lineage digest".to_string()
-        })?;
-        let semantic_digest = action.pins.tail.semantic_digest.clone().ok_or_else(|| {
-            "conversation Pull action lacks its pinned semantic digest".to_string()
-        })?;
-        (
-            rewritten,
-            layout,
-            (
-                None,
-                sha,
-                cloud_tail.clone(),
-                lineage_digest,
-                semantic_digest,
-                None,
                 None,
                 0,
             ),

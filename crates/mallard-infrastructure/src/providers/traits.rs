@@ -115,18 +115,6 @@ impl SessionAnalysis {
     }
 }
 
-/// A structural rewrite of declared session-identity and cwd fields only.
-/// Adapters must round-trip the rewritten transcript through their own codec
-/// and prove unchanged lineage and semantic digests before returning.
-#[derive(Clone, Debug)]
-pub struct SessionRewriteRequest<'a> {
-    pub bytes: &'a [u8],
-    pub expected_source_session_id: Option<&'a str>,
-    pub destination_session_id: &'a str,
-    pub expected_source_cwd: Option<&'a str>,
-    pub destination_cwd: &'a str,
-}
-
 pub struct SessionDiscoveryContext<'a> {
     /// Canonicalized provider home for the selected profile.
     pub provider_home: &'a Path,
@@ -584,9 +572,6 @@ pub trait SessionAdapter: Send + Sync {
     fn scan_metadata(&self, path: &Path) -> Result<SessionFileMetadata, String>;
     /// Full typed-codec analysis of one transcript.
     fn analyze(&self, bytes: &[u8]) -> SessionAnalysis;
-    /// Structural rewrite of declared identity/cwd fields, round-tripped
-    /// through the same codec with proven digests.
-    fn rewrite(&self, request: &SessionRewriteRequest<'_>) -> Result<Vec<u8>, String>;
     /// Verify one staged provider index fragment. Only meaningful when
     /// `index_fragment_limit() > 0`.
     fn verify_index_fragment(

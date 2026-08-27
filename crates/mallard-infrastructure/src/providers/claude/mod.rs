@@ -13,8 +13,8 @@ use super::traits::{
     ProviderCapabilityLevel, ProviderCliLauncher, ProviderDescriptor, SessionActionContext,
     SessionActionDescriptor, SessionActionOutcome, SessionActionRequest, SessionAdapter,
     SessionAnalysis, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
-    SessionFileMetadata, SessionFileSummary, SessionRewriteRequest, SessionTimelineContext,
-    SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
+    SessionFileMetadata, SessionFileSummary, SessionTimelineContext, SessionTimelineIndex,
+    SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::app_settings::conversation_file_limit_bytes;
 use crate::provider_capture::validated_session_metadata;
@@ -167,15 +167,6 @@ impl SessionAdapter for ClaudeAdapter {
 
     fn analyze(&self, bytes: &[u8]) -> SessionAnalysis {
         codec::analyze_claude_transcript(bytes)
-    }
-
-    fn rewrite(&self, _request: &SessionRewriteRequest<'_>) -> Result<Vec<u8>, String> {
-        // Claude conversations materialize exclusively through the pull
-        // flow's wire decode (verify + path decode + sessionId restamp);
-        // the generic structural rewrite has no correct meaning for
-        // token-form cloud objects and was removed with the path-map
-        // cutover.
-        Err("Claude conversations materialize through the wire decode".to_string())
     }
 
     fn materialization_targets(

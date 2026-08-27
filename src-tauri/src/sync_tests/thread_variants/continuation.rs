@@ -1,5 +1,5 @@
 use super::harness::{
-    assert_manifest_consistent, chain, codex, codex_scope, rewrite_transcript_identity, ThreadSpec,
+    assert_manifest_consistent, chain, chain_at, codex, codex_scope, ThreadSpec, TranscriptBuilder,
     VariantWorld,
 };
 use super::recovery::install_scope;
@@ -173,22 +173,24 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
     let initial = world.publish(&[t1.clone(), t2.clone()], origin_a.clone(), 10);
     assert_eq!(initial.snapshot.head.revision, 1);
 
-    let a_active = rewrite_transcript_identity(
-        &t1.transcript,
-        "shared-source-thread",
+    let a_active = chain_at(
         "a-active-thread",
-        "/tmp/project",
         scope_a.project_root.to_str().unwrap(),
-    )
-    .unwrap();
-    let b_active = rewrite_transcript_identity(
-        &t2.transcript,
-        "shared-source-thread",
+        &[
+            ("m-a", "base"),
+            ("m-b", "base answer"),
+            ("m-c1", "A branch"),
+        ],
+    );
+    let b_active = chain_at(
         "b-active-thread",
-        "/tmp/project",
         scope_b.project_root.to_str().unwrap(),
-    )
-    .unwrap();
+        &[
+            ("m-a", "base"),
+            ("m-b", "base answer"),
+            ("m-c2", "B branch"),
+        ],
+    );
     let a_active_path = install_active_branch(
         &world.repo_a,
         &scope_a,
@@ -212,14 +214,12 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
 
     let a_after_first_append = append_message(&a_active, "m-d1", "continued on A");
     fs::write(&a_active_path, &a_after_first_append).unwrap();
-    t1.transcript = rewrite_transcript_identity(
-        &a_after_first_append,
-        "a-active-thread",
-        "shared-source-thread",
-        scope_a.project_root.to_str().unwrap(),
-        "/tmp/project",
-    )
-    .unwrap();
+    t1.transcript = TranscriptBuilder::new("shared-source-thread", "/tmp/project")
+        .message("m-a", "user", "base")
+        .message("m-b", "assistant", "base answer")
+        .message("m-c1", "user", "A branch")
+        .message("m-d1", "user", "continued on A")
+        .build();
     t1.updated_at = 20;
     t1.last_updated_by = Some(origin_a.clone());
     let after_a = publish_bound_thread(
@@ -244,7 +244,6 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         &world,
         &t1_local,
         &t1_id,
-        "shared-source-thread",
         "b-alternate-v1",
         &t1.transcript,
         "operation-pull-b-v1",
@@ -269,14 +268,12 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
 
     let b_after_append = append_message(&b_active_before_pull, "m-d2", "continued on B");
     fs::write(&b_active_path, &b_after_append).unwrap();
-    t2.transcript = rewrite_transcript_identity(
-        &b_after_append,
-        "b-active-thread",
-        "shared-source-thread",
-        scope_b.project_root.to_str().unwrap(),
-        "/tmp/project",
-    )
-    .unwrap();
+    t2.transcript = TranscriptBuilder::new("shared-source-thread", "/tmp/project")
+        .message("m-a", "user", "base")
+        .message("m-b", "assistant", "base answer")
+        .message("m-c2", "user", "B branch")
+        .message("m-d2", "user", "continued on B")
+        .build();
     t2.updated_at = 30;
     t2.last_updated_by = Some(origin_b.clone());
     let after_b = publish_bound_thread(
@@ -302,7 +299,6 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         &world,
         &t2_local,
         &t2_id,
-        "shared-source-thread",
         "a-alternate-v2",
         &t2.transcript,
         "operation-pull-a-v2",
@@ -327,14 +323,13 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
     let a_after_second_append =
         append_message(&a_active_before_pull, "m-e1", "continued again on A");
     fs::write(&a_active_path, &a_after_second_append).unwrap();
-    t1.transcript = rewrite_transcript_identity(
-        &a_after_second_append,
-        "a-active-thread",
-        "shared-source-thread",
-        scope_a.project_root.to_str().unwrap(),
-        "/tmp/project",
-    )
-    .unwrap();
+    t1.transcript = TranscriptBuilder::new("shared-source-thread", "/tmp/project")
+        .message("m-a", "user", "base")
+        .message("m-b", "assistant", "base answer")
+        .message("m-c1", "user", "A branch")
+        .message("m-d1", "user", "continued on A")
+        .message("m-e1", "user", "continued again on A")
+        .build();
     t1.updated_at = 40;
     t1.last_updated_by = Some(origin_a.clone());
     let after_a_second = publish_bound_thread(
@@ -359,7 +354,6 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         &world,
         &t1_local,
         &t1_id,
-        "shared-source-thread",
         "b-alternate-v1",
         &t1.transcript,
         "operation-pull-b-v1-refresh",
@@ -505,14 +499,11 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
 
     // The bound local copy lives in a real rollout under its own alias and
     // has advanced past the published branch.
-    let rebound = rewrite_transcript_identity(
-        &t2.transcript,
-        "shared-source-thread",
+    let rebound = chain_at(
         "local-v2",
-        "/tmp/project",
         &scope.project_root.to_string_lossy(),
-    )
-    .unwrap();
+        &[("m-a", "base"), ("m-b", "answer"), ("m-c2", "local branch")],
+    );
     let local_transcript = append_message(&rebound, "m-d2", "continued here");
     let local_analysis = analyze_codex_transcript(&local_transcript);
     let record_count = local_analysis.record_count;
@@ -522,14 +513,11 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
     fs::write(&local_path, &local_transcript).unwrap();
     // The third thread's bound local copy diverges from its published chain
     // at the branch tip: it carries m-c2 where the cloud recorded m-c3.
-    let diverged_rebound = rewrite_transcript_identity(
-        &t2.transcript,
-        "shared-source-thread",
+    let diverged_rebound = chain_at(
         "local-v3",
-        "/tmp/project",
         &scope.project_root.to_string_lossy(),
-    )
-    .unwrap();
+        &[("m-a", "base"), ("m-b", "answer"), ("m-c2", "local branch")],
+    );
     let diverged_transcript = append_message(&diverged_rebound, "m-d3", "continued elsewhere");
     let diverged_analysis = analyze_codex_transcript(&diverged_transcript);
     let diverged_record_count = diverged_analysis.record_count;
@@ -759,6 +747,10 @@ use mallard_domain::{
     PlanId, PortableConversationTail, PullJournalPhase, PushJournalPhase, RootTailLayout,
     TailPartitionKind, TargetExpectation, PORTABLE_TAIL_CODEC_V1,
 };
+use mallard_infrastructure::codex_history_graph::resolve_codex_root;
+use mallard_infrastructure::codex_standalone_builder::{
+    build_standalone_codex_root, StandaloneBuildMode,
+};
 use mallard_infrastructure::conversation_codec::CodecLineage;
 use mallard_infrastructure::conversation_materialization::{
     apply_conversation_cloud_publication, apply_conversation_materialization,
@@ -965,21 +957,45 @@ fn materialize_thread(
     world: &VariantWorld,
     thread_id: &ThreadId,
     cloud_thread_id: &CloudThreadId,
-    source_thread_id: &str,
     destination_thread_id: &str,
     source_transcript: &[u8],
     operation_id: &str,
     updated_at: u64,
 ) -> PathBuf {
     let snapshot = world.engine().inspect(&world.bundle_id).unwrap();
-    let rewritten = rewrite_transcript_identity(
-        source_transcript,
-        source_thread_id,
-        destination_thread_id,
-        "/tmp/project",
-        scope.project_root.to_str().unwrap(),
+    let source_analysis = analyze_codex_transcript(source_transcript);
+    let source_cwd = source_analysis
+        .source_cwd
+        .as_deref()
+        .expect("source fixture has a cwd");
+    let directory = tempfile::tempdir().unwrap();
+    let source_path = directory.path().join("source.jsonl");
+    fs::write(&source_path, source_transcript).unwrap();
+    let no_bases = |_: &str| Ok(None);
+    let resolved = resolve_codex_root(&source_path, &no_bases).unwrap();
+    let wire = build_standalone_codex_root(
+        &resolved,
+        &StandaloneBuildMode::Encode {
+            root: source_cwd.to_string(),
+            canonical_root: None,
+        },
+        None,
     )
     .unwrap();
+    let staged_path = directory.path().join("staged.jsonl");
+    fs::write(&staged_path, &wire.root_bytes).unwrap();
+    let staged = resolve_codex_root(&staged_path, &no_bases).unwrap();
+    let rewritten = build_standalone_codex_root(
+        &staged,
+        &StandaloneBuildMode::Decode {
+            root_provider_thread_id: destination_thread_id.to_string(),
+            target_root: scope.project_root.to_string_lossy().into_owned(),
+            canonical_target_root: None,
+        },
+        None,
+    )
+    .unwrap()
+    .root_bytes;
     let analysis = analyze_codex_transcript(&rewritten);
     let (lineage_digest, semantic_digest, accepted_tail) = match analysis.lineage {
         CodecLineage::Complete {

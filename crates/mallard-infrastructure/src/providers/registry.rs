@@ -1,9 +1,9 @@
 //! The compile-time provider registry.
 //!
 //! Production registers the Codex and Claude adapters. Tests may construct a
-//! registry with an additional minimal provider to prove the common layers
-//! are registration-driven. This is not a plugin system: no third-party
-//! code, no dynamic ABI, no manifest-supplied commands.
+//! registry with an additional minimal provider to exercise shared discovery
+//! and capture. This is not a plugin system: no third-party code, no dynamic
+//! ABI, no manifest-supplied commands.
 
 use super::traits::{AgentProviderAdapter, ProviderDescriptor, SessionAdapter};
 use mallard_domain::ProviderKey;
@@ -35,8 +35,8 @@ impl ProviderRegistry {
         })
     }
 
-    /// A registry that additionally exposes the minimal test provider. Used
-    /// by suites that prove common flows require no provider branches.
+    /// A registry that additionally exposes the minimal discovery and capture
+    /// test provider.
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_test_provider() -> ProviderRegistry {
         ProviderRegistry::from_adapters(vec![
