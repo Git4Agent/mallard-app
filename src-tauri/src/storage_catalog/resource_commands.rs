@@ -7,14 +7,13 @@
 //! bundle.
 
 use bytes::Bytes;
-use mallard_domain::{StorageConfig, StorageId, SyncConfig};
+use mallard_domain::{now_secs, StorageConfig, StorageId, SyncConfig};
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::storage_core::ConfiguredObjectStore;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::adapters::{capability_matrix, NativeProcessRunner, PluginProcessRunner};
 use super::apply::{
@@ -44,13 +43,6 @@ use super::resource_planning::{
     scope_label, scope_local_records, scope_resource_state, validate_scope_pull_selection,
     ScopeForkPlanInputs, ScopePullPlanInputs, ScopePushPlanInputs,
 };
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-}
 
 fn pull_outcome_accepts_remote(outcome: super::domain::CatalogActionOutcome) -> bool {
     !matches!(
@@ -235,9 +227,7 @@ fn resolve_scope(
 }
 
 #[tauri::command]
-pub async fn list_catalog_capabilities(
-    _app: tauri::AppHandle,
-) -> Result<Vec<CatalogCapabilityDto>, String> {
+pub async fn list_catalog_capabilities() -> Result<Vec<CatalogCapabilityDto>, String> {
     Ok(capability_matrix()
         .into_iter()
         .map(|(provider, kinds)| CatalogCapabilityDto { provider, kinds })
@@ -245,9 +235,7 @@ pub async fn list_catalog_capabilities(
 }
 
 #[tauri::command]
-pub async fn list_catalog_resource_profiles(
-    _app: tauri::AppHandle,
-) -> Result<Vec<LocalCatalogProfile>, String> {
+pub async fn list_catalog_resource_profiles() -> Result<Vec<LocalCatalogProfile>, String> {
     run_blocking(move || {
         list_catalog_resource_profiles_with_repository(
             &catalog_repository()?,
@@ -379,7 +367,6 @@ pub fn save_catalog_resource_profile_with_repository(
 
 #[tauri::command]
 pub async fn save_catalog_resource_profile(
-    _app: tauri::AppHandle,
     provider: ProviderKey,
     path: String,
 ) -> Result<LocalCatalogProfile, String> {
@@ -423,7 +410,6 @@ pub fn rename_catalog_resource_profile_with_repository(
 /// place a name is chosen.
 #[tauri::command]
 pub async fn rename_catalog_resource_profile(
-    _app: tauri::AppHandle,
     profile_id: LocalCatalogProfileId,
     display_name: String,
     expected_revision: u64,
@@ -439,7 +425,7 @@ pub async fn rename_catalog_resource_profile(
 }
 
 #[tauri::command]
-pub async fn list_catalog_scopes(_app: tauri::AppHandle) -> Result<Vec<CatalogScopeDto>, String> {
+pub async fn list_catalog_scopes() -> Result<Vec<CatalogScopeDto>, String> {
     run_blocking(move || {
         let catalog = catalog_repository()?;
         let profiles = catalog.load_profiles()?;
@@ -510,7 +496,6 @@ pub fn create_catalog_scope_with_repositories(
 /// CLI, no storage traffic.
 #[tauri::command]
 pub async fn create_catalog_scope(
-    _app: tauri::AppHandle,
     provider: ProviderKey,
     profile_id: LocalCatalogProfileId,
     resource_kind: CatalogResourceKindTag,
@@ -560,7 +545,6 @@ pub fn delete_catalog_scope_with_repositories(
 
 #[tauri::command]
 pub async fn delete_catalog_scope(
-    _app: tauri::AppHandle,
     scope_id: CatalogScopeId,
     expected_revision: u64,
 ) -> Result<bool, String> {
@@ -889,7 +873,6 @@ fn decorate_pet_row(
 
 #[tauri::command]
 pub async fn list_catalog_scope_resources(
-    _app: tauri::AppHandle,
     scope_id: CatalogScopeId,
     storage_id: Option<StorageId>,
 ) -> Result<CatalogScopeResourcesDto, String> {
@@ -946,7 +929,6 @@ pub fn get_catalog_pet_preview_with_repositories(
 
 #[tauri::command]
 pub async fn get_catalog_pet_preview(
-    _app: tauri::AppHandle,
     scope_id: CatalogScopeId,
     storage_id: StorageId,
     resource_id: CatalogResourceId,
@@ -1079,7 +1061,6 @@ fn read_storage_repository(
 
 #[tauri::command]
 pub async fn list_catalog_storage_repositories(
-    _app: tauri::AppHandle,
     storage_id: StorageId,
 ) -> Result<Vec<CatalogStorageRepositoryDto>, String> {
     run_blocking(move || {
@@ -1187,7 +1168,6 @@ pub fn link_catalog_scope_storage_with_repositories(
 
 #[tauri::command]
 pub async fn link_catalog_scope_storage(
-    _app: tauri::AppHandle,
     scope_id: CatalogScopeId,
     storage_id: StorageId,
 ) -> Result<CatalogScopeLinkOutcomeDto, String> {
@@ -1236,8 +1216,7 @@ fn target_in_scope(
             CatalogResourceKindTag::CodexPetV1 | CatalogResourceKindTag::CodexPetV2,
         ) => {
             let home_matches = context
-                .codex
-                .as_ref()
+                .profile(ProviderKey::Codex)
                 .is_some_and(|profile| profile.canonical_home == Path::new(canonical_home));
             let format = kind.pet_format().expect("pet kinds always carry a format");
             home_matches
@@ -1347,7 +1326,6 @@ pub fn unlink_catalog_scope_storage_with_repositories(
 
 #[tauri::command]
 pub async fn unlink_catalog_scope_storage(
-    _app: tauri::AppHandle,
     link_id: CatalogLinkId,
     expected_revision: u64,
 ) -> Result<bool, String> {
@@ -1407,7 +1385,6 @@ pub(crate) fn prepare_push_with_repositories(
 
 #[tauri::command]
 pub async fn prepare_catalog_scope_push(
-    _app: tauri::AppHandle,
     scope_id: CatalogScopeId,
     storage_id: StorageId,
 ) -> Result<CatalogScopePushPlan, String> {
@@ -1650,7 +1627,6 @@ pub(crate) fn apply_push_with_repositories(
 
 #[tauri::command]
 pub async fn apply_catalog_scope_push(
-    _app: tauri::AppHandle,
     plan_id: CatalogPlanId,
     selected_resource_ids: Vec<CatalogResourceId>,
     acknowledged_warning_digests: Vec<String>,
@@ -1777,7 +1753,6 @@ pub(crate) fn prepare_pull_with_repositories(
 
 #[tauri::command]
 pub async fn prepare_catalog_scope_pull(
-    _app: tauri::AppHandle,
     scope_id: CatalogScopeId,
     storage_id: StorageId,
     requested_copy_names: Option<BTreeMap<CatalogResourceId, String>>,
@@ -1961,7 +1936,6 @@ pub(crate) fn apply_pull_with_repositories(
 
 #[tauri::command]
 pub async fn apply_catalog_scope_pull(
-    _app: tauri::AppHandle,
     plan_id: CatalogPlanId,
     choices: BTreeMap<CatalogResourceId, CatalogPlanActionId>,
     destructive_acknowledged: Vec<CatalogResourceId>,
@@ -2022,7 +1996,6 @@ fn prepare_fork_with_repositories(
 
 #[tauri::command]
 pub async fn prepare_catalog_resource_fork(
-    _app: tauri::AppHandle,
     scope_id: CatalogScopeId,
     resource_id: CatalogResourceId,
     requested_name: String,
@@ -2043,7 +2016,6 @@ pub async fn prepare_catalog_resource_fork(
 
 #[tauri::command]
 pub async fn apply_catalog_resource_fork(
-    _app: tauri::AppHandle,
     scope_id: CatalogScopeId,
     plan_id: CatalogPlanId,
 ) -> Result<CatalogActionResult, String> {

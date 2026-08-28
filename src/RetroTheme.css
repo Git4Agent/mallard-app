@@ -604,6 +604,30 @@ summary {
   box-shadow: none;
 }
 
+/* Every framed region is a rounded tile, and the ones that scroll paint their
+   scrollbar as a plain rectangle in the padding box — so a track that runs the
+   whole length lands inside the curve and squares the corner off. The section
+   dividers and the sidebar resizer already stop short of the tile corners by
+   this radius; the track joins them. The inner radius is the right one every
+   time: the scrollbar sits in the padding box, inside the tile's 1px edge.
+
+   Only the ends that actually meet a curve are inset. A list that runs under a
+   section heading meets one at its bottom alone, and taking the top as well
+   would spend travel a short pane cannot afford. */
+.sync-workspace > .sync-main::-webkit-scrollbar-track:vertical {
+  margin-block: var(--retro-panel-radius-inner);
+}
+
+.sync-workspace > .sync-main::-webkit-scrollbar-track:horizontal {
+  margin-inline: var(--retro-panel-radius-inner);
+}
+
+.sync-primary-nav::-webkit-scrollbar-track:vertical,
+.sidebar-split-pane > .sidebar-links-list::-webkit-scrollbar-track:vertical,
+.sync-log-drawer .log-panel-body::-webkit-scrollbar-track:vertical {
+  margin-bottom: var(--retro-panel-radius-inner);
+}
+
 .sync-app {
   padding: var(--retro-gutter);
   border: 0;
@@ -892,7 +916,6 @@ summary {
 }
 
 .sync-sidebar-sections {
-  overflow: visible;
   padding-top: 0;
   background: transparent;
 }
@@ -1583,6 +1606,15 @@ summary {
    to draw and the rail ends at its fold. */
 .sync-history-commit:last-child::before {
   display: none;
+}
+
+/* Unless a foot follows: then the last card *does* have something below it to
+   reach, and the foot's own segment is only long enough to run into its node.
+   Without this the rail died at the last commit's fold and the foot's stub
+   floated in the gutter attached to nothing — the taller the last commit, the
+   wider the break. */
+.sync-history-timeline:has(> .sync-history-rail-foot) .sync-history-commit:last-child::before {
+  display: block;
 }
 
 .sync-history-commit::after {

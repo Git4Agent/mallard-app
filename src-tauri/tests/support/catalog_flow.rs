@@ -67,6 +67,36 @@ struct Replica {
     scopes: ScopeSet,
 }
 
+fn recommended_push_approval(plan: &CatalogScopePushPlan) -> CatalogPushApproval {
+    CatalogPushApproval {
+        plan_id: plan.plan_id.clone(),
+        selected_resource_ids: plan
+            .rows
+            .iter()
+            .filter(|row| row.row.selected_by_default)
+            .map(|row| row.row.resource_id.clone())
+            .collect(),
+        acknowledged_warning_digests: Vec::new(),
+    }
+}
+
+fn recommended_pull_approval(plan: &CatalogScopePullPlan) -> CatalogPullApproval {
+    CatalogPullApproval {
+        plan_id: plan.plan_id.clone(),
+        choices: plan
+            .items
+            .iter()
+            .filter_map(|item| {
+                item.item
+                    .default_action_id
+                    .clone()
+                    .map(|action_id| (item.item.resource_id.clone(), action_id))
+            })
+            .collect(),
+        destructive_acknowledged: Vec::new(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PullMutation {
     InstallSkill,
@@ -1517,7 +1547,7 @@ fn assert_noop_fixed_point(
     }
     let outcome = replica
         .service
-        .apply_push(CatalogPushApproval::recommended(&push))
+        .apply_push(recommended_push_approval(&push))
         .expect("skip fixed-point Push");
     assert!(!outcome.published);
 
@@ -1533,7 +1563,7 @@ fn assert_noop_fixed_point(
     }
     let outcome = replica
         .service
-        .apply_pull(CatalogPullApproval::recommended(&pull))
+        .apply_pull(recommended_pull_approval(&pull))
         .expect("apply fixed-point Pull");
     assert!(outcome.remote_accepted);
     assert!(outcome

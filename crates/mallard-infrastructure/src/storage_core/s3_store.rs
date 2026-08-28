@@ -25,11 +25,12 @@ use tokio::runtime::Handle;
 use tokio::time::{sleep, timeout};
 
 use super::{
-    hex_lower, sha256 as sha256_bytes, CasExpectation, CasOutcome, ExpectedObject,
-    ImmutablePutOutcome, ObjectKey, ObjectPrefix, ObjectStore, StageOutcome, StoreListPage,
-    StoredMetadata, VerifiedBody,
+    CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix,
+    ObjectStore, StageOutcome, StoreListPage, StoredMetadata, VerifiedBody,
 };
-use mallard_domain::{self as domain, StorageConfig, StorageKind};
+use mallard_domain::{
+    self as domain, hex_lower, sha256_hex as sha256_bytes, StorageConfig, StorageKind,
+};
 
 const MAX_LIST_PAGE: usize = 10_000;
 const S3_MAX_KEYS: usize = 1_000;

@@ -1,47 +1,34 @@
 import { useId, useRef, useState } from "react";
-import Icon, { type IconName } from "../Icons";
 import { clockOptions } from "../../clock";
+import Icon, { type IconName } from "../Icons";
+import type {
+  SyncOutcome,
+  SyncOutcomeAction,
+  SyncOutcomeRowStatus,
+} from "./syncOutcome";
 
-/** Per-row status treatment supplied by the owning feature's view model. */
-export interface SyncOutcomeRowPresentation {
-  icon: IconName;
-  className: string;
-  label: string;
+const ROW_PRESENTATION: Record<
+  SyncOutcomeRowStatus,
+  { icon: IconName; className: string; label: string }
+> = {
+  synced: { icon: "check-circle", className: "synced", label: "Synced" },
+  held: { icon: "git-compare-arrows", className: "diverged", label: "Held for Pull" },
+  preserved: { icon: "git-fork", className: "preserved", label: "Kept independently" },
+  failed: { icon: "octagon-x", className: "unavailable", label: "Failed" },
+};
+
+function actionIcon(action: SyncOutcomeAction): IconName {
+  if (action.kind === "open_pull") return "download";
+  if (action.kind === "reset_metadata") return "trash";
+  return "refresh";
 }
 
-/**
- * One outcome row. The shared renderer knows nothing about threads,
- * resources, or catalogs: an optional monospace identifier and timestamp are
- * the whole vocabulary.
- */
-export interface SyncOutcomeRowView {
-  key: string;
-  title: string;
-  presentation: SyncOutcomeRowPresentation;
-  /** Why this row did not land the way the others did. */
-  reason?: string | null;
-  identifier?: string | null;
-  updatedAt?: number | null;
-}
-
-export interface SyncOutcomeStatView {
-  icon: IconName;
-  value?: string;
-  label: string;
-  /** Renders "Revision 6" rather than "6 revision". */
-  lead?: boolean;
-}
-
-export interface SyncOutcomeView {
-  tone: "success" | "warning";
-  title: string;
-  stats: SyncOutcomeStatView[];
-  rows: SyncOutcomeRowView[];
-  action?: { label: string; icon: IconName; title?: string } | null;
-  /** A clean result folds itself away; one holding a decision opens. */
-  defaultOpen: boolean;
-  /** Support detail, behind its own disclosure inside the fold. */
-  technical: Array<{ label: string; value: string }>;
+function actionTitle(action: SyncOutcomeAction): string | undefined {
+  if (action.kind === "restart_codex") return action.title;
+  if (action.kind === "reset_metadata") {
+    return "Forget this project's local sync bases, mappings, results, and saved plans";
+  }
+  return undefined;
 }
 
 function formatTime(seconds: number): string {
@@ -53,55 +40,39 @@ function formatTime(seconds: number): string {
 }
 
 /**
- * The completed operation, as a section of the storage card: full width, no
- * outline of its own, one divider above, and its tint to say where it starts.
- * The summary line reads without opening; the rows are lines inside the same
- * box, divided rather than boxed. The fold control is the history table's own
- * toggle — chevron-down closed, chevron-up open.
- *
- * Not a `Notice`, because this box is deliberately not a box. The full-bleed
- * section treatment — no border but the divider above it, no radius, no
- * padding — is the whole of `.sync-outcome-notice`, and the frame a notice
- * draws is exactly the second outline the card must not gain. It keeps its own
- * markup and takes only the notice recipe's ARIA rule.
+ * A completed project sync rendered as a full-width section of its storage
+ * card. The summary announces the result; the per-session rows stay behind a
+ * disclosure so assistive technology does not repeat the entire result list.
  */
 export default function SyncOutcomeNotice({
-  view,
+  outcome,
   busy = false,
   onAction,
   onDismiss,
 }: {
-  view: SyncOutcomeView;
+  outcome: SyncOutcome;
   busy?: boolean;
   onAction?: () => void;
   onDismiss: () => void;
 }) {
-  const [open, setOpen] = useState(view.defaultOpen);
-  // A new outcome re-arms the fold to its own default: a clean push after a
-  // warning pull must fold itself away even though the component survives.
-  const rendered = useRef(view);
-  if (rendered.current !== view) {
-    rendered.current = view;
-    setOpen(view.defaultOpen);
+  const [open, setOpen] = useState(outcome.defaultOpen);
+  const rendered = useRef(outcome);
+  if (rendered.current !== outcome) {
+    rendered.current = outcome;
+    setOpen(outcome.defaultOpen);
   }
   const bodyId = `sync-outcome-body-${useId().replace(/:/g, "")}`;
 
   return (
     <div
-      className={`sync-outcome-notice ${view.tone}${open ? "" : " collapsed"}`}
+      className={`sync-outcome-notice ${outcome.tone}${open ? "" : " collapsed"}`}
     >
       <div className="sync-outcome-head">
-        <Icon name={view.tone === "success" ? "check-circle" : "alert-triangle"} size={18} />
-        {/* The live region is this line and nothing more. A finished sync IS
-            an event — it follows a Push or a Pull — so it announces; but the
-            box also holds a row per thread, the fold controls and the
-            dismissal, and wrapping all of that made the reader sit through the
-            whole result list every time one landed. The summary sentence is
-            the announcement; the rows are there to be read on demand. */}
+        <Icon name={outcome.tone === "success" ? "check-circle" : "alert-triangle"} size={18} />
         <span className="sync-outcome-summary" role="status">
-          <strong>{view.title}</strong>
+          <strong>{outcome.title}</strong>
           <span className="sync-outcome-stats">
-            {view.stats.map((stat) => (
+            {outcome.stats.map((stat) => (
               <span key={`${stat.label}:${stat.value ?? ""}`} className="sync-outcome-stat">
                 <Icon name={stat.icon} size={12} />
                 {stat.lead
@@ -111,17 +82,17 @@ export default function SyncOutcomeNotice({
             ))}
           </span>
         </span>
-        {view.action && onAction && (
+        {outcome.action && onAction && (
           <span className="sync-outcome-actions">
             <button
               type="button"
               className="btn btn-ghost"
               disabled={busy}
-              title={view.action.title}
+              title={actionTitle(outcome.action)}
               onClick={onAction}
             >
-              <Icon name={view.action.icon} size={13} />
-              {view.action.label}
+              <Icon name={actionIcon(outcome.action)} size={13} />
+              {outcome.action.label}
             </button>
           </span>
         )}
@@ -149,8 +120,8 @@ export default function SyncOutcomeNotice({
       </div>
       <div className="sync-outcome-body" id={bodyId}>
         <div className="sync-history-thread-list sync-outcome-threads">
-          {view.rows.map((row) => {
-            const presentation = row.presentation;
+          {outcome.rows.map((row) => {
+            const presentation = ROW_PRESENTATION[row.status];
             return (
               <article key={row.key} className="sync-history-thread-card">
                 <div className="sync-history-thread-topline">
@@ -164,9 +135,6 @@ export default function SyncOutcomeNotice({
                       <Icon name={presentation.icon} size={13} />
                     </span>
                     <strong>{row.title}</strong>
-                    {/* The status icon already says what happened; the why is
-                        a mark at the line's end carrying the words on hover,
-                        not a sentence competing with the title. */}
                     {row.reason && (
                       <span
                         className="sync-history-thread-metric sync-outcome-why"
@@ -179,15 +147,13 @@ export default function SyncOutcomeNotice({
                     )}
                   </div>
                 </div>
-                {(row.identifier || row.updatedAt != null) && (
+                {(row.threadId || row.updatedAt != null) && (
                   <div className="sync-history-session-details">
                     <div className="sync-history-session-summary">
-                      {/* Line 2 is which one it is: the whole identifier —
-                          never a truncated stub — and the stamp beside it. */}
                       <div className="sync-history-thread-meta">
-                        {row.identifier && (
+                        {row.threadId && (
                           <span className="sync-outcome-threadid">
-                            <code>{row.identifier}</code>
+                            <code>{row.threadId}</code>
                           </span>
                         )}
                         {row.updatedAt != null && (
@@ -205,11 +171,11 @@ export default function SyncOutcomeNotice({
             );
           })}
         </div>
-        {view.tone === "warning" && view.technical.length > 0 && (
+        {outcome.tone === "warning" && outcome.technical.length > 0 && (
           <details className="sync-outcome-technical">
             <summary>Technical results</summary>
             <dl>
-              {view.technical.map((entry) => (
+              {outcome.technical.map((entry) => (
                 <div key={`${entry.label}:${entry.value}`}>
                   <dt>{entry.label}</dt>
                   <dd>{entry.value}</dd>

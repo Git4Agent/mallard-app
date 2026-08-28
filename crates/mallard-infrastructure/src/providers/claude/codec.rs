@@ -38,14 +38,13 @@
 //! included), and byte pins, probe hashes, and torn-tail handling never see
 //! the projection.
 
-use crate::conversation_codec::{CodecLineage, CodecUnknownReason};
+use crate::conversation_codec::{canonical_json, CodecLineage, CodecUnknownReason};
 use crate::providers::traits::SessionAnalysis;
 use mallard_domain::{
-    conversation_chain_digests, validate_conversation_chain, CanonicalConversationMessage,
-    MessageId,
+    conversation_chain_digests, sha256_hex, validate_conversation_chain,
+    CanonicalConversationMessage, MessageId,
 };
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const CLAUDE_LINEAGE_CODEC_KEY: &str = "claude.lineage.v1";
@@ -472,49 +471,7 @@ pub(crate) fn semantic_record_fingerprint(mut value: Value) -> String {
             object.remove(key);
         }
     }
-    hex_sha256(canonical_json(&value).as_bytes())
-}
-
-fn canonical_json(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        Value::String(value) => serde_json::to_string(value).expect("JSON string serialization"),
-        Value::Array(values) => format!(
-            "[{}]",
-            values
-                .iter()
-                .map(canonical_json)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        Value::Object(object) => {
-            let sorted = object.iter().collect::<BTreeMap<_, _>>();
-            let entries = sorted
-                .into_iter()
-                .map(|(key, value)| {
-                    format!(
-                        "{}:{}",
-                        serde_json::to_string(key).expect("JSON key serialization"),
-                        canonical_json(value)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{{{entries}}}")
-        }
-    }
-}
-
-pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
+    sha256_hex(canonical_json(&value).as_bytes())
 }
 
 #[cfg(test)]

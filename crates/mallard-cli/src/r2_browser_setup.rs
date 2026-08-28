@@ -1,6 +1,6 @@
 use crate::error::CliError;
 use mallard_application::storage_setup::SecretString;
-use mallard_domain::HostId;
+use mallard_domain::{hex_lower, HostId};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -385,11 +385,7 @@ pub(crate) fn derive_destination(account_id: &str, storage_name: &str) -> R2Dest
     hasher.update([0]);
     hasher.update(storage_name.as_bytes());
     let digest = hasher.finalize();
-    let mut suffix = String::with_capacity(R2_BUCKET_SUFFIX_HEX_BYTES);
-    for byte in digest.iter().take(R2_BUCKET_SUFFIX_BYTES) {
-        use std::fmt::Write as _;
-        write!(&mut suffix, "{byte:02x}").expect("writing to a String cannot fail");
-    }
+    let suffix = hex_lower(&digest[..R2_BUCKET_SUFFIX_BYTES]);
     let readable_slug = readable_bucket_slug(storage_name);
     let bucket = format!("{R2_BUCKET_PREFIX}{readable_slug}-{suffix}");
     R2Destination {

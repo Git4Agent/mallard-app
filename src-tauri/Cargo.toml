@@ -36,7 +36,6 @@ sha2 = "0.10"
 hmac = "0.12"
 libc = "0.2"
 tempfile = "3"
-getrandom = "0.3"
 chrono = "0.4"
 notify = "8.2"
 

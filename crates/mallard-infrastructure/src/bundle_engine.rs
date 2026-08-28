@@ -13,24 +13,25 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::provider_capture::CapturedResources;
 use crate::providers::ProviderRegistry;
 use mallard_domain::{
-    self as domain, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt, BindingState,
-    BundleDirectoryEntry, BundleFileEntry, BundleHead, BundleId, BundleIdentity, BundleKind,
-    BundleManifest, BundleRecipe, BundleScope, BundleSnapshot, CapturedWith, CloudThreadId,
-    ConversationThread, LogicalPath, PlanId, PortableOrigin, ProjectBinding, ProviderKey,
-    ResourceDescriptor, ResourceId, ResourceKind, RestoreAction, RestoreActionKind, RestorePlan,
-    StorageId, SyncScopeKey, Tombstone, TombstoneTarget, BUNDLE_SCHEMA, RESTORE_PLAN_SCHEMA,
+    self as domain, hex_lower, now_secs, sha256_hex, ActionId, ActionStatus, ApplyPolicy,
+    ApplyReceipt, BindingState, BundleDirectoryEntry, BundleFileEntry, BundleHead, BundleId,
+    BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleScope, BundleSnapshot,
+    CapturedWith, CloudThreadId, ConversationThread, LogicalPath, PlanId, PortableOrigin,
+    ProjectBinding, ProviderKey, ResourceDescriptor, ResourceId, ResourceKind, RestoreAction,
+    RestoreActionKind, RestorePlan, StorageId, SyncScopeKey, Tombstone, TombstoneTarget,
+    BUNDLE_SCHEMA, RESTORE_PLAN_SCHEMA,
 };
 
 use crate::storage_core::{
-    hex_lower, open_read_only_no_follow, parse_json_bytes, parse_json_reader,
-    repository_object_key, sha256, sha256_reader, validate_bundle_relative_object_key,
-    CasExpectation, CasOutcome, ExpectedObject, ObjectPrefix, ObjectStore, StageOutcome,
-    VerifiedBody, HEAD_FILE, MAX_LIST_PAGE, REPOSITORY_PREFIX, TAG_FILE,
+    open_read_only_no_follow, parse_json_bytes, parse_json_reader, repository_object_key,
+    sha256_reader, validate_bundle_relative_object_key, CasExpectation, CasOutcome, ExpectedObject,
+    ObjectPrefix, ObjectStore, StageOutcome, VerifiedBody, HEAD_FILE, MAX_LIST_PAGE,
+    REPOSITORY_PREFIX, TAG_FILE,
 };
 
 const MAX_BUNDLE_HEAD_BYTES: u64 = 64 * 1024;
@@ -554,7 +555,7 @@ impl<S: ObjectStore> BundleEngine<S> {
             .map_err(|error| format!("serialize registration manifest: {error}"))?;
         let manifest_size = u64::try_from(manifest_bytes.len())
             .map_err(|_| "serialized registration manifest is too large".to_string())?;
-        let manifest_sha256 = sha256(&manifest_bytes);
+        let manifest_sha256 = sha256_hex(&manifest_bytes);
         let manifest_relative_key = format!("_manifests/{}-{}.json", revision, commit_id);
         let manifest_key = repository_object_key(&identity.bundle_id, &manifest_relative_key)?;
         self.store.put_immutable(&manifest_key, &manifest_bytes)?;
@@ -702,7 +703,7 @@ impl<S: ObjectStore> BundleEngine<S> {
                         path, captured.resource_id
                     ));
                 }
-                let digest = sha256(&captured.bytes);
+                let digest = sha256_hex(&captured.bytes);
                 prepared.insert(
                     path.clone(),
                     (
@@ -937,7 +938,7 @@ impl<S: ObjectStore> BundleEngine<S> {
                 .map_err(|error| format!("serialize bundle manifest: {error}"))?;
             let manifest_size = u64::try_from(manifest_bytes.len())
                 .map_err(|_| "serialized bundle manifest is too large".to_string())?;
-            let manifest_sha256 = sha256(&manifest_bytes);
+            let manifest_sha256 = sha256_hex(&manifest_bytes);
             let manifest_relative_key = format!("_manifests/{}-{}.json", revision, commit_id);
             let manifest_key =
                 repository_object_key(&request.identity.bundle_id, &manifest_relative_key)?;
@@ -1879,7 +1880,7 @@ mod tests {
                 }
                 let path = LogicalPath::parse(file.logical_path.clone())?;
                 let resource_id = ResourceId::parse(file.resource_id.clone())?;
-                let digest = sha256(&file.bytes);
+                let digest = sha256_hex(&file.bytes);
                 let mode = Some(file.mode & 0o777);
                 let retained = previous_scope
                     .and_then(|scope| scope.files.get(&path))
@@ -2444,7 +2445,8 @@ mod tests {
         assert!(second.published);
         assert_eq!(second.snapshot.head.revision, 2);
         let changed_key =
-            repository_object_key(&id, &format!("_objects/{}", sha256(b"second draft"))).unwrap();
+            repository_object_key(&id, &format!("_objects/{}", sha256_hex(b"second draft")))
+                .unwrap();
         assert_eq!(
             store.payload_puts(),
             vec![changed_key.as_str().to_string()],
@@ -2459,7 +2461,7 @@ mod tests {
         let stable_path = project_scope(&second.snapshot.manifest)
             .files
             .iter()
-            .find(|(_, entry)| entry.sha256 == sha256(b"stable contents"))
+            .find(|(_, entry)| entry.sha256 == sha256_hex(b"stable contents"))
             .map(|(path, _)| path.clone())
             .unwrap();
         assert_eq!(
@@ -2653,7 +2655,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(store.payload_puts().len(), 1);
-        let shared_key = format!("_objects/{}", sha256(b"same bytes either way"));
+        let shared_key = format!("_objects/{}", sha256_hex(b"same bytes either way"));
         let file_entries: Vec<_> = project_scope(&published.snapshot.manifest)
             .files
             .values()
@@ -3160,7 +3162,7 @@ mod tests {
 }
 
 fn manual_action(resource_id: &ResourceId, message: &str) -> Result<RestoreAction, String> {
-    let suffix = &sha256(message.as_bytes())[..24];
+    let suffix = &sha256_hex(message.as_bytes())[..24];
     let action = RestoreAction {
         action_id: ActionId::parse(format!("manual-{}", suffix))?,
         resource_id: resource_id.clone(),
@@ -3221,7 +3223,7 @@ fn action_id_for(
     action_type: domain::RestoreActionType,
 ) -> Result<ActionId, String> {
     let material = format!("{}\0{}\0{:?}", resource_id, logical_path, action_type);
-    ActionId::parse(format!("action-{}", &sha256(material.as_bytes())[..24]))
+    ActionId::parse(format!("action-{}", &sha256_hex(material.as_bytes())[..24]))
 }
 
 /// Map one project-scope logical path to its machine target. `project/`
@@ -3270,7 +3272,7 @@ fn project_content_target(
 }
 
 fn directory_entry_digest(logical_path: &LogicalPath, mode: u32) -> String {
-    sha256(format!("dir\0{}\0{:03o}", logical_path, mode & 0o777).as_bytes())
+    sha256_hex(format!("dir\0{}\0{:03o}", logical_path, mode & 0o777).as_bytes())
 }
 
 fn inspect_project_directory_target(path: &Path) -> Result<Option<u32>, String> {
@@ -3564,7 +3566,7 @@ fn write_target_atomic_from_reader(
 pub fn write_target_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
     let expected_size = u64::try_from(bytes.len())
         .map_err(|_| "target bytes cannot fit the portable size field".to_string())?;
-    let expected_sha256 = sha256(bytes);
+    let expected_sha256 = sha256_hex(bytes);
     write_target_atomic_from_reader(
         path,
         &mut std::io::Cursor::new(bytes),
@@ -3594,7 +3596,7 @@ fn write_verified_body_atomic(
 pub fn write_immutable_backup(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let expected_size = u64::try_from(bytes.len())
         .map_err(|_| "backup bytes cannot fit the portable size field".to_string())?;
-    let expected_sha256 = sha256(bytes);
+    let expected_sha256 = sha256_hex(bytes);
     write_immutable_backup_from_reader(
         path,
         &mut std::io::Cursor::new(bytes),
@@ -3890,13 +3892,6 @@ fn path_text(path: &Path) -> Result<String, String> {
         .to_string();
     domain::validate_absolute_clean_path("filesystem path", &text)?;
     Ok(text)
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }
 
 fn random_named_id(prefix: &str) -> Result<String, String> {

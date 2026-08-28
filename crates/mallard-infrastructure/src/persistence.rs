@@ -5,18 +5,18 @@
 //! cannot silently lose changes.
 
 use mallard_domain::{
-    derive_origin_host_token, derive_origin_replica_token, fallback_origin_host_label,
-    generated_named_id, BundleId, ConversationBindings, ConversationPushPlan,
-    ConversationSyncJournal, HostId, HostIdentity, LocalProjectId, MachineProjectState,
-    Materializations, OriginHostToken, OriginReplicaToken, PlanId, ProjectSetupDraft, ReplicaId,
-    RestorePlan, SetupDraftId, SetupTransaction, StorageConfig, StorageId, StorageSetupDraft,
-    StorageSetupDraftId, SyncConfig, CONVERSATION_BINDINGS_SCHEMA, HOST_IDENTITY_SCHEMA,
-    MACHINE_PROJECT_SCHEMA, MAX_SETUP_DRAFTS, MAX_STORAGE_SETUP_DRAFTS,
+    derive_origin_host_token, derive_origin_replica_token, generated_named_id, BundleId,
+    ConversationBindings, ConversationPushPlan, ConversationSyncJournal, HostId, HostIdentity,
+    LocalProjectId, MachineProjectState, Materializations, OriginHostToken, OriginReplicaToken,
+    PlanId, ProjectSetupDraft, ReplicaId, RestorePlan, SetupDraftId, SetupTransaction,
+    StorageConfig, StorageId, StorageSetupDraft, StorageSetupDraftId, SyncConfig,
+    CONVERSATION_BINDINGS_SCHEMA, HOST_IDENTITY_SCHEMA, MACHINE_PROJECT_SCHEMA, MAX_SETUP_DRAFTS,
+    MAX_STORAGE_SETUP_DRAFTS,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -404,117 +404,49 @@ impl LocalStateRepository {
         self.load_or_create_host_identity_unlocked()
     }
 
-    pub fn update_host_display_name(
-        &self,
-        expected_host_id: &HostId,
-        expected_revision: u64,
-        local_display_name: Option<String>,
-    ) -> Result<HostIdentity, String> {
-        let _operation = self.acquire_host_operation()?;
-        let _guard = persistence_guard(&self.root)?;
-        let mut identity = self.load_or_create_host_identity_unlocked()?;
-        if &identity.host_id != expected_host_id || identity.revision != expected_revision {
-            return Err("host identity changed; refresh before saving".to_string());
-        }
-        identity.local_display_name = local_display_name;
-        identity.revision = identity.revision.saturating_add(1);
-        identity.updated_at = identity
-            .updated_at
-            .max(identity.created_at)
-            .max(now_secs()?);
-        identity.validate()?;
-        write_json_atomic(
-            &self.root,
-            &self.host_identity_path(),
-            &identity,
-            MAX_HOST_IDENTITY_BYTES,
-        )?;
-        Ok(identity)
-    }
-
-    /// Deliberately rotate the installation identity. Existing project
-    /// records get fresh replica IDs and are detached until their provider
-    /// scope is revalidated; receipts keep their old host/replica pins.
-    pub fn rotate_host_identity(
-        &self,
-        expected: Option<(&HostId, u64)>,
-        local_display_name: Option<String>,
-    ) -> Result<HostIdentity, String> {
-        let _operation = self.acquire_host_operation()?;
-        let _guard = persistence_guard(&self.root)?;
-        let current = self.load_or_create_host_identity_unlocked()?;
-        if let Some((expected_host_id, expected_revision)) = expected {
-            if &current.host_id != expected_host_id || current.revision != expected_revision {
-                return Err(
-                    "host identity changed; refresh before registering this host".to_string(),
-                );
-            }
-        }
-        self.replace_host_identity_unlocked(Some(&current), local_display_name)
-    }
-
     /// Publish a fresh identity and rebase every host-scoped document under
-    /// it inside one recoverable rotation journal. With `current` present the
-    /// rewrite fails closed on any damaged document; without it (automatic
-    /// registration) damaged documents are quarantined and replaced.
-    fn replace_host_identity_unlocked(
-        &self,
-        current: Option<&HostIdentity>,
-        local_display_name: Option<String>,
-    ) -> Result<HostIdentity, String> {
-        let allow_damaged_recovery = current.is_none();
-        self.validate_setup_transactions_unlocked(allow_damaged_recovery)?;
+    /// it inside one recoverable rotation journal. Automatic registration
+    /// quarantines damaged host-scoped documents and replaces them.
+    fn replace_host_identity_unlocked(&self) -> Result<HostIdentity, String> {
+        self.validate_setup_transactions_unlocked()?;
 
         let config = self.load_config_unlocked()?;
         let mut quarantine = HostRotationQuarantine::default();
-        let next = self.prepare_host_identity_unlocked(local_display_name)?;
-        let machine_result = match current {
-            Some(identity) => self.load_bindings_unlocked(&config, identity),
-            None => self.load_bindings_document_unlocked(&config),
-        };
-        let mut machine = match machine_result {
+        let next = self.prepare_host_identity_unlocked()?;
+        let mut machine = match self.load_bindings_document_unlocked(&config) {
             Ok(machine) => machine,
-            Err(_) if allow_damaged_recovery => {
+            Err(_) => {
                 quarantine.machine_projects = true;
                 MachineProjectState::default()
             }
-            Err(error) => return Err(error),
         };
-        let mut conversations = match current {
-            Some(identity) => {
-                self.load_conversation_bindings_document_unlocked(&config, &machine, identity)?
+        let mut conversations = match read_json_bounded::<ConversationBindings>(
+            &self.root,
+            &self.conversation_bindings_path(),
+            MAX_CONVERSATION_BINDINGS_BYTES,
+        ) {
+            Ok(Some(bindings)) => bindings,
+            Ok(None) => ConversationBindings::empty(next.host_id.clone()),
+            Err(_) => {
+                quarantine.conversation_bindings = true;
+                ConversationBindings::empty(next.host_id.clone())
             }
-            None => match read_json_bounded::<ConversationBindings>(
-                &self.root,
-                &self.conversation_bindings_path(),
-                MAX_CONVERSATION_BINDINGS_BYTES,
-            ) {
-                Ok(Some(bindings)) => bindings,
-                Ok(None) => ConversationBindings::empty(next.host_id.clone()),
-                Err(_) => {
-                    quarantine.conversation_bindings = true;
-                    ConversationBindings::empty(next.host_id.clone())
-                }
-            },
         };
-        if allow_damaged_recovery {
-            // Salvaged alias rows must not wedge automatic registration.
-            let mut seen = BTreeSet::new();
-            conversations.origin_aliases.retain(|alias| {
-                alias.validate().is_ok()
-                    && seen.insert((alias.bundle_id.clone(), alias.origin_host_token.clone()))
-            });
-            conversations
-                .origin_aliases
-                .truncate(mallard_domain::MAX_ORIGIN_ALIASES);
-        }
+        // Salvaged alias rows must not wedge automatic registration.
+        let mut seen = BTreeSet::new();
+        conversations.origin_aliases.retain(|alias| {
+            alias.validate().is_ok()
+                && seen.insert((alias.bundle_id.clone(), alias.origin_host_token.clone()))
+        });
+        conversations
+            .origin_aliases
+            .truncate(mallard_domain::MAX_ORIGIN_ALIASES);
         let mut materializations = match self.load_materializations_unlocked(&config) {
             Ok(materializations) => materializations,
-            Err(_) if allow_damaged_recovery => {
+            Err(_) => {
                 quarantine.materializations = true;
                 Materializations::default()
             }
-            Err(error) => return Err(error),
         };
         let timestamp = next.updated_at;
         let mut replica_map = BTreeMap::new();
@@ -601,30 +533,6 @@ impl LocalStateRepository {
         let _guard = persistence_guard(&self.root)?;
         let identity = self.load_or_create_host_identity_unlocked()?;
         derive_origin_host_token(&identity.host_id, bundle_id)
-    }
-
-    pub fn resolve_origin_host_label(
-        &self,
-        bundle_id: &BundleId,
-        origin_host_token: &OriginHostToken,
-    ) -> Result<(String, bool), String> {
-        let _guard = persistence_guard(&self.root)?;
-        let identity = self.load_or_create_host_identity_unlocked()?;
-        let is_this_host =
-            derive_origin_host_token(&identity.host_id, bundle_id)? == *origin_host_token;
-        let display_name = if is_this_host {
-            "This host".to_string()
-        } else {
-            self.load_conversation_bindings_for_aliases_unlocked(&identity)?
-                .origin_aliases
-                .into_iter()
-                .find(|alias| {
-                    alias.bundle_id == *bundle_id && alias.origin_host_token == *origin_host_token
-                })
-                .map(|alias| alias.display_name)
-                .unwrap_or_else(|| fallback_origin_host_label(origin_host_token))
-        };
-        Ok((display_name, is_this_host))
     }
 
     pub fn load_conversation_bindings(&self) -> Result<ConversationBindings, String> {
@@ -724,25 +632,6 @@ impl LocalStateRepository {
             &self.conversation_sync_journal_path(),
             &journal,
             MAX_CONVERSATION_JOURNAL_BYTES,
-        )?;
-        Ok(result)
-    }
-
-    pub fn mutate_origin_aliases<T>(
-        &self,
-        mutate: impl FnOnce(&mut Vec<mallard_domain::OriginHostAlias>) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let _guard = persistence_guard(&self.root)?;
-        let identity = self.load_or_create_host_identity_unlocked()?;
-        let mut document = self.load_conversation_bindings_for_aliases_unlocked(&identity)?;
-        let result = mutate(&mut document.origin_aliases)?;
-        document.revision = document.revision.saturating_add(1);
-        self.validate_origin_aliases_unlocked(&document)?;
-        write_json_atomic(
-            &self.root,
-            &self.conversation_bindings_path(),
-            &document,
-            MAX_CONVERSATION_BINDINGS_BYTES,
         )?;
         Ok(result)
     }
@@ -1839,9 +1728,9 @@ impl LocalStateRepository {
             }
         }
         if !has_host_scoped_state {
-            return self.create_host_identity_unlocked(None);
+            return self.create_host_identity_unlocked();
         }
-        self.replace_host_identity_unlocked(None, None)
+        self.replace_host_identity_unlocked()
     }
 
     #[cfg(test)]
@@ -1864,11 +1753,8 @@ impl LocalStateRepository {
         Ok(identity)
     }
 
-    fn create_host_identity_unlocked(
-        &self,
-        local_display_name: Option<String>,
-    ) -> Result<HostIdentity, String> {
-        let identity = self.prepare_host_identity_unlocked(local_display_name)?;
+    fn create_host_identity_unlocked(&self) -> Result<HostIdentity, String> {
+        let identity = self.prepare_host_identity_unlocked()?;
         write_json_atomic(
             &self.root,
             &self.host_identity_path(),
@@ -1878,16 +1764,13 @@ impl LocalStateRepository {
         Ok(identity)
     }
 
-    fn prepare_host_identity_unlocked(
-        &self,
-        local_display_name: Option<String>,
-    ) -> Result<HostIdentity, String> {
+    fn prepare_host_identity_unlocked(&self) -> Result<HostIdentity, String> {
         let timestamp = now_secs()?;
         let identity = HostIdentity {
             schema: HOST_IDENTITY_SCHEMA,
             revision: 0,
             host_id: HostId::generate()?,
-            local_display_name,
+            local_display_name: None,
             created_at: timestamp,
             updated_at: timestamp,
         };
@@ -1913,10 +1796,7 @@ impl LocalStateRepository {
         }
     }
 
-    fn validate_setup_transactions_unlocked(
-        &self,
-        allow_damaged_recovery: bool,
-    ) -> Result<(), String> {
+    fn validate_setup_transactions_unlocked(&self) -> Result<(), String> {
         let directory = self.root.join("setup_transactions");
         match fs::symlink_metadata(&directory) {
             Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
@@ -1950,18 +1830,9 @@ impl LocalStateRepository {
                     .and_then(decode_setup_transaction);
             match decoded {
                 Ok(_) => {}
-                Err(_) if allow_damaged_recovery => quarantines.push(path),
-                Err(error) => {
-                    return Err(format!(
-                        "setup transaction is unreadable or invalid; register as a new host to quarantine it ({})",
-                        error
-                    ))
-                }
+                Err(_) => quarantines.push(path),
             }
         }
-        // Verified rotation validates the complete directory before changing
-        // any setup journal. Imported recovery quarantines only the entries
-        // it could not validate.
         for path in quarantines {
             self.quarantine_file_unlocked(&path, "setup-transaction")?;
         }
@@ -2474,44 +2345,6 @@ impl LocalStateRepository {
         Ok(bindings)
     }
 
-    fn load_conversation_bindings_for_aliases_unlocked(
-        &self,
-        identity: &HostIdentity,
-    ) -> Result<ConversationBindings, String> {
-        let document = self
-            .read_conversation_bindings_unlocked()?
-            .unwrap_or_else(|| ConversationBindings::empty(identity.host_id.clone()));
-        self.validate_origin_aliases_unlocked(&document)?;
-        if document.host_id != identity.host_id {
-            return Err("origin aliases belong to a different host document".to_string());
-        }
-        Ok(document)
-    }
-
-    fn validate_origin_aliases_unlocked(
-        &self,
-        document: &ConversationBindings,
-    ) -> Result<(), String> {
-        if document.schema != CONVERSATION_BINDINGS_SCHEMA
-            || document.bindings.len() > mallard_domain::MAX_CONVERSATION_BINDINGS
-            || document.origin_aliases.len() > mallard_domain::MAX_ORIGIN_ALIASES
-        {
-            return Err("invalid conversation bindings document".to_string());
-        }
-        let mut aliases = HashSet::new();
-        for alias in &document.origin_aliases {
-            alias.validate()?;
-            if !aliases.insert((alias.bundle_id.clone(), alias.origin_host_token.clone())) {
-                return Err("duplicate origin host alias".to_string());
-            }
-        }
-        Ok(())
-    }
-
-    /// Explicit host registration must remain an escape hatch for copied or
-    /// partially restored state. Preserve a fully valid conversation document;
-    /// otherwise quarantine its host-bound associations while salvaging only
-    /// independently valid, local presentation aliases.
     fn ensure_root(&self) -> Result<(), String> {
         let parent = self
             .root
@@ -2936,7 +2769,7 @@ mod tests {
     use mallard_domain::{
         generated_named_id, BindingState, BundleId, BundleRecipe, ConversationMaterializationState,
         LocalConversationBinding, LocalProjectRegistration, LocalProviderProfileId,
-        MaterializationId, MaterializationRecord, MaterializationStatus, OriginHostAlias, PlanId,
+        MaterializationId, MaterializationRecord, MaterializationStatus, PlanId,
         PreservedProvenance, ProjectBinding, ProjectStorageLink, ProviderKey, ProviderProfile,
         RepositoryBase, RootTailLayout, ScopeBase, StorageConfig, StorageId, StorageKind,
         SyncScopeKey, TailPartitionKind, ThreadId, LOCAL_SCHEMA, PORTABLE_TAIL_CODEC_V1,
@@ -3619,67 +3452,6 @@ mod tests {
                 .0,
             a.0
         );
-
-        assert_eq!(
-            repo.resolve_origin_host_label(&bundle_a, &a.0).unwrap(),
-            ("This host".to_string(), true)
-        );
-        let remote_token = second_repo
-            .derive_origin_tokens(&bundle_a, &replica)
-            .unwrap()
-            .0;
-        assert_eq!(
-            repo.resolve_origin_host_label(&bundle_a, &remote_token)
-                .unwrap(),
-            (fallback_origin_host_label(&remote_token), false)
-        );
-        repo.mutate_origin_aliases(|aliases| {
-            aliases.push(OriginHostAlias {
-                bundle_id: bundle_a.clone(),
-                origin_host_token: remote_token.clone(),
-                display_name: "Remote laptop".to_string(),
-                revision: 0,
-                updated_at: 1,
-            });
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(
-            repo.resolve_origin_host_label(&bundle_a, &remote_token)
-                .unwrap(),
-            ("Remote laptop".to_string(), false)
-        );
-    }
-
-    #[test]
-    fn display_name_updates_are_revision_guarded_and_clock_monotonic() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = repository(&temp);
-        let mut identity = repo.load_or_create_host_identity().unwrap();
-        identity.revision = 7;
-        identity.created_at = u64::MAX - 1;
-        identity.updated_at = u64::MAX - 1;
-        write_json_atomic(
-            repo.root(),
-            &repo.host_identity_path(),
-            &identity,
-            MAX_HOST_IDENTITY_BYTES,
-        )
-        .unwrap();
-
-        let updated = repo
-            .update_host_display_name(
-                &identity.host_id,
-                identity.revision,
-                Some("Work laptop".to_string()),
-            )
-            .unwrap();
-        assert_eq!(updated.revision, 8);
-        assert_eq!(updated.updated_at, u64::MAX - 1);
-        assert!(repo
-            .update_host_display_name(&identity.host_id, identity.revision, None)
-            .unwrap_err()
-            .contains("refresh before saving"));
     }
 
     #[test]
@@ -3744,65 +3516,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_rotation_preserves_invalid_setup_journals_for_explicit_recovery() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = repository(&temp);
-        let previous = repo.load_or_create_host_identity().unwrap();
-        let path = repo.root().join("setup_transactions").join("broken.json");
-        repo.ensure_directory(path.parent().unwrap()).unwrap();
-        let malformed = b"{\"schema\":2}\n";
-        fs::write(&path, malformed).unwrap();
-
-        let error = repo
-            .rotate_host_identity(Some((&previous.host_id, previous.revision)), None)
-            .unwrap_err();
-        assert!(error.contains("unreadable or invalid"), "{error}");
-        assert_eq!(fs::read(&path).unwrap(), malformed);
-        assert_eq!(
-            repo.load_host_identity_document_unlocked().unwrap(),
-            Some(previous.clone())
-        );
-        assert!(!repo.host_rotation_path().exists());
-        assert!(!repo.root().join("host_recovery_quarantine").exists());
-
-        // Automatic registration is damage tolerant: it quarantines the
-        // malformed setup journal instead of failing closed.
-        repo.mutate_conversation_bindings(|_| Ok(())).unwrap();
-        fs::remove_file(repo.host_identity_path()).unwrap();
-        let registered = repo.load_or_create_host_identity().unwrap();
-        assert_ne!(registered.host_id, previous.host_id);
-        assert!(!path.exists());
-        assert!(fs::read_dir(repo.root().join("host_recovery_quarantine"))
-            .unwrap()
-            .any(|entry| entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with("setup-transaction-")));
-    }
-
-    #[test]
-    fn verified_rotation_fails_closed_on_damaged_host_scoped_state() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = repository(&temp);
-        let identity = repo.load_or_create_host_identity().unwrap();
-        let damaged = b"{not valid machine state";
-        fs::write(repo.machine_projects_path(), damaged).unwrap();
-
-        let error = repo
-            .rotate_host_identity(Some((&identity.host_id, identity.revision)), None)
-            .unwrap_err();
-        assert!(error.contains("parse"), "{error}");
-        assert_eq!(fs::read(repo.machine_projects_path()).unwrap(), damaged);
-        assert_eq!(
-            repo.load_host_identity_document_unlocked().unwrap(),
-            Some(identity)
-        );
-        assert!(!repo.host_rotation_path().exists());
-    }
-
-    #[test]
-    fn verified_rotation_rejects_a_structurally_valid_foreign_host_binding() {
+    fn loading_bindings_rejects_a_structurally_valid_foreign_host_binding() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let identity = repo.load_or_create_host_identity().unwrap();
@@ -3819,9 +3533,7 @@ mod tests {
         .unwrap();
         let preserved = fs::read(repo.machine_projects_path()).unwrap();
 
-        let error = repo
-            .rotate_host_identity(Some((&identity.host_id, identity.revision)), None)
-            .unwrap_err();
+        let error = repo.load_bindings().unwrap_err();
         assert!(error.contains("different host"), "{error}");
         assert_eq!(fs::read(repo.machine_projects_path()).unwrap(), preserved);
         assert_eq!(
@@ -3836,7 +3548,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let previous = repo.load_or_create_host_identity().unwrap();
-        let next = repo.prepare_host_identity_unlocked(None).unwrap();
+        let next = repo.prepare_host_identity_unlocked().unwrap();
         let transaction = HostRotationTransaction {
             // The payload of an unsupported schema must never be replayed.
             schema: 99,
@@ -3875,7 +3587,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let _previous = repo.load_or_create_host_identity().unwrap();
-        let next = repo.prepare_host_identity_unlocked(None).unwrap();
+        let next = repo.prepare_host_identity_unlocked().unwrap();
         let transaction = HostRotationTransaction {
             schema: 1,
             next_identity: next.clone(),
@@ -3913,7 +3625,7 @@ mod tests {
         fs::write(repo.host_rotation_path(), b"{not-json").unwrap();
         let setup = repo.root().join("setup_transactions").join("broken.json");
         repo.ensure_directory(setup.parent().unwrap()).unwrap();
-        fs::write(&setup, b"{also-not-json").unwrap();
+        fs::write(&setup, b"{\"schema\":2}\n").unwrap();
         fs::remove_file(repo.host_identity_path()).unwrap();
 
         let registered = repo.load_or_create_host_identity().unwrap();
@@ -3976,25 +3688,6 @@ mod tests {
         fs::write(repo.machine_projects_path(), b"{broken-machine").unwrap();
         fs::write(repo.materializations_path(), b"{broken-materializations").unwrap();
 
-        // Explicit rotation stays strict: an invalid display name fails
-        // before any load, and damaged documents keep it failing closed.
-        let error = repo
-            .rotate_host_identity(
-                Some((&previous.host_id, previous.revision)),
-                Some("\n".to_string()),
-            )
-            .unwrap_err();
-        assert!(error.contains("invalid local host display name"));
-        assert_eq!(
-            fs::read(repo.machine_projects_path()).unwrap(),
-            b"{broken-machine"
-        );
-        assert_eq!(
-            fs::read(repo.materializations_path()).unwrap(),
-            b"{broken-materializations"
-        );
-        assert!(!repo.host_rotation_path().exists());
-
         fs::remove_file(repo.host_identity_path()).unwrap();
         let registered = repo.load_or_create_host_identity().unwrap();
         assert_ne!(registered.host_id, previous.host_id);
@@ -4017,7 +3710,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let _previous = repo.load_or_create_host_identity().unwrap();
-        let next = repo.prepare_host_identity_unlocked(None).unwrap();
+        let next = repo.prepare_host_identity_unlocked().unwrap();
         let transaction = HostRotationTransaction {
             schema: 1,
             next_identity: next.clone(),
@@ -4105,7 +3798,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let _previous = repo.load_or_create_host_identity().unwrap();
-        let next = repo.prepare_host_identity_unlocked(None).unwrap();
+        let next = repo.prepare_host_identity_unlocked().unwrap();
         let transaction = HostRotationTransaction {
             schema: 1,
             next_identity: next.clone(),

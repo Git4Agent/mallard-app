@@ -68,12 +68,6 @@ const detail: ProjectSessionDetail = {
     reads: { quality: "unsupported", explanation: "This transcript cannot distinguish direct reads." },
     other_tools: exact(1),
   },
-  capabilities: {
-    intermediate_steps: true,
-    checkpoints: true,
-    tool_calls: true,
-    event_detail: true,
-  },
   actions: [{
     action_id: "codex.open_in_app",
     kind: "open_in_app",

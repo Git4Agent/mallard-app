@@ -1,5 +1,31 @@
 use super::*;
 
+#[test]
+fn shared_hash_and_time_primitives_keep_the_existing_encoding_and_epoch_policy() {
+    use sha2::{Digest as _, Sha256};
+    use std::time::Duration;
+
+    assert_eq!(hex_lower(&[0x00, 0x0f, 0x10, 0xff]), "000f10ff");
+    assert_eq!(
+        sha256_hex(b""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+
+    let mut framed = Sha256::new();
+    update_length_prefixed(&mut framed, b"ab");
+    let mut explicit = Sha256::new();
+    explicit.update(2_u64.to_be_bytes());
+    explicit.update(b"ab");
+    assert_eq!(framed.finalize(), explicit.finalize());
+
+    assert_eq!(unix_timestamp_secs(UNIX_EPOCH), 0);
+    assert_eq!(
+        unix_timestamp_secs(UNIX_EPOCH + Duration::from_secs(42)),
+        42
+    );
+    assert_eq!(unix_timestamp_secs(UNIX_EPOCH - Duration::from_secs(1)), 0);
+}
+
 fn bundle_id() -> BundleId {
     BundleId::parse("0123456789abcdef0123456789abcdef").unwrap()
 }
@@ -10,6 +36,39 @@ fn resource_id(value: &str) -> ResourceId {
 
 fn provider(key: &str) -> ProviderKey {
     ProviderKey::parse(key).unwrap()
+}
+
+#[test]
+fn conversation_decision_wire_shape_matches_the_review_contract() {
+    let selectable = ConversationDecision {
+        action: ConversationReviewAction::Publish,
+        blocker: None,
+        selectable: true,
+        blocked_reason: None,
+    };
+    assert_eq!(
+        serde_json::to_value(selectable).unwrap(),
+        serde_json::json!({
+            "action": "publish",
+            "selectable": true,
+        })
+    );
+
+    let blocked = ConversationDecision {
+        action: ConversationReviewAction::Blocked,
+        blocker: Some(ConversationBlocker::MissingBinding),
+        selectable: false,
+        blocked_reason: Some("Connect the provider profile.".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_value(blocked).unwrap(),
+        serde_json::json!({
+            "action": "blocked",
+            "blocker": "missing_binding",
+            "selectable": false,
+            "blocked_reason": "Connect the provider profile.",
+        })
+    );
 }
 
 fn portable_origin() -> PortableOrigin {
@@ -1692,7 +1751,6 @@ fn tail_codec_golden_vectors_are_pinned() {
         )
     );
     tail.validate().unwrap();
-    assert_eq!(tail.tail_record_count(), 2);
 }
 
 #[test]
@@ -1858,16 +1916,6 @@ fn portable_tail_validation_fails_closed() {
     ] {
         assert!(broken.validate().is_err(), "{broken:?}");
     }
-    assert_eq!(
-        portable_tail(
-            TailPartitionKind::WholeThread,
-            0,
-            0,
-            TAIL_VECTOR_EMPTY_WHOLE_AT_0
-        )
-        .tail_record_count(),
-        0
-    );
 }
 
 #[test]

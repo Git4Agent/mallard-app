@@ -16,9 +16,31 @@ version = "0.1.2"
 edition = "2021"
 license = "Apache-2.0"
 
+[profile.dev]
+# Keep source locations in development backtraces without retaining full type
+# and variable information for every workspace object.
+debug = "line-tables-only"
+
 # Optimize dependencies only: the wildcard excludes workspace members, so app
 # edits keep opt-level 0 incremental builds while serde_json/sha2/aws-* run
-# optimized (~3.9× on transcript analysis). Deps compile once; the cost is a
-# single full rebuild when this setting first lands.
+# optimized (~3.9× on transcript analysis). Dependencies do not need debugger
+# information during ordinary application development.
 [profile.dev.package."*"]
 opt-level = 1
+debug = false
+
+[profile.test]
+# Unit-test failures retain source locations, while completed test builds do
+# not leave a separate incremental cache for every workspace test crate.
+debug = "line-tables-only"
+incremental = false
+
+[profile.test.package."*"]
+opt-level = 1
+debug = false
+
+[profile.debugging]
+# Full debugger information remains an explicit, disposable build mode.
+inherits = "dev"
+debug = "full"
+incremental = false

@@ -13,10 +13,9 @@ use super::object_store::{
     StoreListPage, StoredMetadata, VerifiedBody,
 };
 use super::{
-    hex_lower, sha256, sha256_reader, ObjectKey, ObjectPrefix, LOCAL_STORAGE_LOCK, MALLARD_ROOT,
-    MAX_LIST_PAGE,
+    sha256_reader, ObjectKey, ObjectPrefix, LOCAL_STORAGE_LOCK, MALLARD_ROOT, MAX_LIST_PAGE,
 };
-use mallard_domain as domain;
+use mallard_domain::{self as domain, hex_lower, sha256_hex};
 
 #[derive(Clone, Debug)]
 pub struct LocalObjectStore {
@@ -150,7 +149,7 @@ impl LocalObjectStore {
             return Err(format!("metadata object '{}' exceeds its read limit", key));
         }
         Ok(Some(StoredMetadata {
-            etag: sha256(&bytes),
+            etag: sha256_hex(&bytes),
             bytes,
         }))
     }
@@ -257,7 +256,7 @@ impl ObjectStore for LocalObjectStore {
         let _guard = self.lock()?;
         if let Some((mut existing, metadata)) = self.open_object_unlocked(key)? {
             if metadata.len() == bytes.len() as u64
-                && sha256_reader(&mut existing, &format!("object '{}'", key))? == sha256(bytes)
+                && sha256_reader(&mut existing, &format!("object '{}'", key))? == sha256_hex(bytes)
             {
                 return Ok(ImmutablePutOutcome::AlreadyPresent);
             }
@@ -287,7 +286,7 @@ impl ObjectStore for LocalObjectStore {
         }
         self.write_atomic_unlocked(key, bytes)?;
         Ok(CasOutcome::Written {
-            etag: sha256(bytes),
+            etag: sha256_hex(bytes),
         })
     }
 

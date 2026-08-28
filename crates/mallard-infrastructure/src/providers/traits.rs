@@ -41,22 +41,6 @@ pub(crate) fn timeline_tool_detail_budgets(
     (argument_budget, result_budget)
 }
 
-/// Typed capability ladder. Levels are ordered: each level includes every
-/// weaker level's abilities.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderCapabilityLevel {
-    /// Local/remote metadata may be displayed; no payload sync.
-    ActivityOnly,
-    /// Selected local sessions may be stored, but Pull cannot make them
-    /// resumable.
-    BackupOnly,
-    /// Create and proven fast-forward operations; divergence is blocked.
-    Resumable,
-    /// The complete decision matrix, including conflict preservation.
-    ResumableWithConflictPreservation,
-}
-
 /// How to open this provider's coding-agent CLI with a prompt, for the R2
 /// setup hand-off. Absent when the provider ships no launchable CLI.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -85,8 +69,6 @@ pub struct ProviderDescriptor {
     /// argument at launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_launcher: Option<ProviderCliLauncher>,
-    pub capabilities: ProviderCapabilityLevel,
-    pub adapter_version: u32,
 }
 
 /// Bounded provider-authoritative identity metadata from one session file.
@@ -169,9 +151,6 @@ pub struct SessionDiscovery {
     pub state_resources: Vec<DiscoveredProviderState>,
     pub warnings: Vec<String>,
     pub excluded_subagent_session_ids: BTreeSet<String>,
-    /// Provider-native session identities observed by the adapter's one
-    /// profile-wide discovery walk, before project ownership filtering.
-    pub profile_session_ids: BTreeSet<String>,
 }
 
 /// Bounded per-file summary for Activity. Fields default to unknown; the
@@ -517,7 +496,6 @@ pub struct SessionActionDescriptor {
 pub struct SessionActionContext<'a> {
     pub provider_session_id: &'a str,
     pub is_local: bool,
-    pub transcript_path: Option<&'a Path>,
 }
 
 pub struct SessionActionRequest<'a> {
@@ -525,7 +503,6 @@ pub struct SessionActionRequest<'a> {
     pub provider_home: &'a Path,
     pub project_root: &'a Path,
     pub provider_session_id: &'a str,
-    pub transcript_path: Option<&'a Path>,
     /// Observer for the exact shell command before it is launched, so the
     /// activity log records what ran.
     pub before_launch: &'a mut dyn FnMut(&str),

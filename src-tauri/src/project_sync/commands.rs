@@ -16,14 +16,15 @@ use mallard_domain::{
     absent_bundle_head_pin, classify_remote_continuity, classify_scope_continuity,
     cloud_conversation_resource_id, cloud_conversation_transcript_path, compare_conversation_tail,
     compose_preserved_title, conversation_resource_id, fallback_origin_host_label,
-    generated_named_id, generated_uuid_v4, initial_conversation_thread_id,
-    is_conversation_resource_id, parse_conversation_resource_id, retained_conversation_thread_id,
-    validate_absolute_clean_path, ActionId, ActionStatus, ApplyPolicy, ApplyReceipt,
-    BindingResolution, BindingState, BundleDirectoryEntry, BundleId, BundleIdentity, BundleKind,
-    BundleManifest, BundleRecipe, BundleSnapshot, CapturedWith, ClassifiedThread, CloudThreadId,
-    ConversationActionPins, ConversationBlocker, ConversationCapabilities, ConversationCheckpoint,
-    ConversationCloudAnchor, ConversationContextPins, ConversationDecision, ConversationFileRef,
-    ConversationFileRole, ConversationLineageStatus, ConversationMaterializationOperation,
+    generated_named_id, generated_uuid_v4, hex_lower as hex_digest, initial_conversation_thread_id,
+    is_conversation_resource_id, now_secs, parse_conversation_resource_id,
+    retained_conversation_thread_id, validate_absolute_clean_path, ActionId, ActionStatus,
+    ApplyPolicy, ApplyReceipt, BindingResolution, BindingState, BundleDirectoryEntry, BundleId,
+    BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleSnapshot, CapturedWith,
+    ClassifiedThread, CloudThreadId, ConversationActionPins, ConversationBlocker,
+    ConversationCapabilities, ConversationCheckpoint, ConversationCloudAnchor,
+    ConversationContextPins, ConversationDecision, ConversationFileRef, ConversationFileRole,
+    ConversationLineageStatus, ConversationMaterializationOperation,
     ConversationMaterializationState, ConversationOperationId, ConversationOperationState,
     ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
     ConversationPublicationOperation, ConversationPushPlan, ConversationReviewAction,
@@ -105,7 +106,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, UNIX_EPOCH};
 use tauri::Emitter as _;
 use tokio::time::Duration;
 use walkdir::WalkDir;
@@ -417,27 +418,6 @@ pub enum ThreadSyncState {
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-pub struct ThreadSyncDecision {
-    pub action: ConversationReviewAction,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocker: Option<ConversationBlocker>,
-    pub selectable: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocked_reason: Option<String>,
-}
-
-impl From<ConversationDecision> for ThreadSyncDecision {
-    fn from(decision: ConversationDecision) -> Self {
-        Self {
-            action: decision.action,
-            blocker: decision.blocker,
-            selectable: decision.selectable,
-            blocked_reason: decision.blocked_reason,
-        }
-    }
-}
-
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct ThreadSyncEntry {
     pub provider: ProviderKey,
     pub provider_display_name: String,
@@ -470,8 +450,8 @@ pub struct ThreadSyncEntry {
     pub compared_against_storage: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
-    pub push_decision: ThreadSyncDecision,
-    pub pull_decision: ThreadSyncDecision,
+    pub push_decision: ConversationDecision,
+    pub pull_decision: ConversationDecision,
 }
 
 #[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -649,9 +629,7 @@ pub struct BundleReadiness {
     pub generated_at: u64,
 }
 
-fn repository<R: tauri::Runtime>(
-    _app: &tauri::AppHandle<R>,
-) -> Result<LocalStateRepository, String> {
+fn repository() -> Result<LocalStateRepository, String> {
     LocalStateRepository::from_user_home()
 }
 
@@ -790,10 +768,11 @@ async fn run_session_detail_blocking<T: Send + 'static>(
 ) -> Result<T, SessionDetailError> {
     tauri::async_runtime::spawn_blocking(operation)
         .await
-        .map_err(|_| SessionDetailError {
-            code: SessionDetailErrorCode::ProviderError,
-            message: "The session-detail worker stopped unexpectedly.".to_string(),
-            current_snapshot_id: None,
+        .map_err(|_| {
+            session_detail_error(
+                SessionDetailErrorCode::ProviderError,
+                "The session-detail worker stopped unexpectedly.",
+            )
         })?
 }
 
@@ -966,8 +945,8 @@ fn require_verified_r2_changes(
 }
 
 #[tauri::command]
-pub async fn get_project_sync_config(app: tauri::AppHandle) -> Result<SyncConfig, String> {
-    repository(&app)?.load_config().map(redact_storage_secrets)
+pub async fn get_project_sync_config() -> Result<SyncConfig, String> {
+    repository()?.load_config().map(redact_storage_secrets)
 }
 
 /// Local webview adapter for manual R2 Create/Save. The secret is converted
@@ -1016,7 +995,7 @@ pub async fn upsert_r2_storage(
     app: tauri::AppHandle,
     request: UpsertR2StorageRequest,
 ) -> Result<UpsertR2StorageResult, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let runtime = tokio::runtime::Handle::current();
     let existing_storage_id = request.storage_id.clone();
     let storage_name = request.name.clone();
@@ -1059,10 +1038,9 @@ pub async fn upsert_r2_storage(
 /// changes nothing (contrast [`upsert_r2_storage`], the committing twin).
 #[tauri::command]
 pub async fn test_r2_storage(
-    app: tauri::AppHandle,
     request: UpsertR2StorageRequest,
 ) -> Result<TestR2StorageResult, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let runtime = tokio::runtime::Handle::current();
     let request = application_r2_request(request);
     run_blocking(move || {
@@ -1241,18 +1219,15 @@ fn get_storage_setup_draft_with_repository(
 }
 
 #[tauri::command]
-pub async fn list_storage_setup_drafts(
-    app: tauri::AppHandle,
-) -> Result<StorageSetupDraftList, String> {
-    list_storage_setup_drafts_with_repository(&repository(&app)?)
+pub async fn list_storage_setup_drafts() -> Result<StorageSetupDraftList, String> {
+    list_storage_setup_drafts_with_repository(&repository()?)
 }
 
 #[tauri::command]
 pub async fn create_storage_setup_draft(
-    app: tauri::AppHandle,
     storage: StorageSetupDraftPayload,
 ) -> Result<StorageSetupDraftView, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     run_blocking(move || {
         create_storage_setup_draft_with_repository(&repository, storage)
             .map(redact_storage_setup_draft)
@@ -1262,18 +1237,16 @@ pub async fn create_storage_setup_draft(
 
 #[tauri::command]
 pub async fn get_storage_setup_draft(
-    app: tauri::AppHandle,
     draft_id: StorageSetupDraftId,
 ) -> Result<Option<StorageSetupDraftView>, String> {
-    get_storage_setup_draft_with_repository(&repository(&app)?, &draft_id)
+    get_storage_setup_draft_with_repository(&repository()?, &draft_id)
 }
 
 #[tauri::command]
 pub async fn update_storage_setup_draft(
-    app: tauri::AppHandle,
     request: UpdateStorageSetupDraftRequest,
 ) -> Result<StorageSetupDraftView, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     run_blocking(move || {
         update_storage_setup_draft_with_repository(&repository, request)
             .map(redact_storage_setup_draft)
@@ -1282,11 +1255,8 @@ pub async fn update_storage_setup_draft(
 }
 
 #[tauri::command]
-pub async fn discard_storage_setup_draft(
-    app: tauri::AppHandle,
-    draft_id: StorageSetupDraftId,
-) -> Result<bool, String> {
-    repository(&app)?.delete_storage_setup_draft(&draft_id)
+pub async fn discard_storage_setup_draft(draft_id: StorageSetupDraftId) -> Result<bool, String> {
+    repository()?.delete_storage_setup_draft(&draft_id)
 }
 
 fn packaged_cli_path(current_executable: &Path) -> Result<PathBuf, String> {
@@ -1412,8 +1382,8 @@ fn host_identity_status(identity: mallard_domain::HostIdentity) -> HostIdentityS
 /// Loading the status on app open auto-registers a fresh host whenever no
 /// valid identity exists, so this never surfaces a recovery decision.
 #[tauri::command]
-pub async fn get_host_identity_status(app: tauri::AppHandle) -> Result<HostIdentityStatus, String> {
-    let identity = repository(&app)?.load_or_create_host_identity()?;
+pub async fn get_host_identity_status() -> Result<HostIdentityStatus, String> {
+    let identity = repository()?.load_or_create_host_identity()?;
     Ok(host_identity_status(identity))
 }
 
@@ -1422,7 +1392,7 @@ pub async fn save_project_sync_config(
     app: tauri::AppHandle,
     mut config: SyncConfig,
 ) -> Result<SyncConfig, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let previous = repository.load_config().ok();
     // Before anything compares or persists the incoming config, put back the
     // secrets the read path withheld — otherwise every save wipes them, and
@@ -1473,10 +1443,8 @@ fn save_project_sync_config_with_repository(
 }
 
 #[tauri::command]
-pub async fn list_local_projects(
-    app: tauri::AppHandle,
-) -> Result<Vec<LocalProjectRegistration>, String> {
-    let repository = repository(&app)?;
+pub async fn list_local_projects() -> Result<Vec<LocalProjectRegistration>, String> {
+    let repository = repository()?;
     run_blocking(move || Ok(repository.load_config()?.projects)).await
 }
 
@@ -1488,7 +1456,7 @@ pub async fn list_local_projects(
 /// to ride along on a routine listing.
 #[tauri::command]
 pub async fn recover_startup_state(app: tauri::AppHandle) -> Result<(), String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     // Both passes are blocking filesystem work, so they belong on the blocking
     // pool rather than a runtime worker.  Logging stays out here: `run_blocking`
     // turns a panic in the worker into a command error, whereas panicking
@@ -1521,25 +1489,19 @@ pub async fn recover_startup_state(app: tauri::AppHandle) -> Result<(), String> 
 
 #[tauri::command]
 pub async fn get_project(
-    app: tauri::AppHandle,
     local_project_id: LocalProjectId,
 ) -> Result<Option<ProjectDetail>, String> {
-    get_project_with_repository(&repository(&app)?, &local_project_id)
+    get_project_with_repository(&repository()?, &local_project_id)
 }
 
 #[tauri::command]
-pub async fn list_project_repository_kinds(
-    app: tauri::AppHandle,
-) -> Result<BTreeMap<String, bool>, String> {
-    let repository = repository(&app)?;
+pub async fn list_project_repository_kinds() -> Result<BTreeMap<String, bool>, String> {
+    let repository = repository()?;
     run_blocking(move || project_activity::list_project_repository_kinds(&repository)).await
 }
 
 #[tauri::command]
-pub async fn list_agent_providers(
-    app: tauri::AppHandle,
-) -> Result<Vec<ProviderDescriptor>, String> {
-    let _ = app;
+pub async fn list_agent_providers() -> Result<Vec<ProviderDescriptor>, String> {
     Ok(ProviderRegistry::production().descriptors())
 }
 
@@ -1675,7 +1637,7 @@ pub async fn get_project_activity(
     before_time: Option<u64>,
     window_days: Option<u64>,
 ) -> Result<ProjectActivity, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let log = ActivityLogScope::new(ActivityLogType::History).project(&local_project_id, None);
     let log_routine_scan = should_log_history_scan(&local_project_id);
     if log_routine_scan {
@@ -1735,7 +1697,7 @@ pub async fn get_project_thread_sync_comparison(
     local_project_id: LocalProjectId,
     storage_id: StorageId,
 ) -> Result<ThreadSyncComparison, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let log = ActivityLogScope::new(ActivityLogType::History).project(&local_project_id, None);
     let log_routine_compare = HISTORY_SCAN_LOGGED_AT
         .lock()
@@ -1955,14 +1917,14 @@ pub(super) fn get_project_session_event_detail_with_repository(
 
 #[tauri::command]
 pub async fn get_project_session_detail(
-    app: tauri::AppHandle,
     local_project_id: LocalProjectId,
     resource_id: String,
 ) -> Result<ProjectSessionDetail, SessionDetailError> {
-    let repository = repository(&app).map_err(|_| SessionDetailError {
-        code: SessionDetailErrorCode::ProviderError,
-        message: "Mallard could not open its local state repository.".to_string(),
-        current_snapshot_id: None,
+    let repository = repository().map_err(|_| {
+        session_detail_error(
+            SessionDetailErrorCode::ProviderError,
+            "Mallard could not open its local state repository.",
+        )
     })?;
     run_session_detail_blocking(move || {
         get_project_session_detail_with_repository(&repository, &local_project_id, &resource_id)
@@ -1973,7 +1935,6 @@ pub async fn get_project_session_detail(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn get_project_session_timeline_page(
-    app: tauri::AppHandle,
     local_project_id: LocalProjectId,
     resource_id: String,
     snapshot_id: String,
@@ -1983,10 +1944,11 @@ pub async fn get_project_session_timeline_page(
     included_tool_categories: Vec<SessionToolCategory>,
     turn_id: Option<String>,
 ) -> Result<ProjectSessionTimelinePage, SessionDetailError> {
-    let repository = repository(&app).map_err(|_| SessionDetailError {
-        code: SessionDetailErrorCode::ProviderError,
-        message: "Mallard could not open its local state repository.".to_string(),
-        current_snapshot_id: None,
+    let repository = repository().map_err(|_| {
+        session_detail_error(
+            SessionDetailErrorCode::ProviderError,
+            "Mallard could not open its local state repository.",
+        )
     })?;
     run_session_detail_blocking(move || {
         get_project_session_timeline_page_with_repository(
@@ -2008,16 +1970,16 @@ pub async fn get_project_session_timeline_page(
 
 #[tauri::command]
 pub async fn get_project_session_event_detail(
-    app: tauri::AppHandle,
     local_project_id: LocalProjectId,
     resource_id: String,
     snapshot_id: String,
     event_id: String,
 ) -> Result<SessionEventDetail, SessionDetailError> {
-    let repository = repository(&app).map_err(|_| SessionDetailError {
-        code: SessionDetailErrorCode::ProviderError,
-        message: "Mallard could not open its local state repository.".to_string(),
-        current_snapshot_id: None,
+    let repository = repository().map_err(|_| {
+        session_detail_error(
+            SessionDetailErrorCode::ProviderError,
+            "Mallard could not open its local state repository.",
+        )
     })?;
     run_session_detail_blocking(move || {
         get_project_session_event_detail_with_repository(
@@ -2033,14 +1995,14 @@ pub async fn get_project_session_event_detail(
 
 #[tauri::command]
 pub async fn open_project_markdown_path(
-    app: tauri::AppHandle,
     local_project_id: LocalProjectId,
     relative_path: String,
 ) -> Result<(), SessionDetailError> {
-    let repository = repository(&app).map_err(|_| SessionDetailError {
-        code: SessionDetailErrorCode::ProviderError,
-        message: "Mallard could not open its local state repository.".to_string(),
-        current_snapshot_id: None,
+    let repository = repository().map_err(|_| {
+        session_detail_error(
+            SessionDetailErrorCode::ProviderError,
+            "Mallard could not open its local state repository.",
+        )
     })?;
     run_session_detail_blocking(move || {
         let path = session_detail::resolve_project_markdown_path(
@@ -2048,10 +2010,11 @@ pub async fn open_project_markdown_path(
             &local_project_id,
             &relative_path,
         )?;
-        tauri_plugin_opener::open_path(path, None::<&str>).map_err(|_| SessionDetailError {
-            code: SessionDetailErrorCode::ProviderError,
-            message: "Mallard could not open the linked project path.".to_string(),
-            current_snapshot_id: None,
+        tauri_plugin_opener::open_path(path, None::<&str>).map_err(|_| {
+            session_detail_error(
+                SessionDetailErrorCode::ProviderError,
+                "Mallard could not open the linked project path.",
+            )
         })
     })
     .await
@@ -2063,14 +2026,14 @@ pub async fn open_project_markdown_path(
 /// Only paths inside the registered project are ever served.
 #[tauri::command]
 pub async fn read_project_markdown_image(
-    app: tauri::AppHandle,
     local_project_id: LocalProjectId,
     relative_path: String,
 ) -> Result<session_detail::ProjectMarkdownImage, SessionDetailError> {
-    let repository = repository(&app).map_err(|_| SessionDetailError {
-        code: SessionDetailErrorCode::ProviderError,
-        message: "Mallard could not open its local state repository.".to_string(),
-        current_snapshot_id: None,
+    let repository = repository().map_err(|_| {
+        session_detail_error(
+            SessionDetailErrorCode::ProviderError,
+            "Mallard could not open its local state repository.",
+        )
     })?;
     run_session_detail_blocking(move || {
         session_detail::read_project_markdown_image(&repository, &local_project_id, &relative_path)
@@ -2085,7 +2048,7 @@ pub async fn execute_project_session_action(
     resource_id: String,
     action_id: String,
 ) -> Result<(), String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let worker_app = app.clone();
     let worker_log =
         ActivityLogScope::new(ActivityLogType::History).project(&local_project_id, None);
@@ -2110,11 +2073,8 @@ pub async fn execute_project_session_action(
 }
 
 #[tauri::command]
-pub async fn remove_local_project(
-    app: tauri::AppHandle,
-    local_project_id: LocalProjectId,
-) -> Result<bool, String> {
-    remove_local_project_with_repository(&repository(&app)?, &local_project_id)
+pub async fn remove_local_project(local_project_id: LocalProjectId) -> Result<bool, String> {
+    remove_local_project_with_repository(&repository()?, &local_project_id)
 }
 
 /// Explicit escape hatch for derived machine-local sync state. The project
@@ -2125,7 +2085,7 @@ pub async fn reset_project_sync_metadata(
     local_project_id: LocalProjectId,
     expected_project_revision: u64,
 ) -> Result<ProjectSyncMetadataResetResult, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let project_for_work = local_project_id.clone();
     let log = ActivityLogScope::new(ActivityLogType::Repair).project(&local_project_id, None);
     log.emit(
@@ -2212,7 +2172,7 @@ pub async fn clear_storage_data(
     storage_id: StorageId,
     expected_config_revision: u64,
 ) -> Result<StorageDataClearResult, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let storage_name = repository
         .load_config()?
         .storages
@@ -2262,13 +2222,12 @@ pub async fn clear_storage_data(
 
 #[tauri::command]
 pub async fn rename_local_project(
-    app: tauri::AppHandle,
     local_project_id: LocalProjectId,
     local_alias: Option<String>,
     expected_revision: u64,
 ) -> Result<LocalProjectRegistration, String> {
     rename_local_project_with_repository(
-        &repository(&app)?,
+        &repository()?,
         &local_project_id,
         local_alias,
         expected_revision,
@@ -2277,10 +2236,9 @@ pub async fn rename_local_project(
 
 #[tauri::command]
 pub async fn save_project_link(
-    app: tauri::AppHandle,
     request: SaveProjectLinkRequest,
 ) -> Result<ProjectStorageLink, String> {
-    save_project_link_with_repository(&repository(&app)?, request)
+    save_project_link_with_repository(&repository()?, request)
 }
 
 #[tauri::command]
@@ -2288,7 +2246,7 @@ pub async fn connect_project_to_remote_bundle(
     app: tauri::AppHandle,
     request: ConnectProjectBundleRequest,
 ) -> Result<ProjectDetail, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let storage = storage_log_label(&repository, &request.storage_id);
     let log = ActivityLogScope::new(ActivityLogType::Configuration)
         .project(&request.local_project_id, None)
@@ -2328,11 +2286,10 @@ pub async fn connect_project_to_remote_bundle(
 
 #[tauri::command]
 pub async fn remove_project_link(
-    app: tauri::AppHandle,
     local_project_id: LocalProjectId,
     storage_id: StorageId,
 ) -> Result<bool, String> {
-    remove_project_link_with_repository(&repository(&app)?, &local_project_id, &storage_id)
+    remove_project_link_with_repository(&repository()?, &local_project_id, &storage_id)
 }
 
 fn remove_project_link_with_repository(
@@ -2353,32 +2310,28 @@ fn remove_project_link_with_repository(
 }
 
 #[tauri::command]
-pub async fn list_provider_profiles(
-    app: tauri::AppHandle,
-) -> Result<Vec<ProviderProfileSummary>, String> {
-    let repository = repository(&app)?;
+pub async fn list_provider_profiles() -> Result<Vec<ProviderProfileSummary>, String> {
+    let repository = repository()?;
     run_blocking(move || list_provider_profiles_with_repository(&repository)).await
 }
 
 #[tauri::command]
 pub async fn probe_provider_profile(
-    app: tauri::AppHandle,
     provider: ProviderKey,
     path: String,
 ) -> Result<ProviderProfileProbe, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     run_blocking(move || probe_provider_profile_with_repository(&repository, &provider, &path))
         .await
 }
 
 #[tauri::command]
 pub async fn create_provider_profile(
-    app: tauri::AppHandle,
     provider: ProviderKey,
     display_name: String,
     path: String,
 ) -> Result<ProviderProfile, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     run_blocking(move || {
         create_provider_profile_with_repository(&repository, &provider, &display_name, &path)
     })
@@ -2386,16 +2339,15 @@ pub async fn create_provider_profile(
 }
 
 #[tauri::command]
-pub async fn list_project_bindings(app: tauri::AppHandle) -> Result<Vec<ProjectBinding>, String> {
-    Ok(repository(&app)?.load_bindings()?.bindings)
+pub async fn list_project_bindings() -> Result<Vec<ProjectBinding>, String> {
+    Ok(repository()?.load_bindings()?.bindings)
 }
 
 #[tauri::command]
 pub async fn audit_codex_conversation_paths(
-    app: tauri::AppHandle,
     local_project_id: LocalProjectId,
 ) -> Result<CodexConversationPathAudit, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     run_blocking(move || {
         audit_codex_conversation_paths_with_repository(&repository, &local_project_id)
     })
@@ -2407,7 +2359,7 @@ pub async fn repair_codex_conversation_paths(
     app: tauri::AppHandle,
     local_project_id: LocalProjectId,
 ) -> Result<CodexConversationPathRepairResult, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let log = ActivityLogScope::new(ActivityLogType::Repair).project(&local_project_id, None);
     log.emit(
         &app,
@@ -2446,28 +2398,25 @@ pub async fn repair_codex_conversation_paths(
 
 #[tauri::command]
 pub async fn save_project_binding(
-    app: tauri::AppHandle,
     request: SaveProjectBindingRequest,
 ) -> Result<ProjectBinding, String> {
-    save_project_binding_with_repository(&repository(&app)?, request)
+    save_project_binding_with_repository(&repository()?, request)
 }
 
 #[tauri::command]
 pub async fn get_bundle_inventory(
-    app: tauri::AppHandle,
     local_project_id: LocalProjectId,
 ) -> Result<ResourceInventory, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     run_blocking(move || get_bundle_inventory_with_repository(&repository, &local_project_id)).await
 }
 
 #[tauri::command]
 pub async fn inspect_project_files(
-    app: tauri::AppHandle,
     local_project_id: LocalProjectId,
     storage_id: StorageId,
 ) -> Result<ProjectContentInventory, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     run_blocking(move || {
         inspect_project_files_with_repository(&repository, &local_project_id, &storage_id)
     })
@@ -2476,10 +2425,9 @@ pub async fn inspect_project_files(
 
 #[tauri::command]
 pub async fn list_remote_bundle_snapshots(
-    app: tauri::AppHandle,
     storage_id: StorageId,
 ) -> Result<Vec<BundleSnapshotSummary>, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     run_blocking(move || list_remote_bundle_snapshots_with_repository(&repository, &storage_id))
         .await
 }
@@ -2498,7 +2446,7 @@ pub async fn push_bundle(
     conversation_push_plan_id: Option<PlanId>,
     approved_conversation_action_ids: Option<Vec<ActionId>>,
 ) -> Result<ProjectOperationResult, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let (project, storage) =
         project_storage_log_labels(&repository, &local_project_id, &storage_id);
     let log = ActivityLogScope::new(ActivityLogType::Push)
@@ -2627,6 +2575,23 @@ fn format_mb(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
 
+fn format_fetch_started_message(
+    upload: bool,
+    total_objects: usize,
+    total_bytes: u64,
+    storage_name: &str,
+) -> String {
+    let (arrow, action, preposition) = if upload {
+        ("↑", "Uploading", "to")
+    } else {
+        ("↓", "Downloading", "from")
+    };
+    format!(
+        "{arrow}  {action} {total_objects} objects ({}) {preposition} {storage_name}",
+        format_mb(total_bytes)
+    )
+}
+
 /// Bridges engine transfer progress to the UI: one started log line when the
 /// first object lands, a throttled `project-sync-fetch-progress` event stream
 /// while the transfer runs, and a completed line with byte and throughput
@@ -2677,21 +2642,12 @@ impl FetchProgressEmitter {
                 } else {
                     "pull.fetch_started"
                 },
-                &if upload {
-                    format!(
-                        "↑  Uploading {} objects ({}) to {}",
-                        progress.total_objects,
-                        format_mb(progress.total_bytes),
-                        self.storage_name
-                    )
-                } else {
-                    format!(
-                        "↓  Downloading {} objects ({}) from {}",
-                        progress.total_objects,
-                        format_mb(progress.total_bytes),
-                        self.storage_name
-                    )
-                },
+                &format_fetch_started_message(
+                    upload,
+                    progress.total_objects,
+                    progress.total_bytes,
+                    &self.storage_name,
+                ),
             );
         }
         let last = progress.index == progress.total_objects;
@@ -2825,7 +2781,7 @@ pub async fn plan_bundle_restore(
     bundle_id: BundleId,
     binding: ProjectBinding,
 ) -> Result<RestorePlan, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let (project, storage) =
         project_storage_log_labels(&repository, &binding.local_project_id, &storage_id);
     let log = ActivityLogScope::new(ActivityLogType::Pull)
@@ -2924,7 +2880,7 @@ pub async fn apply_bundle_restore(
     plan_id: PlanId,
     approved_action_ids: Vec<ActionId>,
 ) -> Result<RestoreResult, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let log_repository = repository.clone();
     let plan_for_log = repository.load_restore_plan(&plan_id).ok();
     let log = ActivityLogScope::new(ActivityLogType::Pull);
@@ -3074,10 +3030,9 @@ pub async fn apply_bundle_restore(
 
 #[tauri::command]
 pub async fn restart_codex_app_after_pull(
-    app: tauri::AppHandle,
     request: RestartCodexAppAfterPullRequest,
 ) -> Result<CodexAppRestartResult, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     run_blocking(move || {
         if !request.active_chats_complete {
             return Err(
@@ -3107,11 +3062,8 @@ pub async fn restart_codex_app_after_pull(
 }
 
 #[tauri::command]
-pub async fn get_restore_readiness(
-    app: tauri::AppHandle,
-    restore_plan_id: PlanId,
-) -> Result<BundleReadiness, String> {
-    let repository = repository(&app)?;
+pub async fn get_restore_readiness(restore_plan_id: PlanId) -> Result<BundleReadiness, String> {
+    let repository = repository()?;
     run_blocking(move || get_restore_readiness_with_repository(&repository, &restore_plan_id)).await
 }
 
@@ -3526,13 +3478,7 @@ fn inspect_project_files_guarded(
         .project(local_project_id)
         .cloned()
         .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
-    require_project_link(&config, &project, storage_id)?;
-    let link = config
-        .links
-        .iter()
-        .find(|link| link.local_project_id == *local_project_id && link.storage_id == *storage_id)
-        .cloned()
-        .ok_or_else(|| "project storage link disappeared".to_string())?;
+    let link = require_project_link(&config, &project, storage_id)?;
     let binding = repository
         .load_bindings()?
         .active_for(local_project_id)
@@ -3560,7 +3506,7 @@ fn inspect_project_files_guarded(
         local_project_id,
         storage_id,
         &project,
-        &link,
+        link,
         &binding,
         eligibility,
         &engine,
@@ -3704,9 +3650,9 @@ fn build_project_files_inventory(
                     logical_path: format!("project/{}", relative_path),
                     relative_path,
                     entry_type,
-                    size: parse_optional_metadata_u64(&item.descriptor, "_local_size")?,
-                    mode: parse_optional_metadata_u32(&item.descriptor, "_local_mode")?,
-                    source_mtime: parse_optional_metadata_u64(
+                    size: parse_optional_metadata::<u64>(&item.descriptor, "_local_size")?,
+                    mode: parse_optional_metadata::<u32>(&item.descriptor, "_local_mode")?,
+                    source_mtime: parse_optional_metadata::<u64>(
                         &item.descriptor,
                         "_local_source_mtime",
                     )?,
@@ -3843,33 +3789,19 @@ fn project_content_entry_rank(entry_type: ProjectContentEntryType) -> u8 {
     }
 }
 
-fn parse_optional_metadata_u64(
+fn parse_optional_metadata<T>(
     descriptor: &ResourceDescriptor,
     key: &str,
-) -> Result<Option<u64>, String> {
+) -> Result<Option<T>, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
     descriptor
         .metadata
         .get(key)
         .map(|value| {
-            value.parse::<u64>().map_err(|error| {
-                format!(
-                    "resource '{}' has invalid {}: {}",
-                    descriptor.resource_id, key, error
-                )
-            })
-        })
-        .transpose()
-}
-
-fn parse_optional_metadata_u32(
-    descriptor: &ResourceDescriptor,
-    key: &str,
-) -> Result<Option<u32>, String> {
-    descriptor
-        .metadata
-        .get(key)
-        .map(|value| {
-            value.parse::<u32>().map_err(|error| {
+            value.parse::<T>().map_err(|error| {
                 format!(
                     "resource '{}' has invalid {}: {}",
                     descriptor.resource_id, key, error
@@ -4550,11 +4482,10 @@ fn sibling_bundle_status_with_repository(
 
 #[tauri::command]
 pub async fn get_sibling_bundle_status(
-    app: tauri::AppHandle,
     local_project_id: LocalProjectId,
     storage_id: StorageId,
 ) -> Result<SiblingBundleStatus, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     run_blocking(move || {
         sibling_bundle_status_with_repository(&repository, &local_project_id, &storage_id)
     })
@@ -6819,8 +6750,8 @@ fn provider_thread_review(
                 .or_else(|| local_binding.and_then(|binding| binding.forked_from.clone())),
             compared_against_storage: true,
             provider_thread_id: provider_thread_id.clone(),
-            push_decision: push.clone().into(),
-            pull_decision: pull.clone().into(),
+            push_decision: push.clone(),
+            pull_decision: pull.clone(),
         });
 
         if purpose == ReviewPurpose::Observe {
@@ -7342,16 +7273,13 @@ fn load_project_remote_read(
         .project(local_project_id)
         .cloned()
         .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
-    require_project_link(&config, &project, storage_id)?;
+    let link = require_project_link(&config, &project, storage_id)?.clone();
     let storage_name = config
         .storages
         .iter()
         .find(|storage| storage.id == *storage_id)
         .map(|storage| storage.name.clone())
         .ok_or_else(|| format!("unknown storage '{}'", storage_id))?;
-    let link = project_link(&config, local_project_id, storage_id)
-        .cloned()
-        .ok_or_else(|| "project is not linked to this storage".to_string())?;
     let (_, engine) = storage_engine(repository, storage_id)?;
     let current = engine.inspect_optional(&project.bundle_id)?;
     let remote_continuity = classify_remote_continuity(
@@ -7724,7 +7652,7 @@ fn build_thread_sync_comparison(
             continue;
         }
         let detail = thread_capture_unavailable_detail(candidate.blocked_reason.as_deref());
-        let blocked = ThreadSyncDecision {
+        let blocked = ConversationDecision {
             action: ConversationReviewAction::Blocked,
             blocker: Some(ConversationBlocker::CodecUnsupported),
             selectable: false,
@@ -7832,7 +7760,7 @@ fn build_thread_sync_comparison(
             } else {
                 ProviderAccessState::Unsupported
             };
-            let view_only = ThreadSyncDecision {
+            let view_only = ConversationDecision {
                 action: ConversationReviewAction::Blocked,
                 blocker: Some(ConversationBlocker::MissingBinding),
                 selectable: false,
@@ -8278,19 +8206,13 @@ pub(super) fn prepare_push_review_with_progress(
         .project(local_project_id)
         .cloned()
         .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
-    require_project_link(&config, &project, storage_id)?;
+    let link = require_project_link(&config, &project, storage_id)?.clone();
     let storage_name = config
         .storages
         .iter()
         .find(|storage| storage.id == *storage_id)
         .map(|storage| storage.name.clone())
         .ok_or_else(|| format!("unknown storage '{}'", storage_id))?;
-    let link = config
-        .links
-        .iter()
-        .find(|link| link.local_project_id == *local_project_id && link.storage_id == *storage_id)
-        .cloned()
-        .ok_or_else(|| "project storage link disappeared".to_string())?;
     let machine = repository.load_bindings()?;
     let binding = machine
         .active_for(local_project_id)
@@ -8500,7 +8422,7 @@ fn get_push_destination_status_with_repository(
         .project(local_project_id)
         .cloned()
         .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
-    require_project_link(&config, &project, storage_id)?;
+    let link = require_project_link(&config, &project, storage_id)?;
     let binding = repository
         .load_bindings()?
         .active_for(local_project_id)
@@ -8511,14 +8433,11 @@ fn get_push_destination_status_with_repository(
                 local_project_id
             )
         })?;
-    let link = project_link(&config, local_project_id, storage_id)
-        .cloned()
-        .ok_or_else(|| "project is not linked to this storage".to_string())?;
     let (_, engine) = storage_engine(repository, storage_id)?;
     let current = engine.inspect_optional(&project.bundle_id)?;
     let status = classify_push_destination(
         current.as_ref(),
-        &link,
+        link,
         &binding,
         &mut continuity_probe(&engine, &project.bundle_id),
     );
@@ -8531,7 +8450,7 @@ pub async fn prepare_push_review(
     local_project_id: LocalProjectId,
     storage_id: StorageId,
 ) -> Result<PushReviewContext, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let (project, storage) =
         project_storage_log_labels(&repository, &local_project_id, &storage_id);
     let log = ActivityLogScope::new(ActivityLogType::Push)
@@ -8603,11 +8522,10 @@ pub async fn prepare_push_review(
 
 #[tauri::command]
 pub async fn get_push_destination_status(
-    app: tauri::AppHandle,
     local_project_id: LocalProjectId,
     storage_id: StorageId,
 ) -> Result<PushDestinationStatus, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     run_blocking(move || {
         get_push_destination_status_with_repository(&repository, &local_project_id, &storage_id)
     })
@@ -8620,26 +8538,10 @@ fn push_bundle_with_repository(
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
 ) -> Result<ProjectOperationResult, String> {
-    let review = prepare_push_review_with_repository(repository, local_project_id, storage_id)?;
-    let recipe = recommended_review_recipe(&review, storage_id);
-    push_reviewed_test_context(repository, local_project_id, storage_id, review, recipe)
-}
-
-#[cfg(test)]
-fn push_bundle_with_recipe_with_repository(
-    repository: &LocalStateRepository,
-    local_project_id: &LocalProjectId,
-    storage_id: &StorageId,
-    requested_recipe: BundleRecipe,
-) -> Result<ProjectOperationResult, String> {
-    let review = prepare_push_review_with_repository(repository, local_project_id, storage_id)?;
-    push_reviewed_test_context(
-        repository,
-        local_project_id,
-        storage_id,
-        review,
-        requested_recipe,
-    )
+    let service = ProjectSyncService::new(repository);
+    let review = service.prepare_push_review(local_project_id, storage_id)?;
+    let approval = PushApproval::recommended(&review, storage_id);
+    service.push_reviewed(local_project_id, storage_id, approval)
 }
 
 pub(super) fn recommended_review_recipe(
@@ -8700,46 +8602,6 @@ pub(super) fn recommended_review_recipe(
         }
     }
     recipe
-}
-
-#[cfg(test)]
-fn push_reviewed_test_context(
-    repository: &LocalStateRepository,
-    local_project_id: &LocalProjectId,
-    storage_id: &StorageId,
-    review: PushReviewContext,
-    requested_recipe: BundleRecipe,
-) -> Result<ProjectOperationResult, String> {
-    let selected_resources = requested_recipe
-        .entries
-        .keys()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let approved_conversation_action_ids = review
-        .thread_comparison
-        .as_ref()
-        .into_iter()
-        .flat_map(|comparison| comparison.entries.iter())
-        .filter(|entry| {
-            entry.push_decision.selectable && selected_resources.contains(&entry.resource_id)
-        })
-        .filter_map(|entry| {
-            review
-                .conversation_action_ids
-                .get(&entry.resource_id)
-                .cloned()
-        })
-        .collect();
-    push_bundle_reviewed_with_repository(
-        repository,
-        local_project_id,
-        storage_id,
-        requested_recipe,
-        ProjectContentPushReview::default(),
-        review.conversation_push_plan_id,
-        approved_conversation_action_ids,
-        &mut |_| {},
-    )
 }
 
 /// A divergent or blocked thread holds back only itself: its row is not
@@ -10080,17 +9942,6 @@ fn cloud_publication_from_snapshot(snapshot: &BundleSnapshot) -> ConversationClo
         revision: snapshot.head.revision,
         commit_id: snapshot.head.commit_id.clone(),
         manifest_sha256: snapshot.head.manifest_sha256.clone(),
-        manifest_size: snapshot.head.manifest_size,
-        scope_pins: snapshot
-            .manifest
-            .provider_scopes()
-            .map(|(provider, scope)| {
-                (
-                    SyncScopeKey::Provider(provider.clone()).canonical(),
-                    (scope.revision, scope.content_sha256.clone()),
-                )
-            })
-            .collect(),
     }
 }
 
@@ -10517,15 +10368,9 @@ pub(super) fn push_bundle_reviewed_with_progress(
         .project(local_project_id)
         .cloned()
         .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
-    require_project_link(&config, &project, storage_id)?;
-    let stored_link = config
-        .links
-        .iter()
-        .find(|link| link.local_project_id == *local_project_id && link.storage_id == *storage_id)
-        .cloned()
-        .ok_or_else(|| "project storage link disappeared".to_string())?;
-    let stored_destination_recipe = stored_link.recipe.clone();
-    let expected_preference_revision = stored_link.project_content_preferences.revision;
+    let link = require_project_link(&config, &project, storage_id)?.clone();
+    let stored_destination_recipe = link.recipe.clone();
+    let expected_preference_revision = link.project_content_preferences.revision;
     let binding = repository
         .load_bindings()?
         .active_for(local_project_id)
@@ -10537,7 +10382,6 @@ pub(super) fn push_bundle_reviewed_with_progress(
             )
         })?;
     require_codex_conversation_paths_ready(repository, &binding.local_project_id)?;
-    let link = stored_link.clone();
     on_phase("load config and binding", phase_started.elapsed());
     let phase_started = Instant::now();
     // One provider walk feeds the review-token freshness check and byte
@@ -10651,7 +10495,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
             local_project_id,
             storage_id,
             &project,
-            &stored_link,
+            &link,
             &binding,
             eligibility.clone(),
             &engine,
@@ -13735,18 +13579,7 @@ fn capture_request_for_resolved_binding(
     Ok(request)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RepositoryIdentity {
-    fingerprint: String,
-}
-
-impl RepositoryIdentity {
-    fn matches(&self, fingerprint: Option<&str>) -> bool {
-        fingerprint == Some(self.fingerprint.as_str())
-    }
-}
-
-fn repository_identity(project_root: &Path) -> Option<RepositoryIdentity> {
+fn repository_fingerprint(project_root: &Path) -> Option<String> {
     let config_path = project_root.join(".git/config");
     let metadata = fs::symlink_metadata(&config_path).ok()?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 1024 * 1024 {
@@ -13765,24 +13598,18 @@ fn repository_identity(project_root: &Path) -> Option<RepositoryIdentity> {
                 continue;
             };
             if key.trim().eq_ignore_ascii_case("url") {
-                return Some(repository_identity_from_remote_url(value.trim()));
+                return Some(repository_fingerprint_from_remote_url(value.trim()));
             }
         }
     }
     None
 }
 
-fn repository_fingerprint(project_root: &Path) -> Option<String> {
-    repository_identity(project_root).map(|identity| identity.fingerprint)
-}
-
-fn repository_identity_from_remote_url(value: &str) -> RepositoryIdentity {
+fn repository_fingerprint_from_remote_url(value: &str) -> String {
     let sanitized = strip_url_userinfo(value.trim());
     let canonical_github = project_activity::normalize_github_repository_url(value);
     let canonical = canonical_github.as_deref().unwrap_or(&sanitized);
-    RepositoryIdentity {
-        fingerprint: repository_url_fingerprint(canonical),
-    }
+    repository_url_fingerprint(canonical)
 }
 
 fn repository_url_fingerprint(value: &str) -> String {
@@ -13802,32 +13629,25 @@ fn strip_url_userinfo(value: &str) -> String {
     format!("{}://{}", scheme, &remainder[at + 1..])
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(output, "{:02x}", byte);
-    }
-    output
-}
-
-fn require_project_link(
-    config: &SyncConfig,
+fn require_project_link<'a>(
+    config: &'a SyncConfig,
     project: &LocalProjectRegistration,
     storage_id: &StorageId,
-) -> Result<(), String> {
-    if config.links.iter().any(|link| {
-        link.local_project_id == project.local_project_id
-            && &link.storage_id == storage_id
-            && link.bundle_id == project.bundle_id
-    }) {
-        Ok(())
-    } else {
-        Err(format!(
-            "project '{}' is not linked to storage '{}'",
-            project.local_project_id, storage_id
-        ))
-    }
+) -> Result<&'a ProjectStorageLink, String> {
+    config
+        .links
+        .iter()
+        .find(|link| {
+            link.local_project_id == project.local_project_id
+                && &link.storage_id == storage_id
+                && link.bundle_id == project.bundle_id
+        })
+        .ok_or_else(|| {
+            format!(
+                "project '{}' is not linked to storage '{}'",
+                project.local_project_id, storage_id
+            )
+        })
 }
 
 pub(super) fn storage_engine(
@@ -14716,16 +14536,13 @@ pub struct SetupDraftInspection {
 }
 
 #[tauri::command]
-pub async fn list_setup_drafts(app: tauri::AppHandle) -> Result<SetupDraftList, String> {
-    list_setup_drafts_with_repository(&repository(&app)?)
+pub async fn list_setup_drafts() -> Result<SetupDraftList, String> {
+    list_setup_drafts_with_repository(&repository()?)
 }
 
 #[tauri::command]
-pub async fn create_setup_draft(
-    app: tauri::AppHandle,
-    project_root: String,
-) -> Result<CreateSetupDraftResult, String> {
-    let repository = repository(&app)?;
+pub async fn create_setup_draft(project_root: String) -> Result<CreateSetupDraftResult, String> {
+    let repository = repository()?;
     run_blocking(move || {
         ProjectSyncService::new(&repository).create_setup_draft(Path::new(&project_root))
     })
@@ -14733,36 +14550,24 @@ pub async fn create_setup_draft(
 }
 
 #[tauri::command]
-pub async fn get_setup_draft(
-    app: tauri::AppHandle,
-    draft_id: SetupDraftId,
-) -> Result<Option<ProjectSetupDraft>, String> {
-    repository(&app)?.load_setup_draft(&draft_id)
+pub async fn get_setup_draft(draft_id: SetupDraftId) -> Result<Option<ProjectSetupDraft>, String> {
+    repository()?.load_setup_draft(&draft_id)
 }
 
 #[tauri::command]
-pub async fn update_setup_draft(
-    app: tauri::AppHandle,
-    draft: ProjectSetupDraft,
-) -> Result<ProjectSetupDraft, String> {
-    let repository = repository(&app)?;
+pub async fn update_setup_draft(draft: ProjectSetupDraft) -> Result<ProjectSetupDraft, String> {
+    let repository = repository()?;
     run_blocking(move || ProjectSyncService::new(&repository).update_setup_draft(draft)).await
 }
 
 #[tauri::command]
-pub async fn discard_setup_draft(
-    app: tauri::AppHandle,
-    draft_id: SetupDraftId,
-) -> Result<bool, String> {
-    discard_setup_draft_with_repository(&repository(&app)?, &draft_id)
+pub async fn discard_setup_draft(draft_id: SetupDraftId) -> Result<bool, String> {
+    discard_setup_draft_with_repository(&repository()?, &draft_id)
 }
 
 #[tauri::command]
-pub async fn inspect_setup_draft(
-    app: tauri::AppHandle,
-    draft_id: SetupDraftId,
-) -> Result<SetupDraftInspection, String> {
-    let repository = repository(&app)?;
+pub async fn inspect_setup_draft(draft_id: SetupDraftId) -> Result<SetupDraftInspection, String> {
+    let repository = repository()?;
     run_blocking(move || ProjectSyncService::new(&repository).inspect_setup_draft(&draft_id)).await
 }
 
@@ -14772,7 +14577,7 @@ pub async fn finalize_project_setup(
     draft_id: SetupDraftId,
     expected_revision: u64,
 ) -> Result<ProjectDetail, String> {
-    let repository = repository(&app)?;
+    let repository = repository()?;
     let log = ActivityLogScope::new(ActivityLogType::Configuration);
     log.emit(
         &app,
@@ -15158,11 +14963,8 @@ fn resolve_draft_storage(
     }
 }
 
-fn verified_repository_identity(
-    remote: &Option<String>,
-    local: Option<&RepositoryIdentity>,
-) -> bool {
-    local.is_some_and(|local| local.matches(remote.as_deref()))
+fn verified_repository_identity(remote: &Option<String>, local: Option<&String>) -> bool {
+    local.is_some_and(|local| remote.as_deref() == Some(local.as_str()))
 }
 
 pub(super) fn inspect_setup_draft_with_repository(
@@ -15172,10 +14974,11 @@ pub(super) fn inspect_setup_draft_with_repository(
     let mut draft = repository
         .load_setup_draft(draft_id)?
         .ok_or_else(|| format!("setup draft '{}' does not exist", draft_id))?;
-    let local_repository_identity = repository_identity(Path::new(&draft.canonical_project_root));
-    draft.repository_fingerprint = local_repository_identity
-        .as_ref()
-        .map(|identity| identity.fingerprint.clone());
+    let local_repository_fingerprint =
+        repository_fingerprint(Path::new(&draft.canonical_project_root));
+    draft
+        .repository_fingerprint
+        .clone_from(&local_repository_fingerprint);
     let mut sections = Vec::new();
     let mut blocked = false;
 
@@ -15288,7 +15091,7 @@ pub(super) fn inspect_setup_draft_with_repository(
                 }
             } else if !verified_repository_identity(
                 remote_fingerprint,
-                local_repository_identity.as_ref(),
+                local_repository_fingerprint.as_ref(),
             ) && !mismatch_acknowledged
             {
                 SetupSectionStatus {
@@ -15352,10 +15155,7 @@ fn build_setup_transaction(
         ));
     }
     let resolved_storage = resolve_draft_storage(repository, draft)?;
-    let local_repository_identity = repository_identity(&canonical);
-    let local_fingerprint = local_repository_identity
-        .as_ref()
-        .map(|identity| identity.fingerprint.clone());
+    let local_fingerprint = repository_fingerprint(&canonical);
 
     // Existing remote repos are revalidated against storage now, not at draft
     // time: the bundle must still exist and mismatches must be acknowledged.
@@ -15385,7 +15185,7 @@ fn build_setup_transaction(
             let summary = bundle_snapshot_summary_from_snapshot(snapshot)?;
             if !verified_repository_identity(
                 &summary.repository_fingerprint,
-                local_repository_identity.as_ref(),
+                local_fingerprint.as_ref(),
             ) && !mismatch_acknowledged
             {
                 return Err(
@@ -17087,13 +16887,6 @@ fn derive_canonical_alias(root: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -17112,6 +16905,18 @@ mod tests {
         library_object_key, repository_object_key, LocalObjectStore, ObjectStore,
         STORAGE_MARKER_KEY,
     };
+
+    #[test]
+    fn fetch_started_messages_preserve_direction_and_byte_formatting() {
+        assert_eq!(
+            format_fetch_started_message(true, 3, 1_200_000, "Shared"),
+            "↑  Uploading 3 objects (1.2 MB) to Shared"
+        );
+        assert_eq!(
+            format_fetch_started_message(false, 3, 1_200_000, "Shared"),
+            "↓  Downloading 3 objects (1.2 MB) from Shared"
+        );
+    }
 
     #[test]
     fn unchanged_scope_recipe_preserves_remote_revision_after_pull() {
@@ -18105,29 +17910,8 @@ mod tests {
         let project = register(&repo);
         let project_root = temp.path().join("project");
         let claude_home = temp.path().join("claude-home");
-        std::fs::create_dir_all(&project_root).unwrap();
+        bind_and_link_claude_replica(&repo, &project, &storage_id, &project_root, &claude_home);
         std::fs::create_dir_all(claude_home.join("projects/source/memory")).unwrap();
-        let claude = ProviderKey::parse("claude").unwrap();
-        let profile_id = add_profile(&repo, &claude, &claude_home);
-        save_project_binding_with_repository(
-            &repo,
-            SaveProjectBindingRequest {
-                local_project_id: project.local_project_id.clone(),
-                project_root: project_root.to_string_lossy().into_owned(),
-                profile_ids: BTreeMap::from([(claude, profile_id)]),
-                expected_revision: None,
-            },
-        )
-        .unwrap();
-        save_project_link_with_repository(
-            &repo,
-            SaveProjectLinkRequest {
-                local_project_id: project.local_project_id.clone(),
-                storage_id: storage_id.clone(),
-                pinned: true,
-            },
-        )
-        .unwrap();
 
         let cwd = project_root.to_string_lossy().into_owned();
         let records = [
@@ -20332,27 +20116,7 @@ mod tests {
         let project = register(&repo);
         let project_root = temp.path().join("project");
         let codex_home = temp.path().join("codex-home");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let profile_id = add_profile(&repo, &codex_key(), &codex_home);
-        save_project_binding_with_repository(
-            &repo,
-            SaveProjectBindingRequest {
-                local_project_id: project.local_project_id.clone(),
-                project_root: project_root.to_string_lossy().into_owned(),
-                profile_ids: BTreeMap::from([(codex_key(), profile_id)]),
-                expected_revision: None,
-            },
-        )
-        .unwrap();
-        save_project_link_with_repository(
-            &repo,
-            SaveProjectLinkRequest {
-                local_project_id: project.local_project_id.clone(),
-                storage_id: storage_id.clone(),
-                pinned: true,
-            },
-        )
-        .unwrap();
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
 
         let first_id = "019f742a-a206-7932-876c-9db8d8ce575a";
         let second_id = "019f742b-0e23-7f95-aab5-124bdbdf6b42";
@@ -20487,13 +20251,12 @@ mod tests {
             .keys()
             .all(|resource_id| { !is_conversation_resource_id(resource_id.as_str()) }));
         // A later reviewed selection belongs only to this destination.
-        let pushed_empty = push_bundle_with_recipe_with_repository(
-            &repo,
-            &project.local_project_id,
-            &storage_id,
-            BundleRecipe::default(),
-        )
-        .unwrap();
+        let mut empty_approval = PushApproval::recommended(&clean_review, &storage_id);
+        empty_approval.recipe = BundleRecipe::default();
+        empty_approval.approved_conversation_action_ids.clear();
+        let pushed_empty = ProjectSyncService::new(&repo)
+            .push_reviewed(&project.local_project_id, &storage_id, empty_approval)
+            .unwrap();
         assert!(
             !pushed_empty.results.is_empty()
                 && pushed_empty
@@ -25340,7 +25103,7 @@ mod tests {
                 .unwrap();
         let storage_id = first.links[0].storage_id.clone();
         let bundle_id = first.project.bundle_id.clone();
-        let expected_fingerprint = repository_identity_from_remote_url(url).fingerprint;
+        let expected_fingerprint = repository_fingerprint_from_remote_url(url);
         assert_eq!(
             first.project.repository_fingerprint.as_deref(),
             Some(expected_fingerprint.as_str())
@@ -26062,26 +25825,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let source_profile = add_profile(&repo, &codex_key(), &source_codex);
-        save_project_binding_with_repository(
-            &repo,
-            SaveProjectBindingRequest {
-                local_project_id: source.local_project_id.clone(),
-                project_root: source_root.to_string_lossy().into_owned(),
-                profile_ids: BTreeMap::from([(codex_key(), source_profile)]),
-                expected_revision: None,
-            },
-        )
-        .unwrap();
-        save_project_link_with_repository(
-            &repo,
-            SaveProjectLinkRequest {
-                local_project_id: source.local_project_id.clone(),
-                storage_id: storage_id.clone(),
-                pinned: true,
-            },
-        )
-        .unwrap();
+        bind_and_link_test_replica(&repo, &source, &storage_id, &source_root, &source_codex);
         push_bundle_with_repository(&repo, &source.local_project_id, &storage_id).unwrap();
 
         let target = register_local_project_with_repository(
@@ -26095,34 +25839,8 @@ mod tests {
         .unwrap();
         let target_root = temp.path().join("gam2");
         let target_codex = temp.path().join("target-codex");
-        std::fs::create_dir_all(&target_root).unwrap();
-        std::fs::create_dir_all(&target_codex).unwrap();
-        let target_profile = add_profile(&repo, &codex_key(), &target_codex);
-        save_project_binding_with_repository(
-            &repo,
-            SaveProjectBindingRequest {
-                local_project_id: target.local_project_id.clone(),
-                project_root: target_root.to_string_lossy().into_owned(),
-                profile_ids: BTreeMap::from([(codex_key(), target_profile)]),
-                expected_revision: None,
-            },
-        )
-        .unwrap();
-        save_project_link_with_repository(
-            &repo,
-            SaveProjectLinkRequest {
-                local_project_id: target.local_project_id.clone(),
-                storage_id: storage_id.clone(),
-                pinned: true,
-            },
-        )
-        .unwrap();
-        let target_binding = repo
-            .load_bindings()
-            .unwrap()
-            .active_for(&target.local_project_id)
-            .cloned()
-            .unwrap();
+        let target_binding =
+            bind_and_link_test_replica(&repo, &target, &storage_id, &target_root, &target_codex);
 
         let comparison = get_project_thread_sync_comparison_with_repository(
             &repo,
@@ -26508,13 +26226,12 @@ mod tests {
         // The keep-both marker names this device; the preserved identity,
         // provenance, and marker title are minted at apply and surface
         // through the journal-sourced receipt — the plan carries none.
-        let identity = repo.load_or_create_host_identity().unwrap();
-        repo.update_host_display_name(
-            &identity.host_id,
-            identity.revision,
-            Some("Machine A".to_string()),
-        )
-        .unwrap();
+        let device_label = fallback_origin_host_label(
+            &repo
+                .derive_origin_tokens(&bundle_id, &source_binding.replica_id)
+                .unwrap()
+                .0,
+        );
         let divergent_pull = ProjectSyncService::new(&repo)
             .plan_bundle_restore(&storage_id, &bundle_id, &source_binding)
             .unwrap();
@@ -26527,7 +26244,7 @@ mod tests {
             divergent_action.action,
             ConversationPlanActionType::KeepBoth
         );
-        let marker_title = "Change glb color to yellow (Preserved 1 · Machine A)";
+        let marker_title = format!("Change glb color to yellow (Preserved 1 · {device_label})");
         let divergent_result = ProjectSyncService::new(&repo)
             .apply_bundle_restore(
                 &divergent_pull.plan_id,
@@ -26628,8 +26345,8 @@ mod tests {
         assert_eq!(detail.title, marker_title);
 
         // The preserved copy's first Push is CreateCloud: the manifest
-        // record carries the provenance, the marker title, and this
-        // device's shared origin label.
+        // record carries the provenance and marker title without publishing
+        // a local display label.
         let pushed_preserved =
             push_bundle_with_repository(&repo, &source.local_project_id, &storage_id).unwrap();
         assert_eq!(pushed_preserved.revision, Some(5));
@@ -26662,14 +26379,14 @@ mod tests {
         );
         assert_eq!(
             preserved_record.display_title.as_deref(),
-            Some(marker_title)
+            Some(marker_title.as_str())
         );
         assert_eq!(
             preserved_record
                 .last_updated_by_origin
                 .as_ref()
                 .and_then(|origin| origin.shared_label.as_deref()),
-            Some("Machine A")
+            None
         );
 
         // Pulling the preserved thread elsewhere restores the provenance in
@@ -26816,7 +26533,7 @@ mod tests {
         assert_eq!(second_result.preserved_threads.len(), 1);
         assert_eq!(
             second_result.preserved_threads[0].preserved_display_title,
-            "Change glb color to yellow (Preserved 6 · Machine A)"
+            format!("Change glb color to yellow (Preserved 6 · {device_label})")
         );
         let second_preserved_row = repo
             .load_conversation_bindings()
@@ -28842,10 +28559,10 @@ mod tests {
             "ssh://git@github.com/Owner/repository.git",
             "git@github.com:Owner/repository.git",
         ];
-        let expected = repository_identity_from_remote_url(remotes[0]).fingerprint;
+        let expected = repository_fingerprint_from_remote_url(remotes[0]);
         for remote in remotes {
             assert_eq!(
-                repository_identity_from_remote_url(remote).fingerprint,
+                repository_fingerprint_from_remote_url(remote),
                 expected,
                 "remote should canonicalize: {remote}"
             );
@@ -28854,17 +28571,20 @@ mod tests {
 
     #[test]
     fn github_repository_identity_requires_the_current_canonical_fingerprint() {
-        let identity =
-            repository_identity_from_remote_url("https://github.com/Owner/repository.git");
-        assert!(identity.matches(Some(&repository_url_fingerprint(
-            "https://github.com/Owner/repository"
-        ))));
-        assert!(!identity.matches(Some(&repository_url_fingerprint(
-            "https://github.com/Owner/repository.git"
-        ))));
-        assert!(!identity.matches(Some(&repository_url_fingerprint(
-            "https://github.com/Owner/different-repository"
-        ))));
-        assert!(!identity.matches(None));
+        let fingerprint =
+            repository_fingerprint_from_remote_url("https://github.com/Owner/repository.git");
+        assert_eq!(
+            fingerprint,
+            repository_url_fingerprint("https://github.com/Owner/repository")
+        );
+        assert_ne!(
+            fingerprint,
+            repository_url_fingerprint("https://github.com/Owner/repository.git")
+        );
+        assert_ne!(
+            fingerprint,
+            repository_url_fingerprint("https://github.com/Owner/different-repository")
+        );
+        assert!(!verified_repository_identity(&None, Some(&fingerprint)));
     }
 }

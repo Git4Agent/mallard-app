@@ -311,7 +311,6 @@ fn intent_resource(
             namespace: observation.namespace.clone(),
             git,
         },
-        requirement: None,
         resolution,
     };
     let mut resource = PluginInstallIntentResource {
@@ -823,7 +822,6 @@ mod tests {
                     git_ref: None,
                 }),
             },
-            requirement: None,
             resolution: PluginResolutionPolicy::ProviderResolved,
         };
         let plan = CodexCatalogAdapter
@@ -939,7 +937,6 @@ mod tests {
                     git_ref: None,
                 }),
             },
-            requirement: None,
             resolution: PluginResolutionPolicy::ProviderResolved,
         };
         let install = ClaudeCatalogAdapter

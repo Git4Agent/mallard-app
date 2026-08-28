@@ -12,7 +12,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-use mallard_domain::{validate_absolute_clean_path, validate_sha256, StorageId};
+pub(crate) use mallard_domain::sha256_hex;
+use mallard_domain::{
+    generated_named_id, hex_lower, update_length_prefixed, validate_absolute_clean_path,
+    validate_sha256, StorageId,
+};
 
 /// Portable catalog schema. Exactly 1; unknown versions block catalog work.
 pub const CATALOG_SCHEMA: u32 = 1;
@@ -38,28 +42,14 @@ pub const MAX_CATALOG_WITNESSES: usize = 512;
 pub const MAX_CATALOG_OPERATIONS: usize = 256;
 pub const MAX_GENERATED_NAME_ATTEMPTS: u32 = 64;
 
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut output, "{:02x}", byte);
-    }
-    output
-}
-
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    hex_lower(&Sha256::digest(bytes))
-}
-
-fn random_hex(byte_count: usize) -> Result<String, String> {
-    let mut bytes = vec![0_u8; byte_count];
-    getrandom::fill(&mut bytes).map_err(|error| format!("gather randomness: {}", error))?;
-    Ok(hex_lower(&bytes))
-}
-
-fn update_length_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
-    hasher.update((bytes.len() as u64).to_be_bytes());
-    hasher.update(bytes);
+fn generate_catalog_id(prefix: &str) -> Result<String, String> {
+    generated_named_id(prefix).map_err(|error| {
+        error
+            .strip_prefix("random id: ")
+            .map_or(error.clone(), |detail| {
+                format!("gather randomness: {detail}")
+            })
+    })
 }
 
 fn length_prefixed_digest(domain_tag: &[u8], fields: &[&[u8]]) -> String {
@@ -142,25 +132,25 @@ catalog_id!(
 
 impl CatalogCommitId {
     pub fn generate() -> Result<Self, String> {
-        Self::parse(format!("commit-{}", random_hex(12)?))
+        Self::parse(generate_catalog_id("commit")?)
     }
 }
 
 impl CatalogPlanId {
     pub fn generate() -> Result<Self, String> {
-        Self::parse(format!("catplan-{}", random_hex(12)?))
+        Self::parse(generate_catalog_id("catplan")?)
     }
 }
 
 impl CatalogPlanActionId {
     pub fn generate() -> Result<Self, String> {
-        Self::parse(format!("action-{}", random_hex(12)?))
+        Self::parse(generate_catalog_id("action")?)
     }
 }
 
 impl CatalogOperationId {
     pub fn generate() -> Result<Self, String> {
-        Self::parse(format!("catop-{}", random_hex(12)?))
+        Self::parse(generate_catalog_id("catop")?)
     }
 }
 
@@ -181,19 +171,19 @@ impl CatalogResourceRepositoryId {
 
 impl CatalogLinkId {
     pub fn generate() -> Result<Self, String> {
-        Self::parse(format!("catlink-{}", random_hex(12)?))
+        Self::parse(generate_catalog_id("catlink")?)
     }
 }
 
 impl CatalogScopeId {
     pub fn generate() -> Result<Self, String> {
-        Self::parse(format!("catscope-{}", random_hex(12)?))
+        Self::parse(generate_catalog_id("catscope")?)
     }
 }
 
 impl LocalCatalogProfileId {
     pub fn generate() -> Result<Self, String> {
-        Self::parse(format!("catprofile-{}", random_hex(12)?))
+        Self::parse(generate_catalog_id("catprofile")?)
     }
 }
 
@@ -640,15 +630,6 @@ pub enum PortablePluginSource {
     },
 }
 
-/// An exact version or immutable ref, present only when the native provider
-/// operation can enforce it. Neither supported provider proves enforceable
-/// exact-version installation today, so validation rejects any requirement.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct PortablePluginRequirement {
-    pub exact: String,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginInstallIntentDescriptor {
@@ -656,8 +637,6 @@ pub struct PluginInstallIntentDescriptor {
     pub provider_native_namespace: String,
     pub plugin_id: String,
     pub source: PortablePluginSource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requirement: Option<PortablePluginRequirement>,
     pub resolution: PluginResolutionPolicy,
 }
 
@@ -716,13 +695,6 @@ impl PluginInstallIntentResource {
                     ));
                 }
             }
-        }
-        if descriptor.requirement.is_some() {
-            return Err(format!(
-                "plugin '{}' declares an exact requirement, but {} cannot natively enforce one",
-                descriptor.plugin_id,
-                descriptor.provider.as_str()
-            ));
         }
         let computed = self.compute_content_sha256();
         if computed != self.content_sha256 {
@@ -1983,7 +1955,6 @@ pub struct CatalogPushRow {
     pub selectable: bool,
     pub selected_by_default: bool,
     pub held_for_pull: bool,
-    pub removal_candidate: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_content_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2875,7 +2846,6 @@ mod tests {
                     git_ref: None,
                 }),
             },
-            requirement: None,
             resolution: PluginResolutionPolicy::ProviderResolved,
         };
         let mut resource = PluginInstallIntentResource {
@@ -2898,16 +2868,10 @@ mod tests {
         changed.content_sha256 = changed.compute_content_sha256();
         assert_ne!(baseline, changed.content_sha256);
 
-        // An unenforceable exact requirement is rejected outright.
-        let mut with_requirement = resource.clone();
-        with_requirement.descriptor.requirement = Some(PortablePluginRequirement {
-            exact: "1.2.3".to_string(),
-        });
-        with_requirement.content_sha256 = with_requirement.compute_content_sha256();
-        assert!(with_requirement
-            .validate()
-            .unwrap_err()
-            .contains("cannot natively enforce"));
+        // Exact requirements are not part of the supported portable contract.
+        let mut with_requirement = serde_json::to_value(&resource).unwrap();
+        with_requirement["descriptor"]["requirement"] = serde_json::json!({ "exact": "1.2.3" });
+        assert!(serde_json::from_value::<PluginInstallIntentResource>(with_requirement).is_err());
     }
 
     #[test]
@@ -3122,6 +3086,35 @@ mod tests {
         assert!(serde_json::from_str::<CatalogPlanId>("\"plan-abcdef\"").is_err());
         let valid = format!("\"resource-{}\"", "a".repeat(64));
         assert!(serde_json::from_str::<CatalogResourceId>(&valid).is_ok());
+    }
+
+    #[test]
+    fn generated_ids_keep_the_catalog_grammar() {
+        let generated = [
+            ("commit", CatalogCommitId::generate().unwrap().to_string()),
+            ("catplan", CatalogPlanId::generate().unwrap().to_string()),
+            (
+                "action",
+                CatalogPlanActionId::generate().unwrap().to_string(),
+            ),
+            ("catop", CatalogOperationId::generate().unwrap().to_string()),
+            ("catlink", CatalogLinkId::generate().unwrap().to_string()),
+            ("catscope", CatalogScopeId::generate().unwrap().to_string()),
+            (
+                "catprofile",
+                LocalCatalogProfileId::generate().unwrap().to_string(),
+            ),
+        ];
+
+        for (prefix, value) in generated {
+            let random = value
+                .strip_prefix(&format!("{}-", prefix))
+                .expect("generated ID keeps its prefix");
+            assert_eq!(random.len(), 24);
+            assert!(random
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')));
+        }
     }
 
     fn scope_row(provider: ProviderKey, kind: CatalogResourceKindTag) -> CatalogScope {

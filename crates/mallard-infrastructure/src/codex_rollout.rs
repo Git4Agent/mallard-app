@@ -28,13 +28,9 @@ pub struct CodexHistoryBase {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexSessionMetaRecord {
-    pub record_index: usize,
     pub id: String,
-    pub session_id: Option<String>,
     pub forked_from_id: Option<String>,
-    pub parent_thread_id: Option<String>,
     pub cwd: String,
-    pub thread_source: Option<String>,
     pub is_internal_subagent: bool,
     pub history_mode: Option<String>,
     pub history_base: Option<CodexHistoryBase>,
@@ -160,7 +156,7 @@ impl<'a> CodexStructureAccumulator<'a> {
                         "Codex rollout contains conversation items before its authoritative session_meta",
                     ));
                 }
-                let record = parse_session_meta(value, self.record_count - 1)?;
+                let record = parse_session_meta(value)?;
                 self.structural_cwds.insert(record.cwd.clone());
                 if self.current.is_none() {
                     if let Some(expected) = self.expected_active_id {
@@ -328,7 +324,6 @@ pub(crate) fn authoritative_session_meta(
     bytes: &[u8],
 ) -> Result<CodexSessionMetaRecord, CodexStructureError> {
     check_rollout_bounds(bytes)?;
-    let mut record_index = 0_usize;
     for raw in bytes.split(|byte| *byte == b'\n') {
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
         if raw.is_empty() {
@@ -341,7 +336,7 @@ pub(crate) fn authoritative_session_meta(
             )
         })?;
         match structural_record_type(&value) {
-            Some("session_meta") => return parse_session_meta(&value, record_index),
+            Some("session_meta") => return parse_session_meta(&value),
             Some("response_item") | Some("event_msg") | Some("compacted") => {
                 return Err(error(
                     CodexStructureErrorKind::MissingSessionMetadata,
@@ -350,7 +345,6 @@ pub(crate) fn authoritative_session_meta(
             }
             _ => {}
         }
-        record_index += 1;
     }
     Err(error(
         CodexStructureErrorKind::MissingSessionMetadata,
@@ -383,10 +377,7 @@ pub fn session_meta_is_internal_subagent(value: &Value) -> bool {
             .is_some_and(|source| source.contains_key("subagent"))
 }
 
-fn parse_session_meta(
-    value: &Value,
-    record_index: usize,
-) -> Result<CodexSessionMetaRecord, CodexStructureError> {
+fn parse_session_meta(value: &Value) -> Result<CodexSessionMetaRecord, CodexStructureError> {
     let payload = payload_object(value).ok_or_else(|| malformed_meta("has no payload"))?;
     let id = session_meta_id(payload)
         .ok_or_else(|| malformed_meta("has no thread ID"))
@@ -397,26 +388,19 @@ fn parse_session_meta(
     if !std::path::Path::new(&cwd).is_absolute() {
         return Err(malformed_meta("has a non-absolute cwd"));
     }
-    let session_id = optional_text(payload, &["session_id", "sessionId"], "session ID", 128)?;
+    optional_text(payload, &["session_id", "sessionId"], "session ID", 128)?;
     let forked_from_id = optional_text(
         payload,
         &["forked_from_id", "forkedFromId"],
         "fork parent",
         128,
     )?;
-    let parent_thread_id = optional_text(
+    optional_text(
         payload,
         &["parent_thread_id", "parentThreadId"],
         "parent thread ID",
         128,
     )?;
-    let thread_source = payload
-        .get("source")
-        .map(|source| {
-            serde_json::to_string(source)
-                .map_err(|_| malformed_meta("has an invalid source descriptor"))
-        })
-        .transpose()?;
     let history_mode = optional_text(
         payload,
         &["history_mode", "historyMode"],
@@ -425,13 +409,9 @@ fn parse_session_meta(
     )?;
     let history_base = parse_history_base(payload)?;
     Ok(CodexSessionMetaRecord {
-        record_index,
         id,
-        session_id,
         forked_from_id,
-        parent_thread_id,
         cwd,
-        thread_source,
         is_internal_subagent: session_meta_is_internal_subagent(value),
         history_mode,
         history_base,

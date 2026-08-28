@@ -1,9 +1,5 @@
 import type { IconName } from "../Icons";
 import type {
-  SyncOutcomeRowPresentation,
-  SyncOutcomeView,
-} from "../sync-review/SyncOutcomeNotice";
-import type {
   BundleReadiness,
   ProjectOperationResult,
   RestorePlan,
@@ -305,46 +301,5 @@ export function buildPullOutcome({
       ...(result.message ? [{ label: "Message", value: result.message }] : []),
       ...(result.plan_id ? [{ label: "Plan", value: result.plan_id }] : []),
     ],
-  };
-}
-
-const ROW_PRESENTATION: Record<SyncOutcomeRowStatus, SyncOutcomeRowPresentation> = {
-  synced: { icon: "check-circle", className: "synced", label: "Synced" },
-  held: { icon: "git-compare-arrows", className: "diverged", label: "Held for Pull" },
-  preserved: { icon: "git-fork", className: "preserved", label: "Kept independently" },
-  failed: { icon: "octagon-x", className: "unavailable", label: "Failed" },
-};
-
-/** Project the domain outcome onto the shared, resource-neutral renderer. */
-export function syncOutcomeView(outcome: SyncOutcome): SyncOutcomeView {
-  return {
-    tone: outcome.tone,
-    title: outcome.title,
-    stats: outcome.stats,
-    rows: outcome.rows.map((row) => ({
-      key: row.key,
-      title: row.title,
-      presentation: ROW_PRESENTATION[row.status],
-      reason: row.reason,
-      identifier: row.threadId,
-      updatedAt: row.updatedAt,
-    })),
-    action: outcome.action
-      ? {
-        label: outcome.action.label,
-        icon: outcome.action.kind === "open_pull"
-          ? "download"
-          : outcome.action.kind === "reset_metadata"
-            ? "trash"
-            : "refresh",
-        title: outcome.action.kind === "restart_codex"
-          ? outcome.action.title
-          : outcome.action.kind === "reset_metadata"
-            ? "Forget this project's local sync bases, mappings, results, and saved plans"
-            : undefined,
-      }
-      : null,
-    defaultOpen: outcome.defaultOpen,
-    technical: outcome.technical,
   };
 }

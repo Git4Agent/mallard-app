@@ -171,7 +171,6 @@ mod tests {
         let actions = available_actions(&SessionActionContext {
             provider_session_id: "0193b6c1-5352-7b12-9c6e-000000000001",
             is_local: true,
-            transcript_path: None,
         });
         assert_eq!(actions.len(), 2);
         assert_eq!(actions[0].kind, SessionActionKind::OpenInApp);

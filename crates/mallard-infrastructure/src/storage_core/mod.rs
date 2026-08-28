@@ -27,7 +27,6 @@ pub use s3_store::{
 
 use mallard_domain::{BundleId, StorageConfig, StorageKind};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::io::{BufReader, Read};
 
 pub const MALLARD_ROOT: &str = ".mallard";
@@ -46,13 +45,6 @@ const MAX_STORAGE_CLEAR_OBJECTS: u64 = 1_000_000;
 pub struct ManagedStorageClearResult {
     pub repository_objects_deleted: u64,
     pub library_objects_deleted: u64,
-}
-
-impl ManagedStorageClearResult {
-    pub fn objects_deleted(&self) -> u64 {
-        self.repository_objects_deleted
-            .saturating_add(self.library_objects_deleted)
-    }
 }
 
 /// A validated absolute store key inside one of the closed `.mallard/`
@@ -251,19 +243,6 @@ pub fn library_object_key(repository_id: &str, relative: &str) -> Result<ObjectK
     }
     validate_library_relative_object_key(relative)?;
     ObjectKey::parse(format!("{}/{}/{}", LIBRARY_PREFIX, repository_id, relative))
-}
-
-pub(crate) fn sha256(bytes: &[u8]) -> String {
-    hex_lower(&Sha256::digest(bytes))
-}
-
-pub(crate) fn hex_lower(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut output, "{:02x}", byte);
-    }
-    output
 }
 
 pub(crate) fn parse_json_bytes<T: for<'de> Deserialize<'de>>(
@@ -473,11 +452,8 @@ mod tests {
         assert!(store.get_metadata(&library, 64).unwrap().is_none());
         assert!(root.join(STORAGE_MARKER_KEY).is_file());
         assert_eq!(fs::read(root.join("user-file.txt")).unwrap(), b"keep");
-        assert_eq!(
-            clear_managed_storage_data(&store)
-                .unwrap()
-                .objects_deleted(),
-            0
-        );
+        let second_clear = clear_managed_storage_data(&store).unwrap();
+        assert_eq!(second_clear.repository_objects_deleted, 0);
+        assert_eq!(second_clear.library_objects_deleted, 0);
     }
 }

@@ -38,22 +38,13 @@ pub struct LocalResourceRecord {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockedCandidate {
     pub display_name: String,
-    pub provider: ProviderKey,
     pub scope_label: Option<String>,
     pub reason: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PluginOwnedSkill {
-    pub name: String,
-    pub provider: ProviderKey,
-    pub owner: String,
 }
 
 pub struct CatalogLocalInventory {
     pub resources: BTreeMap<CatalogResourceId, LocalResourceRecord>,
     pub blocked: Vec<BlockedCandidate>,
-    pub plugin_owned_skills: Vec<PluginOwnedSkill>,
     pub warnings: Vec<String>,
     pub plugin_inventories: BTreeMap<ProviderKey, ProviderInventory>,
 }
@@ -117,10 +108,8 @@ fn scan_skill_root(
     root: &Path,
     only_install_directory: Option<&str>,
     ownership_roots: &[PathBuf],
-    owner_labels: &BTreeMap<PathBuf, String>,
     inventory: &mut CatalogLocalInventory,
 ) -> Result<(), String> {
-    let provider = scope.provider();
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -143,7 +132,6 @@ fn scan_skill_root(
             }
             inventory.blocked.push(BlockedCandidate {
                 display_name: entry.file_name().to_string_lossy().to_string(),
-                provider,
                 scope_label: Some(scope.display_label().to_string()),
                 reason: "skill directory name is not UTF-8".to_string(),
             });
@@ -162,7 +150,6 @@ fn scan_skill_root(
             Err(error) => {
                 inventory.blocked.push(BlockedCandidate {
                     display_name: name,
-                    provider,
                     scope_label: Some(scope.display_label().to_string()),
                     reason: format!("skill directory is unreadable: {}", error),
                 });
@@ -172,7 +159,6 @@ fn scan_skill_root(
         if meta.file_type().is_symlink() {
             inventory.blocked.push(BlockedCandidate {
                 display_name: name,
-                provider,
                 scope_label: Some(scope.display_label().to_string()),
                 reason: "skill directory is a symlink".to_string(),
             });
@@ -185,7 +171,6 @@ fn scan_skill_root(
         if let Err(error) = validate_skill_name("skill install directory", &name) {
             inventory.blocked.push(BlockedCandidate {
                 display_name: name,
-                provider,
                 scope_label: Some(scope.display_label().to_string()),
                 reason: error,
             });
@@ -195,18 +180,10 @@ fn scan_skill_root(
         // marketplace root belongs to that plugin. Name or content equality
         // alone is never ownership evidence.
         let canonical = canonical_or_self(&entry.path());
-        if let Some(owner_root) = ownership_roots
+        if ownership_roots
             .iter()
-            .find(|owner| canonical.starts_with(owner))
+            .any(|owner| canonical.starts_with(owner))
         {
-            inventory.plugin_owned_skills.push(PluginOwnedSkill {
-                name,
-                provider,
-                owner: owner_labels
-                    .get(owner_root)
-                    .cloned()
-                    .unwrap_or_else(|| owner_root.to_string_lossy().to_string()),
-            });
             continue;
         }
         match capture_skill_tree(&entry.path()) {
@@ -222,7 +199,6 @@ fn scan_skill_root(
             Err(reason) => {
                 inventory.blocked.push(BlockedCandidate {
                     display_name: name,
-                    provider,
                     scope_label: Some(scope.display_label().to_string()),
                     reason,
                 });
@@ -243,7 +219,6 @@ fn scan_skill_root(
         if folded_counts[&candidate.effective_name.to_lowercase()] > 1 {
             inventory.blocked.push(BlockedCandidate {
                 display_name: candidate.effective_name,
-                provider,
                 scope_label: Some(scope.display_label().to_string()),
                 reason: "skill name collides with another skill in the same root".to_string(),
             });
@@ -259,7 +234,6 @@ fn scan_skill_root(
             Err(reason) => {
                 inventory.blocked.push(BlockedCandidate {
                     display_name: candidate.effective_name,
-                    provider,
                     scope_label: Some(scope.display_label().to_string()),
                     reason,
                 });
@@ -342,7 +316,6 @@ fn scan_pets(
             Err(error) => {
                 inventory.blocked.push(BlockedCandidate {
                     display_name: name,
-                    provider: ProviderKey::Codex,
                     scope_label: Some("Pets".to_string()),
                     reason: format!("pet directory is unreadable: {}", error),
                 });
@@ -353,7 +326,6 @@ fn scan_pets(
             if meta.file_type().is_symlink() {
                 inventory.blocked.push(BlockedCandidate {
                     display_name: name,
-                    provider: ProviderKey::Codex,
                     scope_label: Some("Pets".to_string()),
                     reason: "pet directory is a symlink".to_string(),
                 });
@@ -393,7 +365,6 @@ fn scan_pets(
                     }
                     Err(reason) => inventory.blocked.push(BlockedCandidate {
                         display_name: name,
-                        provider: ProviderKey::Codex,
                         scope_label: Some("Pets".to_string()),
                         reason,
                     }),
@@ -401,7 +372,6 @@ fn scan_pets(
             }
             Err(reason) => inventory.blocked.push(BlockedCandidate {
                 display_name: name,
-                provider: ProviderKey::Codex,
                 scope_label: Some("Pets".to_string()),
                 reason,
             }),
@@ -421,7 +391,6 @@ pub fn inventory_local(
     let mut inventory = CatalogLocalInventory {
         resources: BTreeMap::new(),
         blocked: Vec::new(),
-        plugin_owned_skills: Vec::new(),
         warnings: Vec::new(),
         plugin_inventories: BTreeMap::new(),
     };
@@ -429,7 +398,6 @@ pub fn inventory_local(
     // 1-2. Plugins first, so plugin ownership exists before skill
     // classification.
     let mut ownership_roots: Vec<PathBuf> = Vec::new();
-    let mut owner_labels: BTreeMap<PathBuf, String> = BTreeMap::new();
     let discovery_providers: &[ProviderKey] = if matches!(
         kind,
         CatalogResourceKindTag::AgentSkill | CatalogResourceKindTag::PluginInstallIntent
@@ -449,29 +417,6 @@ pub fn inventory_local(
             .extend(provider_inventory.warnings.iter().cloned());
         for root in provider_inventory.ownership_roots() {
             let canonical = canonical_or_self(&root);
-            let owner = provider_inventory
-                .plugins
-                .iter()
-                .find(|observation| {
-                    observation
-                        .install_root
-                        .as_ref()
-                        .is_some_and(|install_root| canonical_or_self(install_root) == canonical)
-                })
-                .map(|observation| observation.plugin_id.clone())
-                .or_else(|| {
-                    provider_inventory
-                        .marketplaces
-                        .iter()
-                        .find(|marketplace| {
-                            marketplace.root.as_ref().is_some_and(|marketplace_root| {
-                                canonical_or_self(marketplace_root) == canonical
-                            })
-                        })
-                        .map(|marketplace| format!("marketplace {}", marketplace.name))
-                })
-                .unwrap_or_else(|| "a plugin".to_string());
-            owner_labels.insert(canonical.clone(), owner);
             ownership_roots.push(canonical);
         }
         for observation in &provider_inventory.plugins {
@@ -510,14 +455,13 @@ pub fn inventory_local(
                 &root.canonical_root,
                 None,
                 &ownership_roots,
-                &owner_labels,
                 &mut inventory,
             )
             .map_err(|detail| CatalogBlocker::InventoryFailed { detail })?;
         }
     }
     if kind.pet_format().is_some() {
-        if let Some(codex) = &context.codex {
+        if let Some(codex) = context.profile(ProviderKey::Codex) {
             scan_pets(&codex.canonical_home, None, &mut inventory)
                 .map_err(|detail| CatalogBlocker::InventoryFailed { detail })?;
         }
@@ -623,7 +567,7 @@ mod tests {
     fn codex_scans_only_its_two_fixed_roots_and_ignores_project_lookalikes() {
         let temp = tempfile::tempdir().unwrap();
         let context = context_for(&temp);
-        let codex_home = context.codex.as_ref().unwrap().canonical_home.clone();
+        let codex_home = context.profile.canonical_home.clone();
         let user_home = temp.path().join("user-home");
 
         write(
@@ -676,7 +620,7 @@ mod tests {
     fn pets_are_discovered_with_distinct_v1_and_v2_identities() {
         let temp = tempfile::tempdir().unwrap();
         let context = context_for(&temp);
-        let codex_home = context.codex.as_ref().unwrap().canonical_home.clone();
+        let codex_home = context.profile.canonical_home.clone();
         let atlas = webp_atlas(CodexPetFormat::V1);
         write(
             &codex_home.join("pets/duck/pet.json"),
@@ -697,7 +641,7 @@ mod tests {
     fn case_folded_collisions_within_one_root_block_both_candidates() {
         let temp = tempfile::tempdir().unwrap();
         let context = context_for(&temp);
-        let codex_home = context.codex.as_ref().unwrap().canonical_home.clone();
+        let codex_home = context.profile.canonical_home.clone();
         write(
             &codex_home.join("skills/Review/SKILL.md"),
             b"---\nname: Review\n---\n",
@@ -731,7 +675,7 @@ mod tests {
         }
         let temp = tempfile::tempdir().unwrap();
         let context = context_for(&temp);
-        let codex_home = context.codex.as_ref().unwrap().canonical_home.clone();
+        let codex_home = context.profile.canonical_home.clone();
         write(
             &codex_home.join("pets/duck/pet.json"),
             br#"{"id":"duck","displayName":"Duck","description":"A duck.","spritesheetPath":"spritesheet.webp"}"#,
@@ -794,7 +738,7 @@ mod tests {
         }
         let temp = tempfile::tempdir().unwrap();
         let context = context_for(&temp);
-        let codex_home = context.codex.as_ref().unwrap().canonical_home.clone();
+        let codex_home = context.profile.canonical_home.clone();
         write(
             &codex_home.join("skills/owned/SKILL.md"),
             b"---\nname: owned\n---\n",
@@ -811,10 +755,6 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(inventory
-            .plugin_owned_skills
-            .iter()
-            .any(|owned| owned.name == "owned"));
         let ids: BTreeSet<_> = inventory.resources.keys().cloned().collect();
         assert!(ids.contains(&skill_resource_id(
             AgentSkillScope::CodexHome,

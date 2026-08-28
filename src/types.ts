@@ -107,12 +107,6 @@ export interface LocalStateWipeResult {
  */
 export type ProviderKey = string;
 
-export type ProviderCapabilityLevel =
-  | "activity_only"
-  | "backup_only"
-  | "resumable"
-  | "resumable_with_conflict_preservation";
-
 export interface ProviderCliLauncher {
   /** Executable name resolved by the opened terminal's login shell. */
   program: string;
@@ -128,8 +122,6 @@ export interface ProviderDescriptor {
   setup_default: boolean;
   /** Present when the provider ships an agent CLI that takes a prompt. */
   cli_launcher?: ProviderCliLauncher | null;
-  capabilities: ProviderCapabilityLevel;
-  adapter_version: number;
 }
 
 export type ProviderAccessState =
@@ -1107,13 +1099,6 @@ export interface SessionDetailWarning {
   severity: NoticeSeverity;
 }
 
-export interface SessionDetailCapabilities {
-  intermediate_steps: boolean;
-  checkpoints: boolean;
-  tool_calls: boolean;
-  event_detail: boolean;
-}
-
 export interface SessionCheckpoint {
   sha: string;
   short_sha: string;
@@ -1136,7 +1121,6 @@ export interface ProjectSessionDetail {
   recorded_sha?: string | null;
   tokens: SessionCount;
   event_counts: SessionEventCounts;
-  capabilities: SessionDetailCapabilities;
   actions: SessionActionDescriptor[];
   github_repository_url?: string | null;
   snapshot_id: string;
@@ -1356,6 +1340,15 @@ export interface UnmappedSessionReference {
   reason: string;
 }
 
+/** What lies before `window_start`. Absent when the window reaches the end. */
+export interface OlderActivity {
+  /** Newest thing below the window; the next page ends just past it. */
+  newest_at: number;
+  /** Commits below the window that are not already drawn on this page. */
+  commits: number;
+  sessions: number;
+}
+
 export interface ProjectActivity {
   project_id: string;
   sessions: ProjectSessionSummary[];
@@ -1365,6 +1358,6 @@ export interface ProjectActivity {
   warnings: string[];
   window_start: number;
   window_end: number;
-  next_before?: number | null;
+  older?: OlderActivity | null;
   storage_sync: StorageSyncSummary[];
 }

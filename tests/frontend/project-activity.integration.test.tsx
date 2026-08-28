@@ -120,7 +120,7 @@ const activity = {
   warnings: [],
   window_start: 1_750_000_000,
   window_end: 1_753_000_000,
-  next_before: 1_750_000_000,
+  older: { newest_at: 1_749_000_000, commits: 41, sessions: 6 },
   storage_sync: [{
     storage_id: "storage-1",
     storage_name: "Local storage 1",
@@ -139,6 +139,8 @@ const contentDefaults = {
   onBranchChange: () => undefined,
   onRefresh: () => undefined,
   onLoadMore: () => undefined,
+  onShowLess: () => undefined,
+  canShowLess: false,
   onSessionAction: () => undefined,
 };
 
@@ -1125,10 +1127,64 @@ test("session actions stay compact and trail the readouts", () => {
   // The menu is deliberately static so the popover anchors to the row instead
   // of to the 22px trigger — anchored to the trigger it was pushed outside the
   // card and clipped by the workspace scroll container.
-  assert.match(debugMenuRule, /position:\s*static/);
-  assert.match(debugPopoverRule, /position:\s*absolute/);
-  assert.match(debugPopoverRule, /width: min\(380px, calc\(100% - 24px\)\)/);
+  // The panel is portalled onto body and pinned to the window, so it carries no
+  // static geometry at all: position, width and cap are measured as it opens.
+  assert.match(debugPopoverRule, /position:\s*fixed/);
+  assert.doesNotMatch(debugPopoverRule, /^\s*(top|left|right|bottom|width):/m);
   assert.doesNotMatch(debugPopoverRule, /100vw/);
+  // Nothing anchors to the menu once the panel has left its subtree, and the
+  // flip class went with it — placement is computed, never a CSS variant.
+  assert.doesNotMatch(debugMenuRule, /position:/);
+  assert.doesNotMatch(css, /\.sync-history-debug-popover\.drop-up/);
+  // A row can sit where the panel fits neither above nor below. It is capped at
+  // the room it lands in and scrolls inside that cap, so nothing is ever cut
+  // off unreachably: header and footer hold, the value list takes the rest.
+  assert.match(debugPopoverRule, /display:\s*flex/);
+  assert.match(debugPopoverRule, /flex-direction:\s*column/);
+  assert.match(css, /\.sync-history-debug-popover > header,\s*\n\.sync-history-debug-popover > footer\s*\{[^}]*flex: 0 0 auto;/s);
+  assert.match(css, /\.sync-history-debug-values\s*\{[^}]*min-height: 0;[^}]*overflow-y: auto;/s);
+  // Declaring display on the class outranks the UA sheet's [hidden] rule, so
+  // the attribute has to be restated or the panel never closes.
+  assert.match(css, /\.sync-history-debug-popover\[hidden\]\s*\{[^}]*display: none;/s);
+
+  const placementSource = readFileSync("src/components/sync-review/debugPopoverPlacement.ts", "utf8");
+  // The height is measured off the panel, never estimated: the row count varies
+  // by provider, and the constant this replaced stood at 300 under a five-row
+  // panel measuring 317, so it sent the panel into a gap it did not fit.
+  // Ceiling of the fractional height, not offsetHeight's rounded integer: a
+  // panel measuring 263.4 capped at 263 falls a hair short of its own content
+  // and grows a scrollbar it does not need.
+  assert.match(placementSource, /Math\.ceil\(panel\.getBoundingClientRect\(\)\.height\)/);
+  assert.doesNotMatch(placementSource, /panel\.offsetHeight/);
+  assert.doesNotMatch(placementSource, /= 300\b/);
+  // Measured in layout, so the uncapped panel never paints and the scroller's
+  // scrollable height never grows for a frame.
+  assert.match(placementSource, /useLayoutEffect\(\(\) => \{\s*\n\s*if \(!open\) \{\s*\n\s*setPlacement\(null\);/s);
+  // Measured against the window, not the scroller — that is the whole point of
+  // lifting it out of the list, and .sync-main must not creep back in.
+  assert.match(placementSource, /window\.innerHeight - anchor\.bottom/);
+  assert.doesNotMatch(placementSource, /closest[^;]*sync-main/);
+  // A fixed panel does not travel with its row, so it is dismissed rather than
+  // left stranded beside the wrong session. Capture, or an inner scroll misses.
+  assert.match(placementSource, /window\.addEventListener\("scroll", dismiss, true\)/);
+  assert.match(placementSource, /window\.addEventListener\("resize", dismiss\)/);
+  // Portalled, so "outside the menu" has to mean outside the panel too, or the
+  // first click on a Copy button dismisses the thing being clicked.
+  const topLayer = readFileSync("src/components/sync-review/TopLayer.tsx", "utf8");
+  assert.match(topLayer, /typeof document === "undefined"/);
+  // Both panels share the markup and the stylesheet, so they share the
+  // placement — the catalog's copy had no placement logic at all.
+  for (const page of [
+    "src/components/project-sync/ProjectActivityPage.tsx",
+    "src/components/storage-catalog/StorageCatalogPage.tsx",
+  ]) {
+    const source = readFileSync(page, "utf8");
+    assert.match(source, /useDebugPopoverPlacement\(rootRef, panelRef, open, /, page);
+    assert.match(source, /<TopLayer>/, page);
+    assert.match(source, /maxHeight: `\$\{placement\.maxHeight\}px`/, page);
+    assert.doesNotMatch(source, /SESSION_DEBUG_POPOVER_HEIGHT/, page);
+    assert.match(source, /panelRef\.current\?\.contains\(target\)/, page);
+  }
 });
 
 test("session debug copy text keeps complete local diagnostics", () => {
@@ -1405,7 +1461,11 @@ test("selection review removes repeated history and storage labels", () => {
   const css = readFileSync("src/App.css", "utf8");
   const compactReviewRule = css.match(/\.sync-sync-review-scroll > \.sync-history-selection-review\s*\{[^}]+\}/s)?.[0] ?? "";
   const compactHeadingRule = css.match(/\.sync-history-selection-review \.sync-history-section-heading\s*\{[^}]+\}/s)?.[0] ?? "";
-  assert.match(compactReviewRule, /padding-top:\s*0/);
+  // 8px, not 0. The compact review was zeroed while a section heading with its
+  // own top margin led the body; embedded, that heading is suppressed, so a
+  // timeline leads with a card and a flat list with a row — neither carries a
+  // margin, and both sat their first border on the header's hairline.
+  assert.match(compactReviewRule, /padding-top:\s*8px/);
   assert.match(compactReviewRule, /padding-right:\s*8px/);
   assert.match(compactHeadingRule, /margin-top:\s*8px/);
 });
@@ -2356,4 +2416,180 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
   assert.doesNotMatch(html, /data-icon="more"/);
   assert.match(html, /sync-sidebar-storage-warning/);
   assert.match(storageButton, /Storage issue: Storage folder unavailable\./);
+});
+
+test("the rail's foot names the day one press lands on", () => {
+  // The control it replaced said "Load previous 30 days" and floated at the
+  // very bottom of the page, below the Older activity fold — detached from the
+  // rail it paged, and unable to say whether the next click landed on anything.
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={activity} />,
+  );
+  const marker = html.indexOf("sync-history-rail-foot");
+  assert.ok(marker > 0, "the foot renders");
+  const foot = html.slice(html.lastIndexOf("<div", marker), html.indexOf("</div>", html.indexOf("</button>", marker)));
+  assert.match(foot, /<strong>Load earlier<\/strong>/);
+  // The counts stay available without being printed at everyone.
+  assert.match(foot, /aria-label="Load earlier history — through [^"]*, 41 commits and 6 sessions"/);
+  // The node is the foot's, not a button's: two controls cannot each own it.
+  assert.match(foot, /class="sync-history-rail-foot-node"[^>]*>.*?data-icon="chevron-down"/s);
+  assert.doesNotMatch(foot, /icon-spin/);
+  // One window loaded, so there is nothing to pop.
+  assert.doesNotMatch(foot, /Show less/);
+  // It ends the timeline it pages, rather than trailing the whole page.
+  assert.ok(
+    html.indexOf("sync-history-rail-foot") > html.indexOf("sync-history-commit-rail"),
+    "the foot comes after the rail",
+  );
+  assert.doesNotMatch(html, /sync-history-load-more|Load previous 30 days/);
+});
+
+test("Show less appears only once a window has been loaded onto the stack", () => {
+  // Paging was a one-way door until this existed: the merged view had no way
+  // back to the window it opened on.
+  const one = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={activity} />,
+  );
+  assert.doesNotMatch(one, /Show less/);
+
+  const paged = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={activity} canShowLess />,
+  );
+  assert.match(paged, /<strong>Show less<\/strong>/);
+  assert.match(paged, /<strong>Load earlier<\/strong>/);
+  // Both are steps in the same foot, so one node serves them.
+  const nodes = paged.match(/class="sync-history-rail-foot-node"/g) ?? [];
+  assert.equal(nodes.length, 1);
+
+  // At the end of the history there is nothing to load, but still something to
+  // pop — so the foot stays and the floor does not claim the last word.
+  const spent = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={{ ...activity, older: null }} canShowLess />,
+  );
+  assert.match(spent, /<strong>Show less<\/strong>/);
+  assert.doesNotMatch(spent, /Load earlier|sync-history-rail-floor/);
+});
+
+test("a fetch in flight moves the node and nothing else", () => {
+  // The labels and the date hold their positions because the spinner lands in
+  // the rail node, a 24px slot outside the row. The date holds because the
+  // fetch is still running *through* that day.
+  const ready = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={activity} />,
+  );
+  const busy = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={activity} loadingMore />,
+  );
+  assert.match(busy, /class="sync-history-rail-foot-node"[^>]*>.*?data-icon="refresh"[^>]*class="icon-spin"/s);
+  assert.match(busy, /<strong>Loading…<\/strong>/);
+  assert.match(busy, /disabled=""/);
+  // Same stamp, in the same slot, either way.
+  const stamp = (html: string) => html.match(/<time datetime="[^"]*">· ([^<]*)<\/time>/)?.[1];
+  assert.equal(stamp(busy), stamp(ready));
+});
+
+test("nothing older draws a floor, not a control that would reload the page", () => {
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={{ ...activity, older: null }} />,
+  );
+  assert.doesNotMatch(html, /sync-history-rail-step/);
+  assert.match(html, /<p class="sync-history-rail-floor">[^<]*· nothing earlier<\/p>/);
+});
+
+test("an empty rail is still the rail, and says which of three things happened", () => {
+  // One sentence used to cover all three, blaming a 30-day window even for the
+  // two the window has nothing to do with — where no amount of paging would
+  // ever have produced a commit.
+  const noCommits = { ...activity.git, commits: [], unique_session_count: 0 };
+  const emptyWindow = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={{ ...activity, git: noCommits }} />,
+  );
+  assert.doesNotMatch(emptyWindow, /No commits are available in this 30-day window/);
+  assert.match(emptyWindow, /class="sync-history-commit sync-history-commit-gap"/);
+  assert.match(emptyWindow, /<strong>No commits<\/strong>/);
+  assert.match(emptyWindow, /data-icon="clock"/);
+  // The gap sits on the rail, so the terminus below still has a spine to end.
+  assert.ok(emptyWindow.indexOf("sync-history-commit-gap") > emptyWindow.indexOf("sync-history-commit-rail"));
+  assert.match(emptyWindow, /sync-history-rail-step/);
+
+  const unborn = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{ ...activity, git: noCommits, older: { newest_at: 1_749_000_000, commits: 0, sessions: 6 } }}
+    />,
+  );
+  assert.match(unborn, /<strong>No commits yet<\/strong>/);
+
+  const historyOnly = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{
+        ...activity,
+        git: { ...noCommits, branches: [{ name: "main", is_current: false, available: false }] },
+      }}
+    />,
+  );
+  assert.match(historyOnly, /<strong>Branch not checked out here<\/strong>/);
+  assert.match(historyOnly, /data-icon="git-branch"/);
+});
+
+test("a project with no repository gets the same control, minus the rail", () => {
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={{ ...activity, git: null }} />,
+  );
+  assert.match(html, /class="sync-history-rail-foot no-rail"/);
+  assert.match(html, /<strong>Load earlier<\/strong>/);
+});
+
+test("a review pages too, and the fold waits until paging is spent", () => {
+  // Two doors into one room, otherwise: while anything is still loadable the
+  // terminus is the route, so the fold stays out of the way. It cannot just be
+  // deleted — the comparison is not windowed and the terminus only walks the
+  // session timeline, so an entry with no session row at all is reachable by
+  // no amount of paging.
+  const entry = {
+    provider: "codex",
+    provider_display_name: "Codex",
+    access: "bound_ready",
+    thread_id: "orphan",
+    conversation_resource_id: "codex:conversation:orphan",
+    resource_id: "codex:conversation:orphan",
+    display_name: "A thread no session row reaches",
+    state: "local_only",
+    local_present: true,
+    storage_present: false,
+    compared_against_storage: true,
+    push_decision: { action: "create_cloud", selectable: true },
+    pull_decision: { action: "no_changes", selectable: false },
+  };
+  const comparison = emptyComparison({ entries: [entry] });
+
+  // More to load: the terminus is the way back, and the fold holds its peace.
+  const paging = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults} activity={activity} selectionMode="push" comparison={comparison} />,
+  );
+  assert.match(paging, /sync-history-rail-step/);
+  assert.match(paging, /<strong>Load earlier<\/strong>/);
+  assert.doesNotMatch(paging, /Older activity/);
+
+  // Paging spent: whatever the comparison still holds is the true remainder,
+  // and a review has to offer it or it drops candidates silently.
+  const spent = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults} activity={{ ...activity, older: null }} selectionMode="push" comparison={comparison} />,
+  );
+  assert.doesNotMatch(spent, /sync-history-rail-step/);
+  assert.match(spent, /Older activity/);
+  assert.match(spent, /A thread no session row reaches/);
+  // "nothing earlier" is browse's last word, never a review's.
+  assert.doesNotMatch(spent, /nothing earlier/);
+});
+
+test("browse keeps its floor, because nothing catches what paging misses there", () => {
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={{ ...activity, older: null }} />,
+  );
+  assert.match(html, /sync-history-rail-floor/);
+  assert.match(html, /nothing earlier/);
 });

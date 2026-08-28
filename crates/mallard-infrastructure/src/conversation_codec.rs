@@ -7,15 +7,14 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 use crate::codex_rollout::{
     check_rollout_bounds, CodexStructureAccumulator, CodexStructureErrorKind,
 };
 use mallard_domain::{
-    conversation_chain_digests, validate_conversation_chain, CanonicalConversationMessage,
-    MessageId,
+    conversation_chain_digests, sha256_hex, validate_conversation_chain,
+    CanonicalConversationMessage, MessageId,
 };
 
 pub const CODEX_LINEAGE_CODEC_KEY: &str = "codex.lineage.v1";
@@ -33,7 +32,6 @@ pub enum CodecUnknownReason {
     MalformedJson,
     MissingSessionMetadata,
     ConflictingSessionMetadata,
-    UnsupportedCodec,
     MissingMessageId,
     DuplicateMessageId,
     NonLinearParentage,
@@ -466,7 +464,7 @@ fn synthetic_turn_message_id(
     let ordinal = idless_turn_ordinals.entry(turn_id.to_string()).or_default();
     let identity = format!(
         "codex-turn-message-v1:{}",
-        hex_sha256(format!("codex-turn-message-v1\0{turn_id}\0{ordinal}").as_bytes())
+        sha256_hex(format!("codex-turn-message-v1\0{turn_id}\0{ordinal}").as_bytes())
     );
     *ordinal += 1;
     Some((identity, turn_id.to_string()))
@@ -511,10 +509,10 @@ fn semantic_record_fingerprint(mut value: Value) -> String {
         }
     }
     let canonical = canonical_json(&value);
-    hex_sha256(canonical.as_bytes())
+    sha256_hex(canonical.as_bytes())
 }
 
-fn canonical_json(value: &Value) -> String {
+pub(crate) fn canonical_json(value: &Value) -> String {
     match value {
         Value::Null => "null".to_string(),
         Value::Bool(value) => value.to_string(),
@@ -567,16 +565,6 @@ pub(crate) fn payload_object(value: &Value) -> Option<&Map<String, Value>> {
 fn string_field<'a>(object: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| object.get(*key).and_then(Value::as_str))
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
 }
 
 #[cfg(test)]

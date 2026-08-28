@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import type { ProjectFileSyncEligibility } from "../../types";
 import Icon from "../Icons";
 import Notice from "../notice/Notice";
-import { clockOptions } from "../../clock";
+import { formatDateTime } from "../../clock";
 import { formatBytes } from "../../format";
 import { STORAGE_BLOCKING_STATES } from "./model";
 
@@ -80,17 +80,6 @@ function displayState(row: ProjectFileReviewRow, mode: Props["mode"]): string {
     unknown: "Unknown",
   };
   return labels[row.state] ?? row.state.replace(/_/g, " ");
-}
-
-/** The only stamp on this page. It used to be a bare `toLocaleString()`, which
- *  ignored the 24-hour preference every other surface honours. */
-function formatFileTimestamp(seconds: number): string {
-  return new Date(seconds * 1_000).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    ...clockOptions(),
-  });
 }
 
 /** The row's size is optional; everything else is the shared formatter. */
@@ -370,7 +359,7 @@ export default function ProjectFilesReviewPage({
                     <span>Path</span><code>{row.relativePath}</code>
                     <span>Type</span><code>{isDirectory ? "Directory" : row.entryType === "blocked" ? "Blocked entry" : "Regular file"}</code>
                     {formatMode(row.mode) && <><span>Mode</span><code>{formatMode(row.mode)}</code></>}
-                    {row.sourceMtime != null && <><span>Modified</span><code>{formatFileTimestamp(row.sourceMtime)}</code></>}
+                    {row.sourceMtime != null && <><span>Modified</span><code>{formatDateTime(row.sourceMtime * 1_000)}</code></>}
                     {row.blockedReason && <><span>Blocked</span><code>{row.blockedReason}</code></>}
                   </div>
                 )}

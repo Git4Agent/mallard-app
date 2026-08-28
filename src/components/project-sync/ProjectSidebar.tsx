@@ -21,7 +21,11 @@ import { projectLabel } from "./model";
    it holds an unbounded list of configured destinations, so it is sized to
    its contents up to a 40% cap until the lower handle pins it, and the list
    scrolls past either limit rather than squeezing the panes above onto their
-   floors. */
+   floors. Its floor rides on the pane rather than the track: fit-content()
+   is a track size and cannot go inside minmax(), and a content-sized track
+   takes its base from the item's minimum contribution, which the split pane
+   zeroes — so this was the one track a short box could reclaim entirely,
+   leaving two pixels of clipped heading where a section should be. */
 type SectionLayout = {
   headHeight: number | null;
   projectShare: number;
@@ -710,7 +714,11 @@ export default function ProjectSidebar({
             : `Storage height: ${Math.round(sectionLayout.storageHeight)} pixels`}
         />
 
-        <section className="sidebar-split-pane sidebar-storage-pane" aria-label="Storages">
+        <section
+          className="sidebar-split-pane sidebar-storage-pane"
+          aria-label="Storages"
+          style={{ minHeight: `${MIN_PANE_HEIGHT}px` }}
+        >
           <div className="sidebar-section-heading">
             <div className="sidebar-section-label">
               <span className="sidebar-section-title">Storages</span>

@@ -2898,7 +2898,6 @@ dependencies = [
  "bytes",
  "chrono",
  "dirs 5.0.1",
- "getrandom 0.3.4",
  "hmac 0.12.1",
  "http-body-util",
  "hyper 1.10.1",

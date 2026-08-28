@@ -195,6 +195,7 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   const startup = readFileSync("src/components/project-sync/StartupLoadingScreen.tsx", "utf8");
   const document = readFileSync("index.html", "utf8");
   const retroCss = readFileSync("src/RetroTheme.css", "utf8");
+  const appCss = readFileSync("src/App.css", "utf8");
 
   assert.match(app, /import "\.\/App\.css";\s*import "\.\/RetroTheme\.css";/);
   // One mark, everywhere: brand, product footer, startup screen, favicon.
@@ -300,6 +301,18 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /::-webkit-scrollbar-thumb:vertical\s*\{[^}]*inset -1px 0 0 var\(--retro-scroll-thumb-highlight\),[^}]*0 1px 2px var\(--retro-scroll-thumb-shadow\);/s);
   assert.match(retroCss, /::-webkit-scrollbar-thumb:horizontal\s*\{[^}]*inset 0 -1px 0 var\(--retro-scroll-thumb-highlight\),[^}]*0 1px 2px var\(--retro-scroll-thumb-shadow\);/s);
   assert.match(retroCss, /::-webkit-scrollbar-corner\s*\{[^}]*background: transparent;[^}]*box-shadow: none;/s);
+  // Every framed region is a rounded tile, and the ones that scroll paint their
+  // scrollbar as a plain rectangle in the padding box — so a track that runs the
+  // whole length squares off the curve it lands in. The inner radius is the
+  // right one: the scrollbar sits inside the tile's 1px edge.
+  assert.match(retroCss, /\.sync-workspace > \.sync-main::-webkit-scrollbar-track:vertical\s*\{[^}]*margin-block: var\(--retro-panel-radius-inner\);/s);
+  assert.match(retroCss, /\.sync-workspace > \.sync-main::-webkit-scrollbar-track:horizontal\s*\{[^}]*margin-inline: var\(--retro-panel-radius-inner\);/s);
+  // Only the ends that meet a curve are inset: these three run under a heading,
+  // so they meet one at the bottom alone and keep their full travel above it.
+  assert.match(retroCss, /\.sync-primary-nav::-webkit-scrollbar-track:vertical,\s*\.sidebar-split-pane > \.sidebar-links-list::-webkit-scrollbar-track:vertical,\s*\.sync-log-drawer \.log-panel-body::-webkit-scrollbar-track:vertical\s*\{[^}]*margin-bottom: var\(--retro-panel-radius-inner\);/s);
+  // Declared once. App.css used to restate the whole recipe below this one, and
+  // RetroTheme overrode every property of it, so none of it reached a pixel.
+  assert.doesNotMatch(appCss, /::-webkit-scrollbar/);
   // The shell frame is a mosaic of rounded tiles floating on one gutter, so a
   // horizontal separator meets a vertical one in rounded corners — never in a
   // square T-joint — and the outer padding reads as the same gutter.
@@ -317,7 +330,21 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /\.sync-primary-nav::after\s*\{[^}]*display: none;/s);
   assert.match(retroCss, /\.sync-titlebar\s*\{[^}]*margin-bottom: var\(--retro-gutter\);/s);
   assert.doesNotMatch(retroCss, /\.sync-titlebar\s*\{[^}]*border-bottom: 1px solid var\(--retro-rule\);/s);
-  assert.match(retroCss, /\.sync-sidebar-sections\s*\{[^}]*overflow: visible;[^}]*background: transparent;/s);
+  // The skin restyles the tray; it does not decide whether the tray contains
+  // its rows. As `overflow: visible` this rule outranked both of App.css's
+  // containment declarations on source order alone, and the bottom pane spilled
+  // over the product mark — whose tile is the same colour, so it read as two
+  // labels printed on one row rather than as one panel covering another.
+  assert.match(retroCss, /\.sync-sidebar-sections\s*\{[^}]*padding-top: 0;[^}]*background: transparent;/s);
+  assert.doesNotMatch(retroCss, /\.sync-sidebar-sections\s*\{[^}]*overflow/s);
+  // Containment is declared once, beside the grid it contains. The element
+  // carries both class names, so a second block naming the other one is not a
+  // second opinion — it decides the cascade by source order.
+  assert.doesNotMatch(appCss, /^\.sync-sidebar-sections\s*\{/m);
+  // Every row floors at MIN_PANE_HEIGHT, so a window at the 560px minimum asks
+  // this grid for more height than the box has. It scrolls the shortfall, which
+  // keeps Storages reachable; clipping it would hide the pane instead.
+  assert.match(appCss, /\.sidebar-settings-sections\s*\{[^}]*display: grid;[^}]*overflow-y: auto;/s);
   // Two elastic rows and a Storages row that fits its contents up to a 40% cap
   // until the lower handle pins it, parted by two 3px handle tracks. The cap
   // matters because the configured destination list is unbounded, and an
@@ -331,6 +358,11 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   // rows stop filling the box and leave dead space under the last pane.
   assert.match(sidebarSource, /const projects = projectShare \* 100;/);
   assert.match(sidebarSource, /minmax\(\$\{MIN_PANE_HEIGHT\}px, \$\{projects\}fr\) 3px minmax\(\$\{MIN_PANE_HEIGHT\}px, \$\{100 - projects\}fr\)/);
+  // Storages carries its floor on the pane, not the track: fit-content() is a
+  // track size and cannot go inside minmax(), and a content-sized track takes
+  // its base from the item's minimum contribution, which .sidebar-split-pane
+  // zeroes. Unfloored it was the one track a short box could reclaim outright.
+  assert.match(sidebarSource, /className="sidebar-split-pane sidebar-storage-pane"[\s\S]{0,120}?style=\{\{ minHeight: `\$\{MIN_PANE_HEIGHT\}px` \}\}/);
   assert.match(retroCss, /\.sidebar-project-pane,\s*\.sidebar-storage-pane,\s*\.sidebar-catalog-pane\s*\{[^}]*background: var\(--bg-1\);/s);
   assert.doesNotMatch(retroCss, /\.sidebar-catalog-pane\s*\{[^}]*margin-top/s);
   assert.match(retroCss, /\.sidebar-section-divider\s*\{[^}]*height: 9px;[^}]*margin: -3px 0;[^}]*align-self: center;[^}]*background: transparent;/s);
@@ -407,6 +439,37 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   assert.match(retroCss, /\.sync-history-storage-only \.sync-history-heading-count\s*\{[^}]*margin-left: auto;/s);
   assert.match(retroCss, /@container sync-history-layout \(min-width: 700px\)\s*\{[^{]*\.sync-history-timeline,\s*\.sync-history-storage-only\s*\{[^}]*--sync-history-row-anchor-y: 19px;/s);
   assert.doesNotMatch(retroCss, /sync-history-spine-mark/);
+
+  // ── The rail's terminus ──────────────────────────────────────────────────
+  // The card offset falls back to 0 because the same control also ends the
+  // flat Sessions list, which draws no rail and never defines the token. Drop
+  // the fallback and that list's control lands on an invalid calc().
+  assert.match(appCss, /\.sync-history-rail-foot\s*\{[^}]*width: calc\(100% - var\(--sync-history-card-offset, 0px\)\);/s);
+  assert.match(appCss, /\.sync-history-rail-floor\s*\{[^}]*margin: 3px 0 0 var\(--sync-history-card-offset, 0px\);/s);
+  // The foot draws no line of its own. Every segment on this rail is a
+  // connector to the *next* fold and the foot is that fold, so the card above
+  // reaches it — which is also the only way the line survives a tall last
+  // commit. It briefly owned one too, and the pair broke on exactly that case.
+  assert.doesNotMatch(appCss, /\.sync-history-rail-foot::before/);
+  assert.match(retroCss, /\.sync-history-timeline:has\(> \.sync-history-rail-foot\) \.sync-history-commit:last-child::before\s*\{\s*display: block;/s);
+  // The node takes the fold's own column and its 24px WCAG 2.5.8 box.
+  assert.match(appCss, /\.sync-history-rail-foot-node\s*\{[^}]*left: calc\(var\(--sync-history-rail-x\) - var\(--sync-history-card-offset\) - 12px\);[^}]*width: 24px;[^}]*height: 24px;/s);
+  // Pressable in the way every other control here is, using the button tokens
+  // rather than an invented skin: --border is *lighter* than the card's
+  // --border-mid in this palette, so "a stronger border" would weaken it.
+  assert.match(appCss, /\.sync-history-rail-step\s*\{[^}]*border: 1px solid var\(--button-border\);[^}]*background: var\(--button-bg\);/s);
+  // Busy dims the label, never the control: a fetch still has to say what it
+  // is fetching.
+  assert.doesNotMatch(appCss, /\.sync-history-rail-step:disabled\s*\{[^}]*opacity:/s);
+  // Equal slots: one control fills the foot the way the load bar always did,
+  // and two split it evenly.
+  assert.match(appCss, /\.sync-history-rail-step\s*\{[^}]*flex: 1;/s);
+  // A transparent border, not none: the node and the segment are positioned
+  // against the padding box, and every card on the rail puts its fold inside a
+  // 1px border. Drop it and the node sits a pixel off the column.
+  assert.match(appCss, /\.sync-history-rail-foot\s*\{[^}]*border: 1px solid transparent;/s);
+  // The old floating button is gone, not merely unreferenced.
+  assert.doesNotMatch(appCss, /sync-history-load-more/);
   assert.doesNotMatch(retroCss, /--sync-history-commit-thread-rail-x|--sync-history-commit-child-offset|--sync-history-commit-branch-length/);
   assert.doesNotMatch(retroCss, /\.sync-history-commit-heading:has\(\+ \.sync-history-thread-list\)::after/);
   assert.match(retroCss, /\.sync-history-commit > \.sync-history-thread-list::after\s*\{[^}]*display: none;/s);

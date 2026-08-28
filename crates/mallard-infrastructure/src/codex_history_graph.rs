@@ -9,7 +9,6 @@
 //! appended complete records without re-reading consumed bytes; every
 //! disagreement is a typed invalid outcome, never an empty tail.
 
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 use crate::app_settings::conversation_file_limit_bytes;
@@ -19,11 +18,11 @@ use crate::codex_rollout::{
 };
 use crate::conversation_codec::{CanonicalChainBuilder, ChainFeedOutcome};
 use crate::jsonl_tail_io::{
-    hex_sha256, open_no_follow, read_bounded, safe_record_end, TailWindow, PROBE_WINDOW_BYTES,
+    open_no_follow, read_bounded, safe_record_end, TailWindow, PROBE_WINDOW_BYTES,
 };
 use mallard_domain::{
     compute_portable_conversation_tail, conversation_chain_digests, conversation_prefix_witness,
-    validate_conversation_chain, CanonicalConversationMessage, ConversationCheckpoint,
+    sha256_hex, validate_conversation_chain, CanonicalConversationMessage, ConversationCheckpoint,
     ConversationPrefixWitness, MessageId, PhysicalMappingState, PortableConversationTail,
     RootPhysicalMapping, RootTailLayout, TailAccumulator, TailPartitionKind,
     PORTABLE_TAIL_CODEC_V1,
@@ -39,8 +38,6 @@ pub struct ResolvedSegment {
     pub consumed_byte_len: u64,
     /// Non-empty JSONL records inside the consumed bytes.
     pub consumed_record_count: u64,
-    /// Canonical messages this segment contributed to the flattened chain.
-    pub canonical_messages: u64,
 }
 
 /// A fully resolved and flattened logical root.
@@ -147,10 +144,7 @@ pub fn retained_root_is_byte_identical(
         return Ok(false);
     }
     crate::sync_metrics::record_transcript_bytes_read(path, bytes.len() as u64);
-    let digest = Sha256::digest(&bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let digest = sha256_hex(&bytes);
     Ok(digest == raw_range_pin.range_sha256)
 }
 
@@ -252,7 +246,6 @@ pub fn resolve_codex_root(
     let leaf_index = segments.len() - 1;
     for (index, segment) in segments.into_iter().enumerate() {
         let mut structure = CodexStructureAccumulator::new(Some(&segment.meta.id));
-        let appended_before = builder.appended_len() as u64;
         let mut record_count = 0_u64;
         let paginated = segment.meta.history_mode.as_deref() == Some("paginated");
         if (segment.meta.history_base.is_some() || segment.declared_end_ordinal_exclusive.is_some())
@@ -326,7 +319,6 @@ pub fn resolve_codex_root(
                 ));
             }
         }
-        let canonical_messages = builder.appended_len() as u64 - appended_before;
         crate::sync_metrics::record_records_parsed(&segment.path, record_count);
         if index < leaf_index {
             boundary = builder.appended_len() as u64;
@@ -336,7 +328,6 @@ pub fn resolve_codex_root(
             path: segment.path,
             consumed_byte_len: segment.consumed_byte_len,
             consumed_record_count: record_count,
-            canonical_messages,
         });
     }
 
@@ -433,7 +424,7 @@ pub fn seed_codex_root(
     };
     let probe_window_len = consumed.min(PROBE_WINDOW_BYTES);
     let window_start = (consumed - probe_window_len) as usize;
-    let probe_window_sha256 = hex_sha256(&leaf_bytes[window_start..consumed as usize]);
+    let probe_window_sha256 = sha256_hex(&leaf_bytes[window_start..consumed as usize]);
     let mapping = RootPhysicalMapping {
         provider_thread_id: resolved.leaf_meta.id.clone(),
         root_path: leaf
@@ -500,7 +491,7 @@ pub fn refresh_codex_tail(
     let consumed = mapping.consumed_byte_offset as usize;
     let window = mapping.probe_window_len as usize;
     crate::sync_metrics::record_bytes_hashed(Path::new(&mapping.root_path), window as u64);
-    let probe = hex_sha256(&tail.bytes[..window]);
+    let probe = sha256_hex(&tail.bytes[..window]);
     if probe != mapping.probe_window_sha256 {
         return Ok(CodexTailRefresh::Invalid {
             reason: CodexTailInvalidReason::Replaced,
@@ -601,7 +592,7 @@ pub fn refresh_codex_tail(
         consumed_byte_offset: safe_end,
         consumed_record_ordinal: next_record_ordinal,
         probe_window_len,
-        probe_window_sha256: hex_sha256(&tail.bytes[relative(window_start)..relative(safe_end)]),
+        probe_window_sha256: sha256_hex(&tail.bytes[relative(window_start)..relative(safe_end)]),
         last_canonical_message_id: builder
             .last_message_id()
             .map(|id| id.as_str().to_string())
@@ -657,7 +648,7 @@ mod tests {
                     consumed_byte_offset: bytes.len() as u64,
                     consumed_record_ordinal: 1,
                     probe_window_len: bytes.len() as u64,
-                    probe_window_sha256: hex_sha256(bytes),
+                    probe_window_sha256: sha256_hex(bytes),
                     last_canonical_message_id: None,
                     last_synthetic_turn_id: None,
                     next_synthetic_turn_ordinal: 0,
@@ -665,7 +656,7 @@ mod tests {
                 raw_range_pin: RawRangePin {
                     start_byte_offset: 0,
                     end_byte_offset: bytes.len() as u64,
-                    range_sha256: hex_sha256(bytes),
+                    range_sha256: sha256_hex(bytes),
                 },
             },
             prefix_witness: None,
@@ -1648,8 +1639,6 @@ mod tests {
         );
         assert_eq!(preserved_push.portable_tail.start_record_count, 5);
         assert_eq!(preserved_push.portable_tail.accepted_end_record_count, 9);
-        assert!(preserved_push.subagents.is_empty());
-        assert!(preserved_push.id_map.is_empty());
     }
 
     /// The redaction sibling of the round trip above: planted secrets ride

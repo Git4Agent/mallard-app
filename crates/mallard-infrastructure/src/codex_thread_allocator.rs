@@ -9,6 +9,7 @@
 //! UUIDv7 values locally under the same validation. Both paths collision-check
 //! against the caller's inventory.
 
+use mallard_domain::hex_lower;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -104,7 +105,7 @@ pub fn generate_random_uuid_v7() -> Result<String, String> {
     getrandom::fill(&mut bytes).map_err(|error| format!("random Codex thread id: {}", error))?;
     bytes[6] = (bytes[6] & 0x0f) | 0x70;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex = hex_lower(&bytes);
     let uuid = format!(
         "{}-{}-{}-{}-{}",
         &hex[0..8],

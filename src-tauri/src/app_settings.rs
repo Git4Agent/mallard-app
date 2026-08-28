@@ -31,15 +31,12 @@ fn update_app_settings_core(
 }
 
 #[tauri::command]
-pub async fn get_app_settings(_app: tauri::AppHandle) -> Result<AppSettings, String> {
+pub async fn get_app_settings() -> Result<AppSettings, String> {
     run_settings_io(|| load_app_settings(&LocalStateRepository::from_user_home()?)).await
 }
 
 #[tauri::command]
-pub async fn update_app_settings(
-    _app: tauri::AppHandle,
-    settings: AppSettings,
-) -> Result<AppSettings, String> {
+pub async fn update_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
     run_settings_io(move || {
         let repository = LocalStateRepository::from_user_home()?;
         let saved = update_app_settings_core(&repository, &settings)?;

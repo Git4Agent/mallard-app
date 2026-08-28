@@ -8,7 +8,6 @@
 //! Extracted mechanically from `codex_history_graph.rs` by
 //! `docs/PLAN_CLAUDE_SESSION_CURSOR_PARITY.md` D2.
 
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 
@@ -218,9 +217,4 @@ pub fn safe_record_end(bytes: &[u8]) -> u64 {
         .rposition(|byte| *byte == b'\n')
         .map(|position| position as u64 + 1)
         .unwrap_or(0)
-}
-
-pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }

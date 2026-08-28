@@ -8,9 +8,8 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use mallard_domain::StorageId;
+use mallard_domain::{now_secs, StorageId};
 use mallard_infrastructure::persistence::LocalStateRepository;
 
 use super::adapters::{NativeProcessRunner, PluginProcessRunner};
@@ -25,13 +24,6 @@ use super::resource_commands::{
     CatalogScopePushOutcomeDto, CatalogScopeResourcesDto,
 };
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-}
-
 /// The complete approval captured by a reviewed scope Push.
 #[derive(Clone, Debug)]
 pub struct CatalogPushApproval {
@@ -40,51 +32,12 @@ pub struct CatalogPushApproval {
     pub acknowledged_warning_digests: Vec<String>,
 }
 
-impl CatalogPushApproval {
-    /// Select every row exactly as recommended by the review. Warning
-    /// acknowledgement is deliberately empty: callers must copy the digests
-    /// they actually displayed and received approval for.
-    pub fn recommended(plan: &CatalogScopePushPlan) -> Self {
-        Self {
-            plan_id: plan.plan_id.clone(),
-            selected_resource_ids: plan
-                .rows
-                .iter()
-                .filter(|row| row.row.selected_by_default)
-                .map(|row| row.row.resource_id.clone())
-                .collect(),
-            acknowledged_warning_digests: Vec::new(),
-        }
-    }
-}
-
 /// The exact per-item actions approved from a reviewed scope Pull.
 #[derive(Clone, Debug)]
 pub struct CatalogPullApproval {
     pub plan_id: CatalogPlanId,
     pub choices: BTreeMap<CatalogResourceId, CatalogPlanActionId>,
     pub destructive_acknowledged: Vec<CatalogResourceId>,
-}
-
-impl CatalogPullApproval {
-    /// Approve every item's recommended action; items with no recommendation
-    /// are explicit Skips.
-    pub fn recommended(plan: &CatalogScopePullPlan) -> Self {
-        Self {
-            plan_id: plan.plan_id.clone(),
-            choices: plan
-                .items
-                .iter()
-                .filter_map(|item| {
-                    item.item
-                        .default_action_id
-                        .clone()
-                        .map(|action_id| (item.item.resource_id.clone(), action_id))
-                })
-                .collect(),
-            destructive_acknowledged: Vec::new(),
-        }
-    }
 }
 
 /// Production Library use cases with explicitly selected machine state,

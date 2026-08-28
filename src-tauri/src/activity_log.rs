@@ -16,9 +16,7 @@ use mallard_infrastructure::activity_log::day_for_timestamp;
 static PERSISTENCE_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
 /// Resolve the activity log store below the machine-global metadata directory.
-fn store_from_app<R: tauri::Runtime>(
-    _app: &tauri::AppHandle<R>,
-) -> Result<ActivityLogStore, String> {
+fn activity_log_store() -> Result<ActivityLogStore, String> {
     let repository = LocalStateRepository::from_user_home()?;
     ActivityLogStore::from_repository(&repository)
 }
@@ -99,7 +97,7 @@ fn emit_activity_log<R: tauri::Runtime>(
 ) {
     let entry = ActivityLogEntry::new(log_type, level, event, message, run_id, context);
     #[cfg(not(test))]
-    let persisted = store_from_app(app).and_then(|store| {
+    let persisted = activity_log_store().and_then(|store| {
         store.append(&entry)?;
         let day = day_for_timestamp(entry.ts)?;
         store.maybe_cleanup(&day);
@@ -122,11 +120,8 @@ fn emit_activity_log<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-pub async fn query_activity_logs(
-    app: tauri::AppHandle,
-    query: ActivityLogQuery,
-) -> Result<ActivityLogPage, String> {
-    let store = store_from_app(&app)?;
+pub async fn query_activity_logs(query: ActivityLogQuery) -> Result<ActivityLogPage, String> {
+    let store = activity_log_store()?;
     run_log_io(move || {
         let _ = store.cleanup(&ActivityLogCleanupRequest::default());
         store.query(&query)
@@ -135,17 +130,16 @@ pub async fn query_activity_logs(
 }
 
 #[tauri::command]
-pub async fn get_activity_log_stats(app: tauri::AppHandle) -> Result<ActivityLogStats, String> {
-    let store = store_from_app(&app)?;
+pub async fn get_activity_log_stats() -> Result<ActivityLogStats, String> {
+    let store = activity_log_store()?;
     run_log_io(move || store.stats()).await
 }
 
 #[tauri::command]
 pub async fn update_activity_log_policy(
-    app: tauri::AppHandle,
     policy: ActivityLogPolicy,
 ) -> Result<ActivityLogStats, String> {
-    let store = store_from_app(&app)?;
+    let store = activity_log_store()?;
     run_log_io(move || {
         store.save_policy(&policy)?;
         store.stats()
@@ -155,16 +149,15 @@ pub async fn update_activity_log_policy(
 
 #[tauri::command]
 pub async fn cleanup_activity_logs(
-    app: tauri::AppHandle,
     request: ActivityLogCleanupRequest,
 ) -> Result<ActivityLogCleanupResult, String> {
-    let store = store_from_app(&app)?;
+    let store = activity_log_store()?;
     run_log_io(move || store.cleanup(&request)).await
 }
 
 #[tauri::command]
-pub fn get_activity_log_folder(app: tauri::AppHandle) -> Result<String, String> {
-    let store = store_from_app(&app)?;
+pub fn get_activity_log_folder() -> Result<String, String> {
+    let store = activity_log_store()?;
     store
         .root()
         .to_str()

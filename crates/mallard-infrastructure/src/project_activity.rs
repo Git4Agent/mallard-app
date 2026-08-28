@@ -9,7 +9,7 @@
 //! home.
 
 use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
-use crate::provider_capture::LocalSessionView;
+use crate::provider_capture::{modified_secs, LocalSessionView};
 use crate::providers::{
     ProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionActionRequest,
     SessionDiscoveryContext, SessionFileSummary,
@@ -17,17 +17,18 @@ use crate::providers::{
 use crate::storage_core::ConfiguredObjectStore;
 use mallard_domain::{
     cloud_conversation_resource_id, conversation_resource_id, initial_conversation_thread_id,
-    parse_conversation_resource_id, retained_conversation_thread_id, ActionStatus, BindingState,
-    BundleSnapshot, CloudThreadId, ConversationBindings, ConversationMaterializationState,
-    LocalProjectId, LocalProviderProfileId, MaterializationStatus, Materializations,
-    PreservedProvenance, ProviderKey, StorageId, SyncConfig, SyncScopeKey, ThreadId,
+    now_secs, parse_conversation_resource_id, retained_conversation_thread_id, ActionStatus,
+    BindingState, BundleSnapshot, CloudThreadId, ConversationBindings,
+    ConversationMaterializationState, LocalProjectId, LocalProviderProfileId,
+    MaterializationStatus, Materializations, PreservedProvenance, ProviderKey, StorageId,
+    SyncConfig, SyncScopeKey, ThreadId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 const DEFAULT_HISTORY_WINDOW_DAYS: u64 = 7;
 const DAY_SECS: u64 = 24 * 60 * 60;
@@ -169,6 +170,25 @@ pub struct StorageSyncSummary {
     pub last_push_at: Option<u64>,
 }
 
+/// What lies before `window_start`, so the page can name it instead of
+/// offering a blind step backwards.
+///
+/// Every field is read off data the response already holds: `all_commits` is
+/// loaded by count rather than by date, and `all_sessions` is the full list the
+/// window filters. Nothing here asks git a second question.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OlderActivity {
+    /// The newest thing older than the window. The next page ends just past
+    /// this, so a step backwards always lands on data instead of on whatever
+    /// happens to be thirty days earlier.
+    pub newest_at: u64,
+    /// Commits older than the window that are not already on the page. A
+    /// commit outside the window still renders when a visible session maps to
+    /// it, and counting those again would promise rows that are already here.
+    pub commits: usize,
+    pub sessions: usize,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ProjectActivity {
     pub project_id: String,
@@ -184,7 +204,7 @@ pub struct ProjectActivity {
     pub window_start: u64,
     pub window_end: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_before: Option<u64>,
+    pub older: Option<OlderActivity>,
     #[serde(default)]
     pub storage_sync: Vec<StorageSyncSummary>,
 }
@@ -320,22 +340,6 @@ fn modified_nanos(metadata: &fs::Metadata) -> u64 {
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(0)
-}
-
-fn modified_secs(metadata: &fs::Metadata) -> u64 {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
         .unwrap_or(0)
 }
 
@@ -978,7 +982,6 @@ fn merge_activity_sessions_with_state(
                 adapter.available_actions(&SessionActionContext {
                     provider_session_id: &record.session_id,
                     is_local: access == ProviderAccessState::BoundReady,
-                    transcript_path: Some(&record.physical_path),
                 })
             })
             .unwrap_or_default();
@@ -1124,6 +1127,48 @@ fn merge_activity_sessions_with_state(
 // The complete Activity view
 // ---------------------------------------------------------------------------
 
+/// What lies before the window, weighed over every commit the branch offered
+/// and every session the project has.
+///
+/// Paging used to step a fixed thirty days from a flag that counted sessions
+/// alone. A project whose commits all predate the window then offered no way
+/// back at all — its history was unreachable from the UI at any window — while
+/// a project with older sessions but no older commits stepped into empty page
+/// after empty page. The cursor is the newest thing below instead, so the
+/// control exists exactly when something is down there, and one press always
+/// lands on it.
+///
+/// A commit before the window still draws when a visible session maps to it,
+/// so those are excluded here: counting them would promise rows that are
+/// already on the page. Sessions need no such guard, because the session list
+/// is strictly windowed.
+fn older_activity(
+    branch_commits: &[GitCommitSummary],
+    session_ends: &[u64],
+    window_start: u64,
+) -> Option<OlderActivity> {
+    let mut newest_at: Option<u64> = None;
+    let mut commits = 0usize;
+    for commit in branch_commits {
+        if commit.committed_at < window_start && commit.session_refs.is_empty() {
+            commits += 1;
+            newest_at = newest_at.max(Some(commit.committed_at));
+        }
+    }
+    let mut sessions = 0usize;
+    for ended_at in session_ends {
+        if *ended_at < window_start {
+            sessions += 1;
+            newest_at = newest_at.max(Some(*ended_at));
+        }
+    }
+    newest_at.map(|newest_at| OlderActivity {
+        newest_at,
+        commits,
+        sessions,
+    })
+}
+
 /// Project the Activity response from one already-resolved project, one local
 /// discovery witness, and one verified remote snapshot projection.
 #[allow(clippy::too_many_arguments)]
@@ -1179,6 +1224,10 @@ pub fn build_project_activity(
         &recorded_branches,
     )?;
     let mut unmapped = Vec::new();
+    // Every first-parent commit the branch offered, windowed or not. Carried
+    // out of the block below so `older_activity` can weigh what lies before
+    // the window against the sessions.
+    let mut branch_commits: Vec<GitCommitSummary> = Vec::new();
     let git_page = if let Some(discovery) = git {
         let github_repository_url = discover_github_repository_url(&resolved.project_root);
         let all_commits = if discovery.selected_ref_available {
@@ -1211,6 +1260,8 @@ pub fn build_project_activity(
             })
             .cloned()
             .collect::<Vec<_>>();
+        // After the mapping, so the refs a commit picked up are already on it.
+        branch_commits = all_commits;
         Some(GitHistoryPage {
             selected_branch: discovery.selected_branch,
             branches: discovery.branches,
@@ -1241,9 +1292,14 @@ pub fn build_project_activity(
         })
         .collect();
 
-    let has_older_sessions = all_sessions
-        .iter()
-        .any(|session| session.ended_at < window_start);
+    let older = older_activity(
+        &branch_commits,
+        &all_sessions
+            .iter()
+            .map(|session| session.ended_at)
+            .collect::<Vec<_>>(),
+        window_start,
+    );
     Ok(ProjectActivity {
         project_id: resolved.project_id.to_string(),
         sessions,
@@ -1253,7 +1309,7 @@ pub fn build_project_activity(
         warnings,
         window_start,
         window_end,
-        next_before: has_older_sessions.then_some(window_start),
+        older,
         storage_sync: project_storage_sync(repository, &resolved.project_id, &materializations)?,
     })
 }
@@ -1400,60 +1456,9 @@ pub fn execute_project_session_action(
         provider_home: &home.home,
         project_root: &resolved.project_root,
         provider_session_id: &session.session_id,
-        transcript_path: Some(&session.physical_path),
         before_launch,
     };
     adapter.execute_action(&mut request).map(|_| ())
-}
-
-/// Deep-link guard: revalidate that one session belongs to the project
-/// without launching anything.
-pub fn validate_session_ownership(
-    repository: &LocalStateRepository,
-    registry: &ProviderRegistry,
-    local_project_id: &LocalProjectId,
-    resource_id: &str,
-) -> Result<(), String> {
-    let (provider, thread_id) = parse_conversation_resource_id(resource_id)?;
-    let resolved = resolve_activity_project(repository, local_project_id)?;
-    let bindings = repository.load_conversation_bindings()?;
-    let session_for_thread = bindings
-        .bindings
-        .iter()
-        .find(|binding| {
-            binding.local_project_id == resolved.project_id && binding.thread_id == thread_id
-        })
-        .and_then(|binding| binding.provider_thread_id.clone());
-    let adapter = registry.require_sessions(&provider)?;
-    let home = resolved
-        .homes
-        .get(&provider)
-        .ok_or_else(|| format!("provider '{}' is not bound on this machine", provider))?;
-    let context = SessionDiscoveryContext {
-        provider_home: &home.home,
-        project_root: &resolved.project_root,
-    };
-    let discovery = adapter.discover(&context)?;
-    for session in discovery.sessions {
-        let matches = match session_for_thread.as_deref() {
-            Some(expected) => expected == session.session_id,
-            None => {
-                resolve_local_provider_alias_thread(
-                    repository,
-                    &resolved,
-                    &provider,
-                    &session.session_id,
-                    &session.physical_path,
-                )?
-                .as_ref()
-                    == Some(&thread_id)
-            }
-        };
-        if matches {
-            return Ok(());
-        }
-    }
-    Err("session does not belong to the selected project".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1797,8 +1802,8 @@ mod activity_only_tests {
     use super::*;
     use crate::providers::{
         AgentProviderAdapter, MaterializationTargetRequest, PlannedProviderTarget,
-        ProviderCapabilityLevel, ProviderDescriptor, SessionActionOutcome, SessionAnalysis,
-        SessionEventDetail, SessionFileMetadata, SessionTimelineContext, SessionTimelineIndex,
+        ProviderDescriptor, SessionActionOutcome, SessionAnalysis, SessionEventDetail,
+        SessionFileMetadata, SessionTimelineContext, SessionTimelineIndex,
         SessionTimelinePageSlice, SessionTimelineQuery,
     };
     use mallard_domain::{
@@ -1810,6 +1815,86 @@ mod activity_only_tests {
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    fn commit_at(committed_at: u64, session_refs: &[&str]) -> GitCommitSummary {
+        GitCommitSummary {
+            sha: format!("{committed_at:040}"),
+            short_sha: format!("{committed_at:07}"),
+            committed_at,
+            subject: format!("commit at {committed_at}"),
+            session_refs: session_refs
+                .iter()
+                .map(|resource_id| CommitSessionReference {
+                    resource_id: (*resource_id).to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn older_commits_offer_a_step_back_even_with_no_older_sessions() {
+        // The defect this replaced: the cursor counted sessions alone, so a
+        // project whose commits all predate the window had no way back to them.
+        let older = older_activity(
+            &[commit_at(500, &[]), commit_at(400, &[])],
+            &[1_500, 1_800],
+            1_000,
+        )
+        .expect("commits below the window are still something to step back to");
+        assert_eq!(older.newest_at, 500);
+        assert_eq!(older.commits, 2);
+        assert_eq!(older.sessions, 0);
+    }
+
+    #[test]
+    fn older_sessions_offer_a_step_back_even_with_no_older_commits() {
+        let older = older_activity(&[commit_at(1_500, &[])], &[800, 600], 1_000)
+            .expect("sessions below the window are something to step back to");
+        assert_eq!(older.newest_at, 800);
+        assert_eq!(older.commits, 0);
+        assert_eq!(older.sessions, 2);
+    }
+
+    #[test]
+    fn a_commit_held_on_the_page_by_its_session_is_not_also_waiting_below_it() {
+        // An out-of-window commit still renders when a visible session maps to
+        // it. Counting it again would promise a row that is already on screen,
+        // and pointing the cursor at it would reload the same page forever.
+        let older = older_activity(
+            &[commit_at(900, &["codex:session:visible"]), commit_at(700, &[])],
+            &[1_200],
+            1_000,
+        )
+        .expect("the unclaimed commit still lies below");
+        assert_eq!(older.newest_at, 700);
+        assert_eq!(older.commits, 1);
+    }
+
+    #[test]
+    fn the_cursor_takes_the_newest_of_either_kind() {
+        assert_eq!(
+            older_activity(&[commit_at(900, &[])], &[400], 1_000)
+                .unwrap()
+                .newest_at,
+            900,
+        );
+        assert_eq!(
+            older_activity(&[commit_at(400, &[])], &[900], 1_000)
+                .unwrap()
+                .newest_at,
+            900,
+        );
+    }
+
+    #[test]
+    fn nothing_below_the_window_offers_no_step_at_all() {
+        // The floor: absent `older`, the page states its range and draws no
+        // control, rather than offering one that reloads the same rows.
+        assert!(older_activity(&[commit_at(1_500, &[])], &[2_000], 1_000).is_none());
+        assert!(older_activity(&[], &[], 1_000).is_none());
+        // The window is half-open at the bottom, so its own start is inside it.
+        assert!(older_activity(&[commit_at(1_000, &[])], &[1_000], 1_000).is_none());
+    }
 
     struct InstrumentedAdapter {
         provider: ProviderKey,
@@ -1828,8 +1913,6 @@ mod activity_only_tests {
                 default_profile_directory: None,
                 setup_default: false,
                 cli_launcher: None,
-                capabilities: ProviderCapabilityLevel::ActivityOnly,
-                adapter_version: 1,
             }
         }
 

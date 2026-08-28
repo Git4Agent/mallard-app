@@ -14,12 +14,13 @@ use std::path::{Path, PathBuf};
 use crate::conversation_codec::CodecLineage;
 use crate::persistence::LocalStateRepository;
 use mallard_domain::{
-    conversation_resource_id, ActionId, ActionStatus, ApplyReceipt, ConversationApplyReceipt,
-    ConversationBindings, ConversationFileRole, ConversationJournalTarget,
-    ConversationMaterializationState, ConversationOperationId, ConversationPlanDirection,
-    ConversationSourceDisposition, ConversationSyncOperation, ConversationSyncOperationKind,
-    MaterializationId, MaterializationRecord, MaterializationStatus, PullJournalPhase,
-    PushJournalPhase, RestoreActionType, SyncConfig, TargetExpectation, LOCAL_SCHEMA,
+    conversation_resource_id, hex_lower, sha256_hex, ActionId, ActionStatus, ApplyReceipt,
+    ConversationApplyReceipt, ConversationBindings, ConversationFileRole,
+    ConversationJournalTarget, ConversationMaterializationState, ConversationOperationId,
+    ConversationPlanDirection, ConversationSourceDisposition, ConversationSyncOperation,
+    ConversationSyncOperationKind, MaterializationId, MaterializationRecord, MaterializationStatus,
+    PullJournalPhase, PushJournalPhase, RestoreActionType, SyncConfig, TargetExpectation,
+    LOCAL_SCHEMA,
 };
 
 const MAX_PROVIDER_TARGET_BYTES: u64 = 512 * 1024 * 1024;
@@ -110,10 +111,6 @@ pub struct ConversationCloudPublication {
     pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
-    pub manifest_size: u64,
-    /// Published per-provider scope coordinates, keyed by canonical scope
-    /// string, for ScopeBase advancement inside journaled after-states.
-    pub scope_pins: std::collections::BTreeMap<String, (u64, String)>,
 }
 
 fn push_phase(operation: &ConversationSyncOperation) -> Option<PushJournalPhase> {
@@ -841,7 +838,7 @@ fn prepare_operation(
                 .join(operation.operation_id.as_str())
                 .join(format!("{index}.bak"))
         });
-        let staged_sha256 = sha256(&payload.bytes);
+        let staged_sha256 = sha256_hex(&payload.bytes);
         payloads.push(payload.bytes);
         targets.push(ConversationJournalTarget {
             target_path: path_text(&target_path)?,
@@ -1776,7 +1773,7 @@ fn read_regular_file_digest(path: &Path) -> Result<Option<String>, String> {
         }
         hasher.update(&buffer[..count]);
     }
-    Ok(Some(hex_digest(hasher.finalize().as_slice())))
+    Ok(Some(hex_lower(&hasher.finalize())))
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -1925,7 +1922,7 @@ fn path_text(path: &Path) -> Result<String, String> {
 }
 
 fn stable_fragment(value: &str) -> String {
-    sha256(value.as_bytes())[..24].to_string()
+    sha256_hex(value.as_bytes())[..24].to_string()
 }
 
 fn stable_action_id(operation_id: &ConversationOperationId) -> Result<ActionId, String> {
@@ -1942,12 +1939,4 @@ fn stable_materialization_id(
         "materialization-conversation-{}",
         stable_fragment(operation_id.as_str())
     ))
-}
-
-fn sha256(bytes: &[u8]) -> String {
-    hex_digest(Sha256::digest(bytes).as_slice())
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

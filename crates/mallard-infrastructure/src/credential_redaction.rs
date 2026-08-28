@@ -33,6 +33,7 @@
 //! Gate errors never echo matched text: payloads carry record/line index,
 //! JSON pointer, and rule id only.
 
+use mallard_domain::hex_lower;
 use regex::{Regex, RegexSet};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -1664,11 +1665,7 @@ fn ruleset_fingerprint_hex() -> String {
     input.push_str(&format!("vocabulary={LABEL_VOCABULARY:?}\n"));
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex_lower(&hasher.finalize())
 }
 
 #[cfg(test)]

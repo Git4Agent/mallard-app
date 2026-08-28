@@ -878,13 +878,6 @@ summary:focus-visible {
 .sidebar-msg { padding: 16px; font-size: var(--type-md); color: var(--text-2); }
 .sidebar-msg.error { color: var(--danger-text); }
 
-/* ── Scrollbar ───────────────────────────────────── */
-
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border-mid); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--text-2); }
-
 /* ── File editor ─────────────────────────────────── */
 
 /* ── Markdown preview ────────────────────────────── */
@@ -2553,13 +2546,6 @@ summary:focus-visible {
   font-size: var(--type-md);
 }
 
-.sync-sidebar-sections {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding-top: 8px;
-}
-
 .sync-sidebar .sync-sidebar-empty {
   width: calc(100% - 8px);
   margin: 2px 4px 8px;
@@ -3581,11 +3567,20 @@ span.sync-path-crumb {
 
 /* ── Profile-first sync settings ────────────────── */
 
+/* Declared once: a second `.sync-sidebar-sections` block 1,000 lines above
+   used to restate flex, min-height and padding-top on this same element and
+   set a conflicting overflow, so which containment applied was decided by
+   source order rather than by intent. */
 .sidebar-settings-sections {
   min-height: 0;
   flex: 1;
   display: grid;
-  overflow: hidden;
+  /* Every row floors at MIN_PANE_HEIGHT so no pane is ever reduced below its
+     heading and one row, which means a short window asks this grid for more
+     height than the box has. The tray scrolls the shortfall; left visible it
+     spilled the bottom pane over the product mark below, whose tile is the
+     same colour and so read as two labels printed on one row. */
+  overflow-y: auto;
   padding-top: 8px;
 }
 
@@ -5504,8 +5499,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   color: var(--text-0);
 }
 
-.sync-history-icon-action:focus-visible,
-.sync-history-load-more:focus-visible {
+.sync-history-icon-action:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -6024,8 +6018,8 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 /* Static on purpose: the popover anchors to the row rather than to this 22px
    trigger, so it cannot be pushed outside the card and clipped by the
    workspace scroll container. */
+/* Nothing to anchor any more: the panel is portalled out of this subtree. */
 .sync-history-debug-menu {
-  position: static;
   display: inline-flex;
   flex: 0 0 auto;
 }
@@ -6044,19 +6038,21 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   color: var(--text-0);
 }
 
+/* Pinned to the window, from a portal on body. Anchored inside the list the
+   panel was bounded by whatever room .sync-main had left, so near either end of
+   a long list it came up too short to read; against the window there is almost
+   always room for the whole of it, and no card, rail or scrollport can clip it.
+   Position, width and cap are all measured and set inline as it opens — the
+   anchor is still the row, so the panel keeps reading as that row's. */
 .sync-history-debug-popover {
-  position: absolute;
-  z-index: 60;
-  top: calc(100% + 6px);
-  bottom: auto;
-  /* Aligned to the row's content edge, directly under the metrics it explains.
-     Anchoring it to the trigger instead puts it wherever that icon happens to
-     land — which is how it ended up outside the card and clipped. */
-  right: auto;
-  left: 12px;
-  /* Sized against the row rather than the viewport: the sidebar means viewport
-     width is not the space actually available here. */
-  width: min(380px, calc(100% - 24px));
+  position: fixed;
+  /* Above the log drawer and the selection bar, below a modal's scrim. */
+  z-index: 200;
+  /* Header and footer hold their size; the value list takes what is left and
+     scrolls, so a window too short for the whole panel still reaches every row
+     rather than cutting the last ones off unreachably. */
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
@@ -6065,14 +6061,15 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   color: var(--text-1);
 }
 
-/* Flipped up for rows near the bottom of the list. Hanging below them extended
-   the workspace's scrollable height — measured at +29px to +137px depending on
-   how far down the row sat — which made the scrollbar jump on every click.
-   Overflow past the block-start edge is not scrollable, so opening up costs
-   nothing there, and rows higher up keep opening down so nothing is clipped. */
-.sync-history-debug-popover.drop-up {
-  top: auto;
-  bottom: calc(100% + 6px);
+/* A class-level `display` outranks the UA sheet's [hidden] rule, so the
+   attribute has to be restated or the panel never closes. */
+.sync-history-debug-popover[hidden] {
+  display: none;
+}
+
+.sync-history-debug-popover > header,
+.sync-history-debug-popover > footer {
+  flex: 0 0 auto;
 }
 
 .sync-history-debug-popover > header {
@@ -6094,8 +6091,10 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 }
 
 .sync-history-debug-values {
+  min-height: 0;
   display: grid;
   gap: 1px;
+  overflow-y: auto;
   padding: 4px;
 }
 
@@ -6172,9 +6171,138 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   font-size: var(--type-2xs);
 }
 
-.sync-history-load-more {
+/* ── The rail's foot ─────────────────────────────────────────────────────
+   The paging controls hang under the rail they page, node centred on the rail
+   column. The line into that node is drawn by the card above, the way every
+   segment on this rail is a connector to the *next* fold — the foot is that
+   next fold, so it owns no line of its own. It owned one briefly, and two
+   rules painting one column is how the next break gets missed.
+
+   The offset token falls back to 0 because the same foot also ends the flat
+   Sessions list of a project with no repository, which draws no rail and
+   therefore never defines it. */
+.sync-history-rail-foot {
+  position: relative;
+  box-sizing: border-box;
+  width: calc(100% - var(--sync-history-card-offset, 0px));
   display: flex;
-  margin: 2px auto 0;
+  align-items: stretch;
+  gap: 8px;
+  margin: 0 0 0 var(--sync-history-card-offset, 0px);
+  /* Transparent, not absent: the node and the segment are positioned against
+     the padding box, and every card on the rail puts its own fold inside a 1px
+     border. Without one here the node sits a pixel off the column, which reads
+     as a break in a vertical line. */
+  border: 1px solid transparent;
+}
+
+.sync-history-rail-foot-node {
+  position: absolute;
+  z-index: 6;
+  top: calc(var(--sync-history-row-anchor-y) - 12px);
+  left: calc(var(--sync-history-rail-x) - var(--sync-history-card-offset) - 12px);
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 3px;
+  color: var(--text-2);
+}
+
+.sync-history-rail-foot.no-rail .sync-history-rail-foot-node {
+  display: none;
+}
+
+/* Equal slots, so one control fills the foot the way the load bar always did
+   and two split it evenly. */
+.sync-history-rail-step {
+  flex: 1;
+  min-width: 0;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border: 1px solid var(--button-border);
+  border-radius: var(--button-radius);
+  background: var(--button-bg);
+  color: var(--text-1);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.sync-history-rail-step:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--button-bg-hover);
+}
+
+.sync-history-rail-step:active:not(:disabled) {
+  background: var(--button-bg-active);
+}
+
+.sync-history-rail-step:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.sync-history-rail-step > strong {
+  color: var(--text-0);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-bold);
+}
+
+.sync-history-rail-step > time {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Busy: no dimming, because a control that is fetching still has to say what
+   it is fetching. The node carries the motion, and it sits outside the row, so
+   nothing in a label or a date moves when the request starts. */
+.sync-history-rail-step:disabled {
+  cursor: default;
+}
+
+.sync-history-rail-step:disabled > strong {
+  color: var(--text-2);
+}
+
+/* Nothing older: no control, so no rail. The rail already ends at the last
+   commit's fold, and a segment below it would be a connector to a commit that
+   does not exist. */
+.sync-history-rail-floor {
+  margin: 3px 0 0 var(--sync-history-card-offset, 0px);
+  padding: 0 12px;
+  color: var(--text-2);
+  font-size: var(--type-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The empty window, drawn as a card on the rail so the page keeps its spine
+   where the data stops. Dashed and muted, because it marks an absence — but a
+   card, because the rail must not break. */
+.sync-history-commit-gap {
+  border-style: dashed;
+  background: var(--surface-subtle);
+}
+
+.sync-history-commit-gap .sync-history-commit-icon {
+  color: var(--text-3);
+}
+
+.sync-history-commit-gap .sync-history-commit-title > strong {
+  color: var(--text-2);
+  font-weight: var(--weight-regular);
+}
+
+/* A marker, not a control: the gap card has nothing to expand, so its rail
+   slot wears the same dimming a fold gets when its commit holds no sessions. */
+.sync-history-spine-fold.inert {
+  opacity: 0.35;
+  pointer-events: none;
 }
 
 /* Push and Pull reuse the project tabs as one focused review workflow. */
@@ -6341,8 +6469,14 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   border-top: 0;
 }
 
+/* 8px rather than 0: the compact review used to be led by a section heading
+   carrying its own top margin, so zeroing this read as tight rather than
+   flush. A timeline leads with a card and a flat list leads with a row, and
+   neither has a margin of its own — both sat their first border directly on
+   the header's hairline. The gutter belongs here, where every body shape gets
+   it once. */
 .sync-sync-review-scroll > .sync-history-selection-review {
-  padding-top: 0;
+  padding-top: 8px;
   padding-right: 8px;
 }
 

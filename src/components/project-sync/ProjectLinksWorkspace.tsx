@@ -28,7 +28,7 @@ import type {
 } from "../../types";
 import Icon from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
-import { clockOptions, toEpochMilliseconds } from "../../clock";
+import { formatDateTime, toEpochMilliseconds } from "../../clock";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import ProjectActivityPage, { BranchPicker, type ActivityHeaderModel } from "./ProjectActivityPage";
 import type {
@@ -42,10 +42,9 @@ import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-r
 import ProviderMark from "../sync-review/ProviderMark";
 import type { SessionHeaderModel } from "./session-detail/SessionDetailPage";
 import type { PullRequiredCopy } from "./PushResourceWorkspace";
-import SyncOutcomeNotice from "../sync-review/SyncOutcomeNotice";
+import SyncOutcomeNotice from "./SyncOutcomeNotice";
 import { writeClipboardText } from "../sync-review/clipboard";
 import SiblingRepoNotice from "./SiblingRepoNotice";
-import { syncOutcomeView } from "./syncOutcome";
 import { isIrrecoverableSyncError } from "./syncError";
 import type { SyncOutcome } from "./syncOutcome";
 import { newStorage, r2FieldsSet, storageConfigReady, StorageEditor } from "./StorageSettings";
@@ -403,15 +402,6 @@ export function buildR2AgentSetupInstruction({
   ].join("\n");
 }
 
-function absoluteTime(epoch: number): string {
-  return new Date(toEpochMilliseconds(epoch)).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    ...clockOptions(),
-  });
-}
-
 /** The fold: everything the storage listing knows about a repository beyond
  * its chips. Absent facts don't render — no dash placeholders. */
 export function StorageRepositoryDetails({ bundle, id }: { bundle: RemoteBundleSummary; id?: string }) {
@@ -422,7 +412,7 @@ export function StorageRepositoryDetails({ bundle, id }: { bundle: RemoteBundleS
       {typeof bundle.updated_at === "number" && (
         <>
           <dt>Updated</dt>
-          <dd>{absoluteTime(bundle.updated_at)}</dd>
+          <dd>{formatDateTime(toEpochMilliseconds(bundle.updated_at))}</dd>
         </>
       )}
       {typeof bundle.resource_count === "number" && (
@@ -529,7 +519,7 @@ export function CatalogStorageRepositoryRow({ repo }: { repo: CatalogStorageRepo
           {typeof repo.updated_at === "number" && (
             <>
               <dt>Updated</dt>
-              <dd>{absoluteTime(repo.updated_at)}</dd>
+              <dd>{formatDateTime(toEpochMilliseconds(repo.updated_at))}</dd>
             </>
           )}
           {repo.resource_names.length > 0 && (
@@ -705,13 +695,6 @@ export default function ProjectLinksWorkspace({
      open_path only for the log folder, so a project root or a storage folder
      is refused there. The rejection is surfaced, never dropped — a folder that
      was moved or deleted since the config was written is the ordinary case. */
-  /* Derived once per outcome, not once per render. SyncOutcomeNotice re-arms
-     its fold whenever this object's identity changes, so rebuilding it inline
-     snapped the expanded rows shut on every unrelated re-render. */
-  const outcomeView = useMemo(
-    () => (storageNotice?.kind === "outcome" ? syncOutcomeView(storageNotice.outcome) : null),
-    [storageNotice],
-  );
   const [renameError, setRenameError] = useState<string | null>(null);
   const [revealError, setRevealError] = useState<string | null>(null);
   const revealPath = (path: string) => {
@@ -3188,7 +3171,7 @@ export default function ProjectLinksWorkspace({
                           )}
                           {activeNotice && activeNotice.kind === "outcome" && (
                             <SyncOutcomeNotice
-                              view={outcomeView ?? syncOutcomeView(activeNotice.outcome)}
+                              outcome={activeNotice.outcome}
                               busy={noticeActionsDisabled}
                               onAction={() => onStorageNoticeAction?.(activeNotice.outcome)}
                               onDismiss={() => onDismissStorageNotice?.()}

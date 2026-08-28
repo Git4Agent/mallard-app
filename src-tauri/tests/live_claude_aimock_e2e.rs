@@ -3090,7 +3090,6 @@ fn session_detail_history(
     assert_eq!(header.resource_id, resource_id.as_str());
     assert_eq!(header.provider, claude_key());
     assert_eq!(header.provider_session_id, provider_thread_id);
-    assert!(header.capabilities.tool_calls && header.capabilities.event_detail);
     assert_eq!(
         header.event_counts.prompts.value,
         Some(
@@ -3335,7 +3334,6 @@ fn session_detail_text_history(
     assert_eq!(header.resource_id, resource_id.as_str());
     assert_eq!(header.provider, claude_key());
     assert_eq!(header.provider_session_id, provider_thread_id);
-    assert!(header.capabilities.tool_calls && header.capabilities.event_detail);
     assert_eq!(
         header.event_counts.prompts.value,
         Some(

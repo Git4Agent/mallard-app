@@ -13,7 +13,7 @@ use super::domain::{
     CatalogPushRow, CatalogResource, CatalogResourceForkPlan, CatalogResourceId, CatalogScope,
     CatalogScopeLink, CatalogScopePullItem, CatalogScopePullPlan, CatalogScopePushPlan,
     CatalogScopePushRow, CatalogTargetExpectation, LibraryHeadCoordinate, LocalCatalogTargetId,
-    PluginApplyMode, CATALOG_SCHEMA, MAX_GENERATED_NAME_ATTEMPTS,
+    PluginApplyMode, ProviderKey, CATALOG_SCHEMA, MAX_GENERATED_NAME_ATTEMPTS,
 };
 use super::inventory::{CatalogLocalInventory, LocalResourceRecord};
 use super::profiles::ResolvedCatalogContext;
@@ -149,8 +149,7 @@ pub fn target_for_resource(
         }
         CatalogResource::CodexPetV1(pet) | CatalogResource::CodexPetV2(pet) => {
             let profile = context
-                .codex
-                .as_ref()
+                .profile(ProviderKey::Codex)
                 .ok_or("no Codex profile is active for this pet")?;
             Ok((
                 LocalCatalogTargetId::PetDirectory {
@@ -352,7 +351,6 @@ pub fn build_scope_push_plan(
                 selectable,
                 selected_by_default: selectable,
                 held_for_pull: blocked_reason.is_some(),
-                removal_candidate: false,
                 local_content_sha256: local
                     .map(|record| record.resource.content_sha256().to_string()),
                 storage_content_sha256: remote
@@ -1014,13 +1012,12 @@ mod tests {
 
     fn context() -> ResolvedCatalogContext {
         ResolvedCatalogContext {
-            codex: Some(ResolvedCatalogProfile {
+            profile: ResolvedCatalogProfile {
                 profile_id: LocalCatalogProfileId::generate().unwrap(),
                 provider_key: ProviderKey::Codex,
                 revision: 1,
                 canonical_home: PathBuf::from("/tmp/planning/codex-home"),
-            }),
-            claude: None,
+            },
             skill_roots: vec![ResolvedSkillRoot {
                 scope: AgentSkillScope::CodexHome,
                 canonical_root: PathBuf::from(SKILL_ROOT),
@@ -1086,7 +1083,6 @@ mod tests {
                 .map(|record| (record.resource.resource_id(), record))
                 .collect(),
             blocked: Vec::new(),
-            plugin_owned_skills: Vec::new(),
             warnings: Vec::new(),
             plugin_inventories: BTreeMap::new(),
         }

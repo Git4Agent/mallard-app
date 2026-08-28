@@ -54,7 +54,7 @@ pub enum TailPartitionKind {
 impl TailPartitionKind {
     /// The tag folded into `S0`; identical to the serde wire tag so the codec
     /// and the schema share one vocabulary.
-    pub fn partition_tag(self) -> &'static str {
+    fn partition_tag(self) -> &'static str {
         match self {
             TailPartitionKind::WholeThread => "whole_thread",
             TailPartitionKind::FixedPaginatedTail => "fixed_paginated_tail",
@@ -98,7 +98,7 @@ impl PortableConversationTail {
     /// The codex wire pin: schema-1 `ConversationThread` values for
     /// `provider == codex` must carry exactly the wire-form codec — cloud
     /// artifacts are token-form, and their tails fold token-form bytes.
-    pub fn validate_codex_wire(&self) -> Result<(), String> {
+    pub(crate) fn validate_codex_wire(&self) -> Result<(), String> {
         self.validate()?;
         if self.codec != PORTABLE_TAIL_CODEC_WIRE_V1 {
             return Err(format!(
@@ -111,7 +111,7 @@ impl PortableConversationTail {
 
     /// The claude wire pin: schema-1 `ConversationThread` values for
     /// `provider == claude` must carry exactly the Claude wire-form codec.
-    pub fn validate_claude_wire(&self) -> Result<(), String> {
+    pub(crate) fn validate_claude_wire(&self) -> Result<(), String> {
         self.validate()?;
         if self.codec != CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1 {
             return Err(format!(
@@ -120,12 +120,6 @@ impl PortableConversationTail {
             ));
         }
         Ok(())
-    }
-
-    /// There is no serialized tail count; it is always derived.
-    pub fn tail_record_count(&self) -> u64 {
-        self.accepted_end_record_count
-            .saturating_sub(self.start_record_count)
     }
 }
 

@@ -39,7 +39,7 @@ fn reset_local_state_with_repositories(
 }
 
 #[tauri::command]
-pub async fn get_local_state_summary(_app: tauri::AppHandle) -> Result<LocalStateSummary, String> {
+pub async fn get_local_state_summary() -> Result<LocalStateSummary, String> {
     run_reset_io(|| LocalStateRepository::from_user_home()?.local_state_summary()).await
 }
 

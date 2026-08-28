@@ -37,17 +37,13 @@ pub struct ResolvedSkillRoot {
 /// The complete resolved view of one selected Library provider profile.
 #[derive(Clone, Debug)]
 pub struct ResolvedCatalogContext {
-    pub codex: Option<ResolvedCatalogProfile>,
-    pub claude: Option<ResolvedCatalogProfile>,
+    pub profile: ResolvedCatalogProfile,
     pub skill_roots: Vec<ResolvedSkillRoot>,
 }
 
 impl ResolvedCatalogContext {
     pub fn profile(&self, provider: ProviderKey) -> Option<&ResolvedCatalogProfile> {
-        match provider {
-            ProviderKey::Codex => self.codex.as_ref(),
-            ProviderKey::Claude => self.claude.as_ref(),
-        }
+        (self.profile.provider_key == provider).then_some(&self.profile)
     }
 
     pub fn skill_root(&self, scope: AgentSkillScope) -> Option<&Path> {
@@ -58,16 +54,12 @@ impl ResolvedCatalogContext {
     }
 
     pub fn profile_pins(&self) -> Vec<CatalogProfilePin> {
-        [&self.codex, &self.claude]
-            .into_iter()
-            .flatten()
-            .map(|profile| CatalogProfilePin {
-                profile_id: profile.profile_id.clone(),
-                provider_key: profile.provider_key,
-                revision: profile.revision,
-                canonical_home: profile.canonical_home.to_string_lossy().to_string(),
-            })
-            .collect()
+        vec![CatalogProfilePin {
+            profile_id: self.profile.profile_id.clone(),
+            provider_key: self.profile.provider_key,
+            revision: self.profile.revision,
+            canonical_home: self.profile.canonical_home.to_string_lossy().to_string(),
+        }]
     }
 
     pub fn skill_root_pins(&self) -> Vec<CatalogSkillRootPin> {
@@ -278,8 +270,7 @@ pub fn resolve_profile_context(
         });
     }
     Ok(ResolvedCatalogContext {
-        codex: (provider == ProviderKey::Codex).then_some(profile.clone()),
-        claude: (provider == ProviderKey::Claude).then_some(profile),
+        profile,
         skill_roots,
     })
 }

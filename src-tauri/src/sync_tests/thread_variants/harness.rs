@@ -1,3 +1,4 @@
+pub(crate) use mallard_domain::sha256_hex as sha256;
 use mallard_domain::{
     cloud_conversation_resource_id, cloud_conversation_transcript_path, ApplyPolicy, BundleId,
     BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleScope, BundleSnapshot,
@@ -444,12 +445,6 @@ pub fn analyzed_chain(bytes: &[u8]) -> Vec<mallard_domain::CanonicalConversation
         .chain()
         .unwrap()
         .to_vec()
-}
-
-pub fn sha256(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub fn assert_manifest_consistent(world: &VariantWorld) {

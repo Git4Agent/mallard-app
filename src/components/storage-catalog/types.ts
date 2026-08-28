@@ -136,7 +136,6 @@ export interface CatalogPushRow {
   selectable: boolean;
   selected_by_default: boolean;
   held_for_pull: boolean;
-  removal_candidate: boolean;
   local_content_sha256?: string | null;
   storage_content_sha256?: string | null;
   blocked_reason?: string | null;

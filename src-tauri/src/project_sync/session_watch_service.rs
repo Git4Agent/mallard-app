@@ -18,7 +18,9 @@
 //! operations is always visible to the second one.
 
 use super::commands::LocalTailObservation;
-use mallard_domain::{LocalProjectId, ProviderKey, StorageId, TargetExpectation, ThreadId};
+use mallard_domain::{
+    now_secs, LocalProjectId, ProviderKey, StorageId, TargetExpectation, ThreadId,
+};
 use mallard_infrastructure::persistence::write_json_atomic;
 use mallard_infrastructure::provider_capture::{self, CaptureRequest, Discovery, LocalSessionView};
 use mallard_infrastructure::sync_metrics;
@@ -31,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 /// Bounded process-local state: past any bound the profile drops to the
 /// bounded path rather than evicting part of its evidence.
@@ -45,44 +47,15 @@ const MAX_OBSERVATION_DISK_BYTES: u64 = 16 * 1024 * 1024;
 const OBSERVATION_DISK_FILE: &str = "observation_cache.json";
 const EVENT_QUEUE_DEPTH: usize = 8_192;
 
-enum WatchBackend {
-    #[cfg(not(test))]
-    Recommended(RecommendedWatcher),
-    #[cfg(test)]
-    /// Deterministic test backend: a synchronous scanner that diffs full
-    /// file contents on every drain, so a mutation between two operations
-    /// — same-size, same-second included — is always visible to the second
-    /// one, and never earlier or later.
-    Manual(ManualScanner),
-}
+#[cfg(not(test))]
+type WatchBackend = RecommendedWatcher;
 
-impl WatchBackend {
-    fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
-        match self {
-            #[cfg(not(test))]
-            WatchBackend::Recommended(watcher) => watcher.watch(path, mode),
-            #[cfg(test)]
-            WatchBackend::Manual(scanner) => {
-                scanner.watch(path, mode);
-                Ok(())
-            }
-        }
-    }
+#[cfg(test)]
+type WatchBackend = ManualScanner;
 
-    fn poll(&mut self) -> notify::Result<()> {
-        match self {
-            #[cfg(not(test))]
-            WatchBackend::Recommended(_) => Ok(()),
-            #[cfg(test)]
-            WatchBackend::Manual(scanner) => {
-                scanner.poll();
-                Ok(())
-            }
-        }
-    }
-}
-
-/// The deterministic test scanner behind `WatchBackend::Manual`.
+/// Deterministic test backend: a synchronous scanner that diffs full file
+/// contents on every drain, so a mutation between two operations — same-size,
+/// same-second included — is always visible to the second one.
 #[cfg(test)]
 struct ManualScanner {
     sender: SyncSender<notify::Result<Event>>,
@@ -100,10 +73,11 @@ impl ManualScanner {
         }
     }
 
-    fn watch(&mut self, path: &Path, mode: RecursiveMode) {
+    fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
         self.roots.push((path.to_path_buf(), mode));
         // Baseline without emitting: arming precedes the first scan.
         self.baseline = self.scan();
+        Ok(())
     }
 
     fn scan(&self) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
@@ -179,7 +153,7 @@ impl ManualScanner {
 struct ProfileWatch {
     provider: ProviderKey,
     canonical_home: PathBuf,
-    backend: WatchBackend,
+    _backend: WatchBackend,
     receiver: Receiver<notify::Result<Event>>,
     overflowed: Arc<AtomicBool>,
     watched_session_roots: BTreeSet<PathBuf>,
@@ -320,13 +294,6 @@ fn modified_nanos(metadata: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-}
-
 fn path_pin(path: &Path) -> Option<DiskPathPin> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
     if !metadata.is_file() {
@@ -427,7 +394,7 @@ fn arm_backend(
     #[cfg(test)]
     {
         let _ = overflowed;
-        Ok(WatchBackend::Manual(ManualScanner::new(sender)))
+        Ok(ManualScanner::new(sender))
     }
     #[cfg(not(test))]
     {
@@ -438,10 +405,7 @@ fn arm_backend(
                 overflowed.store(true, Ordering::Relaxed);
             }
         };
-        Ok(WatchBackend::Recommended(RecommendedWatcher::new(
-            handler,
-            Config::default(),
-        )?))
+        RecommendedWatcher::new(handler, Config::default())
     }
 }
 
@@ -521,7 +485,7 @@ fn arm_profile(
     Ok(ProfileWatch {
         provider: provider.clone(),
         canonical_home: canonical_home.to_path_buf(),
-        backend,
+        _backend: backend,
         receiver,
         overflowed,
         watched_session_roots,
@@ -610,10 +574,8 @@ impl ProfileWatch {
 
     /// Poll (manual backend), then drain and classify every queued event.
     fn drain(&mut self) {
-        if self.backend.poll().is_err() {
-            self.healthy = false;
-            return;
-        }
+        #[cfg(test)]
+        self._backend.poll();
         loop {
             match self.receiver.try_recv() {
                 Ok(Ok(event)) => self.classify(&event),

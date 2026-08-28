@@ -14,6 +14,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use mallard_domain::sha256_hex as sha256_bytes;
 use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::fs;
@@ -21,13 +22,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
-
-fn sha256_bytes(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
 
 #[derive(Clone, Debug)]
 pub struct RequestRecord {

@@ -12,7 +12,7 @@ use crate::app_settings::{
 use crate::path_text_boundary::replace_sensitive_path_occurrences;
 use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
 use crate::project_activity::{discover_github_repository_url, resolve_activity_project};
-use crate::provider_capture::LocalSessionView;
+use crate::provider_capture::{modified_secs, LocalSessionView};
 use crate::providers::traits::timeline_tool_detail_budgets;
 use crate::providers::{
     ProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionCheckpoint,
@@ -21,9 +21,11 @@ use crate::providers::{
     SessionTimelineEventKind, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
     SessionToolCategory,
 };
-use mallard_domain::{parse_conversation_resource_id, LocalProjectId, NoticeSeverity, ProviderKey};
+use mallard_domain::{
+    hex_lower, now_secs, parse_conversation_resource_id, sha256_hex, LocalProjectId,
+    NoticeSeverity, ProviderKey,
+};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -89,14 +91,6 @@ impl SessionDetailError {
 pub type SessionDetailResult<T> = Result<T, SessionDetailError>;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct SessionDetailCapabilities {
-    pub intermediate_steps: bool,
-    pub checkpoints: bool,
-    pub tool_calls: bool,
-    pub event_detail: bool,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ProjectSessionDetail {
     pub resource_id: String,
     pub provider: ProviderKey,
@@ -116,7 +110,6 @@ pub struct ProjectSessionDetail {
     pub recorded_sha: Option<String>,
     pub tokens: SessionCount,
     pub event_counts: SessionEventCounts,
-    pub capabilities: SessionDetailCapabilities,
     #[serde(default)]
     pub actions: Vec<SessionActionDescriptor>,
     /// Where this project's commits can be read on GitHub, when a GitHub remote
@@ -239,29 +232,6 @@ fn modified_nanos(metadata: &fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-fn modified_secs(metadata: &fs::Metadata) -> u64 {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-}
-
-fn hex_sha256(value: impl AsRef<[u8]>) -> String {
-    Sha256::digest(value.as_ref())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn snapshot_id(session: &ResolvedLocalSession, timeline_version: u32) -> String {
     snapshot_id_with_limits(
         session,
@@ -280,25 +250,31 @@ fn snapshot_id_with_limits(
     preview_budget_bytes: u64,
     conversation_limit_bytes: u64,
 ) -> String {
-    hex_sha256(format!(
-        "session-detail-v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
-        session.provider,
-        session.resource_id,
-        session.file_size,
-        session.modified_nanos,
-        timeline_version,
-        preview_budget_bytes,
-        conversation_limit_bytes
-    ))
+    sha256_hex(
+        format!(
+            "session-detail-v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            session.provider,
+            session.resource_id,
+            session.file_size,
+            session.modified_nanos,
+            timeline_version,
+            preview_budget_bytes,
+            conversation_limit_bytes
+        )
+        .as_bytes(),
+    )
 }
 
 fn cache_key(session: &ResolvedLocalSession) -> String {
-    hex_sha256(format!(
-        "timeline-cache-v1\0{}\0{}\0{}",
-        session.provider,
-        session.resource_id,
-        session.transcript_path.display()
-    ))
+    sha256_hex(
+        format!(
+            "timeline-cache-v1\0{}\0{}\0{}",
+            session.provider,
+            session.resource_id,
+            session.transcript_path.display()
+        )
+        .as_bytes(),
+    )
 }
 
 fn invalid_request(message: impl Into<String>) -> SessionDetailError {
@@ -1318,10 +1294,6 @@ fn with_checkpoint_count(
     counts
 }
 
-fn count_is_supported(count: &SessionCount) -> bool {
-    count.quality != SessionCountQuality::Unsupported
-}
-
 fn append_unique_warnings(
     target: &mut Vec<SessionDetailWarning>,
     warnings: impl IntoIterator<Item = SessionDetailWarning>,
@@ -1449,14 +1421,6 @@ fn sanitize_actions(
     Ok(())
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push_str(&format!("{byte:02x}"));
-    }
-    encoded
-}
-
 fn decode_hex(value: &str) -> SessionDetailResult<Vec<u8>> {
     if value.len() > 16 * 1024 || !value.len().is_multiple_of(2) {
         return Err(invalid_request("The timeline cursor is invalid."));
@@ -1483,7 +1447,7 @@ fn hex_digit(byte: u8) -> SessionDetailResult<u8> {
 fn encode_cursor(cursor: &TimelineCursor) -> SessionDetailResult<String> {
     let bytes = serde_json::to_vec(cursor)
         .map_err(|_| invalid_request("Mallard could not encode the timeline cursor."))?;
-    Ok(format!("v1-{}", encode_hex(&bytes)))
+    Ok(format!("v1-{}", hex_lower(&bytes)))
 }
 
 fn decode_cursor(value: &str) -> SessionDetailResult<TimelineCursor> {
@@ -1508,7 +1472,7 @@ fn filter_fingerprint(request: &ProjectSessionTimelineRequest) -> SessionDetailR
         &request.turn_id,
     ))
     .map_err(|_| invalid_request("The timeline filters are invalid."))?;
-    Ok(hex_sha256(bytes))
+    Ok(sha256_hex(&bytes))
 }
 
 fn validate_slice_against_query(
@@ -1618,7 +1582,6 @@ pub fn get_project_session_detail(
             adapter.available_actions(&SessionActionContext {
                 provider_session_id: &session.provider_session_id,
                 is_local: true,
-                transcript_path: Some(&session.transcript_path),
             })
         })
         .unwrap_or_default();
@@ -1657,12 +1620,6 @@ pub fn get_project_session_detail(
             .map(|branch| sanitize_boundary_text(branch, &session)),
         recorded_sha: summary.recorded_sha.filter(|sha| valid_full_sha(sha)),
         tokens,
-        capabilities: SessionDetailCapabilities {
-            intermediate_steps: count_is_supported(&event_counts.intermediate_steps),
-            checkpoints: matches!(checkpoint, CheckpointSupport::Supported(_)),
-            tool_calls: count_is_supported(&event_counts.tool_calls),
-            event_detail: count_is_supported(&event_counts.tool_calls),
-        },
         event_counts,
         actions,
         github_repository_url: matches!(checkpoint, CheckpointSupport::Supported(_))

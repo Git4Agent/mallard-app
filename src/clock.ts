@@ -29,6 +29,34 @@ export function toEpochMilliseconds(value: number): number {
   return value > 10_000_000_000 ? value : value * 1_000;
 }
 
+export function formatDateTime(milliseconds: number): string {
+  return new Date(milliseconds).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    ...clockOptions(),
+  });
+}
+
+let fullDateFormatter: Intl.DateTimeFormat | null = null;
+let fullClockFormatter: Intl.DateTimeFormat | null = null;
+let fullClockFormatterIs24Hour: boolean | null = null;
+
+export function formatFullDateTime(seconds: number): string {
+  const when = new Date(seconds * 1_000);
+  fullDateFormatter ??= new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  const clock24 = getPreference("clock24");
+  if (fullClockFormatter === null || fullClockFormatterIs24Hour !== clock24) {
+    fullClockFormatter = new Intl.DateTimeFormat(undefined, clockOptions());
+    fullClockFormatterIs24Hour = clock24;
+  }
+  return `${fullDateFormatter.format(when)} at ${fullClockFormatter.format(when)}`;
+}
+
 /**
  * A span at one significant unit: `45s`, `11m`, `1h 5m`, `2d 3h`. Null when
  * there is nothing measurable to show, so a zero-length span prints no chip

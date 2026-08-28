@@ -3,6 +3,7 @@ import type {
   GitBranchSummary,
   LocalProjectSummary,
   NoticeSeverity,
+  OlderActivity,
   ProjectActivity,
   ProjectBinding,
   ProjectSessionSummary,
@@ -13,8 +14,7 @@ import type {
 } from "../../types";
 import Icon, { type IconName } from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
-import { clockOptions, formatDuration } from "../../clock";
-import { getPreference } from "../../preferences";
+import { formatDuration, formatFullDateTime } from "../../clock";
 import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { githubCommitUrl, openExternalUrl } from "./externalLink";
@@ -22,6 +22,8 @@ import LoadingScaffold from "../LoadingScaffold";
 import { compactProjectPath, projectLabel } from "./model";
 import ProviderMark from "../sync-review/ProviderMark";
 import { writeClipboardText } from "../sync-review/clipboard";
+import TopLayer from "../sync-review/TopLayer";
+import { useDebugPopoverPlacement } from "../sync-review/debugPopoverPlacement";
 import { formatCompactNumber, formatSessionDetailTimestamp, type OpenSessionDetailRequest } from "./session-detail/sessionDetailModel";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 
@@ -56,6 +58,10 @@ interface PageProps {
   selectableResourceIds?: ReadonlySet<string>;
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
+  /** Rows that Show less removed from view and that were ticked. The review
+   *  drops them: a selection you can no longer see is one you cannot check
+   *  before it travels. */
+  onDropSelection?: (resourceIds: string[]) => void;
   onReviewPull?: () => void;
   onUnlinkStorage?: () => void;
   continuityActionBusy?: boolean;
@@ -93,6 +99,9 @@ interface ContentProps {
   actionBusyResourceId: string | null;
   actionBusyActionId?: string | null;
   onLoadMore: () => void;
+  onShowLess: () => void;
+  /** True once more than one window is loaded — there is something to pop. */
+  canShowLess: boolean;
   /** Dispatches one backend-declared row action. */
   onSessionAction: (session: ProjectSessionSummary, action: SessionActionDescriptor) => void;
   onOpenSessionDetail?: (
@@ -289,39 +298,115 @@ function formatDate(value?: number | null): string {
   return formatSessionDetailTimestamp(value);
 }
 
-/* Constructing an Intl.DateTimeFormat is the expensive part of formatting, and
-   one session row asks for six of them — three full stamps, each a date plus a
-   time. Build each formatter once. The clock one is rebuilt only when the
-   24-hour preference actually flips, so a Settings change still takes effect
-   without making every row pay for the possibility. */
-let calendarFormatter: Intl.DateTimeFormat | null = null;
-
-function formatCalendarDate(value: number): string {
-  calendarFormatter ??= new Intl.DateTimeFormat(undefined, {
-    month: "short", day: "numeric", year: "numeric",
-  });
-  return calendarFormatter.format(new Date(value * 1_000));
-}
-
-let clockFormatter: Intl.DateTimeFormat | null = null;
-let clockFormatterIs24Hour: boolean | null = null;
-
-function formatClockTime(value: number): string {
-  const clock24 = getPreference("clock24");
-  if (clockFormatter === null || clockFormatterIs24Hour !== clock24) {
-    clockFormatter = new Intl.DateTimeFormat(undefined, clockOptions());
-    clockFormatterIs24Hour = clock24;
-  }
-  return clockFormatter.format(new Date(value * 1_000));
-}
-
-function formatFullDateTime(value: number): string {
-  return `${formatCalendarDate(value)} at ${formatClockTime(value)}`;
-}
-
 function formatCount(value?: number | null): string {
   if (value == null) return "Not reported";
   return formatCompactNumber(value);
+}
+
+/* Day precision, for the two places that name a boundary rather than a moment:
+   the window a page covers, and the day a step backwards lands on. A clock
+   time on either would claim the edge falls at that exact second. */
+let dayFormatter: Intl.DateTimeFormat | null = null;
+function formatDay(seconds: number): string {
+  dayFormatter ??= new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  return dayFormatter.format(new Date(seconds * 1_000));
+}
+
+/* `formatRange` collapses the parts two dates share — "Jul 28 – Aug 27, 2026"
+   rather than the year twice — and does it per locale, which hand-rolling
+   cannot. It postdates this project's TS lib, so it is reached through a
+   capability check with the spelled-out form as the fallback. */
+interface RangeCapableFormat extends Intl.DateTimeFormat {
+  formatRange?: (from: Date, to: Date) => string;
+}
+
+/** The window a page covers, as one range — "Jul 28 – Aug 27, 2026". */
+function formatDayRange(fromSeconds: number, toSeconds: number): string {
+  dayFormatter ??= new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  const formatter = dayFormatter as RangeCapableFormat;
+  const from = new Date(fromSeconds * 1_000);
+  // The window is half-open, so its last covered day is the second before it
+  // ends; formatting `window_end` itself would name a day the page excludes.
+  const to = new Date(Math.max(fromSeconds, toSeconds - 1) * 1_000);
+  return formatter.formatRange
+    ? formatter.formatRange(from, to)
+    : `${formatter.format(from)} – ${formatter.format(to)}`;
+}
+
+/** "41 commits and 6 sessions", dropping whichever side is empty. */
+function describeOlder(older: OlderActivity): string {
+  const parts: string[] = [];
+  if (older.commits > 0) parts.push(`${older.commits} commit${older.commits === 1 ? "" : "s"}`);
+  if (older.sessions > 0) parts.push(`${older.sessions} session${older.sessions === 1 ? "" : "s"}`);
+  const through = `through ${formatDay(older.newest_at)}`;
+  return parts.length ? `Load earlier history — ${through}, ${parts.join(" and ")}` : `Load earlier history — ${through}`;
+}
+
+/**
+ * The rail's foot: whichever of the two paging controls apply, under the rail
+ * they page and in its own column.
+ *
+ * Load earlier states the day one press lands on, which is the point of a
+ * cursor that tracks the data instead of stepping a fixed thirty days into
+ * whatever is there. Show less pops the newest window back off — paging was a
+ * one-way door until it existed.
+ *
+ * While a fetch runs only the node moves. It is a 24px slot outside the row,
+ * so the labels and the date hold their positions; the date holds because the
+ * fetch is still running *through* that day.
+ */
+function RailFoot({ older, canShowLess, busy, railed, onLoadMore, onShowLess }: {
+  older: OlderActivity | null;
+  canShowLess: boolean;
+  busy: boolean;
+  /** False in the flat Sessions list of a project with no repository, which
+   *  has no rail to hang a node on. */
+  railed: boolean;
+  onLoadMore: () => void;
+  onShowLess: () => void;
+}) {
+  if (!older && !canShowLess) return null;
+  const loadLabel = older ? describeOlder(older) : "";
+  return (
+    <div className={`sync-history-rail-foot${railed ? "" : " no-rail"}`}>
+      <span className="sync-history-rail-foot-node" aria-hidden="true">
+        <Icon name={busy ? "refresh" : "chevron-down"} size={12} className={busy ? "icon-spin" : undefined} />
+      </span>
+      {canShowLess && (
+        <button
+          type="button"
+          className="sync-history-rail-step"
+          disabled={busy}
+          title="Drop the most recently loaded window"
+          onClick={onShowLess}
+        >
+          <strong>Show less</strong>
+        </button>
+      )}
+      {older && (
+        <button
+          type="button"
+          className="sync-history-rail-step"
+          disabled={busy}
+          aria-busy={busy || undefined}
+          title={loadLabel}
+          aria-label={loadLabel}
+          onClick={onLoadMore}
+        >
+          <strong>{busy ? "Loading…" : "Load earlier"}</strong>
+          <time dateTime={new Date(older.newest_at * 1_000).toISOString()}>· {formatDay(older.newest_at)}</time>
+        </button>
+      )}
+    </div>
+  );
 }
 
 export function compactThreadTitle(value: string): string {
@@ -719,7 +804,6 @@ export function sessionDebugCopyText(
 }
 
 /** Roughly the panel's rendered height; only used to pick which way it opens. */
-const SESSION_DEBUG_POPOVER_HEIGHT = 300;
 
 type SessionDebugCopyTarget =
   | "resource-id"
@@ -737,11 +821,12 @@ function SessionDebugMenu({
   workingDirectory,
 }: SessionDebugMenuProps) {
   const [open, setOpen] = useState(false);
-  const [dropUp, setDropUp] = useState(false);
   const [copied, setCopied] = useState<SessionDebugCopyTarget | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const placement = useDebugPopoverPlacement(rootRef, panelRef, open, () => closeMenu());
   const menuId = `session-debug-${useId().replace(/:/g, "")}`;
   const rows: Array<{ key: Exclude<SessionDebugCopyTarget, "all">; label: string; value: string }> = [
     { key: "resource-id", label: "Resource ID", value: resourceId },
@@ -777,25 +862,6 @@ function SessionDebugMenu({
     if (restoreFocus) window.requestAnimationFrame(() => triggerRef.current?.focus());
   };
 
-  // Hanging the panel below a row near the end of the list grows the
-  // workspace's scrollable height, which makes the scrollbar jump the moment
-  // it opens. Overflow past the top of a scroller is not scrollable, so those
-  // rows open upward instead; rows with room below keep opening down.
-  useEffect(() => {
-    if (!open) {
-      setDropUp(false);
-      return;
-    }
-    const trigger = triggerRef.current;
-    if (!trigger) return;
-    const rect = trigger.getBoundingClientRect();
-    const scroller = trigger.closest<HTMLElement>(".sync-main")?.getBoundingClientRect();
-    const roomBelow = (scroller?.bottom ?? window.innerHeight) - rect.bottom;
-    const roomAbove = rect.top - (scroller?.top ?? 0);
-    // Only flip when down does not fit *and* up is the roomier side, so a row
-    // that fits neither way still opens toward whichever clips it less.
-    setDropUp(roomBelow < SESSION_DEBUG_POPOVER_HEIGHT && roomAbove > roomBelow);
-  }, [open]);
 
   const copyValue = async (target: SessionDebugCopyTarget, value: string) => {
     try {
@@ -810,11 +876,15 @@ function SessionDebugMenu({
 
   useEffect(() => {
     if (!open) return;
+    // The panel is portalled onto body, so it is not inside rootRef. Both have
+    // to count as "inside" or the first click on a Copy button dismisses it.
+    const inside = (target: EventTarget | null) => target instanceof Node
+      && Boolean(rootRef.current?.contains(target) || panelRef.current?.contains(target));
     const handlePointerDown = (event: PointerEvent) => {
-      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) closeMenu();
+      if (!inside(event.target)) closeMenu();
     };
     const handleFocusIn = (event: FocusEvent) => {
-      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) closeMenu();
+      if (!inside(event.target)) closeMenu();
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -855,61 +925,79 @@ function SessionDebugMenu({
       >
         <Icon name="info" size={14} />
       </button>
-      <div
-        id={menuId}
-        className={`sync-history-debug-popover${dropUp ? " drop-up" : ""}`}
-        role="dialog"
-        aria-label="Session debug info"
-        hidden={!open}
-      >
-        <header>
-          <strong>Session debug info</strong>
-          <span>Click a value to copy it.</span>
-        </header>
-        <div className="sync-history-debug-values">
-          {rows.map((row) => (
-            <button
-              key={row.key}
-              type="button"
-              className="sync-history-debug-copy"
-              aria-label={`Copy ${row.label.toLowerCase()}`}
-              title={`Copy ${row.label.toLowerCase()}`}
-              onClick={() => void copyValue(row.key, row.value)}
+      {/* On body, not in the row. Nothing in the list can bound it there:
+          not the row's card, not the commit rail's stacking context, and
+          not .sync-main's scrollport, which used to cap it to whatever
+          room the scroller had left. */}
+      <TopLayer>
+        <div
+          ref={panelRef}
+          id={menuId}
+          className="sync-history-debug-popover"
+          style={placement
+            ? {
+              top: `${placement.top}px`,
+              left: `${placement.left}px`,
+              width: `${placement.width}px`,
+              maxHeight: `${placement.maxHeight}px`,
+            }
+            /* Measured on the first layout pass; kept out of the paint
+               until then so it never shows at the window origin. */
+            : { visibility: "hidden" }}
+          role="dialog"
+          aria-label="Session debug info"
+          hidden={!open}
+        >
+          <header>
+            <strong>Session debug info</strong>
+            <span>Click a value to copy it.</span>
+          </header>
+          <div className="sync-history-debug-values">
+            {rows.map((row) => (
+              <button
+                key={row.key}
+                type="button"
+                className="sync-history-debug-copy"
+                aria-label={`Copy ${row.label.toLowerCase()}`}
+                title={`Copy ${row.label.toLowerCase()}`}
+                onClick={() => void copyValue(row.key, row.value)}
+              >
+                <span>{row.label}</span>
+                <code>{row.value}</code>
+                <small className={copied === row.key ? "copied" : undefined}>
+                  {copied === row.key ? "Copied" : "Copy"}
+                </small>
+              </button>
+            ))}
+          </div>
+          <footer>
+            <span
+              className={`sync-history-debug-status${copyError ? " error" : copied ? " success" : ""}`}
+              role="status"
+              aria-live="polite"
             >
-              <span>{row.label}</span>
-              <code>{row.value}</code>
-              <small className={copied === row.key ? "copied" : undefined}>
-                {copied === row.key ? "Copied" : "Copy"}
-              </small>
+              {copyError ?? copiedLabel}
+            </span>
+            <button
+              type="button"
+              className="btn btn-ghost sync-history-debug-copy-all"
+              onClick={() => void copyValue(
+                "all",
+                sessionDebugCopyText(
+                  resourceId,
+                  logicalThreadId,
+                  providerSessionId,
+                  transcriptPath,
+                  workingDirectory,
+                ),
+              )}
+            >
+              {copied === "all" ? "Copied all" : "Copy all"}
             </button>
-          ))}
+          </footer>
         </div>
-        <footer>
-          <span
-            className={`sync-history-debug-status${copyError ? " error" : copied ? " success" : ""}`}
-            role="status"
-            aria-live="polite"
-          >
-            {copyError ?? copiedLabel}
-          </span>
-          <button
-            type="button"
-            className="btn btn-ghost sync-history-debug-copy-all"
-            onClick={() => void copyValue(
-              "all",
-              sessionDebugCopyText(
-                resourceId,
-                logicalThreadId,
-                providerSessionId,
-                transcriptPath,
-                workingDirectory,
-              ),
-            )}
-          >
-            {copied === "all" ? "Copied all" : "Copy all"}
-          </button>
-        </footer>
-      </div>
+
+      </TopLayer>
     </div>
   );
 }
@@ -1408,7 +1496,7 @@ function providerNoticeSeverity(state: ProviderActivityState): NoticeSeverity {
 }
 
 export function ProjectChatHistoryContent({
-  project, binding, activity, loading, loadingMore, actionError, loadError, onRetryLoad, actionBusyResourceId, actionBusyActionId = null,
+  project, binding, activity, loading, loadingMore, actionError, loadError, onRetryLoad, actionBusyResourceId, actionBusyActionId = null, onShowLess, canShowLess,
   onLoadMore,
   onSessionAction, onOpenSessionDetail, embedded = false, comparison = null,
   comparisonLoading = false, comparisonError = null, activeStorageName = null,
@@ -1491,6 +1579,23 @@ export function ProjectChatHistoryContent({
     hasBoundProvider,
   }), [comparison, comparisonLoading, comparisonError, activeStorageName, hasBoundProvider]);
   const sectionTitle = activity?.git ? "Git history" : activity ? "Sessions" : "Activity";
+  const windowRange = activity ? formatDayRange(activity.window_start, activity.window_end) : "";
+  /* An empty rail has three causes and they are not interchangeable. Only one
+     of them is about the window, and for the other two no amount of paging
+     would ever produce a commit — so the page has to say which it is.
+     `available` is false for a branch recorded in session metadata but with no
+     local ref; it is true for the current branch even before its first commit,
+     which is what separates the remaining two. */
+  const emptyRail = useMemo(() => {
+    const branch = activity?.git?.branches.find((entry) => entry.name === activity.git?.selected_branch);
+    if (branch && !branch.available) {
+      return { icon: "git-branch" as IconName, title: "Branch not checked out here", meta: null };
+    }
+    if ((activity?.older?.commits ?? 0) === 0) {
+      return { icon: "git-commit" as IconName, title: "No commits yet", meta: null };
+    }
+    return { icon: "clock" as IconName, title: "No commits", meta: windowRange };
+  }, [activity?.git?.branches, activity?.git?.selected_branch, activity?.older?.commits, windowRange]);
   const refreshStatus = comparisonLoading
     ? `Comparing threads with ${activeStorageName ?? "storage"}`
     : loading
@@ -1738,7 +1843,34 @@ export function ProjectChatHistoryContent({
                 )}
                 <section className="sync-history-commit-section" aria-label={`First-parent commits on ${activity.git.selected_branch}`}>
                   {!embedded && <div className="sync-history-section-heading"><h2>Commit history</h2><span className="sync-history-heading-count" title={`${activity.git.unique_session_count} session${activity.git.unique_session_count === 1 ? "" : "s"} linked to commits`} aria-label={`${activity.git.unique_session_count} session${activity.git.unique_session_count === 1 ? "" : "s"} linked to commits`}><Icon name="message" size={12} />{activity.git.unique_session_count}</span></div>}
-                  {activity.git.commits.length === 0 ? <div className="sync-history-state">No commits are available in this 30-day window.</div> : (
+                  {activity.git.commits.length === 0 ? (
+                    /* An empty rail is still the rail: the gap draws as a card
+                       on it, so the page keeps the spine every other state is
+                       read against, and the terminus below still has something
+                       to hang from. `commits.length === 0` used to print one
+                       sentence blaming a 30-day window for all three of these
+                       — and for two of them the window has nothing to do with
+                       it, so no amount of paging would ever have helped. */
+                    <ol className="sync-history-commit-rail">
+                      <li className="sync-history-commit sync-history-commit-gap">
+                        {/* Not a fold: there is nothing here to expand, so the
+                            rail column gets a marker rather than a control
+                            that would do nothing when pressed. */}
+                        <span className="sync-history-spine-fold inert" aria-hidden="true"><Icon name="chevron-down" size={12} /></span>
+                        <div className="sync-history-commit-heading">
+                          <span className="sync-history-commit-title">
+                            <span className="sync-history-commit-icon" aria-hidden="true"><Icon name={emptyRail.icon} size={14} /></span>
+                            <strong>{emptyRail.title}</strong>
+                          </span>
+                          {emptyRail.meta && (
+                            <span className="sync-history-commit-meta">
+                              <time dateTime={new Date(activity.window_start * 1_000).toISOString()}>{emptyRail.meta}</time>
+                            </span>
+                          )}
+                        </div>
+                      </li>
+                    </ol>
+                  ) : (
                     <ol className="sync-history-commit-rail">{activity.git.commits.map((commit) => {
                       const commitUrl = githubCommitUrl(activity.git?.github_repository_url, commit.sha);
                       const references = orderedReferences(commit.session_refs);
@@ -1793,6 +1925,19 @@ export function ProjectChatHistoryContent({
                     })}</ol>
                   )}
                 </section>
+                {/* The paging control ends the rail it pages. It used to float
+                    below the Older activity fold at the very bottom of the
+                    page, detached from the list it extended.
+
+                    A review pages too, so an out-of-window thread arrives as a
+                    real row rather than as an entry in a fold. The floor stays
+                    browse-only: in a review "nothing earlier" is not the last
+                    word, because the Older activity fold below catches
+                    whatever paging cannot reach. */}
+                <RailFoot older={activity.older ?? null} canShowLess={canShowLess} busy={loadingMore}
+                  railed onLoadMore={onLoadMore} onShowLess={onShowLess} />
+                {!activity.older && !canShowLess && !selectionMode
+                  && <p className="sync-history-rail-floor">{windowRange} · nothing earlier</p>}
               </div>
             ) : (
               <section
@@ -1803,10 +1948,28 @@ export function ProjectChatHistoryContent({
                 {!embedded && <div className="sync-history-section-heading"><h2 id="project-sessions-heading"><Icon name="message" size={14} />Sessions</h2><span className="sync-history-heading-count" title={`${sessions.length} session${sessions.length === 1 ? "" : "s"}`}><Icon name="message" size={12} />{sessions.length}</span></div>}
                 <div className="sync-history-thread-list flat">{sessions.length
                   ? sessions.map((session) => renderSession(session, session.resource_id))
-                  : <div className="sync-history-state">No project-owned agent sessions were found in this 30-day window.</div>}</div>
+                  : <div className="sync-history-state">{`No sessions in ${windowRange}.`}</div>}</div>
+                {/* Same control, no rail to hang it from: a project with no
+                    repository draws no spine, so the node and its segment are
+                    suppressed and the row keeps the list's own left edge. */}
+                <RailFoot older={activity.older ?? null} canShowLess={canShowLess} busy={loadingMore}
+                  railed={false} onLoadMore={onLoadMore} onShowLess={onShowLess} />
+                {!activity.older && !canShowLess && !selectionMode
+                  && <p className="sync-history-rail-floor no-rail">{windowRange} · nothing earlier</p>}
               </section>
             )}
-            {selectionMode && olderEntries.length > 0 && (
+            {/* The catcher, not the route. Paging is how an out-of-window
+                thread is reached now, so this stays out of the way while
+                anything is still loadable — a fold offering the same rows the
+                control above it fetches is two doors into one room.
+                It cannot simply be deleted: the comparison is not windowed and
+                the terminus only walks the session timeline, so an entry with
+                no session row in the activity scan at all is reachable by no
+                amount of paging. Once `older` is null everything loadable is
+                loaded, and whatever is still here is exactly that remainder —
+                which a review must offer or it would silently drop
+                candidates. */}
+            {selectionMode && !activity.older && olderEntries.length > 0 && (
               <section className="sync-history-older" aria-label="Older activity">
                 <details className="sync-history-older-group">
                   <summary>
@@ -1845,7 +2008,6 @@ export function ProjectChatHistoryContent({
                 </details>
               </section>
             )}
-            {activity.next_before != null && <button type="button" className="btn sync-history-load-more" disabled={loadingMore} onClick={onLoadMore}>{loadingMore ? "Loading…" : "Load previous 30 days"}</button>}
           </>
         )}
       </section>
@@ -1859,12 +2021,18 @@ export function ProjectChatHistoryContent({
 
 function mergePages(previous: ProjectActivity | null, next: ProjectActivity): ProjectActivity {
   if (!previous || previous.git?.selected_branch !== next.git?.selected_branch) return next;
+  /* The merged page covers both windows, and everything between them: the
+     cursor lands just past the newest thing below the previous window, so the
+     span it skipped held nothing by construction. `older` comes from `next`,
+     the deepest page — it is what still lies below all of this. */
+  const window_start = Math.min(previous.window_start, next.window_start);
+  const window_end = Math.max(previous.window_end, next.window_end);
   const sessions = new Map(previous.sessions.map((session) => [session.resource_id, session]));
   next.sessions.forEach((session) => sessions.set(session.resource_id, session));
   const mergedSessions = [...sessions.values()].sort(compareSessions);
   const unmapped = new Map(previous.unmapped.map((item) => [item.resource_id, item]));
   next.unmapped.forEach((item) => unmapped.set(item.resource_id, item));
-  if (!previous.git || !next.git) return { ...next, sessions: mergedSessions, unmapped: [...unmapped.values()] };
+  if (!previous.git || !next.git) return { ...next, window_start, window_end, sessions: mergedSessions, unmapped: [...unmapped.values()] };
   const commits = new Map(previous.git.commits.map((commit) => [commit.sha, commit]));
   next.git.commits.forEach((commit) => {
     const existing = commits.get(commit.sha);
@@ -1875,7 +2043,7 @@ function mergePages(previous: ProjectActivity | null, next: ProjectActivity): Pr
   });
   const mergedCommits = [...commits.values()].sort((left, right) => right.committed_at - left.committed_at);
   const unique = new Set(mergedCommits.flatMap((commit) => commit.session_refs.map((reference) => reference.resource_id))).size;
-  return { ...next, sessions: mergedSessions, unmapped: [...unmapped.values()], git: { ...next.git, commits: mergedCommits, unique_session_count: unique } };
+  return { ...next, window_start, window_end, sessions: mergedSessions, unmapped: [...unmapped.values()], git: { ...next.git, commits: mergedCommits, unique_session_count: unique } };
 }
 
 export default function ProjectActivityPage({
@@ -1890,6 +2058,7 @@ export default function ProjectActivityPage({
   selectableResourceIds,
   selectionDisabled = false,
   onToggleResource,
+  onDropSelection,
   onReviewPull,
   onUnlinkStorage,
   continuityActionBusy = false,
@@ -1898,7 +2067,15 @@ export default function ProjectActivityPage({
   onHeaderModelChange,
   onOpenSessionDetail,
 }: PageProps) {
-  const [activity, setActivity] = useState<ProjectActivity | null>(null);
+  /* The windows this view has loaded, oldest press last. Kept as a stack
+     rather than one merged blob so paging is reversible: `mergePages` was
+     always a pure fold over pages, and holding the pages themselves makes
+     Show less a pop instead of a refetch. */
+  const [pages, setPages] = useState<ProjectActivity[]>([]);
+  const activity = useMemo(
+    () => pages.reduce<ProjectActivity | null>((merged, page) => mergePages(merged, page), null),
+    [pages],
+  );
   const [comparison, setComparison] = useState<ThreadSyncComparison | null>(null);
   const [comparisonLoading, setComparisonLoading] = useState(false);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
@@ -1928,7 +2105,7 @@ export default function ProjectActivityPage({
         30,
       );
       if (requestId !== requestRef.current) return false;
-      setActivity((current) => beforeTime ? mergePages(current, next) : next);
+      setPages((current) => beforeTime ? [...current, next] : [next]);
       setBranch(next.git?.selected_branch ?? null);
     } catch (reason) {
       // Page-level failures and row-action failures are different facts;
@@ -1993,7 +2170,7 @@ export default function ProjectActivityPage({
     // and loading flags set carried the previous project's failure banner onto
     // the next one, and a switch made mid-flight stranded the spinners on
     // because their owning request had already been superseded.
-    setActivity(null); setBranch(null); setComparison(null);
+    setPages([]); setBranch(null); setComparison(null);
     setLoadError(null); setComparisonError(null); setActionError(null);
     setLoading(false); setComparisonLoading(false); setLoadingMore(false);
     void loadWorkspace(null);
@@ -2013,9 +2190,38 @@ export default function ProjectActivityPage({
   const latest = useRef({ load, loadWorkspace, branch });
   latest.current = { load, loadWorkspace, branch };
 
+  /* Show less pops the newest page off the stack. Every id a review can tick
+     is either a session's own or its comparison entry's, so the set a row
+     answers to is built the same way the row builds it — anything else would
+     drop a project file or a tool, which no window ever governed.
+     Only ids that *were* reachable and no longer are get dropped, and only
+     when something was actually ticked. */
+  const visibleReviewIds = useCallback((page: ProjectActivity | null) => {
+    const index = indexSessionSyncEntries(comparison?.entries ?? []);
+    const ids = new Set<string>();
+    for (const session of page?.sessions ?? []) {
+      ids.add(session.resource_id);
+      const entry = syncEntryForSession(session, index);
+      if (entry) ids.add(entry.resource_id);
+    }
+    return ids;
+  }, [comparison?.entries]);
+
+  const showLess = useCallback(() => {
+    if (pages.length <= 1) return;
+    const next = pages.slice(0, -1);
+    const before = visibleReviewIds(activity);
+    const after = visibleReviewIds(
+      next.reduce<ProjectActivity | null>((merged, page) => mergePages(merged, page), null),
+    );
+    const dropped = [...(selectedResourceIds ?? [])].filter((id) => before.has(id) && !after.has(id));
+    setPages(next);
+    if (dropped.length > 0) onDropSelection?.(dropped);
+  }, [activity, onDropSelection, pages, selectedResourceIds, visibleReviewIds]);
+
   const changeBranch = useCallback((nextBranch: string) => {
     setBranch(nextBranch);
-    setActivity(null);
+    setPages([]);
     void latest.current.load(null, nextBranch);
   }, []);
   const refreshActivity = useCallback(() => {
@@ -2069,5 +2275,5 @@ export default function ProjectActivityPage({
       setActionBusyActionId(null);
     }
   };
-  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.next_before ?? null, branch)} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
+  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
 }

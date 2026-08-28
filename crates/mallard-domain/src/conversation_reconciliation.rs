@@ -8,6 +8,7 @@ use crate::{
     ConversationBlocker, ConversationPlanActionType, ConversationPlanDirection,
     ConversationReviewAction, SyncCurrency, TailClassification,
 };
+use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BindingResolution {
@@ -48,11 +49,13 @@ impl Default for ConversationCapabilities {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct ConversationDecision {
     pub action: ConversationReviewAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocker: Option<ConversationBlocker>,
     pub selectable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
 }
 
@@ -121,7 +124,7 @@ impl ConversationReviewAction {
 }
 
 impl ConversationPlanActionType {
-    pub fn matches_relation(self, relation: TailClassification) -> bool {
+    pub(crate) fn matches_relation(self, relation: TailClassification) -> bool {
         match self {
             Self::Publish => relation == TailClassification::LocalOutstanding,
             Self::CreateCloud => relation == TailClassification::MissingCloud,

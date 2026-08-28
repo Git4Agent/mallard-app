@@ -16,7 +16,7 @@ use mallard_infrastructure::r2_setup_journal::{
     R2_SETUP_JOURNAL_SCHEMA,
 };
 use mallard_infrastructure::storage_core::{R2CapabilityProbeErrorKind, S3ObjectStore};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
@@ -51,7 +51,7 @@ pub struct PrepareR2StorageDraftRequest {
     pub secret_access_key: SecretString,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrepareR2StorageDraftResult {
     pub draft_id: StorageSetupDraftId,
     pub draft_revision: u64,
@@ -91,22 +91,21 @@ pub struct TestR2StorageResult {
     pub verified: bool,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifyStorageResult {
     pub storage_id: StorageId,
     pub config_revision: u64,
     pub verified: bool,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageSummary {
     pub storage_id: StorageId,
     pub name: String,
     pub kind: StorageKind,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StorageSetupErrorKind {
     InvalidInput,
     Conflict,
@@ -209,8 +208,7 @@ impl fmt::Display for StorageSetupError {
 
 impl std::error::Error for StorageSetupError {}
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum R2Jurisdiction {
     Default,
     Eu,

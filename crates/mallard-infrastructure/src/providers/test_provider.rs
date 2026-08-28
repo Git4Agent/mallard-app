@@ -6,8 +6,8 @@
 use super::claude::codec::analyze_claude_transcript;
 use super::traits::{
     AgentProviderAdapter, DiscoveredSession, MaterializationTargetRequest, PlannedProviderTarget,
-    ProviderCapabilityLevel, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
-    SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
+    ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionOutcome,
+    SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
     SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
     SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
 };
@@ -86,8 +86,6 @@ impl AgentProviderAdapter for TestProviderAdapter {
             default_profile_directory: Some(".testprov".to_string()),
             setup_default: false,
             cli_launcher: None,
-            capabilities: ProviderCapabilityLevel::Resumable,
-            adapter_version: 1,
         }
     }
 

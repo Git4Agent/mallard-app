@@ -102,7 +102,7 @@ const activity = {
   warnings: [],
   window_start: WINDOW_START,
   window_end: WINDOW_START + 3_000_000,
-  next_before: null,
+  older: null,
   storage_sync: [],
 };
 

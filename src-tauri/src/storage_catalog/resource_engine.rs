@@ -486,7 +486,6 @@ mod tests {
                     git_ref: Some(git_ref.to_string()),
                 }),
             },
-            requirement: None,
             resolution: PluginResolutionPolicy::ProviderResolved,
         };
         let mut resource = PluginInstallIntentResource {

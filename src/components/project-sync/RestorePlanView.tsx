@@ -545,6 +545,13 @@ export default function RestorePlanView({
                   selectableResourceIds={conversationIds}
                   selectionDisabled={busy || finalReady}
                   onToggleResource={toggle}
+                  onDropSelection={(resourceIds) => setSelected((current) => {
+                    // Show less took these out of view. A tick you can no
+                    // longer see is one you cannot check before it applies.
+                    const next = new Set(current);
+                    resourceIds.forEach((resourceId) => next.delete(resourceId));
+                    return next;
+                  })}
                   onUnlinkStorage={onUnlinkStorage}
                   continuityActionBusy={busy || finalReady}
                   onReviewListReadyChange={setReviewListReady}

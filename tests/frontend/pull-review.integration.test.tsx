@@ -15,10 +15,9 @@ import type {
 import RestorePlanView, {
   pullSelectableResourceIds,
 } from "../../src/components/project-sync/RestorePlanView";
-import SyncOutcomeNotice from "../../src/components/sync-review/SyncOutcomeNotice";
+import SyncOutcomeNotice from "../../src/components/project-sync/SyncOutcomeNotice";
 import {
   buildPullOutcome,
-  syncOutcomeView,
   type SyncOutcome,
 } from "../../src/components/project-sync/syncOutcome";
 import { isIrrecoverableSyncError } from "../../src/components/project-sync/syncError";
@@ -36,7 +35,7 @@ import {
 function renderOutcome(outcome: SyncOutcome) {
   return renderToStaticMarkup(
     <SyncOutcomeNotice
-      view={syncOutcomeView(outcome)}
+      outcome={outcome}
       onAction={() => undefined}
       onDismiss={() => undefined}
     />,

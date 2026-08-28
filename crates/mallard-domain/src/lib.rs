@@ -11,15 +11,16 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::path::{Component, Path};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const LOCAL_SCHEMA: u32 = 1;
 pub const MACHINE_PROJECT_SCHEMA: u32 = 1;
 pub const HOST_IDENTITY_SCHEMA: u32 = 1;
 pub const CONVERSATION_BINDINGS_SCHEMA: u32 = 1;
-pub const CONVERSATION_SYNC_JOURNAL_SCHEMA: u32 = 1;
+pub(crate) const CONVERSATION_SYNC_JOURNAL_SCHEMA: u32 = 1;
 pub const PUSH_PLAN_SCHEMA: u32 = 1;
 pub const BUNDLE_SCHEMA: u32 = 1;
-pub const RECIPE_SCHEMA: u32 = 1;
+pub(crate) const RECIPE_SCHEMA: u32 = 1;
 pub const RESTORE_PLAN_SCHEMA: u32 = 1;
 pub const SETUP_DRAFT_SCHEMA: u32 = 1;
 pub const SETUP_TRANSACTION_SCHEMA: u32 = 1;
@@ -27,23 +28,23 @@ pub const MAX_SETUP_DRAFTS: usize = 64;
 pub const STORAGE_SETUP_DRAFT_SCHEMA: u32 = 1;
 pub const MAX_STORAGE_SETUP_DRAFTS: usize = 16;
 /// Bound on provider scopes in one manifest (the project scope is separate).
-pub const MAX_PROVIDER_SCOPES: usize = 64;
+pub(crate) const MAX_PROVIDER_SCOPES: usize = 64;
 
-pub const MAX_PROJECTS: usize = 1_024;
-pub const MAX_STORAGES: usize = 128;
-pub const MAX_LINKS: usize = 4_096;
-pub const MAX_BINDINGS: usize = 4_096;
-pub const MAX_PROVIDER_PROFILES: usize = 1_024;
-pub const MAX_RESOURCES: usize = 20_000;
-pub const MAX_FILES: usize = 100_000;
-pub const MAX_ACTIONS: usize = 100_000;
+pub(crate) const MAX_PROJECTS: usize = 1_024;
+pub(crate) const MAX_STORAGES: usize = 128;
+pub(crate) const MAX_LINKS: usize = 4_096;
+pub(crate) const MAX_BINDINGS: usize = 4_096;
+pub(crate) const MAX_PROVIDER_PROFILES: usize = 1_024;
+pub(crate) const MAX_RESOURCES: usize = 20_000;
+pub(crate) const MAX_FILES: usize = 100_000;
+pub(crate) const MAX_ACTIONS: usize = 100_000;
 pub const MAX_CONVERSATION_BINDINGS: usize = 100_000;
 pub const MAX_ORIGIN_ALIASES: usize = 20_000;
-pub const MAX_CONVERSATION_JOURNAL_OPERATIONS: usize = 10_000;
-pub const MAX_LOGICAL_PATH_BYTES: usize = 1_024;
+pub(crate) const MAX_CONVERSATION_JOURNAL_OPERATIONS: usize = 10_000;
+pub(crate) const MAX_LOGICAL_PATH_BYTES: usize = 1_024;
 pub const MAX_CONVERSATION_FILE_BYTES: u64 = 100 * 1024 * 1024;
-pub const MAX_PROJECT_CONTENT_FILE_BYTES: u64 = 16 * 1024 * 1024;
-pub const MAX_PROJECT_CONTENT_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_PROJECT_CONTENT_FILE_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_PROJECT_CONTENT_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 const ABSENT_BUNDLE_COMMIT_ID: &str = "absent";
 
 const WINDOWS_RESERVED_NAMES: &[&str] = &[
@@ -446,7 +447,7 @@ pub fn generated_named_id(prefix: &str) -> Result<String, String> {
     Ok(format!("{}-{}", prefix, hex_lower(&bytes)))
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
+pub fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -454,6 +455,20 @@ fn hex_lower(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0xf) as usize] as char);
     }
     out
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex_lower(&Sha256::digest(bytes))
+}
+
+fn unix_timestamp_secs(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+pub fn now_secs() -> u64 {
+    unix_timestamp_secs(SystemTime::now())
 }
 
 /// A portable path inside one bundle.  It is never joined directly to a
@@ -826,7 +841,7 @@ pub enum ResourceKind {
 impl ResourceKind {
     /// The sync scope this kind of resource belongs to: provider-owned kinds
     /// live in their provider's scope, everything else in the project scope.
-    pub fn requires_provider(self) -> bool {
+    fn requires_provider(self) -> bool {
         matches!(self, Self::Conversation | Self::ProviderState)
     }
 }
@@ -1272,7 +1287,7 @@ pub struct ProjectStorageLink {
     pub created_at: u64,
 }
 
-pub const PROJECT_CONTENT_PREFERENCES_SCHEMA: u32 = 1;
+pub(crate) const PROJECT_CONTENT_PREFERENCES_SCHEMA: u32 = 1;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ProjectContentPreferences {
@@ -1339,12 +1354,7 @@ fn project_content_identity(
                 logical_path
             )
         })?;
-    let digest = Sha256::digest(format!("{}\0{}", entry_type, relative_path).as_bytes());
-    let mut hex = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(&mut hex, "{:02x}", byte);
-    }
+    let hex = sha256_hex(format!("{}\0{}", entry_type, relative_path).as_bytes());
     let prefix = match entry_type {
         "file" => "project:content-file:",
         "dir" => "project:content-dir:",
@@ -1806,7 +1816,7 @@ pub enum ConversationMaterializationState {
 /// Read-side character budget for provider index titles: composed preserved
 /// marker titles must fit it whole so the marker suffix survives truncating
 /// readers.
-pub const PRESERVED_TITLE_MAX_CHARS: usize = 180;
+pub(crate) const PRESERVED_TITLE_MAX_CHARS: usize = 180;
 
 const PRESERVED_MARKER_PREFIX: &str = "Preserved ";
 const PRESERVED_MARKER_SEPARATOR: &str = " · ";
@@ -1837,7 +1847,7 @@ impl PreservedProvenance {
     /// Cloud rows share the provenance id space with their own key, so a
     /// self-preserve is expressible there and rejected here. Binding rows
     /// carry a local-space key, where the mismatch is a type error instead.
-    pub fn validate_for_cloud_row(&self, carrier: &CloudThreadId) -> Result<(), String> {
+    fn validate_for_cloud_row(&self, carrier: &CloudThreadId) -> Result<(), String> {
         self.validate()?;
         if &self.preserved_from == carrier {
             return Err(format!(
@@ -1868,7 +1878,7 @@ fn is_preserved_marker(text: &str) -> bool {
 /// or the bare `"Preserved {N} · {label}"` — returning the base title (empty
 /// when the title was only a marker). Titles without a marker come back
 /// unchanged.
-pub fn strip_preserved_marker(title: &str) -> String {
+fn strip_preserved_marker(title: &str) -> String {
     let trimmed = title.trim_end();
     if is_preserved_marker(trimmed) {
         return String::new();
@@ -3872,7 +3882,7 @@ pub fn conversation_chain_digests(
     ))
 }
 
-fn update_length_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+pub fn update_length_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update((bytes.len() as u64).to_be_bytes());
     hasher.update(bytes);
 }
@@ -4034,17 +4044,6 @@ pub fn is_conversation_resource_id(resource_id: &str) -> bool {
         || parse_cloud_conversation_resource_id(resource_id).is_ok()
 }
 
-pub fn conversation_transcript_path(
-    provider: &ProviderKey,
-    thread_id: &ThreadId,
-) -> Result<LogicalPath, String> {
-    LogicalPath::parse(format!(
-        "state/conversations/{}/{}/transcript.jsonl",
-        provider.as_str(),
-        thread_id
-    ))
-}
-
 pub fn cloud_conversation_transcript_path(
     provider: &ProviderKey,
     thread_id: &CloudThreadId,
@@ -4053,21 +4052,6 @@ pub fn cloud_conversation_transcript_path(
         "state/conversations/{}/{}/transcript.jsonl",
         provider.as_str(),
         thread_id
-    ))
-}
-
-pub fn conversation_sidecar_path(
-    provider: &ProviderKey,
-    thread_id: &ThreadId,
-    sidecar_kind: &str,
-    file_name: &str,
-) -> Result<LogicalPath, String> {
-    LogicalPath::parse(format!(
-        "state/conversations/{}/{}/sidecars/{}/{}",
-        provider.as_str(),
-        thread_id,
-        sidecar_kind,
-        file_name
     ))
 }
 
@@ -4325,7 +4309,7 @@ impl BundleScope {
         };
         let bytes = serde_json::to_vec(&view)
             .map_err(|error| format!("encode scope '{}' digest view: {}", scope, error))?;
-        Ok(hex_lower(&Sha256::digest(&bytes)))
+        Ok(sha256_hex(&bytes))
     }
 
     fn validate(&self, scope: &SyncScopeKey) -> Result<(), String> {

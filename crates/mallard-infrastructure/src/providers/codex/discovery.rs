@@ -63,9 +63,6 @@ pub(super) fn discover(
                     continue;
                 }
             };
-            discovery
-                .profile_session_ids
-                .insert(meta.session_id.clone());
             if !session_home_is_project_root(context.project_root, &meta.cwd) {
                 continue;
             }

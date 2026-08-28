@@ -4396,8 +4396,6 @@ fn assert_session_detail_paths(
     assert_eq!(header.resource_id, resource_id.as_str());
     assert_eq!(header.provider, codex_key());
     assert_eq!(header.provider_session_id, provider_thread_id);
-    assert!(header.capabilities.tool_calls);
-    assert!(header.capabilities.event_detail);
 
     let included_event_kinds = BTreeSet::from([SessionTimelineEventKind::ToolCall]);
     let included_tool_categories = BTreeSet::from([

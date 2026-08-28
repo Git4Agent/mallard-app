@@ -420,18 +420,6 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
             (&t2_local, "b-active-thread"),
         ],
     );
-    assert_eq!(
-        reopened_a
-            .resolve_origin_host_label(&world.bundle_id, &origin_a.origin_host_token)
-            .unwrap(),
-        ("This host".to_string(), true),
-    );
-    assert!(
-        !reopened_a
-            .resolve_origin_host_label(&world.bundle_id, &origin_b.origin_host_token)
-            .unwrap()
-            .1
-    );
     assert_manifest_consistent(&world);
 }
 
@@ -934,8 +922,6 @@ fn publish_bound_thread(
                     revision: published.snapshot.head.revision,
                     commit_id: published.snapshot.head.commit_id,
                     manifest_sha256: published.snapshot.head.manifest_sha256,
-                    manifest_size: published.snapshot.head.manifest_size,
-                    scope_pins: BTreeMap::new(),
                 })
         },
         || Ok(None),

@@ -8,12 +8,11 @@ pub mod history;
 pub mod materialization;
 
 use super::traits::{
-    AgentProviderAdapter, MaterializationTargetRequest, PlannedProviderTarget,
-    ProviderCapabilityLevel, ProviderCliLauncher, ProviderDescriptor, SessionActionContext,
-    SessionActionDescriptor, SessionActionOutcome, SessionActionRequest, SessionAdapter,
-    SessionAnalysis, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
-    SessionFileMetadata, SessionFileSummary, SessionTimelineContext, SessionTimelineIndex,
-    SessionTimelinePageSlice, SessionTimelineQuery,
+    AgentProviderAdapter, MaterializationTargetRequest, PlannedProviderTarget, ProviderCliLauncher,
+    ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionOutcome,
+    SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
+    SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
+    SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::conversation_codec::{
     analyze_codex_transcript, CODEX_CODEC_VERSION, CODEX_LINEAGE_CODEC_KEY,
@@ -100,8 +99,6 @@ impl AgentProviderAdapter for CodexAdapter {
                 program: "codex".to_string(),
                 display_name: "Codex".to_string(),
             }),
-            capabilities: ProviderCapabilityLevel::ResumableWithConflictPreservation,
-            adapter_version: 1,
         }
     }
 

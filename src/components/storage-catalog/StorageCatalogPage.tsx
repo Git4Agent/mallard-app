@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import Icon, { type IconName } from "../Icons";
-import { clockOptions } from "../../clock";
+import { formatFullDateTime } from "../../clock";
 import { formatBytes } from "../../format";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import LoadingScaffold from "../LoadingScaffold";
 import { writeClipboardText } from "../sync-review/clipboard";
+import TopLayer from "../sync-review/TopLayer";
+import { useDebugPopoverPlacement } from "../sync-review/debugPopoverPlacement";
 import { focusMenuEdge, moveMenuFocus } from "../sync-review/menuKeyboard";
 import ProviderMark from "../sync-review/ProviderMark";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
@@ -153,21 +155,6 @@ interface RowAction {
   onChoose: (actionId: string) => void;
 }
 
-/** The activity page's own stamp, to the character — both draw their clock
- * fields from the shared preference: "Aug 17, 2026 at 21:11". */
-function fullStamp(seconds: number): string {
-  const when = new Date(seconds * 1_000);
-  const date = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(when);
-  const clock = new Intl.DateTimeFormat(undefined, clockOptions()).format(when);
-  return `${date} at ${clock}`;
-}
-
-/** Local time wins when the resource is on this Mac, because that is the copy
- * you can edit; a stored-only row shows when the storage last moved. */
-function stampSeconds(row: CatalogScopeRow): number | null {
-  return (row.local_present ? row.local_modified_at ?? null : null) ?? row.remote_updated_at ?? null;
-}
-
 function badge(row: CatalogScopeRow, storageName: string | null) {
   const status = rowStatus(row);
   const label = rowStatusLabel(row, storageName);
@@ -204,11 +191,18 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const placement = useDebugPopoverPlacement(rootRef, panelRef, open, () => setOpen(false));
 
   useEffect(() => {
     if (!open) return;
+    // The panel is portalled onto body, so it is not inside rootRef. Both have
+    // to count as "inside" or the first click on a Copy button dismisses it.
     const onPointerDown = (event: PointerEvent) => {
-      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) setOpen(false);
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (rootRef.current?.contains(target) || panelRef.current?.contains(target)) return;
+      setOpen(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -243,7 +237,7 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
         ? "Not stored yet"
         : [
           storageRevision == null ? null : `Revision ${storageRevision}`,
-          row.remote_updated_at == null ? null : `updated ${fullStamp(row.remote_updated_at)}`,
+          row.remote_updated_at == null ? null : `updated ${formatFullDateTime(row.remote_updated_at)}`,
         ].filter(Boolean).join(" · ") || "In this storage",
     },
     {
@@ -265,40 +259,63 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
       >
         <Icon name="info" size={13} />
       </button>
-      <div className="sync-history-debug-popover" role="dialog" aria-label="Paths and digests" hidden={!open}>
-        <header>
-          <strong>Paths and digests</strong>
-          <span>Click a value to copy it.</span>
-        </header>
-        <div className="sync-history-debug-values">
-          {values.map((entry) => (
-            <button
-              key={entry.label}
-              type="button"
-              className="sync-history-debug-copy"
-              title={`Copy ${entry.label.toLowerCase()}`}
-              /* Was a bare `navigator.clipboard?.writeText` — on a webview
-                 that exposes Clipboard but rejects it, and on one that exposes
-                 none at all, the click copied nothing and said nothing. The
-                 shared helper carries the document fallback the other three
-                 copy paths already had. */
-              onClick={() => {
-                void writeClipboardText(entry.value)
-                  .then(() => setCopied(entry.label))
-                  .catch(() => setCopied("__failed__"));
-              }}
-            >
-              <span>{entry.label}</span>
-              <code>{entry.value}</code>
-              <small className={copied === entry.label ? "copied" : undefined}>
-                {copied === entry.label
-                  ? "Copied"
-                  : copied === "__failed__" ? "Couldn’t copy" : "Copy"}
-              </small>
-            </button>
-          ))}
+      {/* On body, not in the row. Nothing in the list can bound it there:
+          not the row's card, not the commit rail's stacking context, and
+          not .sync-main's scrollport, which used to cap it to whatever
+          room the scroller had left. */}
+      <TopLayer>
+        <div
+          ref={panelRef}
+          className="sync-history-debug-popover"
+          style={placement
+            ? {
+              top: `${placement.top}px`,
+              left: `${placement.left}px`,
+              width: `${placement.width}px`,
+              maxHeight: `${placement.maxHeight}px`,
+            }
+            /* Measured on the first layout pass; kept out of the paint
+               until then so it never shows at the window origin. */
+            : { visibility: "hidden" }}
+          role="dialog"
+          aria-label="Paths and digests"
+          hidden={!open}
+        >
+          <header>
+            <strong>Paths and digests</strong>
+            <span>Click a value to copy it.</span>
+          </header>
+          <div className="sync-history-debug-values">
+            {values.map((entry) => (
+              <button
+                key={entry.label}
+                type="button"
+                className="sync-history-debug-copy"
+                title={`Copy ${entry.label.toLowerCase()}`}
+                /* Was a bare `navigator.clipboard?.writeText` — on a webview
+                   that exposes Clipboard but rejects it, and on one that exposes
+                   none at all, the click copied nothing and said nothing. The
+                   shared helper carries the document fallback the other three
+                   copy paths already had. */
+                onClick={() => {
+                  void writeClipboardText(entry.value)
+                    .then(() => setCopied(entry.label))
+                    .catch(() => setCopied("__failed__"));
+                }}
+              >
+                <span>{entry.label}</span>
+                <code>{entry.value}</code>
+                <small className={copied === entry.label ? "copied" : undefined}>
+                  {copied === entry.label
+                    ? "Copied"
+                    : copied === "__failed__" ? "Couldn’t copy" : "Copy"}
+                </small>
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+
+      </TopLayer>
     </div>
   );
 }
@@ -468,7 +485,6 @@ function ResourceCard({
   /** The inline fork form, when this card's Fork is open. */
   footer?: ReactNode;
 }) {
-  const seconds = stampSeconds(row);
   const stamp = rowStamp(row);
   return (
     <article className={`sync-history-thread-card catalog-card${preview !== undefined ? " catalog-card-pet" : ""}`}>
@@ -625,12 +641,12 @@ function ResourceCard({
               modification or the storage update. */}
           <span
             className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end"
-            data-tooltip={stamp ?? undefined}
-            aria-label={stamp ?? undefined}
+            data-tooltip={stamp?.detail}
+            aria-label={stamp?.detail}
             tabIndex={0}
           >
-            <time dateTime={seconds == null ? undefined : new Date(seconds * 1_000).toISOString()}>
-              {seconds == null ? "—" : fullStamp(seconds)}
+            <time dateTime={stamp == null ? undefined : new Date(stamp.seconds * 1_000).toISOString()}>
+              {stamp == null ? "—" : formatFullDateTime(stamp.seconds)}
             </time>
           </span>
         </div>

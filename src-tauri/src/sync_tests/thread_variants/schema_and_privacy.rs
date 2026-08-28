@@ -2,14 +2,14 @@ use super::harness::{chain, codex_scope, codex_scope_key, ThreadSpec, VariantWor
 use mallard_domain::{
     BundleId, BundleManifest, BundleScope, CloudThreadId, ConversationFileRef,
     ConversationFileRole, ConversationLineageStatus, ConversationMaterializationState,
-    ConversationPlanActionType, LocalConversationBinding, LogicalPath, OriginHostAlias,
-    PreservedProvenance, ProviderKey, ReplicaId, ThreadId, Tombstone, TombstoneTarget,
+    ConversationPlanActionType, LocalConversationBinding, LogicalPath, PreservedProvenance,
+    ProviderKey, ReplicaId, ThreadId, Tombstone, TombstoneTarget,
 };
 use mallard_infrastructure::storage_core::ObjectStore;
 use std::fs;
 
 #[test]
-fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
+fn host_replica_identity_and_stale_pin_invariants_hold_together() {
     let world = VariantWorld::new();
     let identity_a = world.repo_a.load_or_create_host_identity().unwrap();
     let identity_b = world.repo_b.load_or_create_host_identity().unwrap();
@@ -42,47 +42,6 @@ fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
             .unwrap()
             .0
     );
-    assert_eq!(
-        world
-            .repo_a
-            .resolve_origin_host_label(&world.bundle_id, &same_a1.0)
-            .unwrap(),
-        ("This host".to_string(), true)
-    );
-
-    let remote = world
-        .repo_b
-        .derive_origin_tokens(&world.bundle_id, &replica_a1)
-        .unwrap()
-        .0;
-    let fallback = world
-        .repo_a
-        .resolve_origin_host_label(&world.bundle_id, &remote)
-        .unwrap();
-    assert!(!fallback.1);
-    assert!(fallback.0.starts_with("Host "));
-    assert!(fallback.0.len() <= 16);
-    world
-        .repo_a
-        .mutate_origin_aliases(|aliases| {
-            aliases.push(OriginHostAlias {
-                bundle_id: world.bundle_id.clone(),
-                origin_host_token: remote.clone(),
-                display_name: "Private local alias".to_string(),
-                revision: 0,
-                updated_at: 1,
-            });
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(
-        world
-            .repo_a
-            .resolve_origin_host_label(&world.bundle_id, &remote)
-            .unwrap(),
-        ("Private local alias".to_string(), false)
-    );
-
     let (mut action, mut current) = super::relation_matrix::reviewed_action(
         ConversationPlanActionType::Publish,
         mallard_domain::TailClassification::LocalOutstanding,
@@ -93,13 +52,12 @@ fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
     current.pins.context.host_identity_revision = identity_a.revision;
     mallard_infrastructure::conversation_sync::validate_conversation_action_pins(&action, &current)
         .unwrap();
-    let rotated = world
+    world
         .repo_a
-        .rotate_host_identity(
-            Some((&identity_a.host_id, identity_a.revision)),
-            Some("Rotated host".to_string()),
-        )
+        .mutate_conversation_bindings(|_| Ok(()))
         .unwrap();
+    fs::remove_file(world.repo_a.host_identity_path()).unwrap();
+    let rotated = world.repo_a.load_or_create_host_identity().unwrap();
     assert_ne!(rotated.host_id, identity_a.host_id);
     assert_ne!(
         world
@@ -121,26 +79,6 @@ fn host_replica_alias_rotation_and_bundle_privacy_invariants_hold_together() {
             )
         )
     );
-
-    let origin = world.origin(&world.repo_b, "replica-b");
-    world.publish(
-        &[ThreadSpec::new(
-            "cloudthread-alias-scan",
-            "source-thread",
-            chain("source-thread", &[("m-a", "safe")]),
-            origin.clone(),
-            10,
-        )],
-        origin,
-        10,
-    );
-    for entry in walkdir::WalkDir::new(world.store.local_root().unwrap()).follow_links(false) {
-        let entry = entry.unwrap();
-        if entry.file_type().is_file() {
-            assert!(!String::from_utf8_lossy(&fs::read(entry.path()).unwrap())
-                .contains("Private local alias"));
-        }
-    }
 }
 
 #[test]

@@ -7,7 +7,12 @@ import type {
   SessionToolCallPreview,
   SessionToolCategory,
 } from "../../../types";
-import { clockOptions, formatDuration, toEpochMilliseconds } from "../../../clock";
+import {
+  clockOptions,
+  formatDateTime,
+  formatDuration,
+  toEpochMilliseconds,
+} from "../../../clock";
 
 export type ActiveProjectSubview =
   | { kind: "overview" }
@@ -237,12 +242,7 @@ const toMilliseconds = toEpochMilliseconds;
 
 export function formatSessionDetailTimestamp(value?: number | null): string {
   if (value == null) return "Time unavailable";
-  return new Date(toMilliseconds(value)).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    ...clockOptions(),
-  });
+  return formatDateTime(toMilliseconds(value));
 }
 
 export function sessionDetailDateTime(value?: number | null): string | undefined {

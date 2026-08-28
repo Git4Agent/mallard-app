@@ -631,6 +631,13 @@ export default function PushResourceWorkspace({
                   selectableResourceIds={selectableConversationIds}
                   selectionDisabled={busy}
                   onToggleResource={toggleResource}
+                  onDropSelection={(resourceIds) => {
+                    // Show less took these out of view. A tick you can no
+                    // longer see is one you cannot check before it travels.
+                    const next = new Set(effectiveSelected);
+                    resourceIds.forEach((resourceId) => next.delete(resourceId));
+                    commitSelection(next);
+                  }}
                   onReviewPull={onPull}
                   onUnlinkStorage={onUnlinkStorage}
                   continuityActionBusy={busy}

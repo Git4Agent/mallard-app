@@ -5,13 +5,14 @@
 //! remote store must already be on a blocking-capable thread.
 
 use bytes::Bytes;
+use mallard_domain::{hex_lower, sha256_hex};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
 
-use super::{sha256, ObjectKey, ObjectPrefix};
+use super::{ObjectKey, ObjectPrefix};
 use mallard_domain as domain;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,7 +124,7 @@ impl VerifiedBody {
         Read::take(self.open()?, max_bytes.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|error| format!("read {}: {}", label, error))?;
-        if bytes.len() as u64 != self.size || sha256(&bytes) != self.sha256 {
+        if bytes.len() as u64 != self.size || sha256_hex(&bytes) != self.sha256 {
             return Err(format!("{} changed after verification", label));
         }
         Ok(bytes)
@@ -248,12 +249,12 @@ pub(crate) fn sha256_reader(reader: &mut impl Read, label: &str) -> Result<Strin
         }
         hasher.update(&buffer[..count]);
     }
-    Ok(super::hex_lower(&hasher.finalize()))
+    Ok(hex_lower(&hasher.finalize()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::{sha256, LocalObjectStore};
+    use super::super::LocalObjectStore;
     use super::*;
 
     #[test]
@@ -263,7 +264,7 @@ mod tests {
         let key = ObjectKey::parse(format!(
             ".mallard/v1/repositories/{:032x}/_objects/{}",
             1,
-            sha256(b"abcdef")
+            sha256_hex(b"abcdef")
         ))
         .unwrap();
         store.put_immutable(&key, b"abcdef").unwrap();
@@ -272,7 +273,7 @@ mod tests {
                 &key,
                 &ExpectedObject {
                     size: 6,
-                    sha256: sha256(b"abcdef"),
+                    sha256: sha256_hex(b"abcdef"),
                 },
             )
             .unwrap();

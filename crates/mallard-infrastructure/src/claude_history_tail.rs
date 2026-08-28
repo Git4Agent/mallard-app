@@ -33,16 +33,16 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::conversation_codec::CodecLineage;
-use crate::jsonl_tail_io::{hex_sha256, safe_record_end, TailWindow};
+use crate::jsonl_tail_io::{safe_record_end, TailWindow};
 use crate::providers::claude::codec::{
     classify_claude_record, is_thinking_only_record, project_claude_record,
     semantic_record_fingerprint, ClaudeRecordClass, MAX_CLAUDE_RECORDS,
 };
 use crate::providers::traits::SessionAnalysis;
 use mallard_domain::{
-    compute_portable_conversation_tail_with_codec, CanonicalConversationMessage, MessageId,
-    PortableConversationTail, RawRangePin, RootPhysicalMapping, RootTailLayout, TailAccumulator,
-    TailPartitionKind, CLAUDE_PORTABLE_TAIL_CODEC_V1,
+    compute_portable_conversation_tail_with_codec, sha256_hex, CanonicalConversationMessage,
+    MessageId, PortableConversationTail, RawRangePin, RootPhysicalMapping, RootTailLayout,
+    TailAccumulator, TailPartitionKind, CLAUDE_PORTABLE_TAIL_CODEC_V1,
 };
 use serde_json::Value;
 
@@ -288,7 +288,7 @@ pub fn seed_claude_root(
         consumed_byte_offset: consumed,
         consumed_record_ordinal: consumed_ordinal,
         probe_window_len,
-        probe_window_sha256: hex_sha256(&bytes[window_start..consumed as usize]),
+        probe_window_sha256: sha256_hex(&bytes[window_start..consumed as usize]),
         last_canonical_message_id: Some(leaf.message_id.as_str().to_string()),
         last_synthetic_turn_id: None,
         next_synthetic_turn_ordinal: 0,
@@ -296,7 +296,7 @@ pub fn seed_claude_root(
     let raw_range_pin = RawRangePin {
         start_byte_offset: 0,
         end_byte_offset: consumed,
-        range_sha256: hex_sha256(&bytes[..consumed as usize]),
+        range_sha256: sha256_hex(&bytes[..consumed as usize]),
     };
     let layout = RootTailLayout {
         codec: CLAUDE_PORTABLE_TAIL_CODEC_V1.to_string(),
@@ -339,7 +339,7 @@ pub fn refresh_claude_tail(
     let consumed = mapping.consumed_byte_offset as usize;
     let window = mapping.probe_window_len as usize;
     crate::sync_metrics::record_bytes_hashed(Path::new(&mapping.root_path), window as u64);
-    let probe = hex_sha256(&tail.bytes[..window]);
+    let probe = sha256_hex(&tail.bytes[..window]);
     if probe != mapping.probe_window_sha256 {
         return Ok(ClaudeTailRefresh::Invalid {
             reason: ClaudeTailInvalidReason::Replaced,
@@ -445,7 +445,7 @@ pub fn refresh_claude_tail(
         consumed_byte_offset: consumed_end,
         consumed_record_ordinal: consumed_ordinal,
         probe_window_len,
-        probe_window_sha256: hex_sha256(
+        probe_window_sha256: sha256_hex(
             &tail.bytes[relative(window_start)..relative(consumed_end)],
         ),
         last_canonical_message_id: Some(feeder.last_message_id().as_str().to_string()),

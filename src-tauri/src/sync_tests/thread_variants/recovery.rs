@@ -1164,8 +1164,6 @@ fn every_cloud_publication_checkpoint_recovers_to_one_valid_fixed_point() {
                 revision: snapshot.head.revision,
                 commit_id: snapshot.head.commit_id,
                 manifest_sha256: snapshot.head.manifest_sha256,
-                manifest_size: snapshot.head.manifest_size,
-                scope_pins: BTreeMap::new(),
             })
         } else {
             None
@@ -1651,8 +1649,6 @@ fn cloud_publication(
         revision: outcome.snapshot.head.revision,
         commit_id: outcome.snapshot.head.commit_id,
         manifest_sha256: outcome.snapshot.head.manifest_sha256,
-        manifest_size: outcome.snapshot.head.manifest_size,
-        scope_pins: BTreeMap::new(),
     }
 }
 

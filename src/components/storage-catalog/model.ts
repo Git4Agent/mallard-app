@@ -144,13 +144,16 @@ export function rowPullable(row: CatalogScopeRow): boolean {
 
 /** The exact time a row last moved, and which side moved it. Local time wins
  * when the resource is on this Mac, because that is the copy you can edit. */
-export function rowStamp(row: CatalogScopeRow): string | null {
+export function rowStamp(row: CatalogScopeRow): { seconds: number; detail: string } | null {
   const local = row.local_present ? row.local_modified_at ?? null : null;
   const seconds = local ?? row.remote_updated_at ?? null;
   if (seconds == null) return null;
   const when = new Date(seconds * 1000);
   const exact = `${when.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })} · ${when.toLocaleTimeString(undefined, clockOptions())}`;
-  return `${local == null ? "Stored" : "Edited"} ${exact}`;
+  return {
+    seconds,
+    detail: `${local == null ? "Stored" : "Edited"} ${exact}`,
+  };
 }
 
 export function actionLabel(action: CatalogPullAction): string {

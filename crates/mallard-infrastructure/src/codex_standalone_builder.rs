@@ -39,9 +39,9 @@ use crate::session_path_map::{
     path_map_marker, validate_path_map_marker, SessionPathMapper, PATH_MAP_FIELD,
 };
 use mallard_domain::{
-    compute_portable_conversation_tail_with_codec, conversation_prefix_witness,
-    ConversationPrefixWitness, PortableConversationTail, PORTABLE_TAIL_CODEC_V1,
-    PORTABLE_TAIL_CODEC_WIRE_V1,
+    compute_portable_conversation_tail_with_codec, conversation_prefix_witness, hex_lower,
+    update_length_prefixed, ConversationPrefixWitness, PortableConversationTail,
+    PORTABLE_TAIL_CODEC_V1, PORTABLE_TAIL_CODEC_WIRE_V1,
 };
 
 const ARTIFACT_DOMAIN_V1: &[u8] = b"mallard-codex-artifact-v1";
@@ -73,21 +73,6 @@ pub enum StandaloneBuildMode {
     },
 }
 
-/// One transported file of a standalone artifact.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StandaloneSubagentArtifact {
-    pub provider_thread_id: String,
-    pub bytes: Vec<u8>,
-    pub sha256: String,
-}
-
-/// A plan-persisted identity allocation consumed by `Decode` builds.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StandaloneThreadAllocation {
-    pub source_provider_thread_id: String,
-    pub output_provider_thread_id: String,
-}
-
 /// The verified output of one build. Every derived value — tail, digests,
 /// witness — belongs to the **output form**: wire values from `Encode`,
 /// local values from `Decode`. Forms are never cross-compared.
@@ -95,10 +80,6 @@ pub struct StandaloneThreadAllocation {
 pub struct StandaloneConversationArtifact {
     pub root_provider_thread_id: String,
     pub root_bytes: Vec<u8>,
-    /// Empty in codec v1: Codex declares no structural parent-to-subagent
-    /// reference records, so there is no bounded closure to transport.
-    pub subagents: Vec<StandaloneSubagentArtifact>,
-    pub id_map: Vec<StandaloneThreadAllocation>,
     /// Output-form portable tail: `PORTABLE_TAIL_CODEC_WIRE_V1` from
     /// `Encode`, `PORTABLE_TAIL_CODEC_V1` from `Decode`.
     pub portable_tail: PortableConversationTail,
@@ -278,21 +259,11 @@ pub fn build_standalone_codex_root(
     )?;
     let prefix_witness = conversation_prefix_witness(&chain, start_record_count)?;
 
-    let id_map = match mode {
-        StandaloneBuildMode::Encode { .. } => Vec::new(),
-        StandaloneBuildMode::Decode { .. } => vec![StandaloneThreadAllocation {
-            source_provider_thread_id: resolved.leaf_meta.id.clone(),
-            output_provider_thread_id: output_root_id.clone(),
-        }],
-    };
-    let subagents: Vec<StandaloneSubagentArtifact> = Vec::new();
-    let artifact_sha256 = artifact_digest(&output, &output_root_id, &subagents);
+    let artifact_sha256 = artifact_digest(&output, &output_root_id);
     Ok(StandaloneConversationArtifact {
         root_provider_thread_id: output_root_id,
         message_count: chain.len() as u64,
         root_bytes: output,
-        subagents,
-        id_map,
         portable_tail,
         prefix_witness,
         last_canonical_message_id,
@@ -405,36 +376,15 @@ fn validate_projection_fixpoint(bytes: &[u8], output_root_id: &str) -> Result<()
 
 /// Domain-separated integrity digest over the complete root output and the
 /// ordered `(file role, provider ID, byte length, SHA-256)` file list.
-fn artifact_digest(
-    root_bytes: &[u8],
-    root_provider_thread_id: &str,
-    subagents: &[StandaloneSubagentArtifact],
-) -> String {
+fn artifact_digest(root_bytes: &[u8], root_provider_thread_id: &str) -> String {
     let mut hasher = Sha256::new();
     update_length_prefixed(&mut hasher, ARTIFACT_DOMAIN_V1);
-    let mut files = Vec::with_capacity(1 + subagents.len());
-    files.push((
-        "transcript",
-        root_provider_thread_id.to_string(),
-        root_bytes.len() as u64,
-        Sha256::digest(root_bytes),
-    ));
-    for subagent in subagents {
-        files.push((
-            "subagent",
-            subagent.provider_thread_id.clone(),
-            subagent.bytes.len() as u64,
-            Sha256::digest(&subagent.bytes),
-        ));
-    }
-    hasher.update((files.len() as u64).to_be_bytes());
-    for (role, provider_thread_id, byte_len, sha) in files {
-        update_length_prefixed(&mut hasher, role.as_bytes());
-        update_length_prefixed(&mut hasher, provider_thread_id.as_bytes());
-        hasher.update(byte_len.to_be_bytes());
-        hasher.update(sha);
-    }
-    hex_digest(&hasher.finalize())
+    hasher.update(1_u64.to_be_bytes());
+    update_length_prefixed(&mut hasher, b"transcript");
+    update_length_prefixed(&mut hasher, root_provider_thread_id.as_bytes());
+    hasher.update((root_bytes.len() as u64).to_be_bytes());
+    hasher.update(Sha256::digest(root_bytes));
+    hex_lower(&hasher.finalize())
 }
 
 /// Fold the leaf's same-thread metadata records into one effective head,
@@ -598,15 +548,6 @@ fn validate_standalone_record_layout(bytes: &[u8]) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-fn update_length_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
-    hasher.update((bytes.len() as u64).to_be_bytes());
-    hasher.update(bytes);
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -795,7 +736,6 @@ mod tests {
         assert_eq!(local.portable_tail.start_record_count, 2);
         assert_eq!(local.portable_tail.accepted_end_record_count, 3);
         assert_eq!(local.last_canonical_message_id.as_deref(), Some("m3"));
-        assert_eq!(local.id_map.len(), 1);
         // The artifact witness is local-form: it folds the *decoded* chain's
         // prefix, not the staged wire chain's — the two differ exactly
         // because the excluded prefix contains a remapped path. A later

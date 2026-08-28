@@ -9,12 +9,11 @@ pub mod history;
 pub mod materialization;
 
 use super::traits::{
-    AgentProviderAdapter, MaterializationTargetRequest, PlannedProviderTarget,
-    ProviderCapabilityLevel, ProviderCliLauncher, ProviderDescriptor, SessionActionContext,
-    SessionActionDescriptor, SessionActionOutcome, SessionActionRequest, SessionAdapter,
-    SessionAnalysis, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
-    SessionFileMetadata, SessionFileSummary, SessionTimelineContext, SessionTimelineIndex,
-    SessionTimelinePageSlice, SessionTimelineQuery,
+    AgentProviderAdapter, MaterializationTargetRequest, PlannedProviderTarget, ProviderCliLauncher,
+    ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionOutcome,
+    SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
+    SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
+    SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::app_settings::conversation_file_limit_bytes;
 use crate::provider_capture::validated_session_metadata;
@@ -130,8 +129,6 @@ impl AgentProviderAdapter for ClaudeAdapter {
                 program: "claude".to_string(),
                 display_name: "Claude Code".to_string(),
             }),
-            capabilities: ProviderCapabilityLevel::ResumableWithConflictPreservation,
-            adapter_version: 1,
         }
     }
 
