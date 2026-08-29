@@ -30,7 +30,6 @@ import type {
   ProviderKey,
   ProviderProfile,
   ProviderProfileSummary,
-  PushDestinationStatus,
   ResourceInventory as ResourceInventoryModel,
   RestorePlan,
   RestoreResult,
@@ -272,7 +271,6 @@ interface PendingPush {
   binding: ProjectBinding | null;
   storage: StorageConfig;
   inventory: ResourceInventoryModel;
-  destinationStatus: PushDestinationStatus;
   savedRecipe: BundleRecipe | null;
   projectDefaults: Set<string>;
   threadComparison?: ThreadSyncComparison | null;
@@ -886,12 +884,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       || storageIndexOpen
       || settingsOpen
       || activeStorageSettingsId != null);
-  const restoreProfileLabel = restoreBinding
-    ? [...new Set(Object.values(restoreBinding.profile_ids)
-      .map((profileId) => profiles.find((profile) => profile.profile_id === profileId)?.display_name)
-      .filter((name): name is string => Boolean(name)))]
-      .join(" + ") || "the assigned provider profile"
-    : "the assigned provider profile";
   const pendingConnectionProject = pendingBundleConnection
     ? registrations.find((candidate) => candidate.local_project_id === pendingBundleConnection.projectId) ?? null
     : null;
@@ -1971,7 +1963,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         binding: nextDetail.binding ?? null,
         storage,
         inventory: nextInventory,
-        destinationStatus: context.destination_status,
         savedRecipe,
         projectDefaults,
         threadComparison: nextThreadComparison,
@@ -3454,10 +3445,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       pushWarningAcknowledgements,
     )
     : 0;
-  const pendingPushDestinationBlocked =
-    pendingPush?.destinationStatus.state === "remote_history_missing"
-    || pendingPush?.destinationStatus.state === "remote_history_replaced"
-    || pendingPush?.destinationStatus.state === "requires_pull";
   const inlineStorageReview = pendingPush ? {
     kind: "push" as const,
     projectId: pendingPush.projectId,
@@ -3467,7 +3454,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     },
     continueDisabled: (safePushSelection.size === 0 && pushProjectContentRemovals.size === 0)
       || pendingPushBlockingCount > 0
-      || pendingPushDestinationBlocked
       || projectContentLoading,
     onClose: () => {
       if (busy) return;
@@ -3494,7 +3480,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         projectContentLoading={projectContentLoading}
         projectContentRemovals={pushProjectContentRemovals}
         acknowledgedWarningDigests={pushWarningAcknowledgements}
-        destinationStatus={pendingPush.destinationStatus}
         fetchProgress={fetchProgress}
         showProjectFiles={pendingPush.showProjectFiles}
         activeStep={pushReviewStep}
@@ -3575,11 +3560,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     onClose: closePullReview,
     content: (
       <RestorePlanView
-        embedded
         project={projects.find((candidate) => candidate.local_project_id === restoreBinding.local_project_id) ?? undefined}
         storageName={config.storages.find((storage) => storage.id === restorePlan.storage_id)?.name ?? null}
         projectName={restoreProjectName}
-        profileLabel={restoreProfileLabel}
         plan={restorePlan}
         binding={restoreBinding}
         readiness={readiness}

@@ -35,7 +35,7 @@ const binding = {
   project_root: project.project_root,
   canonical_project_root: project.project_root,
   profile_ids: { codex: "profile-codex" },
-  state: "active",
+  state: "active" as const,
   revision: 1,
   updated_at: 2,
 };
@@ -193,7 +193,6 @@ function render(props: {
 }) {
   return renderToStaticMarkup(
     <ProjectChatHistoryContent
-      embedded
       project={project}
       binding={binding}
       activity={activity}
@@ -205,10 +204,12 @@ function render(props: {
       loading={false}
       loadingMore={false}
       actionError={null}
+      loadError={null}
+      onRetryLoad={() => undefined}
       actionBusyResourceId={null}
-      onBranchChange={() => undefined}
-      onRefresh={() => undefined}
       onLoadMore={() => undefined}
+      onShowLess={() => undefined}
+      canShowLess={false}
       onSessionAction={() => undefined}
     />,
   );

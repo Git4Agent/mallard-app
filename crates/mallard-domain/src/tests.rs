@@ -1643,8 +1643,8 @@ fn push_plans_carry_per_provider_pins() {
 
 // --- Portable tail codec v1 -------------------------------------------------
 
-// Golden vectors computed independently of the implementation (python sha256
-// over the Section 4 framing). Any drift is a codec break, not a test update.
+// Golden vectors pin the current codec framing. Any drift is a codec break,
+// not an automatic test update.
 const TAIL_VECTOR_EMPTY_WHOLE_AT_0: &str =
     "267171df350b0854b2a599f63c7c6929e3ab9461da4bf037b953dce7f6bb7758";
 const TAIL_VECTOR_EMPTY_FIXED_AT_0: &str =

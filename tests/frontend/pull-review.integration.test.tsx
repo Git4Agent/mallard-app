@@ -63,6 +63,11 @@ const binding: ProjectBinding = {
   updated_at: 1,
 };
 
+const localThreadId = "019fac21-4aba-7fc2-bb7d-df711c950987";
+const cloudThreadId = "cloudthread-019fac21-4aba-7fc2-bb7d-df711c950987";
+const preservedThreadId = "019fac21-4aba-7fc2-bb7d-df711c950988";
+const preservedDisplayTitle = "Diverged conversation (Preserved 1 · Machine A)";
+
 const restorePlan: RestorePlan = {
   schema_version: 1,
   plan_id: "plan-restore",
@@ -101,10 +106,9 @@ function conversationAction(
     action_id: `conversation-${action}`,
     action,
     provider: "codex",
-    thread_id: "019fac21-4aba-7fc2-bb7d-df711c950987",
-    source_resource_id: "codex:conversation:019fac21-4aba-7fc2-bb7d-df711c950987",
-    proposed_provider_thread_id: null,
-    keep_both: null,
+    thread_id: localThreadId,
+    cloud_thread_id: cloudThreadId,
+    source_resource_id: `codex:conversation:${localThreadId}`,
     pins: {
       context: {
         host_id: binding.host_id,
@@ -139,8 +143,9 @@ function conversationRow(
 ): ConversationReviewRow {
   return {
     provider: "codex",
-    thread_id: "019fac21-4aba-7fc2-bb7d-df711c950987",
-    resource_id: "codex:conversation:019fac21-4aba-7fc2-bb7d-df711c950987",
+    thread_id: localThreadId,
+    cloud_thread_id: cloudThreadId,
+    resource_id: `codex:conversation:${localThreadId}`,
     action,
     action_id: actionId,
     blocker,
@@ -152,15 +157,6 @@ function keepBothAction(): ConversationPlanAction {
   return {
     ...conversationAction("keep_both"),
     action_id: "conversation-keep-both",
-    keep_both: {
-      preserved_thread_id: "019fac21-4aba-7fc2-bb7d-df711c950988",
-      remote_provider_thread_id: "019fac21-4aba-7fc2-bb7d-df711c950989",
-      preserved: {
-        preserved_from: "019fac21-4aba-7fc2-bb7d-df711c950987",
-        ordinal: 1,
-      },
-      preserved_display_title: "Diverged conversation (Preserved 1 · Machine A)",
-    },
     pins: {
       ...conversationAction("keep_both").pins,
       target: {
@@ -195,7 +191,6 @@ function renderReview(
     <RestorePlanView
       projectName="gam2"
       storageName="Local storage 1"
-      profileLabel="myconf2"
       plan={plan}
       binding={binding}
       readiness={null}
@@ -207,7 +202,6 @@ function renderReview(
       failedResourceIds={new Set()}
       busy={false}
       error={error}
-      initialStep="history"
       onApply={() => undefined}
       onBack={() => undefined}
       onUnlinkStorage={() => undefined}
@@ -269,9 +263,10 @@ test("keep-both is one reviewed action with no second resolution payload", () =>
   const selection = buildPullReviewSelection(items, selected, new Set(), new Set());
 
   assert.deepEqual(selection, {
-    resourceIds: ["codex:conversation:019fac21-4aba-7fc2-bb7d-df711c950987"],
+    resourceIds: [`codex:conversation:${localThreadId}`],
     restoreActionIds: ["conversation-keep-both"],
   });
+  assert.equal("keep_both" in plan.conversation_actions[0], false);
   assert.deepEqual(
     pullSelectableResourceIds(items, new Set(), new Set()),
     selected,
@@ -349,9 +344,9 @@ test("keep-both completion reports the independent session and optional Codex re
     applied_action_ids: [action.action_id],
     preserved_threads: [{
       action_id: action.action_id,
-      original_thread_id: action.thread_id,
-      preserved_thread_id: action.keep_both!.preserved_thread_id,
-      preserved_display_title: action.keep_both!.preserved_display_title,
+      original_thread_id: action.thread_id!,
+      preserved_thread_id: preservedThreadId,
+      preserved_display_title: preservedDisplayTitle,
     }],
     codex_app_refresh: {
       operation_id: "operation-materialize",
@@ -372,7 +367,7 @@ test("keep-both completion reports the independent session and optional Codex re
   });
 
   assert.equal(outcome.rows[0].status, "preserved");
-  assert.equal(outcome.rows[0].threadId, action.keep_both!.preserved_thread_id);
+  assert.equal(outcome.rows[0].threadId, preservedThreadId);
   // The row is named by the marker title the copy was renamed to.
   assert.equal(outcome.rows[0].title, "Diverged conversation (Preserved 1 · Machine A)");
   assert.deepEqual(outcome.action, {

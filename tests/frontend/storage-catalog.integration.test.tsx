@@ -154,6 +154,7 @@ function renderScopePage() {
       onAddStorage={() => undefined}
       onAddScope={() => undefined}
       onRemoveScope={() => undefined}
+      onScopeGone={() => undefined}
       onProfileRenamed={() => undefined}
       notify={() => undefined}
     />,

@@ -396,11 +396,10 @@ across suites, but compile it only for tests.
 
 ### SIM-011 — Repository verification residue is ambiguous
 
-The 1,058-line executable conflict model at
-[`verify_portable_tail_conflict_model.py`](../scripts/verify_portable_tail_conflict_model.py#L1)
-is documented as verification evidence but has no package script or CI gate.
-Either make it part of the aggregate suite or label and place it as historical
-design evidence.
+**Resolution (2026-08-29):** the 1,058-line conflict model and its report were
+deleted after codec and relation drift was confirmed. The current Rust golden
+vectors and relation-matrix tests are authoritative. A separate bounded model
+requires a named owner and an aggregate test gate before it can return.
 
 A repository link scan also found 62 broken internal links across six
 documents, mostly references to pre-reorganization

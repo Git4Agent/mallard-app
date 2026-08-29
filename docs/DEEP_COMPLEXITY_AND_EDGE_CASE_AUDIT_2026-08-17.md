@@ -164,10 +164,9 @@ the implementation.
 
 ### DEEP-003 — The formal model passes obsolete codec vectors
 
-The Python model describes itself as an executable bounded model of the current
-dual-pin schema-1 resolver at
-[`FORMAL_VERIFICATION_PORTABLE_TAIL_CONFLICT_RESOLVER.md`](./FORMAL_VERIFICATION_PORTABLE_TAIL_CONFLICT_RESOLVER.md#L1).
-It is not part of any package script or CI gate.
+The now-deleted Python model described itself as an executable bounded model
+of the current dual-pin schema-1 resolver. Its report and executable were not
+part of any package script or CI gate.
 
 Running it succeeds:
 
@@ -181,14 +180,13 @@ PASS: no bounded counterexample in the simplified model
 ```
 
 However, its empty-whole-tail vector is
-`85ca60a860dfac615f75141b865e6191feea154a72dac2b1007c8d5dcdedf5fd` at
-[`verify_portable_tail_conflict_model.py`](../scripts/verify_portable_tail_conflict_model.py#L861),
-while the passing Rust golden test pins
+`85ca60a860dfac615f75141b865e6191feea154a72dac2b1007c8d5dcdedf5fd`, while
+the passing Rust golden test pins
 `267171df350b0854b2a599f63c7c6929e3ab9461da4bf037b953dce7f6bb7758` at
-[`mallard-domain/src/tests.rs`](../crates/mallard-domain/src/tests.rs#L1365).
+[`mallard-domain/src/tests.rs`](../crates/mallard-domain/src/tests.rs#L1649).
 The Python framing still includes a codec field and tuple count that the current
 Rust accumulator at
-[`conversation_tail.rs`](../crates/mallard-domain/src/conversation_tail.rs#L147)
+[`conversation_tail.rs`](../crates/mallard-domain/src/conversation_tail.rs#L169)
 does not hash.
 
 The model also has five relation outcomes, while production has nine effective
@@ -197,11 +195,10 @@ three absence states plus `Unknown`. Its documented simplifications are
 reasonable, but a self-consistent stale model should not be presented as
 current verification evidence.
 
-**Recommendation:** make Rust emit a machine-readable vector and decision
-fixture consumed by the Python explorer, then run both in the aggregate test
-gate. If independent implementation is the purpose, compare its results to
-that shared fixture. If the model will not gate releases, move it to historical
-design evidence and remove the current-status claim.
+**Resolution (2026-08-29):** the ungated model and report were deleted. The
+current Rust golden-vector and relation-matrix tests are authoritative. Any
+future independent bounded verification requires a named owner and an
+aggregate test gate.
 
 ### DEEP-004 — Conversation reconciliation is overdetermined
 
@@ -654,8 +651,8 @@ manual test backend behind `#[cfg(test)]`.
 
 - Read and traced the existing knowledge graph metadata and relevant one-hop
   subgraph.
-- Ran `python3 scripts/verify_portable_tail_conflict_model.py`: passed 282
-  modeled states and 312 transitions, while exposing the stale vectors above.
+- Ran the now-deleted Python model before removal: it passed 282 modeled states
+  and 312 transitions while exposing the stale vectors above.
 - Ran `cargo test -p mallard-domain tail_codec_golden_vectors_are_pinned -- --nocapture`:
   passed the current Rust vectors.
 - Recounted hooks, request guards, plan fields, test source reads, parser aliases,

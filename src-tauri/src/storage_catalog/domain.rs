@@ -2209,12 +2209,12 @@ pub enum CatalogForkSourceKind {
 
 /// One row inside a scope Push review: the presentation row plus the exact
 /// captured resource the publish would upsert. Storage-only rows carry no
-/// resource and can never be selected.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+/// resource and can never be selected. The capture stays backend-side —
+/// apply verifies against it, and the review only ever renders `row`.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CatalogScopePushRow {
     pub row: CatalogPushRow,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub resource: Option<CatalogResource>,
 }
 
@@ -2246,11 +2246,10 @@ impl CatalogScopePushRow {
 }
 
 /// Immutable Push review for one scope link: one observed repository head and
-/// one row per resource on either side.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+/// one row per resource on either side. Reviews live only in the in-memory
+/// plan store; serialization is the one-way trip to the review dialog.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CatalogScopePushPlan {
-    pub schema_version: u32,
     pub plan_id: CatalogPlanId,
     pub scope_id: CatalogScopeId,
     pub link_id: CatalogLinkId,
@@ -2260,7 +2259,7 @@ pub struct CatalogScopePushPlan {
     pub storage_identity_sha256: String,
     pub profile_pins: Vec<CatalogProfilePin>,
     pub skill_root_pins: Vec<CatalogSkillRootPin>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_head: Option<LibraryHeadCoordinate>,
     pub rows: Vec<CatalogScopePushRow>,
     pub warning_digests: Vec<String>,
@@ -2270,12 +2269,6 @@ pub struct CatalogScopePushPlan {
 
 impl CatalogScopePushPlan {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != CATALOG_SCHEMA {
-            return Err(format!(
-                "unsupported catalog Push schema {} (expected {})",
-                self.schema_version, CATALOG_SCHEMA
-            ));
-        }
         validate_sha256(
             "catalog Push storage identity",
             &self.storage_identity_sha256,
@@ -2319,13 +2312,13 @@ impl CatalogScopePushPlan {
 
 /// One item inside a scope Pull review: the presentation item, the stored
 /// resource its actions would materialize, and its cross-storage claim pins.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+/// The stored resource stays backend-side for apply; the review renders
+/// `item` and its claim pins.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CatalogScopePullItem {
     pub item: CatalogPullItem,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub resource: Option<CatalogResource>,
-    #[serde(default)]
     pub conflicting_claims: Vec<CatalogClaimPin>,
 }
 
@@ -2386,11 +2379,10 @@ impl CatalogScopePullItem {
 }
 
 /// Immutable Pull review for one scope link: one mandatory repository head
-/// and one item per stored resource.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+/// and one item per stored resource. Reviews live only in the in-memory plan
+/// store; serialization is the one-way trip to the review dialog.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CatalogScopePullPlan {
-    pub schema_version: u32,
     pub plan_id: CatalogPlanId,
     pub scope_id: CatalogScopeId,
     pub link_id: CatalogLinkId,
@@ -2408,12 +2400,6 @@ pub struct CatalogScopePullPlan {
 
 impl CatalogScopePullPlan {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != CATALOG_SCHEMA {
-            return Err(format!(
-                "unsupported catalog Pull schema {} (expected {})",
-                self.schema_version, CATALOG_SCHEMA
-            ));
-        }
         validate_sha256(
             "catalog Pull storage identity",
             &self.storage_identity_sha256,
@@ -2455,10 +2441,8 @@ impl CatalogScopePullPlan {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CatalogResourceForkPlan {
-    pub schema_version: u32,
     pub plan_id: CatalogPlanId,
     pub scope_id: CatalogScopeId,
     pub profile_pins: Vec<CatalogProfilePin>,
@@ -2479,9 +2463,6 @@ pub struct CatalogResourceForkPlan {
 
 impl CatalogResourceForkPlan {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != CATALOG_SCHEMA {
-            return Err("invalid catalog resource Fork schema".to_string());
-        }
         self.source_target.validate()?;
         if matches!(self.source_target, LocalCatalogTargetId::Plugin { .. }) {
             return Err("plugins do not support Fork".to_string());
@@ -2498,8 +2479,8 @@ impl CatalogResourceForkPlan {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+/// The one value type the in-memory plan store holds: any pending review.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CatalogResourcePlanDocument {
     Push(CatalogScopePushPlan),
     Pull(CatalogScopePullPlan),
@@ -2512,6 +2493,22 @@ impl CatalogResourcePlanDocument {
             Self::Push(plan) => &plan.plan_id,
             Self::Pull(plan) => &plan.plan_id,
             Self::Fork(plan) => &plan.plan_id,
+        }
+    }
+
+    pub fn created_at(&self) -> u64 {
+        match self {
+            Self::Push(plan) => plan.created_at,
+            Self::Pull(plan) => plan.created_at,
+            Self::Fork(plan) => plan.created_at,
+        }
+    }
+
+    pub fn expires_at(&self) -> u64 {
+        match self {
+            Self::Push(plan) => plan.expires_at,
+            Self::Pull(plan) => plan.expires_at,
+            Self::Fork(plan) => plan.expires_at,
         }
     }
 
@@ -3034,7 +3031,6 @@ mod tests {
     #[test]
     fn fork_plans_cannot_target_plugins() {
         let plan = CatalogResourceForkPlan {
-            schema_version: CATALOG_SCHEMA,
             plan_id: CatalogPlanId::generate().unwrap(),
             scope_id: CatalogScopeId::generate().unwrap(),
             profile_pins: Vec::new(),

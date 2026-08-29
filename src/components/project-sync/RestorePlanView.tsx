@@ -36,7 +36,6 @@ interface Props {
   projectName: string;
   project?: LocalProjectSummary;
   storageName?: string | null;
-  profileLabel: string;
   plan: RestorePlan;
   binding: ProjectBinding;
   readiness: BundleReadiness | null;
@@ -48,8 +47,6 @@ interface Props {
   failedResourceIds: ReadonlySet<string>;
   busy: boolean;
   error: string | null;
-  embedded?: boolean;
-  initialStep?: SyncReviewStep;
   onApply: (selection: PullReviewSelection) => void;
   onBack: () => void;
   onUnlinkStorage?: () => void;
@@ -212,7 +209,6 @@ function ItemList({
 export default function RestorePlanView({
   projectName,
   project,
-  profileLabel,
   storageName = "storage",
   plan,
   binding,
@@ -225,8 +221,6 @@ export default function RestorePlanView({
   failedResourceIds,
   busy,
   error,
-  embedded = false,
-  initialStep = "history",
   onApply,
   onBack,
   onUnlinkStorage,
@@ -249,9 +243,7 @@ export default function RestorePlanView({
   const showProjectFiles = plan.project_content_eligibility?.state === "eligible" || projectContentItems.length > 0;
   const reviewSteps = useMemo(() => syncReviewSteps(showProjectFiles), [showProjectFiles]);
   const knownItems = useRef(new Set<string>());
-  const [activeStep, setActiveStep] = useState<SyncReviewStep>(() => (
-    syncReviewSteps(showProjectFiles).includes(initialStep) ? initialStep : "history"
-  ));
+  const [activeStep, setActiveStep] = useState<SyncReviewStep>("history");
   const [selected, setSelected] = useState<Set<string>>(() => new Set(
     items.filter(defaultSelected).map((item) => item.resourceId),
   ));
@@ -298,10 +290,10 @@ export default function RestorePlanView({
     if (!reviewSteps.includes(activeStep)) setActiveStep("history");
   }, [activeStep, reviewSteps]);
 
-  // The embedded Activity review renders the storage rows ("Only in …") from
+  // The Activity review renders the storage rows ("Only in …") from
   // its own async fetches; until it reports ready, the primary must not apply
   // a selection the user has not seen. The ItemList fallback is synchronous.
-  const embeddedHistoryInUse = conversationItems.length > 0 && Boolean(project);
+  const activityHistoryInUse = conversationItems.length > 0 && Boolean(project);
   const [reviewListReady, setReviewListReady] = useState(false);
   const failureCount = restoreResult?.failed_actions?.length ?? 0;
   const finalReady = hasResult && !error && failureCount === 0 && readiness?.state === "ready";
@@ -312,7 +304,7 @@ export default function RestorePlanView({
   // storage is ahead and the user wants none of its changes.
   const primaryDisabledReason = busy
     ? null
-    : embeddedHistoryInUse && !reviewListReady
+    : activityHistoryInUse && !reviewListReady
       ? "Loading storage changes…"
       : null;
 
@@ -454,38 +446,16 @@ export default function RestorePlanView({
         operation: item.projectContentOperation ?? undefined,
       };
     });
-  const ReviewContainer = embedded ? "section" : "main";
-
   return (
-    <ReviewContainer
-      className={embedded ? "sync-inline-action-review sync-inline-pull-review sync-sync-review-workspace" : "sync-main sync-pull-review-workspace sync-sync-review-workspace"}
+    <section
+      className="sync-inline-action-review sync-inline-pull-review sync-sync-review-workspace"
       aria-labelledby="sync-pull-review-title"
     >
-      <header className={embedded ? "sync-inline-action-header sync-inline-pull-header sync-sync-review-header" : "sync-pull-review-header sync-sync-review-header"}>
-        {!embedded && (
-          <button type="button" className="btn btn-ghost sync-pull-back" onClick={onBack} disabled={busy}>
-            <Icon name="chevron-left" size={15} /> Back to <span className="sync-btn-name">{projectName}</span>
-          </button>
-        )}
-        <div className={embedded ? "sync-inline-action-heading" : "sync-pull-review-heading"}>
-          <div className={embedded ? "sync-sync-review-title" : undefined}>
-            {embedded
-              ? (
-                <>
-                  <h2 id="sync-pull-review-title">Pull review</h2>
-                  <span className="sync-pull-review-meta">Revision {plan.revision}</span>
-                </>
-              )
-              : <h1 id="sync-pull-review-title">Restore {projectName}</h1>}
-            {!embedded && (
-                <p className="sync-pull-review-meta">
-                  <span>{`Choose changes from ${storageName || "storage"} to apply to this machine.`}</span>
-                  {/* Naming the write destination belongs on the screen that
-                      approves the write. The prop was already required and
-                      passed; only the line that read it was removed. */}
-                  {profileLabel && <span>{`Installs into ${profileLabel}.`}</span>}
-                </p>
-              )}
+      <header className="sync-inline-action-header sync-inline-pull-header sync-sync-review-header">
+        <div className="sync-inline-action-heading">
+          <div className="sync-sync-review-title">
+            <h2 id="sync-pull-review-title">Pull review</h2>
+            <span className="sync-pull-review-meta">Revision {plan.revision}</span>
           </div>
         </div>
         {/* The recommend button's own count is a property of the plan, not of
@@ -500,9 +470,7 @@ export default function RestorePlanView({
           onRecommended={useRecommended}
           clearDisabled={finalReady || selectedIn(stepItems) === 0}
           onClear={clearStep}
-          close={embedded
-            ? { ariaLabel: `Close pull review for ${projectName}`, onClose: onBack }
-            : undefined}
+          close={{ ariaLabel: `Close pull review for ${projectName}`, onClose: onBack }}
         />
       </header>
 
@@ -515,7 +483,7 @@ export default function RestorePlanView({
 
       <div
         id={`sync-review-${activeStep}-panel`}
-        className={embedded ? "sync-pull-review-content sync-inline-action-content sync-sync-review-content" : "sync-pull-review-content sync-sync-review-content"}
+        className="sync-pull-review-content sync-inline-action-content sync-sync-review-content"
         role="tabpanel"
         aria-labelledby={`sync-review-${activeStep}-tab`}
       >
@@ -534,7 +502,6 @@ export default function RestorePlanView({
             <>
               {conversationItems.length > 0 && project ? (
                 <ProjectActivityPage
-                  embedded
                   project={project}
                   binding={binding}
                   refreshEpoch={0}
@@ -621,7 +588,7 @@ export default function RestorePlanView({
         </div>
       </div>
 
-      <footer className={embedded ? "sync-pull-apply-bar sync-inline-action-footer sync-sync-review-footer" : "sync-pull-apply-bar sync-sync-review-footer"}>
+      <footer className="sync-pull-apply-bar sync-inline-action-footer sync-sync-review-footer">
         {busy && (
           /* Same contract as Push: no safe mid-write abort exists, so the
              sealed exits are named instead of leaving a cancel to hunt for.
@@ -643,6 +610,6 @@ export default function RestorePlanView({
           {busy ? "Pulling…" : "Pull"}
         </button>
       </footer>
-    </ReviewContainer>
+    </section>
   );
 }

@@ -3254,8 +3254,8 @@ fn provider_state_target(
 ) -> Option<PathBuf> {
     let prefix = mallard_domain::provider_state_path_prefix(provider);
     let suffix = logical_path.as_str().strip_prefix(prefix.as_str())?;
-    let sessions = registry.sessions(provider)?;
-    sessions
+    let adapter = registry.get(provider)?;
+    adapter
         .state_target(Path::new(provider_home), &binding.project_root, suffix)
         .ok()
 }

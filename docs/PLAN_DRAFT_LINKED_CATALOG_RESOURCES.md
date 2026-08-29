@@ -502,7 +502,6 @@ catalog_resource_profiles.json
 catalog_resources.json
 catalog_setup_drafts/<draft-id>.json
 catalog_setup_transactions/<draft-id>.json
-catalog_resource_plans/<plan-id>.json
 catalog_resource_operations.json
 catalog_resource_materializations.json
 catalog_resource_preservations.json
@@ -514,9 +513,11 @@ catalog_quarantine/<document>-<timestamp>.quarantined
 
 `catalog_resources.json` contains registrations and links in one bounded,
 atomically replaced document so their referential invariants validate
-together. Plans are immutable create-only documents. Drafts and transactions
-are separate bounded documents so one corrupt entry can be quarantined
-without resetting accepted bases for unrelated resources.
+together. Reviewed Push/Pull/Fork plans are not persisted: they live in a
+bounded in-memory plan store, are discarded on apply, replacement, expiry, or
+restart, and apply re-verifies every pin against live state. Drafts and
+transactions are separate bounded documents so one corrupt entry can be
+quarantined without resetting accepted bases for unrelated resources.
 
 Every document uses schema 1 for this new file family, strict unknown-field
 rejection, bounded counts and text, atomic write/rename, restrictive

@@ -2528,7 +2528,7 @@ fn timeline_history_from_standalone(
     project_root_aliases.dedup();
     let registry = ProviderRegistry::production();
     let adapter = registry
-        .require_sessions(&codex_key())
+        .require(&codex_key())
         .map_err(|_| failure(5, 0, 0, 0))?;
     let context = SessionTimelineContext {
         resource_id: "codex:conversation:live-history-oracle",
@@ -4363,7 +4363,7 @@ fn assert_offline_path_timeline(
     expected_provider_call_id: &str,
 ) {
     let adapter = ProviderRegistry::production()
-        .require_sessions(&codex_key())
+        .require(&codex_key())
         .expect("Codex session adapter is unavailable");
     let context = SessionTimelineContext {
         resource_id: "codex:conversation:offline-path-fixture",

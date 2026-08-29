@@ -1285,8 +1285,7 @@ mod tests {
 
     /// S4's manual corpus gate (`docs/PLAN_CLAUDE_DESKTOP_IMPORT_TOLERANCE.md`):
     /// the shipped Rust analyzer must hold the import-equivalence property
-    /// on every real transcript, agreeing with the Python scan
-    /// (`scripts/claude_corpus_scan_thinking_blind.py`) on outcome counts.
+    /// on every real transcript and report the outcome counts.
     /// Ignored in CI — it reads the developer's `~/.claude/projects`. Run:
     /// `cargo test -p mallard-infrastructure --lib -- --ignored --nocapture
     /// claude_corpus_import_equivalence`.

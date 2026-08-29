@@ -1240,8 +1240,7 @@ fn verify_target_role_set(
     // Provider index rows are conditional presentation metadata (Codex keeps
     // `session_index.jsonl`); the registered adapter declares how many one
     // operation may carry. Providers without an index allow none.
-    let adapter =
-        crate::providers::ProviderRegistry::production().require_sessions(&operation.provider)?;
+    let adapter = crate::providers::ProviderRegistry::production().require(&operation.provider)?;
     if indexes > adapter.index_fragment_limit() {
         return Err(format!(
             "{} conversations allow at most {} index fragment(s)",
@@ -1272,8 +1271,8 @@ fn verify_provider_payload(
             // the reviewed project with exactly the pinned lineage and
             // semantic digests. No provider ever falls back to generic
             // copying.
-            let adapter = crate::providers::ProviderRegistry::production()
-                .require_sessions(&operation.provider)?;
+            let adapter =
+                crate::providers::ProviderRegistry::production().require(&operation.provider)?;
             let analysis = adapter.analyze(&bytes);
             if analysis.source_provider_session_id.as_deref()
                 != operation.provider_thread_id.as_deref()
@@ -1325,8 +1324,8 @@ fn verify_provider_payload(
             // The journaled target names every row this fragment rewrites
             // (destination and, on keep-both, the preserved rename); the
             // domain guarantees the list is non-empty for this role.
-            let adapter = crate::providers::ProviderRegistry::production()
-                .require_sessions(&operation.provider)?;
+            let adapter =
+                crate::providers::ProviderRegistry::production().require(&operation.provider)?;
             for thread_id in &target.index_rows {
                 adapter.verify_index_fragment(&bytes, thread_id)?;
             }

@@ -6,7 +6,6 @@ import { RESOURCE_GROUPS, applyPolicyLabel, categoryFor, kindLabel } from "./mod
 interface Props {
   resources: ProjectResourceDescriptor[];
   selected: Set<string>;
-  statuses: Map<string, string>;
   selectableResourceIds?: ReadonlySet<string>;
   disabled?: boolean;
   /**
@@ -24,11 +23,6 @@ const CATEGORY_ICON: Record<ProjectResourceCategory, "activity" | "settings" | "
   tools: "settings",
 };
 
-function statusLabel(status?: string): string {
-  if (!status) return "Not compared";
-  return status.replace(/_/g, " ");
-}
-
 function resourceIcon(resource: ProjectResourceDescriptor): "activity" | "file" | "settings" {
   if (resource.kind === "requirement") return "settings";
   if (resource.kind.includes("conversation")) return "activity";
@@ -38,14 +32,12 @@ function resourceIcon(resource: ProjectResourceDescriptor): "activity" | "file" 
 function ResourceRow({
   resource,
   checked,
-  status,
   selectable,
   disabled,
   onToggle,
 }: {
   resource: ProjectResourceDescriptor;
   checked: boolean;
-  status?: string;
   selectable: boolean;
   disabled: boolean;
   onToggle: () => void;
@@ -84,9 +76,6 @@ function ResourceRow({
         <span className="sync-resource-copy">
           <strong>{resource.display_name}</strong>
         </span>
-        <span className="sync-resource-meta">
-          {status && <span className={`sync-resource-status status-${status}`}>{statusLabel(status)}</span>}
-        </span>
       </button>
       {expanded && (
         <div className="sync-resource-detail">
@@ -124,7 +113,6 @@ function ResourceGroup({
   group,
   items,
   selected,
-  statuses,
   selectableResourceIds,
   disabled,
   defaultCollapsed,
@@ -133,7 +121,6 @@ function ResourceGroup({
   group: (typeof RESOURCE_GROUPS)[number];
   items: ProjectResourceDescriptor[];
   selected: Set<string>;
-  statuses: Map<string, string>;
   selectableResourceIds?: ReadonlySet<string>;
   disabled: boolean;
   defaultCollapsed: boolean;
@@ -208,7 +195,6 @@ function ResourceGroup({
               key={resource.resource_id}
               resource={resource}
               checked={selectableIds.has(resource.resource_id) && selected.has(resource.resource_id)}
-              status={statuses.get(resource.resource_id)}
               selectable={selectableIds.has(resource.resource_id)}
               disabled={disabled}
               onToggle={() => onToggle(resource.resource_id)}
@@ -223,7 +209,6 @@ function ResourceGroup({
 export default function ResourceInventory({
   resources,
   selected,
-  statuses,
   selectableResourceIds,
   disabled = false,
   defaultCollapsed = false,
@@ -257,7 +242,6 @@ export default function ResourceInventory({
             group={group}
             items={items}
             selected={selected}
-            statuses={statuses}
             selectableResourceIds={selectableResourceIds}
             disabled={disabled}
             defaultCollapsed={defaultCollapsed}

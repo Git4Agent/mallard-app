@@ -5,18 +5,18 @@
 //! and capture. This is not a plugin system: no third-party code, no dynamic
 //! ABI, no manifest-supplied commands.
 
-use super::traits::{AgentProviderAdapter, ProviderDescriptor, SessionAdapter};
+use super::traits::{ProviderDescriptor, SessionAdapter};
 use mallard_domain::ProviderKey;
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
 #[derive(Clone)]
 pub struct ProviderRegistry {
-    adapters: BTreeMap<ProviderKey, Arc<dyn AgentProviderAdapter>>,
+    adapters: BTreeMap<ProviderKey, Arc<dyn SessionAdapter>>,
 }
 
 impl ProviderRegistry {
-    pub fn from_adapters(adapters: Vec<Arc<dyn AgentProviderAdapter>>) -> Self {
+    pub fn from_adapters(adapters: Vec<Arc<dyn SessionAdapter>>) -> Self {
         let adapters = adapters
             .into_iter()
             .map(|adapter| (adapter.descriptor().key, adapter))
@@ -46,28 +46,13 @@ impl ProviderRegistry {
         ])
     }
 
-    pub fn get(&self, key: &ProviderKey) -> Option<&Arc<dyn AgentProviderAdapter>> {
-        self.adapters.get(key)
+    pub fn get(&self, key: &ProviderKey) -> Option<&dyn SessionAdapter> {
+        self.adapters.get(key).map(Arc::as_ref)
     }
 
-    pub fn require(&self, key: &ProviderKey) -> Result<&Arc<dyn AgentProviderAdapter>, String> {
-        self.adapters
-            .get(key)
+    pub fn require(&self, key: &ProviderKey) -> Result<&dyn SessionAdapter, String> {
+        self.get(key)
             .ok_or_else(|| format!("no provider adapter is registered for '{}'", key))
-    }
-
-    pub fn sessions(&self, key: &ProviderKey) -> Option<&dyn SessionAdapter> {
-        self.adapters.get(key).and_then(|adapter| {
-            // SAFETY of lifetimes: the returned trait object borrows from the
-            // Arc stored in this registry, which outlives the call.
-            let adapter: &dyn AgentProviderAdapter = adapter.as_ref();
-            adapter.sessions()
-        })
-    }
-
-    pub fn require_sessions(&self, key: &ProviderKey) -> Result<&dyn SessionAdapter, String> {
-        self.sessions(key)
-            .ok_or_else(|| format!("provider '{}' has no session adapter", key))
     }
 
     pub fn contains(&self, key: &ProviderKey) -> bool {
@@ -80,5 +65,22 @@ impl ProviderRegistry {
             .values()
             .map(|adapter| adapter.descriptor())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_provider_keeps_option_and_result_failure_paths() {
+        let registry = ProviderRegistry::with_test_provider();
+        let unknown = ProviderKey::parse("unknown").unwrap();
+
+        assert!(registry.get(&unknown).is_none());
+        assert_eq!(
+            registry.require(&unknown).err().as_deref(),
+            Some("no provider adapter is registered for 'unknown'")
+        );
     }
 }

@@ -13,7 +13,7 @@ use super::domain::{
     CatalogPushRow, CatalogResource, CatalogResourceForkPlan, CatalogResourceId, CatalogScope,
     CatalogScopeLink, CatalogScopePullItem, CatalogScopePullPlan, CatalogScopePushPlan,
     CatalogScopePushRow, CatalogTargetExpectation, LibraryHeadCoordinate, LocalCatalogTargetId,
-    PluginApplyMode, ProviderKey, CATALOG_SCHEMA, MAX_GENERATED_NAME_ATTEMPTS,
+    PluginApplyMode, ProviderKey, MAX_GENERATED_NAME_ATTEMPTS,
 };
 use super::inventory::{CatalogLocalInventory, LocalResourceRecord};
 use super::profiles::ResolvedCatalogContext;
@@ -382,7 +382,6 @@ pub fn build_scope_push_plan(
     });
 
     let plan = CatalogScopePushPlan {
-        schema_version: CATALOG_SCHEMA,
         plan_id: CatalogPlanId::generate()?,
         scope_id: inputs.scope.scope_id.clone(),
         link_id: inputs.link.link_id.clone(),
@@ -861,7 +860,6 @@ pub fn build_scope_pull_plan(
     }
 
     let plan = CatalogScopePullPlan {
-        schema_version: CATALOG_SCHEMA,
         plan_id: CatalogPlanId::generate()?,
         scope_id: inputs.scope.scope_id.clone(),
         link_id: inputs.link.link_id.clone(),
@@ -972,7 +970,6 @@ pub fn build_resource_fork_plan(
         }
     };
     let plan = CatalogResourceForkPlan {
-        schema_version: CATALOG_SCHEMA,
         plan_id: CatalogPlanId::generate()?,
         scope_id: inputs.scope.scope_id.clone(),
         profile_pins: inputs.context.profile_pins(),

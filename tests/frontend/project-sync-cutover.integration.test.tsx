@@ -8,9 +8,12 @@ import { expandHomePath } from "../../src/profilePath";
 import { PROJECT_SYNC_SCHEMA } from "../../src/types";
 import {
   MIN_PANE_HEIGHT,
+  sectionGridRows,
+  shareDragged,
   storageHeightRange,
   shareHolding,
   shareHoldingCatalog,
+  type SectionId,
 } from "../../src/components/project-sync/ProjectSidebar";
 import {
   profilePathHint,
@@ -351,18 +354,21 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   // uncapped content-sized track would squeeze Projects and Catalog onto their
   // 96px floors.
   const sidebarSource = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
-  assert.match(sidebarSource, /gridTemplateRows: `\$\{elasticRows\(sectionLayout\.projectShare\)\} 3px \$\{sectionLayout\.storageHeight === null \? "fit-content\(40%\)" : `\$\{sectionLayout\.storageHeight\}px`\}`/);
+  assert.match(sidebarSource, /gridTemplateRows: sectionGridRows\(sectionLayout\.projectShare, sectionLayout\.storageHeight, collapsedSections\)/);
   // Shares go out as fr factors scaled to 100, never as the fractions
   // themselves: a track whose flex factor is under 1 is only given that
   // fraction of the leftover space, so once a pane bottoms out on its floor the
   // rows stop filling the box and leave dead space under the last pane.
   assert.match(sidebarSource, /const projects = projectShare \* 100;/);
-  assert.match(sidebarSource, /minmax\(\$\{MIN_PANE_HEIGHT\}px, \$\{projects\}fr\) 3px minmax\(\$\{MIN_PANE_HEIGHT\}px, \$\{100 - projects\}fr\)/);
+  assert.match(sidebarSource, /minmax\(\$\{MIN_PANE_HEIGHT\}px, \$\{projects\}fr\)/);
+  assert.match(sidebarSource, /minmax\(\$\{MIN_PANE_HEIGHT\}px, \$\{100 - projects\}fr\)/);
   // Storages carries its floor on the pane, not the track: fit-content() is a
   // track size and cannot go inside minmax(), and a content-sized track takes
   // its base from the item's minimum contribution, which .sidebar-split-pane
   // zeroes. Unfloored it was the one track a short box could reclaim outright.
-  assert.match(sidebarSource, /className="sidebar-split-pane sidebar-storage-pane"[\s\S]{0,120}?style=\{\{ minHeight: `\$\{MIN_PANE_HEIGHT\}px` \}\}/);
+  // The floor leaves with the list: a closed tile floored at 96px would be
+  // held open on empty space.
+  assert.match(sidebarSource, /minHeight: collapsedSections\.has\("storages"\) \? undefined : `\$\{MIN_PANE_HEIGHT\}px`/);
   assert.match(retroCss, /\.sidebar-project-pane,\s*\.sidebar-storage-pane,\s*\.sidebar-catalog-pane\s*\{[^}]*background: var\(--bg-1\);/s);
   assert.doesNotMatch(retroCss, /\.sidebar-catalog-pane\s*\{[^}]*margin-top/s);
   assert.match(retroCss, /\.sidebar-section-divider\s*\{[^}]*height: 9px;[^}]*margin: -3px 0;[^}]*align-self: center;[^}]*background: transparent;/s);
@@ -371,6 +377,21 @@ test("the retro skin stays presentation-only and preserves the shell controls", 
   // corners so the rounded junction keeps its shape while dragging.
   assert.match(retroCss, /\.sidebar-section-divider::after\s*\{[^}]*top: 3px;[^}]*right: var\(--retro-panel-radius\);[^}]*left: var\(--retro-panel-radius\);[^}]*height: var\(--retro-gutter\);[^}]*background: transparent;/s);
   assert.match(retroCss, /\.sidebar-section-divider:hover::after,[\s\S]*?\.sidebar-settings-sections\.resizing \.sidebar-section-divider::after\s*\{[^}]*background: var\(--border-strong\);/s);
+  // The hidden attribute is the UA's display:none at attribute-selector
+  // strength, and .sidebar-links-list declares display:flex — which wins, so
+  // without the backing rule a collapsed Storages pane keeps drawing its rows.
+  assert.match(appCss, /\.sidebar-split-pane > \[hidden\]\s*\{[^}]*display: none;/s);
+  // An inert handle keeps its seam but never advertises a drag: no hover tint,
+  // and none from the tray-wide resizing tint while another handle moves.
+  assert.match(appCss, /\.sidebar-section-divider\.inert\s*\{[^}]*cursor: default;/s);
+  assert.match(appCss, /\.sidebar-section-divider\.inert:hover::after,[\s\S]*?\.sidebar-settings-sections\.resizing \.sidebar-section-divider\.inert::after\s*\{[^}]*background: transparent;/s);
+  // The closed heading's pad override sits three classes deep so it outranks
+  // RetroTheme's two-class heading padding on any source order.
+  assert.match(appCss, /\.sidebar-settings-sections \.sidebar-split-pane\.collapsed > \.sidebar-section-heading\s*\{[^}]*padding-bottom: 8px;/s);
+  // The toggle replaced the .sidebar-section-label wrapper outright; a block
+  // for the old name would be a second opinion on a class nothing renders.
+  assert.doesNotMatch(appCss, /\.sidebar-section-label/);
+  assert.doesNotMatch(sidebarSource, /sidebar-section-label/);
   assert.match(workspace, /className=\{`sync-workspace\$\{activityOpen \? " logs-open" : ""\}\$\{resizingLog \? " resizing-log" : ""\}`\}/);
   assert.doesNotMatch(retroCss, /\.sync-workspace\.logs-open > \.sync-main/);
   // A closed drawer collapses its gutter with its height, so nothing is left
@@ -875,6 +896,53 @@ test("the Storages pane floors at the same height as the panes above it", () => 
   const [min, max] = storageHeightRange(700, 210);
   assert.equal(min, MIN_PANE_HEIGHT);
   assert.equal(max, 700 - 6 - 210 - MIN_PANE_HEIGHT);
+});
+
+/* The share drag is relative to the grab point on the elastic scale. Mapped
+   against the whole box it snapped to the pointer's absolute position on
+   grab — jumping by however much of the box the Storages row had taken — and
+   then tracked under 1:1. */
+test("the share drag tracks the pointer without a grab jump", () => {
+  // Zero travel keeps the split exactly where the panes sit: grabbing the
+  // handle must not move it, whatever height Storages holds.
+  assert.equal(shareDragged(210, 140, 0), 210 / 350);
+  // Travel moves the boundary pixel for pixel across the two panes it splits.
+  assert.equal(shareDragged(210, 140, 35), 245 / 350);
+  assert.equal(shareDragged(210, 140, -35), 0.5);
+  // Clamped by the same floors as every other share path.
+  assert.equal(shareDragged(340, 10, 200), 0.8);
+  assert.equal(shareDragged(10, 340, -200), 0.2);
+});
+
+test("collapsed sections drop to their headings and leave the split intact", () => {
+  const open = new Set<SectionId>();
+  // The untouched layout is exactly what shipped before sections collapsed:
+  // two share-sized rows and a content-sized Storages row, or its pin.
+  assert.equal(
+    sectionGridRows(0.56, null, open),
+    `minmax(96px, ${0.56 * 100}fr) 3px minmax(96px, ${100 - 0.56 * 100}fr) 3px fit-content(40%)`,
+  );
+  assert.equal(
+    sectionGridRows(0.56, 210, open),
+    `minmax(96px, ${0.56 * 100}fr) 3px minmax(96px, ${100 - 0.56 * 100}fr) 3px 210px`,
+  );
+  // A collapsed row is min-content — the heading — never the 96px list floor,
+  // and the share and pin ride through untouched so reopening restores the
+  // exact prior split.
+  assert.equal(
+    sectionGridRows(0.56, 210, new Set<SectionId>(["catalog"])),
+    `minmax(96px, ${0.56 * 100}fr) 3px min-content 3px 210px`,
+  );
+  // With both share-sized panes closed the Storages row inherits the elastic
+  // factor over its own pin: the leftover space always belongs to someone.
+  assert.equal(
+    sectionGridRows(0.56, 210, new Set<SectionId>(["projects", "catalog"])),
+    "min-content 3px min-content 3px minmax(96px, 1fr)",
+  );
+  assert.equal(
+    sectionGridRows(0.56, null, new Set<SectionId>(["projects", "catalog", "storages"])),
+    "min-content 3px min-content 3px min-content",
+  );
 });
 
 test("custom profile paths resolve this user's home", () => {

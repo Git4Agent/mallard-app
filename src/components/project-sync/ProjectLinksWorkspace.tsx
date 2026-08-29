@@ -3231,7 +3231,6 @@ export default function ProjectLinksWorkspace({
         {activeProject && !newProjectSetup && !inlineStorageReview && (
           <div id="project-history-panel" className="sync-project-tab-panel">
             <ProjectActivityPage
-              embedded
               project={activeProject}
               binding={activeBindingByProject.get(activeProject.local_project_id) ?? null}
               refreshEpoch={historyRefreshEpoch}

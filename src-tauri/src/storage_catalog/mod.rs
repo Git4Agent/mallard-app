@@ -3,14 +3,14 @@
 //!
 //! Module boundaries follow `docs/PLAN_DRAFT_LINKED_CATALOG_RESOURCES.md`:
 //! `domain` owns validated portable and plan types; `persistence` owns
-//! machine-local state; `profiles` resolves provider homes and global skill
-//! roots; `adapters` speaks the native plugin CLIs; `skill_tree` and
-//! `codex_pet` validate and transform payload directories; `inventory`
-//! assembles the local view; `resource_engine` owns the independent remote
-//! repository protocol; `resource_planning` reconciles and pins scope-level
-//! plans; `apply` executes approved mutations; `service` is the non-Tauri
-//! application boundary shared by tests and `resource_commands`, the Tauri
-//! surface.
+//! machine-local state; `plan_store` holds pending reviewed plans in memory;
+//! `profiles` resolves provider homes and global skill roots; `adapters`
+//! speaks the native plugin CLIs; `skill_tree` and `codex_pet` validate and
+//! transform payload directories; `inventory` assembles the local view;
+//! `resource_engine` owns the independent remote repository protocol;
+//! `resource_planning` reconciles and pins scope-level plans; `apply`
+//! executes approved mutations; `service` is the non-Tauri application
+//! boundary shared by tests and `resource_commands`, the Tauri surface.
 
 pub mod adapters;
 pub mod apply;
@@ -19,6 +19,7 @@ pub mod domain;
 pub mod inventory;
 pub mod persistence;
 pub mod pet_preview;
+pub mod plan_store;
 pub mod profiles;
 pub mod resource_commands;
 pub mod resource_engine;

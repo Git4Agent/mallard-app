@@ -1165,10 +1165,7 @@ The implementation must include negative tests for these rules:
 6. Pet v1 remains unsupported; it is not rewritten as v2.
 7. Existing storage with repository bundles but no catalog starts with an
    empty catalog; repository data is not copied, rewritten, or deleted.
-8. Archived code under `docs/archive/skill-plugin-sync/` may supply test cases
-   and provider-adapter lessons, but production files are not copied back
-   wholesale.
-9. Format dispatch matches an exact `(format_key, format_version)` pair. There
+8. Format dispatch matches an exact `(format_key, format_version)` pair. There
    are no version ranges, aliases, converters, or legacy format readers.
 
 ## 20. Acceptance criteria

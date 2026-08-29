@@ -5,11 +5,11 @@
 
 use super::claude::codec::analyze_claude_transcript;
 use super::traits::{
-    AgentProviderAdapter, DiscoveredSession, MaterializationTargetRequest, PlannedProviderTarget,
-    ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionOutcome,
-    SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
-    SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
-    SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
+    DiscoveredSession, MaterializationTargetRequest, PlannedProviderTarget, ProviderDescriptor,
+    SessionActionContext, SessionActionDescriptor, SessionActionOutcome, SessionActionRequest,
+    SessionAdapter, SessionAnalysis, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
+    SessionFileMetadata, SessionFileSummary, SessionTimelineContext, SessionTimelineIndex,
+    SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::provider_capture::{
     canonical_existing_dir, provider_walk_entry, scan_session_metadata_with,
@@ -77,7 +77,7 @@ impl Default for TestProviderAdapter {
     }
 }
 
-impl AgentProviderAdapter for TestProviderAdapter {
+impl SessionAdapter for TestProviderAdapter {
     fn descriptor(&self) -> ProviderDescriptor {
         ProviderDescriptor {
             key: provider_key(),
@@ -89,12 +89,6 @@ impl AgentProviderAdapter for TestProviderAdapter {
         }
     }
 
-    fn sessions(&self) -> Option<&dyn SessionAdapter> {
-        Some(self)
-    }
-}
-
-impl SessionAdapter for TestProviderAdapter {
     fn codec_key(&self) -> &str {
         TEST_PROVIDER_CODEC_KEY
     }

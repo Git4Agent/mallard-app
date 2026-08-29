@@ -114,14 +114,13 @@ The POC uses the single-argument spelling `--tools=`. The two-argument form
 `--tools ""` is unsafe for this CLI because the variadic option can consume
 the following prompt.
 
-## 3. POC command and implementation boundary
+## 3. Current command and implementation boundary
 
-The POC is deliberately not registered in `package.json`. It must be invoked
-directly with an explicit paid-use acknowledgement:
+The one-turn POC was removed after the package runner replaced it. Invoke the
+current paid test with an explicit paid-use acknowledgement:
 
 ```sh
-MALLARD_RUN_LIVE_CLAUDE_TUZI_POC=1 \
-  node scripts/poc-live-claude-tuzi.mjs
+MALLARD_RUN_LIVE_CLAUDE_TUZI_E2E=1 npm run test:live-claude-tuzi-e2e
 ```
 
 The runner:
@@ -367,7 +366,6 @@ This distinction avoids claiming that conversation payload bytes are path-free.
 
 The Tuzi work consists of:
 
-- the retained one-turn research POC in `scripts/poc-live-claude-tuzi.mjs`;
 - the paid package runner in `scripts/run-live-claude-tuzi-e2e.mjs`;
 - the ignored `live_claude_tuzi_setup_push_pull_divergence` function and strict
   fake-only connection parser tests in

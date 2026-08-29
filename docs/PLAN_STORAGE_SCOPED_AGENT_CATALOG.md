@@ -120,9 +120,10 @@ Before production mutation code:
 7. Convert the design's type sketches into strict Rust types and validation
    tests before connecting filesystem or network code.
 
-The archive at `docs/archive/skill-plugin-sync/` is reference evidence. Port
-specific pure tests and verified adapter behavior; do not copy its project
-resource, dependency-plan, command, persistence, or frontend layers.
+The now-removed source archive supplied reference evidence during
+implementation. Specific pure tests and verified adapter behavior were ported;
+its project resource, dependency-plan, command, persistence, and frontend
+layers were not copied.
 
 ## 4. Phase 1 — extract shared storage transport
 
@@ -606,7 +607,8 @@ After the new path is green:
    still emits global agent customizations.
 4. Mark the old project/repository capability plans as historical and link to
    the new design.
-5. Keep `docs/archive/skill-plugin-sync/` read-only as historical evidence.
+5. Remove the historical source archive after its test and adapter evidence is
+   incorporated.
 6. Add repository-wide negative searches/tests for removed production symbols
    such as `get_project_capability_status` and the old dependency plan.
 

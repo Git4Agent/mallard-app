@@ -9,11 +9,11 @@ pub mod history;
 pub mod materialization;
 
 use super::traits::{
-    AgentProviderAdapter, MaterializationTargetRequest, PlannedProviderTarget, ProviderCliLauncher,
-    ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionOutcome,
-    SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
-    SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
-    SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
+    MaterializationTargetRequest, PlannedProviderTarget, ProviderCliLauncher, ProviderDescriptor,
+    SessionActionContext, SessionActionDescriptor, SessionActionOutcome, SessionActionRequest,
+    SessionAdapter, SessionAnalysis, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
+    SessionFileMetadata, SessionFileSummary, SessionTimelineContext, SessionTimelineIndex,
+    SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::app_settings::conversation_file_limit_bytes;
 use crate::provider_capture::validated_session_metadata;
@@ -117,7 +117,7 @@ impl Default for ClaudeAdapter {
     }
 }
 
-impl AgentProviderAdapter for ClaudeAdapter {
+impl SessionAdapter for ClaudeAdapter {
     fn descriptor(&self) -> ProviderDescriptor {
         ProviderDescriptor {
             key: provider_key(),
@@ -132,12 +132,6 @@ impl AgentProviderAdapter for ClaudeAdapter {
         }
     }
 
-    fn sessions(&self) -> Option<&dyn SessionAdapter> {
-        Some(self)
-    }
-}
-
-impl SessionAdapter for ClaudeAdapter {
     fn codec_key(&self) -> &str {
         CLAUDE_LINEAGE_CODEC_KEY
     }

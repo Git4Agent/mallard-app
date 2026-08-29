@@ -2205,16 +2205,6 @@ summary {
   font-variant-numeric: tabular-nums;
 }
 
-/* The context strip is mostly paths; the repository name beside them is not. */
-.sync-history-context-item > span {
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-}
-
-.sync-history-context-item > .sync-history-context-name {
-  font-family: var(--font-sans);
-}
-
 /* Sentences read in the clean face even when the app wrote them. */
 .sync-history-state {
   font-family: var(--font-sans);
@@ -2680,7 +2670,6 @@ summary {
   background: var(--surface-subtle);
 }
 
-.sync-pull-apply-bar,
 .sync-modal-footer {
   border-color: var(--border-mid);
   background: var(--surface-footer);

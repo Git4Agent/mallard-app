@@ -513,14 +513,8 @@ pub enum SessionActionOutcome {
     Launched,
 }
 
-/// One built-in provider. `sessions()` is `None` for providers that manage
-/// no session files (activity-only integrations).
-pub trait AgentProviderAdapter: Send + Sync {
-    fn descriptor(&self) -> ProviderDescriptor;
-    fn sessions(&self) -> Option<&dyn SessionAdapter>;
-}
-
 pub trait SessionAdapter: Send + Sync {
+    fn descriptor(&self) -> ProviderDescriptor;
     fn codec_key(&self) -> &str;
     fn codec_version(&self) -> u32;
     /// Version of the normalized timeline projection. Changing event

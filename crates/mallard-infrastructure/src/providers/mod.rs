@@ -18,14 +18,14 @@ pub mod traits;
 
 pub use registry::ProviderRegistry;
 pub use traits::{
-    AgentProviderAdapter, DiscoveredProviderState, DiscoveredSession, DiscoveredSidecar,
-    DiscoveredStateFile, MaterializationTargetRequest, PlannedProviderTarget, ProviderCliLauncher,
-    ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionKind,
-    SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis, SessionCheckpoint,
-    SessionCount, SessionCountQuality, SessionDetailWarning, SessionDiscovery,
-    SessionDiscoveryContext, SessionEventCounts, SessionEventDetail, SessionFileMetadata,
-    SessionFileSummary, SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent,
-    SessionTimelineEventKind, SessionTimelineIndex, SessionTimelineIndexEntry,
-    SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus,
-    SessionToolCategory, SessionToolIndexEntry, SessionTurnToolSummary,
+    DiscoveredProviderState, DiscoveredSession, DiscoveredSidecar, DiscoveredStateFile,
+    MaterializationTargetRequest, PlannedProviderTarget, ProviderCliLauncher, ProviderDescriptor,
+    SessionActionContext, SessionActionDescriptor, SessionActionKind, SessionActionOutcome,
+    SessionActionRequest, SessionAdapter, SessionAnalysis, SessionCheckpoint, SessionCount,
+    SessionCountQuality, SessionDetailWarning, SessionDiscovery, SessionDiscoveryContext,
+    SessionEventCounts, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
+    SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind,
+    SessionTimelineIndex, SessionTimelineIndexEntry, SessionTimelinePageSlice,
+    SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory,
+    SessionToolIndexEntry, SessionTurnToolSummary,
 };

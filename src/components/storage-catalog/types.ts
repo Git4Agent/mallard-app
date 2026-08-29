@@ -143,15 +143,14 @@ export interface CatalogPushRow {
   detail?: string | null;
 }
 
-/** One row of the scope Push review. The captured resource rides along for
- * the backend's re-verification; the review reads only `row`. */
+/** One row of the scope Push review. The captured resource the backend
+ * re-verifies against stays in its in-memory plan store and never crosses
+ * IPC; the review renders `row`. */
 export interface CatalogScopePushRow {
   row: CatalogPushRow;
-  resource?: unknown;
 }
 
 export interface CatalogScopePushPlan {
-  schema_version: 1;
   plan_id: string;
   scope_id: string;
   link_id: string;
@@ -228,15 +227,14 @@ export interface CatalogClaimPin {
 }
 
 /** One item of the scope Pull review: the presentation item plus its
- * cross-storage claim pins. The stored resource rides along for apply. */
+ * cross-storage claim pins. The stored resource apply materializes stays in
+ * the backend's in-memory plan store and never crosses IPC. */
 export interface CatalogScopePullItem {
   item: CatalogPullItem;
-  resource?: unknown;
   conflicting_claims: CatalogClaimPin[];
 }
 
 export interface CatalogScopePullPlan {
-  schema_version: 1;
   plan_id: string;
   scope_id: string;
   link_id: string;
@@ -277,7 +275,6 @@ export interface CatalogScopePullOutcome {
 }
 
 export interface CatalogResourceForkPlan {
-  schema_version: 1;
   plan_id: string;
   scope_id: string;
   source_resource_id: string;

@@ -4,8 +4,7 @@
 > described here was removed on 2026-07-30. It must not be reintroduced.
 > Its storage-scoped successor is
 > [`DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md`](./DESIGN_STORAGE_SCOPED_AGENT_CATALOG.md).
-> The removed source snapshot remains under
-> [`archive/skill-plugin-sync/`](./archive/skill-plugin-sync/).
+> The obsolete source snapshot was removed after the successor shipped.
 
 **Status:** historical; formerly implemented, then removed
 **Date:** 2026-07-18 (implemented 2026-07-18)

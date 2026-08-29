@@ -1,8 +1,7 @@
 //! Compiled provider adapters: exactly `codex` and `claude`.
 //!
-//! Native contract evidence (frozen for this delivery, verified against
-//! codex-cli 0.145.0 and Claude Code 2.1.220 plus the previously shipped
-//! implementation archived under `docs/archive/skill-plugin-sync/`):
+//! Native contract evidence (verified against codex-cli 0.145.0 and Claude
+//! Code 2.1.220):
 //!
 //! - Codex inventory: `codex plugin marketplace list --json` returning
 //!   `{"marketplaces":[{name, marketplaceSource:{sourceType, source, ref?},

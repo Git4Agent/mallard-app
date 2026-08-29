@@ -182,7 +182,7 @@ before an import is simply gone; the user explicitly does not care.)
 
 ## 7. Corpus gates (run 2026-08-20, 420 files under `~/.claude/projects`)
 
-`scripts/claude_corpus_scan_thinking_blind.py` — the equivalence gate
+The one-time equivalence scan, removed after the rules were frozen, checked
 (`analyze(F) == analyze(desktop_sanitize(F))` over chain length, record
 count, leaf uuid, sessionId, digest):
 
@@ -194,12 +194,12 @@ count, leaf uuid, sessionId, digest):
 | Files whose walk stitches | 101 of 106 |
 | Stitches on active paths | 9,493 across 49,476 chain records (~19% of links cross a projected-out thinking row — stitching is the norm, not the exception) |
 
-`scripts/claude_corpus_scan_severed.py` — v1's backstop gate, retained: under
-sever-only rules the two damaged files yield chains of 5/978 and 12/7,338;
-under projection they stitch to full extent. The parity plan's §R8 verdict
-("genuine corruption") is revised: the old 53.2 MB reject bears the sanitizer
-damage class (987 distinct absent parent uuids; its one surviving thinking
-block is post-import appends) — almost certainly an earlier Desktop import.
+The one-time sever-only backstop scan showed that the two damaged files yield
+chains of 5/978 and 12/7,338 under sever-only rules; under projection they
+stitch to full extent. The parity plan's §R8 verdict ("genuine corruption") is
+revised: the old 53.2 MB reject bears the sanitizer damage class (987 distinct
+absent parent uuids; its one surviving thinking block is post-import appends)
+— almost certainly an earlier Desktop import.
 
 Serialization robustness: fingerprints already parse-then-canonicalize
 (sorted keys via `canonical_json`; default `serde_json` BTreeMap), so

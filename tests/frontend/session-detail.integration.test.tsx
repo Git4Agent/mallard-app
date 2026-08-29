@@ -7,9 +7,7 @@ import type {
   ProjectSessionTimelinePage,
   SessionTimelineEvent,
 } from "../../src/types";
-import SessionDetailEvent, {
-  SessionDetailMarkdown,
-} from "../../src/components/project-sync/session-detail/SessionDetailEvent";
+import { SessionDetailMarkdown } from "../../src/components/project-sync/session-detail/SessionDetailEvent";
 import SessionDetailHeader from "../../src/components/project-sync/session-detail/SessionDetailHeader";
 import SessionDetailTimeline from "../../src/components/project-sync/session-detail/SessionDetailTimeline";
 import SessionDetailToolbar from "../../src/components/project-sync/session-detail/SessionDetailToolbar";
@@ -175,8 +173,11 @@ function renderTimeline(
       onLoadMore={() => undefined}
       onToolExpandedChange={() => undefined}
       onOpenProjectPath={() => undefined}
+      projectImages={{}}
+      onLoadProjectImage={() => undefined}
       projectRoot="/Users/example/HorrorGame"
       repositoryUrl={overrides?.repositoryUrl ?? null}
+      hasFilterToggles
     />,
   );
 }

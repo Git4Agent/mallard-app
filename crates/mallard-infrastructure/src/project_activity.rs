@@ -385,7 +385,7 @@ pub fn scan_local_session_views(
     let mut seen_cache_keys = BTreeSet::new();
 
     for (provider, home) in &resolved.homes {
-        let Some(adapter) = registry.sessions(provider) else {
+        let Some(adapter) = registry.get(provider) else {
             warnings.push(format!(
                 "provider '{}' is bound but has no registered adapter",
                 provider
@@ -977,7 +977,7 @@ fn merge_activity_sessions_with_state(
                 )
             });
         let actions = registry
-            .sessions(&record.provider)
+            .get(&record.provider)
             .map(|adapter| {
                 adapter.available_actions(&SessionActionContext {
                     provider_session_id: &record.session_id,
@@ -1416,7 +1416,7 @@ pub fn execute_project_session_action(
             binding.local_project_id == resolved.project_id && binding.thread_id == thread_id
         })
         .and_then(|binding| binding.provider_thread_id.clone());
-    let adapter = registry.require_sessions(&provider)?;
+    let adapter = registry.require(&provider)?;
     let home = resolved.homes.get(&provider).ok_or_else(|| {
         format!(
             "provider '{}' is not bound with a readable profile on this machine",
@@ -1801,10 +1801,10 @@ fn git_error(action: &str, output: &Output) -> String {
 mod activity_only_tests {
     use super::*;
     use crate::providers::{
-        AgentProviderAdapter, MaterializationTargetRequest, PlannedProviderTarget,
-        ProviderDescriptor, SessionActionOutcome, SessionAnalysis, SessionEventDetail,
-        SessionFileMetadata, SessionTimelineContext, SessionTimelineIndex,
-        SessionTimelinePageSlice, SessionTimelineQuery,
+        MaterializationTargetRequest, PlannedProviderTarget, ProviderDescriptor,
+        SessionActionOutcome, SessionAnalysis, SessionEventDetail, SessionFileMetadata,
+        SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice,
+        SessionTimelineQuery,
     };
     use mallard_domain::{
         ActionId, ApplyReceipt, BundleId, BundleRecipe, ConversationApplyReceipt,
@@ -1861,7 +1861,10 @@ mod activity_only_tests {
         // it. Counting it again would promise a row that is already on screen,
         // and pointing the cursor at it would reload the same page forever.
         let older = older_activity(
-            &[commit_at(900, &["codex:session:visible"]), commit_at(700, &[])],
+            &[
+                commit_at(900, &["codex:session:visible"]),
+                commit_at(700, &[]),
+            ],
             &[1_200],
             1_000,
         )
@@ -1904,7 +1907,7 @@ mod activity_only_tests {
         timeline_calls: Arc<AtomicUsize>,
     }
 
-    impl AgentProviderAdapter for InstrumentedAdapter {
+    impl crate::providers::SessionAdapter for InstrumentedAdapter {
         fn descriptor(&self) -> ProviderDescriptor {
             ProviderDescriptor {
                 key: self.provider.clone(),
@@ -1916,12 +1919,6 @@ mod activity_only_tests {
             }
         }
 
-        fn sessions(&self) -> Option<&dyn crate::providers::SessionAdapter> {
-            Some(self)
-        }
-    }
-
-    impl crate::providers::SessionAdapter for InstrumentedAdapter {
         fn codec_key(&self) -> &str {
             "instrumented.v1"
         }

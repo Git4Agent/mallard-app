@@ -258,7 +258,6 @@ Acceptance: re-run the `MALLARD_SYNC_METRICS=1` real-profile benchmark and compa
 - `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`.
 - `cargo test -p mallard-domain -p mallard-infrastructure`; src-tauri suite == `npm run test:backend-integration`.
 - `npx tsc --noEmit`; frontend integration suite.
-- `scripts/verify_portable_tail_conflict_model.py` (unchanged semantics — classifier untouched).
 - Live: wipe `~/.mallard` + the cloud bucket, run both live e2e scripts.
 
 ## Risks

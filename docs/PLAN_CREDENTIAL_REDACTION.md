@@ -732,7 +732,8 @@ Landed exactly as designed except where noted. Touch list as realized:
 `mallard-domain` (`ConversationWireRedaction`, thread field + validation,
 `ConversationBlocker::RedactionRulesetMismatch`,
 `blocked_conversation_decision` export), `mod.rs` re-export, `types.ts`,
-`scripts/credential_corpus_scan.py`, tests across
+the one-time credential corpus scan (removed after the rules were frozen),
+tests across
 `credential_redaction.rs` (31 unit), `codex_history_graph.rs` (A→B→A
 secrets sibling + tamper refusal), `commands.rs` (Claude A→B→A end-to-end,
 ruleset-mismatch review blocker, repair secret survival, first-contact
@@ -797,8 +798,8 @@ rows).
    `bounded_file_expectation` disk reads everywhere (local-form);
    `local_target_expectation_for_action` digests captured **transcript**
    bytes only, which remain local-form. **V2 verified**: see note 2.
-   **V3**: `scripts/credential_corpus_scan.py` (types-and-counts only)
-   is the pre-freeze input; `encrypted_content` and
+   **V3**: the removed types-and-counts corpus scan was the pre-freeze input;
+   `encrypted_content` and
    `__mallard_path_map__` are already in the skip-list.
 10. **Corpus scan results (V3/D6, 2026-08-21)** — Codex: 1477 files,
     1.33 M records, 11.9 M string leaves, 8.24 GB scanned; Claude: 445

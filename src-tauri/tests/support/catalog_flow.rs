@@ -615,7 +615,6 @@ fn push_resource(
         .service
         .prepare_push(scope_id, storage_id)
         .expect("prepare reviewed Library Push");
-    assert_eq!(plan.schema_version, CATALOG_SCHEMA);
     let row = plan
         .rows
         .iter()
@@ -742,7 +741,6 @@ fn pull_resource(
             BTreeMap::from([(resource_id.clone(), copy_name.to_string())]),
         );
     }
-    assert_eq!(plan.schema_version, CATALOG_SCHEMA);
     let item = plan
         .items
         .iter()

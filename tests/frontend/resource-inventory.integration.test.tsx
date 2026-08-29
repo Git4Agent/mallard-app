@@ -16,6 +16,7 @@ import type {
   BundleRecipe,
   ConversationReviewAction,
   ProjectResourceDescriptor,
+  ThreadSyncEntry,
   ThreadSyncComparison,
   ThreadSyncDecision,
 } from "../../src/types";
@@ -64,8 +65,45 @@ function conversation(resourceId: string): ProjectResourceDescriptor {
     codec_version: 1,
     metadata: {},
     category: "conversations",
+    default_selected: false,
   };
 }
+
+function threadEntryBase(
+  threadId: string,
+  resourceId: string,
+  displayName: string,
+): Pick<
+  ThreadSyncEntry,
+  | "provider"
+  | "provider_display_name"
+  | "access"
+  | "thread_id"
+  | "conversation_resource_id"
+  | "resource_id"
+  | "display_name"
+  | "compared_against_storage"
+> {
+  return {
+    provider: "codex",
+    provider_display_name: "Codex",
+    access: "bound_ready",
+    thread_id: threadId,
+    conversation_resource_id: resourceId,
+    resource_id: resourceId,
+    display_name: displayName,
+    compared_against_storage: true,
+  };
+}
+
+const comparisonDefaults: Pick<
+  ThreadSyncComparison,
+  "scopes" | "provider_errors" | "remote_continuity"
+> = {
+  scopes: [],
+  provider_errors: {},
+  remote_continuity: { state: "in_sync", revision: 1 },
+};
 
 test("recommended Push selection includes only locally changed sessions", () => {
   const localAhead = conversation("codex:session:local-ahead");
@@ -73,6 +111,7 @@ test("recommended Push selection includes only locally changed sessions", () => 
   const storageAhead = conversation("codex:session:storage-ahead");
   const memory = memoryResource("frontend-memory");
   const comparison: ThreadSyncComparison = {
+    ...comparisonDefaults,
     project_id: "project-a",
     storage_id: "storage-a",
     storage_name: "Local storage 1",
@@ -81,9 +120,7 @@ test("recommended Push selection includes only locally changed sessions", () => 
     warnings: [],
     entries: [
       {
-        thread_id: "local-ahead",
-        resource_id: localAhead.resource_id,
-        display_name: "Local ahead",
+        ...threadEntryBase("local-ahead", localAhead.resource_id, "Local ahead"),
         state: "local_ahead",
         local_present: true,
         storage_present: true,
@@ -91,9 +128,7 @@ test("recommended Push selection includes only locally changed sessions", () => 
         pull_decision: decision("report_push_eligible", "local_outstanding"),
       },
       {
-        thread_id: "synced",
-        resource_id: synced.resource_id,
-        display_name: "Synced",
+        ...threadEntryBase("synced", synced.resource_id, "Synced"),
         state: "synced",
         local_present: true,
         storage_present: true,
@@ -101,9 +136,7 @@ test("recommended Push selection includes only locally changed sessions", () => 
         pull_decision: decision("no_changes", "sync_current"),
       },
       {
-        thread_id: "storage-ahead",
-        resource_id: storageAhead.resource_id,
-        display_name: "Storage ahead",
+        ...threadEntryBase("storage-ahead", storageAhead.resource_id, "Storage ahead"),
         state: "storage_ahead",
         local_present: true,
         storage_present: true,
@@ -150,6 +183,7 @@ test("non-uploadable sessions cannot remain in the active Push selection", () =>
   const synced = conversation("codex:session:synced");
   const storageAhead = conversation("codex:session:storage-ahead");
   const comparison: ThreadSyncComparison = {
+    ...comparisonDefaults,
     project_id: "project-a",
     storage_id: "storage-a",
     storage_name: "Local storage 1",
@@ -158,9 +192,7 @@ test("non-uploadable sessions cannot remain in the active Push selection", () =>
     warnings: [],
     entries: [
       {
-        thread_id: "local-ahead",
-        resource_id: localAhead.resource_id,
-        display_name: "Local ahead",
+        ...threadEntryBase("local-ahead", localAhead.resource_id, "Local ahead"),
         state: "local_ahead",
         local_present: true,
         storage_present: true,
@@ -168,9 +200,7 @@ test("non-uploadable sessions cannot remain in the active Push selection", () =>
         pull_decision: decision("report_push_eligible", "local_outstanding"),
       },
       {
-        thread_id: "synced",
-        resource_id: synced.resource_id,
-        display_name: "Synced",
+        ...threadEntryBase("synced", synced.resource_id, "Synced"),
         state: "synced",
         local_present: true,
         storage_present: true,
@@ -178,9 +208,7 @@ test("non-uploadable sessions cannot remain in the active Push selection", () =>
         pull_decision: decision("no_changes", "sync_current"),
       },
       {
-        thread_id: "storage-ahead",
-        resource_id: storageAhead.resource_id,
-        display_name: "Storage ahead",
+        ...threadEntryBase("storage-ahead", storageAhead.resource_id, "Storage ahead"),
         state: "storage_ahead",
         local_present: true,
         storage_present: true,
@@ -203,9 +231,7 @@ test("non-uploadable sessions cannot remain in the active Push selection", () =>
 test("conversation divergence holds only its thread instead of blocking Push", () => {
   const resource = conversation("codex:session:diverged");
   const entry = {
-    thread_id: "provider-diverged",
-    resource_id: resource.resource_id,
-    display_name: "Diverged",
+    ...threadEntryBase("provider-diverged", resource.resource_id, "Diverged"),
     state: "diverged" as const,
     local_present: true,
     storage_present: true,
@@ -213,6 +239,7 @@ test("conversation divergence holds only its thread instead of blocking Push", (
     pull_decision: decision("keep_both", "diverged", true),
   };
   const comparison: ThreadSyncComparison = {
+    ...comparisonDefaults,
     project_id: "project-a",
     storage_id: "storage-a",
     storage_name: "Local storage 1",
@@ -256,7 +283,6 @@ test("blocked resources remain unselectable in the inventory", () => {
         memoryResource("review-two", reason),
       ]}
       selected={new Set()}
-      statuses={new Map()}
       onToggle={() => undefined}
     />,
   );
@@ -267,7 +293,10 @@ test("blocked resources remain unselectable in the inventory", () => {
 });
 
 test("a group states its own name once, and counts its blocked rows rather than assuming them", () => {
-  const requirement = (name: string, blockedReason: string | null = null) => ({
+  const requirement = (
+    name: string,
+    blockedReason: string | null = null,
+  ): ProjectResourceDescriptor => ({
     ...memoryResource(name, blockedReason),
     resource_id: `codex:requirement:${name}`,
     kind: "requirement" as const,
@@ -277,7 +306,6 @@ test("a group states its own name once, and counts its blocked rows rather than 
     <ResourceInventory
       resources={[requirement("missing", "Resource is unavailable at the mapped paths"), requirement("present")]}
       selected={new Set()}
-      statuses={new Map()}
       defaultCollapsed
       onToggle={() => undefined}
     />,
@@ -300,7 +328,6 @@ test("a group states its own name once, and counts its blocked rows rather than 
     <ResourceInventory
       resources={[requirement("present")]}
       selected={new Set()}
-      statuses={new Map()}
       onToggle={() => undefined}
     />,
   );
@@ -326,7 +353,6 @@ test("a resource named by its own id states that id once, and says why once", ()
     <ResourceInventory
       resources={[ghost]}
       selected={new Set()}
-      statuses={new Map()}
       onToggle={() => undefined}
     />,
   );
@@ -462,46 +488,25 @@ test("two steps render two plain tabs — never a Review tab", () => {
   assert.doesNotMatch(primary, /data-icon="upload"/);
 });
 
-test("destination gates never render inside the push review", () => {
-  const resource = memoryResource("review");
-  const destinations = [
-    { state: "remote_history_missing", base_revision: 3 },
-    {
-      state: "remote_history_replaced",
-      base_revision: 1,
-      remote_revision: 2,
-      base_manifest_sha256: "a".repeat(64),
-      remote_manifest_sha256: "b".repeat(64),
-    },
-    { state: "requires_pull", reason: "remote_advanced", remote_revision: 4, base_revision: 3 },
-  ];
-  for (const destinationStatus of destinations) {
-    const html = renderToStaticMarkup(
-      <PushResourceWorkspace
-        resources={[resource]}
-        selected={new Set([resource.resource_id])}
-        projectDefaults={new Set([resource.resource_id])}
-        busy={false}
-        error={null}
-        storageName="R2 storage 1"
-        destinationStatus={destinationStatus as never}
-        onToggle={() => undefined}
-        onClose={() => undefined}
-        onPush={() => undefined}
-        onPull={() => undefined}
-        onUnlinkStorage={() => undefined}
-      />,
-    );
+test("blocked destinations gate before review and publish failures recheck the destination", () => {
+  const source = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const openPushChooser = source.slice(
+    source.indexOf("const openPushChooser = async"),
+    source.indexOf("const scanPendingProjectFiles = async"),
+  );
+  const destinationGate = openPushChooser.indexOf('destination.state === "requires_pull"');
+  const pendingPushCreation = openPushChooser.indexOf("setPendingPush({");
+  assert.ok(destinationGate >= 0 && destinationGate < pendingPushCreation);
+  assert.match(openPushChooser.slice(destinationGate, pendingPushCreation), /setStorageNotice\([\s\S]*return;/);
 
-    // These states close the review before it opens — ProjectSync lands them
-    // as a storage-card notice instead. The workspace keeps only a defensive
-    // disable with the reason on the button.
-    assert.doesNotMatch(html, /Remote history is missing|Storage history changed|Storage has newer changes/);
-    assert.doesNotMatch(html, /Open Pull review/);
-    const pushButton = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[^>]*>/)?.[0];
-    assert.match(pushButton ?? "", /disabled=""/);
-    assert.match(pushButton ?? "", /title="Resolve the storage notice before pushing"/);
-  }
+  const publishProject = source.slice(
+    source.indexOf("const publishProject = async"),
+    source.indexOf("const publishPendingPush = async"),
+  );
+  assert.match(
+    publishProject,
+    /catch \(reason\)[\s\S]*getPushDestinationStatus\([\s\S]*destinationStatus\.state === "remote_history_missing"[\s\S]*destinationStatus\.state === "remote_history_replaced"[\s\S]*destinationStatus\.state === "requires_pull"[\s\S]*setPendingPush\(null\)/,
+  );
 });
 
 test("the pull-required sentence counts the conversations a Pull would bring", () => {
@@ -538,6 +543,7 @@ test("held threads and storage blockers share one banner with one way forward", 
   const held = conversation("codex:session:held");
   const pushable = conversation("codex:session:pushable");
   const comparison: ThreadSyncComparison = {
+    ...comparisonDefaults,
     project_id: "project-a",
     storage_id: "storage-a",
     storage_name: "Local storage 1",
@@ -546,9 +552,7 @@ test("held threads and storage blockers share one banner with one way forward", 
     warnings: [],
     entries: [
       {
-        thread_id: "held",
-        resource_id: held.resource_id,
-        display_name: "Held",
+        ...threadEntryBase("held", held.resource_id, "Held"),
         state: "diverged",
         local_present: true,
         storage_present: true,
@@ -558,9 +562,7 @@ test("held threads and storage blockers share one banner with one way forward", 
         pull_decision: decision("keep_both", "diverged", true),
       },
       {
-        thread_id: "pushable",
-        resource_id: pushable.resource_id,
-        display_name: "Pushable",
+        ...threadEntryBase("pushable", pushable.resource_id, "Pushable"),
         state: "local_ahead",
         local_present: true,
         storage_present: true,
@@ -661,6 +663,7 @@ test("the header count reserves its widest slot so ticking a row moves no icon",
   // string by a character and pushed the header's icon buttons 6px sideways.
   const rows = Array.from({ length: 13 }, (_, i) => conversation(`codex:session:n${i}`));
   const comparison: ThreadSyncComparison = {
+    ...comparisonDefaults,
     project_id: "project-a",
     storage_id: "storage-a",
     storage_name: "Local storage 1",
@@ -668,9 +671,7 @@ test("the header count reserves its widest slot so ticking a row moves no icon",
     counts: { synced: 0, local: 13, storage: 0, diverged: 0, unavailable: 0, unknown: 0 },
     warnings: [],
     entries: rows.map((row, i) => ({
-      thread_id: `n${i}`,
-      resource_id: row.resource_id,
-      display_name: `Conversation ${i}`,
+      ...threadEntryBase(`n${i}`, row.resource_id, `Conversation ${i}`),
       state: "local_ahead" as const,
       local_present: true,
       storage_present: true,
@@ -710,6 +711,7 @@ test("a selected item that cannot be captured reports in the footer, not above t
   // the cursor (measured at 255px before this fix).
   const broken = conversation("codex:session:broken");
   const comparison: ThreadSyncComparison = {
+    ...comparisonDefaults,
     project_id: "project-a",
     storage_id: "storage-a",
     storage_name: "Local storage 1",
@@ -718,9 +720,8 @@ test("a selected item that cannot be captured reports in the footer, not above t
     warnings: [],
     entries: [
       {
-        thread_id: "broken",
-        resource_id: broken.resource_id,
-        display_name: "Broken",
+        ...threadEntryBase("broken", broken.resource_id, "Broken"),
+        compared_against_storage: false,
         state: "unavailable",
         local_present: true,
         storage_present: false,

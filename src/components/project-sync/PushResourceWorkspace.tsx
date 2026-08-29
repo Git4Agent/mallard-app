@@ -6,7 +6,6 @@ import type {
   ProjectBinding,
   ProjectContentInventory,
   ProjectResourceDescriptor,
-  PushDestinationStatus,
   ThreadSyncComparison,
   ThreadSyncEntry,
 } from "../../types";
@@ -21,8 +20,6 @@ import { type SyncReviewStep, projectReviewTabs, syncReviewSteps } from "./revie
 import { categoryFor, STORAGE_BLOCKING_STATES } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { isIrrecoverableSyncError } from "./syncError";
-
-const EMPTY_STATUSES = new Map<string, string>();
 
 export interface PushReviewBlocker {
   kind: "storage" | "local";
@@ -48,11 +45,9 @@ interface Props {
   projectContentLoading?: boolean;
   projectContentRemovals?: ReadonlySet<string>;
   acknowledgedWarningDigests?: ReadonlySet<string>;
-  destinationStatus?: PushDestinationStatus | null;
   /** Live upload progress while the push publishes; renders in the footer button. */
   fetchProgress?: BundleFetchProgress | null;
   showProjectFiles?: boolean;
-  initialStep?: SyncReviewStep;
   activeStep?: SyncReviewStep;
   onStepChange?: (step: SyncReviewStep) => void;
   onToggle: (resourceId: string) => void;
@@ -351,10 +346,8 @@ export default function PushResourceWorkspace({
   projectContentLoading = false,
   projectContentRemovals = new Set(),
   acknowledgedWarningDigests = new Set(),
-  destinationStatus,
   fetchProgress = null,
   showProjectFiles = false,
-  initialStep = "history",
   activeStep: controlledActiveStep,
   onStepChange,
   onToggle,
@@ -369,7 +362,7 @@ export default function PushResourceWorkspace({
   onResetMetadata,
 }: Props) {
   const steps = useMemo(() => syncReviewSteps(showProjectFiles), [showProjectFiles]);
-  const [uncontrolledActiveStep, setUncontrolledActiveStep] = useState<SyncReviewStep>(initialStep);
+  const [uncontrolledActiveStep, setUncontrolledActiveStep] = useState<SyncReviewStep>("history");
   const requestedActiveStep = controlledActiveStep ?? uncontrolledActiveStep;
   const activeStep = steps.includes(requestedActiveStep) ? requestedActiveStep : "history";
   const selectStep = (step: SyncReviewStep) => {
@@ -422,11 +415,6 @@ export default function PushResourceWorkspace({
   );
   const blockingCount = blockers.length;
   const pullHolds = pushReviewPullHolds(threadComparison);
-  // Gates on the destination close this workspace before it opens (they exit
-  // to the storage-card notice); the flags stay only as a defensive disable.
-  const remoteHistoryMissing = destinationStatus?.state === "remote_history_missing";
-  const remoteHistoryReplaced = destinationStatus?.state === "remote_history_replaced";
-  const remotePullRequired = destinationStatus?.state === "requires_pull";
   const storageBlockingCount = blockers.filter((blocker) => blocker.kind === "storage").length;
   const localBlockingCount = blockingCount - storageBlockingCount;
   const warningSteps = new Set<SyncReviewStep>();
@@ -483,15 +471,13 @@ export default function PushResourceWorkspace({
   const localBlockerSentence = localBlockingCount > 0
     ? `${localBlockingCount} selected item${localBlockingCount === 1 ? "" : "s"} can't be captured — exclude ${localBlockingCount === 1 ? "it" : "them"} to push.`
     : null;
-  const pushDisabledReason = remoteHistoryMissing || remoteHistoryReplaced || remotePullRequired
-    ? "Resolve the storage notice before pushing"
-    : localBlockingCount > 0
-      ? "Exclude the items that can't be captured"
-      : blockingCount > 0
-        ? "Resolve the held items above before pushing"
-        : effectiveSelected.size === 0 && projectContentRemovals.size === 0
-          ? "Nothing is selected"
-          : null;
+  const pushDisabledReason = localBlockingCount > 0
+    ? "Exclude the items that can't be captured"
+    : blockingCount > 0
+      ? "Resolve the held items above before pushing"
+      : effectiveSelected.size === 0 && projectContentRemovals.size === 0
+        ? "Nothing is selected"
+        : null;
 
   const commitSelection = (next: Set<string>) => {
     const safeNext = includeRequiredProjectContentDirectories(
@@ -620,7 +606,6 @@ export default function PushResourceWorkspace({
             <>
               {project && binding ? (
                 <ProjectActivityPage
-                  embedded
                   project={project}
                   binding={binding}
                   refreshEpoch={refreshEpoch}
@@ -644,7 +629,7 @@ export default function PushResourceWorkspace({
                   comparisonOverride={threadComparison}
                 />
               ) : (
-                <ResourceInventory resources={conversations} selected={effectiveSelected} statuses={EMPTY_STATUSES} selectableResourceIds={selectableConversationIds} disabled={busy} onToggle={toggleResource} />
+                <ResourceInventory resources={conversations} selected={effectiveSelected} selectableResourceIds={selectableConversationIds} disabled={busy} onToggle={toggleResource} />
               )}
               {/* No disclosure wrapper here: `other` is exactly the `tools`
                   category, so ResourceInventory renders one group whose own
@@ -656,7 +641,6 @@ export default function PushResourceWorkspace({
                 <ResourceInventory
                   resources={other}
                   selected={effectiveSelected}
-                  statuses={EMPTY_STATUSES}
                   selectableResourceIds={selectableIds}
                   disabled={busy}
                   defaultCollapsed

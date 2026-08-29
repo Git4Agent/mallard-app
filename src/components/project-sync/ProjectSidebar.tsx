@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type {
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
+  ReactNode,
 } from "react";
 import packageMetadata from "../../../package.json";
 import type {
@@ -34,8 +35,18 @@ type SectionLayout = {
 /* 0 is the head over Projects, 1 Projects over Catalog, 2 Catalog over
    Storages — top to bottom, the order they appear down the rail. */
 type SectionHandle = 0 | 1 | 2;
+/* What a drag on a gutter means: the head's own height, the Projects/Catalog
+   share, or the Storages pin. Which operation a handle carries depends on
+   which panes are open — see gutterOperation. */
+type GutterOperation = "head" | "share" | "pin";
+
+/* The three collapsible panes, in the same rail order. The head never
+   collapses — its rows are destinations, not a list to put away. */
+export type SectionId = "projects" | "catalog" | "storages";
+const SECTION_IDS: readonly SectionId[] = ["projects", "catalog", "storages"];
 
 const SIDEBAR_SECTION_SPLIT_KEY = "mallard.sidebar-section-split";
+const SIDEBAR_SECTION_COLLAPSED_KEY = "mallard.sidebar-section-collapsed";
 const DEFAULT_PROJECT_SHARE = 0.56;
 const MIN_SECTION_SHARE = 0.2;
 export const MIN_PANE_HEIGHT = 96;
@@ -65,6 +76,23 @@ function clampStorageHeight(value: number, boxHeight: number, projectsHeight: nu
 export function shareHolding(projectsHeight: number, boxHeight: number, storageHeight: number): number {
   const elastic = boxHeight - 6 - storageHeight;
   return elastic > 0 ? clampSectionShare(projectsHeight / elastic) : DEFAULT_PROJECT_SHARE;
+}
+
+/* The share drag tracks the pointer pixel for pixel on the elastic scale: the
+   share is Projects' fraction of the two share-sized panes, so it re-derives
+   from the panes as measured at grab time plus the pointer's travel. Mapped
+   against the whole box instead, the split used to snap to the pointer's
+   absolute position the moment the handle was grabbed — jumping by however
+   much of the box the Storages row had taken — and then tracked under 1:1. */
+export function shareDragged(
+  projectsHeight: number,
+  catalogHeight: number,
+  deltaY: number,
+): number {
+  const elastic = projectsHeight + catalogHeight;
+  return elastic > 0
+    ? clampSectionShare((projectsHeight + deltaY) / elastic)
+    : DEFAULT_PROJECT_SHARE;
 }
 
 /* The head's handle changes the size of the whole box beneath it, which moves
@@ -125,15 +153,107 @@ function storedSectionLayout(): SectionLayout {
   };
 }
 
+function storedCollapsedSections(): ReadonlySet<SectionId> {
+  if (typeof window === "undefined") return new Set();
+  let stored = "";
+  try {
+    stored = window.localStorage.getItem(SIDEBAR_SECTION_COLLAPSED_KEY) ?? "";
+  } catch {
+    return new Set();
+  }
+  return new Set(
+    stored.split(",").filter((id): id is SectionId => (SECTION_IDS as readonly string[]).includes(id)),
+  );
+}
+
 /* Whole fr factors, not the shares themselves. Grid gives a track whose flex
    factor is below 1 only that fraction of the leftover space — so once a pane
    bottoms out on its 96px floor and the factors still in play add up to less
    than 1, the rows stop filling the box and leave dead space under the last
-   pane. Scaled to 100 the remaining factor is always well over 1. The first
-   track is Projects and the second is Catalog. */
-function elasticRows(projectShare: number): string {
+   pane. Scaled to 100 the remaining factor is always well over 1. The rows are
+   Projects, Catalog, and Storages, parted by the two 3px handle tracks.
+
+   A collapsed pane's row drops to min-content — its heading; the 96px floor is
+   for lists, and flooring a closed tile would hold it open on empty space. The
+   share and the Storages pin ride through a collapse untouched, so reopening
+   restores the exact prior split. When both share-sized panes are closed the
+   Storages row takes the elastic factor instead of its content size: the
+   leftover space always belongs to someone. */
+export function sectionGridRows(
+  projectShare: number,
+  storageHeight: number | null,
+  collapsed: ReadonlySet<SectionId>,
+): string {
   const projects = projectShare * 100;
-  return `minmax(${MIN_PANE_HEIGHT}px, ${projects}fr) 3px minmax(${MIN_PANE_HEIGHT}px, ${100 - projects}fr)`;
+  const projectsRow = collapsed.has("projects")
+    ? "min-content"
+    : `minmax(${MIN_PANE_HEIGHT}px, ${projects}fr)`;
+  const catalogRow = collapsed.has("catalog")
+    ? "min-content"
+    : `minmax(${MIN_PANE_HEIGHT}px, ${100 - projects}fr)`;
+  const storagesRow = collapsed.has("storages")
+    ? "min-content"
+    : collapsed.has("projects") && collapsed.has("catalog")
+      ? `minmax(${MIN_PANE_HEIGHT}px, 1fr)`
+      : storageHeight === null
+        ? "fit-content(40%)"
+        : `${storageHeight}px`;
+  return `${projectsRow} 3px ${catalogRow} 3px ${storagesRow}`;
+}
+
+const SECTION_TITLES: Record<SectionId, string> = {
+  projects: "Projects",
+  catalog: "Catalog",
+  storages: "Storages",
+};
+
+/* One disclosure recipe for all three headings (ARIA disclosure pattern): the
+   label half of the row is the button, and the add action stays a sibling so
+   no button nests inside another. A closed heading still reports its list —
+   the row count, and the warning triangle when a row inside is flagged —
+   because putting a section away must not put its attention state away with
+   it; the triangle is also named on the button, not only drawn, the same
+   WCAG 1.4.1 rule the rows themselves follow. */
+function SectionHeading({
+  section,
+  collapsed,
+  count,
+  flagged,
+  onToggle,
+  children,
+}: {
+  section: SectionId;
+  collapsed: boolean;
+  count: number;
+  flagged: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  const title = SECTION_TITLES[section];
+  return (
+    <div className="sidebar-section-heading">
+      {/* Never disabled on busy: collapsing is pure view state, and a control
+          that only rearranges the rail should not wait on the backend. */}
+      <button
+        type="button"
+        className="sidebar-section-toggle"
+        aria-expanded={!collapsed}
+        aria-controls={`sidebar-${section}-list`}
+        aria-label={collapsed && flagged
+          ? `${title}, ${count} row${count === 1 ? "" : "s"}, contains a flagged row`
+          : undefined}
+        onClick={onToggle}
+      >
+        <Icon name={collapsed ? "chevron-right" : "chevron-down"} size={13} aria-hidden="true" />
+        <span className="sidebar-section-title">{title}</span>
+        {collapsed && flagged && (
+          <Icon name="alert-triangle" size={13} className="sidebar-section-alert" aria-hidden="true" />
+        )}
+        {collapsed && <span className="sidebar-section-count">{count}</span>}
+      </button>
+      <div className="sidebar-heading-actions">{children}</div>
+    </div>
+  );
 }
 
 interface Props {
@@ -209,6 +329,7 @@ export default function ProjectSidebar({
   onOpenSettings,
 }: Props) {
   const [sectionLayout, setSectionLayout] = useState<SectionLayout>(storedSectionLayout);
+  const [collapsedSections, setCollapsedSections] = useState<ReadonlySet<SectionId>>(storedCollapsedSections);
   const [resizingSections, setResizingSections] = useState(false);
   const sectionsRef = useRef<HTMLDivElement>(null);
   const headRef = useRef<HTMLDivElement>(null);
@@ -216,8 +337,7 @@ export default function ProjectSidebar({
     {
       pointerId: number;
       handle: SectionHandle;
-      top: number;
-      bottom: number;
+      startY: number;
       height: number;
       projects: number;
       catalog: number;
@@ -261,6 +381,60 @@ export default function ProjectSidebar({
     }
   }, [sectionLayout]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_SECTION_COLLAPSED_KEY, [...collapsedSections].join(","));
+    } catch {
+      // Collapsing still works for this session when browser storage is unavailable.
+    }
+  }, [collapsedSections]);
+
+  const toggleSection = (section: SectionId) =>
+    setCollapsedSections((current) => {
+      const next = new Set(current);
+      if (!next.delete(section)) next.add(section);
+      return next;
+    });
+
+  /* The add actions put a row inside their pane, so a collapsed pane reopens
+     before the flow starts — otherwise the new row would land out of sight.
+     Nothing else reopens a pane: navigating to a destination that lives in a
+     closed section respects that the user closed it. */
+  const revealSection = (section: SectionId) =>
+    setCollapsedSections((current) => {
+      if (!current.has(section)) return current;
+      const next = new Set(current);
+      next.delete(section);
+      return next;
+    });
+
+  /* With either share-sized pane closed, the share has no rendered meaning —
+     min-content rows ignore their fr factor — but it is still what reopening
+     restores. Re-solving it against a closed pane's heading-height would
+     corrupt that stored split, so the head handle then only moves the box
+     edge and the open pane absorbs the change on its own. */
+  const shareLocked = collapsedSections.has("projects") || collapsedSections.has("catalog");
+
+  /* What a drag on this gutter can mean right now. The share needs both
+     share-sized panes open, and the Storages pin needs Storages open plus an
+     open pane above it to absorb the change. A gutter beside a closed Catalog
+     passes the pin through — the drag re-pins Storages across the closed
+     tile, the way a sash resizes across a collapsed view in VS Code — and a
+     gutter with no open pane on one side means nothing at all, so it goes
+     inert. */
+  const gutterOperation = (handle: SectionHandle): GutterOperation | null => {
+    if (handle === 0) return "head";
+    const projectsOpen = !collapsedSections.has("projects");
+    const catalogOpen = !collapsedSections.has("catalog");
+    const storagesOpen = !collapsedSections.has("storages");
+    if (handle === 1) {
+      if (projectsOpen && catalogOpen) return "share";
+      return projectsOpen && storagesOpen ? "pin" : null;
+    }
+    if (!storagesOpen) return null;
+    return projectsOpen || catalogOpen ? "pin" : null;
+  };
+
   const startSectionResize = (event: ReactPointerEvent<HTMLDivElement>, handle: SectionHandle) => {
     if (event.button !== 0) return;
     const bounds = sectionsRef.current?.getBoundingClientRect();
@@ -270,8 +444,7 @@ export default function ProjectSidebar({
     sectionResizeRef.current = {
       pointerId: event.pointerId,
       handle,
-      top: bounds.top,
-      bottom: bounds.bottom,
+      startY: event.clientY,
       height: bounds.height,
       projects: paneHeight(".sidebar-project-pane"),
       catalog: paneHeight(".sidebar-catalog-pane"),
@@ -286,7 +459,10 @@ export default function ProjectSidebar({
   const continueSectionResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     const resize = sectionResizeRef.current;
     if (!resize || resize.pointerId !== event.pointerId) return;
-    if (resize.handle === 0) {
+    // Collapse state cannot change mid-drag, so the operation the gutter
+    // carried at pointerdown is the one derived here.
+    const operation = gutterOperation(resize.handle);
+    if (operation === "head") {
       // The head is a flex tile above the box, so this handle sets its height
       // directly. The rail is a fixed column, so whatever the head takes the box
       // below loses — re-solve the share against that new box so Catalog keeps
@@ -297,22 +473,41 @@ export default function ProjectSidebar({
       setSectionLayout((current) => ({
         ...current,
         headHeight: height,
-        projectShare: shareHoldingCatalog(resize.catalog, box, resize.storage),
+        projectShare: shareLocked
+          ? current.projectShare
+          : shareHoldingCatalog(resize.catalog, box, resize.storage),
       }));
       return;
     }
-    if (resize.handle === 1) {
-      const share = clampSectionShare((event.clientY - resize.top) / resize.height);
-      setSectionLayout((current) => ({ ...current, projectShare: share }));
+    if (operation === "share") {
+      setSectionLayout((current) => ({
+        ...current,
+        projectShare: shareDragged(resize.projects, resize.catalog, event.clientY - resize.startY),
+      }));
       return;
     }
-    // The lowest handle sets the Storages pane's own height, measured up from the
-    // bottom of the box, and re-solves the share so Projects keeps the pixels it
-    // started with — only Catalog, the pane this handle borders, gives way.
-    const height = clampStorageHeight(resize.bottom - event.clientY, resize.height, resize.projects);
+    if (operation !== "pin") return;
+    // The pin moves with the pointer relative to the grab point — measured off
+    // the box bottom it would snap Storages to the pointer's absolute height,
+    // which for the gutter passing the pin through a closed Catalog means a
+    // jump by the closed tile's whole span the moment it is grabbed. With
+    // Catalog open it absorbs the change and the share is re-solved so
+    // Projects keeps the pixels it started with; with Catalog closed Projects
+    // absorbs on its own and the stored share must ride through untouched.
+    // The clamp holds the fixed pane's pixels and stops once the absorber is
+    // down on its own floor.
+    const catalogClosed = collapsedSections.has("catalog");
+    const held = catalogClosed ? resize.catalog : resize.projects;
+    const height = clampStorageHeight(
+      resize.storage + (resize.startY - event.clientY),
+      resize.height,
+      held,
+    );
     setSectionLayout((current) => ({
       ...current,
-      projectShare: shareHolding(resize.projects, resize.height, height),
+      projectShare: catalogClosed
+        ? current.projectShare
+        : shareHolding(resize.projects, resize.height, height),
       storageHeight: height,
     }));
   };
@@ -332,7 +527,8 @@ export default function ProjectSidebar({
   ) => {
     if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    if (handle === 0) {
+    const operation = gutterOperation(handle);
+    if (operation === "head") {
       const head = headRef.current;
       if (!head) return;
       const [min, max] = headHeightRange(head);
@@ -344,7 +540,7 @@ export default function ProjectSidebar({
       setSectionLayout((current) => ({ ...current, headHeight: Math.min(max, Math.max(min, next)) }));
       return;
     }
-    if (handle === 1) {
+    if (operation === "share") {
       const share = sectionLayout.projectShare;
       const next = event.key === "ArrowUp" ? share - 0.05
         : event.key === "ArrowDown" ? share + 0.05
@@ -353,63 +549,137 @@ export default function ProjectSidebar({
       setSectionLayout((current) => ({ ...current, projectShare: clampSectionShare(next) }));
       return;
     }
+    if (operation !== "pin") return;
     const box = sectionsRef.current?.getBoundingClientRect().height ?? 0;
+    const catalogClosed = collapsedSections.has("catalog");
     const projects = paneHeight(".sidebar-project-pane");
-    const [min, max] = storageHeightRange(box, projects);
+    const held = catalogClosed ? paneHeight(".sidebar-catalog-pane") : projects;
+    const [min, max] = storageHeightRange(box, held);
     const current = sectionLayout.storageHeight ?? storageContentHeight();
     const next = event.key === "ArrowUp" ? current + SECTION_KEYBOARD_STEP
       : event.key === "ArrowDown" ? current - SECTION_KEYBOARD_STEP
       : event.key === "Home" ? max
       : min;
-    const height = clampStorageHeight(next, box, projects);
+    const height = clampStorageHeight(next, box, held);
     setSectionLayout((layout) => ({
       ...layout,
-      projectShare: shareHolding(projects, box, height),
+      projectShare: catalogClosed ? layout.projectShare : shareHolding(projects, box, height),
       storageHeight: height,
     }));
   };
 
   const resetSection = (handle: SectionHandle) => {
-    if (handle === 0) {
+    const operation = gutterOperation(handle);
+    if (operation === "head") {
       // Back to the height its own rows ask for.
       setSectionLayout((current) => ({ ...current, headHeight: null }));
       return;
     }
-    if (handle === 1) {
+    if (operation === "share") {
       setSectionLayout((current) => ({ ...current, projectShare: DEFAULT_PROJECT_SHARE }));
       return;
     }
+    if (operation !== "pin") return;
     // Back to fitting its contents exactly — the state a fixed list wants — and
-    // holding Projects where it is, the same as a drag of this handle.
+    // holding Projects where it is, the same as a drag of this gutter; through
+    // a closed Catalog the stored share rides untouched instead.
+    const catalogClosed = collapsedSections.has("catalog");
     const box = sectionsRef.current?.getBoundingClientRect().height ?? 0;
-    const projects = sectionsRef.current
-      ?.querySelector<HTMLElement>(".sidebar-project-pane")
-      ?.getBoundingClientRect().height ?? MIN_PANE_HEIGHT;
+    const projects = paneHeight(".sidebar-project-pane");
     setSectionLayout((current) => ({
       ...current,
-      projectShare: shareHolding(projects, box, storageContentHeight()),
+      projectShare: catalogClosed
+        ? current.projectShare
+        : shareHolding(projects, box, storageContentHeight()),
       storageHeight: null,
     }));
   };
 
-  /* Every gutter wears the same handle; only what it resizes differs. */
-  const dividerProps = (handle: SectionHandle, label: string) => ({
-    className: "sidebar-section-divider",
-    role: "separator",
-    "aria-label": label,
-    "aria-orientation": "horizontal" as const,
-    tabIndex: 0,
-    onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => startSectionResize(event, handle),
-    onPointerMove: continueSectionResize,
-    onPointerUp: finishSectionResize,
-    onPointerCancel: finishSectionResize,
-    onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => resizeSectionsWithKeyboard(event, handle),
-    onDoubleClick: () => resetSection(handle),
-  });
+  /* The name says what the drag trades right now, so a gutter that passes the
+     pin through a closed Catalog announces Projects and Storages — the panes
+     it actually moves. An inert gutter keeps the geometric name of the seam
+     it draws. */
+  const dividerLabel = (handle: SectionHandle, operation: GutterOperation | null): string => {
+    if (handle === 0) return "Resize navigation and Projects sections";
+    if (operation === "pin" && collapsedSections.has("catalog")) {
+      return "Resize Projects and Storages sections";
+    }
+    return handle === 1
+      ? "Resize Projects and Catalog sections"
+      : "Resize Catalog and Storages sections";
+  };
+
+  /* The separator reports the value of whatever it operates: the head its
+     height, the share its percentage, the pin the Storages height. */
+  const dividerValues = (operation: GutterOperation | null) => {
+    if (operation === "head") {
+      return {
+        "aria-valuenow": sectionLayout.headHeight === null
+          ? undefined
+          : Math.round(sectionLayout.headHeight),
+        "aria-valuetext": sectionLayout.headHeight === null
+          ? "Navigation height: fits contents"
+          : `Navigation height: ${Math.round(sectionLayout.headHeight)} pixels`,
+      };
+    }
+    if (operation === "share") {
+      return {
+        "aria-valuemin": Math.round(MIN_SECTION_SHARE * 100),
+        "aria-valuemax": Math.round((1 - MIN_SECTION_SHARE) * 100),
+        "aria-valuenow": Math.round(sectionLayout.projectShare * 100),
+      };
+    }
+    if (operation === "pin") {
+      return {
+        "aria-valuemin": MIN_PANE_HEIGHT,
+        "aria-valuenow": sectionLayout.storageHeight === null
+          ? undefined
+          : Math.round(sectionLayout.storageHeight),
+        "aria-valuetext": sectionLayout.storageHeight === null
+          ? "Storage height: fits contents"
+          : `Storage height: ${Math.round(sectionLayout.storageHeight)} pixels`,
+      };
+    }
+    return {};
+  };
+
+  /* Every gutter wears the same handle; only what it resizes differs. A gutter
+     whose operation has gone with a collapsed pane is inert: the 3px seam
+     stays, but the drag affordance, the keyboard stop, and the double-click
+     reset all leave with it. */
+  const dividerProps = (handle: SectionHandle) => {
+    const operation = gutterOperation(handle);
+    const inert = operation === null;
+    return {
+      className: `sidebar-section-divider${inert ? " inert" : ""}`,
+      role: "separator",
+      "aria-label": dividerLabel(handle, operation),
+      "aria-orientation": "horizontal" as const,
+      "aria-disabled": inert || undefined,
+      tabIndex: inert ? -1 : 0,
+      ...dividerValues(operation),
+      ...(inert ? {} : {
+        onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => startSectionResize(event, handle),
+        onPointerMove: continueSectionResize,
+        onPointerUp: finishSectionResize,
+        onPointerCancel: finishSectionResize,
+        onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => resizeSectionsWithKeyboard(event, handle),
+        onDoubleClick: () => resetSection(handle),
+      }),
+    };
+  };
 
   const primaryStorageId = activeStorageId && storages.some((storage) => storage.id === activeStorageId)
     ? activeStorageId
     : storages[0]?.id ?? null;
+
+  /* What a closed heading must still say: the attention draft and the
+     profile-less project are the two flags the Projects rows draw, and the
+     storage rows draw theirs from the issue map. Catalog rows have no flagged
+     state to carry. */
+  const projectsFlagged = drafts.some((draft) => draft.status === "attention")
+    || projects.some((item) => Object.keys(item.profile_ids ?? {}).length === 0);
+  const storagesFlagged = storages.some((storage) => Boolean(storageIssues[storage.id]));
 
   return (
     <aside id="project-sidebar" className="sync-sidebar">
@@ -474,41 +744,48 @@ export default function ProjectSidebar({
       </div>
 
       <div
-        {...dividerProps(0, "Resize navigation and Projects sections")}
+        {...dividerProps(0)}
         className="sidebar-section-divider sidebar-head-divider"
-        aria-valuenow={sectionLayout.headHeight === null ? undefined : Math.round(sectionLayout.headHeight)}
-        aria-valuetext={sectionLayout.headHeight === null
-          ? "Navigation height: fits contents"
-          : `Navigation height: ${Math.round(sectionLayout.headHeight)} pixels`}
       />
 
       <div
         ref={sectionsRef}
         className={`sync-sidebar-sections sidebar-settings-sections${resizingSections ? " resizing" : ""}`}
         style={{
-          gridTemplateRows: `${elasticRows(sectionLayout.projectShare)} 3px ${sectionLayout.storageHeight === null ? "fit-content(40%)" : `${sectionLayout.storageHeight}px`}`,
+          gridTemplateRows: sectionGridRows(sectionLayout.projectShare, sectionLayout.storageHeight, collapsedSections),
         }}
       >
-        <section className="sidebar-split-pane sidebar-project-pane" aria-label="Projects">
-          <div className="sidebar-section-heading">
-            <div className="sidebar-section-label">
-              <span className="sidebar-section-title">Projects</span>
-            </div>
-            <div className="sidebar-heading-actions">
-              <button
-                type="button"
-                className="sidebar-section-action sidebar-add-action"
-                onClick={onAddProject}
-                disabled={busy}
-                title="Add project"
-                aria-label="Add project"
-              >
-                <Icon name="plus" size={16} />
-              </button>
-            </div>
-          </div>
+        <section
+          className={`sidebar-split-pane sidebar-project-pane${collapsedSections.has("projects") ? " collapsed" : ""}`}
+          aria-label="Projects"
+        >
+          <SectionHeading
+            section="projects"
+            collapsed={collapsedSections.has("projects")}
+            count={drafts.length + projects.length}
+            flagged={projectsFlagged}
+            onToggle={() => toggleSection("projects")}
+          >
+            <button
+              type="button"
+              className="sidebar-section-action sidebar-add-action"
+              onClick={() => {
+                revealSection("projects");
+                onAddProject();
+              }}
+              disabled={busy}
+              title="Add project"
+              aria-label="Add project"
+            >
+              <Icon name="plus" size={16} />
+            </button>
+          </SectionHeading>
 
-          <div className="sidebar-profile-list">
+          <div
+            id="sidebar-projects-list"
+            className="sidebar-profile-list"
+            hidden={collapsedSections.has("projects")}
+          >
             {drafts.map((draft) => (
               <div
                 key={draft.draft_id}
@@ -637,30 +914,38 @@ export default function ProjectSidebar({
           </div>
         </section>
 
-        <div
-          {...dividerProps(1, "Resize Projects and Catalog sections")}
-          aria-valuemin={Math.round(MIN_SECTION_SHARE * 100)}
-          aria-valuemax={Math.round((1 - MIN_SECTION_SHARE) * 100)}
-          aria-valuenow={Math.round(sectionLayout.projectShare * 100)}
-        />
+        <div {...dividerProps(1)} />
 
-        <section className="sidebar-split-pane sidebar-catalog-pane" aria-label="Catalog">
-          <div className="sidebar-section-heading">
-            <div className="sidebar-section-label">
-              <span className="sidebar-section-title">Catalog</span>
-            </div>
+        <section
+          className={`sidebar-split-pane sidebar-catalog-pane${collapsedSections.has("catalog") ? " collapsed" : ""}`}
+          aria-label="Catalog"
+        >
+          <SectionHeading
+            section="catalog"
+            collapsed={collapsedSections.has("catalog")}
+            count={catalogScopes.length}
+            flagged={false}
+            onToggle={() => toggleSection("catalog")}
+          >
             <button
               type="button"
               className="sidebar-section-action sidebar-add-action"
-              onClick={onAddCatalogScope}
+              onClick={() => {
+                revealSection("catalog");
+                onAddCatalogScope();
+              }}
               disabled={busy}
               title="Add a resource: one kind from one agent profile"
               aria-label="Add Catalog resource"
             >
               <Icon name="plus" size={16} />
             </button>
-          </div>
-          <div className="sidebar-profile-list">
+          </SectionHeading>
+          <div
+            id="sidebar-catalog-list"
+            className="sidebar-profile-list"
+            hidden={collapsedSections.has("catalog")}
+          >
             {catalogScopes.length === 0 ? (
               <button
                 type="button"
@@ -705,36 +990,42 @@ export default function ProjectSidebar({
           </div>
         </section>
 
-        <div
-          {...dividerProps(2, "Resize Catalog and Storages sections")}
-          aria-valuemin={MIN_PANE_HEIGHT}
-          aria-valuenow={sectionLayout.storageHeight === null ? undefined : Math.round(sectionLayout.storageHeight)}
-          aria-valuetext={sectionLayout.storageHeight === null
-            ? "Storage height: fits contents"
-            : `Storage height: ${Math.round(sectionLayout.storageHeight)} pixels`}
-        />
+        <div {...dividerProps(2)} />
 
         <section
-          className="sidebar-split-pane sidebar-storage-pane"
+          className={`sidebar-split-pane sidebar-storage-pane${collapsedSections.has("storages") ? " collapsed" : ""}`}
           aria-label="Storages"
-          style={{ minHeight: `${MIN_PANE_HEIGHT}px` }}
+          /* The floor rides the pane rather than the track (see the header
+             comment) — but a closed tile floored at 96px would be held open
+             on empty space, so the floor leaves with the list. */
+          style={{ minHeight: collapsedSections.has("storages") ? undefined : `${MIN_PANE_HEIGHT}px` }}
         >
-          <div className="sidebar-section-heading">
-            <div className="sidebar-section-label">
-              <span className="sidebar-section-title">Storages</span>
-            </div>
+          <SectionHeading
+            section="storages"
+            collapsed={collapsedSections.has("storages")}
+            count={storages.length + storageDrafts.length}
+            flagged={storagesFlagged}
+            onToggle={() => toggleSection("storages")}
+          >
             <button
               type="button"
               className="sidebar-section-action sidebar-add-action"
-              onClick={onAddStorage}
+              onClick={() => {
+                revealSection("storages");
+                onAddStorage();
+              }}
               disabled={busy}
               title="Add storage"
               aria-label="Add storage"
             >
               <Icon name="plus" size={16} />
             </button>
-          </div>
-          <div className="sidebar-links-list">
+          </SectionHeading>
+          <div
+            id="sidebar-storages-list"
+            className="sidebar-links-list"
+            hidden={collapsedSections.has("storages")}
+          >
             {storages.length === 0 && storageDrafts.length === 0 ? (
               <button type="button" className="sync-sidebar-empty" onClick={onAddStorage} disabled={busy}>
                 <Icon name="plus" size={15} /> Add your first storage

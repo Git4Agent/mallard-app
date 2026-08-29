@@ -1,6 +1,7 @@
 //! Machine-local catalog state under `~/.mallard`: bounded, atomic JSON
-//! documents, create-only immutable plans, permission-restricted backups, and
-//! canonical-target locks.
+//! documents, permission-restricted backups, and canonical-target locks.
+//! Pending Push/Pull/Fork reviews are not documents — they live in the
+//! in-memory `plan_store` and die with the process.
 //!
 //! The catalog owns its documents end to end; it never reads project-sync
 //! documents and project sync never reads these. Corrupt catalog state is
@@ -23,7 +24,6 @@ use super::domain::{
 
 const MAX_CATALOG_PROFILES_BYTES: u64 = 1024 * 1024;
 const MAX_CATALOG_SCOPES_BYTES: u64 = 1024 * 1024;
-const MAX_CATALOG_PLAN_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CATALOG_MATERIALIZATIONS_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CATALOG_PRESERVATIONS_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_CATALOG_OPERATIONS_BYTES: u64 = 16 * 1024 * 1024;
@@ -50,7 +50,6 @@ pub struct CatalogStateRepository {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CatalogStorageDataClearResult {
     pub links_reset: u64,
-    pub plans_removed: u64,
     pub claims_removed: u64,
     pub preservation_witnesses_removed: u64,
     pub terminal_operations_removed: u64,
@@ -156,12 +155,6 @@ impl CatalogStateRepository {
 
     fn scopes_path(&self) -> PathBuf {
         self.root.join("catalog_scopes.json")
-    }
-
-    fn plan_path(&self, plan_id: &CatalogPlanId) -> PathBuf {
-        self.root
-            .join("catalog_resource_plans")
-            .join(format!("{}.json", plan_id))
     }
 
     fn materializations_path(&self) -> PathBuf {
@@ -335,88 +328,6 @@ impl CatalogStateRepository {
         Ok(value)
     }
 
-    /// Plans are immutable: reusing a plan ID is always an error, and edits
-    /// arrive as new plans that supersede (discard) the old file.
-    pub fn save_resource_plan(&self, plan: &CatalogResourcePlanDocument) -> Result<(), String> {
-        plan.validate()?;
-        let _guard = self.guard()?;
-        let path = self.plan_path(plan.plan_id());
-        if fs::symlink_metadata(&path).is_ok() {
-            return Err(format!(
-                "catalog resource plan '{}' already exists",
-                plan.plan_id()
-            ));
-        }
-        self.ensure_directory(&self.root.join("catalog_resource_plans"))?;
-        write_json_atomic(&self.root, &path, plan, MAX_CATALOG_PLAN_BYTES)
-    }
-
-    pub fn load_resource_plan(
-        &self,
-        plan_id: &CatalogPlanId,
-    ) -> Result<CatalogResourcePlanDocument, String> {
-        let _guard = self.guard()?;
-        let document = read_json_bounded::<CatalogResourcePlanDocument>(
-            &self.root,
-            &self.plan_path(plan_id),
-            MAX_CATALOG_PLAN_BYTES,
-        )
-        .map_err(BoundedReadError::into_message)?
-        .ok_or_else(|| format!("catalog resource plan '{}' does not exist", plan_id))?;
-        document.validate()?;
-        if document.plan_id() != plan_id {
-            return Err(format!(
-                "catalog resource plan file '{}' holds a different plan",
-                plan_id
-            ));
-        }
-        Ok(document)
-    }
-
-    pub fn list_resource_plans(&self) -> Result<Vec<CatalogResourcePlanDocument>, String> {
-        let _guard = self.guard()?;
-        self.list_resource_plans_unlocked()
-    }
-
-    fn list_resource_plans_unlocked(&self) -> Result<Vec<CatalogResourcePlanDocument>, String> {
-        let mut plans = Vec::new();
-        let directory = self.root.join("catalog_resource_plans");
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(plans),
-            Err(error) => return Err(format!("read '{}': {}", directory.display(), error)),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|error| format!("read catalog plan entry: {}", error))?;
-            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-                continue;
-            };
-            if !name.ends_with(".json") {
-                continue;
-            }
-            let plan = read_json_bounded::<CatalogResourcePlanDocument>(
-                &self.root,
-                &entry.path(),
-                MAX_CATALOG_PLAN_BYTES,
-            )
-            .map_err(BoundedReadError::into_message)?
-            .ok_or_else(|| format!("catalog resource plan '{}' disappeared", name))?;
-            plan.validate()?;
-            plans.push(plan);
-        }
-        Ok(plans)
-    }
-
-    pub fn discard_plan(&self, plan_id: &CatalogPlanId) -> Result<bool, String> {
-        let _guard = self.guard()?;
-        let path = self.plan_path(plan_id);
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(format!("discard catalog plan '{}': {}", plan_id, error)),
-        }
-    }
-
     pub fn load_materializations(&self) -> Result<CatalogMaterializationsDocument, String> {
         let _guard = self.guard()?;
         let document: CatalogMaterializationsDocument = self.load_document(
@@ -554,13 +465,6 @@ impl CatalogStateRepository {
         {
             return Ok(Some("a Library link uses this storage".to_string()));
         }
-        if self.list_resource_plans()?.iter().any(|plan| match plan {
-            CatalogResourcePlanDocument::Push(plan) => &plan.storage_id == storage_id,
-            CatalogResourcePlanDocument::Pull(plan) => &plan.storage_id == storage_id,
-            CatalogResourcePlanDocument::Fork(_) => false,
-        }) {
-            return Ok(Some("a Library review plan uses this storage".to_string()));
-        }
         if self
             .load_materializations()?
             .claims
@@ -633,17 +537,6 @@ impl CatalogStateRepository {
                 storage_id
             ));
         }
-
-        let plans = self.list_resource_plans_unlocked()?;
-        let plan_ids = plans
-            .into_iter()
-            .filter(|plan| match plan {
-                CatalogResourcePlanDocument::Push(plan) => &plan.storage_id == storage_id,
-                CatalogResourcePlanDocument::Pull(plan) => &plan.storage_id == storage_id,
-                CatalogResourcePlanDocument::Fork(_) => false,
-            })
-            .map(|plan| plan.plan_id().clone())
-            .collect::<Vec<_>>();
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -730,47 +623,23 @@ impl CatalogStateRepository {
                 MAX_CATALOG_OPERATIONS_BYTES,
             )?;
         }
-        for plan_id in &plan_ids {
-            let path = self.plan_path(plan_id);
-            ensure_no_symlinks(&self.root, &path)?;
-            match fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(format!("discard catalog plan '{}': {}", plan_id, error)),
-            }
-        }
+        // Pending reviews pinned against this storage can only fail their
+        // apply-time checks now; drop them rather than leave dead entries.
+        super::plan_store::discard_where(&self.root, |plan| match plan {
+            CatalogResourcePlanDocument::Push(plan) => &plan.storage_id == storage_id,
+            CatalogResourcePlanDocument::Pull(plan) => &plan.storage_id == storage_id,
+            CatalogResourcePlanDocument::Fork(_) => false,
+        });
 
         Ok((
             value,
             CatalogStorageDataClearResult {
                 links_reset,
-                plans_removed: plan_ids.len() as u64,
                 claims_removed,
                 preservation_witnesses_removed,
                 terminal_operations_removed,
             },
         ))
-    }
-
-    fn ensure_directory(&self, directory: &Path) -> Result<(), String> {
-        if !directory.starts_with(&self.root) {
-            return Err(format!(
-                "'{}' escapes the catalog state root",
-                directory.display()
-            ));
-        }
-        match fs::symlink_metadata(directory) {
-            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => Ok(()),
-            Ok(_) => Err(format!(
-                "'{}' must be a real directory",
-                directory.display()
-            )),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir_all(directory)
-                    .map_err(|error| format!("create '{}': {}", directory.display(), error))
-            }
-            Err(error) => Err(format!("inspect '{}': {}", directory.display(), error)),
-        }
     }
 }
 
@@ -814,14 +683,6 @@ fn open_lock_file(path: &Path) -> Result<fs::File, String> {
 enum BoundedReadError {
     Corrupt(String),
     Io(String),
-}
-
-impl BoundedReadError {
-    fn into_message(self) -> String {
-        match self {
-            BoundedReadError::Corrupt(message) | BoundedReadError::Io(message) => message,
-        }
-    }
 }
 
 fn ensure_no_symlinks(root: &Path, destination: &Path) -> Result<(), String> {
@@ -942,10 +803,9 @@ fn sync_directory(_directory: &Path) {}
 #[cfg(test)]
 mod tests {
     use super::super::domain::{
-        CatalogCommitId, CatalogLinkId, CatalogPlanId, CatalogProfilesDocument,
-        CatalogResourceKindTag, CatalogResourceRepositoryId, CatalogScope, CatalogScopeId,
-        CatalogScopeLink, CatalogScopePushPlan, CatalogScopesDocument, LibraryHeadCoordinate,
-        LocalCatalogProfileId, ProviderKey, CATALOG_SCHEMA,
+        CatalogCommitId, CatalogLinkId, CatalogProfilesDocument, CatalogResourceKindTag,
+        CatalogResourceRepositoryId, CatalogScope, CatalogScopeId, CatalogScopeLink,
+        CatalogScopesDocument, LibraryHeadCoordinate, LocalCatalogProfileId, ProviderKey,
     };
     use super::*;
     use mallard_domain::StorageId;
@@ -1003,45 +863,6 @@ mod tests {
             repo.load_profiles().unwrap(),
             CatalogProfilesDocument::default()
         );
-    }
-
-    #[test]
-    fn resource_plan_persistence_is_create_only_and_missing_safe() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = repository(&temp);
-        let missing = CatalogPlanId::generate().unwrap();
-        assert!(repo
-            .load_resource_plan(&missing)
-            .unwrap_err()
-            .contains("does not exist"));
-        assert!(!repo.discard_plan(&missing).unwrap());
-
-        let plan = CatalogResourcePlanDocument::Push(CatalogScopePushPlan {
-            schema_version: CATALOG_SCHEMA,
-            plan_id: CatalogPlanId::generate().unwrap(),
-            scope_id: CatalogScopeId::generate().unwrap(),
-            link_id: CatalogLinkId::generate().unwrap(),
-            link_revision: 1,
-            storage_id: StorageId::parse("storage-a").unwrap(),
-            repository_id: CatalogResourceRepositoryId::for_kind(
-                ProviderKey::Codex,
-                CatalogResourceKindTag::AgentSkill,
-            ),
-            storage_identity_sha256: "a".repeat(64),
-            profile_pins: Vec::new(),
-            skill_root_pins: Vec::new(),
-            observed_head: None,
-            rows: Vec::new(),
-            warning_digests: Vec::new(),
-            created_at: 1,
-            expires_at: 2,
-        });
-
-        repo.save_resource_plan(&plan).unwrap();
-        assert_eq!(repo.load_resource_plan(plan.plan_id()).unwrap(), plan);
-        let error = repo.save_resource_plan(&plan).unwrap_err();
-        assert!(error.contains("already exists"), "{error}");
-        assert_eq!(repo.load_resource_plan(plan.plan_id()).unwrap(), plan);
     }
 
     #[test]

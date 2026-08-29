@@ -107,8 +107,6 @@ on demand.
 |   `-- <plan-id>.json
 |-- conversation_push_plans/
 |   `-- <plan-id>.json
-|-- catalog_resource_plans/
-|   `-- <plan-id>.json
 |
 |-- conversation_operations/
 |   `-- <operation-id>/
@@ -150,7 +148,6 @@ on demand.
 | `catalog_resource_profiles.json` | Machine-local Codex/Claude Library profiles | Provider key, display name, configured `CODEX_HOME`/`CLAUDE_CONFIG_DIR` path, revisions | No |
 | `catalog_scopes.json` | User-added Catalog menu rows | One row per (profile × resource kind); membership is the kind inventory, never stored | No |
 | `catalog_scope_links.json` | Scope-storage links | One link per (scope × storage): the derived kind-repository ID, the accepted head continuity pin, and per-resource accepted content bases | No |
-| `catalog_resource_plans/<plan-id>.json` | Immutable scope Push/Pull and resource Fork reviews | One review per scope link with per-resource rows/items, digest-pinned actions, preservation-copy pins, profile/root/link revisions, expiry | No |
 | `catalog_resource_materializations.json` | Verified per-target Library receipts | Cross-storage claim edges keyed by canonical target identity with content digests and outcomes | No |
 | `catalog_resource_preservations.json` | Named-copy preservation witnesses | Source/preserved targets, digests, and operation IDs used for idempotent recovery | No |
 | `catalog_resource_operations.json` | Library mutation journal | In-flight and recent directory/preservation/fork/plugin operations with phases, paths, and terminal outcomes | No |
@@ -274,9 +271,13 @@ error.
 | --- | --- | --- |
 | `restore_plans/` | `RestorePlan` | Host/replica, storage/bundle, revision, commit, manifest hash, binding revision, expiry, absolute targets, expected target state, selected file/conversation actions |
 | `conversation_push_plans/` | `ConversationPushPlan` | Host/replica/project/profile revisions, current or absent head coordinates, conversation relations/actions, target expectations, lineage/semantic pins, expiry |
-| `catalog_resource_plans/` | `CatalogResourcePlanDocument` | Exactly one scope link (Push/Pull) or Fork source, provider/root/storage/head revisions, per-resource local and remote digests, cross-storage claim pins, exact actions, and expiry |
 
-Restore and Library resource plans normally expire after 24 hours. Completed
+Library (Catalog) Push/Pull/Fork reviews are not documents: they live in a
+bounded in-memory plan store, expire after 24 hours, and are discarded on
+apply, replacement, or app restart. Apply re-verifies every pin against live
+state, so a lost review can only fail closed ("review again").
+
+Restore and conversation Push plans normally expire after 24 hours. Completed
 project results live in `materializations.json`; Library outcomes and recovery
 state live in the claim, preservation, and operation documents. Plans are not
 themselves portable history.
@@ -444,7 +445,6 @@ reactivate them.
 | `catalog_resource_profiles.json` | 1 MiB |
 | `catalog_scopes.json` | 1 MiB |
 | `catalog_scope_links.json` | 16 MiB |
-| `catalog_resource_plans/<id>.json` | 64 MiB |
 | `catalog_resource_materializations.json` | 16 MiB |
 | `catalog_resource_preservations.json` | 8 MiB |
 | `catalog_resource_operations.json` | 16 MiB |

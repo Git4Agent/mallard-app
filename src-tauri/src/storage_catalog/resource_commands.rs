@@ -30,6 +30,7 @@ use super::domain::{
 };
 use super::inventory::{inventory_local, CatalogLocalInventory, LocalResourceRecord};
 use super::persistence::CatalogStateRepository;
+use super::plan_store;
 use super::profiles::{
     default_profile_home, resolve_profile_context, validate_new_profile_home,
     ResolvedCatalogContext,
@@ -1227,26 +1228,22 @@ fn target_in_scope(
     }
 }
 
+/// Push and Pull reviews supersede per pairing: opening a new review for a
+/// (scope, storage) pair discards the pair's previous one.
 fn discard_scope_plans(
     catalog: &CatalogStateRepository,
     scope_id: &CatalogScopeId,
     storage_id: &StorageId,
-) -> Result<(), String> {
-    for plan in catalog.list_resource_plans()? {
-        let matches = match &plan {
-            CatalogResourcePlanDocument::Push(plan) => {
-                &plan.scope_id == scope_id && &plan.storage_id == storage_id
-            }
-            CatalogResourcePlanDocument::Pull(plan) => {
-                &plan.scope_id == scope_id && &plan.storage_id == storage_id
-            }
-            CatalogResourcePlanDocument::Fork(_) => false,
-        };
-        if matches {
-            let _ = catalog.discard_plan(plan.plan_id());
+) {
+    plan_store::discard_where(catalog.root(), |plan| match plan {
+        CatalogResourcePlanDocument::Push(plan) => {
+            &plan.scope_id == scope_id && &plan.storage_id == storage_id
         }
-    }
-    Ok(())
+        CatalogResourcePlanDocument::Pull(plan) => {
+            &plan.scope_id == scope_id && &plan.storage_id == storage_id
+        }
+        CatalogResourcePlanDocument::Fork(_) => false,
+    });
 }
 
 pub fn unlink_catalog_scope_storage_with_repositories(
@@ -1284,7 +1281,7 @@ pub fn unlink_catalog_scope_storage_with_repositories(
     if active_operation {
         return Err("an operation for this link is still in progress".to_string());
     }
-    discard_scope_plans(catalog, &link.scope_id, &storage_id)?;
+    discard_scope_plans(catalog, &link.scope_id, &storage_id);
     catalog.mutate_materializations(|claims| {
         claims.claims.retain(|claim| {
             claim.storage_id != storage_id
@@ -1378,8 +1375,12 @@ pub(crate) fn prepare_push_with_repositories(
             .map(|observed| head_coordinate(&observed.head, &storage_identity)),
         now,
     })?;
-    discard_scope_plans(catalog, scope_id, storage_id)?;
-    catalog.save_resource_plan(&CatalogResourcePlanDocument::Push(plan.clone()))?;
+    discard_scope_plans(catalog, scope_id, storage_id);
+    plan_store::save(
+        catalog.root(),
+        CatalogResourcePlanDocument::Push(plan.clone()),
+        now,
+    )?;
     Ok(plan)
 }
 
@@ -1436,14 +1437,15 @@ pub(crate) fn apply_push_with_repositories(
     user_home: &Path,
     now: u64,
 ) -> Result<CatalogScopePushOutcomeDto, String> {
-    let CatalogResourcePlanDocument::Push(plan) = catalog.load_resource_plan(&plan_id)? else {
+    let CatalogResourcePlanDocument::Push(plan) = plan_store::load(catalog.root(), &plan_id)?
+    else {
         return Err("the referenced plan is not a Push review".to_string());
     };
     if now < plan.created_at || now > plan.expires_at {
         return Err("the Push review expired; review again".to_string());
     }
     if selected_resource_ids.is_empty() {
-        catalog.discard_plan(&plan_id)?;
+        plan_store::discard(catalog.root(), &plan_id);
         return Ok(CatalogScopePushOutcomeDto {
             plan_id,
             published: false,
@@ -1612,7 +1614,7 @@ pub(crate) fn apply_push_with_repositories(
         link.updated_at = now;
         Ok(())
     })?;
-    catalog.discard_plan(&plan_id)?;
+    plan_store::discard(catalog.root(), &plan_id);
     Ok(CatalogScopePushOutcomeDto {
         plan_id,
         published: published.published,
@@ -1746,8 +1748,12 @@ pub(crate) fn prepare_pull_with_repositories(
         name_taken: &name_taken,
         now,
     })?;
-    discard_scope_plans(catalog, scope_id, storage_id)?;
-    catalog.save_resource_plan(&CatalogResourcePlanDocument::Pull(plan.clone()))?;
+    discard_scope_plans(catalog, scope_id, storage_id);
+    plan_store::save(
+        catalog.root(),
+        CatalogResourcePlanDocument::Pull(plan.clone()),
+        now,
+    )?;
     Ok(plan)
 }
 
@@ -1778,7 +1784,8 @@ pub(crate) fn apply_pull_with_repositories(
     user_home: &Path,
     now: u64,
 ) -> Result<CatalogScopePullOutcomeDto, String> {
-    let CatalogResourcePlanDocument::Pull(plan) = catalog.load_resource_plan(&plan_id)? else {
+    let CatalogResourcePlanDocument::Pull(plan) = plan_store::load(catalog.root(), &plan_id)?
+    else {
         return Err("the referenced plan is not a Pull review".to_string());
     };
     if now < plan.created_at || now > plan.expires_at {
@@ -1926,7 +1933,7 @@ pub(crate) fn apply_pull_with_repositories(
             Ok(())
         })?;
     }
-    catalog.discard_plan(&plan_id)?;
+    plan_store::discard(catalog.root(), &plan_id);
     Ok(CatalogScopePullOutcomeDto {
         plan_id,
         remote_accepted: advance_head,
@@ -1981,16 +1988,20 @@ fn prepare_fork_with_repositories(
         name_taken: &name_taken,
         now,
     })?;
-    for existing in catalog.list_resource_plans()? {
-        if matches!(
-            &existing,
+    // A Fork review supersedes per source: re-asking for the same resource
+    // replaces its pending review.
+    plan_store::discard_where(catalog.root(), |existing| {
+        matches!(
+            existing,
             CatalogResourcePlanDocument::Fork(existing)
                 if &existing.scope_id == scope_id && &existing.source_resource_id == resource_id
-        ) {
-            let _ = catalog.discard_plan(existing.plan_id());
-        }
-    }
-    catalog.save_resource_plan(&CatalogResourcePlanDocument::Fork(plan.clone()))?;
+        )
+    });
+    plan_store::save(
+        catalog.root(),
+        CatalogResourcePlanDocument::Fork(plan.clone()),
+        now,
+    )?;
     Ok(plan)
 }
 
@@ -2021,7 +2032,8 @@ pub async fn apply_catalog_resource_fork(
 ) -> Result<CatalogActionResult, String> {
     run_blocking(move || {
         let catalog = catalog_repository()?;
-        let CatalogResourcePlanDocument::Fork(plan) = catalog.load_resource_plan(&plan_id)? else {
+        let CatalogResourcePlanDocument::Fork(plan) = plan_store::load(catalog.root(), &plan_id)?
+        else {
             return Err("the referenced plan is not a Fork review".to_string());
         };
         if plan.scope_id != scope_id {
@@ -2039,7 +2051,7 @@ pub async fn apply_catalog_resource_fork(
         // Staleness is guarded by the plan's pinned source content digest:
         // apply refuses when the on-disk source no longer matches it.
         let result = apply_resource_fork(&catalog, &plan, now_secs())?;
-        catalog.discard_plan(&plan_id)?;
+        plan_store::discard(catalog.root(), &plan_id);
         Ok(result)
     })
     .await

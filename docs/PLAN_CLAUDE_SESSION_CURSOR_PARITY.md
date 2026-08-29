@@ -72,7 +72,9 @@ Replaces the linear-scan fold in `analyze_claude_transcript` ([codec.rs:30](../c
 - **R7 — codec key stays `claude.lineage.v1` (decided 2026-08-20).** `CLAUDE_LINEAGE_CODEC_KEY` and `codec_version()` are unchanged ([mod.rs:105-111](../crates/mallard-infrastructure/src/providers/claude/mod.rs)); the chain-derivation semantics are revised in place and the strict-linearity behavior is deleted. Normal discipline would mint a new key for changed semantics; it is deliberately waived here: nothing outside this repo has ever consumed v1 values (no customers; `~/.mallard` and cloud data are wiped before retest), and keeping the key avoids churning every manifest value, validation pin, and test assertion that names it — the same precedent as resetting schemas to 1 during the backward-compat removal. The corpus gate (R8) and the live-CLI e2e stand in as the behavioral fence. If a build carrying the strict rules is ever released first, revisit this.
 - **R8 — corpus gate.** Before freezing R1–R6, port the three scan scripts from this investigation into `scripts/` (types-and-structure only, no content) and record the acceptance numbers in this doc — the same discipline as the Codex projection v2 work. Acceptance target on this machine's corpus: every non-subagent, non-metadata-only file `Complete` (currently 96 + 7 = 103).
 
-**Corpus gate results (2026-08-20, rules frozen).** Scripts: `scripts/claude_corpus_scan_strict.py`, `scripts/claude_corpus_scan_revised.py`, `scripts/claude_corpus_scan_duplicates.py`. Corpus at scan time: 420 files.
+**Corpus gate results (2026-08-20, rules frozen).** Three one-time Python scans
+covered the strict, revised, and duplicate UUID rules. They were removed after
+the rules were frozen. Corpus at scan time: 420 files.
 
 | | Strict (shipped) | Revised (R1–R6) |
 |---|---|---|

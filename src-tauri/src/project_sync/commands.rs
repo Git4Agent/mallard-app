@@ -138,7 +138,7 @@ fn provider_registry() -> &'static ProviderRegistry {
 /// captured up front.
 fn provider_supports_tail_cursor(provider: &ProviderKey) -> bool {
     provider_registry()
-        .sessions(provider)
+        .get(provider)
         .is_some_and(|adapter| adapter.supports_tail_cursor())
 }
 
@@ -2147,7 +2147,6 @@ fn storage_data_clear_result(
         .saturating_add(local.journal_operations_removed)
         .saturating_add(local.restore_plans_removed)
         .saturating_add(local.push_plans_removed)
-        .saturating_add(catalog.plans_removed)
         .saturating_add(catalog.claims_removed)
         .saturating_add(catalog.preservation_witnesses_removed)
         .saturating_add(catalog.terminal_operations_removed);
@@ -4742,7 +4741,7 @@ fn thread_review(
     };
     let registry = provider_registry();
     for provider in resolved.binding.profile_ids.keys() {
-        if registry.sessions(provider).is_none() {
+        if registry.get(provider).is_none() {
             merged.provider_errors.insert(
                 provider.clone(),
                 format!("no provider adapter is registered for '{}'", provider),
@@ -5668,7 +5667,7 @@ fn provider_thread_review(
     purpose: ReviewPurpose,
 ) -> Result<ThreadReview, String> {
     let binding = &resolved.binding;
-    let adapter = provider_registry().require_sessions(provider)?;
+    let adapter = provider_registry().require(provider)?;
     let provider_label = provider_registry()
         .get(provider)
         .map(|registered| registered.descriptor().display_name)
@@ -8807,7 +8806,7 @@ fn conversation_thread_from_capture(
         first_codex_user_summary(published_bytes)
     } else if claude_wire.is_some() {
         provider_registry()
-            .require_sessions(&action.provider)?
+            .require(&action.provider)?
             .summarize_bytes(published_bytes)?
             .title
     } else {
@@ -8944,7 +8943,7 @@ fn captured_with_for_provider(provider: &ProviderKey) -> CapturedWith {
         provider_versions: BTreeMap::new(),
         codec_versions: BTreeMap::new(),
     };
-    if let Some(adapter) = provider_registry().sessions(provider) {
+    if let Some(adapter) = provider_registry().get(provider) {
         captured_with
             .codec_versions
             .insert(adapter.codec_key().to_string(), adapter.codec_version());
@@ -11172,7 +11171,7 @@ fn prepare_pull_conversation_actions(
             conversation_file_limit_bytes(),
             "cloud conversation transcript",
         )?;
-        let adapter = provider_registry().require_sessions(&action.provider)?;
+        let adapter = provider_registry().require(&action.provider)?;
         let analysis = adapter.analyze(&cloud_transcript);
         let cloud_provider_thread_id = analysis
             .source_provider_session_id
@@ -11531,7 +11530,7 @@ fn apply_prepared_pull_conversation(
             "conversation cloud update lost its provider identity after review".to_string(),
         );
     }
-    let adapter = provider_registry().require_sessions(&action.provider)?;
+    let adapter = provider_registry().require(&action.provider)?;
     let is_codex = action.provider.as_str() == "codex";
     let phase_started = Instant::now();
 
@@ -15952,7 +15951,7 @@ fn audit_codex_conversation_paths_with_repository(
                 continue;
             }
             let metadata = match provider_registry()
-                .require_sessions(&codex_key())?
+                .require(&codex_key())?
                 .scan_metadata(entry.path())
             {
                 Ok(metadata) => metadata,
@@ -24066,10 +24065,10 @@ mod tests {
         // Session Detail regression: the Write tool classifies under B's
         // root and indexes the relative path — before the remap the foreign
         // source path never matched and `affected_paths` stayed empty.
-        let claude_sessions = provider_registry()
-            .require_sessions(&ProviderKey::parse("claude").unwrap())
+        let claude_adapter = provider_registry()
+            .require(&ProviderKey::parse("claude").unwrap())
             .unwrap();
-        let index = claude_sessions
+        let index = claude_adapter
             .build_timeline_index(
                 &b_session_path,
                 &mallard_infrastructure::providers::SessionTimelineContext {

@@ -734,7 +734,7 @@ fn resolve_local_session(
             "The project or its provider profile changed; open Project Settings.",
         )
     })?;
-    let adapter = registry.require_sessions(&provider).map_err(|_| {
+    let adapter = registry.require(&provider).map_err(|_| {
         SessionDetailError::new(
             SessionDetailErrorCode::NotFound,
             "No registered provider can read this session.",
@@ -986,7 +986,7 @@ fn load_or_build_index(
     String,
     Vec<SessionDetailWarning>,
 )> {
-    let adapter = registry.require_sessions(&session.provider).map_err(|_| {
+    let adapter = registry.require(&session.provider).map_err(|_| {
         SessionDetailError::new(
             SessionDetailErrorCode::NotFound,
             "No registered provider can read this session.",
@@ -1341,7 +1341,7 @@ fn summarize_session(
     registry: &ProviderRegistry,
     session: &ResolvedLocalSession,
 ) -> SessionDetailResult<crate::providers::SessionFileSummary> {
-    let adapter = registry.require_sessions(&session.provider).map_err(|_| {
+    let adapter = registry.require(&session.provider).map_err(|_| {
         SessionDetailError::new(
             SessionDetailErrorCode::NotFound,
             "No registered provider can read this session.",
@@ -1577,7 +1577,7 @@ pub fn get_project_session_detail(
         ),
     };
     let mut actions = registry
-        .require_sessions(&session.provider)
+        .require(&session.provider)
         .map(|adapter| {
             adapter.available_actions(&SessionActionContext {
                 provider_session_id: &session.provider_session_id,
@@ -1686,7 +1686,7 @@ pub fn get_project_session_timeline_page(
         .limit
         .unwrap_or(MAX_TIMELINE_PAGE_EVENTS)
         .clamp(1, 50);
-    let adapter = registry.require_sessions(&session.provider).map_err(|_| {
+    let adapter = registry.require(&session.provider).map_err(|_| {
         SessionDetailError::new(
             SessionDetailErrorCode::NotFound,
             "No registered provider can read this session.",
@@ -1800,7 +1800,7 @@ pub fn get_project_session_event_detail(
             "Only tool-call events have expanded detail.",
         ));
     }
-    let adapter = registry.require_sessions(&session.provider).map_err(|_| {
+    let adapter = registry.require(&session.provider).map_err(|_| {
         SessionDetailError::new(
             SessionDetailErrorCode::NotFound,
             "No registered provider can read this session.",

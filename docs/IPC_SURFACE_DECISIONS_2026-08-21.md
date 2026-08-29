@@ -227,10 +227,10 @@ Three further items are recorded rather than actioned:
   migration warning above: removing `origin_aliases` later would not merely fail
   to parse, it would quarantine and discard every conversation binding.
 
-**Knowingly stale docs.** `DESIGN_PUSH_PULL_FLOW.md`, `DESIGN_FAST_PUSH_PULL.md`
-and `REORG_BASELINE_INVENTORY.md` still describe `verify_bundle_objects` as a
-shipped command, and `PLAN_PROJECT_STRUCTURE_REORGANIZATION.md` (§10-§12) plus
-`REORG_BASELINE_INVENTORY.md` still name the deleted freeze test as a per-PR
-acceptance gate. Those are records for work still in flight; amending them
-belongs with whoever closes out the reorganization, and the reverse-direction
-guard proposed above is what should replace the freeze in its acceptance list.
+**Knowingly stale docs.** `DESIGN_PUSH_PULL_FLOW.md` and
+`DESIGN_FAST_PUSH_PULL.md` still describe `verify_bundle_objects` as a shipped
+command, and `PLAN_PROJECT_STRUCTURE_REORGANIZATION.md` (§10-§12) still names
+the deleted freeze test as a per-PR acceptance gate. Those are records for work
+still in flight; amending them belongs with whoever closes out the
+reorganization, and the reverse-direction guard proposed above is what should
+replace the freeze in its acceptance list.

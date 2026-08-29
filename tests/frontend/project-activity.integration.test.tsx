@@ -15,29 +15,37 @@ import {
 import ProjectSidebar from "../../src/components/project-sync/ProjectSidebar";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../../src/components/sync-review/ThreadStatusIcon";
 import { createSingleFlight } from "../../src/components/project-sync/api";
+import type {
+  ConversationReviewAction,
+  LocalProjectSummary,
+  ProjectBinding,
+  ThreadSyncComparison,
+  ThreadSyncDecision,
+  ThreadSyncEntry,
+} from "../../src/types";
 
-const project = {
+const PROJECT_ROOT = "/Users/test/projects/mallard";
+
+const project: LocalProjectSummary = {
   local_project_id: "project-mallard",
   bundle_id: "bundle-mallard",
   display_name: "mallard",
   local_alias: "Mallard local",
   repository_fingerprint: "fingerprint",
-  project_root: "/Users/test/projects/mallard",
-  canonical_project_root: "/Users/test/projects/mallard",
+  project_root: PROJECT_ROOT,
+  canonical_project_root: PROJECT_ROOT,
   profile_ids: { codex: "profile-codex" },
   profile_names: ["Default Codex"],
-  created_at: 1,
-  updated_at: 2,
   revision: 1,
 };
 
-const binding = {
+const binding: ProjectBinding = {
   host_id: "00112233445566778899aabbccddeeff",
   replica_id: "replica",
   local_project_id: project.local_project_id,
   bundle_id: project.bundle_id,
-  project_root: project.project_root,
-  canonical_project_root: project.project_root,
+  project_root: PROJECT_ROOT,
+  canonical_project_root: PROJECT_ROOT,
   profile_ids: { codex: "profile-codex" },
   state: "active",
   revision: 1,
@@ -135,16 +143,23 @@ const contentDefaults = {
   loading: false,
   loadingMore: false,
   actionError: null,
+  loadError: null,
+  onRetryLoad: () => undefined,
   actionBusyResourceId: null,
-  onBranchChange: () => undefined,
-  onRefresh: () => undefined,
   onLoadMore: () => undefined,
   onShowLess: () => undefined,
   canShowLess: false,
   onSessionAction: () => undefined,
-};
+} satisfies Omit<ComponentProps<typeof ProjectChatHistoryContent>, "activity">;
 
-function emptyComparison(overrides: Record<string, unknown> = {}) {
+function reviewDecision(
+  action: ConversationReviewAction,
+  selectable = false,
+): ThreadSyncDecision {
+  return { action, selectable };
+}
+
+function emptyComparison(overrides: Partial<ThreadSyncComparison> = {}): ThreadSyncComparison {
   return {
     project_id: project.local_project_id,
     storage_id: "storage-1",
@@ -564,7 +579,7 @@ test("every row leads with exactly one glyph, so the titles form a column", () =
 
 test("fresh storage matches portable Activity rows to conversation comparisons", () => {
   const syncResourceId = `codex:conversation:${CODEX_SESSION_ID}`;
-  const decision = (action: string, selectable: boolean) => ({
+  const decision = (action: ConversationReviewAction, selectable: boolean) => ({
     action,
     selectable,
   });
@@ -591,7 +606,6 @@ test("fresh storage matches portable Activity rows to conversation comparisons",
   const browseHtml = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={{ ...activity, git: null }}
       comparison={comparison}
       activeStorageName="Local storage 1"
@@ -604,7 +618,6 @@ test("fresh storage matches portable Activity rows to conversation comparisons",
   const reviewHtml = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={{ ...activity, git: null }}
       comparison={comparison}
       activeStorageName="Local storage 1"
@@ -863,7 +876,7 @@ test("activity requests share concurrent work but not completed results", async 
   assert.equal(starts, 2);
 });
 
-test("activity content uses the local alias and renders commit and session rows", () => {
+test("activity content renders commit and session rows without repeating project context", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
@@ -876,14 +889,10 @@ test("activity content uses the local alias and renders commit and session rows"
   // The alias is the path bar's to say. The list used to print it again as an
   // <h1> directly under the crumb that already carried it.
   assert.doesNotMatch(html, /Mallard local/);
-  assert.match(html, /sync-history-project-context/);
   // The provider-neutral page no longer prints a provider home path; identity
   // and provenance live in the per-row debug panel instead.
   assert.doesNotMatch(html, /Codex configuration:/);
-  assert.match(html, /Local storage 1/);
-  assert.match(html, /aria-label="Last pull:/);
-  assert.match(html, /aria-label="Last push:/);
-  assert.match(html, /Repository: mallard/);
+  assert.doesNotMatch(html, /sync-history-project-context|Project directory:|Repository: mallard/);
   assert.match(html, />Add project-scoped history</);
   assert.doesNotMatch(html, /sync-history-commit-metrics/);
   assert.match(commitHeading, /data-icon="git-commit"/);
@@ -921,7 +930,6 @@ test("activity content uses the local alias and renders commit and session rows"
   assert.match(html, /aria-label="Messages: 8\. Prompts: 3\. Replies: 5"/);
   assert.match(html, /data-tooltip="Total input · 20K\nTotal output · 4,800"/);
   assert.match(html, /aria-label="Total tokens: 25K\. Total input: 20K\. Total output: 4,800"/);
-  assert.match(html, /aria-label="1 session linked to commits"/);
   assert.match(html, /class="sync-history-session-title-button"/);
   assert.match(html, /aria-label="View session details"/);
   assert.doesNotMatch(html, /during session|after session|started from/);
@@ -990,7 +998,6 @@ test("changed storage history explains the recovery path and exposes only unlink
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={activity}
       comparison={emptyComparison({
         revision: 2,
@@ -1230,7 +1237,6 @@ test("browse-mode session titles navigate without retaining the inline preview",
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={{ ...activity, git: null }}
       onOpenSessionDetail={() => undefined}
     />,
@@ -1243,7 +1249,7 @@ test("browse-mode session titles navigate without retaining the inline preview",
   assert.doesNotMatch(html, /aria-expanded="(?:true|false)"[^>]*View session details/);
 });
 
-test("embedded activity follows the project workspace without repeating project controls", () => {
+test("activity follows the project workspace without repeating project controls", () => {
   const activityWithUncommitted = {
     ...activity,
     sessions: [{
@@ -1258,15 +1264,13 @@ test("embedded activity follows the project workspace without repeating project 
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={activityWithUncommitted}
     />,
   );
 
   assert.match(html, /sync-history-embedded/);
   // The workspace path bar's section crumb is the visible name for this page,
-  // so the embedded header keeps its controls and drops its title; the region
-  // still carries an accessible name.
+  // so the activity region drops a repeated title and keeps its accessible name.
   assert.doesNotMatch(html, /sync-history-embedded-title/);
   assert.match(html, /aria-label="Git history"/);
   assert.match(html, /class="sync-history-timeline has-uncommitted"/);
@@ -1316,7 +1320,6 @@ test("storage-only sessions leave Uncommitted for their own group above the rail
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activeStorageName="Local storage 1"
       activity={{
         ...activity,
@@ -1364,7 +1367,6 @@ test("a page whose unmapped rows are all storage-only renders no Uncommitted gro
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activeStorageName="Local storage 1"
       activity={{
         ...activity,
@@ -1390,7 +1392,6 @@ test("Activity badges the provenance-carrying preserved side of a divergent Pull
   ) => renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={{
         ...activity,
         git: null,
@@ -1417,11 +1418,10 @@ test("Activity badges the provenance-carrying preserved side of a divergent Pull
   assert.doesNotMatch(titleOnly, /sync-history-preserved-badge|>Preserved 2<\/span>/);
 });
 
-test("embedded non-Git activity is named once, and not on screen", () => {
+test("non-Git activity is named once, and not on screen", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={{ ...activity, git: null }}
     />,
   );
@@ -1442,7 +1442,6 @@ test("selection review removes repeated history and storage labels", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={activity}
       activeStorageName="R2 storage 2"
       selectionMode="push"
@@ -1462,7 +1461,7 @@ test("selection review removes repeated history and storage labels", () => {
   const compactReviewRule = css.match(/\.sync-sync-review-scroll > \.sync-history-selection-review\s*\{[^}]+\}/s)?.[0] ?? "";
   const compactHeadingRule = css.match(/\.sync-history-selection-review \.sync-history-section-heading\s*\{[^}]+\}/s)?.[0] ?? "";
   // 8px, not 0. The compact review was zeroed while a section heading with its
-  // own top margin led the body; embedded, that heading is suppressed, so a
+  // own top margin led the body; that heading is suppressed, so a
   // timeline leads with a card and a flat list with a row — neither carries a
   // margin, and both sat their first border on the header's hairline.
   assert.match(compactReviewRule, /padding-top:\s*8px/);
@@ -1484,7 +1483,7 @@ test("Push review renders checkboxes only for selectable bound-ready rows", () =
     started_at: codexSession.started_at + 1,
     ended_at: codexSession.ended_at + 1,
   };
-  const decision = (action: string, selectable: boolean) => ({
+  const decision = (action: ConversationReviewAction, selectable: boolean) => ({
     action,
     selectable,
   });
@@ -1530,7 +1529,6 @@ test("Push review renders checkboxes only for selectable bound-ready rows", () =
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={{ ...activity, git: null, sessions: [codexSession, localAheadSession] }}
       comparison={comparison}
       activeStorageName="Local storage 1"
@@ -1591,6 +1589,8 @@ test("selected storage adds directional indicators and remote-only session rows"
         provider_thread_id: CODEX_SESSION_ID,
         local_updated_at: codexSession.ended_at,
         storage_updated_at: codexSession.ended_at - 60,
+        push_decision: reviewDecision("publish", true),
+        pull_decision: reviewDecision("report_push_eligible"),
       },
       {
         provider: "codex",
@@ -1606,6 +1606,8 @@ test("selected storage adds directional indicators and remote-only session rows"
         cloud_thread_id: remoteId,
         compared_against_storage: true,
         storage_updated_at: 1_752_802_500,
+        push_decision: reviewDecision("no_changes"),
+        pull_decision: reviewDecision("create_local", true),
       },
       {
         provider: "codex",
@@ -1623,13 +1625,14 @@ test("selected storage adds directional indicators and remote-only session rows"
         provider_thread_id: olderId,
         local_updated_at: activity.window_start - 60,
         storage_updated_at: activity.window_start - 120,
+        push_decision: reviewDecision("publish", true),
+        pull_decision: reviewDecision("report_push_eligible"),
       },
     ],
   });
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={{ ...activity, git: null, sessions: [codexSession, remoteSession] }}
       comparison={comparison}
       activeStorageName="Local storage 1"
@@ -1682,15 +1685,17 @@ test("unavailable sessions explain why they cannot be synced", () => {
       state: "unavailable",
       local_present: true,
       storage_present: false,
+      compared_against_storage: true,
       provider_thread_id: CODEX_SESSION_ID,
       status_detail: "Session file exceeds the 100 MiB per-file sync limit.",
       local_updated_at: codexSession.ended_at,
+      push_decision: reviewDecision("not_pushable"),
+      pull_decision: reviewDecision("report_local_only"),
     }],
   });
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={{ ...activity, git: null }}
       comparison={comparison}
       activeStorageName="Local storage 1"
@@ -1706,7 +1711,6 @@ test("assignment-conflicted sessions stay visible but cannot be selected for syn
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={{
         ...activity,
         git: null,
@@ -1722,7 +1726,7 @@ test("assignment-conflicted sessions stay visible but cannot be selected for syn
   );
 
   assert.match(html, /Add Git history mapping/);
-  assert.match(html, new RegExp(`aria-label="Unavailable for sync\\. ${reason.replaceAll(".", "\\.")}"`));
+  assert.match(html, new RegExp(`aria-label="Unavailable for sync\\. ${reason.replace(/\./g, "\\.")}"`));
   assert.doesNotMatch(html, /sync-sync-row-choice/);
 });
 
@@ -1776,7 +1780,7 @@ test("mixed-provider rows sort deterministically and never collide on native ids
       { provider: "claude", display_name: "Claude", access: "bound_ready" as const },
     ],
   };
-  const decision = {
+  const decision: ThreadSyncDecision = {
     action: "create_cloud",
     selectable: true,
   };
@@ -1821,7 +1825,6 @@ test("mixed-provider rows sort deterministically and never collide on native ids
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={mixedActivity}
       comparison={comparison}
       activeStorageName="Local storage 1"
@@ -1876,7 +1879,6 @@ test("view-only rows keep their badge and copy but never a checkbox", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={{
         ...activity,
         git: null,
@@ -1926,7 +1928,6 @@ test("session actions render from backend descriptors with disabled reasons", ()
   const browseHtml = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={{ ...activity, git: null, sessions: [localSession, heldSession] }}
     />,
   );
@@ -1948,7 +1949,6 @@ test("session actions render from backend descriptors with disabled reasons", ()
   const reviewHtml = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={{ ...activity, git: null, sessions: [localSession, heldSession] }}
       selectionMode="push"
       selectableResourceIds={new Set()}
@@ -1962,7 +1962,6 @@ test("provider comparison failures render isolated warnings", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      embedded
       activity={{
         ...activity,
         git: null,
@@ -1987,26 +1986,6 @@ test("provider comparison failures render isolated warnings", () => {
   // The failure is isolated: the healthy provider's rows still render.
   assert.match(html, /Add Git history mapping/);
   assert.doesNotMatch(html, /<strong>Codex<\/strong> comparison failed/);
-});
-
-test("non-Git activity renders a flat session list", () => {
-  const html = renderToStaticMarkup(
-    <ProjectChatHistoryContent
-      {...contentDefaults}
-      project={{ ...project, local_alias: null }}
-      activity={{ ...activity, git: null }}
-    />,
-  );
-  const headingIndex = html.indexOf('id="project-sessions-heading"');
-  const headingEndIndex = html.indexOf("</h2>", headingIndex);
-  const messageIconIndex = html.indexOf('data-icon="message"', headingIndex);
-
-  assert.match(html, />Sessions</);
-  assert.doesNotMatch(html, /Codex threads/);
-  assert.ok(headingIndex >= 0);
-  assert.ok(messageIconIndex > headingIndex);
-  assert.ok(messageIconIndex < headingEndIndex);
-  assert.doesNotMatch(html, /Branch/);
 });
 
 test("a project without a bound provider profile stays in the workspace", () => {
@@ -2052,9 +2031,11 @@ test("completed projects use their main row for history and only mark Git reposi
       onOpenStorageDraft={() => undefined}
       onDiscardStorageDraft={() => undefined}
       activeProjectId={project.local_project_id}
+      activeStorageId={null}
       catalogScopes={[]}
       activeCatalogScopeId={null}
       addingCatalogScope={false}
+      settingsOpen={false}
       loading={false}
       busy={false}
       activityOpen={false}
@@ -2065,7 +2046,7 @@ test("completed projects use their main row for history and only mark Git reposi
       onDiscardDraft={() => undefined}
       onToggleActivity={() => undefined}
       onAddProject={() => undefined}
-      onRefresh={() => undefined}
+      onOpenSettings={() => undefined}
       onOpenStorage={() => undefined}
       onRemoveStorage={() => undefined}
       onAddStorage={() => undefined}
@@ -2157,6 +2138,7 @@ test("the project menu accepts multiple bound provider profiles", () => {
       catalogScopes={[]}
       activeCatalogScopeId={null}
       addingCatalogScope={false}
+      settingsOpen={false}
       loading={false}
       busy={false}
       activityOpen={false}
@@ -2167,6 +2149,7 @@ test("the project menu accepts multiple bound provider profiles", () => {
       onDiscardDraft={() => undefined}
       onToggleActivity={() => undefined}
       onAddProject={() => undefined}
+      onOpenSettings={() => undefined}
       onOpenStorage={() => undefined}
       onRemoveStorage={() => undefined}
       onAddStorage={() => undefined}
@@ -2190,6 +2173,160 @@ test("the project menu accepts multiple bound provider profiles", () => {
   assert.match(noProfileRow, /needs-profile/);
   assert.match(noProfileRow, /sync-sidebar-profile-warning/);
   assert.equal((html.match(/sync-sidebar-profile-warning/g) ?? []).length, 1);
+});
+
+/* One prop bundle for the collapse tests; the fixtures vary per test. */
+const sidebarChrome = {
+  activeDraftId: null,
+  storageUsage: {},
+  onOpenStorageDraft: () => undefined,
+  onDiscardStorageDraft: () => undefined,
+  activeProjectId: null,
+  activeStorageId: null,
+  activeCatalogScopeId: null,
+  addingCatalogScope: false,
+  settingsOpen: false,
+  loading: false,
+  busy: false,
+  activityOpen: false,
+  unreadLogs: 0,
+  onSelectProject: () => undefined,
+  onRemoveProject: () => undefined,
+  onSelectDraft: () => undefined,
+  onDiscardDraft: () => undefined,
+  onToggleActivity: () => undefined,
+  onAddProject: () => undefined,
+  onOpenSettings: () => undefined,
+  onOpenStorage: () => undefined,
+  onRemoveStorage: () => undefined,
+  onAddStorage: () => undefined,
+  onOpenCatalogMenu: () => undefined,
+  onOpenCatalogScope: () => undefined,
+  onAddCatalogScope: () => undefined,
+  onRemoveCatalogScope: () => undefined,
+} satisfies Partial<ComponentProps<typeof ProjectSidebar>>;
+
+test("every section heading is a disclosure and a fresh render opens all three", () => {
+  const html = renderToStaticMarkup(
+    <ProjectSidebar
+      {...sidebarChrome}
+      projects={[project]}
+      drafts={[]}
+      storages={[]}
+      storageDrafts={[]}
+      catalogScopes={[]}
+    />,
+  );
+  // The label half of each heading is the toggle — a real button, so the add
+  // action must be its sibling, never its child.
+  assert.equal((html.match(/sidebar-section-toggle/g) ?? []).length, 3);
+  assert.equal((html.match(/aria-expanded="true" aria-controls="sidebar-[a-z]+-list"/g) ?? []).length, 3);
+  for (const section of ["projects", "catalog", "storages"]) {
+    assert.match(html, new RegExp(`aria-controls="sidebar-${section}-list"`));
+    assert.match(html, new RegExp(`id="sidebar-${section}-list"`));
+  }
+  // Open panes hide nothing and carry no collapsed dressing: no hidden lists,
+  // no closed-tile class, no count chips (gated above too), live handles only.
+  assert.doesNotMatch(html, /hidden=""/);
+  assert.doesNotMatch(html, /sidebar-split-pane sidebar-[a-z]+-pane collapsed/);
+  assert.doesNotMatch(html, /sidebar-section-divider inert/);
+  assert.doesNotMatch(html, /aria-disabled="true" tabindex="-1"/);
+});
+
+test("collapsed sections keep their signals and quiet their handles", () => {
+  // The collapse set is read from browser storage at render time, and these
+  // renders are the one place a stubbed window stands in for it.
+  const globals = globalThis as { window?: unknown };
+  globals.window = {
+    localStorage: {
+      getItem: (key: string) => (key === "mallard.sidebar-section-collapsed" ? "projects,storages" : null),
+    },
+  };
+  try {
+    const html = renderToStaticMarkup(
+      <ProjectSidebar
+        {...sidebarChrome}
+        projects={[project, { ...project, local_project_id: "project-no-profile", local_alias: "No profile", profile_ids: {} }]}
+        drafts={[]}
+        storages={[{
+          id: "storage-local",
+          name: "Local storage 1",
+          kind: "local",
+          bucket: "",
+          access_key_id: "",
+          secret_access_key: "",
+          account_id: "",
+          s3_endpoint: "",
+          region: "",
+          local_dir: "/tmp/storage",
+        }]}
+        storageIssues={{ "storage-local": "The storage folder is missing." }}
+        storageDrafts={[]}
+        catalogScopes={[]}
+      />,
+    );
+    // Closed panes: toggle reports the state, the list is hidden, the tile
+    // wears the collapsed class; Catalog stays open between them. (Scoped to
+    // the toggles — the Logs nav button also carries aria-expanded.)
+    assert.equal((html.match(/class="sidebar-section-toggle" aria-expanded="false"/g) ?? []).length, 2);
+    assert.equal((html.match(/class="sidebar-section-toggle" aria-expanded="true"/g) ?? []).length, 1);
+    assert.equal((html.match(/hidden=""/g) ?? []).length, 2);
+    assert.match(html, /sidebar-split-pane sidebar-project-pane collapsed/);
+    assert.match(html, /sidebar-split-pane sidebar-storage-pane collapsed/);
+    assert.match(html, /sidebar-split-pane sidebar-catalog-pane"/);
+    // A closed heading still reports its list: the count chip, and the flag
+    // named on the button rather than only drawn (both panes carry one here).
+    assert.equal((html.match(/sidebar-section-count/g) ?? []).length, 2);
+    assert.match(html, /aria-label="Projects, 2 rows, contains a flagged row"/);
+    assert.match(html, /aria-label="Storages, 1 row, contains a flagged row"/);
+    assert.equal((html.match(/sidebar-section-alert/g) ?? []).length, 2);
+    // Both handles border a closed pane, so both are inert: seam kept, drag
+    // affordance and keyboard stop gone.
+    assert.equal((html.match(/sidebar-section-divider inert/g) ?? []).length, 2);
+    assert.equal((html.match(/aria-disabled="true" tabindex="-1"/g) ?? []).length, 2);
+    // Closed rows are min-content; the open Catalog keeps its elastic factor
+    // between them. (The factor's digits are floating-point noise; the row
+    // shape is what this pins.)
+    assert.match(html, /grid-template-rows:min-content 3px minmax\(96px, [0-9.]+fr\) 3px min-content/);
+    // The closed Storages tile sheds its 96px floor with its list.
+    assert.doesNotMatch(html, /aria-label="Storages"[^>]*style="min-height:96px"/);
+  } finally {
+    delete globals.window;
+  }
+});
+
+test("a closed Catalog passes the Storages pin through both gutters", () => {
+  const globals = globalThis as { window?: unknown };
+  globals.window = {
+    localStorage: {
+      getItem: (key: string) => (key === "mallard.sidebar-section-collapsed" ? "catalog" : null),
+    },
+  };
+  try {
+    const html = renderToStaticMarkup(
+      <ProjectSidebar
+        {...sidebarChrome}
+        projects={[project]}
+        drafts={[]}
+        storages={[]}
+        storageDrafts={[]}
+        catalogScopes={[]}
+      />,
+    );
+    // Neither gutter dies with the closed tile between them: both re-pin
+    // Storages across it, named for the panes the drag actually moves, the
+    // way a sash resizes across a collapsed view in VS Code.
+    assert.doesNotMatch(html, /sidebar-section-divider inert/);
+    assert.equal(
+      (html.match(/aria-label="Resize Projects and Storages sections"/g) ?? []).length,
+      2,
+    );
+    // Both carry the pin's value, not the share's percentage.
+    assert.equal((html.match(/aria-valuetext="Storage height: fits contents"/g) ?? []).length, 2);
+    assert.doesNotMatch(html, /aria-valuenow="56"/);
+  } finally {
+    delete globals.window;
+  }
 });
 
 test("the Catalog pane starts empty and lists one row per added scope", () => {
@@ -2233,6 +2370,7 @@ test("the Catalog pane starts empty and lists one row per added scope", () => {
         catalogScopes={scopes}
         activeCatalogScopeId={activeScopeId}
         addingCatalogScope={false}
+        settingsOpen={false}
         loading={false}
         busy={false}
         activityOpen={false}
@@ -2243,6 +2381,7 @@ test("the Catalog pane starts empty and lists one row per added scope", () => {
         onDiscardDraft={() => undefined}
         onToggleActivity={() => undefined}
         onAddProject={() => undefined}
+        onOpenSettings={() => undefined}
         onOpenStorage={() => undefined}
         onRemoveStorage={() => undefined}
         onAddStorage={() => undefined}
@@ -2299,6 +2438,7 @@ test("an empty Storages pane prompts the way Projects and Catalog do", () => {
         catalogScopes={[]}
         activeCatalogScopeId={null}
         addingCatalogScope={false}
+        settingsOpen={false}
         loading={false}
         busy={false}
         activityOpen={false}
@@ -2309,6 +2449,7 @@ test("an empty Storages pane prompts the way Projects and Catalog do", () => {
         onDiscardDraft={() => undefined}
         onToggleActivity={() => undefined}
         onAddProject={() => undefined}
+        onOpenSettings={() => undefined}
         onOpenStorage={() => undefined}
         onRemoveStorage={() => undefined}
         onAddStorage={() => undefined}
@@ -2374,6 +2515,7 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
       catalogScopes={[]}
       activeCatalogScopeId={null}
       addingCatalogScope={false}
+      settingsOpen={false}
       loading={false}
       busy
       activityOpen={false}
@@ -2384,7 +2526,7 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
       onDiscardDraft={() => undefined}
       onToggleActivity={() => undefined}
       onAddProject={() => undefined}
-      onRefresh={() => undefined}
+      onOpenSettings={() => undefined}
       onOpenStorage={() => undefined}
       onRemoveStorage={() => undefined}
       onAddStorage={() => undefined}
@@ -2547,7 +2689,7 @@ test("a review pages too, and the fold waits until paging is spent", () => {
   // deleted — the comparison is not windowed and the terminus only walks the
   // session timeline, so an entry with no session row at all is reachable by
   // no amount of paging.
-  const entry = {
+  const entry: ThreadSyncEntry = {
     provider: "codex",
     provider_display_name: "Codex",
     access: "bound_ready",

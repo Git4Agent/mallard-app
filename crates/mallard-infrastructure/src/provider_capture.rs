@@ -487,7 +487,7 @@ fn capture_resource(
     }
     let content_sha256 = resource_digest(&files, directory.as_ref());
     let conversation = if let Some(conversation_meta) = &item.discovered.conversation {
-        let adapter = registry.require_sessions(&conversation_meta.provider)?;
+        let adapter = registry.require(&conversation_meta.provider)?;
         let transcript = files
             .iter()
             .find(|file| file.logical_path == conversation_meta.transcript_logical_path)
@@ -974,7 +974,7 @@ pub fn discover_full(
         discover_generic_project_content(request, &canonical_project, &mut discovery)?;
     }
     for (provider, home) in &request.provider_homes {
-        let adapter = registry.require_sessions(provider)?;
+        let adapter = registry.require(provider)?;
         let context = crate::providers::SessionDiscoveryContext {
             provider_home: home,
             project_root: &canonical_project,

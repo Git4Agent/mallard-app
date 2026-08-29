@@ -447,10 +447,9 @@ row). The contract gains, in both the Rust DTO and `src/types.ts`:
   earlier draft also pinned a `wire_bases` table; the single immutable
   root base of §3.1 leaves nothing table-shaped to pin.)
 
-`FORMAL_VERIFICATION_PORTABLE_TAIL_CONFLICT_RESOLVER.md` and the
-relation-matrix suite are rewritten against this table (task, not
-afterthought: it is the main cost of this design and was priced in when
-choosing it).
+The relation-matrix suite is rewritten against this table. This is a main cost
+of the design, not an afterthought. No independent codec model is retained
+without a named owner and an automated gate.
 
 ## 6. Flows
 
@@ -774,7 +773,7 @@ same change (no legacy execution paths):
 | Push/pull sites, adoption, repair + checkpoint rebase, audit | `src-tauri/src/project_sync/commands.rs` |
 | Wire tail codec constant | `crates/mallard-domain/src/conversation_tail.rs` (`PORTABLE_TAIL_CODEC_WIRE_V1`; `validate_codex_wire` pins it; local constant and `codex.lineage.v1` analyzer key untouched) |
 | Windows gating | encoder base registration + decode block (`codex_path_map.rs`), platform-gated tests |
-| Tests | codec/builder/graph module tests, `src-tauri/src/sync_tests/*`, formal-verification doc rewrite |
+| Tests | codec/builder/graph module tests, `src-tauri/src/sync_tests/*`, relation-matrix and codec golden tests |
 
 ## 12. Open questions
 

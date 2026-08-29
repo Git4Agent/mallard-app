@@ -181,8 +181,7 @@ projection and rejected by the index, or vice versa.
 `parse_rfc3339` private (`parse_timestamp_value` is its only caller). Keep the
 numeric-epoch seconds-vs-milliseconds heuristic at `:5-23` — chrono does not
 cover that. Confirm first that no corpus record depends on the current
-tolerance; `scripts/claude_corpus_scan_*.py` plus the history tests will show
-it.
+tolerance; use a bounded one-time corpus scan plus the history tests.
 
 ---
 

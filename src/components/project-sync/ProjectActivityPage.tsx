@@ -19,7 +19,7 @@ import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { githubCommitUrl, openExternalUrl } from "./externalLink";
 import LoadingScaffold from "../LoadingScaffold";
-import { compactProjectPath, projectLabel } from "./model";
+import { projectLabel } from "./model";
 import ProviderMark from "../sync-review/ProviderMark";
 import { writeClipboardText } from "../sync-review/clipboard";
 import TopLayer from "../sync-review/TopLayer";
@@ -50,7 +50,6 @@ interface PageProps {
   project: LocalProjectSummary;
   binding: ProjectBinding | null;
   refreshEpoch: number;
-  embedded?: boolean;
   activeStorageId?: string | null;
   activeStorageName?: string | null;
   selectionMode?: "push" | "pull";
@@ -108,7 +107,6 @@ interface ContentProps {
     request: OpenSessionDetailRequest,
     trigger: HTMLButtonElement,
   ) => void;
-  embedded?: boolean;
   comparison?: ThreadSyncComparison | null;
   comparisonLoading?: boolean;
   comparisonError?: string | null;
@@ -1498,7 +1496,7 @@ function providerNoticeSeverity(state: ProviderActivityState): NoticeSeverity {
 export function ProjectChatHistoryContent({
   project, binding, activity, loading, loadingMore, actionError, loadError, onRetryLoad, actionBusyResourceId, actionBusyActionId = null, onShowLess, canShowLess,
   onLoadMore,
-  onSessionAction, onOpenSessionDetail, embedded = false, comparison = null,
+  onSessionAction, onOpenSessionDetail, comparison = null,
   comparisonLoading = false, comparisonError = null, activeStorageName = null,
   selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
   selectionDisabled = false, onToggleResource, onReviewPull, onUnlinkStorage,
@@ -1508,7 +1506,6 @@ export function ProjectChatHistoryContent({
   const [uncommittedCollapsed, setUncommittedCollapsed] = useState(false);
   const [storageOnlyCollapsed, setStorageOnlyCollapsed] = useState(false);
   const label = projectLabel(project);
-  const aliased = label !== project.display_name;
   const sessions = useMemo(
     () => [...(activity?.sessions ?? [])].sort(compareSessions),
     [activity?.sessions],
@@ -1555,7 +1552,7 @@ export function ProjectChatHistoryContent({
   const unmappedReferences = activity?.unmapped ?? [];
   const storageOnlyReferences = unmappedReferences.filter((reference) => sessionsByResource.get(reference.resource_id)?.source === "remote_only");
   const uncommittedReferences = unmappedReferences.filter((reference) => sessionsByResource.get(reference.resource_id)?.source !== "remote_only");
-  const compactSelectionReview = embedded && selectionMode != null;
+  const compactSelectionReview = selectionMode != null;
   const olderEntries = useMemo(() => {
     if (!selectionMode) return [];
     return (comparison?.entries ?? []).filter((entry) => (
@@ -1733,7 +1730,7 @@ export function ProjectChatHistoryContent({
 
   const content = (
       <section
-        className={embedded ? "sync-history-content" : "profile-links-section"}
+        className="sync-history-content"
         aria-label={sectionTitle}
       >
         {/* No header. Branch, counts and refresh are the workspace path bar's
@@ -1784,22 +1781,6 @@ export function ProjectChatHistoryContent({
           ) : null
         ) : (
           <>
-            {!embedded && (
-              <section className="sync-history-project-context" aria-label="Project information">
-                <span className="sync-history-context-item" data-tooltip={`Project directory: ${binding?.canonical_project_root ?? binding?.project_root ?? project.project_root ?? "Not configured"}`} aria-label={`Project directory: ${binding?.canonical_project_root ?? binding?.project_root ?? project.project_root ?? "Not configured"}`} tabIndex={0}>
-                  <Icon name="folder" size={14} /><span>{compactProjectPath(binding?.canonical_project_root ?? binding?.project_root ?? project.project_root ?? "Not configured")}</span>
-                </span>
-                {aliased && <span className="sync-history-context-item" title={`Repository: ${project.display_name}`}><Icon name="git-branch" size={14} /><span className="sync-history-context-name">{project.display_name}</span></span>}
-                {activity.storage_sync.length ? activity.storage_sync.map((storage) => (
-                  <span key={storage.storage_id} className="sync-history-context-item sync-history-storage-item" title={`Storage: ${storage.storage_name}`}>
-                    <Icon name="cloud" size={14} /><strong>{storage.storage_name}</strong>
-                    <span className={storage.last_pull_at ? "recorded" : undefined} data-tooltip={`Last pull: ${formatDate(storage.last_pull_at)}`} aria-label={`Last pull: ${formatDate(storage.last_pull_at)}`} tabIndex={0}><Icon name="download" size={13} /></span>
-                    <span className={storage.last_push_at ? "recorded" : undefined} data-tooltip={`Last push: ${formatDate(storage.last_push_at)}`} aria-label={`Last push: ${formatDate(storage.last_push_at)}`} tabIndex={0}><Icon name="upload" size={13} /></span>
-                  </span>
-                )) : <span className="sync-history-context-item muted" title="No storage linked"><Icon name="cloud" size={14} /><span>No storage</span></span>}
-              </section>
-            )}
-
             {activity.git && storageOnlyReferences.length > 0 && (
               /* Above the timeline, not on it: these rows have no commit and no
                  local file, so the group draws the timeline's frame treatment
@@ -1842,7 +1823,6 @@ export function ProjectChatHistoryContent({
                   </section>
                 )}
                 <section className="sync-history-commit-section" aria-label={`First-parent commits on ${activity.git.selected_branch}`}>
-                  {!embedded && <div className="sync-history-section-heading"><h2>Commit history</h2><span className="sync-history-heading-count" title={`${activity.git.unique_session_count} session${activity.git.unique_session_count === 1 ? "" : "s"} linked to commits`} aria-label={`${activity.git.unique_session_count} session${activity.git.unique_session_count === 1 ? "" : "s"} linked to commits`}><Icon name="message" size={12} />{activity.git.unique_session_count}</span></div>}
                   {activity.git.commits.length === 0 ? (
                     /* An empty rail is still the rail: the gap draws as a card
                        on it, so the page keeps the spine every other state is
@@ -1940,12 +1920,7 @@ export function ProjectChatHistoryContent({
                   && <p className="sync-history-rail-floor">{windowRange} · nothing earlier</p>}
               </div>
             ) : (
-              <section
-                // Embedded, the enclosing region already carries the name; a
-                // second one on the list inside it announces the same thing twice.
-                aria-labelledby={embedded ? undefined : "project-sessions-heading"}
-              >
-                {!embedded && <div className="sync-history-section-heading"><h2 id="project-sessions-heading"><Icon name="message" size={14} />Sessions</h2><span className="sync-history-heading-count" title={`${sessions.length} session${sessions.length === 1 ? "" : "s"}`}><Icon name="message" size={12} />{sessions.length}</span></div>}
+              <section>
                 <div className="sync-history-thread-list flat">{sessions.length
                   ? sessions.map((session) => renderSession(session, session.resource_id))
                   : <div className="sync-history-state">{`No sessions in ${windowRange}.`}</div>}</div>
@@ -2013,10 +1988,7 @@ export function ProjectChatHistoryContent({
       </section>
   );
 
-  if (embedded) {
-    return <div className={`sync-history-page sync-history-embedded${compactSelectionReview ? " sync-history-selection-review" : ""}`}>{content}</div>;
-  }
-  return <main className="sync-main sync-project-links-page sync-git-info-page sync-history-page">{content}</main>;
+  return <div className={`sync-history-page sync-history-embedded${compactSelectionReview ? " sync-history-selection-review" : ""}`}>{content}</div>;
 }
 
 function mergePages(previous: ProjectActivity | null, next: ProjectActivity): ProjectActivity {
@@ -2050,7 +2022,6 @@ export default function ProjectActivityPage({
   project,
   binding,
   refreshEpoch,
-  embedded = false,
   activeStorageId = null,
   activeStorageName = null,
   selectionMode,
@@ -2275,5 +2246,5 @@ export default function ProjectActivityPage({
       setActionBusyActionId(null);
     }
   };
-  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} embedded={embedded} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
+  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
 }

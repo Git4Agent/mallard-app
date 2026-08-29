@@ -39,6 +39,7 @@ function descriptor(
     metadata: {},
     category: "project_files",
     logical_paths: [`project/${path}`],
+    default_selected: false,
   };
 }
 
@@ -151,10 +152,8 @@ test("an explicit Push scan presents new entries selected and locks both directo
       projectContentInventory={inventory}
       projectContentScanned
       showProjectFiles
-      initialStep="project_files"
+      activeStep="project_files"
       onToggle={() => undefined}
-      onUseProjectDefaults={() => undefined}
-      onClear={() => undefined}
       onClose={() => undefined}
       onPush={() => undefined}
     />,
@@ -179,10 +178,7 @@ test("Project file controls stay on the dedicated page", () => {
       projectContentInventory={inventory}
       projectContentScanned
       showProjectFiles
-      initialStep="history"
       onToggle={() => undefined}
-      onUseProjectDefaults={() => undefined}
-      onClear={() => undefined}
       onClose={() => undefined}
       onPush={() => undefined}
     />,
@@ -203,10 +199,8 @@ test("before Scan, Push uses a compact optional-files action", () => {
       projectContentInventory={null}
       projectContentScanned={false}
       showProjectFiles
-      initialStep="project_files"
+      activeStep="project_files"
       onToggle={() => undefined}
-      onUseProjectDefaults={() => undefined}
-      onClear={() => undefined}
       onClose={() => undefined}
       onPush={() => undefined}
       onScanProjectFiles={() => undefined}
@@ -299,10 +293,9 @@ test("Pull project content starts as keep-local and selecting a nested file requ
   const selected = includeRequiredPullProjectDirectories(items, new Set(["file-a"]));
   assert.deepEqual([...selected].sort(), ["dir-docs", "dir-specs", "file-a"]);
 
-  const render = (initialStep: "history" | "project_files") => renderToStaticMarkup(
+  const html = renderToStaticMarkup(
     <RestorePlanView
       projectName="Project B"
-      profileLabel="Profile"
       plan={pullPlan}
       binding={binding}
       readiness={null}
@@ -314,14 +307,11 @@ test("Pull project content starts as keep-local and selecting a nested file requ
       failedResourceIds={new Set()}
       busy={false}
       error={null}
-      initialStep={initialStep}
       onApply={() => undefined}
-      onRefresh={() => undefined}
       onBack={() => undefined}
     />,
   );
 
-  const html = render("history");
   assert.equal((html.match(/role="tab"/g) ?? []).length, 2);
   const history = html.indexOf(">Git &amp; sessions<");
   const projectFiles = html.indexOf(">Project files<");
@@ -337,8 +327,49 @@ test("Pull project content starts as keep-local and selecting a nested file requ
     "undecided file entries keep Pull available so keep-local can advance the base",
   );
 
-  const filesHtml = render("project_files");
-  assert.match(filesHtml, /svg> Select safe additions<\/button>/);
+  const filesHtml = renderToStaticMarkup(
+    <ProjectFilesReviewPage
+      mode="pull"
+      eligibility={pullPlan.project_content_eligibility!}
+      rows={[
+        {
+          resourceId: "dir-docs",
+          relativePath: "docs",
+          entryType: "directory",
+          state: "create_directory",
+          mode: 0o755,
+          sourceMtime: 1,
+          localPresent: false,
+          storagePresent: true,
+          operation: "create_directory",
+        },
+        {
+          resourceId: "dir-specs",
+          relativePath: "docs/specs",
+          entryType: "directory",
+          state: "create_directory",
+          mode: 0o755,
+          sourceMtime: 1,
+          localPresent: false,
+          storagePresent: true,
+          operation: "create_directory",
+        },
+        {
+          resourceId: "file-a",
+          relativePath: "docs/specs/a.md",
+          entryType: "file",
+          state: "add",
+          mode: 0o644,
+          sourceMtime: 1,
+          localPresent: false,
+          storagePresent: true,
+          operation: "add",
+        },
+      ]}
+      selectedIds={new Set()}
+      onToggle={() => undefined}
+    />,
+  );
   assert.match(filesHtml, /aria-label="Apply docs"/);
   assert.match(filesHtml, /Create folder · 2 descendants/);
   assert.match(filesHtml, /<strong>0 selected<\/strong>/);
@@ -359,6 +390,7 @@ test("confirming keep-local still submits an empty approved set so Pull can adva
           applied_action_ids: [],
           failed_actions: [],
           divergences: [],
+          preserved_threads: [],
         };
       },
       getRestoreReadiness: async () => {

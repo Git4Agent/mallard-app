@@ -267,15 +267,15 @@ entirely local and do not use that connection file.
 
 ```sh
 npm run build
-npm run test:frontend-integration
+npm run test:frontend-integration # strict test type-check plus frontend tests
 cargo check --manifest-path src-tauri/Cargo.toml
-cargo test --manifest-path src-tauri/Cargo.toml --lib
-npm run test:storage-catalog-e2e
-npm run test:cli
+npm run test:backend-integration  # all Rust targets plus loopback aimock tests
+npm run test:integration          # all committed standard suites
 ```
 
-The Rust suite includes tests that bind localhost for the stub S3 transport;
-restricted environments may require permission for that test server.
+The backend suite includes Rust and aimock server tests that bind localhost.
+Restricted environments may require permission for these test servers. The
+aimock server tests use fixed local responses and require no credentials.
 
 ### Live Codex API end-to-end test
 
