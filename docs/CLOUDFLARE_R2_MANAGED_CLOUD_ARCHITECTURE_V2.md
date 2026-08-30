@@ -1,86 +1,436 @@
-# Mallard Managed Cloud v2: Cloudflare R2, D1, Identity, Teams, and End-to-End Encryption
+# Mallard Managed Cloud V1: Public and Private Git Collaboration
 
-- **Status:** Proposal
-- **Last reviewed:** August 2, 2026
-- **Scope:** production foundation for a Mallard-operated managed cloud
-- **Current implementation baseline:** Mallard 0.1.2, machine-local schema 1,
-  portable bundle schema 1
-- **Relationship to the earlier proposal:** supersedes
-  [CLOUDFLARE_R2_MANAGED_CLOUD_ARCHITECTURE.md](CLOUDFLARE_R2_MANAGED_CLOUD_ARCHITECTURE.md)
-  for future design and implementation
+- **Status:** Implementation proposal
+- **Last revised:** August 30, 2026
+- **Scope:** Production foundation for the Git-only first release of a
+  Mallard-operated managed cloud
+- **Implementation baseline:** Mallard 0.1.2 has machine-local schema 1,
+  portable bundle schema 1, local-folder storage, and user-owned S3/R2
+  storage. Managed cloud is not implemented.
+- **Authority:** This file defines the complete managed-cloud target. An
+  implementer does not need an earlier plan to use it.
+
+## Reading guide
+
+- Sections 1-4 define product, access, branch, and MR decisions.
+- Section 5 defines the portable bundle and desktop safety contract.
+- Sections 6-10 define cloud infrastructure, trust, storage, D1, and API.
+- Sections 11-14 define user flows, failure handling, operations, and UI.
+- Sections 15-18 define delivery, tests, release criteria, and deferred work.
+- Section 19 lists primary vendor and identity references.
 
 ## 1. Decision
 
-Mallard should offer a managed, multi-tenant cloud provider backed by
-Cloudflare Workers, D1, and private R2 storage. The service is operated by
-Mallard and is distinct from the existing local-folder and user-owned R2
-providers.
+Mallard will offer a managed cloud service on Cloudflare. The service will use
+Workers for the API, D1 for identity and collaboration state, and private R2
+storage for immutable bundle objects.
 
-The service has four non-negotiable properties:
+The managed cloud will support:
 
-1. The desktop application never receives the managed R2 credentials or an
-   administrative service token.
-2. The current schema-1 bundle protocol remains the portable data model.
-3. D1 authorizes every account, workspace, repository, and object operation;
-   an object identifier alone grants no access.
-4. Every repository object body is encrypted before it leaves the Tauri Rust
-   backend. Mallard's cloud service can route and account for objects but
-   cannot read heads, tags, manifests, commits, or payloads.
+- public and private workspaces;
+- public and private repositories;
+- invitation-only write access;
+- two workspace roles: Admin and Member;
+- configurable protected branches for Git projects;
+- direct Member pushes to branches that are not protected;
+- merge requests for Member changes to protected Git branches;
+- manual merge-request rejection by an Admin; and
+- automatic rejection when a controlled target has a conflict.
 
-This is a master architecture, not a single implementation milestone. Delivery
-is divided into four independently reviewable programs:
+Managed Cloud V1 supports Git repositories only. Repository creation rejects
+a project that is not Git-managed. Non-Git cloud repositories and their
+review workflow are deferred.
 
-1. Cloud control plane and object gateway.
-2. Authentication, users, devices, and team management.
-3. End-to-end encryption, key distribution, rotation, and recovery.
-4. Desktop managed-provider integration and production rollout.
+Mallard will not encrypt repository content in the application. The service
+can read stored manifests, conversations, metadata, and payloads. Standard
+HTTPS transport security, Cloudflare storage protection, token signing, token
+hashing, and operating-system credential storage remain mandatory. They are
+platform security controls, not Mallard content encryption.
 
-## 2. Goals and non-goals
+The following properties are mandatory:
 
-### 2.1 Goals
+1. The desktop application never receives managed R2 credentials or a service
+   administration token.
+2. The schema-1 bundle contract in section 5 remains the portable data model.
+3. Every write is authenticated and authorized in D1.
+4. A public identifier does not grant write access.
+5. A private identifier does not grant read access.
+6. All direct head changes use compare-and-swap.
+7. All MRs pin an exact source head, target head,
+   policy revision, and chat.
+8. A conflicting MR is rejected. Mallard does not auto-merge it.
+9. The Push review and Pull review defined in sections 5.5 and 5.6 remain
+   mandatory.
 
-- Let one user securely sync Mallard projects across multiple devices without
-  provisioning a Cloudflare account or copying R2 credentials.
-- Support personal and team workspaces with workspace-wide roles.
-- Preserve Mallard's immutable-object publication order and single-winner head
-  compare-and-swap behavior.
-- Keep local-folder and BYO R2 behavior unchanged.
-- Make authentication, quota accounting, retries, deletion, and partial
-  failure behavior explicit and testable.
-- Provide end-to-end content confidentiality from the first managed-cloud
-  release.
-- Establish a production-shaped operational model even if the initial rollout
-  uses a small allowlist.
+## 2. Requirement resolution
 
-### 2.2 Deferred work
+This table converts the product notes into explicit rules.
 
-The first design deliberately excludes:
+| Product note | Decision |
+| --- | --- |
+| Remove encryption | Remove client-side and end-to-end content encryption. Remove key epochs, envelopes, recovery keys, device key approval, and ciphertext APIs. |
+| Demo repository | Use an ordinary public repository in a public Mallard workspace. Anonymous users can read it. Invited workspace Members can edit it under branch policy. |
+| Public workspace, invitation to write | Anyone can read public content. Only an accepted Admin or Member can write. Joining a workspace always requires an invitation. |
+| Public / Private | Both workspaces and repositories have visibility. A repository is publicly readable only when both values are public. |
+| Combine Owner and Admin | Use only Admin. Do not retain Owner as a role or compatibility alias. |
+| Member | A Member can read workspace content, push to branches that are not protected, and open MRs for protected branches. A Member cannot administer the workspace. |
+| Non-Git repository | Exclude it from V1. Managed repository creation accepts Git projects only. |
+| Git main | Protect the primary branch by default. The initial UI value is main. A Member must raise a merge request. |
+| Git develop | Develop is not protected by default. A Member can push directly after the normal local Push review. |
+| Admin branch configuration | An Admin can protect or unprotect exact Git branch names. A Member cannot push directly to a protected branch. |
+| Member MR for a protected branch | Supported. The app must start one new provider chat and one MR-scoped managed source ref. An existing chat cannot be attached. |
+| Merge conflict | Reject the MR immediately. Do not add rebase, auto-merge, or conflict-resolution UI. |
+| Reject MR or pull request | An Admin can reject an open MR. The rejection is final and audited. The user must start a new MR and a new chat. |
 
-- billing, paid subscriptions, invoices, and payment-provider integration;
-- direct email/password and email-code login;
-- self-hosting the managed service;
-- per-repository access-control lists;
-- a web account-management portal;
-- public demo repositories or a public gallery;
-- regional shards, including US/EU jurisdiction shards, or customer-selected
-  residency;
-- shared-CDN caching of private objects;
-- presigned direct R2 access;
-- Durable Objects;
-- server-side plaintext search, previews, malware scanning, or embeddings; and
-- moving a repository between workspaces in place.
+## 3. Product and access model
 
-GitHub and Google are the public identity providers. Cloudflare Email Service
-is used only for team invitations and security notices, not as an
-authentication provider.
+### 3.1 Terms
 
-## 3. Compatibility with current Mallard
+**Workspace**
 
-### 3.1 Portable bundle protocol
+A workspace is the membership and administration boundary. A role applies to
+all repositories in that workspace.
 
-The managed provider preserves the current portable layout and schema:
+**Managed repository**
 
-```text
+A managed repository stores one Mallard project bundle and its managed-cloud
+refs. It does not replace the project's Git source repository.
+
+**Ref**
+
+A ref is a managed-cloud pointer to one schema-1 bundle head. Each ref maps to
+one validated Git branch name.
+
+**Controlled target**
+
+A controlled target is a protected Git branch.
+
+**Merge request**
+
+A merge request, or MR, proposes a Member change to a protected Git branch.
+Some Git hosts call this a pull request. A Mallard MR changes Mallard bundle
+state. It does not merge source code in the Git host.
+
+**Provider chat**
+
+A provider chat is one project-scoped Codex or Claude conversation. Mallard
+assigns it a portable cloud thread ID. The cloud thread ID is an opaque
+Mallard identifier. It is not a machine-local provider session ID.
+
+**Repository fingerprint**
+
+The repository fingerprint is SHA-256 of the normalized origin remote URL.
+The desktop obtains the URL with Git, removes URL user information, normalizes
+equivalent GitHub URL forms, and hashes the result. It never uploads the raw
+remote URL. Managed repository creation fails when the project has no usable
+origin remote or the fingerprint cannot be computed.
+
+The featured demo catalog is the only V1 exception. An internal publisher can
+attach a separately reviewed public HTTPS clone URL to a featured repository.
+The URL must contain no user information, query, fragment, or credential.
+
+### 3.2 Visibility
+
+Workspaces and repositories each have one visibility value:
+
+- public; or
+- private.
+
+A repository has effective public visibility only when:
+
+~~~text
+workspace.visibility = public
+AND repository.visibility = public
+AND workspace.state = active
+AND repository.state = active
+~~~
+
+The access result is:
+
+| Workspace | Repository | Anonymous read | Member read | Write |
+| --- | --- | --- | --- | --- |
+| Public | Public | Yes | Yes | Invitation and role policy |
+| Public | Private | No | Yes | Invitation and role policy |
+| Private | Private | No | Yes | Invitation and role policy |
+| Private | Public | Invalid configuration | Not applicable | Not applicable |
+
+The service must not allow a public repository in a private workspace.
+
+Visibility changes use these rules:
+
+- Only an Admin can change visibility.
+- Changing a private workspace to public does not publish any repository.
+  Each repository remains private until an Admin publishes it.
+- Changing a public workspace to private atomically changes all repositories
+  to private.
+- Changing a repository from private to public requires a current full Push
+  review and explicit acknowledgement of public disclosure.
+- Changing a public resource to private increments its visibility generation
+  before the API returns success. Old public cache keys then become unusable.
+- A best-effort cache purge follows the visibility transaction.
+- The service never exposes a private resource because the caller knows its
+  workspace, repository, ref, object, or MR ID.
+
+Public repository content can include conversations and provider state.
+Before first publication, the UI must explain that the content is readable by
+anyone and that Mallard cannot revoke copies that other users downloaded.
+
+### 3.3 Roles
+
+The workspace has only two roles.
+
+| Capability | Public reader | Member | Admin |
+| --- | --- | --- | --- |
+| Read effective-public content | Yes | Yes | Yes |
+| Read private workspace content | No | Yes | Yes |
+| Direct push to an unprotected Git branch | No | Yes | Yes |
+| Open an MR for a protected branch | No | Yes | Yes |
+| Direct push to a protected Git branch | No | No | Yes |
+| Accept or reject an MR | No | No | Yes |
+| Create or archive a repository | No | No | Yes |
+| Change repository visibility | No | No | Yes |
+| Configure protected branches | No | No | Yes |
+| Invite or remove a Member | No | No | Yes |
+| Promote or demote an Admin | No | No | Yes |
+| Change workspace visibility | No | No | Yes |
+| Delete the workspace | No | No | Yes |
+
+All pushes use the Push review in section 5.5. Admin status does not bypass
+capture review, warning acknowledgement, revision checks, or
+compare-and-swap.
+
+Role rules:
+
+- A new workspace starts with one Admin.
+- A workspace must always have at least one active Admin.
+- Admin and Member are the only serialized role values.
+- Owner and Viewer do not exist.
+- An invitation always creates a Member.
+- An Admin can promote an accepted Member in a separate action.
+- An Admin cannot demote, remove, or leave if that action removes the last
+  active Admin.
+- Roles apply to all workspace repositories. Per-repository collaborator roles
+  are not part of the first release.
+
+### 3.4 Invitations
+
+Public visibility grants read access only. It never grants membership.
+
+An Admin invites a person by verified email. The invitation:
+
+- grants the Member role;
+- expires after seven days;
+- contains a random, single-use token;
+- is accepted only by an authenticated identity with the matching verified
+  email;
+- becomes active only after explicit acceptance; and
+- can be revoked before acceptance.
+
+D1 stores a keyed email lookup hash for matching. The delivery address can be
+stored only until the invitation email is sent. The service then removes the
+delivery address. No application-level field encryption is used.
+
+The invitation token is sent in a URL fragment or transcription code. The
+desktop sends it in a POST body. It must not appear in an API path, query
+string, referrer, analytics field, or log.
+
+### 3.5 Public demo
+
+The official demo uses the same model as every other repository:
+
+- The Mallard Demo workspace is public.
+- The demo repository is public.
+- The repository is marked as featured for catalog display.
+- The featured record contains the reviewed public Git clone URL.
+- The featured flag changes discovery only. It grants no access.
+- Anonymous users can list and pull accepted demo content.
+- An Admin invites editors as workspace Members.
+- The primary branch is main and is protected.
+- Develop is not protected by default.
+- A Member can push to develop.
+- A Member must open an MR to update main.
+- Only an Admin can accept or reject the MR.
+
+The Mallard Demo workspace must contain only content that can be public. It
+must not share membership with an internal or private workspace.
+
+There is no special demo bucket, guest token, or demo write path. This avoids
+a second authorization model.
+
+## 4. Project, branch, and review behavior
+
+### 4.1 Git-only repository scope
+
+V1 repository creation accepts only a canonical project root for which Git
+confirms that the path is inside a working tree. The desktop records the
+repository fingerprint and Git remote identity without storing a local
+absolute path in cloud data.
+
+Managed refs use validated Git branch names. The configured primary branch is
+protected by default. The initial primary-branch value is main. All other
+branches are not protected by default. Develop is therefore directly writable
+by a Member unless an Admin protects it.
+
+An Admin can add or remove protection for exact branch names.
+
+The first release does not support branch-name patterns, wildcards,
+role-specific exceptions, required reviewer counts, scheduled rules, or
+external status checks.
+
+If the project stops being Git-managed, managed Push and MR creation fail
+closed. The user must restore a valid Git working tree or unlink the managed
+repository.
+
+### 4.2 Write decision
+
+| Target | Member action | Admin action |
+| --- | --- | --- |
+| Branch is not protected | Direct Push | Direct Push |
+| Branch is protected | Merge request | Direct Push or Merge request |
+
+The authorization decision occurs again in the same D1 transaction that
+changes a ref. A stale desktop policy view cannot authorize a push.
+
+Every branch-policy change increments repository policy_revision. Direct-push
+plans and MRs pin this value.
+
+### 4.3 New-chat requirement
+
+Each MR must use one new provider chat.
+
+The desktop flow is:
+
+1. The Member selects Create merge request.
+2. Mallard reads the current protected target.
+3. Mallard records the checked-out source branch, protected target branch,
+   target commit ID, and initial merge-base commit ID. The source branch must
+   differ from the protected target branch.
+4. Mallard starts a new provider chat for the work.
+5. Mallard submits the new cloud thread ID and pinned coordinates.
+6. D1 verifies that the chat is unused, creates the MR, and creates its source
+   ref from the exact target head in one transaction.
+7. The user makes changes in that chat.
+8. Mallard performs the Push review in section 5.5 against the MR source ref.
+9. The Member opens the MR. Mallard freezes the current source commit ID and
+   recalculates the merge-base commit ID.
+
+The server enforces one MR per cloud thread ID. An existing chat cannot be
+attached to an MR. A chat used by a rejected, withdrawn, or accepted MR cannot
+be reused for another MR.
+
+This rule keeps the UI and audit history simple. One MR has one chat, one
+source ref, one target ref, and one decision.
+
+### 4.4 Merge-request states
+
+The state model is:
+
+~~~mermaid
+stateDiagram-v2
+    [*] --> draft
+    draft --> open: Member opens MR
+    draft --> withdrawn: Author cancels
+    open --> accepted: Admin accepts exact heads
+    open --> rejected: Admin rejects
+    open --> rejected: Target conflict
+    open --> rejected: Git conflict reported
+    open --> withdrawn: Author withdraws
+    accepted --> [*]
+    rejected --> [*]
+    withdrawn --> [*]
+~~~
+
+Rules:
+
+- A draft source ref can advance through reviewed pushes.
+- Opening the MR freezes the exact source head.
+- An open MR cannot receive more commits.
+- Acceptance moves the target to the exact frozen source head.
+- Rejection does not change the target.
+- Withdrawal does not change the target.
+- Accepted, rejected, and withdrawn MRs are terminal.
+- A terminal MR cannot reopen.
+- A retry requires a new MR and a new chat.
+- MR draft content and review events are visible only to workspace
+  Members and Admins in the first release.
+
+### 4.5 Conflict policy
+
+The first release uses strict fast-forward acceptance. It does not attempt a
+three-way content merge.
+
+An MR pins:
+
+- target ref ID;
+- target head bytes and ETag at MR creation;
+- source ref ID;
+- source head bytes and ETag when the MR opens;
+- repository policy_revision;
+- Git source branch, target branch, source commit ID, target commit ID, and
+  merge-base commit ID;
+- chat thread ID; and
+- MR revision.
+
+An Admin acceptance succeeds only when:
+
+- the MR is open;
+- the source head still matches the frozen source ETag;
+- the target head still matches the base target ETag;
+- the policy revision still permits the MR;
+- the Admin is active; and
+- all referenced immutable objects pass integrity checks.
+
+If the target head changed, the service defines the result as a conflict. It
+atomically changes the MR to rejected with reason target_changed. This
+rule can reject changes that a more complex merge engine could combine. The
+conservative result is intentional.
+
+For a Git project, the Admin desktop also performs a non-mutating Git conflict
+check between the source and target branches before it submits acceptance. If
+Git reports a conflict, the desktop submits rejection with reason
+git_conflict. Mallard does not show a conflict editor.
+
+The check fetches the exact commits through the user's configured Git remote
+and credentials. It runs in an isolated temporary Git work area and does not
+change the user's checked-out branch or working tree. Git credentials do not
+go to the managed cloud.
+
+If the protected Git target commit changed after MR creation, the desktop
+submits rejection with reason git_target_changed. If the desktop cannot fetch
+and verify the pinned Git commits, acceptance stops without changing the MR.
+
+The managed service does not host Git objects. Therefore, the server can
+authoritatively enforce Mallard bundle-head conflicts, but it cannot
+independently prove a source-code merge result. Git source protection remains
+the responsibility of the linked Git host or remote.
+
+### 4.6 Manual rejection
+
+An Admin can reject any open MR.
+
+The rejection records:
+
+- the MR revision;
+- the Admin user ID;
+- a bounded reason code;
+- an optional bounded comment;
+- the decision time; and
+- the MR source and target head coordinates.
+
+The API returns the terminal MR. It does not delete immutable objects or
+the source ref in the MR decision path. A retention job can remove unreachable
+draft data later.
+
+## 5. Portable bundle and desktop contract
+
+This section defines the complete contract between the desktop, the managed
+adapter, the cloud API, and stored bundle data.
+
+### 5.1 Closed logical namespace
+
+Every project bundle uses this logical layout:
+
+~~~text
 .mallard/
 |-- _storage.json
 `-- v1/repositories/<bundle-id>/
@@ -89,1965 +439,1727 @@ The managed provider preserves the current portable layout and schema:
     |-- _objects/<payload-sha256>
     |-- _manifests/<revision>-<commit-id>.json
     `-- _commits/<revision>-<commit-id>.json
-```
+~~~
 
-`_uploads/` remains only a reserved logical namespace. The current publisher
-does not write it, and the managed-cloud multipart protocol does not revive it.
-Multipart state is service-local D1/R2 state, not portable bundle state.
+The namespace is closed. A client can use only the listed roots and validated
+descendants. The Worker rejects:
 
-Portable bundle manifests remain schema 1. The managed adapter must preserve
-the current `BundleObjectStore` contract:
+- an absolute key;
+- an empty path segment;
+- dot or dot-dot segments;
+- a backslash;
+- a control character;
+- an overlength key;
+- a bundle ID that does not match the authorized repository; and
+- an unknown root or file name.
 
-```rust
-trait BundleObjectStore {
-    fn get(&self, key: &ObjectKey) -> Result<Option<StoredObject>, String>;
-    fn get_many(&self, keys: &[ObjectKey])
-        -> Result<Vec<Option<StoredObject>>, String>;
-    fn put_immutable(&self, key: &ObjectKey, bytes: &[u8])
-        -> Result<ImmutablePutOutcome, String>;
-    fn put_many(&self, objects: Vec<(ObjectKey, Bytes)>)
-        -> Result<Vec<ImmutablePutOutcome>, String>;
-    fn compare_and_swap(
-        &self,
-        key: &ObjectKey,
-        expectation: &CasExpectation,
-        bytes: &[u8],
-    ) -> Result<CasOutcome, String>;
-    fn list(
-        &self,
-        prefix: &ObjectPrefix,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<StoreListPage, String>;
-}
-```
+The bundle ID is a validated random identifier. It is portable. Workspace IDs,
+managed repository IDs, ref IDs, storage IDs, local project IDs, device IDs,
+and machine paths are not portable.
 
-The adapter returns decrypted plaintext bytes to the bundle engine while
-retaining the service's ciphertext ETag in `StoredObject.etag`. The bundle
-engine therefore continues to verify plaintext manifest and payload hashes,
-and its existing CAS logic remains unchanged.
+### 5.2 Document roles
 
-### 3.2 Machine-local configuration
+All JSON documents use schema_version 1 and reject unknown or invalid
+coordinates.
 
-Adding a third storage kind is a machine-local schema change. The implementation
-must perform one atomic, one-way migration from `sync_config.json` schema 1 to
-schema 2. After migration, only schema 2 is read or written; there is no
-permanent dual execution path.
+**Storage marker**
 
-The serialized storage variants become conceptually:
+The storage marker has this exact value:
 
-```text
-local    -> id, name, local_dir, exclusions
-s3       -> id, name, bucket, account/endpoint/region, credential references,
-            conditional-write capability, exclusions
-managed  -> id, name, service_base_url, workspace_id, exclusions
-```
-
-An initial flat DTO may retain empty fields used by other variants, but
-`StorageKind::Managed` must be explicit in Rust and `"managed"` must be
-explicit in TypeScript. A managed record contains no access token, refresh
-token, recovery material, private key, or R2 key.
-
-Non-secret account and device references live in a bounded, atomic
-`~/.mallard/cloud_state.json` document with its own schema and revision.
-Refresh tokens, device private keys, account key packages, and recovery
-material live in the platform keychain:
-
-- macOS Keychain;
-- Windows Credential Manager; and
-- Linux Secret Service.
-
-Managed cloud is unavailable when a supported keychain cannot be opened.
-There is no plaintext fallback.
-
-### 3.3 Storage marker
-
-The managed adapter synthesizes the existing marker:
-
-```json
+~~~json
 {"format":"mallard-storage","layout_version":1}
-```
+~~~
 
-The Worker does not allocate a tenant object for this marker. A matching
-immutable `put` returns `AlreadyPresent`; any other value is rejected locally.
-This keeps `BundleEngine::open` behavior aligned across all providers.
+It identifies the storage layout. It is not repository content. The managed
+adapter synthesizes it. A matching immutable write returns AlreadyPresent.
+Any other value is rejected.
 
-## 4. Cloudflare topology
+**Repository tag**
 
-```mermaid
+The tag is bounded listing metadata. It contains:
+
+- schema version;
+- bundle ID;
+- display name;
+- bundle kind, which is project;
+- current observed revision;
+- update time;
+- resource count; and
+- file count.
+
+The tag is not authoritative. A reader must validate the head and manifest.
+
+**Head**
+
+The head is the only authoritative mutable bundle pointer. It contains:
+
+- schema version;
+- bundle ID;
+- bundle kind;
+- monotonically increasing revision;
+- commit ID;
+- manifest logical key;
+- exact manifest SHA-256;
+- exact manifest byte length; and
+- update time.
+
+The head changes only with compare-and-swap against an absent value or an
+exact prior ETag. A failed comparison never overwrites the winner.
+
+**Manifest**
+
+The manifest is one immutable, complete snapshot. It contains:
+
+- schema version;
+- repository revision;
+- commit ID;
+- update time;
+- bundle identity;
+- privacy-preserving publishing origin; and
+- a map of independently revisioned scopes.
+
+The bundle identity contains the bundle ID, display name, bundle kind
+project, and a repository fingerprint. The fingerprint is a SHA-256 value.
+It is not a path or credential. Managed Cloud V1 requires the fingerprint
+because every repository is Git-managed.
+
+Scope keys are:
+
+- project; or
+- provider:<provider-key>.
+
+Each scope contains:
+
+- its revision and canonical content SHA-256;
+- a reviewed capture and apply recipe;
+- live resource descriptors;
+- regular-file entries;
+- directory entries;
+- typed conversation entries where supported; and
+- typed tombstones.
+
+A file entry contains a resource ID, SHA-256, byte length, source modification
+time, immutable object key, and optional safe permission bits. A directory
+entry contains a resource ID, modification time, and optional safe permission
+bits. Modes cannot contain special permission bits.
+
+The portable schema has a project scope. Managed Cloud V1 rejects ordinary
+project-file entries, project-directory entries, and their tombstones in that
+scope. Git source travels through Git. A provider scope can contain only that
+provider's conversations and selected provider state. References cannot cross
+scope boundaries.
+
+**Commit record**
+
+The immutable commit record contains:
+
+- schema version;
+- bundle ID;
+- revision;
+- commit ID;
+- manifest key and SHA-256;
+- creation time;
+- optional previous commit ID;
+- added, changed, and removed file counts; and
+- privacy-preserving publishing origin.
+
+The commit record is history. The head is authority.
+
+**Payload object**
+
+Each payload object is stored at _objects/<sha256>. The bytes must match the
+key. Objects are immutable and scoped to one managed repository. Equal bytes
+in different repositories do not grant cross-repository access.
+
+### 5.3 Publication invariants
+
+One publication performs these steps:
+
+1. Validate the repository, ref, expected head, and policy revision.
+2. Verify that every retained manifest entry still has its immutable object.
+3. Detect a semantic no-op and write nothing when the snapshot did not change.
+4. Write new payload objects with create-only semantics.
+5. Serialize the immutable manifest once.
+6. Record its exact byte length and SHA-256.
+7. Write the manifest with create-only semantics.
+8. Write the immutable commit record.
+9. Compare-and-swap the ref head.
+10. Update the non-authoritative tag on a best-effort basis.
+11. Commit machine-local accepted bases only after the head succeeds.
+
+Readers cannot see an incomplete publication because only a successful head
+change makes a revision authoritative.
+
+Revision, commit ID, manifest key, manifest hash, and bundle ID must agree
+across the head, manifest, and commit record. Every mismatch is an integrity
+failure.
+
+### 5.4 Managed object-store adapter
+
+The desktop uses one object-store contract for local folders, user-owned
+S3/R2, and managed cloud. The required operations are:
+
+| Operation | Contract |
+| --- | --- |
+| get_metadata | Read bounded metadata bytes and an ETag |
+| stage_verified | Stream one object to a private temporary file and return it only after exact length and SHA-256 verification |
+| stage_many_verified | Perform bounded concurrent verified reads while preserving request order |
+| put_immutable | Create exact bytes or confirm identical existing bytes |
+| put_many | Perform bounded concurrent immutable writes while preserving request order |
+| compare_and_swap | Create when absent or replace only an exact prior ETag |
+| list | Return bounded validated keys and an opaque cursor |
+| delete | Delete one exact validated object for authorized lifecycle work; a missing object is success |
+
+There is no API operation that accepts an arbitrary delete prefix.
+
+A managed adapter instance is bound to:
+
+- one service URL;
+- one managed workspace ID;
+- one managed repository ID; and
+- one managed ref ID.
+
+The adapter projects the selected ref into the portable single-head contract:
+
+- get_metadata for _head.json reads the selected D1 ref;
+- compare_and_swap for _head.json changes the selected D1 ref;
+- get_metadata for _tag.json reads the bounded repository tag in D1;
+- immutable reads and writes map to private R2 through the Worker;
+- list returns only authorized logical keys; and
+- delete is available only to explicit lifecycle operations.
+
+Local-folder and user-owned S3/R2 providers have one head per bundle. They do
+not gain cloud roles, visibility, refs, or MRs.
+
+### 5.5 Capture and Push review
+
+Push is always review-first.
+
+The desktop performs these steps:
+
+1. Resolve the canonical local project binding and selected provider homes.
+2. Detect whether the project is Git-managed.
+3. Read and verify the selected remote ref head and manifest.
+4. Discover project-scoped conversations and allowed provider state.
+5. Capture candidate metadata and bytes into private temporary files.
+6. Compare each candidate with the accepted local base and remote manifest.
+7. Classify each item as local-only, remote-only, ahead, synchronized, or
+   conflict.
+8. Show exact additions, changes, removals, warnings, and retained remote
+   entries.
+9. Let the user select the exact resources to publish.
+10. Require acknowledgement for credential-shaped, executable, or public
+    content warnings.
+11. Create a bounded plan that pins configuration revision, remote head ETag,
+    policy revision, source digests, selection, warning acknowledgements, and
+    expiry.
+12. Recheck every pin before publication.
+13. Publish by the ordering in section 5.3.
+
+Capture can include:
+
+- selected project-scoped Codex and Claude conversations;
+- selected provider memory and supported provider state;
+- portable recipes and resource metadata; and
+- Git commit, branch, and conversation-mapping metadata.
+
+Capture cannot include:
+
+- an access token, refresh token, OAuth code, cookie, private key, or provider
+  credential store;
+- the complete provider home;
+- an absolute local path;
+- a storage credential or endpoint secret;
+- a local exclusion or trust decision;
+- a backup, receipt, staging, or temporary file;
+- a symlink, socket, device, FIFO, or other special file; or
+- a project-scope ordinary file, directory, or project-content tombstone; or
+- any source file from the Git working tree.
+
+Source files always travel through Git. The Push review can include Git
+metadata and mapped conversations, but it cannot upload source files from the
+working tree.
+
+### 5.6 Pull review and local apply
+
+Pull is also review-first. The service cannot trigger a local apply.
+
+The desktop performs these steps:
+
+1. Read the exact ref head.
+2. Stage and verify the manifest by its pinned length and SHA-256.
+3. Validate every repository, revision, commit, scope, and object coordinate.
+4. Compare remote entries with local content and accepted bases.
+5. Build a bounded plan with exact target paths and actions.
+6. Show creates, overwrites, preserved local items, conflicts, optional
+   deletions, warnings, and manual actions.
+7. Let the user approve the exact actions.
+8. Pin configuration revision, head ETag, manifest digest, local target
+   digests, action selection, warning acknowledgements, and expiry.
+9. Stage only the approved payloads and verify each payload.
+10. Recheck every pin immediately before apply.
+11. Create local backups before replacement.
+12. Apply with atomic file replacement where supported.
+13. Write a bounded receipt only after the action result is known.
+
+Deletion is opt-in:
+
+- A file deletion requires the exact expected local digest.
+- A directory deletion can target only the exact expected empty directory.
+- Directory deletion is never recursive.
+- A changed local target blocks deletion and becomes a manual action.
+
+No Pull operation writes outside validated project or provider roots. Pull
+rejects symlinks, special files, traversal, path aliases, and targets that
+escape after canonical resolution.
+
+### 5.7 Git boundary
+
+Git-managed source travels through the configured Git remote. Managed cloud
+stores Mallard bundle history, selected agent conversations, provider state,
+and metadata.
+
+A managed branch ref can use the same name as a Git branch. The matching name
+supports history mapping. It does not make Mallard a Git remote.
+
+A Mallard MR:
+
+- controls one Mallard bundle target ref;
+- records the Git source branch, target branch, and commit coordinates;
+- does not push Git commits;
+- does not create or merge a Git-host pull request;
+- does not change the Git default branch; and
+- does not replace Git-host branch protection.
+
+The MR review must show this boundary.
+
+### 5.8 Machine-local state
+
+Machine-local state lives under ~/.mallard and is never portable bundle
+content.
+
+The first managed-cloud implementation performs one atomic, one-way migration
+from sync_config.json schema 1 to schema 2. After success, it reads and writes
+only schema 2. It does not retain a second execution path.
+
+Storage variants are:
+
+~~~text
+local
+  id, name, local directory, local exclusions
+
+s3
+  id, name, bucket, endpoint/account/region, credential references,
+  conditional-write capability, local exclusions
+
+managed
+  id, name, service URL, workspace ID, local exclusions
+~~~
+
+A project-to-storage binding stores the selected managed repository ID and ref
+ID, canonical local Git root, and expected repository fingerprint. It also
+stores provider-home and accepted-base references. Those machine-local values
+do not enter a portable manifest.
+
+Bounded, atomic ~/.mallard/cloud_state.json schema 1 stores:
+
+- local document revision;
+- Mallard user ID;
+- device ID;
+- non-secret session-family reference;
+- login and last-refresh times; and
+- service environment identifier.
+
+Access and refresh tokens live only in the operating-system keychain.
+
+Normal JSON configuration contains no:
+
+- R2 credential;
+- service administration token;
+- access or refresh token;
+- provider credential;
+- content key;
+- account key;
+- device private key;
+- key epoch;
+- key envelope; or
+- recovery package.
+
+## 6. Cloudflare architecture
+
+### 6.1 Topology
+
+~~~mermaid
 flowchart LR
-    APP["Mallard desktop<br/>Rust auth + E2EE + ManagedBundleObjectStore"]
-    EDGE["Cloudflare custom domain<br/>TLS + WAF + rate limiting"]
-    API["Public API Worker<br/>authentication + authorization + object gateway"]
-    IDP["GitHub / Google<br/>OAuth and OIDC identity"]
-    D1["D1 control plane<br/>users, workspaces, ACLs, keys,<br/>object index, quotas, jobs, audit"]
-    R2I["Private immutable R2<br/>encrypted unique physical objects<br/>30-day bucket lock"]
-    R2M["Private mutable R2<br/>encrypted head and tag objects"]
-    Q["Queues + DLQ<br/>reconciliation and purge acceleration"]
-    CRON["Cron Worker<br/>durable due-job scanner"]
-    EMAIL["Cloudflare Email Service<br/>invitations and security notices"]
-    ADMIN["Access-protected internal routes<br/>support and operations"]
-    OBS["Workers Logs / Logpush<br/>sanitized operational telemetry"]
+    READER["Public reader"]
+    APP["Mallard desktop<br/>Tauri Rust managed adapter"]
+    EDGE["Cloudflare custom domain<br/>TLS, web application firewall, rate limits"]
+    API["Public API Worker<br/>auth, policy, object gateway"]
+    IDP["GitHub and Google<br/>OAuth and OpenID Connect identity"]
+    D1["D1 control plane<br/>users, visibility, roles, refs,<br/>MRs, quotas, jobs, audit"]
+    R2I["Private immutable R2<br/>plaintext bundle objects"]
+    R2S["Private staging R2<br/>multipart uploads"]
+    CACHE["Workers Cache<br/>effective-public immutable reads"]
+    Q["Queue and dead-letter queue<br/>cleanup and reconciliation"]
+    CRON["Cron Worker<br/>due-job scanner"]
+    EMAIL["Email delivery<br/>invitations and notices"]
+    ADMIN["Access-protected internal API"]
+    OBS["Workers Logs and Logpush<br/>sanitized operations data"]
 
-    APP -->|"HTTPS + DPoP"| EDGE
+    READER -->|"HTTPS read"| EDGE
+    APP -->|"HTTPS read and write"| EDGE
     EDGE --> API
-    API <-->|"OAuth/OIDC"| IDP
+    API <-->|"OAuth or OIDC"| IDP
     API --> D1
-    API -->|"R2 binding"| R2I
-    API -->|"R2 binding"| R2M
+    API --> R2I
+    API --> R2S
+    API --> CACHE
     API --> Q
     API --> EMAIL
     CRON --> D1
     CRON --> Q
     Q --> D1
     Q --> R2I
-    Q --> R2M
+    Q --> R2S
     ADMIN --> API
     API --> OBS
-```
+~~~
 
-### 4.1 Cloudflare resources
+### 6.2 Cloudflare resources
 
 The first production deployment uses:
 
 - one public API Worker on a Mallard-controlled custom domain;
-- one D1 database for the global control plane;
-- one private immutable R2 bucket;
-- one private mutable R2 bucket;
-- one work queue and one dead-letter queue;
-- one Cron trigger for due-job discovery and stale-state reconciliation;
-- Cloudflare Worker Secrets or Secrets Store bindings for OAuth client
-  secrets, token-signing keys, email lookup HMAC keys, and service-side field
-  encryption keys;
-- Cloudflare Email Service for invitations and security notifications;
-- WAF and rate-limiting rules on the public domain;
-- a separate internal hostname protected by Cloudflare Access; and
-- Workers Logs with optional Logpush for retained operational telemetry.
-
-The service is a single global deployment using Cloudflare automatic
-placement. Regional data shards are a later architecture, not a hidden
-requirement of this one.
-
-### 4.2 Why no Durable Object
-
-Mallard already requires object-store CAS for the one mutable authority:
-`_head.json`. R2 conditional operations supply that primitive. D1 transactions,
-unique constraints, quota triggers, and explicit upload state machines cover
-the remaining coordination.
-
-Adding a Durable Object per workspace would create a second application
-database and a second recovery/migration path without removing the unavoidable
-D1-to-R2 partial-failure boundary. It should be reconsidered only after
-measured D1 contention demonstrates a need.
-
-### 4.3 Network boundary
-
-The Worker is the only public storage gateway. The desktop never receives
-official-service R2 credentials and cannot address a physical object key.
-
-The R2 buckets have no public custom domain and no `r2.dev` production path.
-Only bound Workers can read or write them. The public API never accepts:
-
-- an R2 bucket name;
-- a physical R2 key;
-- a tenant prefix;
-- a Cloudflare account ID; or
-- arbitrary Worker callback or redirect destinations.
-
-Private object responses use `Cache-Control: private, no-store` in v1. The
-desktop's existing bounded in-memory cache may contain verified plaintext
-during one process lifetime, but the managed provider does not add a plaintext
-disk cache.
-
-## 5. Authority and trust boundaries
-
-### 5.1 Sources of truth
-
-| Concern | Authority |
-| --- | --- |
-| User identity and account state | D1 |
-| Device and refresh-session state | D1 |
-| Workspace membership and role | D1 |
-| Workspace key-grant metadata | D1; envelope contents are client-authenticated |
-| Repository ownership and lifecycle | D1 |
-| Logical immutable-key allocation | D1 unique constraint |
-| Quota reservation and usage ledger | D1 |
-| Immutable ciphertext bytes | Immutable R2 bucket |
-| Mutable head/tag ciphertext and CAS ETag | Mutable R2 bucket |
-| Async work that must eventually happen | D1 deletion/reconciliation job |
-| Queue delivery | Acceleration only; never the sole durable record |
-| Portable snapshot integrity | Existing Mallard schema-1 hash chain after decryption |
-
-### 5.2 Threat model
-
-The design protects against:
-
-- an untrusted or modified open-source client;
-- guessing or learning another repository ID;
-- cross-workspace and cross-user access attempts;
-- stolen bearer tokens without the device proof key;
-- replayed OAuth state, app codes, refresh tokens, and mutating requests;
-- path traversal and physical-key injection;
-- duplicate or concurrent immutable uploads;
-- concurrent head publication;
-- interrupted D1/R2 operations;
-- an R2 credential leak from the desktop, because no such credential exists
-  there; and
-- a cloud operator or R2 reader attempting to inspect repository object
-  bodies.
-
-The design cannot protect against:
-
-- malware or an attacker controlling an authorized, unlocked endpoint;
-- a user deliberately exporting plaintext;
-- an authorized member retaining plaintext or keys learned before removal;
-- total loss of every trusted device and the recovery key;
-- traffic analysis from visible routing metadata; or
-- a malicious service denying availability, deleting unlocked data after its
-  retention period, or serving stale ciphertext.
-
-Mallard's existing hashes and E2EE authentication detect stale or modified
-ciphertext. They cannot force an untrusted service to remain available.
-
-### 5.3 Visible metadata
-
-E2EE covers every repository object body. The service still observes:
-
-- users, devices, workspace membership, and roles;
-- workspace and repository opaque IDs;
-- the schema-1 logical object namespace;
-- bundle IDs and `_objects/<sha256>` key components;
-- ciphertext sizes and transfer timing;
-- object creation/update times;
-- current R2 ETags;
-- quota counters; and
-- account, repository, and deletion lifecycle state.
-
-Workspace names, repository display metadata, heads, tags, manifests, commits,
-and payload content are encrypted. Visible payload hash keys permit
-confirmation attacks against guessed plaintext and are an acknowledged
-compatibility trade-off. Hiding logical keys would require a different
-listing/index protocol and is deferred.
-
-## 6. Managed object storage
-
-### 6.1 Logical and physical keys
-
-Clients continue to use validated Mallard logical keys. D1 maps them to
-service-generated physical keys:
+- one D1 database for the control plane;
+- one private R2 bucket for immutable repository objects;
+- one private R2 bucket for temporary multipart staging;
+- one Queue and one dead-letter queue;
+- one Cron trigger for due jobs and stale-state reconciliation;
+- Worker Secrets or Secrets Store bindings for OAuth secrets, token-signing
+  secrets, keyed email lookup, and internal service credentials;
+- one invitation and security-notice email delivery integration;
+- web application firewall and rate-limit rules;
+- one internal hostname protected by Cloudflare Access; and
+- Workers Logs with optional Logpush.
+
+The R2 buckets do not use a public R2 custom domain. Every read goes through
+the Worker.
+
+The first release does not use a Durable Object. D1 holds each ref head and
+performs the atomic branch-policy, compare-and-swap, and MR-decision
+transaction.
+
+### 6.3 Network boundary
+
+The Worker derives every D1 key and physical R2 prefix. The client never
+supplies a bucket name, tenant prefix, or physical object key.
+
+The Worker must:
+
+- authenticate every private read and every write;
+- evaluate effective visibility before every anonymous read;
+- evaluate current membership and branch policy before every write;
+- validate IDs, branch names, logical keys, sizes, and digests;
+- enforce bounded pagination and request sizes;
+- use create-only writes for immutable objects;
+- use D1 compare-and-swap for refs;
+- omit a general object-delete route; and
+- return safe external errors.
+
+## 7. Privacy, identity, and trust
+
+### 7.1 Plaintext content decision
+
+Mallard does not encrypt managed-cloud content before upload.
+
+The following values are plaintext to the managed service:
+
+- repository tags;
+- ref heads;
+- manifests;
+- commit records;
+- conversation transcripts;
+- provider memory selected by the user;
+- names and descriptions; and
+- MR metadata and comments.
+
+The consequences are explicit:
+
+- Mallard service operators can technically access private content.
+- A Cloudflare compromise can expose private content.
+- Legal and support processes can apply to stored plaintext.
+- Server-side integrity validation and abuse scanning are possible.
+- Client key enrollment, recovery, rotation, and sharing are not required.
+
+The public-release UI and privacy policy must describe this trust model.
+
+No content-encryption milestone is hidden in the delivery plan. Adding
+client-side encryption later would require a separate product and schema
+decision.
+
+### 7.2 Content safety
+
+The capture rules in section 5.5 are mandatory. The service also enforces:
+
+- Do not capture credentials or provider authentication stores.
+- Do not put local absolute paths in portable documents.
+- Reject symlinks and special files.
+- Preserve bounded, no-follow traversal.
+- Keep machine-local exclusions and trust decisions local.
+- Preserve warnings for credential-shaped and executable content.
+- Require explicit acknowledgement before publishing warned content.
+- Require an additional public-disclosure acknowledgement for a public
+  repository.
+
+Secret detection remains best-effort. It is not proof that public content is
+safe.
+
+### 7.3 OAuth and application sessions
+
+GitHub and Google are the initial identity providers. Email is not an identity
+key.
+
+The stable identity key is:
+
+~~~text
+(issuer, provider_subject)
+~~~
+
+The desktop uses the system browser and Authorization Code with Proof Key for
+Code Exchange (PKCE):
+
+1. The Rust backend binds a random loopback port on 127.0.0.1.
+2. It creates app state and an S256 PKCE verifier and challenge.
+3. The Worker redirects to the identity provider.
+4. The provider returns to one fixed Worker callback.
+5. The Worker verifies state and nonce where applicable.
+6. The Worker exchanges the provider code with its stored client secret.
+7. The Worker redirects one single-use Mallard code to the exact loopback
+   callback.
+8. The Rust backend exchanges the code and PKCE verifier for Mallard tokens.
+
+Only literal loopback IP callbacks are accepted. Localhost names, arbitrary
+hosts, URL credentials, fragments, and unapproved paths are rejected.
+
+Session rules:
+
+- OAuth transactions and Mallard application codes expire after five minutes
+  and are single-use.
+- Access tokens are audience-restricted JSON Web Tokens with a 10-minute
+  lifetime.
+- Refresh tokens are random opaque values with a maximum 30-day lifetime.
+- The desktop stores refresh tokens in the operating-system keychain.
+- D1 stores only a keyed hash of each refresh token.
+- Every successful refresh rotates the token.
+- Reuse of an old token revokes the session family.
+- Logout and device revocation are idempotent.
+- The service discards provider tokens after identity lookup.
+
+The first login creates one private personal workspace and makes the user its
+Admin.
+
+### 7.4 Authorization
+
+D1 is the source of truth for:
+
+- user and session state;
+- workspace and repository state;
+- visibility;
+- active membership;
+- role;
+- ref state;
+- branch protection;
+- policy revision;
+- MR state; and
+- archive state.
+
+The Worker does not trust a role, visibility value, or branch rule supplied by
+the client.
+
+An unauthorized private identifier returns 404. An authenticated user who can
+see the resource but lacks a write capability receives 403.
+
+### 7.5 Logging and support access
+
+Logs and audit events must not contain:
+
+- access or refresh tokens;
+- OAuth codes;
+- invitation tokens;
+- verified email addresses;
+- raw conversation text;
+- file bodies;
+- provider memory;
+- local paths;
+- MR comments;
+- D1 SQL; or
+- physical R2 keys.
 
-```text
-logical:
-  .mallard/v1/repositories/<bundle-id>/_objects/<sha256>
+Internal support routes use Cloudflare Access and separate authorization.
+There is no support route that returns arbitrary repository content. Any
+production content-access procedure must be exceptional, logged, and defined
+outside the normal API.
+
+## 8. Storage and consistency model
 
-physical immutable:
-  immutable/<workspace-id>/<repository-id>/<object-id>
+### 8.1 Logical and physical storage
+
+Clients use the schema-1 logical keys defined in section 5.1. The Worker maps
+them to service-owned records and keys.
 
-logical:
-  .mallard/v1/repositories/<bundle-id>/_head.json
-
-physical mutable:
-  mutable/<workspace-id>/<repository-id>/_head.json
-```
-
-The tag uses the same stable mapping with `_tag.json`. Clients can neither
-choose nor observe either physical key.
-
-`object-id` is 128 random bits generated by the Worker. Immutable multipart
-uploads always target this unique physical key. Completing one upload can
-therefore never overwrite the bytes allocated to a different logical object.
-
-D1 has a unique `(repository_id, logical_key)` constraint. When allocation
-finds an existing ready object, the adapter downloads, decrypts, and
-byte-compares it. It returns `AlreadyPresent` only if the plaintext matches.
-A mismatch is an immutable-key integrity error. An existing non-ready
-allocation returns a retryable conflict unless the caller presents the same
-idempotency key and request digest; a client can never take over an unrelated
-upload session.
-
-### 6.2 Small and multipart uploads
-
-Ciphertext no larger than 16 MiB uses one authenticated Worker request.
-Larger ciphertext uses R2 multipart upload through the Worker:
-
-1. Allocate the immutable logical object and reserve its full ciphertext size
-   in D1.
-2. Create an R2 multipart upload for the unique physical key.
-3. Upload uniform 16 MiB parts; only the last part may be smaller.
-4. Record each returned part ETag and size in D1.
-5. Complete using exactly the D1-recorded ordered part set.
-6. In one D1 transaction, mark the logical object ready, mark the upload
-   complete, move reserved bytes to used bytes, and update repository counters.
-
-The upload session expires after 24 hours. R2's incomplete-multipart lifecycle
-is a secondary cleanup mechanism. A Cron scan owns the application-level
-expiry and quota release.
-
-An `Idempotency-Key` is unique within a repository. Repeating allocation with
-the same key and same request digest returns the same upload state. Reusing it
-with different parameters returns `409 idempotency_mismatch`.
-
-### 6.3 Mutable head and tag writes
-
-Only `_head.json` and `_tag.json` are accepted by the mutable route.
-
-- `CasExpectation::Absent` becomes `If-None-Match: *`.
-- `CasExpectation::Match(etag)` becomes `If-Match: "<etag>"`.
-- A successful R2 conditional write returns the new ciphertext ETag.
-- A failed condition returns `412 precondition_failed`; the adapter maps it to
-  `CasOutcome::Conflict`.
-
-R2 is the CAS authority. D1's mutable-object row is an index and audit mirror.
-If the R2 write succeeds and the D1 mirror update fails, the response is
-ambiguous. A retry with the same idempotency key reads R2, compares the
-ciphertext digest, repairs D1, and returns the original success. It must not
-blindly submit a second write.
-
-The service refuses head/tag writes while `workspaces.key_rotation_required`
-is true.
-
-### 6.4 Listing and reads
-
-`list` queries D1's logical-key index, never the R2 bucket. Results are sorted
-by `(logical_key, object_id)` and paginated with an opaque authenticated
-cursor. The API limit is 1–1,000; the adapter can build the bundle engine's
-larger bounded page by consuming multiple API pages.
-
-`get` resolves the authorized logical key through D1 and streams the R2
-ciphertext. `get_many` uses bounded parallel individual reads rather than a
-single multipart response. The Rust adapter decrypts and authenticates every
-frame before exposing plaintext to the bundle engine.
-
-### 6.5 Retention lock
-
-The immutable bucket has an age-based lock of exactly 2,592,000 seconds on the
-`immutable/` prefix, or equivalently on the entire dedicated bucket. This:
-
-- prevents premature deletion and overwrite of newly written immutable
-  ciphertext;
-- aligns maximum lock delay with the selected 30-day deletion recovery
-  contract; and
-- means orphan cleanup may be delayed until an object's own lock expires.
-
-Mutable head/tag objects are in a separate bucket and are not retention
-locked. No normal public API exposes object deletion.
-
-## 7. End-to-end encryption
-
-### 7.1 Key hierarchy
-
-```text
-random recovery key (offline, user-held)
-    |
-    `-- encrypts account key package recovery envelope
-
-account key package, version N
-    |-- X25519 private wrapping key
-    `-- Ed25519 private signing seed
-             |
-             | HPKE
-             v
-workspace key epoch 1, 2, ...
-             |
-             | HKDF per repository object
-             v
-MCE1 object subkey
-
-device X25519 key
-    `-- receives an HPKE envelope containing the account key package
-
-device DPoP signing key
-    `-- proves possession for service requests
-```
-
-All private keys are generated in the Tauri Rust backend with an operating
-system CSPRNG. Secret buffers must use zeroization-capable types and must not
-cross the WebView boundary.
-
-Every workspace epoch key is an independently generated random 256-bit value.
-Epoch keys are never derived from a user password, recovery key, previous
-epoch, repository identifier, or provider credential.
-
-### 7.2 MCE1 object envelope
-
-`MCE1` is a versioned framed format. Version 1 uses:
-
-- HKDF-SHA-256 for per-object subkeys;
-- XChaCha20-Poly1305 for content frames;
-- 4 MiB plaintext frames;
-- a random 128-bit nonce prefix per encryption; and
-- a 64-bit big-endian frame counter appended to that prefix to form each
-  192-bit XChaCha nonce.
-
-The fixed binary header is:
-
-```text
-magic                 4 bytes   ASCII "MCE1"
-format_version        1 byte    0x01
-algorithm             1 byte    0x01 = XChaCha20-Poly1305 framed
-key_epoch             4 bytes   unsigned big-endian
-frame_size            4 bytes   unsigned big-endian; exactly 4,194,304
-plaintext_length      8 bytes   unsigned big-endian
-nonce_prefix         16 bytes   random
-```
-
-The object subkey is:
-
-```text
-HKDF-Extract(
-  salt = SHA-256("mallard-managed-cloud/mce1" || workspace_id),
-  IKM  = workspace_epoch_key
-)
-
-HKDF-Expand(
-  PRK,
-  info = length_prefixed(
-    "object-key",
-    repository_id,
-    UTF8(logical_object_key)
-  ),
-  L = 32
-)
-```
-
-Each frame stores `ciphertext || 16-byte tag`. Full-frame sizes are implied by
-the header; the final plaintext length is derived from `plaintext_length`.
-There is no unauthenticated per-frame length field.
-
-Frame indexes start at zero. A non-empty object has
-`ceil(plaintext_length / frame_size)` frames. An empty object has exactly one
-authenticated zero-length frame, represented by its 16-byte tag, so the header
-is authenticated even when there is no plaintext.
-
-Associated data for frame `i` is the canonical length-prefixed encoding of:
-
-```text
-"mallard-managed-cloud/mce1-frame"
-service_origin
-workspace_id
-repository_id
-logical_object_key
-the complete fixed header
-frame_index
-```
-
-Because the fixed header is authenticated, this binds every frame to the key
-epoch and declared plaintext length in addition to the service, workspace,
-repository, logical key, and zero-based frame index.
-
-Decryptors reject:
-
-- an unknown magic, version, or algorithm;
-- a frame size other than 4 MiB;
-- an epoch with no authorized key envelope;
-- length overflow or more frames than the header permits;
-- a missing, extra, reordered, or unauthenticated frame; and
-- plaintext whose existing Mallard schema-1 hash checks fail after decryption.
-
-Every encryption, including a mutable-head retry, starts with a new random
-nonce prefix. Idempotent retries reuse the already produced ciphertext bytes
-or reconcile by digest; they do not re-encrypt and assume an identical ETag.
-
-### 7.3 Key envelopes
-
-Public-key envelopes that carry an account key package to a device or a
-workspace key to an account version use HPKE base mode with:
-
-```text
-DHKEM(X25519, HKDF-SHA-256)
-HKDF-SHA-256
-ChaCha20-Poly1305
-```
-
-An account key package contains its version, X25519 private key, and Ed25519
-private seed. It is:
-
-- encrypted to each trusted device's X25519 public key; and
-- separately encrypted under the user's random recovery key.
-
-The recovery package is a separate symmetric envelope: version marker
-`MCR1`, a random 192-bit nonce, and XChaCha20-Poly1305 ciphertext under the
-256-bit recovery key. Its associated data binds the service origin, user ID,
-account-key version, and public-key digests. Cloudflare stores only this
-encrypted package and its non-secret version metadata.
-
-Workspace key grants are HPKE-encrypted to a recipient account-version X25519
-public key. The granting account signs the canonical envelope metadata with
-Ed25519. The signature binds workspace ID, epoch, recipient user and account
-key version, ciphertext digest, granting user/device, and creation time.
-
-The Worker verifies signatures and membership authorization but cannot decrypt
-the envelope.
-
-### 7.4 Recovery and device enrollment
-
-Initial setup displays a random 256-bit recovery key once, encoded with a
-checksum and grouped for transcription. Mallard asks the user to confirm a
-subset before enabling managed sync. The recovery key is never uploaded or
-logged.
-
-A new device:
-
-1. Signs in with GitHub or Google.
-2. Generates device encryption and DPoP key pairs.
-3. Registers as `pending`.
-4. Either enters the recovery key or requests approval from a trusted device.
-5. Obtains/decrypts an account key package envelope.
-6. Signs its enrollment and becomes `trusted`.
-
-Existing-device approval presents a short comparison code derived from both
-device public keys and the enrollment transaction. The approving user must
-compare the code on both devices before release of the envelope.
-
-Losing every trusted device and the recovery key is unrecoverable by design.
-Support can delete the account but cannot recover repository plaintext.
-
-### 7.5 Membership changes and rotation
-
-Adding a member gives that user envelopes for every retained workspace key
-epoch, so the member can read workspace history.
-
-Removing an active member:
-
-1. Revokes service authorization and outstanding invitations immediately.
-2. Marks `key_rotation_required`.
-3. Blocks every repository write, including immutable allocation, part upload,
-   completion, and mutable head/tag writes. Reconciliation aborts in-flight
-   uploads and releases their reservations; clients re-encrypt after rotation.
-4. Requires an owner/admin device to generate a new independent workspace key.
-5. Uploads a signed envelope for every remaining active member.
-6. Advances `current_key_epoch` by exactly one and re-enables writes.
-
-Existing immutable objects remain encrypted under their historical epochs.
-New objects use the new epoch. A removed member may retain plaintext,
-ciphertext, or old keys previously acquired; no cryptographic system can claw
-those bytes back.
-
-Device revocation terminates that device's sessions immediately. If compromise
-is suspected, the user rotates the account key package and workspace owners
-rotate affected workspace epochs. A simple "remove old laptop" action does not
-claim to revoke already downloaded keys.
-
-## 8. Authentication and user management
-
-### 8.1 OAuth broker
-
-Mallard is a public native client and cannot keep an OAuth client secret. The
-Worker is the confidential broker:
-
-1. The Rust backend binds a random loopback port on `127.0.0.1`, generates
-   app state and an S256 PKCE verifier/challenge, and creates an auth
-   transaction.
-2. It opens the system browser on the Worker authorization route.
-3. The Worker creates provider state and an OIDC nonce where applicable, then
-   redirects to GitHub or Google.
-4. The provider returns to one fixed HTTPS Worker callback.
-5. The Worker verifies state/nonce, exchanges the provider code using a secret
-   binding, resolves the stable provider subject, and discards provider tokens
-   after identity lookup.
-6. The Worker redirects a single-use Mallard app code to the exact allowlisted
-   loopback callback.
-7. The Rust backend exchanges that code plus the PKCE verifier and device
-   public keys for a Mallard session.
-
-Only literal loopback IP callbacks are accepted. `localhost`, arbitrary host
-names, non-HTTP callbacks, URL credentials, fragments, and callback paths
-outside the fixed Mallard path are rejected.
-
-GitHub requests only identity/profile and verified-email access. Google
-requests only `openid email profile`. Mallard never requests repository,
-Drive, Calendar, organization-management, or other product scopes for login.
-
-### 8.2 Identity linking
-
-The stable identity key is `(issuer, provider_subject)`. Email is not an
-identity key.
-
-- First login creates a user and one personal workspace.
-- A signed-in user may start an explicit reauthenticated provider-link flow.
-- A matching verified email never silently joins two users.
-- If a second provider already belongs to another Mallard user, linking fails.
-- Automated account merging is out of scope for v1.
-
-Email lookup uses `HMAC-SHA-256(service_email_lookup_key,
-normalized_verified_email)`. When delivery is required, the normalized email
-is retained only in a service-encrypted D1 field.
-
-Service-encrypted fields use a versioned AES-256-GCM field envelope with a
-random 96-bit nonce and associated data binding table, row ID, field name, and
-key version. The field-encryption and email-lookup keys are separate Worker
-secrets and rotate independently. These fields are decrypted only long enough
-to send an invitation or security notice.
-
-### 8.3 Mallard sessions
-
-Access tokens are audience- and scope-restricted JWTs with a 10-minute
-lifetime. They include user, session, and device IDs plus a DPoP confirmation
-thumbprint. Token signing keys are versioned secrets with a `kid`.
-
-Refresh tokens are random 256-bit opaque values:
-
-- stored in the OS keychain on the desktop;
-- stored only as HMAC hashes in D1;
-- valid for at most 30 days;
-- rotated on every successful refresh; and
-- organized into a session family.
-
-Reusing an already rotated token marks replay, revokes the entire family, and
-creates a security audit event. Logout and device revocation are idempotent.
-
-Every authenticated request carries a DPoP proof over method, absolute URI,
-access-token hash, issued time, and unique `jti`. Mutating requests and token
-refreshes record a short-lived D1 replay hash. Read-only requests still verify
-the proof and its time window but do not write one D1 row per read.
-
-### 8.4 Workspaces and roles
-
-Every user has exactly one personal workspace. Team workspaces may have
-multiple owners.
-
-| Role | Read | Push | Create/archive repository | Invite/remove | Change roles | Delete workspace |
-| --- | --- | --- | --- | --- | --- | --- |
-| Owner | Yes | Yes | Yes | Yes | Yes, including owners | Yes |
-| Admin | Yes | Yes | Yes | Non-owners | Member/viewer only | No |
-| Member | Yes | Yes | No | No | No | No |
-| Viewer | Yes | No | No | No | No | No |
-
-Roles apply to every repository in a workspace. A workspace can never lose its
-last active owner.
-
-### 8.5 Two-phase invitations
-
-Invitations target a verified normalized email and expire after seven days.
-
-For an existing Mallard user, the inviter can immediately encrypt historical
-workspace epochs to the known account public key. Membership becomes active
-only after the invitee accepts.
-
-For a new user:
-
-1. The invite is sent without a workspace key.
-2. The user signs in and accepts.
-3. Membership enters `awaiting_key`.
-4. An owner/admin device reviews the pending user and uploads signed envelopes
-   for every retained epoch.
-5. D1 activates the membership only when all envelopes are present.
-
-The service never places a workspace key or key-wrapping secret in email.
-
-## 9. D1 control-plane schema
+Conceptual physical immutable keys are:
+
+~~~text
+managed/v1/repositories/<repository-id>/_objects/<sha256>
+managed/v1/repositories/<repository-id>/_manifests/<revision>-<commit-id>.json
+managed/v1/repositories/<repository-id>/_commits/<revision>-<commit-id>.json
+~~~
+
+D1 stores:
+
+- the bounded repository tag bytes and digest;
+- each ref name, head bytes, head digest, ETag, and version;
+- visibility and policy state;
+- object index and quota state; and
+- MR state.
+
+The managed ETag is the lowercase SHA-256 of the exact stored head bytes. The
+D1 ref version increments on each successful change, even when another ref
+already points to the same head bytes.
+
+The service generates repository IDs and ref IDs. A client cannot select a
+physical prefix.
+
+### 8.2 Immutable publication
+
+A push performs:
+
+1. Read the current ref and policy revision.
+2. Perform local capture and Push review.
+3. Create content-addressed payload objects in R2.
+4. Create the immutable manifest in R2.
+5. Create the immutable commit record in R2.
+6. Verify the exact length and SHA-256 of every new object.
+7. Change the D1 ref head with compare-and-swap.
+8. Record the audit event.
+
+If step 7 fails, the immutable objects can remain unreachable. A delayed
+orphan job can remove them after retention allows it. Readers cannot see the
+new revision because the ref did not change.
+
+An immutable key can be created only when absent. If the key exists, the
+service verifies that the stored length and digest match. Different bytes at
+the same immutable key are an integrity error.
+
+### 8.3 Direct ref changes
+
+A direct push D1 transaction verifies:
+
+- active user and session;
+- active workspace and repository;
+- current membership and role;
+- repository fingerprint and target Git ref;
+- current branch rule;
+- policy revision;
+- expected head ETag;
+- new head document bounds and schema coordinates; and
+- referenced object readiness.
+
+The transaction changes the ref only when all checks pass.
+
+### 8.4 Merge-request acceptance
+
+One D1 transaction decides an MR.
+
+If all pinned values match, the transaction:
+
+1. copies the frozen source head coordinates to the target ref;
+2. increments the target ref version;
+3. sets the MR state to accepted;
+4. records the decision event; and
+5. records the audit event.
+
+If the target head does not match, the same transaction:
+
+1. leaves the target unchanged;
+2. sets the MR state to rejected;
+3. sets reason target_changed;
+4. records the conflict event; and
+5. records the audit event.
+
+There is no state in which D1 says accepted but the target ref did not change.
+
+### 8.5 Public reads and caching
+
+Public immutable objects can use Workers Cache only after the Worker confirms
+effective public visibility in D1.
+
+The cache key includes:
+
+- repository ID;
+- visibility generation;
+- immutable logical key; and
+- immutable digest.
+
+Ref heads, tags, membership data, invitations, MR drafts, errors, and
+authenticated private responses use no-store.
+
+The Worker performs the visibility check before it reads Workers Cache. A
+direct public R2 hostname is prohibited.
+
+### 8.6 Upload state
+
+Small uploads use one request. Large uploads use a bounded multipart state
+machine.
+
+The upload record pins:
+
+- repository ID;
+- logical immutable key;
+- exact expected size and SHA-256;
+- creator;
+- quota reservation;
+- part bounds;
+- expiry; and
+- idempotency key.
+
+Completing an upload verifies the recorded parts and resulting object before
+the object becomes ready. Expiry releases quota. Cleanup of abandoned staging
+objects is idempotent.
+
+## 9. D1 control-plane model
 
 ### 9.1 Conventions
 
-- IDs are 32 lowercase hexadecimal characters generated from 128 random bits.
-- Timestamps are UTC Unix epoch milliseconds in signed D1 `INTEGER` values.
-- SHA-256/HMAC values are 32-byte `BLOB`s.
-- Public enums are constrained with `CHECK`.
-- All queries are prepared and bounded.
+- IDs use 128 random bits and lowercase hexadecimal encoding.
+- Times use UTC Unix epoch milliseconds.
+- Digests and keyed hashes use 32-byte values.
+- Public enums use database checks.
+- Queries are prepared and bounded.
 - Foreign keys are enabled.
-- Authorization and mutation flows start a D1 session at the primary.
-- V2 does not depend on D1 read replicas. If they are enabled later, they may
-  serve only non-authoritative catalog views where a stale result cannot grant
-  access or approve a write.
+- Authorization mutations use the D1 primary.
+- Migrations are forward-only.
 
-### 9.2 Initial migration
+This proposal has not been deployed. The first implementation starts from one
+clean initial schema. Do not add migrations or compatibility fields for the
+removed encryption design.
 
-The following SQL is the normative initial D1 schema. Later changes use
-forward-only numbered migrations.
+### 9.2 Main tables
 
-```sql
--- D1 enforces foreign keys. Local SQLite validators enable PRAGMA
--- foreign_keys = ON on their connection before applying this migration.
+| Table | Purpose | Critical fields |
+| --- | --- | --- |
+| users | Account lifecycle | ID, state, display name, timestamps |
+| identities | OAuth identity links | issuer, provider subject, user ID, verified-email lookup hash |
+| devices | Named desktop sessions | user ID, name, state, last seen |
+| refresh_sessions | Rotating session families | device ID, token hash, expiry, replay state |
+| workspaces | Collaboration boundary | slug, name, visibility, visibility generation, state |
+| workspace_members | Workspace roles | user ID, workspace ID, Admin or Member, state |
+| invitations | Invitation lifecycle | workspace ID, email lookup hash, token hash, expiry, state |
+| repositories | Git bundle catalog | workspace ID, bundle ID, repository fingerprint, primary branch, visibility, policy revision, tag |
+| repository_refs | Managed heads | repository ID, ref name, head bytes, head digest, ETag, version, frozen state |
+| protected_branches | Exact Git rules | repository ID, branch name, created by, created time |
+| merge_requests | MR state | source ref, target ref, Git coordinates, pinned heads, chat ID, state, reason |
+| merge_events | MR audit history | MR ID, actor, event kind, bounded comment, time |
+| repository_objects | Immutable object index | logical key, physical key, length, digest, state |
+| upload_sessions | Single and multipart state | object coordinates, parts, expiry, quota reservation |
+| idempotency_records | Mutation replay protection | user, route scope, key hash, request hash, result code |
+| quota_ledgers | Reserved and committed use | workspace, class, bytes and object counts |
+| deletion_jobs | Delayed archive purge | target type, target ID, not-before time, attempts |
+| audit_events | Sanitized security and policy events | actor, action, target IDs, result, request ID, time |
+| featured_repositories | Public catalog selection | repository ID, reviewed public Git clone URL, rank, state |
 
-CREATE TABLE schema_migrations (
-  version INTEGER PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE CHECK (length(name) BETWEEN 1 AND 128),
-  applied_at_ms INTEGER NOT NULL CHECK (applied_at_ms >= 0)
-);
+### 9.3 Enums and state transitions
 
-CREATE TABLE users (
-  id TEXT PRIMARY KEY
-    CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
-  status TEXT NOT NULL
-    CHECK (status IN ('active', 'disabled', 'deleting', 'deleted')),
-  profile_ciphertext BLOB CHECK (
-    profile_ciphertext IS NULL OR length(profile_ciphertext) BETWEEN 1 AND 65536
-  ),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
-  deleted_at_ms INTEGER CHECK (deleted_at_ms IS NULL OR deleted_at_ms >= created_at_ms)
-);
+The initial schema uses these public enum values:
 
-CREATE TABLE external_identities (
-  id TEXT PRIMARY KEY
-    CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
-  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  provider TEXT NOT NULL CHECK (provider IN ('github', 'google')),
-  issuer TEXT NOT NULL CHECK (length(issuer) BETWEEN 1 AND 512),
-  provider_subject TEXT NOT NULL CHECK (length(provider_subject) BETWEEN 1 AND 512),
-  email_lookup_hash BLOB CHECK (
-    email_lookup_hash IS NULL OR length(email_lookup_hash) = 32
-  ),
-  email_ciphertext BLOB CHECK (
-    email_ciphertext IS NULL OR length(email_ciphertext) BETWEEN 1 AND 4096
-  ),
-  email_verified INTEGER NOT NULL CHECK (email_verified IN (0, 1)),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  last_login_at_ms INTEGER NOT NULL CHECK (last_login_at_ms >= created_at_ms),
-  UNIQUE (issuer, provider_subject)
-);
+| Field | Values |
+| --- | --- |
+| visibility | public, private |
+| workspace role | admin, member |
+| user state | active, disabled, deleting |
+| workspace state | active, archived, deleting |
+| membership state | active, suspended |
+| invitation state | pending, accepted, revoked, expired |
+| repository state | active, archived, deleting |
+| ref state | active, draft, frozen, archived |
+| MR state | draft, open, accepted, rejected, withdrawn |
+| object state | staging, ready, orphaned, deleting |
+| upload state | allocated, uploading, completed, aborted, expired |
+| deletion-job state | pending, running, retry, succeeded |
 
-CREATE INDEX external_identities_user
-  ON external_identities(user_id, provider);
-CREATE INDEX external_identities_email
-  ON external_identities(email_lookup_hash)
-  WHERE email_lookup_hash IS NOT NULL AND email_verified = 1;
+State changes use explicit allowlists:
 
-CREATE TABLE oauth_transactions (
-  id TEXT PRIMARY KEY
-    CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
-  provider TEXT NOT NULL CHECK (provider IN ('github', 'google')),
-  app_state_hash BLOB NOT NULL CHECK (length(app_state_hash) = 32),
-  provider_state_hash BLOB NOT NULL CHECK (length(provider_state_hash) = 32),
-  oidc_nonce_hash BLOB CHECK (oidc_nonce_hash IS NULL OR length(oidc_nonce_hash) = 32),
-  pkce_challenge TEXT NOT NULL CHECK (length(pkce_challenge) = 43),
-  loopback_redirect_uri TEXT NOT NULL
-    CHECK (length(loopback_redirect_uri) BETWEEN 1 AND 512),
-  status TEXT NOT NULL CHECK (status IN ('pending', 'callback_complete', 'consumed', 'expired')),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > created_at_ms),
-  consumed_at_ms INTEGER CHECK (consumed_at_ms IS NULL OR consumed_at_ms >= created_at_ms)
-);
+- active workspace or repository can become archived;
+- archived workspace or repository can return to active during retention;
+- archived workspace or repository can become deleting after retention;
+- deleting is terminal until the row is removed;
+- active membership can become suspended and can return to active;
+- pending invitation can become accepted, revoked, or expired;
+- draft MR can become open or withdrawn;
+- open MR can become accepted, rejected, or withdrawn;
+- accepted, rejected, and withdrawn MRs are terminal;
+- draft ref can advance until its MR opens;
+- opening an MR changes its source ref from draft to frozen; and
+- a frozen ref cannot advance.
 
-CREATE INDEX oauth_transactions_expiry
-  ON oauth_transactions(status, expires_at_ms);
+MR rejection reason codes are:
 
-CREATE TABLE authorization_codes (
-  code_hash BLOB PRIMARY KEY CHECK (length(code_hash) = 32),
-  transaction_id TEXT NOT NULL
-    REFERENCES oauth_transactions(id) ON DELETE CASCADE,
-  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  pkce_challenge TEXT NOT NULL CHECK (length(pkce_challenge) = 43),
-  loopback_redirect_uri TEXT NOT NULL
-    CHECK (length(loopback_redirect_uri) BETWEEN 1 AND 512),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > created_at_ms),
-  consumed_at_ms INTEGER CHECK (consumed_at_ms IS NULL OR consumed_at_ms >= created_at_ms)
-);
+- admin_rejected;
+- target_changed;
+- git_target_changed;
+- git_conflict;
+- policy_changed;
+- source_changed; and
+- integrity_failed.
 
-CREATE INDEX authorization_codes_expiry
-  ON authorization_codes(expires_at_ms)
-  WHERE consumed_at_ms IS NULL;
+The service rejects an enum or state transition that is not listed.
 
-CREATE TABLE devices (
-  id TEXT PRIMARY KEY
-    CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
-  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  status TEXT NOT NULL CHECK (status IN ('pending', 'trusted', 'revoked')),
-  platform TEXT NOT NULL CHECK (platform IN ('macos', 'windows', 'linux')),
-  name_ciphertext BLOB NOT NULL CHECK (length(name_ciphertext) BETWEEN 1 AND 4096),
-  encryption_public_key BLOB NOT NULL CHECK (length(encryption_public_key) = 32),
-  dpop_public_jwk TEXT NOT NULL CHECK (length(dpop_public_jwk) BETWEEN 1 AND 2048),
-  approved_by_device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  approved_at_ms INTEGER CHECK (approved_at_ms IS NULL OR approved_at_ms >= created_at_ms),
-  last_seen_at_ms INTEGER CHECK (last_seen_at_ms IS NULL OR last_seen_at_ms >= created_at_ms),
-  revoked_at_ms INTEGER CHECK (revoked_at_ms IS NULL OR revoked_at_ms >= created_at_ms),
-  UNIQUE (user_id, encryption_public_key)
-);
+### 9.4 Required constraints
 
-CREATE INDEX devices_user_status ON devices(user_id, status);
+The schema and service must enforce:
 
-CREATE TABLE refresh_sessions (
-  id TEXT PRIMARY KEY
-    CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
-  family_id TEXT NOT NULL
-    CHECK (length(family_id) = 32 AND family_id NOT GLOB '*[^0-9a-f]*'),
-  parent_session_id TEXT REFERENCES refresh_sessions(id) ON DELETE SET NULL,
-  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-  token_hash BLOB NOT NULL UNIQUE CHECK (length(token_hash) = 32),
-  status TEXT NOT NULL CHECK (status IN ('active', 'rotated', 'revoked', 'replay')),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > created_at_ms),
-  last_used_at_ms INTEGER CHECK (last_used_at_ms IS NULL OR last_used_at_ms >= created_at_ms),
-  rotated_at_ms INTEGER CHECK (rotated_at_ms IS NULL OR rotated_at_ms >= created_at_ms),
-  revoked_at_ms INTEGER CHECK (revoked_at_ms IS NULL OR revoked_at_ms >= created_at_ms),
-  replay_detected_at_ms INTEGER CHECK (
-    replay_detected_at_ms IS NULL OR replay_detected_at_ms >= created_at_ms
-  )
-);
+- role is Admin or Member;
+- visibility is public or private;
+- a private workspace has no public repository;
+- one active Admin remains in every active workspace;
+- one user has at most one active membership per workspace;
+- invitation tokens and refresh tokens are unique by hash;
+- repository bundle identity is unique within the managed service;
+- every repository has a valid Git repository fingerprint;
+- Git ref names are unique per repository;
+- main is protected when a Git repository uses main as its primary branch;
+- source and target refs belong to the same repository;
+- an MR uses one unique cloud thread ID;
+- an open MR has frozen source and target coordinates;
+- a terminal MR cannot change state;
+- only an Admin can decide an MR;
+- direct Member push cannot change a controlled target;
+- a managed manifest has no ordinary project-file content;
+- object readiness precedes any ref that references the object; and
+- archive state blocks new writes.
 
-CREATE INDEX refresh_sessions_family
-  ON refresh_sessions(family_id, status);
-CREATE INDEX refresh_sessions_device
-  ON refresh_sessions(device_id, status, expires_at_ms);
+### 9.5 Service invariants
 
-CREATE TABLE dpop_replays (
-  session_id TEXT NOT NULL REFERENCES refresh_sessions(id) ON DELETE CASCADE,
-  jti_hash BLOB NOT NULL CHECK (length(jti_hash) = 32),
-  expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms >= 0),
-  PRIMARY KEY (session_id, jti_hash)
-);
+Some checks require request context:
 
-CREATE INDEX dpop_replays_expiry ON dpop_replays(expires_at_ms);
-
-CREATE TABLE idempotency_records (
-  actor_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  route_scope TEXT NOT NULL CHECK (length(route_scope) BETWEEN 1 AND 128),
-  idempotency_key TEXT NOT NULL
-    CHECK (length(idempotency_key) BETWEEN 16 AND 256),
-  request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
-  status TEXT NOT NULL CHECK (status IN ('processing', 'complete', 'failed')),
-  response_status INTEGER CHECK (
-    response_status IS NULL OR response_status BETWEEN 200 AND 599
-  ),
-  response_json TEXT CHECK (
-    response_json IS NULL OR length(response_json) BETWEEN 2 AND 4096
-  ),
-  resource_id TEXT CHECK (
-    resource_id IS NULL OR length(resource_id) BETWEEN 1 AND 128
-  ),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
-  expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > created_at_ms),
-  PRIMARY KEY (actor_user_id, route_scope, idempotency_key)
-);
-
-CREATE INDEX idempotency_records_expiry
-  ON idempotency_records(status, expires_at_ms);
-
-CREATE TABLE account_key_versions (
-  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  key_version INTEGER NOT NULL CHECK (key_version >= 1),
-  status TEXT NOT NULL CHECK (status IN ('active', 'retired')),
-  wrapping_public_key BLOB NOT NULL CHECK (length(wrapping_public_key) = 32),
-  signing_public_key BLOB NOT NULL CHECK (length(signing_public_key) = 32),
-  recovery_envelope BLOB NOT NULL
-    CHECK (length(recovery_envelope) BETWEEN 1 AND 65536),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  retired_at_ms INTEGER CHECK (retired_at_ms IS NULL OR retired_at_ms >= created_at_ms),
-  PRIMARY KEY (user_id, key_version)
-);
-
-CREATE UNIQUE INDEX one_active_account_key
-  ON account_key_versions(user_id)
-  WHERE status = 'active';
-
-CREATE TABLE device_key_envelopes (
-  user_id TEXT NOT NULL,
-  account_key_version INTEGER NOT NULL,
-  device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-  envelope BLOB NOT NULL CHECK (length(envelope) BETWEEN 1 AND 65536),
-  granted_by_device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
-  signature BLOB NOT NULL CHECK (length(signature) = 64),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  revoked_at_ms INTEGER CHECK (revoked_at_ms IS NULL OR revoked_at_ms >= created_at_ms),
-  PRIMARY KEY (user_id, account_key_version, device_id),
-  FOREIGN KEY (user_id, account_key_version)
-    REFERENCES account_key_versions(user_id, key_version) ON DELETE CASCADE
-);
-
-CREATE TABLE workspaces (
-  id TEXT PRIMARY KEY
-    CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
-  kind TEXT NOT NULL CHECK (kind IN ('personal', 'team')),
-  status TEXT NOT NULL CHECK (status IN ('active', 'archived', 'deleting', 'deleted')),
-  created_by_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-  metadata_ciphertext BLOB NOT NULL
-    CHECK (length(metadata_ciphertext) BETWEEN 1 AND 65536),
-  current_key_epoch INTEGER NOT NULL CHECK (current_key_epoch >= 1),
-  key_rotation_required INTEGER NOT NULL DEFAULT 0
-    CHECK (key_rotation_required IN (0, 1)),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
-  archived_at_ms INTEGER CHECK (archived_at_ms IS NULL OR archived_at_ms >= created_at_ms),
-  delete_after_ms INTEGER CHECK (delete_after_ms IS NULL OR delete_after_ms >= created_at_ms),
-  deleted_at_ms INTEGER CHECK (deleted_at_ms IS NULL OR deleted_at_ms >= created_at_ms)
-);
-
-CREATE UNIQUE INDEX one_personal_workspace_per_user
-  ON workspaces(created_by_user_id)
-  WHERE kind = 'personal' AND status <> 'deleted';
-CREATE INDEX workspaces_lifecycle
-  ON workspaces(status, delete_after_ms);
-
-CREATE TABLE workspace_memberships (
-  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'viewer')),
-  status TEXT NOT NULL CHECK (
-    status IN ('invited', 'awaiting_key', 'active', 'suspended', 'removed')
-  ),
-  account_key_version INTEGER NOT NULL CHECK (account_key_version >= 1),
-  invited_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  joined_at_ms INTEGER CHECK (joined_at_ms IS NULL OR joined_at_ms >= created_at_ms),
-  removed_at_ms INTEGER CHECK (removed_at_ms IS NULL OR removed_at_ms >= created_at_ms),
-  PRIMARY KEY (workspace_id, user_id),
-  CHECK (status <> 'active' OR joined_at_ms IS NOT NULL),
-  CHECK (status <> 'removed' OR removed_at_ms IS NOT NULL),
-  FOREIGN KEY (user_id, account_key_version)
-    REFERENCES account_key_versions(user_id, key_version) ON DELETE RESTRICT
-);
-
-CREATE INDEX workspace_memberships_user
-  ON workspace_memberships(user_id, status);
-CREATE INDEX workspace_memberships_role
-  ON workspace_memberships(workspace_id, status, role);
-
-CREATE TABLE workspace_invitations (
-  id TEXT PRIMARY KEY
-    CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
-  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  email_lookup_hash BLOB NOT NULL CHECK (length(email_lookup_hash) = 32),
-  email_ciphertext BLOB NOT NULL
-    CHECK (length(email_ciphertext) BETWEEN 1 AND 4096),
-  role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'viewer')),
-  token_hash BLOB NOT NULL UNIQUE CHECK (length(token_hash) = 32),
-  status TEXT NOT NULL CHECK (
-    status IN ('pending', 'accepted', 'awaiting_key', 'active', 'revoked', 'expired')
-  ),
-  invited_by_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-  accepted_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > created_at_ms),
-  accepted_at_ms INTEGER CHECK (accepted_at_ms IS NULL OR accepted_at_ms >= created_at_ms),
-  activated_at_ms INTEGER CHECK (activated_at_ms IS NULL OR activated_at_ms >= created_at_ms),
-  revoked_at_ms INTEGER CHECK (revoked_at_ms IS NULL OR revoked_at_ms >= created_at_ms)
-);
-
-CREATE INDEX workspace_invitations_lookup
-  ON workspace_invitations(email_lookup_hash, status, expires_at_ms);
-
-CREATE TABLE workspace_key_envelopes (
-  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  key_epoch INTEGER NOT NULL CHECK (key_epoch >= 1),
-  recipient_user_id TEXT NOT NULL,
-  recipient_account_key_version INTEGER NOT NULL,
-  envelope BLOB NOT NULL CHECK (length(envelope) BETWEEN 1 AND 65536),
-  granted_by_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-  granted_by_device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE RESTRICT,
-  signature BLOB NOT NULL CHECK (length(signature) = 64),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  revoked_at_ms INTEGER CHECK (revoked_at_ms IS NULL OR revoked_at_ms >= created_at_ms),
-  PRIMARY KEY (
-    workspace_id,
-    key_epoch,
-    recipient_user_id,
-    recipient_account_key_version
-  ),
-  FOREIGN KEY (workspace_id, recipient_user_id)
-    REFERENCES workspace_memberships(workspace_id, user_id) ON DELETE CASCADE,
-  FOREIGN KEY (recipient_user_id, recipient_account_key_version)
-    REFERENCES account_key_versions(user_id, key_version) ON DELETE RESTRICT
-);
-
-CREATE TABLE workspace_limits (
-  workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
-  plan_code TEXT NOT NULL CHECK (plan_code IN ('free', 'internal')),
-  storage_limit_bytes INTEGER NOT NULL CHECK (storage_limit_bytes >= 0),
-  used_bytes INTEGER NOT NULL DEFAULT 0 CHECK (used_bytes >= 0),
-  reserved_bytes INTEGER NOT NULL DEFAULT 0 CHECK (reserved_bytes >= 0),
-  repository_limit INTEGER NOT NULL CHECK (repository_limit BETWEEN 1 AND 100000),
-  member_limit INTEGER NOT NULL CHECK (member_limit BETWEEN 1 AND 100000),
-  request_rate_tier TEXT NOT NULL CHECK (request_rate_tier IN ('free', 'internal')),
-  override_reason_ciphertext BLOB CHECK (
-    override_reason_ciphertext IS NULL
-    OR length(override_reason_ciphertext) BETWEEN 1 AND 8192
-  ),
-  updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
-);
-
-CREATE TABLE repositories (
-  id TEXT PRIMARY KEY
-    CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
-  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  bundle_id TEXT NOT NULL
-    CHECK (length(bundle_id) = 32 AND bundle_id NOT GLOB '*[^0-9a-f]*'),
-  status TEXT NOT NULL CHECK (status IN ('active', 'archived', 'deleting', 'deleted')),
-  metadata_ciphertext BLOB NOT NULL
-    CHECK (length(metadata_ciphertext) BETWEEN 1 AND 65536),
-  created_by_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-  object_count INTEGER NOT NULL DEFAULT 0 CHECK (object_count >= 0),
-  ciphertext_bytes INTEGER NOT NULL DEFAULT 0 CHECK (ciphertext_bytes >= 0),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
-  archived_at_ms INTEGER CHECK (archived_at_ms IS NULL OR archived_at_ms >= created_at_ms),
-  delete_after_ms INTEGER CHECK (delete_after_ms IS NULL OR delete_after_ms >= created_at_ms),
-  deleted_at_ms INTEGER CHECK (deleted_at_ms IS NULL OR deleted_at_ms >= created_at_ms),
-  UNIQUE (workspace_id, bundle_id)
-);
-
-CREATE INDEX repositories_workspace
-  ON repositories(workspace_id, status, id);
-CREATE INDEX repositories_lifecycle
-  ON repositories(status, delete_after_ms);
-
-CREATE TABLE repository_immutable_objects (
-  id TEXT PRIMARY KEY
-    CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
-  repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-  logical_key TEXT NOT NULL CHECK (length(logical_key) BETWEEN 1 AND 2048),
-  physical_key TEXT NOT NULL UNIQUE CHECK (length(physical_key) BETWEEN 1 AND 1024),
-  state TEXT NOT NULL CHECK (
-    state IN ('reserved', 'uploading', 'ready', 'orphaned', 'deleting', 'deleted')
-  ),
-  key_epoch INTEGER NOT NULL CHECK (key_epoch >= 1),
-  ciphertext_size INTEGER NOT NULL CHECK (ciphertext_size >= 0),
-  ciphertext_sha256 BLOB NOT NULL CHECK (length(ciphertext_sha256) = 32),
-  r2_etag TEXT CHECK (r2_etag IS NULL OR length(r2_etag) BETWEEN 1 AND 512),
-  created_by_device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE RESTRICT,
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  ready_at_ms INTEGER CHECK (ready_at_ms IS NULL OR ready_at_ms >= created_at_ms),
-  deleted_at_ms INTEGER CHECK (deleted_at_ms IS NULL OR deleted_at_ms >= created_at_ms),
-  CHECK (state <> 'ready' OR (r2_etag IS NOT NULL AND ready_at_ms IS NOT NULL)),
-  UNIQUE (repository_id, logical_key)
-);
-
-CREATE INDEX immutable_objects_list
-  ON repository_immutable_objects(repository_id, state, logical_key, id);
-
-CREATE TABLE repository_mutable_objects (
-  repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-  logical_key TEXT NOT NULL CHECK (logical_key IN ('_head.json', '_tag.json')),
-  physical_key TEXT NOT NULL UNIQUE CHECK (length(physical_key) BETWEEN 1 AND 1024),
-  r2_etag TEXT NOT NULL CHECK (length(r2_etag) BETWEEN 1 AND 512),
-  key_epoch INTEGER NOT NULL CHECK (key_epoch >= 1),
-  ciphertext_size INTEGER NOT NULL CHECK (ciphertext_size >= 0),
-  ciphertext_sha256 BLOB NOT NULL CHECK (length(ciphertext_sha256) = 32),
-  object_version INTEGER NOT NULL CHECK (object_version >= 1),
-  updated_by_device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE RESTRICT,
-  updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
-  PRIMARY KEY (repository_id, logical_key)
-);
-
-CREATE TABLE upload_sessions (
-  id TEXT PRIMARY KEY
-    CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
-  repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-  immutable_object_id TEXT NOT NULL
-    REFERENCES repository_immutable_objects(id) ON DELETE CASCADE,
-  idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 16 AND 256),
-  request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
-  strategy TEXT NOT NULL CHECK (strategy IN ('single', 'multipart')),
-  r2_upload_id_ciphertext BLOB CHECK (
-    r2_upload_id_ciphertext IS NULL
-    OR length(r2_upload_id_ciphertext) BETWEEN 1 AND 4096
-  ),
-  part_size INTEGER NOT NULL CHECK (part_size = 16777216),
-  expected_ciphertext_size INTEGER NOT NULL CHECK (expected_ciphertext_size >= 0),
-  status TEXT NOT NULL CHECK (
-    status IN (
-      'allocated', 'uploading', 'finalizing', 'complete',
-      'aborted', 'expired', 'failed'
-    )
-  ),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
-  expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > created_at_ms),
-  completed_at_ms INTEGER CHECK (completed_at_ms IS NULL OR completed_at_ms >= created_at_ms),
-  CHECK (status <> 'complete' OR completed_at_ms IS NOT NULL),
-  UNIQUE (repository_id, idempotency_key)
-);
-
-CREATE UNIQUE INDEX one_open_upload_per_object
-  ON upload_sessions(immutable_object_id)
-  WHERE status IN ('allocated', 'uploading', 'finalizing');
-CREATE INDEX upload_sessions_expiry
-  ON upload_sessions(status, expires_at_ms);
-
-CREATE TABLE upload_parts (
-  upload_session_id TEXT NOT NULL
-    REFERENCES upload_sessions(id) ON DELETE CASCADE,
-  part_number INTEGER NOT NULL CHECK (part_number BETWEEN 1 AND 10000),
-  r2_etag TEXT NOT NULL CHECK (length(r2_etag) BETWEEN 1 AND 512),
-  size_bytes INTEGER NOT NULL CHECK (size_bytes BETWEEN 1 AND 16777216),
-  ciphertext_sha256 BLOB NOT NULL CHECK (length(ciphertext_sha256) = 32),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  PRIMARY KEY (upload_session_id, part_number)
-);
-
-CREATE TABLE deletion_jobs (
-  id TEXT PRIMARY KEY
-    CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
-  kind TEXT NOT NULL CHECK (
-    kind IN ('repository', 'workspace', 'user', 'orphan_upload', 'orphan_object')
-  ),
-  target_id TEXT NOT NULL
-    CHECK (length(target_id) = 32 AND target_id NOT GLOB '*[^0-9a-f]*'),
-  status TEXT NOT NULL CHECK (
-    status IN ('pending', 'enqueued', 'running', 'retry', 'complete', 'dead')
-  ),
-  not_before_ms INTEGER NOT NULL CHECK (not_before_ms >= 0),
-  next_attempt_at_ms INTEGER NOT NULL CHECK (next_attempt_at_ms >= 0),
-  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
-  last_error_code TEXT CHECK (
-    last_error_code IS NULL OR length(last_error_code) BETWEEN 1 AND 128
-  ),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-  updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
-  completed_at_ms INTEGER CHECK (completed_at_ms IS NULL OR completed_at_ms >= created_at_ms)
-);
-
-CREATE UNIQUE INDEX one_live_deletion_job
-  ON deletion_jobs(kind, target_id)
-  WHERE status IN ('pending', 'enqueued', 'running', 'retry');
-CREATE INDEX deletion_jobs_due
-  ON deletion_jobs(status, next_attempt_at_ms, not_before_ms);
-
-CREATE TABLE audit_events (
-  id TEXT PRIMARY KEY
-    CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
-  workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
-  user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-  device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
-  event_type TEXT NOT NULL CHECK (length(event_type) BETWEEN 1 AND 128),
-  target_type TEXT CHECK (target_type IS NULL OR length(target_type) BETWEEN 1 AND 64),
-  target_id TEXT CHECK (
-    target_id IS NULL
-    OR (length(target_id) = 32 AND target_id NOT GLOB '*[^0-9a-f]*')
-  ),
-  outcome TEXT NOT NULL CHECK (outcome IN ('success', 'denied', 'conflict', 'failed')),
-  request_id TEXT NOT NULL CHECK (length(request_id) BETWEEN 1 AND 128),
-  ip_prefix_hash BLOB CHECK (ip_prefix_hash IS NULL OR length(ip_prefix_hash) = 32),
-  details_json TEXT CHECK (details_json IS NULL OR length(details_json) <= 4096),
-  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
-);
-
-CREATE INDEX audit_events_workspace_time
-  ON audit_events(workspace_id, created_at_ms DESC);
-CREATE INDEX audit_events_user_time
-  ON audit_events(user_id, created_at_ms DESC);
-CREATE INDEX audit_events_type_time
-  ON audit_events(event_type, created_at_ms DESC);
-
-CREATE TRIGGER require_allocated_upload_insert
-BEFORE INSERT ON upload_sessions
-WHEN NEW.status <> 'allocated'
-BEGIN
-  SELECT RAISE(ABORT, 'upload_must_start_allocated');
-END;
-
-CREATE TRIGGER reserve_upload_quota
-BEFORE INSERT ON upload_sessions
-WHEN NEW.status = 'allocated'
-BEGIN
-  SELECT CASE
-    WHEN NOT EXISTS (
-      SELECT 1
-      FROM workspace_limits l
-      JOIN repositories r ON r.workspace_id = l.workspace_id
-      WHERE r.id = NEW.repository_id
-    )
-    THEN RAISE(ABORT, 'workspace_limits_missing')
-    WHEN (
-      SELECT l.used_bytes + l.reserved_bytes + NEW.expected_ciphertext_size
-      FROM workspace_limits l
-      JOIN repositories r ON r.workspace_id = l.workspace_id
-      WHERE r.id = NEW.repository_id
-    ) > (
-      SELECT l.storage_limit_bytes
-      FROM workspace_limits l
-      JOIN repositories r ON r.workspace_id = l.workspace_id
-      WHERE r.id = NEW.repository_id
-    )
-    THEN RAISE(ABORT, 'quota_exceeded')
-  END;
-
-  UPDATE workspace_limits
-  SET reserved_bytes = reserved_bytes + NEW.expected_ciphertext_size,
-      updated_at_ms = max(updated_at_ms, NEW.created_at_ms)
-  WHERE workspace_id = (
-    SELECT workspace_id FROM repositories WHERE id = NEW.repository_id
-  );
-END;
-
-CREATE TRIGGER validate_upload_status_transition
-BEFORE UPDATE OF status ON upload_sessions
-WHEN NEW.status <> OLD.status
- AND NOT (
-   (OLD.status = 'allocated'
-     AND NEW.status IN ('uploading', 'finalizing', 'aborted', 'expired', 'failed'))
-   OR (OLD.status = 'uploading'
-     AND NEW.status IN ('finalizing', 'aborted', 'expired', 'failed'))
-   OR (OLD.status = 'finalizing'
-     AND NEW.status IN ('complete', 'aborted', 'expired', 'failed'))
- )
-BEGIN
-  SELECT RAISE(ABORT, 'invalid_upload_status_transition');
-END;
-
-CREATE TRIGGER complete_upload_quota
-AFTER UPDATE OF status ON upload_sessions
-WHEN OLD.status IN ('allocated', 'uploading', 'finalizing')
- AND NEW.status = 'complete'
-BEGIN
-  UPDATE workspace_limits
-  SET reserved_bytes = reserved_bytes - NEW.expected_ciphertext_size,
-      used_bytes = used_bytes + NEW.expected_ciphertext_size,
-      updated_at_ms = max(updated_at_ms, NEW.updated_at_ms)
-  WHERE workspace_id = (
-    SELECT workspace_id FROM repositories WHERE id = NEW.repository_id
-  );
-END;
-
-CREATE TRIGGER release_upload_quota
-AFTER UPDATE OF status ON upload_sessions
-WHEN OLD.status IN ('allocated', 'uploading', 'finalizing')
- AND NEW.status IN ('aborted', 'expired', 'failed')
-BEGIN
-  UPDATE workspace_limits
-  SET reserved_bytes = reserved_bytes - NEW.expected_ciphertext_size,
-      updated_at_ms = max(updated_at_ms, NEW.updated_at_ms)
-  WHERE workspace_id = (
-    SELECT workspace_id FROM repositories WHERE id = NEW.repository_id
-  );
-END;
-
-CREATE TRIGGER prevent_active_upload_delete
-BEFORE DELETE ON upload_sessions
-WHEN OLD.status IN ('allocated', 'uploading', 'finalizing')
-BEGIN
-  SELECT RAISE(ABORT, 'active_upload_must_be_aborted_first');
-END;
-
-CREATE TRIGGER prevent_direct_active_membership_insert
-BEFORE INSERT ON workspace_memberships
-WHEN NEW.status = 'active'
-BEGIN
-  SELECT RAISE(ABORT, 'membership_must_be_keyed_before_activation');
-END;
-
-CREATE TRIGGER require_membership_key_envelopes
-BEFORE UPDATE OF status ON workspace_memberships
-WHEN NEW.status = 'active' AND OLD.status <> 'active'
- AND (
-   SELECT count(*)
-   FROM workspace_key_envelopes e
-   WHERE e.workspace_id = NEW.workspace_id
-     AND e.recipient_user_id = NEW.user_id
-     AND e.recipient_account_key_version = NEW.account_key_version
-     AND e.revoked_at_ms IS NULL
-     AND e.key_epoch BETWEEN 1 AND (
-       SELECT current_key_epoch FROM workspaces WHERE id = NEW.workspace_id
-     )
- ) < (
-   SELECT current_key_epoch FROM workspaces WHERE id = NEW.workspace_id
- )
-BEGIN
-  SELECT RAISE(ABORT, 'membership_key_envelopes_missing');
-END;
-
-CREATE TRIGGER prevent_last_owner_update
-BEFORE UPDATE OF role, status ON workspace_memberships
-WHEN OLD.role = 'owner'
- AND OLD.status = 'active'
- AND (NEW.role <> 'owner' OR NEW.status <> 'active')
- AND EXISTS (
-   SELECT 1 FROM workspaces w
-   WHERE w.id = OLD.workspace_id AND w.status NOT IN ('deleting', 'deleted')
- )
- AND NOT EXISTS (
-   SELECT 1
-   FROM workspace_memberships m
-   WHERE m.workspace_id = OLD.workspace_id
-     AND m.user_id <> OLD.user_id
-     AND m.role = 'owner'
-     AND m.status = 'active'
- )
-BEGIN
-  SELECT RAISE(ABORT, 'workspace_requires_owner');
-END;
-
-CREATE TRIGGER prevent_last_owner_delete
-BEFORE DELETE ON workspace_memberships
-WHEN OLD.role = 'owner'
- AND OLD.status = 'active'
- AND EXISTS (
-   SELECT 1 FROM workspaces w
-   WHERE w.id = OLD.workspace_id AND w.status NOT IN ('deleting', 'deleted')
- )
- AND NOT EXISTS (
-   SELECT 1
-   FROM workspace_memberships m
-   WHERE m.workspace_id = OLD.workspace_id
-     AND m.user_id <> OLD.user_id
-     AND m.role = 'owner'
-     AND m.status = 'active'
- )
-BEGIN
-  SELECT RAISE(ABORT, 'workspace_requires_owner');
-END;
-
-CREATE TRIGGER require_rotation_after_member_removal
-AFTER UPDATE OF status ON workspace_memberships
-WHEN OLD.status = 'active' AND NEW.status = 'removed'
-BEGIN
-  UPDATE workspaces
-  SET key_rotation_required = 1,
-      updated_at_ms = max(updated_at_ms, NEW.removed_at_ms)
-  WHERE id = NEW.workspace_id AND kind = 'team';
-END;
-
-CREATE TRIGGER validate_workspace_epoch_advance
-BEFORE UPDATE OF current_key_epoch ON workspaces
-WHEN NEW.current_key_epoch <> OLD.current_key_epoch
-BEGIN
-  SELECT CASE
-    WHEN NEW.current_key_epoch <> OLD.current_key_epoch + 1
-    THEN RAISE(ABORT, 'workspace_key_epoch_must_increment_once')
-    WHEN (
-      SELECT count(*)
-      FROM workspace_memberships m
-      WHERE m.workspace_id = OLD.id AND m.status = 'active'
-    ) <> (
-      SELECT count(DISTINCT e.recipient_user_id)
-      FROM workspace_key_envelopes e
-      JOIN workspace_memberships m
-        ON m.workspace_id = e.workspace_id
-       AND m.user_id = e.recipient_user_id
-      WHERE e.workspace_id = OLD.id
-        AND e.key_epoch = NEW.current_key_epoch
-        AND e.revoked_at_ms IS NULL
-        AND m.status = 'active'
-        AND e.recipient_account_key_version = m.account_key_version
-    )
-    THEN RAISE(ABORT, 'new_epoch_envelopes_missing')
-  END;
-END;
-
-CREATE TRIGGER finish_workspace_epoch_advance
-AFTER UPDATE OF current_key_epoch ON workspaces
-WHEN NEW.current_key_epoch = OLD.current_key_epoch + 1
-BEGIN
-  UPDATE workspaces
-  SET key_rotation_required = 0
-  WHERE id = NEW.id;
-END;
-
-INSERT INTO schema_migrations(version, name, applied_at_ms)
-VALUES (1, 'initial_managed_cloud_control_plane', 0);
-```
-
-The migration runner replaces the final `applied_at_ms = 0` with deployment
-time in its transaction. The zero value keeps the SQL executable in local and
-CI validation.
-
-### 9.3 Service-level invariants above SQL
-
-Some rules require authorization context and remain service logic:
-
-- A personal workspace has only its user as owner.
-- Owner promotion requires an existing owner.
-- Admins cannot invite, promote, demote, suspend, or remove owners.
-- Repository and member counts are checked against limits in the same D1
-  transaction that creates the row.
-- Inserts and updates follow explicit state-transition allowlists; enum checks
-  alone do not authorize skipping a state.
-- An immutable object becomes `ready` in the same D1 transaction that
-  completes its upload quota ledger.
-- `current_key_epoch` advances only after signed envelopes have been verified.
-- Mutating repository routes reject archived/deleting workspaces and
-  repositories.
-- Every object-write route rejects a workspace whose
-  `key_rotation_required` flag is set; key-grant and epoch-advance routes are
-  the only mutations used to clear it.
-- D1 ciphertext/hash fields are bounded before a query is issued.
-- Deletion jobs are inserted before the API acknowledges archive/delete.
-- Generic idempotency responses never contain tokens, email values, key
-  envelopes, ciphertext, or other secret-bearing response bodies.
+- An invitation always activates as Member.
+- Promotion to Admin is a separate authenticated operation.
+- Last-Admin checks and role changes occur in one transaction.
+- Public-to-private workspace changes also privatize repositories in one
+  transaction.
+- Branch-rule changes and policy_revision changes occur in one transaction.
+- Direct push authorization and head CAS occur in one transaction.
+- MR acceptance or conflict rejection occurs in one transaction.
+- Mutations pin current resource revision and use an idempotency key.
+- Generic idempotency records do not store tokens, email values, comments, or
+  response bodies with private content.
 
 ## 10. Public API
 
 ### 10.1 Common contract
 
-The production base URL is configured by release channel, for example:
+All application routes are under /v1. JSON documents use application/json.
+Raw payload objects use application/octet-stream.
 
-```text
-https://api.mallard.example
-```
+Every response contains X-Request-Id.
 
-All application endpoints are under `/v1`. JSON requests use
-`Content-Type: application/json`; ciphertext bodies use
-`application/vnd.mallard.mce1`. Every response contains
-`X-Request-Id`.
+Authenticated requests use:
 
-Authenticated requests require:
+~~~text
+Authorization: Bearer <access-token>
+~~~
 
-```text
-Authorization: DPoP <access-token>
-DPoP: <proof-jwt>
-```
+State-changing requests also use:
 
-State-changing requests also require:
-
-```text
+~~~text
 Idempotency-Key: <16-256 printable ASCII characters>
-```
+~~~
 
-The header is validated before logging or database access. Browser OAuth
-navigation/callbacks, authorization-code exchange, and refresh rotation use
-their own single-use transaction, code, or token-family records instead of the
-generic idempotency table.
-
-Object preconditions use standard `If-Match` and `If-None-Match`. Ciphertext
-metadata uses:
-
-```text
-X-Mallard-Ciphertext-Length
-X-Mallard-Ciphertext-SHA256
-X-Mallard-Key-Epoch
-```
-
-Client-provided ciphertext digests support idempotency and reconciliation.
-They are not proof of plaintext correctness. MCE1 authentication and the
-existing bundle hash chain provide end-to-end integrity.
+Ref preconditions use If-Match and If-None-Match.
 
 Errors have one bounded shape:
 
-```json
+~~~json
 {
   "error": {
-    "code": "precondition_failed",
-    "message": "The repository changed; refresh and review again.",
+    "code": "target_changed",
+    "message": "The target changed. This merge request was rejected.",
     "request_id": "01...",
     "retryable": false
   }
 }
-```
+~~~
 
-Responses never expose provider tokens, token hashes, stack traces, D1 SQL,
-bucket names, physical R2 keys, service secrets, or another tenant's
-existence.
+Errors do not reveal another tenant, internal SQL, bucket names, physical R2
+keys, stack traces, or secrets.
 
-### 10.2 Authentication and identity routes
-
-| Method | Route | Purpose |
-| --- | --- | --- |
-| `POST` | `/v1/auth/transactions` | Create provider state, PKCE binding, and exact loopback callback |
-| `GET` | `/v1/auth/{provider}/authorize` | Enter the system-browser provider flow |
-| `GET` | `/v1/auth/{provider}/callback` | Fixed GitHub/Google callback |
-| `POST` | `/v1/auth/token` | Consume one-time app code and PKCE verifier |
-| `POST` | `/v1/auth/refresh` | Rotate a device-bound refresh session |
-| `POST` | `/v1/auth/logout` | Revoke the current session family |
-| `GET` | `/v1/me` | Read the current account summary |
-| `PATCH` | `/v1/me` | Update encrypted profile metadata |
-| `POST` | `/v1/me/identities/{provider}/link` | Start explicit reauthenticated identity linking |
-| `DELETE` | `/v1/me/identities/{provider}` | Unlink while retaining at least one identity |
-| `POST` | `/v1/me/archive` | Begin account deletion preflight |
-| `POST` | `/v1/me/delete` | Schedule deletion after ownership checks |
-
-Auth transaction and app codes expire after five minutes and are single-use.
-
-### 10.3 Device and key routes
+### 10.2 Authentication routes
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `GET` | `/v1/devices` | List the caller's devices and session state |
-| `POST` | `/v1/devices` | Register a pending device and public keys |
-| `POST` | `/v1/devices/{device_id}/approve` | Store a signed device account-key envelope |
-| `POST` | `/v1/devices/{device_id}/revoke` | Revoke device sessions |
-| `GET` | `/v1/me/account-keys/current` | Read public account-key metadata |
-| `PUT` | `/v1/me/account-keys/{version}` | Publish a signed account-key version |
-| `GET` | `/v1/me/recovery-package` | Fetch the encrypted recovery package |
-| `PUT` | `/v1/me/recovery-package` | Replace the encrypted recovery package during key rotation |
+| POST | /v1/auth/transactions | Create provider state, PKCE binding, and exact loopback callback |
+| GET | /v1/auth/{provider}/authorize | Start the system-browser login |
+| GET | /v1/auth/{provider}/callback | Receive the fixed GitHub or Google callback |
+| POST | /v1/auth/token | Consume the one-time app code |
+| POST | /v1/auth/refresh | Rotate a refresh token |
+| POST | /v1/auth/logout | Revoke the current session family |
+| GET | /v1/me | Read account and active workspace summaries |
+| PATCH | /v1/me | Update bounded profile metadata |
+| GET | /v1/devices | List devices and sessions |
+| POST | /v1/devices/{device_id}/revoke | Revoke one device and its sessions |
 
-The API never accepts or returns the recovery key itself.
+There are no account-key, workspace-key, key-epoch, key-envelope, or recovery
+routes.
+
+### 10.3 Public discovery and read routes
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| GET | /v1/public/workspaces | List bounded public workspace summaries |
+| GET | /v1/public/repositories | List bounded public summaries; featured rows include the reviewed Git clone URL |
+| GET | /v1/workspaces/{workspace_slug} | Read a public summary or an authorized private workspace |
+| GET | /v1/repositories/{repository_id} | Read public or authorized repository metadata |
+| GET | /v1/repositories/{repository_id}/refs | List public accepted refs or authorized refs |
+| GET | /v1/repositories/{repository_id}/refs/{ref_name}/head | Read one visible ref head |
+| GET | /v1/repositories/{repository_id}/objects/{logical_key_b64} | Read one authorized logical object |
+
+Anonymous routes expose accepted repository state only. They do not expose
+members, invitations, MR source refs, MR comments, drafts, rejected content,
+or audit events.
 
 ### 10.4 Workspace and membership routes
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `GET` | `/v1/workspaces` | List authorized encrypted workspace summaries |
-| `POST` | `/v1/workspaces` | Create a team workspace, first epoch, owner, and limit row |
-| `GET` | `/v1/workspaces/{workspace_id}` | Read encrypted metadata, role, limits, and key state |
-| `PATCH` | `/v1/workspaces/{workspace_id}` | Update encrypted metadata |
-| `GET` | `/v1/workspaces/{workspace_id}/members` | List roles and public key versions |
-| `PATCH` | `/v1/workspaces/{workspace_id}/members/{user_id}` | Change role/status under role policy |
-| `POST` | `/v1/workspaces/{workspace_id}/invitations` | Create and email an invitation |
-| `POST` | `/v1/invitations/accept` | Accept a body-carried token into active or awaiting-key state |
-| `POST` | `/v1/workspaces/{workspace_id}/key-grants` | Publish signed epoch envelopes |
-| `POST` | `/v1/workspaces/{workspace_id}/key-epochs` | Atomically advance a fully enveloped epoch |
-| `GET` | `/v1/workspaces/{workspace_id}/limits` | Read quota and count limits |
-| `POST` | `/v1/workspaces/{workspace_id}/archive` | Begin 30-day deletion recovery |
-| `POST` | `/v1/workspaces/{workspace_id}/restore` | Restore within the recovery window |
+| POST | /v1/workspaces | Create a private workspace and Admin membership |
+| PATCH | /v1/workspaces/{workspace_id} | Change name or visibility with revision checks |
+| GET | /v1/workspaces/{workspace_id}/members | List active and invited membership |
+| POST | /v1/workspaces/{workspace_id}/invitations | Invite one Member |
+| POST | /v1/invitations/accept | Accept a body-carried invitation token |
+| POST | /v1/workspaces/{workspace_id}/invitations/{invitation_id}/revoke | Revoke an invitation |
+| PATCH | /v1/workspaces/{workspace_id}/members/{user_id} | Promote, demote, suspend, or reactivate |
+| DELETE | /v1/workspaces/{workspace_id}/members/{user_id} | Remove membership under last-Admin policy |
+| POST | /v1/workspaces/{workspace_id}/archive | Start delayed workspace deletion |
+| POST | /v1/workspaces/{workspace_id}/restore | Restore during retention |
 
-Invitation tokens are random bearer values sent only to the destination email.
-D1 stores their hashes. Acceptance still requires an authenticated identity
-whose verified email lookup hash matches the invitation.
-
-The email carries the token in a URL fragment or as a transcription code; the
-API accepts it only in the POST body. It never appears in an API path, query
-string, referrer, analytics field, or log.
-
-### 10.5 Repository and object routes
+### 10.5 Repository, ref, and policy routes
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `GET` | `/v1/workspaces/{workspace_id}/repositories` | List encrypted repository summaries |
-| `POST` | `/v1/workspaces/{workspace_id}/repositories` | Allocate a repository for a schema-1 bundle ID |
-| `GET` | `/v1/repositories/{repository_id}` | Read repository state and encrypted metadata |
-| `PATCH` | `/v1/repositories/{repository_id}` | Update encrypted metadata |
-| `GET` | `/v1/repositories/{repository_id}/objects` | Cursor-list authorized logical keys |
-| `GET` | `/v1/repositories/{repository_id}/objects/{logical_key_b64}` | Stream one ciphertext object |
-| `POST` | `/v1/repositories/{repository_id}/immutable-uploads` | Allocate/resume an immutable object upload |
-| `PUT` | `/v1/uploads/{upload_id}/body` | Complete a single-request immutable upload |
-| `PUT` | `/v1/uploads/{upload_id}/parts/{part_number}` | Upload one multipart part |
-| `POST` | `/v1/uploads/{upload_id}/complete` | Complete the exact recorded multipart set |
-| `POST` | `/v1/uploads/{upload_id}/abort` | Abort a staging upload and release quota |
-| `PUT` | `/v1/repositories/{repository_id}/mutable/{name}` | Conditionally write encrypted `head` or `tag` |
-| `POST` | `/v1/repositories/{repository_id}/archive` | Begin 30-day deletion recovery |
-| `POST` | `/v1/repositories/{repository_id}/restore` | Restore within the recovery window |
+| GET | /v1/workspaces/{workspace_id}/repositories | List authorized repositories |
+| POST | /v1/workspaces/{workspace_id}/repositories | Create a Git managed repository from a bundle ID, fingerprint, and primary branch |
+| PATCH | /v1/repositories/{repository_id} | Change bounded metadata or visibility |
+| POST | /v1/repositories/{repository_id}/refs | Create a Git branch ref |
+| GET | /v1/repositories/{repository_id}/branch-rules | Read exact protected branches and policy revision |
+| PUT | /v1/repositories/{repository_id}/branch-rules/{branch_name_b64} | Protect an exact Git branch |
+| DELETE | /v1/repositories/{repository_id}/branch-rules/{branch_name_b64} | Remove protection from an exact Git branch |
+| PUT | /v1/repositories/{repository_id}/refs/{ref_name_b64}/head | Direct compare-and-swap push |
+| POST | /v1/repositories/{repository_id}/archive | Start delayed repository deletion |
+| POST | /v1/repositories/{repository_id}/restore | Restore during retention |
 
-`logical_key_b64` is unpadded base64url of the validated UTF-8 logical key.
-The Worker decodes and validates it against the repository's bundle ID and the
-known schema-1 namespaces before querying D1.
+The direct head route checks the current role and branch rule. It does not
+trust a client statement that a branch is writable.
 
-### 10.6 Internal routes
+### 10.6 Merge-request routes
 
-Internal routes live under `/internal/v1` on a separate Access-protected
-hostname. They support:
+| Method | Route | Purpose |
+| --- | --- | --- |
+| POST | /v1/repositories/{repository_id}/merge-requests | Create an MR draft and MR-scoped source ref |
+| GET | /v1/repositories/{repository_id}/merge-requests | List authorized MRs |
+| GET | /v1/merge-requests/{merge_request_id} | Read one MR and its events |
+| PUT | /v1/merge-requests/{merge_request_id}/source/head | Push to the MR draft source ref |
+| POST | /v1/merge-requests/{merge_request_id}/open | Freeze the source head and open the MR |
+| POST | /v1/merge-requests/{merge_request_id}/accept | Accept or atomically reject a target conflict |
+| POST | /v1/merge-requests/{merge_request_id}/reject | Reject an open MR |
+| POST | /v1/merge-requests/{merge_request_id}/withdraw | Withdraw a draft or open MR |
 
-- user/workspace disablement;
-- quota overrides with encrypted reason;
+The accept route does not return a conflict-resolution plan. A target conflict
+changes the MR to rejected and returns that terminal state.
+
+### 10.7 Immutable object routes
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| GET | /v1/repositories/{repository_id}/objects | Cursor-list authorized logical keys |
+| POST | /v1/repositories/{repository_id}/immutable-uploads | Allocate or resume an immutable upload |
+| PUT | /v1/uploads/{upload_id}/body | Complete a single-request upload |
+| PUT | /v1/uploads/{upload_id}/parts/{part_number} | Upload one multipart part |
+| POST | /v1/uploads/{upload_id}/complete | Complete the exact recorded part set |
+| POST | /v1/uploads/{upload_id}/abort | Abort staging and release quota |
+
+The API has no general object-delete route.
+
+### 10.8 Internal routes
+
+Internal routes use /internal/v1 on an Access-protected hostname. They support:
+
+- user or workspace disablement;
+- featured repository selection;
+- quota overrides;
 - deletion-job retry;
-- DLQ inspection and replay;
+- dead-letter inspection and replay;
 - sanitized audit lookup by opaque ID; and
 - service health and migration status.
 
-The Worker validates the Cloudflare Access JWT signature, issuer, audience,
-and expiry. Presence of an Access header alone is never sufficient.
+The Worker validates the Cloudflare Access token signature, issuer, audience,
+and expiry.
 
-### 10.7 Status codes
+### 10.9 Core mutation inputs
+
+Every mutation uses the Idempotency-Key header from section 10.1. Its body
+includes the expected revision of each mutable D1 resource. A response returns
+the new revision and current state.
+
+**Create workspace**
+
+Required fields:
+
+- bounded name and slug; and
+- initial visibility, which defaults to private.
+
+The caller becomes the first Admin in the creation transaction.
+
+**Create repository**
+
+Required fields:
+
+- workspace revision;
+- bundle ID;
+- bounded display name;
+- repository fingerprint;
+- primary Git branch;
+- initial visibility, which defaults to private;
+- bounded schema-1 tag bytes and SHA-256.
+
+The service validates the fingerprint shape, branch name, bundle identity,
+tag, workspace policy, and uniqueness. The desktop is responsible for
+deriving the fingerprint from Git as defined in section 3.1.
+
+**Create branch ref**
+
+Required fields:
+
+- repository policy revision;
+- new branch name;
+- optional base ref ID; and
+- exact base head ETag when a base ref is present.
+
+The new ref starts at the verified base head or at no head.
+
+**Direct head update**
+
+Required values:
+
+- repository policy revision;
+- target ref ID;
+- If-Match or If-None-Match;
+- new schema-1 head bytes.
+
+The service parses the head and verifies all referenced immutable coordinates
+before it updates D1.
+
+**Create MR**
+
+Required fields:
+
+- repository policy revision;
+- target ref ID and exact target head ETag;
+- new cloud thread ID and provider;
+- Git source and target branch names;
+- pinned target commit ID;
+- initial merge-base commit ID.
+
+D1 verifies the role, protected target, unused cloud thread ID, branch names,
+policy revision, and target ETag. It then creates the MR and its draft source
+ref from the target in one transaction.
+
+**Open MR**
+
+Required fields:
+
+- expected MR revision;
+- exact source head ETag;
+- frozen Git source commit ID;
+- pinned Git target commit ID;
+- recalculated merge-base commit ID.
+
+Opening the MR freezes the source ref.
+
+**Accept MR**
+
+Required fields:
+
+- expected MR revision;
+- exact source and target head ETags;
+- Admin Git-check source, target, and merge-base commit IDs;
+- Git-check result no_conflict;
+- Git-check time.
+
+The service treats the authenticated Admin as the authority for the Git check.
+It independently verifies every D1 and object coordinate. A changed target
+causes terminal rejection instead of acceptance.
+
+**Reject MR**
+
+Required fields:
+
+- expected MR revision;
+- reason code;
+- optional bounded comment;
+- Git-check coordinates when the reason is git_conflict or
+  git_target_changed.
+
+Only Admins can use admin_rejected, git_conflict, or git_target_changed.
+
+**Publish visibility**
+
+Required fields:
+
+- expected workspace and repository revisions;
+- accepted head ETag and manifest SHA-256;
+- warning-set digest;
+- warning acknowledgements;
+- public-disclosure acknowledgement.
+
+### 10.10 Status codes
 
 | Status | Meaning |
 | --- | --- |
-| `400` | Malformed request, callback, cursor, or logical key |
-| `401` | Missing/invalid/expired access token or DPoP proof |
-| `403` | Authenticated caller lacks a role capability |
-| `404` | Resource absent or not visible to the caller |
-| `409` | Idempotency mismatch, key rotation required, or invalid workflow state |
-| `412` | Immutable/mutable object precondition failed |
-| `413` | Request or object exceeds a hard size limit |
-| `422` | Valid request violates quota, membership, or lifecycle policy |
-| `429` | Per-IP, per-user, or per-workspace rate limit |
-| `503` | Retryable D1, R2, Queue, or provider dependency failure |
-
-An unauthorized cross-tenant identifier returns `404`, not `403`.
+| 400 | Malformed request, callback, branch name, cursor, or logical key |
+| 401 | Missing, invalid, or expired session |
+| 403 | Visible resource, but the caller lacks the required capability |
+| 404 | Resource absent or not visible |
+| 409 | Target conflict, invalid workflow state, policy change, or idempotency mismatch |
+| 412 | Direct ref compare-and-swap failed |
+| 413 | Request or object exceeds a hard bound |
+| 422 | Valid request violates quota, membership, or lifecycle policy |
+| 429 | Rate limit |
+| 503 | Retryable D1, R2, Queue, email, or identity-provider failure |
 
 ## 11. Critical flows
 
-### 11.1 First login and personal workspace
+### 11.1 First login
 
-1. Complete OAuth/PKCE and register a pending device.
-2. Create the user, external identity, personal workspace, owner membership,
-   and default free limits in one D1 transaction.
-3. The client generates the account key package, recovery key, device
-   envelope, workspace epoch 1, and owner workspace envelope.
-4. Publish and verify those envelopes.
-5. Activate the device and membership.
-6. Display and confirm the recovery key before repository creation is allowed.
+1. Complete OAuth with PKCE.
+2. Create the user, identity, device, private personal workspace, Admin
+   membership, and default limits in one D1 transaction.
+3. Issue the Mallard access and refresh tokens.
+4. Store the refresh token in the operating-system keychain.
+5. Show the empty private workspace.
 
-If step 3–5 is abandoned, a scheduled cleanup deletes the incomplete account
-after 24 hours. No managed repository can exist yet.
+No content key, recovery key, or device approval is required.
 
-### 11.2 Push through `ManagedBundleObjectStore`
+### 11.2 Pull the public demo
 
-1. Refresh the head and decrypt it.
-2. Capture/review locally using the existing Mallard flow.
-3. Encrypt new payload, manifest, and commit objects with the current
-   workspace epoch.
-4. Allocate and upload each immutable logical object idempotently.
-5. Encrypt the new head with a fresh MCE1 nonce.
-6. Conditionally write the head with the previously observed ciphertext ETag.
-7. On conflict, return `CasOutcome::Conflict`; Mallard refreshes and replans.
-8. Best-effort encrypt and conditionally update the discovery tag.
+1. The app lists featured public repositories without a permanent credential.
+2. The catalog returns the reviewed public Git clone URL and repository
+   fingerprint.
+3. The user clones or opens that Git repository.
+4. The desktop verifies the local repository fingerprint.
+5. The user selects the demo's accepted ref.
+6. The Worker verifies effective public visibility.
+7. The Worker returns the D1 ref head with no-store.
+8. The app reads immutable manifest and payload objects through the Worker.
+9. The desktop bundle engine verifies the contract in section 5.
+10. The app builds the Pull plan defined in section 5.6.
+11. The user approves the exact resources to apply.
 
-The Worker cannot decide whether a manifest is semantically correct because it
-cannot decrypt it. The existing desktop review, validation, SHA-256 chain, and
-publish order remain the trust boundary.
+Public visibility removes account setup. It does not remove Pull review.
 
-### 11.3 Pull
+### 11.3 Invite an editor to a public workspace
 
-1. Authorize the repository and stream the encrypted head.
-2. Authenticate/decrypt it and verify its schema-1 identity.
-3. Fetch and decrypt the immutable manifest.
-4. Let the current bundle engine build the review plan.
-5. Fetch/decrypt only approved payload objects.
-6. Preserve all current configuration revision, bundle revision, digest, expiry, backup, and
-   explicit-approval checks before local apply.
+1. An Admin enters the editor's verified email.
+2. The Worker creates a seven-day Member invitation and sends the token.
+3. The recipient signs in and accepts.
+4. D1 creates an active Member row.
+5. The new Member can read private workspace repositories and write only
+   under the branch policy read from D1.
 
-Managed cloud does not weaken Pull review or add a server-triggered apply path.
+The public could already read public content. Invitation adds write capability
+and private workspace read capability.
 
-### 11.4 New-user team invitation
+### 11.4 Member pushes to develop
 
-1. Owner/admin creates an invitation to a verified normalized email.
-2. Worker stores token hash and service-encrypted destination, then sends a
-   generic email without workspace secrets.
-3. Recipient signs in and accepts; D1 creates `awaiting_key` membership.
-4. Owner/admin desktop sees a pending grant.
-5. It verifies the recipient account public key, encrypts every retained
-   epoch, signs the grant set, and uploads it.
-6. D1's activation trigger confirms all epochs and changes membership to
-   active.
+1. The desktop binds the managed ref named develop.
+2. It reads the head and policy revision.
+3. It performs the Push review in section 5.5.
+4. It uploads and verifies immutable objects.
+5. It submits a direct head compare-and-swap.
+6. D1 confirms that develop is not protected and the caller is a Member.
+7. D1 advances the ref or returns a compare-and-swap conflict.
 
-### 11.5 Interrupted immutable upload
+If an Admin protected develop after step 2, step 6 rejects the direct push.
 
-- Before R2 creation: D1 allocation remains resumable.
-- During parts: client lists its recorded parts and resumes missing parts.
-- R2 complete succeeds, D1 finalize fails: retry `HEAD`s the unique physical
-  key, verifies recorded size/ETag, then finalizes D1.
-- D1 expires first: session becomes terminal and quota is released; any R2
-  staging upload is aborted best-effort.
-- Orphaned completed physical object: create a durable orphan job and delete
-  only after retention permits.
+### 11.5 Member proposes a change to main
 
-### 11.6 Account deletion
+1. The Member selects Create merge request for main.
+2. The desktop confirms that main is protected and records the Git
+   coordinates.
+3. The desktop starts a new provider chat.
+4. D1 verifies the unused cloud thread ID and creates the MR and source ref
+   from the exact main head.
+5. The Member works in that chat.
+6. The desktop performs the Push review in section 5.5 and advances the draft
+   source ref.
+7. The Member opens the MR. The source head and Git coordinates become frozen.
+8. An Admin reviews the resource diff and conversation.
+9. The Admin desktop performs its non-mutating Git conflict check.
+10. The Admin accepts or rejects.
+11. On acceptance, D1 either advances main and accepts the MR or detects that
+    main changed and rejects the MR.
 
-1. Reauthenticate and revoke new login/link activity.
-2. Refuse deletion while the user is the last owner of any team workspace;
-   the user must transfer ownership or complete deletion of that team first.
-   Merely scheduling the team's archive is not sufficient.
-3. Archive the personal workspace and memberships.
-4. Revoke refresh families and devices.
-5. Insert a user deletion job with `not_before = now + 30 days`.
-6. Allow reauthentication/recovery only for explicit cancellation during the
-   window.
-7. After the window, delete R2 objects when locks permit, remove identity
-   fields and key envelopes, and retain only de-identified audit events
-   required by policy.
+### 11.6 Admin rejects an MR
 
-## 12. Consistency and failure handling
+1. The Admin opens an exact MR revision.
+2. The Admin selects Reject.
+3. The Admin can add a bounded comment.
+4. D1 verifies that the MR is open and the caller is an active Admin.
+5. D1 records the terminal rejection and audit event.
+6. The target remains unchanged.
+7. The Member must start a new MR and a new chat to try again.
 
-### 12.1 D1-to-R2 state machines
+### 11.7 Conflict rejection
 
-D1 and R2 do not share a transaction. Every cross-service workflow has:
+1. An open MR pins target head H1.
+2. Another authorized operation advances the target to H2.
+3. An Admin tries to accept the MR.
+4. The D1 transaction compares H1 with H2.
+5. The transaction leaves H2 unchanged.
+6. The transaction marks the MR rejected with target_changed.
+7. The UI shows a terminal rejection and offers Start new MR.
 
-- a durable D1 state;
-- an idempotency key and request digest;
-- a unique physical target;
-- bounded retries with exponential backoff and jitter;
-- a reconciliation rule based on R2 `HEAD`/ETag and D1 state;
-- a terminal failure/dead state; and
-- a sanitized audit event.
+There is no rebase or resolve-conflicts action.
 
-The API never reports success before the authoritative operation completes.
-When the operation completed but its response was lost, the idempotency record
-must reproduce the result.
+### 11.8 Change visibility to public
 
-### 12.2 Queue and Cron contract
+1. An Admin opens repository visibility settings.
+2. The desktop refreshes and reviews the current accepted head.
+3. Mallard runs its best-effort secret and executable checks.
+4. The UI explains permanent public disclosure.
+5. The Admin acknowledges all warnings.
+6. The API verifies that the workspace is public.
+7. D1 changes repository visibility and increments visibility generation.
+8. Anonymous reads can now reach accepted refs.
 
-Queue messages contain only a job ID, job type, attempt, and trace ID. They
-contain no email, token, key envelope, object key, or user content.
+Draft refs and MR content remain membership-only.
 
-D1 is the outbox and job authority:
+## 12. Failure handling
 
-1. The request transaction inserts/updates the job row.
-2. Queue send is best-effort after commit.
-3. Cron periodically selects due D1 rows and re-enqueues them.
-4. Consumers claim work with a conditional state update.
-5. Repeated failures move the queue message to a DLQ and the D1 job to
-   `retry` or `dead`.
+### 12.1 D1 and R2 boundary
 
-Queue retention therefore cannot silently lose required deletion or
-reconciliation work.
+Immutable publication uses this order:
 
-### 12.3 Cursor and idempotency integrity
+~~~text
+reserve quota in D1
+-> write and verify immutable R2 object
+-> mark object ready in D1
+-> update D1 ref
+~~~
 
-Cursors are opaque authenticated values containing query scope, last logical
-key/ID, and expiry. A cursor from one workspace/repository cannot be replayed
-against another.
+The system handles partial failure as follows:
 
-Idempotency records are scoped to the authenticated principal and target.
-Results are retained for at least the maximum client retry window and never
-permit a request body mismatch.
+- D1 allocation succeeds and R2 write fails: retry or expire the upload.
+- R2 write succeeds and D1 finalize fails: retry after verifying the exact R2
+  object.
+- Object becomes ready but ref update fails: retain an unreachable immutable
+  object for delayed cleanup.
+- D1 ref update succeeds: every referenced object was already ready.
 
-## 13. Data lifecycle, backup, and operations
+### 12.2 Merge-request decision
+
+MR acceptance, target change, MR state, and decision event share one D1
+transaction.
+
+An ambiguous client response is resolved by reading the MR and target
+again. The client never retries acceptance with a new expectation under the
+same idempotency key.
+
+### 12.3 Queue and Cron
+
+Queue delivery is acceleration, not the only clock.
+
+Cron scans bounded due-job indexes for:
+
+- expired invitations;
+- expired sessions;
+- stale uploads;
+- abandoned multipart state;
+- archived resources ready for purge;
+- rejected or withdrawn draft refs past retention; and
+- orphaned immutable objects.
+
+Consumers are idempotent. Repeated failure moves a job to the dead-letter
+queue and creates an alert.
+
+### 12.4 Idempotency
+
+Every mutation validates an idempotency key before expensive work.
+
+Reusing a key with the same request returns the stored status. Reusing it with
+a different request returns 409. Stored idempotency results are bounded and
+do not include private content or credentials.
+
+## 13. Lifecycle and operations
 
 ### 13.1 Archive and deletion
 
-Repository and workspace archive:
+Archive hides the resource immediately and blocks writes. Physical deletion
+starts after a 30-day recovery period.
 
-- immediately blocks ordinary reads/writes except status and restore;
-- records `delete_after_ms = archived_at + 30 days`;
-- creates a durable deletion job; and
-- is owner-restorable during the window.
+Deletion rules:
 
-At expiry, the worker:
+- There is no public immediate-delete object API.
+- Workspace deletion requires reauthentication.
+- A user cannot leave a workspace as its last Admin.
+- Repository purge deletes indexed objects only.
+- Purge never accepts an arbitrary R2 prefix from a client.
+- R2 retention locks can delay final object removal.
+- Restore during retention is idempotent.
+- Final purge is retryable and audited.
 
-1. verifies the D1 target is still deleting;
-2. deletes unlocked mutable objects;
-3. enumerates D1 immutable mappings and deletes only lock-expired objects;
-4. retries locked objects at their earliest eligible time;
-5. removes object-index rows only after confirmed R2 absence;
-6. de-identifies or deletes associated audit metadata according to retention;
-   and
-7. marks the job and target complete.
+### 13.2 Visibility rollback
 
-There is no arbitrary-key delete endpoint.
+Changing public content to private:
 
-### 13.2 Backup and disaster recovery
+1. increments visibility generation;
+2. blocks new anonymous reads;
+3. invalidates future public cache lookup;
+4. schedules cache purge; and
+5. records an audit event.
 
-- D1 Time Travel supplies the first 30 days of point-in-time recovery on the
-  paid production plan.
-- At least weekly, a restricted operational backup runner invokes Cloudflare's
-  D1 export API, streams the SQL export through authenticated encryption with a
-  dedicated service backup key, and writes only ciphertext to a separate
-  private recovery bucket.
-- Because Cloudflare documents that a running D1 export can block other
-  database requests, the runner uses a declared maintenance window, an
-  availability check, bounded cancellation, and an alert on overrun. Growth
-  that makes this violate the service objective triggers sharding or an
-  incremental backup redesign before rollout expands.
-- Recovery runbooks restore into a non-production database first, validate
-  schema and counts, then perform a controlled production cutover.
-- R2 object bodies need no plaintext backup path; immutable bucket lock
-  protects the recent window.
+This action cannot revoke copies that were already downloaded.
 
-Restoring D1 can resurrect mappings to already deleted R2 objects. The recovery
-runbook must reconcile every restored active object mapping with R2 before
-reopening writes.
+### 13.3 Backup and recovery
 
-### 13.3 Audit and observability
+Production operations must define:
 
-Security audit events include:
+- D1 point-in-time recovery and export tests;
+- R2 inventory and object integrity checks;
+- infrastructure configuration backups;
+- secret rotation procedures;
+- a quarterly restore exercise;
+- recovery point and recovery time objectives; and
+- a reconciliation command that does not expose content in logs.
 
-- auth success/failure and provider;
-- identity link/unlink;
-- refresh replay and session revocation;
-- device enrollment/revocation;
-- invitation create/accept/revoke;
-- role and key-epoch changes;
-- repository create/archive/restore/delete;
-- cross-tenant denial;
-- immutable conflict and head CAS conflict;
-- quota denial/override;
-- deletion/reconciliation result; and
-- internal administrative action.
+### 13.4 Observability
 
-Audit `details_json` and operational logs contain enumerated reason codes and
-bounded counts only. They must not contain email, display names, logical object
-keys, physical R2 keys, internal or local paths, provider credentials,
-provider/access/refresh tokens, key material, ciphertext or plaintext object
-bodies, request bodies, or stack traces.
+Metrics include:
 
-Operational dashboards and alerts cover:
+- request count, latency, and status;
+- anonymous and authenticated rate-limit events;
+- OAuth and refresh failures;
+- invitation delivery and acceptance;
+- authorization denials by capability;
+- direct-push compare-and-swap conflicts;
+- MR opens, accepts, manual rejections, and conflict rejections;
+- D1 transaction latency;
+- R2 upload and verification failures;
+- queue lag and dead-letter depth;
+- cache hit rate for public immutable objects; and
+- archive and purge backlog.
 
-- auth error and refresh-replay rates;
-- cross-tenant denial rate, partitioned only by safe route class;
-- 4xx/5xx by safe error code;
-- D1 latency/errors and database size;
-- R2 latency/errors, multipart failures/resumes, and multipart backlog;
-- workspace used/reserved quota pressure by non-identifying percentile;
-- quota reservations older than one hour;
-- CAS conflict rate;
-- Queue backlog, retry, and DLQ depth;
-- deletion completion latency/rate and due jobs past their deadline; and
-- key-rotation-required workspaces.
+Metrics use opaque IDs and bounded labels. They do not contain content.
 
-### 13.4 Capacity and future sharding
+### 13.5 Capacity
 
-The first deployment uses one D1 database. Begin a sharding design before
-either:
+The first production deployment uses one D1 database. Rollout pauses before a
+measured limit becomes an incident.
 
-- D1 storage reaches 70% of the current paid per-database limit; or
-- sustained primary write latency/error objectives are missed because of
-  control-plane volume.
+Before launch, load tests must measure:
 
-Future shards are assigned by workspace and use separate D1/R2 bindings. This
-document does not define cross-shard moves.
+- D1 write latency under ref and MR contention;
+- public catalog and object-read volume;
+- R2 upload throughput;
+- queue backlog recovery;
+- maximum bounded manifest processing;
+- hot public demo cache behavior; and
+- one-workspace branch-policy contention.
 
-## 14. Delivery programs
+Regional sharding is a later design. It is not part of the first release.
 
-### Program A: Cloud control plane
+## 14. Desktop experience
 
-Deliver the Worker skeleton, D1 migrations, private R2 bindings, logical object
-index, immutable small/multipart upload, mutable CAS, list/read, quota ledger,
-reconciliation jobs, Queue/DLQ, Cron, and Access-protected operations.
+### 14.1 Workspace and repository settings
 
-This program is testable with a non-production protocol client and opaque
-fixture ciphertext; it does not wait for desktop E2EE.
+The desktop shows:
 
-### Program B: Authentication and user/team management
+- workspace visibility;
+- repository visibility;
+- current role;
+- active and invited Members;
+- Git repository fingerprint;
+- primary branch;
+- exact protected branches;
+- selected managed ref; and
+- policy revision freshness.
 
-Deliver GitHub/Google broker login, PKCE/loopback callbacks, device-bound
-rotating sessions, explicit identity linking, personal/team workspaces, roles,
-invitations, limits, account lifecycle, and desktop management screens.
+Only Admins see management controls.
 
-This program treats key envelopes as opaque signed fixtures until Program C.
+### 14.2 Push actions
 
-### Program C: E2EE and recovery
+For a Member:
 
-Deliver reviewed cryptographic dependencies, MCE1 test vectors, keychain
-integration, account/device/workspace envelopes, recovery confirmation,
-trusted-device approval, two-phase key grants, epoch rotation, secret
-zeroization, and compromise workflows.
+- an unprotected Git branch shows Push;
+- a protected Git branch shows Create merge request.
 
-An independent cryptographic review is a release gate.
+For an Admin:
 
-### Program D: Desktop managed provider and rollout
+- every target can show Push;
+- a protected target can also show Create merge request when an Admin wants a
+  recorded review path.
 
-Deliver machine schema-2 migration, `StorageKind::Managed`,
-`ManagedBundleObjectStore`, API/error mapping, bounded parallel transfer,
-managed storage/account/team UI, local activity events, parity tests, staged
-rollout, runbooks, and production monitoring.
+The UI checks current policy before capture and the server checks it again at
+publication.
 
-Local and BYO R2 remain available throughout rollout. Managed cloud is not the
-default until all release gates pass.
+### 14.3 Merge-request UI
 
-## 15. Verification strategy
+The MR UI has:
 
-### 15.1 D1 schema and state machines
+- target branch;
+- MR state;
+- one bound chat;
+- source and target revision summaries;
+- exact resource diff;
+- public-disclosure warnings where applicable;
+- Accept and Reject for Admins;
+- Withdraw for the author; and
+- Start new MR after a terminal rejection.
 
-- Apply every migration to empty SQLite/D1 and to the previous migration.
-- Verify all foreign keys, partial unique indexes, checks, and triggers.
-- Concurrently reserve the final available bytes and prove only one succeeds.
-- Complete, abort, expire, and retry uploads without quota leakage.
-- Reject deletion of an active upload.
-- Reject activation without every historical key envelope.
-- Reject last-owner removal and invalid key-epoch jumps.
-- Reconcile each simulated R2-success/D1-failure boundary idempotently.
+The UI has no:
 
-### 15.2 Authentication and authorization
+- attach-existing-chat control;
+- rebase control;
+- auto-merge control;
+- conflict editor;
+- reopen control; or
+- change-target control after creation.
 
-- Reject invalid, expired, missing, or replayed OAuth state and OIDC nonce.
-- Reject wrong PKCE verifier, reused app code, and unapproved callback.
-- Reject access/refresh tokens without the registered device proof.
-- Rotate refresh tokens and revoke the family on replay.
-- Prove equal provider emails do not auto-link users.
-- Complete an explicitly initiated, reauthenticated identity link and reject a
-  link whose provider subject already belongs to another user.
-- Exercise every role against every workspace/repository operation.
-- Return `404` for cross-tenant identifiers and never leak target metadata.
-- Verify Access JWT signature, issuer, audience, and expiry on internal routes.
+### 14.4 Terminology
 
-### 15.3 E2EE
+Use:
 
-- Publish normative MCE1 vectors for empty, one-frame, boundary, multi-frame,
-  and maximum-supported objects.
-- Round-trip every repository object type.
-- Reject a wrong key as well as wrong workspace, repository, logical key,
-  epoch, frame index, length, nonce, tag, missing frame, extra frame, and
-  reordered frame.
-- Verify mutable retries reconcile ciphertext rather than assuming
-  deterministic encryption.
-- Recover on a new device with the recovery key and with trusted-device
-  approval.
-- Complete two-phase team grant and historical-epoch access.
-- Rotate after member removal and prove old keys cannot decrypt new writes.
-- Scan logs, D1 fixtures, JSON state, and frontend events for private material.
+- Merge request for a Git protected branch;
+- Protected branch for an Admin-controlled Git branch;
+- Admin and Member for roles; and
+- Public and Private for visibility.
 
-### 15.4 Storage protocol parity
+Do not show Owner, Viewer, key, epoch, envelope, encrypted, decrypt, or recovery
+terms in the managed-cloud UI.
 
-Run the shared bundle protocol against:
+## 15. Delivery plan
 
-- `LocalBundleObjectStore`;
-- `S3BundleObjectStore` against an S3/R2-compatible harness, representing BYO
-  R2; and
-- `ManagedBundleObjectStore` backed by a local Worker/D1/R2-compatible harness.
+Each program must leave a working end-to-end product. Do not build all control
+plane tables before one user flow works.
 
-The parity suite covers storage marker behavior, missing reads, immutable
-idempotency/mismatch, bulk ordering, pagination, head creation/replacement
-CAS, concurrent publishers, ambiguous responses, and integrity failure.
+### Program A: Public demo read
 
-Portable manifests, heads, tags, commits, and plaintext object hashes remain
-schema 1 after managed decryption.
+Deliver:
 
-### 15.5 Failure and lifecycle
+- Worker custom domain;
+- D1 public workspace and repository records;
+- private immutable R2;
+- one featured public demo repository;
+- anonymous catalog and object reads;
+- managed desktop read adapter; and
+- Pull review and apply from section 5.6.
 
-- Interrupt every multipart phase and resume or expire safely.
-- Drop Queue messages and prove Cron recovers due D1 jobs.
-- Exhaust retries into the DLQ and replay after correction.
-- Archive, restore, and purge repositories/workspaces across the 30-day state
-  boundary.
-- Simulate an active R2 lock during purge and retry at eligibility.
-- Restore D1 Time Travel into a test database and reconcile missing/orphan R2
-  state before enabling writes.
+Exit condition: A new installation can discover and pull the demo without a
+Mallard account.
 
-## 16. Production acceptance criteria
+### Program B: Private personal sync
 
-- The application and distributable contain no managed R2 credential,
-  provider client secret, shared permanent bearer token, or recovery key.
-- Direct public access to both R2 buckets fails.
-- A new user can sign in, confirm recovery, and sync one project across two
-  approved devices.
-- A user cannot discover or read another workspace through guessed IDs,
-  cursors, object keys, or cached responses.
-- Every stored repository body begins as MCE1 ciphertext; no head, tag,
-  manifest, commit, transcript, or project file is readable in D1/R2.
-- Existing local-folder and BYO R2 integrations pass their unchanged tests.
-- Concurrent head writers produce one success and one CAS conflict.
-- Duplicate immutable writes never overwrite and return `AlreadyPresent` only
-  after plaintext equality is verified client-side.
-- Quota remains exact across retries, aborts, expiry, and reconciliation.
-- A new team user stays `awaiting_key` until a signed full-epoch grant exists.
-- Member removal blocks writes until a new fully enveloped key epoch exists.
-- Recovery succeeds with either the offline recovery key or a trusted device,
-  and fails closed without both.
-- Archive is reversible for 30 days; final purge is durable, audited, and
-  eventually completes despite dropped queue messages.
-- Logs and audit records contain no prohibited secrets or user content.
-- Independent cryptographic review findings are resolved before public
-  production.
+Deliver:
 
-## 17. Assumptions and release gates
+- GitHub and Google OAuth with PKCE;
+- rotating application sessions;
+- private personal workspace;
+- one Admin role;
+- private managed repository;
+- immutable upload;
+- D1 ref compare-and-swap;
+- direct Admin Push; and
+- archive and restore.
 
-- The first production population and write rate fit one D1 database. The 70%
-  capacity and latency gates in section 13.4 are rollout limits, not promises
-  that one database scales indefinitely.
-- The desktop remains the only plaintext and key-management client. A future
-  web client would require its own key-storage and trust design and is not
-  implied by the OAuth browser pages.
-- Supported operating systems provide a usable system keychain. Managed sync
-  fails closed on platforms or sessions where secure storage is unavailable.
-- The production account supports the required Worker request limits, D1
-  features, R2 multipart operations and bucket locks, Queues/DLQ, Access,
-  Secrets, and Email Service binding. Deployment tests verify those
-  capabilities rather than inferring them from a plan name.
-- Cloudflare Email Service outbound sending is documented as beta as of this
-  review. Public team invitations require explicit beta-risk acceptance,
-  deliverability tests, and verified-domain readiness; otherwise the team
-  rollout remains blocked rather than silently substituting another provider.
-- The 30-day archive period is a recovery opportunity, not a promise that a
-  malicious authorized endpoint forgets downloaded plaintext or historical
-  keys. Final purge is an eventually completed job and may wait for R2 lock
-  eligibility or a retryable Cloudflare outage.
-- `free` and `internal` limit codes are capacity policy only. They do not imply
-  billing, metering for invoices, entitlements sold to customers, or a payment
-  system.
-- Cryptographic algorithms and envelope encodings remain provisional until
-  test vectors interoperate across an independent implementation and the
-  external cryptographic review is complete.
+Exit condition: One user can push and pull a private project on two devices.
 
-## 18. Official references
+### Program C: Public and private workspaces
+
+Deliver:
+
+- workspace and repository visibility;
+- public cache policy;
+- Member invitations;
+- Admin promotion and last-Admin rules;
+- public-disclosure review;
+- visibility rollback; and
+- public demo editor invitation.
+
+Exit condition: An invited Member can edit the demo workspace while anonymous
+users remain read-only.
+
+### Program D: Git refs and protected branches
+
+Deliver:
+
+- managed refs;
+- Git-only repository validation;
+- required repository fingerprint;
+- primary branch;
+- main protected by default;
+- exact Admin branch rules;
+- direct Member Push to unprotected branches;
+- policy revisions; and
+- stale-policy rejection.
+
+Exit condition: A Member can push develop and cannot push main directly.
+
+### Program E: Merge requests
+
+Deliver:
+
+- MR-scoped source refs;
+- mandatory new-chat binding;
+- merge requests;
+- frozen source heads;
+- Admin Accept and Reject;
+- atomic target-conflict rejection;
+- Git conflict check in the Admin desktop; and
+- terminal MR history.
+
+Exit condition: A Member can propose a main change, an Admin can accept or
+reject it, and a changed target causes automatic rejection.
+
+### Program F: Production operations
+
+Deliver:
+
+- quota enforcement;
+- WAF and rate limits;
+- Queue, dead-letter queue, and Cron cleanup;
+- audit and operational metrics;
+- backup and restore exercises;
+- deletion jobs;
+- support runbooks;
+- load tests; and
+- staged rollout.
+
+Exit condition: All production acceptance criteria and release gates pass.
+
+## 16. Verification strategy
+
+### 16.1 Access matrix tests
+
+Test every combination of:
+
+- anonymous, inactive invitee, Member, and Admin;
+- public and private workspace;
+- public and private repository;
+- active and archived state; and
+- direct read, list, upload, ref update, MR decision, and administration.
+
+Verify that a hidden resource returns 404 and a visible forbidden action
+returns 403.
+
+### 16.2 Role tests
+
+Verify:
+
+- invitations activate as Member;
+- Member cannot invite, promote, configure, archive, or change visibility;
+- Admin can perform administration;
+- Admin can promote an accepted Member;
+- Owner and Viewer values are rejected;
+- the last Admin cannot leave, demote, or be removed; and
+- concurrent last-Admin operations have one valid result.
+
+### 16.3 Visibility and cache tests
+
+Verify:
+
+- effective public visibility requires public workspace and repository;
+- private workspace plus public repository is rejected;
+- workspace privatization also privatizes repositories;
+- first publication requires warning acknowledgement;
+- visibility generation changes before success;
+- old cache keys are not served after privatization;
+- mutable heads and private responses are no-store; and
+- direct R2 access is unavailable.
+
+### 16.4 Branch-policy tests
+
+Verify:
+
+- main is protected by default when it is the primary branch;
+- develop is not protected by default;
+- Admin can protect and unprotect an exact branch;
+- Member can direct-push an unprotected branch;
+- Member direct push to a protected branch returns 403;
+- Admin can direct-push a protected branch;
+- managed repository creation rejects a non-Git project;
+- a policy change invalidates a stale direct-push plan; and
+- branch patterns and wildcards are rejected.
+
+### 16.5 Merge-request tests
+
+Verify:
+
+- MR creation starts from the exact protected-branch head;
+- one new cloud chat ID is required;
+- one chat ID cannot serve two MRs;
+- an existing MR chat cannot be reused;
+- draft source can advance;
+- open freezes source;
+- open source cannot advance;
+- Member cannot accept or reject;
+- Admin can accept the exact source and target;
+- Admin can manually reject;
+- target change atomically rejects;
+- Git conflict result rejects;
+- rejection leaves target unchanged;
+- accepted, rejected, and withdrawn MRs cannot reopen;
+- terminal retry requires a new MR and chat; and
+- ambiguous acceptance is resolved by read-back.
+
+### 16.6 Bundle and storage tests
+
+Run the object-store contract in section 5.4 against the managed adapter:
+
+- immutable create;
+- identical create replay;
+- mismatched immutable collision;
+- exact verified read;
+- list cursor bounds;
+- per-ref head compare-and-swap;
+- manifest and payload digest verification;
+- interruption before head change;
+- orphan recovery; and
+- local-folder and S3 behavior unchanged.
+
+### 16.7 Frontend and Tauri tests
+
+Add frontend integration coverage for:
+
+- role-specific controls;
+- Public and Private labels;
+- main and develop behavior;
+- Create merge request;
+- non-Git repository rejection;
+- new-chat-only MR creation;
+- Admin Accept and Reject;
+- conflict terminal state;
+- no conflict-resolution controls;
+- public-disclosure warning; and
+- absence of removed encryption and role terms.
+
+Run both frontend and Rust checks for every Tauri contract change.
+
+### 16.8 Security and fault tests
+
+Test:
+
+- OAuth state, PKCE, callback, and code replay;
+- refresh-token rotation and replay;
+- invitation token theft, mismatch, expiry, replay, and revocation;
+- cross-workspace ID probing;
+- path and encoded-path attacks;
+- oversized inputs and pagination;
+- D1 and R2 partial failures;
+- queue duplicate delivery;
+- log redaction;
+- public read rate limits; and
+- archive, restore, and final purge.
+
+## 17. Production acceptance criteria
+
+Production release requires all of the following:
+
+- A public demo can be discovered and pulled without an account.
+- Anonymous users cannot write to a public workspace or repository.
+- Invitation is the only public-workspace write-entry path.
+- Admin and Member are the only roles.
+- The last-Admin invariant survives concurrent changes.
+- A private workspace and repository are not enumerable by an outsider.
+- Main is protected by default.
+- A Member can push develop when it is not protected.
+- A Member cannot direct-push any protected branch.
+- An Admin can configure exact protected branches.
+- Managed Cloud V1 rejects non-Git repository creation.
+- A protected Git Member change uses an MR.
+- Every MR has one new chat.
+- An Admin can accept or reject an open MR.
+- A changed target causes terminal conflict rejection.
+- A Git conflict reported by the Admin desktop causes terminal rejection.
+- The product has no rebase, auto-merge, conflict editor, or reopen path.
+- Public-to-private change blocks new anonymous reads immediately.
+- Public disclosure has an explicit warning and acknowledgement.
+- Managed content uses no Mallard client-side encryption or key lifecycle.
+- Access and refresh credentials are not stored in normal JSON configuration.
+- All immutable objects and accepted heads pass size and SHA-256 checks.
+- Direct head changes and accepted MRs are compare-and-swap safe.
+- Logs and audit records contain no credentials or user content.
+- Backup, restore, queue recovery, and deletion exercises pass.
+- Local-folder and user-owned S3/R2 paths remain unchanged.
+
+## 18. Assumptions and deferred work
+
+### 18.1 Assumptions
+
+- The managed service has no deployed users and no stored production data.
+- No managed-cloud encryption schema has been deployed. The initial schema
+  contains no content-key fields or compatibility migration.
+- The first production population fits one D1 database.
+- The desktop remains the only write client.
+- Managed repository branch refs represent Mallard bundle history, not Git
+  source storage.
+- Admins are trusted to make MR decisions.
+- Supported operating systems provide a usable credential keychain.
+- Deployment tests verify the required Cloudflare product capabilities and
+  current limits.
+
+### 18.2 Deferred work
+
+The first release excludes:
+
+- billing and subscriptions;
+- email and password authentication;
+- per-repository roles;
+- public MR drafts and comments;
+- branch patterns and policy inheritance;
+- required reviewer counts;
+- Member exceptions on protected branches;
+- automatic merge, rebase, conflict resolution, and MR reopen;
+- server-authoritative Git source merge validation;
+- Git-host pull-request creation or merge;
+- server-side source-code hosting;
+- web write clients;
+- public full-text search;
+- direct public R2 domains;
+- presigned direct uploads;
+- Durable Objects;
+- regional shards;
+- moving a repository between workspaces;
+- managed non-Git repositories and the related push-request workflow; and
+- client-side or end-to-end content encryption.
+
+## 19. Official references
 
 Cloudflare:
 
 - [Cloudflare D1](https://developers.cloudflare.com/d1/)
-- [D1 SQL statements and SQLite compatibility](https://developers.cloudflare.com/d1/sql-api/sql-statements/)
-- [D1 database API and transactional batch behavior](https://developers.cloudflare.com/d1/worker-api/d1-database/)
-- [D1 Time Travel and backups](https://developers.cloudflare.com/d1/reference/time-travel/)
-- [D1 import and export](https://developers.cloudflare.com/d1/best-practices/import-export-data/)
-- [R2 Workers API and conditional operations](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/)
-- [R2 multipart uploads through Workers](https://developers.cloudflare.com/r2/api/workers/workers-multipart-usage/)
-- [R2 limits](https://developers.cloudflare.com/r2/platform/limits/)
+- [D1 Worker API](https://developers.cloudflare.com/d1/worker-api/)
+- [D1 Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/)
+- [R2 Workers API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/)
+- [R2 multipart uploads](https://developers.cloudflare.com/r2/api/workers/workers-multipart-usage/)
 - [R2 bucket locks](https://developers.cloudflare.com/r2/buckets/bucket-locks/)
-- [Workers limits](https://developers.cloudflare.com/workers/platform/limits/)
+- [Workers Cache](https://developers.cloudflare.com/workers/runtime-apis/cache/)
 - [Cloudflare Queues](https://developers.cloudflare.com/queues/)
-- [Queue retries and delays](https://developers.cloudflare.com/queues/configuration/batching-retries/)
 - [Queue dead-letter queues](https://developers.cloudflare.com/queues/configuration/dead-letter-queues/)
-- [Cloudflare Email Service](https://developers.cloudflare.com/email-service/)
-- [Cloudflare Access policies](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/)
 - [Workers secrets](https://developers.cloudflare.com/workers/configuration/secrets/)
-- [Workers Logs and Logpush](https://developers.cloudflare.com/workers/observability/logs/)
+- [Cloudflare Access policies](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/)
+- [Workers observability](https://developers.cloudflare.com/workers/observability/)
 
-Identity and cryptography:
+Identity:
 
-- [OAuth 2.0 for Native Apps (RFC 8252)](https://www.rfc-editor.org/rfc/rfc8252)
-- [OAuth 2.0 Demonstrating Proof of Possession (RFC 9449)](https://www.rfc-editor.org/rfc/rfc9449)
-- [Hybrid Public Key Encryption (RFC 9180)](https://www.rfc-editor.org/rfc/rfc9180)
-- [HKDF (RFC 5869)](https://www.rfc-editor.org/rfc/rfc5869)
-- [Ed25519 (RFC 8032)](https://www.rfc-editor.org/rfc/rfc8032)
+- [OAuth 2.0 for Native Apps, RFC 8252](https://www.rfc-editor.org/rfc/rfc8252)
 - [GitHub OAuth authorization](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps)
 - [Google OAuth for desktop apps](https://developers.google.com/identity/protocols/oauth2/native-app)
