@@ -8,7 +8,6 @@ import {
   useThemeChoice,
 } from "./preferences";
 import "./App.css";
-import "./RetroTheme.css";
 
 export default function App() {
   const choice = useThemeChoice();

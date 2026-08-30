@@ -4,9 +4,6 @@
 //! I/O under one safety contract — canonical no-follow regular files within
 //! the bounded transcript limit — with sync-metrics attribution. Provider
 //! semantics (append validation, chain codecs) live in the provider modules.
-//!
-//! Extracted mechanically from `codex_history_graph.rs` by
-//! `docs/PLAN_CLAUDE_SESSION_CURSOR_PARITY.md` D2.
 
 use std::fs;
 use std::path::Path;

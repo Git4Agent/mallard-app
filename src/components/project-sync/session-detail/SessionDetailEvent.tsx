@@ -48,12 +48,9 @@ function MarkdownImagePlaceholder({
   detail?: string;
   loading?: boolean;
 }) {
-  /* Which of the two states a chip is in used to be carried by 30% of opacity
-     and, for the reason, by `title` — a tint is not a text alternative, and a
-     tooltip on a non-interactive span is announced by nothing and reachable
-     without a mouse by no one. The state is printed as a word, and because
-     `role="img"` replaces the subtree with the accessible name, the name has to
-     repeat it; the tooltip stays for the pointer. */
+  /* A tint is not a text alternative, and a tooltip on a non-interactive span
+     is not keyboard-reachable. Print the state as a word and repeat it in the
+     accessible name because `role="img"` replaces the subtree. */
   const state = loading ? "loading…" : "not shown";
   const accessibleName = detail
     ? `${label} — image ${state}. ${detail}`
@@ -123,8 +120,7 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
         img: ({ src, alt }) => {
           const url = typeof src === "string" ? src : "";
           const label = alt ?? "";
-          // External https images render as-is, exactly as before this
-          // renderer existed; the webview loads them directly.
+          // The WebView loads safe external HTTPS images directly.
           if (isSafeExternalMarkdownUrl(url)) {
             return (
               <img
@@ -185,10 +181,8 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
               onClick={external
                 ? (clickEvent) => {
                   clickEvent.preventDefault();
-                  // The shared opener, so a webview that rejects the plugin
-                  // still gets the window.open fallback. The local duplicate
-                  // this replaced awaited openUrl bare: when it rejected, the
-                  // link silently did nothing.
+                  // The shared opener provides a window.open fallback when the
+                  // WebView rejects the plugin call.
                   if (isSafeExternalMarkdownUrl(safeHref)) void openExternalUrl(safeHref);
                 }
                 : projectPath
@@ -243,9 +237,8 @@ const CHECKPOINT_QUALITY_HINT =
   "Matched from Git after the session ended. The transcript does not record a commit.";
 
 /**
- * The rail tile is the speaker: the headings that spelled `You` and `Codex` on
- * every event are gone, and the tile's label carries name and minute instead.
- * Prompts wear the user glyph, checkpoints the commit glyph, and the agent
+ * The rail tile is the speaker, and its label carries name and minute. Prompts
+ * wear the user glyph, checkpoints the commit glyph, and the agent
  * wears its provider's own mark — the same registry the activity list draws
  * from, monogram fallback included.
  */

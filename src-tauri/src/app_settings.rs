@@ -2,8 +2,8 @@
 //! installed process-wide snapshot live in
 //! `mallard_infrastructure::app_settings`; this module adds the command
 //! surface and the cache consequences the infrastructure crate cannot see:
-//! observation and inventory caches bake the old limits into their contents
-//! and a settings change fires no filesystem event, so an update drops them
+//! observation and inventory caches bake limits into their contents, and a
+//! settings change fires no filesystem event, so an update drops them
 //! explicitly.
 
 use crate::project_sync::session_watch_service::session_watch_service;

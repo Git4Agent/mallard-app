@@ -97,8 +97,7 @@ function formatMode(mode?: number | null): string | null {
    standing content and a named region rather than a live one (WCAG 2.2 SC
    4.1.3). Nothing failed while the user watched; the folder was never eligible.
    The detected Git root is the one thing that differs between the two sites —
-   the empty state has never printed it — so it stays opt-in rather than
-   quietly appearing on a face that did not ask for it. */
+   so it stays opt-in. */
 function ProjectFilesLockedNotice({
   eligibility,
   withDetectedRoot = false,
@@ -161,10 +160,8 @@ export default function ProjectFilesReviewPage({
     () => new Set(rows.filter((row) => row.entryType === "directory").map((row) => row.relativePath)),
     [rows],
   );
-  /* Every directory row used to count its descendants by scanning all of
-     `rows`, inside the row map — quadratic in the project's file count, redone
-     on every render. One walk up each row's ancestry gives the same numbers in
-     O(rows x depth), once per row change. */
+  /* Count descendants once per row change in O(rows x depth). Scanning every
+     row for each directory would be quadratic in the project file count. */
   const descendantCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const row of rows) {
@@ -297,12 +294,8 @@ export default function ProjectFilesReviewPage({
       {rows.length === 0 ? (
         <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No changes</strong></span></div>
       ) : (
-        /* A list, not an ARIA tree. The tree roles were here without any of
-           the contract they promise — no focusable treeitem, no arrow-key
-           navigation — and every row nests its own focusable controls, which a
-           tree forbids. VoiceOver announced "tree, N items" and then could not
-           move through it. As a list, Tab already walks the controls correctly
-           and the announcement matches what the widget actually does. */
+        /* A list, not an ARIA tree: rows contain focusable controls and provide
+           no treeitem or arrow-key contract. Tab walks the controls. */
         <div className="sync-project-file-tree" role="list" aria-label="Project files">
           {shownRows.map((row) => {
             const isDirectory = row.entryType === "directory";

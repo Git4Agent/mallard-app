@@ -385,10 +385,9 @@ pub fn list_storages(
         .collect())
 }
 
-/// Validate the clean-cutover invariant for the complete storage document.
-/// Every S3 entry must name one canonical Cloudflare R2 destination, and a
-/// destination may appear at most once regardless of credentials or display
-/// name.
+/// Validate the complete storage document. Every S3 entry must name one
+/// canonical Cloudflare R2 destination, and a destination may appear at most
+/// once regardless of credentials or display name.
 pub fn validate_r2_storage_destinations(config: &SyncConfig) -> Result<(), StorageSetupError> {
     let mut destinations = BTreeSet::new();
     for storage in &config.storages {
@@ -889,7 +888,7 @@ fn probe_r2_upsert<T>(
             // the pending replacement credentials only when the first cleanup
             // fails. This covers a probe interrupted during an earlier
             // same-destination credential replacement without persisting a
-            // secret or adding a journal migration.
+            // secret or changing the journal schema.
             reconcile_journaled_probes_with_fallback(
                 &journal,
                 probe,

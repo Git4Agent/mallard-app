@@ -57,9 +57,7 @@ interface PageProps {
   selectableResourceIds?: ReadonlySet<string>;
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
-  /** Rows that Show less removed from view and that were ticked. The review
-   *  drops them: a selection you can no longer see is one you cannot check
-   *  before it travels. */
+  /** Drop selected rows hidden by Show less because they cannot be reviewed. */
   onDropSelection?: (resourceIds: string[]) => void;
   onReviewPull?: () => void;
   onUnlinkStorage?: () => void;
@@ -193,8 +191,7 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
 
   if (!selected) return null;
 
-  // The trigger is the whole pill — icon, name and chevron in one target —
-  // because it now sits in the path bar beside crumbs that behave the same way.
+  // The whole pill — icon, name, and chevron — is one path-bar target.
   const label = `Branch: ${selected.name}${selected.is_current ? ", current branch" : ""}${!selected.available ? ", history only" : ""}`;
   const face = (
     <>
@@ -274,8 +271,6 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
               <span className="sync-history-branch-check" aria-hidden="true">
                 {branch.name === selectedBranch && <Icon name="check-circle" size={12} />}
               </span>
-              {/* The badges already say what the second line used to; the full
-                  explanation stays on the row's title. */}
               <span className="sync-history-branch-option-copy">
                 <strong>{branch.name}</strong>
               </span>
@@ -354,8 +349,7 @@ function describeOlder(older: OlderActivity): string {
  *
  * Load earlier states the day one press lands on, which is the point of a
  * cursor that tracks the data instead of stepping a fixed thirty days into
- * whatever is there. Show less pops the newest window back off — paging was a
- * one-way door until it existed.
+ * whatever is there. Show less pops the newest window back off.
  *
  * While a fetch runs only the node moves. It is a 24px slot outside the row,
  * so the labels and the date hold their positions; the date holds because the
@@ -590,7 +584,7 @@ export function activityHeaderCounts(
 }
 
 /** The badge, from a presentation the caller has already resolved. Every row
- *  renders one: the slot is a grid column now, and a column that sometimes
+ *  renders one: the slot is a grid column, and a column that sometimes
  *  holds nothing is a column that moves every title beside it. */
 function SessionSyncIndicator({ presentation }: { presentation: SessionSyncPresentation }) {
   return (
@@ -605,8 +599,7 @@ function SessionSyncIndicator({ presentation }: { presentation: SessionSyncPrese
   );
 }
 
-/** What the badge says when there is no comparison entry to read. Five paths
- *  used to land here and all five rendered nothing; each now names itself. */
+/** Named badge state for every row without a comparison entry. */
 export function unresolvedSyncPresentation({
   comparisonLoaded,
   comparisonLoading,
@@ -696,10 +689,8 @@ export function SessionMetrics({
   return <div id={id} className="sync-history-thread-meta" aria-label="Session details">
     {/* Ordered by what the row is about: the exchange first, then the work it
         did, then what it cost, then how long it took. */}
-    {/* One conversation, one number: prompts and final replies summed
-        behind the message glyph, where they used to be two readouts whose
-        relationship nothing stated. The face answers "how much was said";
-        the split lives in the tooltip, each half on its own line. */}
+    {/* One message count sums prompts and final replies. The tooltip shows the
+        split, one value per line. */}
     <span className="sync-history-thread-metric" data-tooltip={`Prompts · ${session.user_round_count}\nReplies · ${session.agent_message_count}`} aria-label={`Messages: ${session.user_round_count + session.agent_message_count}. Prompts: ${session.user_round_count}. Replies: ${session.agent_message_count}`} tabIndex={0}><Icon name="message" size={12} /><b>{session.user_round_count + session.agent_message_count}</b></span>
     {session.tool_call_count > 0 && <span className="sync-history-thread-metric" data-tooltip={`Tool calls · ${session.tool_call_count}`} aria-label={`Tool calls: ${session.tool_call_count}`} tabIndex={0}><Icon name="tool" size={12} /><b>{session.tool_call_count}</b></span>}
     <span className="sync-history-thread-metric" data-tooltip={`Total input · ${totalInputTokens}\nTotal output · ${totalOutputTokens}`} aria-label={`Total tokens: ${totalTokens}. Total input: ${totalInputTokens}. Total output: ${totalOutputTokens}`} tabIndex={0}><Icon name="token" size={12} /><b>{totalTokens}</b></span>
@@ -735,14 +726,6 @@ function sessionAccessNote(session: ProjectSessionSummary): { label: string; det
       return null;
   }
 }
-
-/* No location line and no provider pill. "On this Mac" was on every row of an
-   unlinked project and never varied; on a linked one the status badge already
-   encodes it — synced means both sides, local-outstanding means only here,
-   cloud-outstanding means only in storage — and the badge's tooltip still
-   spells out the phrase. The pill was worse than redundant: it was as wide as
-   whatever name it held, so with more than one provider in the list the titles
-   stopped lining up with each other row to row. */
 
 /** Open carries the provider's own mark; Terminal shows the action itself. */
 const SESSION_ACTION_ICONS: Record<Exclude<SessionActionDescriptor["kind"], "open_in_app">, IconName> = {
@@ -801,7 +784,7 @@ export function sessionDebugCopyText(
   ].join("\n");
 }
 
-/** Roughly the panel's rendered height; only used to pick which way it opens. */
+/** Approximate rendered height for choosing the opening direction. */
 
 type SessionDebugCopyTarget =
   | "resource-id"
@@ -925,8 +908,7 @@ function SessionDebugMenu({
       </button>
       {/* On body, not in the row. Nothing in the list can bound it there:
           not the row's card, not the commit rail's stacking context, and
-          not .sync-main's scrollport, which used to cap it to whatever
-          room the scroller had left. */}
+          not .sync-main's scrollport. */}
       <TopLayer>
         <div
           ref={panelRef}
@@ -1156,10 +1138,7 @@ function SessionCard({
         label: `Unavailable for sync. ${session.sync_blocked_reason}`,
       }
     : null;
-  // No row-level "uncommitted" mark any more. It existed to hold the slot open
-  // when the status badge was absent; the badge is never absent now, and a
-  // second glyph beside it pushed those rows' titles 26px right of every other
-  // row's. The group heading carries the pencil.
+  // The status badge owns row state; the Uncommitted heading owns its pencil.
   const accessNote = sessionAccessNote(session);
   const canOpenDetails = !selectionMode
     && session.source !== "remote_only"
@@ -1426,12 +1405,10 @@ function SyncEntryCard({
   );
 }
 
-/** The fold control lives in the timeline rail, where the pixel node used to
- *  sit — the node became the button. Every fold on the page shares the rail's
- *  column, and because the button is outside the card, neither a review's
- *  checkbox nor an outcome banner can move it. It precedes the heading and
- *  the list in the DOM, so the trigger reads before the content it controls.
- *  Leading-position rotation: right when collapsed, down when open. */
+/** Every fold control shares the timeline rail's column. Because the button is
+ *  outside the card, neither a review checkbox nor an outcome banner can move
+ *  it. It precedes the heading and list in the DOM, so the trigger reads before
+ *  the content it controls. It points right when collapsed and down when open. */
 function SectionFold({ collapsed, controls, label, disabled = false, onToggle }: {
   collapsed: boolean;
   controls: string;
@@ -1481,10 +1458,8 @@ function providerNoticeCopy(state: ProviderActivityState): string {
 
 /** How loudly one of those provider notices reads.
  *
- * The strip carried no tone class before, so its severity lived entirely in
- * the glyph: an alert triangle for a profile that cannot be read, a cloud for
- * everything else. That distinction is real and survives the move. A profile
- * Mallard cannot reach means the reader is seeing less than the whole truth —
+ * A profile Mallard cannot reach means the reader is seeing less than the
+ * whole truth —
  * those sessions fail closed until it comes back — which is exactly `warning`.
  * `view_only` and `unsupported` are facts about how the list was produced,
  * nothing is missing and nothing is broken, so they stay at the quiet rung.
@@ -1639,14 +1614,8 @@ export function ProjectChatHistoryContent({
     });
   };
 
-  /* Everything this page has to say about the list below it, in one box.
-   *
-   * Six sibling callouts used to stack here — a failed row action, a failed
-   * refresh, a replaced storage history, one note per provider whose sessions
-   * are not fully actionable, a failed comparison, and one note per provider
-   * whose comparison failed. They are rungs of one ladder rather than six
-   * banners, so the zone takes the loudest rung present and lists the rest.
-   * The order below is the order they stacked in. */
+  /* One notice zone takes the loudest severity and lists the remaining page,
+   * provider, refresh, continuity, and comparison messages in source order. */
   const notices: NoticeItem[] = [];
   if (actionError) {
     notices.push({ key: "action-failed", severity: "danger", message: actionError });
@@ -1693,10 +1662,8 @@ export function ProjectChatHistoryContent({
       message: `— ${providerNoticeCopy(state)}${state.detail ? ` ${state.detail}` : ""}`,
     });
   }
-  /* The whole comparison failed, as against one provider's failing. It used to
-     be a 24px glyph in the header's corner with the reason on a tooltip; with
-     the header gone it says its piece where the other comparison failures
-     already do. */
+  /* A whole-comparison failure belongs in the shared notice zone, separate
+     from provider-scoped failures. */
   if (comparisonError) {
     notices.push({
       key: "comparison-failed",
@@ -1733,11 +1700,7 @@ export function ProjectChatHistoryContent({
         className="sync-history-content"
         aria-label={sectionTitle}
       >
-        {/* No header. Branch, counts and refresh are the workspace path bar's
-            now — the branch is where you are, and the two tallies belong on the
-            Push and Pull buttons that clear them. A row holding one control
-            that belonged in the trail and one that belonged on a button was a
-            row with nothing of its own to say. */}
+        {/* The workspace path bar owns branch, counts, and refresh. */}
         {refreshStatus && <span className="sync-visually-hidden" role="status">{refreshStatus}</span>}
 
         <NoticeZone
@@ -1827,10 +1790,8 @@ export function ProjectChatHistoryContent({
                     /* An empty rail is still the rail: the gap draws as a card
                        on it, so the page keeps the spine every other state is
                        read against, and the terminus below still has something
-                       to hang from. `commits.length === 0` used to print one
-                       sentence blaming a 30-day window for all three of these
-                       — and for two of them the window has nothing to do with
-                       it, so no amount of paging would ever have helped. */
+                       to hang from. The selected empty-state copy distinguishes
+                       windowing from branches that contain no commits. */
                     <ol className="sync-history-commit-rail">
                       <li className="sync-history-commit sync-history-commit-gap">
                         {/* Not a fold: there is nothing here to expand, so the
@@ -1905,11 +1866,8 @@ export function ProjectChatHistoryContent({
                     })}</ol>
                   )}
                 </section>
-                {/* The paging control ends the rail it pages. It used to float
-                    below the Older activity fold at the very bottom of the
-                    page, detached from the list it extended.
-
-                    A review pages too, so an out-of-window thread arrives as a
+                {/* The paging control ends the rail it pages. A review pages
+                    too, so an out-of-window thread arrives as a
                     real row rather than as an entry in a fold. The floor stays
                     browse-only: in a review "nothing earlier" is not the last
                     word, because the Older activity fold below catches
@@ -1933,8 +1891,8 @@ export function ProjectChatHistoryContent({
                   && <p className="sync-history-rail-floor no-rail">{windowRange} · nothing earlier</p>}
               </section>
             )}
-            {/* The catcher, not the route. Paging is how an out-of-window
-                thread is reached now, so this stays out of the way while
+            {/* The catcher, not the route. Paging reaches out-of-window
+                threads, so this stays out of the way while
                 anything is still loadable — a fold offering the same rows the
                 control above it fetches is two doors into one room.
                 It cannot simply be deleted: the comparison is not windowed and
@@ -2038,10 +1996,7 @@ export default function ProjectActivityPage({
   onHeaderModelChange,
   onOpenSessionDetail,
 }: PageProps) {
-  /* The windows this view has loaded, oldest press last. Kept as a stack
-     rather than one merged blob so paging is reversible: `mergePages` was
-     always a pure fold over pages, and holding the pages themselves makes
-     Show less a pop instead of a refetch. */
+  /* Keep loaded windows as a stack so Show less is a pop instead of a refetch. */
   const [pages, setPages] = useState<ProjectActivity[]>([]);
   const activity = useMemo(
     () => pages.reduce<ProjectActivity | null>((merged, page) => mergePages(merged, page), null),
@@ -2165,8 +2120,7 @@ export default function ProjectActivityPage({
      is either a session's own or its comparison entry's, so the set a row
      answers to is built the same way the row builds it — anything else would
      drop a project file or a tool, which no window ever governed.
-     Only ids that *were* reachable and no longer are get dropped, and only
-     when something was actually ticked. */
+     Drop only selected ids that leave the reachable set. */
   const visibleReviewIds = useCallback((page: ProjectActivity | null) => {
     const index = indexSessionSyncEntries(comparison?.entries ?? []);
     const ids = new Set<string>();

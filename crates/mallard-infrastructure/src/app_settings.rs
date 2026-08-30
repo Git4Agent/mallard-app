@@ -6,8 +6,7 @@
 //! one deliberate divergence: every field carries a serde default, so a
 //! partial or hand-edited file parses instead of failing. Installed values
 //! live in process-wide atomics; readers pay one relaxed load, and a process
-//! that never installs (tests, the CLI) runs on compiled defaults equal to
-//! the constants these knobs replaced.
+//! that never installs (tests, the CLI) runs on the documented defaults.
 
 use crate::persistence::{write_json_atomic, LocalStateRepository};
 use serde::{Deserialize, Serialize};
@@ -142,8 +141,8 @@ static CLOUD_TRANSFER_CONCURRENCY: AtomicU32 = AtomicU32::new(DEFAULT_CLOUD_TRAN
 
 /// Make `settings` the values every accessor below returns, process-wide.
 /// The four cells are independent; a reader racing an install may briefly mix
-/// old and new values, which every consumer tolerates (each gate is correct
-/// under either value).
+/// two settings generations. Every consumer tolerates the mix because each
+/// gate is correct under either value.
 pub fn install_app_settings(settings: &AppSettings) {
     CONVERSATION_FILE_LIMIT_BYTES.store(settings.conversation_file_limit_bytes, Ordering::Relaxed);
     TIMELINE_PREVIEW_LIMIT_BYTES.store(settings.timeline_preview_limit_bytes, Ordering::Relaxed);

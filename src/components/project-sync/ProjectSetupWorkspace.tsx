@@ -86,7 +86,7 @@ export function useHomePath(): string | null {
 /**
  * Debounced probes for every pending custom path, keyed by provider. A typed
  * path is judged as it is typed: the save-time probe is the same call, so the
- * row can say now what saving would say later.
+ * row can report the save-time result before save.
  */
 export function useProfilePathProbes(
   targets: ProfileProbeTarget[],
@@ -525,7 +525,7 @@ export default function ProjectSetupWorkspace({
     } catch (reason) {
       if (!workflowIsActive()) return;
       setError(errorMessage(reason));
-      // The draft may carry a recorded error and a bumped revision now.
+      // The failed finalize can record an error and advance the draft revision.
       try {
         const reloaded = await projectSyncApi.getSetupDraft(draftId);
         if (workflowIsActive() && reloaded) setDraft(reloaded);

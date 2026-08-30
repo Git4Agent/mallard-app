@@ -420,8 +420,8 @@ export default function RestorePlanView({
         : undefined,
     });
   }
-  /* The replaced-history gate is read straight off the plan this view was
-     handed, so it is painted on the first render — standing content, and a
+  /* The replaced-history gate comes from the plan and appears on the first
+     render — standing content, and a
      named region rather than a live one. The error is the opposite: the review
      always mounts with `error` null (the host clears it before it plans, and
      even the supporting-check failure lands after the plan is handed over), so

@@ -52,11 +52,7 @@ export default function BundleConnectionDialog({
     && !!selected
     && !selected.repository_fingerprint;
 
-  /* Everything this dialog has to say about the connection, in one box under
-     the list. It was four stacked callouts, one of them unconditional, so the
-     dialog always drew at least one and a real fingerprint mismatch arrived as
-     a second amber row indistinguishable from the standing reassurance. They
-     are rungs of one ladder now, and the box takes the loudest present.
+  /* One box under the list takes the loudest connection notice.
      All four are standing content — the reassurance is always true, the two
      fingerprint lines are read off the selected match, and the failure comes
      in as a prop — so the box is a named region, never a live one (WCAG 2.2

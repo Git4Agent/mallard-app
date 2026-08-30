@@ -239,7 +239,7 @@ impl S3ObjectStore {
         }
     }
 
-    /// Remove and confirm absence of one previously journaled setup probe.
+    /// Remove and confirm absence of one journaled setup probe.
     /// This accepts the same narrow generated setup identifier as the probe
     /// itself and never exposes a general object-deletion primitive.
     pub fn reconcile_r2_capability_probe(

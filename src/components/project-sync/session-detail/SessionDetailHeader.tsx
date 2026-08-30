@@ -67,20 +67,14 @@ export default function SessionDetailHeader({
               <code>{detail.recorded_sha.slice(0, 7)}</code>
             </FactChip>
           )}
-          {/* Two chips, not one. Every other chip on this strip carries a single
-              fact; the stamp was the only one carrying three — a start, an end
-              and a length, where any two of them give the third. What is left
-              is when it began and how long it took, each in its own box. The
-              end time moves to the length chip's tooltip. The start states
-              itself in full, year included, so it needs no tooltip of its own. */}
+          {/* Each chip carries one fact: start or duration. The duration
+              tooltip includes the end time; the full start needs no tooltip. */}
           {start && (
             <FactChip>
               <time dateTime={sessionDetailDateTime(detail.started_at)}>{start}</time>
             </FactChip>
           )}
-          {/* A live session has no end, so it cannot have a length. `is_active`
-              has been on the DTO all along and this header never read it: a
-              running session drew an arrow at an end that had not happened. */}
+          {/* A live session has no end, so label it running. */}
           {(detail.is_active || length) && (
             <FactChip title={formatSessionLengthDetail(detail.started_at, detail.ended_at, detail.is_active) ?? undefined}>
               <Icon name={detail.is_active ? "activity" : "clock"} size={12} />

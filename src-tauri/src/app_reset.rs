@@ -7,7 +7,7 @@
 //! binary under `tauri dev` orphans the frontend from its dev server (the
 //! CLI kills Vite when the original process exits, and the relaunched app
 //! then loads `devUrl` from a dead port: a white window). The frontend
-//! finishes the cutover with `window.location.reload()` instead.
+//! reloads the live process state with `window.location.reload()`.
 
 use crate::activity_log::ActivityLogScope;
 use crate::project_sync::config_watcher::ConfigWatcher;

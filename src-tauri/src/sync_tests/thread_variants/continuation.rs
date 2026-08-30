@@ -3,7 +3,7 @@ use super::harness::{
     VariantWorld,
 };
 use super::recovery::install_scope;
-use crate::project_sync::commands::ThreadSyncState;
+use crate::project_sync::service::ThreadSyncState;
 use mallard_domain::{
     ConversationBlocker, ConversationMaterializationState, ConversationReviewAction,
     LocalConversationBinding, SessionPresentation, ThreadId,
@@ -610,7 +610,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
     let engine = world.engine();
     let snapshot = engine.inspect(&world.bundle_id).unwrap();
     let mut bytes = engine.byte_source(&snapshot, None, None);
-    let entries = crate::project_sync::commands::thread_entries(
+    let entries = crate::project_sync::service::thread_entries(
         &world.repo_fresh,
         &snapshot,
         &mut bytes,

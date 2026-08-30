@@ -227,8 +227,8 @@ pub fn publish_request(
         let analysis = analyze_codex_transcript(&spec.transcript);
         let resource_id = cloud_conversation_resource_id(&provider, &spec.thread_id).unwrap();
         let logical_path = cloud_conversation_transcript_path(&provider, &spec.thread_id).unwrap();
-        // Post-cutover manifests carry only proven-lineage conversations, so
-        // the fixture demands the same of its specs.
+        // Valid manifests carry only proven-lineage conversations, so the
+        // fixture requires the same of its specs.
         let CodecLineage::Complete {
             chain,
             lineage_digest,

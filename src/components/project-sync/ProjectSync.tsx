@@ -237,11 +237,8 @@ function storedActiveStorages(): Record<string, string> {
   }
 }
 
-/** What happened, not how loud it was: the toast picks its glyph and rail
- *  colour from this. Default "ok" keeps every existing confirmation a
- *  one-argument call. "attention" is for the notices that report a stop —
- *  a binding that needs confirming, for example — which a green tick would
- *  report as done. Hard failures still go to `error`, not here. */
+/** Toast outcome. `ok` confirms completion; `attention` reports a stop that
+ *  needs action. Hard failures use `error`. */
 type SyncNoticeTone = "ok" | "attention";
 
 interface SyncNotice {
@@ -392,9 +389,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     scopeId: string;
   } | null>(null);
   const [backendError, setBackendError] = useState<string | null>(null);
-  // A notice carries its tone so the toast can say which happened. It used to
-  // be a bare string with a hardcoded green tick, which meant a failed Pull
-  // reported itself as a success.
   const [notice, setNotice] = useState<SyncNotice | null>(null);
   const notify = (message: string, tone: SyncNoticeTone = "ok") => setNotice({ message, tone });
   const [hostIdentityStatus, setHostIdentityStatus] = useState<HostIdentityStatus | null>(null);
@@ -466,7 +460,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const shellRequest = useRef(0);
   /* A project switch supersedes the load in flight. The workflow epoch alone
      cannot see it — it only moves when the host identity changes — so a slow
-     project's detail and inventory would land on top of the one now selected. */
+     project's detail and inventory could land on the currently selected one. */
   const projectRequest = useRef(0);
   const hostWorkflowEpoch = useRef(0);
   const configRef = useRef<SyncConfig>(EMPTY_CONFIG);
@@ -871,11 +865,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     : addingCatalogScope
       ? "catalog"
       : "folder";
-  // The project workspace renders a path bar that doubles as the titlebar —
-  // and so do the storage screens: the Storages index owns its state here,
-  // while the storage page reports through activeStorageSettingsId, which the
-  // editor confirms an effect late. That one-frame seam only shows when no
-  // project is active; with one active the bar was already up.
+  // Project and storage workspaces use a path bar as the titlebar. The storage
+  // page reports its state through activeStorageSettingsId after the editor
+  // effect confirms it.
   const showsPathBar = !activeDraftSummary
     && !addingCatalogScope
     && !setupDraftId
@@ -893,10 +885,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const projectLinks: ProjectStorageLink[] = detail?.project.local_project_id === activeProjectId
     ? detail.links
     : config.links.filter((link) => link.local_project_id === activeProjectId);
-  /* The remembered storage only counts while it is still linked to this
-     project. Unlinking it elsewhere used to leave the id in place, so Push and
-     Pull aimed at one storage while the comparison list described another.
-     `loadProjectData` already validates the same way. */
+  /* The remembered storage counts only while it is linked to this project, so
+     Push, Pull, and the comparison list always use the same destination.
+     `loadProjectData` validates the same condition. */
   const rememberedStorageId = activeProjectId ? activeStorageByProject[activeProjectId] : undefined;
   const activeStorageId = activeProjectId
     ? (rememberedStorageId && projectLinks.some((link) => link.storage_id === rememberedStorageId)
@@ -1260,10 +1251,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         : remembered && links.some((link) => link.storage_id === remembered)
           ? remembered
           : links[0]?.storage_id ?? null;
-      // No readiness probe here. Selecting a project used to await a remote
-      // bundle inspect whose only consumer was a summary field nothing
-      // rendered, holding the workspace spinner open for a network round trip.
-      // Pull populates `readiness` from the plan when it actually needs it.
+      // Project selection does not probe remote readiness. Pull populates
+      // `readiness` from the reviewed plan when it needs it.
       if (storageId && nextDetail.binding?.state === "active") {
         setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
       }
@@ -1922,8 +1911,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
       const savedRecipe = link.recipe ?? null;
       const nextResources = inventoryResources(nextInventory);
-      // Degraded sections (storage offline, capture failures) open the dialog
-      // without their comparison, exactly like the old per-command flow.
+      // Degraded sections such as offline storage or capture failures open
+      // without a comparison.
       const nextThreadComparison = context.thread_comparison ?? undefined;
       const isGitRepository = repositoryKinds[projectId] ?? false;
       const lockedProjectContentInventory =
@@ -2301,11 +2290,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  /* Reports through its return value rather than the shell's `error`: the
-     rename form renders the message inline, and borrowing the shared string
-     meant an unrelated failure — a reset, a remove — appeared inside the form
-     and read as the rename's. A superseded workflow is neither outcome: it
-     reports nothing and leaves the form as it was. */
+  /* Return rename errors to the inline form so unrelated shell failures cannot
+     appear as rename failures. A superseded workflow reports no outcome and
+     preserves the form. */
   const renameProject = async (projectId: string, alias: string | null): Promise<RenameResult> => {
     const workflowEpoch = hostWorkflowEpoch.current;
     setBusy(true);
@@ -2422,9 +2409,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
   /**
    * The one follow-up a finished sync can still owe. Restart and retry talk to
-   * the backend directly — the review that used to host them is closed by the
-   * time this banner exists — while anything unresolved reopens the Pull
-   * review, which replans from scratch.
+   * the backend directly because the review is closed by the time this banner
+   * exists. Anything unresolved reopens Pull and replans from scratch.
    */
   const runOutcomeAction = async (outcome: SyncOutcome) => {
     const action = outcome.action;
@@ -2778,9 +2764,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   }
 
-  // App scope for the path-bar overflow: the way into Settings, and the full
-  // reload. The theme item this menu used to carry moved onto the Settings
-  // page's Appearance row — the menu holds commands, not state.
+  // App commands in the path-bar overflow: Settings and a full reload.
   const appActions: PathBarMenuGroup[] = [{
     label: "Mallard",
     items: [
@@ -3115,8 +3099,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setError(null);
     try {
       // Focused project operations can advance the global config revision.
-      // Rebase this storage-only edit on the latest document instead of the
-      // potentially stale React snapshot used to render the editor.
+      // Rebase this storage-only edit on the latest document instead of a
+      // potentially stale React snapshot.
       const current = await projectSyncApi.getConfig();
       if (hostWorkflowEpoch.current !== workflowEpoch) return false;
       const saved = await projectSyncApi.saveConfig(update(current));
@@ -3620,11 +3604,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     return <StartupLoadingScreen stage={startupStage} />;
   }
 
-  /* The shell's banner zone. These three used to be three sibling rows — a
-     backend banner, the one generic error string twenty-three handlers write,
-     and a toast — which meant a failed remove could stack a red row under an
-     amber one under a green tick, three boxes deep, above whatever screen was
-     open. One zone, one box, at the loudest rung present. */
+  /* One shell notice zone renders one box at the loudest severity present. */
   const shellNotices: NoticeItem[] = [];
   if (backendError) {
     shellNotices.push({
@@ -3640,10 +3620,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       key: "shell-error",
       severity: "danger",
       message: error,
-      /* This sits outside every early return the shell takes, so whichever
-         screen is open the failure is seen. Before it had a surface only three
-         screens rendered it, and a failed remove, rename or reset changed
-         nothing on screen — so the user re-ran the destructive action. */
+      /* This sits outside every early return so failures remain visible on
+         every screen, including failures from destructive actions. */
       action: (
         <>
           {catalogRemovalErrorTarget?.message === error && (
@@ -3682,9 +3660,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   if (notice) {
     shellNotices.push({
       key: "shell-notice",
-      /* The tone already said what happened rather than how loud it was: an
-         "attention" notice reports a stop the user has to act on, which is the
-         warning rung, and "ok" is the receipt it always was. */
+      /* "attention" requires user action; "ok" is a successful receipt. */
       severity: notice.tone === "attention" ? "warning" : "success",
       message: notice.message,
       action: (

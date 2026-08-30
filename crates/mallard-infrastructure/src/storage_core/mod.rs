@@ -84,9 +84,8 @@ impl std::fmt::Display for ObjectKey {
 }
 
 /// A validated listing prefix. Project repositories and draft-linked Library
-/// resource repositories are independently enumerable. The removed flat
-/// catalog remains unrepresentable, so no new code can discover legacy
-/// catalog objects accidentally.
+/// resource repositories are independently enumerable. Only the repository
+/// and Library namespaces are representable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectPrefix(String);
 

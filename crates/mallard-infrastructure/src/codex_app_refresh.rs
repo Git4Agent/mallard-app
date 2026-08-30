@@ -182,7 +182,7 @@ pub fn restart_after_pull(
 }
 
 /// Relaunch a stopped, validated app bundle. The default `~/.codex` profile
-/// goes through LaunchServices, exactly as before. Any other profile starts
+/// goes through LaunchServices. Any other profile starts
 /// the bundle executable directly so `CODEX_HOME` can be pinned — a
 /// LaunchServices relaunch would silently come up with the GUI session
 /// environment and read the wrong home. If the pinned launch cannot be

@@ -17,7 +17,7 @@
 //! drain), so event delivery is deterministic: a mutation between two
 //! operations is always visible to the second one.
 
-use super::commands::LocalTailObservation;
+use super::service::LocalTailObservation;
 use mallard_domain::{
     now_secs, LocalProjectId, ProviderKey, StorageId, TargetExpectation, ThreadId,
 };

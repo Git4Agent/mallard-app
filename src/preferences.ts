@@ -20,8 +20,7 @@ export type BooleanPreferenceName =
 
 const THEME_KEY = "mallard.theme";
 
-/** All three default on: each preserves the behavior that was hardcoded
-    before it became a preference. */
+/** All three preferences default on. */
 const BOOLEAN_KEYS: Record<BooleanPreferenceName, string> = {
   openLogsOnSync: "mallard.open-logs-on-sync",
   refreshOnFocus: "mallard.refresh-on-focus",

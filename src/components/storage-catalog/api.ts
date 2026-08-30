@@ -39,6 +39,15 @@ export const storageCatalogApi = {
       expectedRevision,
     }),
 
+  /** The session card's launch pair, profile-scoped: open the provider
+   * desktop app or Terminal on the profile's configured home, at the default
+   * path — no project and no session. */
+  openProfileApp: (profileId: string) =>
+    invoke<void>("open_catalog_profile_in_app", { profileId }),
+
+  openProfileTerminal: (profileId: string) =>
+    invoke<void>("open_catalog_profile_in_terminal", { profileId }),
+
   listScopes: () => invoke<CatalogScopeView[]>("list_catalog_scopes"),
 
   /** Adding a row records a scope and nothing else — no inventory, no

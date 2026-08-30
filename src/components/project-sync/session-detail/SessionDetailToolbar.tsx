@@ -15,11 +15,7 @@ interface Props {
   onFiltersChange: (filters: SessionDetailFilters) => void;
 }
 
-/**
- * Filtering is a property of the list, so it sits over the list rather than in
- * a rail beside it. The rail it replaces cost a permanent 284px column to hold
- * four controls, three of which were empty on a typical session.
- */
+/** Filtering is a property of the list, so the controls sit above the list. */
 export default function SessionDetailToolbar({
   counts,
   filters,
@@ -32,8 +28,7 @@ export default function SessionDetailToolbar({
     onFiltersChange({ ...filters, [key]: !filters[key] });
   };
 
-  // One readout, and an honest one: how much of the whole record is on screen.
-  // The page used to carry three counts that measured three different things.
+  // One readout states how much of the whole record is on screen.
   const readout = coverage.total == null
     ? `${loadedCount} shown`
     : `${loadedCount} of ${coverage.total}${coverage.approximate ? "+" : ""} events`;

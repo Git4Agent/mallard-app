@@ -1,11 +1,7 @@
 /**
- * The one clipboard path. Four copies of this used to exist and they were not
- * equivalent: the Library's was a bare `navigator.clipboard?.writeText(...)`
- * with no fallback and no error, so on a webview that exposes Clipboard but
- * rejects it, clicking a value copied nothing and said nothing.
- *
- * Lives in `sync-review/` because that is the resource-neutral layer both
- * feature modules already import; it holds no DTOs and calls no Tauri command.
+ * Resource-neutral clipboard path for both feature modules. Some WebViews
+ * expose Clipboard but reject writes, so this uses a document fallback and
+ * reports failure. It holds no DTOs and calls no Tauri command.
  */
 export async function writeClipboardText(
   value: string,

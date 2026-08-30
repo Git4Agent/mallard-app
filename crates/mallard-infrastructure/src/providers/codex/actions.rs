@@ -231,6 +231,58 @@ pub(crate) fn launch_terminal_resume(
     }
 }
 
+/// Open the Codex desktop app reading one profile home, with no thread and
+/// no project — the Library's launch. Existing-thread deep links carry no
+/// workspace, so the new-thread route on the caller's default workspace is
+/// the only home-scoped entry point.
+pub fn launch_codex_home_app(codex_home: &Path, workspace: &Path) -> Result<(), String> {
+    if !codex_home.is_absolute() || !workspace.is_absolute() {
+        return Err("Codex home and workspace must be absolute".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let deep_link = format!(
+            "codex://threads/new?path={}",
+            percent_encode_uri_component(&workspace.to_string_lossy())
+        );
+        run_codex_app_deep_link(codex_home, &deep_link, "workspace")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Open in Codex is currently supported only on macOS".to_string())
+    }
+}
+
+/// The Terminal command a Library profile launch runs: the CLI reading this
+/// home, no thread and no `-C` pin — Terminal's own default directory is the
+/// working directory.
+fn codex_home_terminal_command(codex_cli: &Path, codex_home: &Path) -> Result<String, String> {
+    if !codex_cli.is_absolute() || !codex_home.is_absolute() {
+        return Err("Codex CLI and Codex home must be absolute".to_string());
+    }
+    Ok(format!(
+        "CODEX_HOME={} {}",
+        shell_quote(&codex_home.to_string_lossy()),
+        shell_quote(&codex_cli.to_string_lossy())
+    ))
+}
+
+/// Open Terminal running the Codex CLI against one profile home.
+pub fn launch_codex_home_terminal(codex_home: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let codex_cli = resolve_codex_cli()?;
+        let command = codex_home_terminal_command(&codex_cli, codex_home)?;
+        crate::providers::launch::launch_terminal_command(&command)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = codex_home;
+        let _ = codex_home_terminal_command;
+        Err("Open in Terminal is currently supported only on macOS".to_string())
+    }
+}
+
 pub(super) fn available_actions(
     context: &SessionActionContext<'_>,
 ) -> Vec<SessionActionDescriptor> {
@@ -309,6 +361,26 @@ mod tests {
         )
         .unwrap();
         assert!(command.contains("'/Users/dev/my project'"));
+    }
+
+    #[test]
+    fn home_terminal_command_carries_only_the_home_and_cli() {
+        let command = codex_home_terminal_command(
+            Path::new("/usr/local/bin/codex"),
+            Path::new("/Users/dev/my codex's home"),
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            "CODEX_HOME='/Users/dev/my codex'\\''s home' '/usr/local/bin/codex'"
+        );
+        assert!(!command.contains("resume"));
+        assert!(!command.contains("-C"));
+        assert!(
+            codex_home_terminal_command(Path::new("codex"), Path::new("/Users/dev/.codex"))
+                .is_err()
+        );
+        assert!(launch_codex_home_app(Path::new("relative"), Path::new("/Users/dev")).is_err());
     }
 
     #[test]

@@ -27,6 +27,8 @@ const commandNames = [
   "list_catalog_scope_resources",
   "list_catalog_scopes",
   "list_catalog_storage_repositories",
+  "open_catalog_profile_in_app",
+  "open_catalog_profile_in_terminal",
   "prepare_catalog_resource_fork",
   "prepare_catalog_scope_pull",
   "prepare_catalog_scope_push",
@@ -52,7 +54,8 @@ test("the Catalog API exposes only the scope-level command surface", () => {
   for (const method of [
     "listCapabilities", "listProfiles", "saveProfile", "renameProfile",
     "createScope", "listScopeResources", "getPetPreview", "linkScopeStorage",
-    "unlinkScopeStorage", "preparePush", "applyPush", "preparePull", "applyPull",
+    "unlinkScopeStorage", "openProfileApp", "openProfileTerminal",
+    "preparePush", "applyPush", "preparePull", "applyPull",
     "prepareFork", "applyFork",
   ]) {
     assert.match(callers, new RegExp(`storageCatalogApi\\.${method}\\(`), `${method} has a production caller`);
@@ -225,11 +228,18 @@ test("every row is the activity card: badge, name as the door, facts, one ⓘ", 
   // popover, each a click to copy.
   assert.match(page, /sync-history-debug-popover/);
   assert.match(page, /sha256:\$\{row\.content_sha256\}/);
-  // Reveal in Finder is the card's one launch verb, off when nothing is
-  // local; the provider mark beside it is inert.
+  // Reveal in Finder stays off when nothing is local.
   assert.match(page, /revealItemInDir/);
   assert.match(page, /disabled=\{!row\.local_path\}/);
-  assert.match(page, /sync-history-provider-inert/);
+  // The provider mark is a launch button now — the session card's pair,
+  // profile-scoped: the mark opens the desktop app on this profile's home,
+  // and the terminal button opens the provider CLI there. Both name the
+  // action, carry no inert span, and report failures on the page surface.
+  assert.doesNotMatch(page, /sync-history-provider-inert/);
+  assert.match(page, /title=\{`Open in \$\{providerLabel\(provider\)\}`\}[\s\S]{0,200}?<ProviderMark provider=\{provider\}/);
+  assert.match(page, /aria-label="Open in Terminal"[\s\S]{0,120}?<Icon name="terminal" size=\{14\}/);
+  assert.match(page, /storageCatalogApi\.openProfileApp\(profile\.profile_id\)/);
+  assert.match(page, /storageCatalogApi\.openProfileTerminal\(profile\.profile_id\)/);
   // Acknowledgements are row-sized callouts inside the card that raised them:
   // the warning tint for a scan finding, the danger tint for an overwrite,
   // and the app's own checkbox rather than the platform's. The chip spans the
@@ -243,7 +253,7 @@ test("every row is the activity card: badge, name as the door, facts, one ⓘ", 
     /\.catalog-card-ack \{[^}]*grid-column: 1 \/ -1;/,
   );
   assert.match(
-    readFileSync("src/RetroTheme.css", "utf8"),
+    readFileSync("src/App.css", "utf8"),
     /\.catalog-card-pet > \.catalog-card-ack \{[^}]*grid-column: 2 \/ -1;/,
   );
   // Payload first: the bold lead derives from warning.code with the raw
@@ -274,11 +284,11 @@ test("pet rows wear the preview tile, and stored-only previews arrive lazily", (
   assert.match(page, /storageCatalogApi\.getPetPreview\(scopeId, storageId, row\.resource_id!\)/);
   assert.match(page, /previewAttempts/);
   assert.doesNotMatch(page, /getPetPreview[\s\S]{0,400}listScopeResources\(/);
-  // The tile letterboxes in both stylesheets: the tile itself in App.css,
-  // the card's template extension beside the template it extends.
-  assert.match(readFileSync("src/App.css", "utf8"), /\.catalog-pet-preview \{/);
+  // The tile and the card template share one stylesheet.
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(css, /\.catalog-pet-preview \{/);
   assert.match(
-    readFileSync("src/RetroTheme.css", "utf8"),
+    css,
     /\.catalog-card-pet \{[^}]*"preview title actions"[^}]*"preview meta meta"/,
   );
 });
@@ -447,6 +457,24 @@ test("Unlink is the storage crumb's verb and Fork lives on the card", () => {
   assert.match(page, /forkNameRuleBroken/);
   // A refusal stays with the drawer that initiated the action.
   assert.match(page, /setForkError\(errorMessage\(reason\)\)/);
+  // A row with nothing local to copy keeps the button and loses only its
+  // action, the way Reveal beside it already does — dropping it reflowed the
+  // cluster and cost the list its column of controls.
+  assert.match(page, /const canFork = row\.local_present && !!row\.resource_id;/);
+  assert.match(page, /disabled=\{!canFork\}/);
+  assert.match(page, /title=\{canFork \? forkTitle : `Not on this Mac, so there is nothing to fork`\}/);
+  // The kind decides whether the control exists at all; a kind that can never
+  // fork shows no button rather than one dead on every row.
+  assert.match(page, /onFork=\{forkableKind \? \(\) => \{/);
+  // The readouts hold a column so the rule, the info button and the timestamp
+  // after them start at the same x on every row.
+  const appCss = readFileSync("src/App.css", "utf8");
+  assert.match(appCss, /\.catalog-card \.sync-history-thread-meta\s*\{[^}]*min-width: 7\.5rem;/s);
+  // The stamp cells already end on the same pixel; the glyphs inside them did
+  // not. An em dash fills its whole cell while a digit stops short of its own,
+  // so the placeholder is inset by that bearing and the ink edges read as one.
+  assert.match(page, /className=\{stamp == null \? "is-empty" : undefined\}/);
+  assert.match(appCss, /\.sync-history-thread-time time\.is-empty\s*\{[^}]*padding-right: 0\.085em;/s);
 });
 
 test("provider and pet identities stay explicit in the frontend contract", () => {

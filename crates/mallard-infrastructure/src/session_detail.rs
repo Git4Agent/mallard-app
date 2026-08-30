@@ -1972,8 +1972,8 @@ mod tests {
             50 * 1024 * 1024
         ));
 
-        // Entries persisted before the stamps existed deserialize with zeroed
-        // limits — never a parse failure, never a match.
+        // Entries without stamps deserialize with zeroed limits and never
+        // match.
         let mut legacy = serde_json::to_value(&stamped)
             .unwrap()
             .as_object()

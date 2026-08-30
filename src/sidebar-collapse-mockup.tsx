@@ -4,7 +4,6 @@ import ProjectSidebar from "./components/project-sync/ProjectSidebar";
 import type { CatalogScopeView } from "./components/storage-catalog/types";
 import type { LocalProjectSummary, StorageConfig } from "./types";
 import "./App.css";
-import "./RetroTheme.css";
 
 /**
  * Harness: collapsible sidebar sections, on the real ProjectSidebar.

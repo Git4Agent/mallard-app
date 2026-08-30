@@ -128,7 +128,7 @@ interface Props {
   onPush: (projectId: string, storageId: string) => Promise<void> | void;
   onPull: (projectId: string, storageId: string) => Promise<void> | void;
   /** Sibling detection for the active pair: another repo in this storage
-      carries the same repository (`docs/PLAN_REPO_BUNDLE_CONVERGENCE.md`). */
+      carries the same repository. */
   siblingNotice?: {
     projectId: string;
     storageId: string;
@@ -558,8 +558,7 @@ export function projectPushActionLabel({
   preparing: boolean;
   publishing: boolean;
 }): string {
-  // With the wizard gone, the card button on an open review IS the push: the
-  // first click opens the review, the second publishes the selection.
+  // The first click opens review; the button on that review publishes.
   if (publishing) return "Pushing…";
   if (preparing) return "Preparing…";
   return "Push";
@@ -1419,9 +1418,8 @@ export default function ProjectLinksWorkspace({
     && proposedProjectAlias !== (workspaceProject.local_alias ?? null);
 
   // ---- the workspace path bar -------------------------------------------
-  // Everything the header used to spread across an h1, a meta row and a
-  // storage card is derived once here, because the bar renders above the
-  // scrolling page rather than inside it.
+  // Derive the path-bar state once because the bar renders above the
+  // scrolling page.
   const workspaceLinks = workspaceProject
     ? linkedByProject.get(workspaceProject.local_project_id) ?? []
     : [];
@@ -1584,8 +1582,7 @@ export default function ProjectLinksWorkspace({
         setupDraftStorageId,
       );
       if (saved === false) return;
-      // A successful create consumed the draft: the backend discarded an R2
-      // one, ProjectSync retired a local one. Only the form state is left.
+      // A successful create consumes the draft. Only form state remains.
       if (creatingStorage) resetStorageSetupDraftState();
       setStorageConflict(null);
       if (wasCreatingR2) {
@@ -1722,9 +1719,8 @@ export default function ProjectLinksWorkspace({
       }]),
     ];
 
-    // Everything the old header held as its own button — the gear, the
-    // pencil, the ✕ — plus the storage verbs the sidebar keeps as shortcuts.
-    // A draft has none of these; it gets the app scope alone.
+    // Storage commands plus the sidebar's storage shortcuts. A draft receives
+    // only app-level commands.
     const storagePathOverflow: PathBarMenuGroup[] = creatingStorage ? appActions : [
       {
         label: "Storage",
@@ -1780,9 +1776,8 @@ export default function ProjectLinksWorkspace({
       ...appActions,
     ];
 
-    // Creating, the page's verb is the commit bar under the form it commits —
-    // the trail carries no action at all; settled, it is the refresh that the
-    // repositories card no longer duplicates.
+    // Creation uses the form's commit bar. A settled storage exposes Refresh
+    // in the path bar.
     const storagePathActions = creatingStorage ? undefined : (
       <button
         type="button"
@@ -1797,12 +1792,8 @@ export default function ProjectLinksWorkspace({
       </button>
     );
 
-    /* Everything this column has to say, in one box. The externally changed
-     * draft, the two reads behind the repository list and the two loose
-     * callouts under it were five separate rows down one page, each with its
-     * own frame; they are rungs of one ladder, and the box takes the loudest
-     * rung present. Conditions are carried over exactly, including the
-     * conflict's — it only ever rendered inside the expanded panel. */
+    /* One box takes the loudest storage-editor, repository, or conflict
+     * notice. The conflict appears only inside the expanded panel. */
     const storageNotices: NoticeItem[] = [];
     if (showStorageDetails && storageConflict) {
       storageNotices.push({
@@ -2243,11 +2234,9 @@ export default function ProjectLinksWorkspace({
   const pathCrumbs: PathBarCrumb[] = [];
   if (workspaceProject) {
     if (workspaceStorage) {
-      // The menu speaks for the current storage: a header naming it, its two
-      // verbs right beneath — settings and the unlink that used to hide at the
-      // far end of the bar — then the other storages as plain switch commands,
-      // then the ways to get more. No radio state: the header is the "which
-      // one am I on", so switching rows carry no checkmark.
+      // The menu speaks for the current storage: a header, settings and unlink,
+      // other storages as switch commands, then the ways to add one. The header
+      // identifies the current storage, so switching rows need no radio state.
       //
       // While the workspace is locked the menu still opens; one banner says
       // why every row is inert, instead of a tooltip per greyed row.
@@ -2348,8 +2337,7 @@ export default function ProjectLinksWorkspace({
       });
     }
 
-    // Same grammar as the storage crumb: header, this project's verbs — the
-    // four that used to live at the other end of the bar — then the other
+    // Same grammar as the storage crumb: header, project commands, other
     // projects as switch commands, then Add.
     const otherProjects = projects.filter((candidate) => (
       candidate.local_project_id !== workspaceProject.local_project_id
@@ -2522,9 +2510,7 @@ export default function ProjectLinksWorkspace({
 
   const pathActions = workspaceProject && workspaceStorage ? (
     <>
-      {/* One chip for everything neither button can clear. Four coloured
-          tallies said the same thing in a vocabulary nothing else on the page
-          used, and none of them was actionable. */}
+      {/* One chip summarizes issues that neither action can clear. */}
       {attention > 0 && (
         /* Not role="status": this is a standing count, not an event, and a
            live region re-announces it on every unrelated re-render. The label
@@ -2911,10 +2897,8 @@ export default function ProjectLinksWorkspace({
                 </div>
               );
 
-              // The card's contents used to be permanent — the storage row was
-              // always there — but the identity and the buttons moved to the
-              // path bar, so on a settled project it can now hold nothing at
-              // all, and an empty frame draws as a stray box above the history.
+              // Storage identity and actions live in the path bar. Do not draw
+              // an empty frame when this group has no notice or review.
               const storageGroupNotice = (conversationPathNoticeBlocked || selectedStorage)
                 && conversationPathNotice;
               const storageBlockShown = !!selectedStorage
@@ -3001,17 +2985,12 @@ export default function ProjectLinksWorkspace({
                         && siblingNotice.status.state !== "none"
                         ? siblingNotice.status
                         : null;
-                      // The card used to be the storage's identity and its two
-                      // buttons; both live in the path bar now, so what is left
-                      // is a container for banners and the open review. With
-                      // neither it has nothing to frame, and an empty frame
-                      // reads as a gap above the history.
+                      // This card contains banners and the open review. With
+                      // neither, it has nothing to frame.
                       if (!activeNotice && !reviewOpen && !activeSibling) return null;
 
-                      /* The four gates, in one box. They are a discriminated
-                       * union, so at most one is ever present — and they were
-                       * still four frames carrying four hand-written roles.
-                       * Copy, controls and order are carried over unchanged.
+                      /* The four gates form a discriminated union, so at most
+                       * one is present in the shared notice box.
                        *
                        * All four are events without exception: ProjectSync
                        * initialises the notice at null and only ever sets it
@@ -3023,10 +3002,8 @@ export default function ProjectLinksWorkspace({
                       if (activeNotice?.kind === "requires_pull") {
                         gateNotices.push({
                           key: "requires-pull",
-                          /* A destination waiting on a Pull is a step, not a
-                             failure — nothing is broken and one action clears
-                             it, which is why this banner never carried a tone
-                             class and drew its glyph in blue. */
+                          /* Waiting on Pull is an informational step, not a
+                             failure: one action clears it. */
                           severity: "info",
                           title: activeNotice.copy.title,
                           message: (
@@ -3053,10 +3030,8 @@ export default function ProjectLinksWorkspace({
                       if (activeNotice?.kind === "remote_missing") {
                         gateNotices.push({
                           key: "remote-missing",
-                          /* Nothing failed and nothing was lost locally; Push
-                             is held until someone decides what the storage is
-                             now. That is the warning rung, and the amber the
-                             banner already drew. */
+                          /* Nothing failed or was lost locally. Push is held
+                             until the user resolves the missing remote history. */
                           severity: "warning",
                           title: "Remote history is missing",
                           message: `${storage.name || "This storage"} no longer holds this project's sync history, so Push is paused. If this is expected, unlink and link the storage again.`,

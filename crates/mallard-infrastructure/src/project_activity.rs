@@ -1130,13 +1130,8 @@ fn merge_activity_sessions_with_state(
 /// What lies before the window, weighed over every commit the branch offered
 /// and every session the project has.
 ///
-/// Paging used to step a fixed thirty days from a flag that counted sessions
-/// alone. A project whose commits all predate the window then offered no way
-/// back at all — its history was unreachable from the UI at any window — while
-/// a project with older sessions but no older commits stepped into empty page
-/// after empty page. The cursor is the newest thing below instead, so the
-/// control exists exactly when something is down there, and one press always
-/// lands on it.
+/// The cursor is the newest commit or session below the window, so the control
+/// exists exactly when something is there and one press lands on it.
 ///
 /// A commit before the window still draws when a visible session maps to it,
 /// so those are excluded here: counting them would promise rows that are

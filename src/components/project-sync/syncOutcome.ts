@@ -193,8 +193,7 @@ export function buildPullOutcome({
     })),
     ...preserved.map((thread) => ({
       key: thread.action_id,
-      // The renamed marker title, so the row names the session exactly as
-      // it now appears in the provider's session list.
+      // Use the preserved marker title shown in the provider's session list.
       title: displayThreadTitle(thread.preserved_display_title),
       status: "preserved" as const,
       reason: "Storage history was restored and the previous local history was kept as an independent session.",

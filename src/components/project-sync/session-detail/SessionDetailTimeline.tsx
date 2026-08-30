@@ -54,8 +54,6 @@ export default function SessionDetailTimeline({
   repositoryUrl,
   hasFilterToggles,
 }: Props) {
-  // The record is the page; it needs no eyebrow announcing that it is a record,
-  // and no count of its own now that the toolbar states one.
   const days = groupSessionEventsByDay(events);
   const spans = sessionTurnSpans(events);
 
@@ -65,7 +63,7 @@ export default function SessionDetailTimeline({
           request fires from an effect once the detail has resolved — so they
           are events, not content the timeline renders with, and live regions
           are the right shape. `role="status"` already carries
-          `aria-live="polite"`, so authoring the attribute beside it was noise. */}
+          `aria-live="polite"`; do not duplicate the attribute. */}
       {loading && (
         <div className="session-detail-state" role="status">
           <span className="status-loader" />
@@ -76,8 +74,7 @@ export default function SessionDetailTimeline({
 
       {/* A failed page leaves the transcript with nothing to show, so it stops
           the flow rather than advising on it: `blocking`, and the box prints
-          the severity as a word instead of leaving it to the tint and glyph
-          the pane used to carry. */}
+          the severity as a word instead of relying on tint and glyph alone. */}
       {error && (
         <Notice
           severity="danger"

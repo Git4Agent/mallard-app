@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const retroCss = readFileSync("src/RetroTheme.css", "utf8");
+const appCss = readFileSync("src/App.css", "utf8");
 
 function stripComments(css: string): string {
   return css.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -18,7 +18,7 @@ function stripComments(css: string): string {
 
 /** Every custom property declared in a block whose selector matches. */
 function tokensFor(theme: "light" | "dark"): Map<string, string> {
-  const css = stripComments(retroCss);
+  const css = stripComments(appCss);
   const tokens = new Map<string, string>();
   // Blocks apply in source order; a later block overrides an earlier one, and
   // the dark palette rides the bare :root that also carries the shared tokens.

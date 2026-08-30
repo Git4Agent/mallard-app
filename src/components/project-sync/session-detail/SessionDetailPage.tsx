@@ -78,9 +78,8 @@ type SessionDetailEntryStateProps =
 
 function SessionDetailEntryState(props: SessionDetailEntryStateProps) {
   if (props.state === "loading") {
-    // The page's own bones — fact-chip strip, punchcard band, panes — so
-    // the loaded detail lands without a jump. The scaffold is a quiet named
-    // region; the old subline's promise is carried by the geometry now.
+    // Match the loaded page geometry so detail lands without a jump. The
+    // scaffold is a quiet named region.
     return (
       <section className="session-detail-page session-detail-entry-state" aria-label="Loading session detail">
         <LoadingScaffold shape="detail" label="Loading session detail" />
@@ -214,10 +213,8 @@ export default function SessionDetailPage({
     if (append) setTimelineLoadingMore(true);
     else {
       setTimelineLoading(true);
-      // A cursor belongs to the filter set and snapshot that produced it. A
-      // fresh query must not leave the previous one reachable: pressing
-      // "Load 50 more" before the refiltered page arrived sent a cursor the
-      // backend rejects, and the correct page was discarded with it.
+      // A cursor belongs to its filter set and snapshot. Clear it before a new
+      // query so Load more cannot submit a stale cursor.
       setNextCursor(null);
     }
     setTimelineError(null);
@@ -405,10 +402,7 @@ export default function SessionDetailPage({
 
   const warnings = mergeWarnings(detail.warnings, timelineWarnings);
 
-  /* Everything the page has to say about this record, in one box. A failed
-   * action, a snapshot that moved under us and the backend's own notes were
-   * three separate amber rows before; they are three rungs of one ladder, and
-   * the box takes the loudest present. */
+  /* One box takes the loudest action, snapshot, or backend notice. */
   const notices: NoticeItem[] = [];
   if (actionError) {
     notices.push({ key: "action-failed", severity: "danger", message: actionError });

@@ -9,7 +9,7 @@
 //! appended complete records from a bounded tail window.
 //!
 //! Append validation is parent-pointer continuity over the canonical
-//! *projection* (`docs/PLAN_CLAUDE_DESKTOP_IMPORT_TOLERANCE.md`): an
+//! *projection*: an
 //! appended chain record parented to the saved leaf — or to a thinking-only
 //! record the projection dropped since the leaf (the skipped-set) — folds
 //! incrementally with its parent normalized to the leaf, exactly as the full

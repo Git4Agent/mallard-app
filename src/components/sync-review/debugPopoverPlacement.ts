@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 
-/* Matches the gap the panel used to keep from its row when it was anchored
-   inside the list. */
+/* Gap between the panel and its row anchor. */
 const POPOVER_GAP = 6;
 /* The panel never touches the window edge. */
 const POPOVER_EDGE = 8;
@@ -23,10 +22,7 @@ export interface DebugPopoverPlacement {
  *
  * The panel is rendered in a portal on `document.body`, so nothing in the list
  * can bound it: not the row's card, not the commit rail's stacking context, and
- * not `.sync-main`'s scrollport. Anchored inside the list it was capped at the
- * room the scroller had left, which near the top or bottom of a long list meant
- * a panel too short to read; against the window there is almost always room for
- * all of it.
+ * not `.sync-main`'s scrollport. Window placement provides the usable space.
  *
  * A fixed panel does not travel with its row, so scrolling or resizing dismisses
  * it rather than leaving it stranded beside the wrong session.
@@ -50,8 +46,8 @@ export function useDebugPopoverPlacement(
       return;
     }
     const panel = panelRef.current;
-    // The row, not the trigger: anchoring to the icon puts the panel wherever
-    // that icon happens to land, which is how it used to end up off the card.
+    // Anchor to the row so the panel stays within the card instead of following
+    // the trigger icon's variable position.
     const anchorEl = rootRef.current?.closest<HTMLElement>(".sync-history-thread-card")
       ?? rootRef.current;
     if (!panel || !anchorEl) return;

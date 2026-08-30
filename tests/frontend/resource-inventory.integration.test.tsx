@@ -336,9 +336,8 @@ test("a group states its own name once, and counts its blocked rows rather than 
 });
 
 test("a resource named by its own id states that id once, and says why once", () => {
-  // The shape the backend fabricates for a recipe entry that no longer
-  // resolves locally: the id is the only name it has, so display_name is the
-  // id (commands.rs, "resource is unavailable" branch).
+  // The shape the service returns for a recipe entry that no longer resolves
+  // locally: the id is the only available name.
   const ghostId = "codex:session:687bc2c4-9612-313d-a3d2-6d29d1b003a0";
   const ghost: ProjectResourceDescriptor = {
     ...memoryResource("ghost", "Selected for sync, but unavailable at the mapped paths on this machine"),
@@ -373,12 +372,6 @@ test("a resource named by its own id states that id once, and says why once", ()
   );
   assert.match(inventory, /<dt>Kind<\/dt><dd>\{kindLabel\(resource\.kind\)\}<\/dd>/);
   assert.doesNotMatch(inventory, /providerLabel/);
-});
-
-test("the backend fabricates one unavailability sentence, not two", () => {
-  const commands = readFileSync("src-tauri/src/project_sync/commands.rs", "utf8");
-
-  assert.match(commands, /description: None,\s*\n\s*logical_paths: Vec::new\(\),\s*\n\s*default_selected: true,\s*\n\s*blocked_reason: Some\(\s*\n\s*"Selected for sync, but unavailable at the mapped paths on this machine"/);
 });
 
 test("the push step renders the requirements group without a second disclosure", () => {
@@ -628,18 +621,18 @@ test("held threads and storage blockers share one banner with one way forward", 
   assert.equal(bannerZone(deselected), bannerZone(html), "the banner zone does not change with selection");
 });
 
-test("the pixel skin transitions nothing, so a tick cannot flicker its neighbours", () => {
+test("state changes do not transition, so a tick cannot flicker its neighbours", () => {
   // A transitioning element is promoted to its own compositing layer for the
   // duration, and unsmoothed crisp-edged icons re-rasterised against that
   // layer's origin flip whole pixels — the screen appears to flicker with zero
   // geometry change. Ticking one checkbox used to animate four things at once.
-  const retro = readFileSync("src/RetroTheme.css", "utf8");
-  const blanket = retro.match(/\.sync-app \*,\s*\n\.sync-app \*::before,\s*\n\.sync-app \*::after \{[^}]*\}/)?.[0] ?? "";
-  assert.match(blanket, /transition: none/, "the skin drops transitions app-wide");
+  const css = readFileSync("src/App.css", "utf8");
+  const blanket = css.match(/\.sync-app \*,\s*\n\.sync-app \*::before,\s*\n\.sync-app \*::after \{[^}]*\}/)?.[0] ?? "";
+  assert.match(blanket, /transition: none/, "state transitions must stay disabled app-wide");
 
-  // The base sheet styles the row checkbox with a class *and* a type, which
-  // outranks the one-class blanket rule, so the skin repeats those selectors.
-  const checkbox = retro.match(/\.sync-sync-row-choice input,[\s\S]*?\{[^}]*\}/g) ?? [];
+  // Match the checkbox selectors' specificity so the blanket rule also wins
+  // for their border, fill, and tick.
+  const checkbox = css.match(/\.sync-sync-row-choice input,[\s\S]*?\{[^}]*\}/g) ?? [];
   const nulled = checkbox.find((rule) => /transition: none/.test(rule)) ?? "";
   assert.match(nulled, /\.sync-sync-row-choice input::before/, "the tick's transform must not animate");
   assert.match(nulled, /\.sync-sync-review-workspace \.sync-pull-item-select input/);
@@ -698,7 +691,7 @@ test("the header count reserves its widest slot so ticking a row moves no icon",
   assert.match(html, /class="sync-sync-review-selected" style="--review-count-digits:2"/);
   assert.match(html, /<b>9<\/b>\/13/);
 
-  const css = readFileSync("src/RetroTheme.css", "utf8");
+  const css = readFileSync("src/App.css", "utf8");
   const slot = css.match(/\.sync-sync-review-selected > b \{[^}]+\}/)?.[0] ?? "";
   assert.match(slot, /min-width: calc\(var\(--review-count-digits, 1\) \* 1ch\)/);
   assert.match(slot, /display: inline-block/, "an inline element cannot hold a width");

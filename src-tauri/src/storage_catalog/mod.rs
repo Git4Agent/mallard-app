@@ -1,7 +1,6 @@
 //! Draft-linked Library resources, independent of every project and project
 //! repository bundle.
 //!
-//! Module boundaries follow `docs/PLAN_DRAFT_LINKED_CATALOG_RESOURCES.md`:
 //! `domain` owns validated portable and plan types; `persistence` owns
 //! machine-local state; `plan_store` holds pending reviewed plans in memory;
 //! `profiles` resolves provider homes and global skill roots; `adapters`

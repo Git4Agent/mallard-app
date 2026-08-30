@@ -261,8 +261,7 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
       </button>
       {/* On body, not in the row. Nothing in the list can bound it there:
           not the row's card, not the commit rail's stacking context, and
-          not .sync-main's scrollport, which used to cap it to whatever
-          room the scroller had left. */}
+          not .sync-main's scrollport. */}
       <TopLayer>
         <div
           ref={panelRef}
@@ -292,11 +291,6 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
                 type="button"
                 className="sync-history-debug-copy"
                 title={`Copy ${entry.label.toLowerCase()}`}
-                /* Was a bare `navigator.clipboard?.writeText` — on a webview
-                   that exposes Clipboard but rejects it, and on one that exposes
-                   none at all, the click copied nothing and said nothing. The
-                   shared helper carries the document fallback the other three
-                   copy paths already had. */
                 onClick={() => {
                   void writeClipboardText(entry.value)
                     .then(() => setCopied(entry.label))
@@ -320,12 +314,8 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
   );
 }
 
-/** The card's fork drawer: a full-width row under the card's own lines,
- * parted by the card's hairline. It reads as one sentence — Fork “Maple” as
- * [maple-copy] — with the name prefilled and pre-selected, so Enter forks the
- * suggestion and the first keystroke replaces it. The line under the row is
- * the hint, or, in the same slot, the rule refusal while typing and the
- * backend's sentence after a refused submit. */
+/** The fork drawer preselects its suggested name. Validation and backend
+ * errors share the hint line. */
 function ForkDrawer({
   displayName,
   seed,
@@ -340,7 +330,7 @@ function ForkDrawer({
   seed: string;
   maxLength: number;
   busy: boolean;
-  /** A refusal from prepare or apply, shown where the hint line was. */
+  /** Inline refusal from prepare or apply. */
   error: string | null;
   /** Typing resumes: a stale refusal for the previous name clears. */
   onEdited: () => void;
@@ -438,16 +428,17 @@ function AckChip({ danger, lead, body, checked, ariaLabel, verbs, onToggle }: {
 }
 
 /** One card per resource, wearing the activity card's grammar. Line one: the
- * badge, the name, the provider mark, Fork, and Reveal in Finder. Line two:
- * files and size, the rule, the ⓘ, and the full stamp. Reviews put the
- * checkbox where a session's review puts it — inside the title line — and
- * hang the Pull action pill after the name. */
+ * badge, the name, the provider and terminal launches, Fork, and Reveal in
+ * Finder. Line two: files and size, the rule, the ⓘ, and the full stamp.
+ * Reviews put the checkbox where a session's review puts it — inside the
+ * title line — and hang the Pull action pill after the name. */
 function ResourceCard({
   row,
   storageName,
   storageRevision,
   provider,
-  providerTitle,
+  onOpenApp,
+  onOpenTerminal,
   preview,
   onReveal,
   onFork,
@@ -464,12 +455,20 @@ function ResourceCard({
   storageName: string | null;
   storageRevision: number | null;
   provider: CatalogProviderKey;
-  providerTitle: string;
+  /** The session card's launch pair, minus the session: the provider mark
+   * opens the desktop app on this row's profile home, and Terminal opens the
+   * provider CLI there — both at the default path. */
+  onOpenApp: () => void;
+  onOpenTerminal: () => void;
   /** The pet's idle frame as a data URI. `null` draws the kind-glyph tile —
    * the column never collapses and never shows a broken image — and
    * `undefined` (non-pet scopes) draws no tile at all. */
   preview?: string | null;
   onReveal: () => void;
+  /** Given for a kind that can be forked at all. The row's own eligibility is
+   *  decided here, so an ineligible row shows the control disabled rather than
+   *  losing it — a kind that can never fork shows no button, since a control
+   *  that is dead on every row of the page is noise rather than information. */
   /** Fork lives on the card: local rows of forkable kinds grow the button,
    * and it shows pressed while its drawer is open. */
   onFork?: () => void;
@@ -486,6 +485,9 @@ function ResourceCard({
   footer?: ReactNode;
 }) {
   const stamp = rowStamp(row);
+  /* The same test the fork action itself applies: there has to be a local copy
+     to duplicate, and a resource id to name it by. */
+  const canFork = row.local_present && !!row.resource_id;
   return (
     <article className={`sync-history-thread-card catalog-card${preview !== undefined ? " catalog-card-pet" : ""}`}>
       {preview !== undefined && (
@@ -572,19 +574,39 @@ function ResourceCard({
           ))}
         </div>
         {/* Line one's right-hand run, read across from a session's: the
-            provider mark that says whose home this is, Fork when the resource
-            can be duplicated on this Mac, and Reveal in Finder. */}
+            provider and Terminal launches on this row's profile home, Fork
+            when the resource can be duplicated on this Mac, and Reveal in
+            Finder. */}
         <div className="sync-history-thread-actions">
-          <span className="sync-history-launch-action sync-history-provider-inert" title={providerTitle}>
+          <button
+            type="button"
+            className="btn btn-ghost sync-history-launch-action"
+            title={`Open in ${providerLabel(provider)}`}
+            aria-label={`Open in ${providerLabel(provider)}`}
+            onClick={onOpenApp}
+          >
             <ProviderMark provider={provider} displayName={providerLabel(provider)} />
-          </span>
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost sync-history-launch-action"
+            title="Open in Terminal"
+            aria-label="Open in Terminal"
+            onClick={onOpenTerminal}
+          >
+            <Icon name="terminal" size={14} />
+          </button>
           {onFork && (
             <button
               type="button"
               className="btn btn-ghost sync-history-launch-action"
-              title={forkTitle}
-              aria-label={forkTitle}
-              aria-expanded={!!forkOpen}
+              /* Disabled, never dropped: a row with nothing local to copy kept
+                 the same four controls as every other row, so the cluster does
+                 not reflow and the eye keeps its column down the list. */
+              disabled={!canFork}
+              title={canFork ? forkTitle : `Not on this Mac, so there is nothing to fork`}
+              aria-label={canFork ? forkTitle : `Cannot fork ${row.display_name}: not on this Mac`}
+              aria-expanded={canFork ? !!forkOpen : undefined}
               onClick={onFork}
             >
               <Icon name="git-fork" size={14} />
@@ -645,7 +667,10 @@ function ResourceCard({
             aria-label={stamp?.detail}
             tabIndex={0}
           >
-            <time dateTime={stamp == null ? undefined : new Date(stamp.seconds * 1_000).toISOString()}>
+            <time
+              className={stamp == null ? "is-empty" : undefined}
+              dateTime={stamp == null ? undefined : new Date(stamp.seconds * 1_000).toISOString()}
+            >
               {stamp == null ? "—" : formatFullDateTime(stamp.seconds)}
             </time>
           </span>
@@ -683,8 +708,7 @@ export default function StorageCatalogPage({
   onAddStorage: () => void;
   onAddScope: () => void;
   onRemoveScope: () => void;
-  /** The profile was renamed here — sidebar labels and the Switch-to menu
-   * read the scope list, so the shell reloads it. */
+  /** Reload the scope list after a profile rename so shell labels update. */
   onProfileRenamed: () => void;
   /** Opens the storage crumb menu for recovery actions initiated by the shell. */
   openStorageMenuRequestId?: number | null;
@@ -697,9 +721,6 @@ export default function StorageCatalogPage({
 }) {
   const label = catalogScopeLabel(scope.scope, scope.profile);
   const kind = catalogKindMeta(scope.scope.resource_kind);
-  /* The provider mark's sentence, e.g. "Codex skill": whose home this is, in
-     one glyph on every card. */
-  const markTitle = `${providerLabel(scope.scope.provider)} ${kind.label.toLowerCase()}`;
   /* Pets are the one kind that carries artwork: their rows grow a preview
      tile, filled inline for local atlases and lazily for stored-only rows. */
   const petKind = scope.scope.resource_kind === "codex_pet_v1"
@@ -922,12 +943,24 @@ export default function StorageCatalogPage({
     };
   }, [petKind, rows, scope.scope.scope_id, storageId]);
 
-  /** The card's one launch verb. Failures land on the page's own error
+  /** The card's launch verbs. Failures land on the page's own error
    * surface, the same place every other verb reports. */
   const reveal = useCallback((row: CatalogScopeRow) => {
     if (!row.local_path) return;
     void revealItemInDir(row.local_path).catch((reason) => setError(errorMessage(reason)));
   }, []);
+
+  /** The session card's launch pair, profile-scoped: open the provider
+   * desktop app or the provider CLI on this row's configured home, at the
+   * default path — no project and no session to name. */
+  const openProfileApp = useCallback(() => {
+    void storageCatalogApi.openProfileApp(profile.profile_id)
+      .catch((reason) => setError(errorMessage(reason)));
+  }, [profile.profile_id]);
+  const openProfileTerminal = useCallback(() => {
+    void storageCatalogApi.openProfileTerminal(profile.profile_id)
+      .catch((reason) => setError(errorMessage(reason)));
+  }, [profile.profile_id]);
 
   /** Push and Pull need the scope's one pairing with this storage. Linking is
    * configuration only, no provider content changed, so creating it as part
@@ -1345,16 +1378,9 @@ export default function StorageCatalogPage({
     />
   );
 
-  /* Only what has to stay on screen: work in flight, and failures the user
-     has to read line by line. Successes go to the shell's notice, which is
-     where every other screen puts them.
-
-     One zone, spliced into the list and into both reviews. Work in flight,
-     the page's own failure and the per-item failures a half-applied Push or
-     Pull left behind were three sibling boxes; they are three rungs of one
-     ladder, and the box takes the loudest present. The per-item failures keep
-     their own line each — joined into one sentence, five failures read as a
-     run-on — which is what the zone's list is for. */
+  /* Keep work in flight and failures on screen. One zone takes the loudest
+     severity; per-item failures keep one line each. Successes use the shell
+     notice. */
   const pageNotices: NoticeItem[] = [];
   if (progress) {
     pageNotices.push({ key: "progress", severity: "info", message: progress });
@@ -1464,7 +1490,8 @@ export default function StorageCatalogPage({
                         storageName={storageName}
                         storageRevision={storageRevision}
                         provider={scope.scope.provider}
-                        providerTitle={markTitle}
+                        onOpenApp={openProfileApp}
+                        onOpenTerminal={openProfileTerminal}
                         preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
                         onReveal={() => reveal(row)}
                         selectable={planRow.row.selectable}
@@ -1594,8 +1621,7 @@ export default function StorageCatalogPage({
                   <div className="sync-review-banners">
                     {/* Every claim came in with the plan this review pinned,
                         so the zone is a named region and never announces. One
-                        box holds them all — a box per claimed row was the
-                        stack this zone replaces. */}
+                        box holds all claims. */}
                     <NoticeZone
                       timing="standing"
                       label="Notes about this Pull review"
@@ -1627,7 +1653,8 @@ export default function StorageCatalogPage({
                         storageName={storageName}
                         storageRevision={storageRevision}
                         provider={scope.scope.provider}
-                        providerTitle={markTitle}
+                        onOpenApp={openProfileApp}
+                        onOpenTerminal={openProfileTerminal}
                         preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
                         onReveal={() => reveal(row)}
                         selectable={executable}
@@ -1774,10 +1801,8 @@ export default function StorageCatalogPage({
           </form>
         )}
         {notices}
-        {/* Anything a half-finished operation left behind is this page's own
-            news now that no other screen hosts it. The loader hands it over
-            with the rest of the page, so it is standing content in a named
-            region — one box however many messages the backend sent. */}
+        {/* Recovery messages arrive with the page, so they are standing
+            content in one named box. */}
         <NoticeZone
           timing="standing"
           label="Notes about this Catalog row"
@@ -1838,10 +1863,11 @@ export default function StorageCatalogPage({
                     storageName={storageName}
                     storageRevision={storageRevision}
                     provider={scope.scope.provider}
-                    providerTitle={markTitle}
+                    onOpenApp={openProfileApp}
+                    onOpenTerminal={openProfileTerminal}
                     preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
                     onReveal={() => reveal(row)}
-                    onFork={forkable ? () => {
+                    onFork={forkableKind ? () => {
                       setForkError(null);
                       setForkFor(forkOpen ? null : row.resource_id!);
                     } : undefined}

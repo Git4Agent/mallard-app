@@ -1783,9 +1783,9 @@ mod tests {
     }
 
     /// Publish a full captured selection through the scoped publisher: split
-    /// the capture into its sync scopes, treat every selected or previously
-    /// present scope as writable, and pin each one against the observed
-    /// head's manifest.
+    /// the capture into its sync scopes, treat every selected scope or scope
+    /// present in the observed head as writable, and pin each one against the
+    /// observed head's manifest.
     fn publish_captured<S: ObjectStore>(
         engine: &BundleEngine<S>,
         identity: BundleIdentity,

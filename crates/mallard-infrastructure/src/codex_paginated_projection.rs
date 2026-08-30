@@ -8,7 +8,7 @@
 //! displayable: it classifies every `event_msg` payload, converts recognized
 //! legacy display completions into current `TurnItem` projections, attaches
 //! out-of-turn completions to synthesized implicit `rollout-N` turns exactly
-//! as Codex's own migration canonicalizer does, and stays a fixpoint on its
+//! as Codex's own canonicalizer does, and stays a fixpoint on its
 //! own output so rebuilds are byte-identical.
 //!
 //! Original non-metadata records always pass through unchanged, in order.
@@ -52,7 +52,7 @@ const ITEM_KINDS: [&str; 18] = [
 /// `event_msg` payload types that are context, never display completions.
 /// Frozen to the 0.147 persistence surface plus every type observed in real
 /// rollouts. `view_image_tool_call` is deliberately context-only: the 0.147
-/// migration mapping produces no item for it.
+/// canonical mapping produces no item for it.
 const CONTEXT_ONLY_EVENTS: [&str; 8] = [
     "error",
     "item_started",
@@ -986,7 +986,7 @@ fn required_string(
         .ok_or_else(|| format!("Codex {event_type} event has no {key}"))
 }
 
-/// `UserMessageEvent -> UserMessageItem` per the 0.147 migration mapping:
+/// `UserMessageEvent -> UserMessageItem` per the 0.147 canonical mapping:
 /// text plus remote/local image and audio attachments, in that order.
 fn user_message_item_body(payload: &Map<String, Value>) -> Result<ItemBody, String> {
     let message = required_string(payload, "message", "user_message")?;
@@ -1351,8 +1351,8 @@ fn dynamic_tool_call_item_body(payload: &Map<String, Value>) -> Result<ItemBody,
 fn entered_review_item_body(payload: &Map<String, Value>) -> Result<ItemBody, String> {
     let target = match payload.get("target") {
         Some(target) if !target.is_null() => target.clone(),
-        // The upstream line parser synthesizes a custom target from the
-        // retired `prompt` shape before conversion.
+        // The upstream line parser synthesizes a custom target from bare
+        // `prompt` records before conversion.
         _ => match payload.get("prompt").and_then(Value::as_str) {
             Some(prompt) => {
                 let mut target = Map::new();

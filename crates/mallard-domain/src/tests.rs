@@ -3050,7 +3050,7 @@ fn reshaped_documents_reject_unknown_and_retired_keys() {
         .insert("legacy_field".to_string(), serde_json::json!(1));
     assert!(serde_json::from_value::<ConversationCheckpoint>(value).is_err());
 
-    // The retired binding key fails closed without being enumerated anywhere.
+    // An unknown binding key fails closed without explicit enumeration.
     let binding = LocalConversationBinding {
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         replica_id: ReplicaId::parse("replica-a").unwrap(),
@@ -3074,8 +3074,8 @@ fn reshaped_documents_reject_unknown_and_retired_keys() {
         .insert("fork_stamp".to_string(), serde_json::json!({}));
     assert!(serde_json::from_value::<LocalConversationBinding>(value).is_err());
 
-    // Schema 1 is a clean cutover: documents still carrying the retired
-    // `preserved_local` bool fail closed instead of being silently accepted.
+    // Schema 1 rejects the unsupported `preserved_local` key instead of
+    // accepting it silently.
     let mut value = serde_json::to_value(&binding).unwrap();
     value
         .as_object_mut()
@@ -3083,7 +3083,7 @@ fn reshaped_documents_reject_unknown_and_retired_keys() {
         .insert("preserved_local".to_string(), serde_json::json!(false));
     assert!(serde_json::from_value::<LocalConversationBinding>(value).is_err());
 
-    // A pre-cutover link without the checkpoint map is not silently upgraded.
+    // A link without the checkpoint map fails closed.
     let project = sample_project();
     let link = ProjectStorageLink {
         local_project_id: project.local_project_id.clone(),
@@ -3151,11 +3151,10 @@ fn thread_id_spaces_are_structurally_disjoint() {
 }
 
 #[test]
-fn pre_cutover_documents_fail_closed_on_missing_identity_keys() {
+fn documents_fail_closed_on_missing_identity_keys() {
     // Plain `Option` fields deserialize missing keys as `None` even without
     // `#[serde(default)]`; the presence-requiring deserializer is what makes
-    // these keys mandatory. These are the exact document shapes a pre-cutover
-    // ~/.mallard would hold.
+    // these keys mandatory. The fixtures omit the required identity keys.
     let binding = LocalConversationBinding {
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         replica_id: ReplicaId::parse("replica-a").unwrap(),
@@ -3189,10 +3188,9 @@ fn pre_cutover_documents_fail_closed_on_missing_identity_keys() {
         .unwrap()
         .contains_key("cloud_thread_id"));
 
-    // A pre-cutover CreateCloud action: old `thread_id` string, no
-    // `cloud_thread_id` key, retired keys omitted-when-None. This is the
-    // exact shape that would otherwise silently execute under apply-minting.
-    let action = push_action("action-cutover", "codex", "profile-codex", "1");
+    // A malformed CreateCloud action with a string `thread_id` and no
+    // `cloud_thread_id` would otherwise execute silently under apply-minting.
+    let action = push_action("action-missing-ids", "codex", "profile-codex", "1");
     let mut value = serde_json::to_value(&action).unwrap();
     {
         let object = value.as_object_mut().unwrap();
@@ -3206,8 +3204,7 @@ fn pre_cutover_documents_fail_closed_on_missing_identity_keys() {
     let mut value = serde_json::to_value(&action).unwrap();
     value.as_object_mut().unwrap().remove("thread_id");
     assert!(serde_json::from_value::<ConversationPlanAction>(value).is_err());
-    // Documents still carrying the retired minted-identity keys fail closed
-    // via deny_unknown_fields.
+    // Unsupported minted-identity keys fail closed via deny_unknown_fields.
     let mut value = serde_json::to_value(&action).unwrap();
     value.as_object_mut().unwrap().insert(
         "proposed_provider_thread_id".to_string(),
@@ -3221,8 +3218,8 @@ fn pre_cutover_documents_fail_closed_on_missing_identity_keys() {
         .insert("keep_both".to_string(), serde_json::json!(null));
     assert!(serde_json::from_value::<ConversationPlanAction>(value).is_err());
 
-    // A pre-cutover journal operation lacks `cloud_thread_id` entirely; the
-    // required field fails natively.
+    // A journal operation without `cloud_thread_id` fails on the required
+    // field.
     let operation = publication_operation(&tail_chain());
     let mut value = serde_json::to_value(&operation).unwrap();
     value.as_object_mut().unwrap().remove("cloud_thread_id");

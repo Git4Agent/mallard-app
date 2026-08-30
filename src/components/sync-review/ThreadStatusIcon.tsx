@@ -55,12 +55,9 @@ const glyphPaths: Record<ThreadStatusIconName, readonly string[]> = {
     "M9 7h5v1h-5ZM9 8v2h-1v-2ZM14 8h1v2h-1ZM8 10v1h-2v-1ZM15 10h2v1h-2ZM6 11v3h-1v-3ZM17 11h1v5h-12v-2h1v1h10Z",
   ],
   "local-outstanding": ["M11 8h3v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v7h-2v-6h-1v1h-2v-2h1v-1h1v-1h1Z"],
-  // One trunk becoming two — the mark every version-control tool draws for a
-  // history that split, and the codicon (`git-branch`) for this same idea. It
-  // replaced a pair of parting arrows whose meaning lived inside a 2x2 hollow
-  // counter: filled, that counter inverted into an island of ink and closed up,
-  // and at the 18px the list draws the whole glyph read as a letter V. Nothing
-  // here is thinner than three units, and no two rectangles touch.
+  // One trunk becoming two matches the standard version-control branch mark.
+  // Nothing is thinner than three units, and no two rectangles touch, so the
+  // filled 18px glyph remains legible.
   divergent: [
     "M6 7h3v1h-3ZM7 8h3v1h-3ZM8 9h3v1h-3ZM9 10h3v1h-3ZM15 7h3v1h-3ZM14 8h3v1h-3ZM13 9h3v1h-3ZM12 10h3v1h-3ZM10 11h4v1h-4ZM10 12h4v6h-4Z",
   ],

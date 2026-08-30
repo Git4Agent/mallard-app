@@ -1,7 +1,7 @@
 //! Project-scoped synchronization with schema-1 local state and schema-1 bundles.
 //!
-//! Current state is isolated below `~/.mallard`. This module has no migration
-//! or compatibility path for pre-cutover state.
+//! Current state is isolated below `~/.mallard`. This module supports only the
+//! current schema.
 
 pub mod commands;
 pub mod config_watcher;

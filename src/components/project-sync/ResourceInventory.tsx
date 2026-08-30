@@ -86,10 +86,7 @@ function ResourceRow({
               <code>{resource.logical_paths.join("\n")}</code>
             </div>
           )}
-          {/* A description list, which is what this is. As a <div> of bare
-              spans it was also matched by the flex label rule above, so every
-              *value* got the label's 85px box and caption colour — the exact
-              distinction this grid exists to draw. */}
+          {/* A description list keeps labels and values semantically distinct. */}
           <dl className="sync-resource-detail-grid">
             {/* A resource the backend could not name is titled by its own id
                 — a recipe entry that no longer resolves locally is the case.
@@ -143,11 +140,8 @@ function ResourceGroup({
 
   return (
     <section className={`sync-resource-group category-${group.id}`}>
-      {/* Two real controls side by side, not one fake button wrapping another.
-          The wrapper used to be role="button" with its own Enter/Space handler,
-          which swallowed both keys before the nested "Include all" could see
-          them — so that control was reachable by Tab and impossible to
-          activate, and pressing Enter on it folded the group instead. */}
+      {/* Two sibling buttons avoid nested interactive controls and preserve
+          independent Enter and Space activation. */}
       <div className="sync-resource-group-header">
         <button
           type="button"

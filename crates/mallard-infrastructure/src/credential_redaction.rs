@@ -588,10 +588,9 @@ impl RedactionRuleset {
     }
 
     /// L4: credentialed URIs, surgical — only the password sub-span is
-    /// replaced, so `postgres://user:<password>@host/db` keeps its
-    /// structure. Divergence from the reference (which replaced the whole
-    /// URI): the captured password is placeholder-gated, so documentation
-    /// URIs (`:${DB_PASS}@`, `:changeme@`) stay readable.
+    /// replaced, so `postgres://user:<password>@host/db` keeps its structure.
+    /// The captured password is placeholder-gated, so documentation URIs
+    /// (`:${DB_PASS}@`, `:changeme@`) stay readable.
     fn detect_credentialed_uris(&self, s: &str, regions: &mut Vec<LabeledRegion>) {
         for captures in self.credentialed_uri.captures_iter(s) {
             let Some(password) = captures.get(1) else {

@@ -8,11 +8,9 @@ interface Props {
 }
 
 /**
- * The post-setup convergence banner (`docs/PLAN_REPO_BUNDLE_CONVERGENCE.md`
- * D3): another repo in the linked storage carries this project's repository,
- * and connecting to it is how pushes and pulls from every machine converge.
- * Renders nothing for the `none` state so callers can pass the status
- * through unfiltered.
+ * Another repo in the linked storage carries this project's repository.
+ * Connecting to it makes pushes and pulls from every machine converge. The
+ * `none` state renders nothing so callers can pass status through unfiltered.
  */
 export default function SiblingRepoNotice({ status, busy, onConnect }: Props) {
   if (status.state === "none") return null;
@@ -34,8 +32,7 @@ export default function SiblingRepoNotice({ status, busy, onConnect }: Props) {
    * `standing`, not an event: the status is one of the answers the project
    * load returns, so the banner is on screen the moment the storage block
    * first paints. Content the view renders with is not a status message
-   * (WCAG 2.2 SC 4.1.3), and the old role="status" was announcing a fact the
-   * reader had never been without. */
+   * (WCAG 2.2 SC 4.1.3) and must not use a live-region role. */
   return (
     <Notice
       severity="warning"

@@ -206,8 +206,8 @@ impl CloudThreadId {
 /// disables serde's implicit missing-key tolerance for `Option` fields, so
 /// the key must be present on the wire (`null` for `None`). Fields using it
 /// must also serialize unconditionally (no `skip_serializing_if`), making
-/// pre-cutover documents that lack the key fail closed instead of silently
-/// loading as `None`.
+/// documents that lack the key fail closed instead of silently loading as
+/// `None`.
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1278,8 +1278,7 @@ pub struct ProjectStorageLink {
     /// Destination-scoped conversation state, keyed by provider scope and
     /// thread. Two links may have accepted different versions of one alias;
     /// nothing here is ever serialized into a remote bundle. Deliberately not
-    /// defaulted: a pre-cutover link document fails closed instead of being
-    /// silently upgraded.
+    /// defaulted so a link document without this state fails closed.
     pub conversation_checkpoints:
         BTreeMap<SyncScopeKey, BTreeMap<ThreadId, ConversationCheckpoint>>,
     #[serde(default)]
@@ -1944,8 +1943,8 @@ pub struct LocalConversationBinding {
     pub thread_id: ThreadId,
     /// The cloud thread this local thread is paired with; `None` for a
     /// local-only thread (never published, or deliberately detached by
-    /// keep-both). Present on the wire even when `None` so pre-cutover rows
-    /// fail closed on the missing key.
+    /// keep-both). Present on the wire even when `None` so rows with a missing
+    /// key fail closed.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub cloud_thread_id: Option<CloudThreadId>,
     /// Immediate portable parent for an imported conversation branch, in the
@@ -3234,9 +3233,8 @@ impl ConversationThread {
         }
         validate_sha256("conversation lineage", &self.lineage_digest)?;
         validate_sha256("conversation semantic", &self.semantic_digest)?;
-        // Wire-form transcripts carry their redaction ruleset stamp; a row
-        // without one is unreadable by design (there is no unredacted era —
-        // the cutover was wipe-based).
+        // Wire-form transcripts require a redaction ruleset stamp. A row
+        // without one is unreadable and fails closed.
         match &self.wire_redaction {
             Some(stamp) => stamp.validate()?,
             None => {
@@ -3623,14 +3621,13 @@ pub struct ConversationPlanAction {
     pub action: ConversationPlanActionType,
     pub provider: ProviderKey,
     /// The local thread this action operates on; `None` exactly for
-    /// `CreateLocal`, whose local identity is minted at apply. Present on
-    /// the wire even when `None` so pre-cutover actions fail closed.
+    /// `CreateLocal`, whose local identity is minted at apply. Present on the
+    /// wire even when `None` so actions with a missing key fail closed.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub thread_id: Option<ThreadId>,
     /// The cloud row this action was reviewed against; `None` exactly for an
-    /// unmapped `CreateCloud`, whose cloud identity is minted at apply.
-    /// Present on the wire even when `None` so pre-cutover actions fail
-    /// closed.
+    /// unmapped `CreateCloud`, whose cloud identity is minted at apply. Present
+    /// on the wire even when `None` so actions with a missing key fail closed.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub cloud_thread_id: Option<CloudThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3916,7 +3913,7 @@ fn stable_conversation_id(prefix: &str, domain: &str, fields: &[&[u8]]) -> Resul
 
 /// Derive the first machine-local identity for a provider-native
 /// conversation. Strictly machine-local: it makes repeated reviews of the
-/// same previously-unbound local conversation stable before its first
+/// same unbound local conversation stable before its first
 /// publication commits a binding, and lets an orphaned materialized file
 /// whose binding is lost re-derive the same id at rediscovery. It never
 /// determines any cloud identity — the cloud id is minted independently at

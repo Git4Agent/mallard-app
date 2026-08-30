@@ -19,10 +19,8 @@ export function providerLabel(provider: CatalogProviderKey): string {
  * the portable format is the discriminator; there is no conversion — so they
  * share one glyph and are told apart by their label.
  *
- * Each kind wears a mark of its own. They used to borrow: `file` said where a
- * skill was stored rather than what it was, `tool` is the cog this app spends
- * on a tool call, and `openai` names the *provider* — which `ProviderMark`
- * already paints on the same row, so it told a reader nothing. */
+ * Each kind uses a semantic glyph. `ProviderMark` identifies the provider
+ * separately on the same row. */
 export const CATALOG_KINDS: Array<{
   kind: CatalogResourceKind;
   label: string;

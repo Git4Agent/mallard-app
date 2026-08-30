@@ -420,7 +420,7 @@ test("thread status badges use the outlined Default 24px pixel family", () => {
       glyph: "M11 7h2v5h4v2h-6Z",
     },
     conflict: {
-      light: "#c73d28",
+      light: "#be3824",
       dark: "#fb7361",
       glyph: "M11 6h3v9h-3ZM11 16h3v3h-3Z",
       filled: true,
@@ -503,10 +503,9 @@ test("thread status badges use the outlined Default 24px pixel family", () => {
   for (const status of statuses) {
     assert.match(css, new RegExp(`\\.thread-status-icon\\[data-thread-status="${status}"\\]`));
   }
-  // The status hues live with the rest of the palette in RetroTheme.css, and
-  // both halves of every pair have to be in there — the whole point of the
-  // change is that one value can no longer serve both papers.
-  const palette = readFileSync("src/RetroTheme.css", "utf8");
+  // Both halves of every pair must stay in the shared palette; one value
+  // cannot serve both papers.
+  const palette = css;
   for (const { light, dark } of Object.values(expected)) {
     assert.ok(palette.includes(light), `light value ${light} missing from the palette`);
     assert.ok(palette.includes(dark), `dark value ${dark} missing from the palette`);
@@ -685,10 +684,9 @@ test("refreshing project activity spins in the path bar, and announces from the 
 
 test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
   const css = readFileSync("src/App.css", "utf8");
-  const titleRule = css.match(/\.sync-history-thread-title\s*\{[^}]+\}/s)?.[0] ?? "";
   const tooltipRule = css.match(/\.sync-thread-sync-indicator::after,[\s\S]+?\n\}/)?.[0] ?? "";
 
-  assert.match(titleRule, /align-items:\s*center/);
+  assert.match(css, /\.sync-history-thread-title\s*\{[^}]*align-items:\s*center/s);
   assert.doesNotMatch(tooltipRule, /transform:/);
   // The metric tooltips need the same treatment: animating a transform promotes
   // them to their own compositing layer, which re-rasterises the text around
@@ -705,27 +703,22 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
   // The stamp's tooltip carries two lines separated by a newline; nowrap
   // collapsed them into one run-on line, and pre-line soft-wrapped mid-sentence.
   assert.match(metricTooltipRule, /white-space: pre;/);
-  // Menus and panels in the base sheet open with a keyframe that slides and
-  // scales them in. Animating a transform promotes the element to its own
-  // compositing layer, and creating that layer re-rasterises the icons and
-  // text beside it — the twitch that shows when a menu opens. The skin drops
-  // the reveals and lets chevrons rotate instantly.
-  const retroCssMotion = readFileSync("src/RetroTheme.css", "utf8");
-  const revealsOff = retroCssMotion.match(/\.sync-history-branch-menu,[\s\S]*?\{[^}]*animation: none;[^}]*\}/)?.[0] ?? "";
+  // Menu and panel reveals stay disabled so opening them does not re-rasterise
+  // adjacent pixel text. Chevrons rotate instantly.
+  const revealsOff = css.match(/\.sync-history-branch-menu,[\s\S]*?\{[^}]*animation: none;[^}]*\}/)?.[0] ?? "";
   for (const selector of ["\\.storage-link-menu", "\\.storage-link-actions-menu", "\\.sync-project-tab-panel"]) {
     assert.match(revealsOff, new RegExp(selector), `${selector} reveal must be disabled`);
   }
-  const chevrons = retroCssMotion.match(/\.sync-history-branch-chevron,[\s\S]*?\{[^}]*\}/)?.[0] ?? "";
+  const chevrons = css.match(/\.sync-history-branch-chevron,[\s\S]*?\{[^}]*\}/)?.[0] ?? "";
   assert.match(chevrons, /transition: color 120ms ease;/);
   assert.doesNotMatch(chevrons, /transition:[^;]*\btransform\b/);
 
-  // The retro press shifts a button a pixel while held. On the timeline's
+  // A full-size button shifts one pixel while held. On the timeline's
   // 22-26px icon buttons that reads as the icon jogging against its
   // neighbours on every click, so they keep the colour feedback and drop the
   // displacement. Full-size buttons still get the press.
-  const retroCssPress = readFileSync("src/RetroTheme.css", "utf8");
-  assert.match(retroCssPress, /\.btn:active:not\(:disabled\)\s*\{[^}]*transform: translate\(1px, 1px\);/s);
-  const pressExempt = retroCssPress.match(/\.sync-history-thread-actions \.sync-history-launch-action:active[\s\S]*?\{[^}]*\}/)?.[0] ?? "";
+  assert.match(css, /\.btn:active:not\(:disabled\)\s*\{[^}]*transform: translate\(1px, 1px\);/s);
+  const pressExempt = css.match(/\.sync-history-thread-actions \.sync-history-launch-action:active[\s\S]*?\{[^}]*\}/)?.[0] ?? "";
   assert.match(pressExempt, /transform: none;/);
   for (const selector of [
     "\\.sync-history-debug-trigger:active",
@@ -748,16 +741,15 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
   // The tooltip is a pseudo-element sitting above its metric, so any clipping
   // ancestor renders it invisible — all that shows is a sliver at the clip
   // edge. The row is held to one line by truncating the timestamp instead.
-  const retroCss = readFileSync("src/RetroTheme.css", "utf8");
   for (const selector of [
     "\\.sync-history-session-details",
     "\\.sync-history-session-summary",
     "\\.sync-history-thread-meta",
   ]) {
-    const rule = retroCss.match(new RegExp(`\\n${selector} \\{[^}]*\\}`))?.[0] ?? "";
+    const rule = css.match(new RegExp(`\\n${selector} \\{[^}]*\\}`))?.[0] ?? "";
     assert.doesNotMatch(rule, /overflow:\s*(hidden|clip|auto|scroll)/, `${selector} must not clip the metric tooltip`);
   }
-  assert.match(retroCss, /\.sync-history-thread-time time\s*\{[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;/s);
+  assert.match(css, /\.sync-history-thread-time time\s*\{[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;/s);
 
   // Neither tooltip animates. An opacity or transform transition promotes it to
   // its own compositing layer, and text re-rasterised against a layer origin can
@@ -810,19 +802,15 @@ test("Push and Pull reviews use only the outer workspace scroll", () => {
   assert.doesNotMatch(pushReviewHandler, /scrollIntoView/);
 });
 
-/* The Storage card and the Uncommitted card are the same object drawn twice —
-   one by ProjectLinksWorkspace, one by the timeline — and they sit one above
-   the other, so any drift between their frames reads as a mistake. The frame
-   values live in two files (the card joins the timeline's skin from a foreign
-   subtree), which is exactly the arrangement that drifts silently. */
+/* The Storage card and Uncommitted card are the same object drawn in two
+   subtrees, so their frames must stay aligned. */
 test("the storage card wears the uncommitted card's frame", () => {
   const css = readFileSync("src/App.css", "utf8");
-  const retro = readFileSync("src/RetroTheme.css", "utf8");
   const declaration = (rule: string, property: string) =>
     rule.match(new RegExp(`[^-]${property}:\\s*([^;]+);`))?.[1];
 
   const cardRule = css.match(/\.project-storage-card\s*\{[^}]+\}/s)?.[0] ?? "";
-  const uncommittedRule = retro.match(/\.sync-history-uncommitted\s*\{[^}]+\}/s)?.[0] ?? "";
+  const uncommittedRule = css.match(/\.sync-history-uncommitted\s*\{[^}]+\}/s)?.[0] ?? "";
   for (const property of ["border", "border-radius", "background"]) {
     assert.equal(
       declaration(cardRule, property),
@@ -836,11 +824,11 @@ test("the storage card wears the uncommitted card's frame", () => {
   // The inset and icon metrics only resolve if the card joins the timeline's
   // token scope — it lives in a different subtree, so the vars don't reach it
   // on their own and every var() would silently fall back to nothing.
-  const tokenScope = retro.match(/\.sync-history-timeline,[^{]*\{/s)?.[0] ?? "";
+  const tokenScope = css.match(/\.sync-history-timeline,[^{]*\{/s)?.[0] ?? "";
   assert.match(tokenScope, /\.project-storage-card/);
 
   const barRule = css.match(/\.project-storage-card > \.sync-history-section-heading\s*\{[^}]+\}/s)?.[0] ?? "";
-  const uncommittedBarRule = retro.match(/\.sync-history-uncommitted \.sync-history-section-heading\s*\{[^}]+\}/s)?.[0] ?? "";
+  const uncommittedBarRule = css.match(/\.sync-history-uncommitted \.sync-history-section-heading\s*\{[^}]+\}/s)?.[0] ?? "";
   for (const property of ["min-height", "padding", "border-bottom"]) {
     assert.equal(
       declaration(barRule, property),
@@ -1108,14 +1096,12 @@ test("a session that crosses midnight still resolves to an unambiguous end", () 
 
 test("session actions stay compact and trail the readouts", () => {
   const css = readFileSync("src/App.css", "utf8");
-  const retro = readFileSync("src/RetroTheme.css", "utf8");
   const metaRule = css.match(/\.sync-history-session-summary \.sync-history-thread-meta\s*\{[^}]+\}/s)?.[0] ?? "";
   const launchRule = css.match(/\.sync-history-thread-actions \.sync-history-launch-action\s*\{[^}]+\}/s)?.[0] ?? "";
   const debugMenuRule = css.match(/\.sync-history-debug-menu\s*\{[^}]+\}/s)?.[0] ?? "";
   const debugPopoverRule = css.match(/\.sync-history-debug-popover\s*\{[^}]+\}/s)?.[0] ?? "";
 
   assert.match(metaRule, /flex:\s*0 1 auto/);
-  assert.match(launchRule, /width:\s*28px/);
   assert.match(launchRule, /padding:\s*0/);
   // The debug panel and the detail chevron sit on line 2 after the readouts, so
   // a hairline has to part what you hover from what you click. It is a plain
@@ -1126,11 +1112,11 @@ test("session actions stay compact and trail the readouts", () => {
   // same width whether or not the row can be opened — and the session header's
   // launch pair shares the group, so both surfaces move together.
   assert.match(
-    retro,
+    css,
     /\.sync-history-thread-actions \.sync-history-launch-action,\s*\n\.sync-history-thread-actions \.sync-history-provider-inert,\s*\n\.session-detail-launch\s*\{[^}]*width:\s*22px;/s,
   );
-  assert.match(retro, /\.sync-history-session-summary > \.sync-history-thread-time-end\s*\{[^}]*margin-left: auto;/s);
-  assert.doesNotMatch(retro, /\.sync-history-session-summary \.sync-history-thread-meta\s*\{[^}]*flex:\s*1/s, "the readouts must not stretch into the clickables");
+  assert.match(css, /\.sync-history-session-summary > \.sync-history-thread-time-end\s*\{[^}]*margin-left: auto;/s);
+  assert.doesNotMatch(css, /\.sync-history-session-summary \.sync-history-thread-meta\s*\{[^}]*flex:\s*1/s, "the readouts must not stretch into the clickables");
   // The menu is deliberately static so the popover anchors to the row instead
   // of to the 22px trigger — anchored to the trigger it was pushed outside the
   // card and clipped by the workspace scroll container.

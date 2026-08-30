@@ -35,13 +35,10 @@ pub use storage_catalog::domain::{
     CatalogScopePullPlan, CatalogScopePushPlan, CodexPetFormat, LibraryHeadCoordinate,
     LibraryResourceTag, LocalCatalogProfile, LocalCatalogProfileId, ProviderKey, CATALOG_SCHEMA,
 };
-pub use storage_catalog::resource_commands::{
-    CatalogScopeDto, CatalogScopeLinkOutcomeDto, CatalogScopePullOutcomeDto,
-    CatalogScopePushOutcomeDto, CatalogScopeResourcesDto, CatalogScopeRowDto,
-    CatalogStorageRepositoryDto,
-};
 pub use storage_catalog::service::{
-    CatalogPullApproval, CatalogPushApproval, StorageCatalogService,
+    CatalogPullApproval, CatalogPushApproval, CatalogScopeDto, CatalogScopeLinkOutcomeDto,
+    CatalogScopePullOutcomeDto, CatalogScopePushOutcomeDto, CatalogScopeResourcesDto,
+    CatalogScopeRowDto, CatalogStorageRepositoryDto, StorageCatalogService,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -159,6 +156,8 @@ pub fn run() {
             storage_catalog::resource_commands::get_catalog_pet_preview,
             storage_catalog::resource_commands::link_catalog_scope_storage,
             storage_catalog::resource_commands::unlink_catalog_scope_storage,
+            storage_catalog::resource_commands::open_catalog_profile_in_app,
+            storage_catalog::resource_commands::open_catalog_profile_in_terminal,
             storage_catalog::resource_commands::prepare_catalog_scope_push,
             storage_catalog::resource_commands::apply_catalog_scope_push,
             storage_catalog::resource_commands::prepare_catalog_scope_pull,

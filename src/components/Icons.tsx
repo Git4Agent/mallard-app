@@ -199,8 +199,7 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
            to a skill: the Material Icon Theme maps `skill.md` and a `skills/`
            folder to one. No icon system has a mark for a loadable capability —
            Material, SF Symbols, Codicons, Octicons and Fluent all return
-           nothing for "skill" — so there was no convention to follow, only a
-           precedent. Nothing else in the set is a dome over a stem. */
+           nothing for "skill". Nothing else in the set is a dome over a stem. */
         <path
           className="icon-pixel-fill icon-mallard-pixel"
           fill="currentColor"
@@ -450,10 +449,8 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
         />
       )}
       {name === "tool" && (
-        /* A cog: teeth at the cardinals, hollow hub. The crossed hammer-and-
-           wrench it replaced filled 22×22 cells across 236 path commands — at
-           the 12px this mark ships at, that rendered as a smudge. This one
-           matches its row neighbours' 20×20 optical weight and is the only
+        /* A cog: teeth at the cardinals, hollow hub. It matches its row
+           neighbours' 20×20 optical weight and is the only
            round silhouette on the strip, so it is found by shape before it is
            read. Drawn in-house on the 12-cell coarse grid and doubled, so
            every stem is two cells wide; the sibling marks come from downloaded

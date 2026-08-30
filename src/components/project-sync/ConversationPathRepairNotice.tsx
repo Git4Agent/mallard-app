@@ -58,18 +58,14 @@ export default function ConversationPathRepairNotice({
   const severity: NoticeSeverity = auditError ? "danger" : "warning";
 
   /* The region names the count, not the topic: "3 conversation paths require
-   * repair" is what a reader jumping between landmarks needs to hear, and the
-   * generic heading it replaced said nothing the card had not already said.
-   * The sentence itself is visible now rather than parked in a `title` — a
-   * tooltip is not a text equivalent, and the ⓘ that carried it is gone.
+   * repair" is what a reader jumping between landmarks needs to hear. The
+   * sentence is visible because a tooltip is not a text equivalent.
    *
    * The audit is loaded with the project — `loadConversationPathAudits` runs as
    * part of the shell load, and this notice renders off the record it left
    * behind — so the sentence is on screen the moment the card first paints.
-   * Standing content is not a status message (WCAG 2.2 SC 4.1.3), which is what
-   * made the old role="alert" wrong: it interrupted the reader to announce a
-   * condition they had never not had. Repairing does not re-time it either; the
-   * button reports its own progress in its label. */
+   * Standing content is not a status message (WCAG 2.2 SC 4.1.3), so it must
+   * not use a live-region role. The button reports progress in its label. */
   return (
     <Notice
       severity={severity}

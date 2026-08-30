@@ -92,6 +92,59 @@ fn launch_claude_app(
     }
 }
 
+/// Open the Claude desktop app reading one profile home, with no session —
+/// the Library's launch. Claude's only deep link resumes a session, so a
+/// home-scoped open is a plain app launch with the config environment.
+pub fn launch_claude_home_app(claude_home: &Path) -> Result<(), String> {
+    if !claude_home.is_absolute() {
+        return Err("Claude home must be absolute".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let environment = format!("CLAUDE_CONFIG_DIR={}", claude_home.to_string_lossy());
+        let output = Command::new("/usr/bin/open")
+            .args([
+                "-n",
+                "-a",
+                "/Applications/Claude.app",
+                "--env",
+                &environment,
+            ])
+            .output()
+            .map_err(|error| format!("open the Claude desktop app: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Claude desktop app could not open: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Open in Claude is currently supported only on macOS".to_string())
+    }
+}
+
+/// The Terminal command a Library profile launch runs: the CLI reading this
+/// home, no session and no `cd` — Terminal's own default directory is the
+/// working directory.
+fn claude_home_terminal_command(claude_home: &Path) -> Result<String, String> {
+    if !claude_home.is_absolute() {
+        return Err("Claude home must be absolute".to_string());
+    }
+    Ok(format!(
+        "CLAUDE_CONFIG_DIR={} claude",
+        shell_quote(&claude_home.to_string_lossy())
+    ))
+}
+
+/// Open Terminal running the Claude CLI against one profile home.
+pub fn launch_claude_home_terminal(claude_home: &Path) -> Result<(), String> {
+    let command = claude_home_terminal_command(claude_home)?;
+    launch_terminal_command(&command)
+}
+
 pub(super) fn available_actions(
     context: &SessionActionContext<'_>,
 ) -> Vec<SessionActionDescriptor> {
@@ -164,6 +217,16 @@ mod tests {
         let command = claude_app_open_command(Path::new("/Users/dev/my claude"), &deep_link);
         assert!(command.contains("'CLAUDE_CONFIG_DIR=/Users/dev/my claude'"));
         assert!(command.contains("'/Applications/Claude.app'"));
+    }
+
+    #[test]
+    fn home_launches_pin_the_config_dir_and_nothing_else() {
+        let command = claude_home_terminal_command(Path::new("/Users/dev/my claude")).unwrap();
+        assert_eq!(command, "CLAUDE_CONFIG_DIR='/Users/dev/my claude' claude");
+        assert!(!command.contains("--resume"));
+        assert!(!command.contains("cd "));
+        assert!(claude_home_terminal_command(Path::new("relative")).is_err());
+        assert!(launch_claude_home_app(Path::new("relative")).is_err());
     }
 
     #[test]

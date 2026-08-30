@@ -169,12 +169,10 @@ export default function SessionDetailToolCall({
         </span>
       </summary>
 
-      {/* Only an open row builds its payload. `<details>` hides a closed body
-          visually but still mounts it, so a session of a few hundred tool
-          calls was carrying megabytes of invisible <pre> text and running the
-          payload projection for every one of them. Nothing about the
-          disclosure behaviour changes: the summary, the toggle and the native
-          keyboard contract are all outside this guard. */}
+      {/* Only an open row builds its payload. `<details>` hides but still mounts
+          a closed body, so mounting every payload can retain megabytes of
+          invisible text. Summary and native keyboard behavior stay outside
+          this guard. */}
       {expanded && (
       <div className="session-detail-tool-body" aria-busy={detailState?.loading || undefined}>
         {detailState?.loading && (
@@ -185,8 +183,8 @@ export default function SessionDetailToolCall({
         {/* The fetch this reports is started by the row being expanded, so the
             failure is an event and not something the pane renders with — and
             it leaves the pane with no payload at all, which is blocking rather
-            than advisory. The severity used to be a class name and a glyph;
-            the box prints the word now. */}
+            than advisory. The box prints the severity instead of relying on a
+            class and glyph alone. */}
         {detailState?.error && (
           <Notice severity="danger" timing="blocking">{detailState.error}</Notice>
         )}

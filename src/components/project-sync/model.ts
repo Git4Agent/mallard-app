@@ -16,12 +16,8 @@ export type RenameResult = { ok: true } | { ok: false; message: string | null };
  * Thread states where the storage holds work this machine does not, so a Push
  * would have to be preceded by a Pull.
  *
- * `unknown` is deliberately absent. Two divergent copies of this set used to
- * exist and they disagreed on exactly that value: the project-files review
- * counted it as blocking and so refused to let the row be ticked or unticked,
- * while the push review — which is what actually decides whether a push is
- * blocked — did not. An unresolvable row was therefore stuck on screen with no
- * way to take it out of the push. The push review's reading is the authority.
+ * `unknown` is deliberately absent. The Push review is authoritative, and an
+ * unresolvable row must remain removable from the Push selection.
  */
 export const STORAGE_BLOCKING_STATES: ReadonlySet<string> = new Set([
   "storage_only",

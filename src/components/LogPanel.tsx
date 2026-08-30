@@ -81,10 +81,8 @@ function typeSelectionLabel(selected: ActivityLogType[]): string {
   return `${selected.length} selected`;
 }
 
-/* Until now a row's level reached the screen as the colour of its message and
-   as nothing else, so a reader who cannot separate the hues read four levels as
-   one (WCAG 1.4.1). The mark gives the level the second channel ThreadStatusIcon
-   uses for the same reason — a shape. Error takes the octagon rather than the
+/* A log level needs a shape as well as colour (WCAG 1.4.1). Error takes the
+   octagon rather than the
    triangle a notice would draw, because a notice separates the two by printing
    "Error ·" beside the glyph and a log row has no room for that word: here the
    silhouettes have to do it alone.
@@ -118,8 +116,7 @@ const LogRow = memo(function LogRow({
         {mark && (
           <>
             <Icon name={mark.icon} size={12} />
-            {/* The glyph is decorative to a screen reader, which had no level
-                at all before; the word is what it reads. */}
+            {/* The glyph is decorative; the hidden word carries the level. */}
             <span className="sync-visually-hidden">{mark.label}</span>
           </>
         )}

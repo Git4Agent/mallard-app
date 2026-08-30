@@ -25,8 +25,8 @@ import { projectLabel } from "./model";
    floors. Its floor rides on the pane rather than the track: fit-content()
    is a track size and cannot go inside minmax(), and a content-sized track
    takes its base from the item's minimum contribution, which the split pane
-   zeroes — so this was the one track a short box could reclaim entirely,
-   leaving two pixels of clipped heading where a section should be. */
+   zeroes. Put the floor on the pane so a short box cannot reclaim this track
+   entirely. */
 type SectionLayout = {
   headHeight: number | null;
   projectShare: number;
@@ -80,10 +80,9 @@ export function shareHolding(projectsHeight: number, boxHeight: number, storageH
 
 /* The share drag tracks the pointer pixel for pixel on the elastic scale: the
    share is Projects' fraction of the two share-sized panes, so it re-derives
-   from the panes as measured at grab time plus the pointer's travel. Mapped
-   against the whole box instead, the split used to snap to the pointer's
-   absolute position the moment the handle was grabbed — jumping by however
-   much of the box the Storages row had taken — and then tracked under 1:1. */
+   from the panes as measured at grab time plus the pointer's travel. Mapping
+   against the whole box would include the Storages row and make the split
+   jump when the handle is grabbed. */
 export function shareDragged(
   projectsHeight: number,
   catalogHeight: number,
@@ -805,16 +804,10 @@ export default function ProjectSidebar({
                 >
                   <Icon name="folder" size={15} />
                   <span>{draft.display_name}</span>
-                  {/* Attention is the draft that points at a storage or a
-                      profile the machine no longer has, and the only thing
-                      saying so was the badge's tint — the same word, in a
-                      different colour, which is nothing at all to a reader who
-                      cannot separate the two (WCAG 1.4.1). The triangle is the
-                      second channel, the shape the two warnings further down
-                      this rail already use, so the row reads as flagged in
-                      greyscale. The word stays "Draft": it is what marks the
-                      row as a draft at all, and swapping it for the state
-                      would cost more than it bought. */}
+                  {/* An attention draft points at a missing storage or profile.
+                      The triangle provides a second channel beyond tint
+                      (WCAG 1.4.1), while the word keeps the row identified as a
+                      draft. */}
                   <span className={`sync-draft-badge${draft.status === "attention" ? " attention" : ""}`}>
                     {draft.status === "attention" && (
                       <Icon name="alert-triangle" size={12} aria-hidden="true" />
@@ -865,12 +858,8 @@ export default function ProjectSidebar({
                     className="sidebar-profile-main"
                     onClick={() => onSelectProject(project.local_project_id)}
                     disabled={busy}
-                    /* The triangle below is decorative, and the button was
-                       named by the project label alone, so the warning was
-                       drawn and never spoken — a reader who does not see the
-                       rail learned nothing was wrong. The storage rows further
-                       down already name their issue on the button; this says
-                       the same thing the same way. */
+                    /* The triangle is decorative, so the button's accessible
+                       name must include the project issue. */
                     aria-label={[
                       project.is_git_repository === true ? `${label}, Git repository` : label,
                       profileRequired ? "Project issue: No agent profile is assigned" : null,
@@ -1077,11 +1066,9 @@ export default function ProjectSidebar({
                 </div>
               );
             })}
-            {/* A storage that was never created rides the same rail as the
-                ones that were, the way project drafts ride the Projects pane:
-                open resumes the form, the trash discards only the draft. The
-                workspace reports the draft's storage id as the open editor,
-                so the active marker needs no extra state. */}
+            {/* Storage drafts share the configured-storage rail. Open resumes
+                the form; trash discards only the draft. The active editor's
+                storage id supplies the active marker. */}
             {storageDrafts.map((draft) => {
               const draftName = draft.storage.name || "(unnamed)";
               return (

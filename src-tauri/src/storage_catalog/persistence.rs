@@ -623,8 +623,7 @@ impl CatalogStateRepository {
                 MAX_CATALOG_OPERATIONS_BYTES,
             )?;
         }
-        // Pending reviews pinned against this storage can only fail their
-        // apply-time checks now; drop them rather than leave dead entries.
+        // Clearing this storage invalidates every plan pinned against it.
         super::plan_store::discard_where(&self.root, |plan| match plan {
             CatalogResourcePlanDocument::Push(plan) => &plan.storage_id == storage_id,
             CatalogResourcePlanDocument::Pull(plan) => &plan.storage_id == storage_id,

@@ -92,11 +92,8 @@ export default function StorageIndexPage({
                       <strong>{name}</strong>
                       <small>{subtitle}</small>
                     </span>
-                    {/* A flagged row was a tinted triangle and nothing else, so
-                        what it meant lived in the hue and in a tooltip — out of
-                        reach of a reader who cannot separate the two, and out
-                        of reach of anyone not holding a pointer over the row.
-                        The word is the second channel (WCAG 1.4.1). It stays
+                    {/* The word provides a second channel beyond colour
+                        (WCAG 1.4.1). It stays
                         one word because the issue itself is a sentence — R2
                         connection prose runs past a hundred characters — and
                         this row is a grid whose name column would give way to

@@ -3753,9 +3753,8 @@ mod tests {
         fs::hard_link(repo.machine_projects_path(), &machine_quarantine).unwrap();
         assert!(repo.machine_projects_path().is_file());
         assert!(machine_quarantine.is_file());
-        // Resume the state left by a failed destination-directory sync: both
-        // names refer to the same preserved inode, so the live name may now
-        // be retired without treating the destination as a collision.
+        // Resume a failed destination-directory sync. Both names refer to the
+        // same preserved inode, so removing the live name is not a collision.
         repo.quarantine_host_rotation_file_unlocked(
             &transaction,
             &repo.machine_projects_path(),

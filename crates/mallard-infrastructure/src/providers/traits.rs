@@ -580,8 +580,8 @@ pub trait SessionAdapter: Send + Sync {
         path: &Path,
         context: &SessionTimelineContext<'_>,
     ) -> Result<SessionTimelineIndex, String>;
-    /// Read and normalize one filtered page from a previously validated
-    /// index. Filtering happens before pagination.
+    /// Read and normalize one filtered page from a validated index. Filtering
+    /// happens before pagination.
     fn read_timeline_page(
         &self,
         path: &Path,

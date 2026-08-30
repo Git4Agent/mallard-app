@@ -9,11 +9,6 @@
  * object store. One decimal below ten units and none above it, so a size reads
  * precisely where precision matters and stays short where it does not:
  * `640 B`, `1.5 KB`, `45 KB`, `2.3 MB`, `118 MB`.
- *
- * Three divergent copies of this used to exist. The one on the Library card
- * had no `B` tier at all and rounded up, so every resource under 1.5 KB
- * reported itself as "1 KB"; it also mixed a decimal threshold with a binary
- * divisor, so sizes just over a megabyte were understated.
  */
 export function formatBytes(value: number): string {
   if (!Number.isFinite(value) || value < 0) return "0 B";

@@ -109,21 +109,20 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [resetError, setResetError] = useState<string | null>(null);
   const [resetPhase, setResetPhase] = useState<"idle" | "working" | "reloading">("idle");
-  /* Which of the two ways a group's box can fill decided what is in it now.
-     The mount loads below are part of rendering this page, so a load that
+  /* Each group's box can hold initial-load content or an action result. The
+     mount loads below are part of rendering this page, so a load that
      failed is content the view came up with — a named region, not an
      announcement (WCAG 2.2 SC 4.1.3). Retry, a select, a cleanup, Open folder
      and Reset are all things the user DID, and the same box has to announce
-     once one of them speaks. Nothing sets these back: after the first
-     interaction every message in that group is the answer to something. */
+     once one of them speaks. After the first interaction, every message in
+     that group answers an action. */
   const [logsFromAction, setLogsFromAction] = useState(false);
   const [tuningFromAction, setTuningFromAction] = useState(false);
   const [localDataFromAction, setLocalDataFromAction] = useState(false);
 
-  /* Retryable, because the card below renders plausible defaults when `stats`
-     is null — 30 days, 100 MB — and a failed fetch used to leave those on
-     screen looking like the real policy with no way to try again. The retry
-     passes `retried` so the box it refills knows to announce. */
+  /* Retryable because null stats render plausible defaults — 30 days and
+     100 MB. A failed fetch must not leave those values without a retry. The
+     retry passes `retried` so the refilled box announces the result. */
   const loadStats = useCallback(async (retried = false) => {
     setStatsLoading(true);
     setLogsError(null);

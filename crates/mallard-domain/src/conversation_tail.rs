@@ -34,9 +34,8 @@ pub const CLAUDE_PORTABLE_TAIL_CODEC_V1: &str = "mallard-claude-portable-tail-v1
 /// every Claude `ConversationThread`.
 pub const CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1: &str = "mallard-claude-portable-tail-wire-v1";
 
-// The hash domains are shared by every provider's fold; the historical
-// "codex" in the byte strings is a frozen misnomer (renaming them would
-// change every existing tail state for zero semantic gain).
+// Every provider fold shares these hash domains. The frozen byte strings
+// contain "codex"; changing them would invalidate every existing tail state.
 const TAIL_START_DOMAIN_V1: &[u8] = b"mallard-codex-tail-start-v1";
 const TAIL_RECORD_DOMAIN_V1: &[u8] = b"mallard-codex-tail-record-v1";
 

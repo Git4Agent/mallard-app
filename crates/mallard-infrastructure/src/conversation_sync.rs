@@ -13,7 +13,7 @@ use mallard_domain::{
     ConversationPlanDirection, ProviderKey, ResourceId, ThreadId,
 };
 
-/// Immutable inputs used to build one reviewed conversation action. Keeping
+/// Immutable inputs for one reviewed conversation action. Keeping
 /// these values together makes it difficult for Push, Pull, or a test facade
 /// to omit one of the concurrency pins. Plans carry intent only: no request
 /// field can hold a minted identity — fresh cloud ids, local ids, provider

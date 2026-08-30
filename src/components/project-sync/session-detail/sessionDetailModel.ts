@@ -38,13 +38,8 @@ export interface SessionDetailFilters {
 
 export type SessionFilterKey = keyof SessionDetailFilters;
 
-/**
- * The timeline query still takes a category list, so the page names every
- * category on every request. Sorting by category was removed with the
- * inspector: three of the four buckets read zero on a typical session and the
- * only populated one is `other`, the fallback — four rows of chrome that
- * partitioned nothing.
- */
+/** The timeline query requires a category list, so every request names all
+ * supported categories. */
 export const ALL_SESSION_TOOL_CATEGORIES: readonly SessionToolCategory[] = [
   "file_edit",
   "shell",
@@ -84,8 +79,7 @@ function sessionCountEmpty(count: SessionCount): boolean {
 
 /**
  * Tool calls default on: the punchcard rows are the transcript's account of the
- * work, and the per-turn disclosure that used to reveal them lazily is gone.
- * SHOW › Tool calls remains the way to hide them.
+ * work. SHOW › Tool calls hides them.
  */
 export function createDefaultSessionDetailFilters(
   counts: SessionEventCounts,
@@ -146,10 +140,9 @@ export interface SessionEventCoverage {
 }
 
 /**
- * Every event this session holds, across all kinds — the denominator the page
- * never used to state. `approximate` is set when any contributing count is a
- * lower bound, so the readout can say `31+` rather than claim precision the
- * transcript cannot support.
+ * Every event this session holds across all kinds. `approximate` is set when
+ * any contributing count is a lower bound, so the readout can say `31+`
+ * rather than claim precision the transcript cannot support.
  */
 export function sessionEventCoverage(counts: SessionEventCounts): SessionEventCoverage {
   let total = 0;
@@ -254,8 +247,8 @@ export function sessionDetailDateTime(value?: number | null): string | undefined
  * Clock time alone; the day it belongs to is stated once, by the divider.
  * 24-hour by default — this is a fixed-width column read down the page, and a
  * locale AM/PM adds three characters of chrome to every row for a distinction
- * the column already makes by sorting. The cycle itself now comes from the
- * global clock preference, shared with every other timestamp in the app.
+ * the column already makes by sorting. The global clock preference supplies
+ * the cycle for every timestamp in the app.
  */
 export function formatSessionDetailClock(value?: number | null): string {
   if (value == null) return "--:--";
@@ -330,10 +323,7 @@ export function sessionTurnDurationLabel(span: SessionTurnSpan | undefined): str
  *
  * The year always prints. It costs six characters on a chip that is read once,
  * deliberately, on a page you opened on purpose — and the alternative is a
- * stamp whose shape depends on the calendar, where `Aug 18` silently means a
- * different thing in January. The range this replaced went the other way and
- * stripped the year unconditionally, so a 2024 session and a 2026 session came
- * out as the very same string.
+ * stamp whose shape depends on the calendar, where `Aug 18` is ambiguous.
  *
  * Nothing is abbreviated here, so this chip carries no tooltip: there is no
  * fuller value to put in one.
@@ -343,11 +333,8 @@ export function formatSessionStart(value?: number | null): string | null {
   return `${formatSessionDetailDay(value)} · ${formatSessionDetailClock(value)}`;
 }
 
-/**
- * The length chip hovered. The end time is off the chip faces now, so this is
- * where it lives — dropped from the strip, not dropped from the page. An
- * active session has no end to name, only a distance travelled so far.
- */
+/** Tooltip detail for duration. A completed session names its end; an active
+ * session has only elapsed time. */
 export function formatSessionLengthDetail(
   started?: number | null,
   ended?: number | null,
@@ -450,8 +437,7 @@ function decodeJsonFragment(value: string): string {
 }
 
 /** The wrapper's arguments are JS, not JSON: keys may be bare and strings may
- *  be single-quoted or template literals, so this reads all three quote forms.
- *  (Backticks are why some rows used to show nothing but `exec_command({`.) */
+ *  be single-quoted or template literals, so this reads all three quote forms. */
 function wrapperArgumentValue(argsLiteral: string, key: string): string | null {
   const pattern = new RegExp(`["']?${key}["']?\\s*:\\s*(?:"((?:[^"\\\\]|\\\\.)*)"|'((?:[^'\\\\]|\\\\.)*)'|\`((?:[^\`\\\\]|\\\\.)*)\`)`);
   const match = pattern.exec(argsLiteral);

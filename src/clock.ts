@@ -1,10 +1,8 @@
 import { getPreference } from "./preferences";
 
 /**
- * Hour-and-minute fields for every timestamp the app prints, so the clock is
- * decided in one place. Before this, four surfaces disagreed: the session
- * timeline was 24-hour by design while logs, the catalog, and the activity
- * page each followed the locale their own way.
+ * Hour-and-minute fields for every timestamp the app prints, so all surfaces
+ * use one clock policy.
  *
  * With the 24-hour preference on (the default), the hour is `2-digit` under
  * `hourCycle: "h23"` — not `hour12: false`, which under en-US selects the h24
@@ -61,11 +59,6 @@ export function formatFullDateTime(seconds: number): string {
  * A span at one significant unit: `45s`, `11m`, `1h 5m`, `2d 3h`. Null when
  * there is nothing measurable to show, so a zero-length span prints no chip
  * rather than "0s".
- *
- * Two copies of this used to disagree. The session timeline's normalised its
- * units but stopped at hours, so a two-day session read "51h"; the activity
- * page's had the day tier but assumed seconds, so a millisecond timestamp came
- * out a thousand times too long. This has both.
  */
 export function formatDuration(from: number, to: number): string | null {
   const seconds = Math.max(

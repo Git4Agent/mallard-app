@@ -1,7 +1,7 @@
 //! Bounded Codex rollout parsing for Activity summaries and detail previews.
 //!
-//! Moved out of the old Codex-only chat history module: the neutral activity
-//! engine now reaches this parser only through the Codex adapter.
+//! The neutral activity engine reaches this parser only through the Codex
+//! adapter.
 
 use crate::app_settings::{
     conversation_file_limit_bytes, timeline_message_preview_bytes, timeline_page_content_bytes,
@@ -2304,8 +2304,7 @@ fn tool_arguments_from_record(value: &Value, call_id: &str) -> Option<Value> {
     }
 }
 
-/// These fields carried a string or nothing before the argument stayed a
-/// `Value`; a non-string here is not an argument.
+/// Only string-valued fields are valid text arguments.
 fn text_value(value: &Value) -> Option<Value> {
     value.as_str().map(|text| Value::String(text.to_string()))
 }
@@ -2677,8 +2676,7 @@ mod tests {
             label(json!({"title": "Inspect the setup page", "code": "print(1)"})),
             "Inspect the setup page"
         );
-        // Nothing to say falls back to the tool's own name rather than to a
-        // brace: an empty object used to render as `{`.
+        // Nothing to say falls back to the tool's name, not a bare brace.
         assert_eq!(label(json!({})), "exec_command");
         assert_eq!(label(json!([])), "exec_command");
         // A plain string argument is already its own label.

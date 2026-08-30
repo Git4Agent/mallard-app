@@ -9,8 +9,7 @@
 //! re-emitted later under a different parent.
 //!
 //! The canonical conversation is derived from the **Desktop-sanitized
-//! projection** of the transcript, not from the raw rows
-//! (`docs/PLAN_CLAUDE_DESKTOP_IMPORT_TOLERANCE.md`). Claude Desktop's
+//! projection** of the transcript, not from the raw rows. Claude Desktop's
 //! resume-import rewrites live transcripts in place — it strips
 //! `thinking`/`redacted_thinking` blocks from assistant rows, deletes rows
 //! left empty, and never repairs children's `parentUuid` — so the codec
@@ -28,8 +27,8 @@
 //! links. Records off the path (abandoned branches, shadowed re-emissions,
 //! pre-compaction history) are excluded.
 //!
-//! It returns typed `Unknown` reasons instead of guessing. This codec no
-//! longer rewrites transcripts at all: cross-machine materialization decodes
+//! It returns typed `Unknown` reasons instead of guessing. This codec does not
+//! rewrite transcripts: cross-machine materialization decodes
 //! the path-encoded wire form per line and restamps the leaf `sessionId` in
 //! the pull flow (`session_path_map` line facades + the command layer), so
 //! in-root content paths remap with the structural `cwd` instead of
@@ -1283,8 +1282,8 @@ mod tests {
         assert_eq!(analysis.record_count, 4);
     }
 
-    /// S4's manual corpus gate (`docs/PLAN_CLAUDE_DESKTOP_IMPORT_TOLERANCE.md`):
-    /// the shipped Rust analyzer must hold the import-equivalence property
+    /// Manual corpus gate: the shipped Rust analyzer must hold the
+    /// import-equivalence property
     /// on every real transcript and report the outcome counts.
     /// Ignored in CI — it reads the developer's `~/.claude/projects`. Run:
     /// `cargo test -p mallard-infrastructure --lib -- --ignored --nocapture
@@ -1364,12 +1363,11 @@ mod tests {
         assert!(complete > 0, "the corpus gate must see real sessions");
     }
 
-    /// The inverse of the deleted structural-rewrite pin: a committed
-    /// two-root fixture whose prose, tool input, tool result, attachment
-    /// filename, and file-history snapshot all embed the source root must
-    /// come out of the wire hop with the source spelling byte-absent —
-    /// content paths travel with the structural `cwd` now, per line, under
-    /// the shared mapper's gates.
+    /// A committed two-root fixture whose prose, tool input, tool result,
+    /// attachment filename, and file-history snapshot all embed the source
+    /// root must leave the wire hop with the source spelling byte-absent.
+    /// Content paths travel with the structural `cwd`, per line, under the
+    /// shared mapper's gates.
     #[test]
     fn claude_wire_fixture_remaps_content_paths_and_round_trips() {
         use crate::session_path_map::SessionPathMapper;

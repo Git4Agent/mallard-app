@@ -1266,9 +1266,8 @@ export interface ThreadSyncEntry {
   storage_updated_at?: number | null;
   /**
    * The thread's honest cloud mapping (or the cloud row's own id for a
-   * storage-only row); null for a local-only thread. No longer a presence
-   * proxy for "row came from a storage comparison" — see
-   * `compared_against_storage`.
+   * storage-only row); null for a local-only thread. Comparison provenance is
+   * carried by `compared_against_storage`.
    */
   cloud_thread_id?: string | null;
   forked_from?: string | null;
