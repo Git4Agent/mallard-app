@@ -3,14 +3,18 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import StorageCatalogPage from "../../src/components/storage-catalog/StorageCatalogPage";
+import CatalogIndexPage from "../../src/components/storage-catalog/CatalogIndexPage";
 import {
   CATALOG_KINDS,
   actionLabel,
   catalogScopeLabel,
+  rowStatus,
+  rowStatusLabel,
 } from "../../src/components/storage-catalog/model";
 import type {
   CatalogPullAction,
   CatalogScope,
+  CatalogScopeRow,
   CatalogScopeView,
 } from "../../src/components/storage-catalog/types";
 
@@ -124,6 +128,34 @@ test("every kind wears its own mark rather than borrowing one", () => {
   assert.doesNotMatch(page, /<Icon name="openai"/);
 });
 
+test("first-contact Catalog rows use the same storage and conflict states as sessions", () => {
+  const row = (values: Partial<CatalogScopeRow>): CatalogScopeRow => ({
+    row_id: "resource:review",
+    display_name: "Review",
+    local_present: false,
+    remote_present: true,
+    warnings: [],
+    ...values,
+  });
+
+  const storageOnly = row({ state: "local_missing" });
+  assert.equal(rowStatus(storageOnly), "cloud-outstanding");
+  assert.equal(
+    rowStatusLabel(storageOnly, "Vault"),
+    "Only in Vault. Pull to download it here.",
+  );
+
+  const noCommonBase = row({
+    state: "unreviewed_remote",
+    local_present: true,
+  });
+  assert.equal(rowStatus(noCommonBase), "divergent");
+  assert.equal(
+    rowStatusLabel(noCommonBase, "Vault"),
+    "Changed here and in Vault. Review before syncing.",
+  );
+});
+
 const scopeView: CatalogScopeView = {
   scope: {
     scope_id: "catscope-1",
@@ -145,6 +177,34 @@ const scopeView: CatalogScopeView = {
   },
 };
 
+test("the Catalog index is a stable root with empty and populated states", () => {
+  const empty = renderToStaticMarkup(
+    <CatalogIndexPage
+      scopes={[]}
+      busy={false}
+      appActions={[]}
+      onOpenScope={() => undefined}
+      onAddScope={() => undefined}
+    />,
+  );
+  assert.match(empty, /aria-label="Catalog path"/);
+  assert.match(empty, />Catalog</);
+  assert.match(empty, /Add Catalog resource/);
+
+  const populated = renderToStaticMarkup(
+    <CatalogIndexPage
+      scopes={[scopeView]}
+      busy={false}
+      appActions={[]}
+      onOpenScope={() => undefined}
+      onAddScope={() => undefined}
+    />,
+  );
+  assert.match(populated, /sync-storage-index-row/);
+  assert.match(populated, /Skills · conf2/);
+  assert.match(populated, /\/Users\/user\/codex-conf2/);
+});
+
 function renderScopePage() {
   return renderToStaticMarkup(
     <StorageCatalogPage
@@ -163,6 +223,26 @@ function renderScopePage() {
     />,
   );
 }
+
+test("stored-only rows lead the scope page in their own plain section", () => {
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  // A1: the partition and nothing else. Stored-only rows lift into a section
+  // headed "Only in <storage>" above the kind's own list — the same heading
+  // shape, the same cards, no counts, no fold, no new CSS. A row missing on
+  // both sides stays in the kind's section: "not in the storage" would be the
+  // wrong heading for it.
+  assert.match(page, /const cloudRows = rows\.filter\(\(row\) => !row\.local_present && row\.remote_present\)/);
+  assert.match(page, /const localRows = rows\.filter\(\(row\) => row\.local_present \|\| !row\.remote_present\)/);
+  assert.match(
+    page,
+    /Only in <span className="sync-history-storage-name">\{storageName \?\? "storage"\}<\/span>[\s\S]*<h2><Icon name=\{kind\.icon\} size=\{14\} \/>\{kind\.plural\}<\/h2>/,
+    "the cloud section renders above the kind's own section",
+  );
+  // Both sections draw the same rows through one renderer, so the two halves
+  // cannot drift apart card by card.
+  assert.match(page, /\{cloudRows\.map\(renderRow\)\}/);
+  assert.match(page, /\{localRows\.map\(renderRow\)\}/);
+});
 
 test("the scope page wears the project workspace's trail and list", () => {
   const html = renderScopePage();
@@ -228,6 +308,11 @@ test("every row is the activity card: badge, name as the door, facts, one ⓘ", 
   // popover, each a click to copy.
   assert.match(page, /sync-history-debug-popover/);
   assert.match(page, /sha256:\$\{row\.content_sha256\}/);
+  assert.match(page, /aria-controls=\{menuId\}/);
+  assert.match(page, /closeMenu\(true\)/);
+  assert.match(page, /document\.addEventListener\("focusin", onFocusIn\)/);
+  assert.match(page, /role="status" aria-live="polite"/);
+  assert.match(page, /Could not copy\./);
   // Reveal in Finder stays off when nothing is local.
   assert.match(page, /revealItemInDir/);
   assert.match(page, /disabled=\{!row\.local_path\}/);
@@ -310,6 +395,11 @@ test("Push and Pull are page verbs with one review each, and link on the way", (
   assert.match(page, /SyncReviewSelectionBar/);
   assert.match(page, /sync-inline-push-review sync-sync-review-workspace/);
   assert.match(page, /sync-inline-pull-review sync-sync-review-workspace/);
+  // Pull operations speak the files review's chip grammar — "Install skill",
+  // "Update pet · keeps local copy" — one voice across every pull review.
+  assert.match(page, /actionChipLabel\(action\.chosen, kindNoun\)/);
+  assert.match(page, /keeps local copy/);
+  assert.match(page, /kindNoun=\{kind\.label\.toLowerCase\(\)\}/);
   // The scroll owns the gutter under the header. A catalog review's first
   // child is a progress notice, a banner or row one, and only the banner ever
   // carried a top margin — and only by collapsing out of the scroll — so a
@@ -351,6 +441,25 @@ test("the active path-bar Push commits the reviewed selection without rebuilding
   assert.match(page, /mode\.kind === "push"[\s\S]*?sync-path-count[\s\S]*?pushSelected\.size/);
 });
 
+test("the active path-bar Pull commits the reviewed selection without rebuilding it", () => {
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+
+  assert.match(
+    page,
+    /onClick=\{\(\) => void \(mode\.kind === "pull" \? runPull\(\) : openPull\(\)\)\}/,
+  );
+  assert.match(
+    page,
+    /disabled=\{mode\.kind === "pull"\s*\? pullReviewApplyDisabled\s*:\s*syncDisabled \|\| pullRows\.length === 0\}/,
+  );
+  assert.match(
+    page,
+    /const pullReviewApplyDisabled = busy\s*\|\| pullSelected\.size === 0\s*\|\| pullReviewBlocked;/,
+  );
+  assert.match(page, /disabled=\{pullReviewApplyDisabled\}\s*onClick=\{\(\) => void runPull\(\)\}/);
+  assert.match(page, /mode\.kind === "pull"[\s\S]*?sync-path-count[\s\S]*?pullSelected\.size/);
+});
+
 test("Push review keeps matching resources visible but outside its selection", () => {
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
 
@@ -366,7 +475,9 @@ test("Push review keeps matching resources visible but outside its selection", (
   assert.match(page, /onToggle=\{planRow\.row\.selectable \? \(\) => setPushSelected/);
   assert.match(page, /acks=\{planRow\.row\.selectable && pushSelected\.has\(resourceId\)/);
   assert.match(page, /\{selectableRows\.length === 0 && \(/);
-  assert.match(page, /\{rows\.map\(\(row\) => \{/);
+  // The list page still draws every row — now through the shared renderer
+  // that feeds both of its sections.
+  assert.match(page, /\{cloudRows\.map\(renderRow\)\}[\s\S]*\{localRows\.map\(renderRow\)\}/);
 });
 
 test("Add is Kind then agent profile, and never picks a storage or resource", () => {

@@ -122,11 +122,14 @@ function Page() {
           catalogScopes={SCOPES}
           activeCatalogScopeId={null}
           addingCatalogScope={false}
+          catalogIndexOpen={false}
+          storageIndexOpen={false}
           settingsOpen={false}
           loading={false}
           busy={false}
           activityOpen={false}
           unreadLogs={0}
+          onOpenProjects={() => undefined}
           onSelectProject={() => undefined}
           onRemoveProject={() => undefined}
           onSelectDraft={() => undefined}
@@ -138,10 +141,11 @@ function Page() {
           onDiscardStorageDraft={() => undefined}
           onRemoveStorage={() => undefined}
           onAddStorage={() => undefined}
-          onOpenCatalogMenu={() => undefined}
+          onOpenCatalogIndex={() => undefined}
           onOpenCatalogScope={() => undefined}
           onAddCatalogScope={() => undefined}
           onRemoveCatalogScope={() => undefined}
+          onOpenStorageIndex={() => undefined}
           onOpenSettings={() => undefined}
         />
       </div>

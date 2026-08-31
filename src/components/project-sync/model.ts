@@ -38,6 +38,13 @@ export function repositoryFingerprintMatches(
     && remoteFingerprint === localFingerprint;
 }
 
+export function repositoryFingerprintsRequireAcknowledgement(
+  remoteFingerprint: string | null | undefined,
+  localFingerprint: string | null | undefined,
+): boolean {
+  return (remoteFingerprint ?? null) !== (localFingerprint ?? null);
+}
+
 export const RESOURCE_GROUPS: Array<{
   id: ProjectResourceCategory;
   label: string;

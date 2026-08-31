@@ -51,9 +51,11 @@ pub fn derive_link_state(
         remote_content_sha256,
     ) {
         (None, Some(_), None) => CatalogLinkState::New,
-        (None, None, None) | (Some(_), None, Some(_)) => CatalogLinkState::LocalMissing,
-        (None, local, Some(remote)) => {
-            if local == Some(remote) {
+        (None, None, None) | (None, None, Some(_)) | (Some(_), None, Some(_)) => {
+            CatalogLinkState::LocalMissing
+        }
+        (None, Some(local), Some(remote)) => {
+            if local == remote {
                 CatalogLinkState::InSync
             } else {
                 CatalogLinkState::UnreviewedRemote
@@ -1134,6 +1136,7 @@ mod tests {
         let table = [
             (None, Some("x"), None, false, CatalogLinkState::New),
             (None, None, None, false, CatalogLinkState::LocalMissing),
+            (None, None, Some("x"), false, CatalogLinkState::LocalMissing),
             (None, Some("x"), Some("x"), false, CatalogLinkState::InSync),
             (
                 None,

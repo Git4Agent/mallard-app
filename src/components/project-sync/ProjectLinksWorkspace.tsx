@@ -31,6 +31,7 @@ import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice
 import { formatDateTime, toEpochMilliseconds } from "../../clock";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import ProjectActivityPage, { BranchPicker, type ActivityHeaderModel } from "./ProjectActivityPage";
+import ProjectFilesActivityPage, { type FilesActivityHeaderModel } from "./ProjectFilesActivityPage";
 import type {
   ActiveProjectSubview,
   OpenSessionDetailRequest,
@@ -711,6 +712,15 @@ export default function ProjectLinksWorkspace({
     (model: ActivityHeaderModel | null) => setActivityHeader(model),
     [],
   );
+  /* Which face of the activity page a non-git project shows. The path bar's
+     leaf crumb is the switch; a git project has no Files face, so the state
+     resets whenever the project changes. */
+  const [activityView, setActivityView] = useState<"sessions" | "files">("sessions");
+  const [filesActivityHeader, setFilesActivityHeader] = useState<FilesActivityHeaderModel | null>(null);
+  const handleFilesActivityHeaderChange = useCallback(
+    (model: FilesActivityHeaderModel | null) => setFilesActivityHeader(model),
+    [],
+  );
   const bundleRequestRef = useRef(0);
   const storageSettingsRef = useRef<HTMLDivElement>(null);
   const workspaceScrollRef = useRef<HTMLElement>(null);
@@ -1380,6 +1390,8 @@ export default function ProjectLinksWorkspace({
 
   const activeProject = projects.find((project) => project.local_project_id === activeProjectId) ?? null;
   const workspaceProject = newProjectSetup ? null : activeProject;
+  const activeLocalProjectId = activeProject?.local_project_id ?? null;
+  useEffect(() => { setActivityView("sessions"); }, [activeLocalProjectId]);
   const sessionDetailSubview = activeProjectSubview.kind === "session_detail"
     && workspaceProject?.local_project_id === activeProjectSubview.localProjectId
     ? activeProjectSubview
@@ -1493,9 +1505,12 @@ export default function ProjectLinksWorkspace({
     || storageActionLockedForReview(workspaceReviewKind, "storage");
 
   // The section the page is showing. The activity page picks Git history for a
-  // git repo and Sessions otherwise; the crumb reads the same fact off the
-  // project so the trail is right before the page has finished loading.
-  const workspaceSectionLabel = workspaceProject?.is_git_repository ? "Git history" : "Sessions";
+  // git repo; a non-git project has two faces — Sessions and Files — and the
+  // crumb names the one on screen. It reads the same facts off the project and
+  // the view state so the trail is right before the page has finished loading.
+  const workspaceSectionLabel = workspaceProject?.is_git_repository
+    ? "Git history"
+    : activityView === "files" ? "Files" : "Sessions";
   const [sessionHeader, setSessionHeader] = useState<SessionHeaderModel | null>(null);
   const handleSessionHeaderChange = useCallback((header: SessionHeaderModel | null) => {
     setSessionHeader(header);
@@ -2458,7 +2473,9 @@ export default function ProjectLinksWorkspace({
           </span>
         ) : undefined,
       });
-    } else {
+    } else if (workspaceProject.is_git_repository) {
+      // Git history keeps its section and branch in the trail. For a non-Git
+      // project, the compact Sessions/Files switch replaces this crumb.
       pathCrumbs.push({
         id: "section",
         label: workspaceSectionLabel,
@@ -2475,6 +2492,42 @@ export default function ProjectLinksWorkspace({
             onChange={activityHeader.onSelectBranch}
           />
         ) : undefined,
+      });
+    } else if (!inlineStorageReview) {
+      // A non-Git project has two faces, and the crumb names the one on
+      // screen — the same shape the Git project's section crumb has, so both
+      // kinds of project read as one trail. The other face is the crumb's own
+      // menu rather than a control parked in the leaf's position: every crumb
+      // in this bar offers its alternatives that way, and a two-button pill
+      // showed both faces at once while naming neither. The current view is
+      // the menu's header, so no row carries a tick.
+      const otherView = activityView === "files" ? "sessions" : "files";
+      const viewIcon = (view: typeof activityView) => (view === "files" ? "file" as const : "message" as const);
+      const viewLabel = (view: typeof activityView) => (view === "files" ? "Files" : "Sessions");
+      const viewDetail = (view: typeof activityView) => (
+        view === "files" ? "Files outside Git" : "Agent sessions"
+      );
+      pathCrumbs.push({
+        id: "section",
+        label: workspaceSectionLabel,
+        icon: viewIcon(activityView),
+        tone: "section",
+        menuLabel: "Switch view",
+        menuHeader: {
+          label: workspaceSectionLabel,
+          detail: viewDetail(activityView),
+          icon: viewIcon(activityView),
+        },
+        menu: [{
+          label: "Switch to",
+          items: [{
+            id: `view-${otherView}`,
+            label: viewLabel(otherView),
+            detail: viewDetail(otherView),
+            icon: viewIcon(otherView),
+            onSelect: () => setActivityView(otherView),
+          }],
+        }],
       });
     }
   }
@@ -2502,13 +2555,19 @@ export default function ProjectLinksWorkspace({
       onRefresh: sessionHeader.onRefresh,
       label: sessionHeader.refreshing ? "Refreshing session" : "Refresh session",
     }
-    : activityHeader && {
-      refreshing: activityHeader.refreshing,
-      onRefresh: activityHeader.onRefresh,
-      label: activityHeader.refreshing ? "Refreshing activity" : "Refresh activity",
-    };
+    : activityView === "files"
+      ? filesActivityHeader && {
+        refreshing: filesActivityHeader.refreshing,
+        onRefresh: filesActivityHeader.onRefresh,
+        label: filesActivityHeader.refreshing ? "Rescanning project files" : "Rescan project files",
+      }
+      : activityHeader && {
+        refreshing: activityHeader.refreshing,
+        onRefresh: activityHeader.onRefresh,
+        label: activityHeader.refreshing ? "Refreshing activity" : "Refresh activity",
+      };
 
-  const pathActions = workspaceProject && workspaceStorage ? (
+  const syncPathActions = workspaceProject && workspaceStorage ? (
     <>
       {/* One chip summarizes issues that neither action can clear. */}
       {attention > 0 && (
@@ -2642,6 +2701,7 @@ export default function ProjectLinksWorkspace({
     </div>
     </>
   ) : null;
+  const pathActions = syncPathActions;
 
   /* The workspace's own two messages, in one box above the page. A refused
    * reveal is an event — the user picked it out of a crumb menu a moment ago —
@@ -2925,7 +2985,7 @@ export default function ProjectLinksWorkspace({
                 >
                   <div className="profile-link-connections">
                     <section
-                      className="project-storage-card"
+                      className={`project-storage-card${project.is_git_repository ? "" : " project-storage-card-non-git"}`}
                       aria-label={`${projectLabel(project)} storage`}
                     >
                       {storageGroupNotice}
@@ -3201,28 +3261,73 @@ export default function ProjectLinksWorkspace({
               );
             })}
           </div>
-        ) : null)}
+        ) : (
+          <div className="sync-storage-index-list" aria-label="Projects">
+            {projects.map((project) => {
+              const projectBinding = bindingByProject.get(project.local_project_id);
+              const profileMissing = Object.keys(projectBinding?.profile_ids ?? {}).length === 0;
+              return (
+                <button
+                  key={project.local_project_id}
+                  type="button"
+                  className="sync-storage-index-row"
+                  disabled={busy}
+                  onClick={() => onSelectProject(project.local_project_id)}
+                  aria-label={`Open ${projectLabel(project)}`}
+                >
+                  <span className="sync-storage-repository-icon">
+                    <Icon name={project.is_git_repository ? "git-folder" : "folder"} size={14} />
+                  </span>
+                  <span className="sync-storage-index-copy">
+                    <strong>{projectLabel(project)}</strong>
+                    <small>{compactProjectPath(project.project_root)}</small>
+                  </span>
+                  {profileMissing && (
+                    <span className="sync-storage-index-warning">
+                      <Icon name="alert-triangle" size={12} /> Agent profile needed
+                    </span>
+                  )}
+                  <Icon name="chevron-right" size={12} className="sync-storage-index-open" aria-hidden="true" />
+                </button>
+              );
+            })}
+          </div>
+        ))}
 
         {activeProject && !newProjectSetup && !inlineStorageReview && (
           <div id="project-history-panel" className="sync-project-tab-panel">
-            <ProjectActivityPage
-              project={activeProject}
-              binding={activeBindingByProject.get(activeProject.local_project_id) ?? null}
-              refreshEpoch={historyRefreshEpoch}
-              activeStorageId={activeStorageId}
-              activeStorageName={storages.find((storage) => storage.id === activeStorageId)?.name ?? null}
-              onUnlinkStorage={activeStorageId ? () => {
-                void run(
-                  `unlink:${activeProject.local_project_id}:${activeStorageId}`,
-                  () => onUnlinkStorage(activeProject.local_project_id, activeStorageId),
-                );
-              } : undefined}
-              continuityActionBusy={busy || !!runningAction}
-              onHeaderModelChange={handleActivityHeaderChange}
-              onOpenSessionDetail={(request, trigger) => (
-                openSessionDetail(activeProject.local_project_id, request, trigger)
-              )}
-            />
+            {activityView === "files" && !activeProject.is_git_repository ? (
+              <ProjectFilesActivityPage
+                project={activeProject}
+                activeStorageId={activeStorageId}
+                activeStorageName={storages.find((storage) => storage.id === activeStorageId)?.name ?? null}
+                refreshEpoch={historyRefreshEpoch}
+                onHeaderModelChange={handleFilesActivityHeaderChange}
+                onRevealPath={revealPath}
+              />
+            ) : (
+              <ProjectActivityPage
+                project={activeProject}
+                binding={activeBindingByProject.get(activeProject.local_project_id) ?? null}
+                refreshEpoch={historyRefreshEpoch}
+                activeStorageId={activeStorageId}
+                activeStorageName={storages.find((storage) => storage.id === activeStorageId)?.name ?? null}
+                onUnlinkStorage={activeStorageId ? () => {
+                  void run(
+                    `unlink:${activeProject.local_project_id}:${activeStorageId}`,
+                    () => onUnlinkStorage(activeProject.local_project_id, activeStorageId),
+                  );
+                } : undefined}
+                continuityActionBusy={busy || !!runningAction}
+                onHeaderModelChange={handleActivityHeaderChange}
+                onChooseAgentProfile={() => {
+                  void onConfigureBinding(activeProject.local_project_id);
+                }}
+                onOpenSessionDetail={(request, trigger) => (
+                  openSessionDetail(activeProject.local_project_id, request, trigger)
+                )}
+              />
+            )}
           </div>
         )}
       </section>

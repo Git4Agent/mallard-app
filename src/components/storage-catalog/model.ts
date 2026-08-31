@@ -89,10 +89,9 @@ export function rowStatus(row: CatalogScopeRow): ThreadStatusIconName {
     case "storage_changed":
     case "local_missing":
       return "cloud-outstanding";
+    case "unreviewed_remote":
     case "diverged":
       return "divergent";
-    case "unreviewed_remote":
-      return "pending";
     case "blocked":
       return "unavailable";
   }
@@ -117,10 +116,9 @@ export function rowStatusLabel(row: CatalogScopeRow, storageName: string | null)
     case "local_missing":
       if (!row.remote_present) return `Not on this computer, and not in ${storage}.`;
       return `Only in ${storage}. Pull to download it here.`;
+    case "unreviewed_remote":
     case "diverged":
       return `Changed here and in ${storage}. Review before syncing.`;
-    case "unreviewed_remote":
-      return `Held until you Pull: ${storage} has a version this computer has never reviewed.`;
     case "blocked":
       return row.blocker ?? "Can't be synced.";
   }

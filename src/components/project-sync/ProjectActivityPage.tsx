@@ -61,6 +61,7 @@ interface PageProps {
   onDropSelection?: (resourceIds: string[]) => void;
   onReviewPull?: () => void;
   onUnlinkStorage?: () => void;
+  onChooseAgentProfile?: () => void;
   continuityActionBusy?: boolean;
   comparisonOverride?: ThreadSyncComparison | null;
   onOpenSessionDetail?: (
@@ -116,6 +117,7 @@ interface ContentProps {
   onToggleResource?: (resourceId: string) => void;
   onReviewPull?: () => void;
   onUnlinkStorage?: () => void;
+  onChooseAgentProfile?: () => void;
   continuityActionBusy?: boolean;
 }
 
@@ -1016,6 +1018,31 @@ function ReviewPullRowAction({
   );
 }
 
+/**
+ * The pull operation, in the files review's chip grammar — "Add session",
+ * "Update session · keeps local copy" — so every pull review names its
+ * operations in one voice. Rows the pull would not touch return null; the
+ * tick-dependent phrasing stays with the indicator label beside it.
+ */
+export function pullOperationChip(entry: ThreadSyncEntry | undefined): string | null {
+  if (!entry || entry.state === "unavailable") return null;
+  if (entry.compared_against_storage) {
+    switch (entry.pull_decision.action) {
+      case "materialize_cloud": return "Update session";
+      case "keep_both": return "Update session · keeps local copy";
+      case "create_local": return "Add session";
+      case "adopt_cloud_metadata": return "Mark synced";
+      default: return null;
+    }
+  }
+  switch (entry.state) {
+    case "storage_only": return "Add session";
+    case "storage_ahead": return "Update session";
+    case "diverged": return "Update session · keeps local copy";
+    default: return null;
+  }
+}
+
 function syncReviewStateLabel(
   mode: "push" | "pull",
   entry: ThreadSyncEntry | undefined,
@@ -1219,6 +1246,11 @@ function SessionCard({
               Preserved {session.preserved.ordinal}
             </span>
           )}
+          {selectionMode === "pull" && pullOperationChip(syncEntry) && (
+            <span className="sync-history-branch-state history-only" title={holdDetail ?? reviewStateLabel ?? undefined}>
+              {pullOperationChip(syncEntry)}
+            </span>
+          )}
           <ReviewPullRowAction
             mode={selectionMode}
             entry={syncEntry}
@@ -1382,6 +1414,11 @@ function SyncEntryCard({
             <ProviderMark provider={entry.provider} displayName={entry.provider_display_name} />
           </span>
           <strong title={title === fullTitle ? undefined : fullTitle}>{title}</strong>
+          {selectionMode === "pull" && pullOperationChip(entry) && (
+            <span className="sync-history-branch-state history-only" title={holdDetail ?? reviewStateLabel ?? undefined}>
+              {pullOperationChip(entry)}
+            </span>
+          )}
           <ReviewPullRowAction
             mode={selectionMode}
             entry={entry}
@@ -1475,6 +1512,7 @@ export function ProjectChatHistoryContent({
   comparisonLoading = false, comparisonError = null, activeStorageName = null,
   selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
   selectionDisabled = false, onToggleResource, onReviewPull, onUnlinkStorage,
+  onChooseAgentProfile,
   continuityActionBusy = false,
 }: ContentProps) {
   const [collapsedCommitShas, setCollapsedCommitShas] = useState<Set<string>>(new Set());
@@ -1527,6 +1565,10 @@ export function ProjectChatHistoryContent({
   const unmappedReferences = activity?.unmapped ?? [];
   const storageOnlyReferences = unmappedReferences.filter((reference) => sessionsByResource.get(reference.resource_id)?.source === "remote_only");
   const uncommittedReferences = unmappedReferences.filter((reference) => sessionsByResource.get(reference.resource_id)?.source !== "remote_only");
+  /* The non-git flat list's own split of the same fact, session-typed rather
+     than reference-typed because that list renders sessions directly. */
+  const cloudSessions = sessions.filter((session) => session.source === "remote_only");
+  const localSessions = sessions.filter((session) => session.source !== "remote_only");
   const compactSelectionReview = selectionMode != null;
   const olderEntries = useMemo(() => {
     if (!selectionMode) return [];
@@ -1566,7 +1608,7 @@ export function ProjectChatHistoryContent({
     if ((activity?.older?.commits ?? 0) === 0) {
       return { icon: "git-commit" as IconName, title: "No commits yet", meta: null };
     }
-    return { icon: "clock" as IconName, title: "No commits", meta: windowRange };
+    return { icon: "range" as IconName, title: "No commits", meta: windowRange };
   }, [activity?.git?.branches, activity?.git?.selected_branch, activity?.older?.commits, windowRange]);
   const refreshStatus = comparisonLoading
     ? `Comparing threads with ${activeStorageName ?? "storage"}`
@@ -1710,7 +1752,23 @@ export function ProjectChatHistoryContent({
           {...noticeTiming}
         />
         {!hasBoundProvider ? (
-          <div className="sync-history-state sync-history-profile-state"><Icon name="alert-triangle" size={18} /><div><strong>No agent profile is connected.</strong><span>Remove and add the project again to choose a provider profile.</span></div></div>
+          <div className="sync-history-state sync-history-profile-state">
+            <Icon name="alert-triangle" size={18} />
+            <div>
+              <strong>No agent profile is connected.</strong>
+              <span>Choose an Agent profile to load this project’s sessions.</span>
+            </div>
+            {onChooseAgentProfile && (
+              <button
+                type="button"
+                className="btn"
+                disabled={continuityActionBusy}
+                onClick={onChooseAgentProfile}
+              >
+                Choose Agent profile
+              </button>
+            )}
+          </div>
         ) : loading && !activity ? (
           /* Not a status message: the scaffold is what the view renders with
              while its first read is in flight — the page's own row geometry
@@ -1879,9 +1937,44 @@ export function ProjectChatHistoryContent({
               </div>
             ) : (
               <section>
-                <div className="sync-history-thread-list flat">{sessions.length
-                  ? sessions.map((session) => renderSession(session, session.resource_id))
-                  : <div className="sync-history-state">{`No sessions in ${windowRange}.`}</div>}</div>
+                {/* The flat list partitions the way the Catalog page and the
+                    Files face do: stored-only sessions lead under the shared
+                    plain section heading — no frame, no fold, no count — and
+                    the local half takes a heading only while the partition
+                    exists; alone, the leaf crumb already names it. */}
+                {sessions.length === 0 ? (
+                  <div className="sync-history-thread-list flat">
+                    <div className="sync-history-state">{`No sessions in ${windowRange}.`}</div>
+                  </div>
+                ) : (
+                  <>
+                    {cloudSessions.length > 0 && (
+                      <>
+                        <div className="sync-history-section-heading">
+                          <h2>
+                            <Icon name="cloud" size={14} />
+                            Only in <span className="sync-history-storage-name">{storageOnlyName}</span>
+                          </h2>
+                        </div>
+                        <div className="sync-history-thread-list flat">
+                          {cloudSessions.map((session) => renderSession(session, `storage-only:${session.resource_id}`))}
+                        </div>
+                      </>
+                    )}
+                    {localSessions.length > 0 && (
+                      <>
+                        {cloudSessions.length > 0 && (
+                          <div className="sync-history-section-heading">
+                            <h2><Icon name="message" size={14} />Sessions</h2>
+                          </div>
+                        )}
+                        <div className="sync-history-thread-list flat">
+                          {localSessions.map((session) => renderSession(session, session.resource_id))}
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
                 {/* Same control, no rail to hang it from: a project with no
                     repository draws no spine, so the node and its segment are
                     suppressed and the row keeps the list's own left edge. */}
@@ -1990,6 +2083,7 @@ export default function ProjectActivityPage({
   onDropSelection,
   onReviewPull,
   onUnlinkStorage,
+  onChooseAgentProfile,
   continuityActionBusy = false,
   comparisonOverride,
   onReviewListReadyChange,
@@ -2200,5 +2294,5 @@ export default function ProjectActivityPage({
       setActionBusyActionId(null);
     }
   };
-  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} continuityActionBusy={continuityActionBusy} />;
+  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} />;
 }

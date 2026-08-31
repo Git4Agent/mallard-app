@@ -28,7 +28,8 @@ export interface DebugPopoverPlacement {
  * it rather than leaving it stranded beside the wrong session.
  *
  * Layout, not effect: the panel is measured and placed before anything paints,
- * so it never appears at the origin for a frame on its way to the anchor.
+ * so it never appears at the origin for a frame on its way to the anchor. Once
+ * placed, the first enabled action receives focus.
  */
 export function useDebugPopoverPlacement(
   rootRef: RefObject<HTMLElement | null>,
@@ -94,6 +95,13 @@ export function useDebugPopoverPlacement(
       window.removeEventListener("resize", dismiss);
     };
   }, [open]);
+
+  useEffect(() => {
+    if (!open || !placement) return;
+    panelRef.current
+      ?.querySelector<HTMLElement>("button:not([disabled])")
+      ?.focus();
+  }, [open, panelRef, placement]);
 
   return placement;
 }

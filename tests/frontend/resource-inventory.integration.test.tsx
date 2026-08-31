@@ -471,7 +471,9 @@ test("two steps render two plain tabs — never a Review tab", () => {
 
   assert.match(html, /role="tablist"/);
   assert.equal(html.match(/role="tab"/g)?.length, 2);
-  assert.match(html, />Git &amp; sessions</);
+  // A review that shows the files step is a non-git project, so the first
+  // tab holds sessions alone — there is no Git history to co-bill it for.
+  assert.match(html, />Sessions</);
   assert.match(html, />Project files</);
   assert.doesNotMatch(html, />Review</);
   assert.doesNotMatch(html, /Next: |Back: /, "tabs are navigation, not a wizard");

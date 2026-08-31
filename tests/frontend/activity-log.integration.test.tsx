@@ -116,6 +116,40 @@ test("Push and Pull open the activity log at its live tail", () => {
   assert.match(logSource, /new ResizeObserver/);
 });
 
+test("startup defers retained logs and opening the drawer loads them once", () => {
+  const syncSource = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const backendSource = readFileSync("src-tauri/src/activity_log.rs", "utf8");
+  const openActivity = syncSource.slice(
+    syncSource.indexOf("const openActivity = () =>"),
+    syncSource.indexOf("const startLogResize ="),
+  );
+  const queryCommand = backendSource.slice(
+    backendSource.indexOf("pub async fn query_activity_logs"),
+    backendSource.indexOf("pub async fn get_activity_log_stats"),
+  );
+
+  assert.match(
+    syncSource,
+    /useEffect\(\(\) => \{\s*if \(activityOpen\) void loadActivityLogs\(\);\s*\}, \[activityOpen, loadActivityLogs\]\);/,
+  );
+  assert.doesNotMatch(openActivity, /loadActivityLogs/);
+  assert.doesNotMatch(queryCommand, /store\.cleanup/);
+  assert.match(queryCommand, /store\.query\(&query\)/);
+});
+
+test("closed Logs remove their controls and explicit open manages focus", () => {
+  const syncSource = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const sidebarSource = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
+
+  assert.match(sidebarSource, /id="activity-log-trigger"/);
+  assert.match(sidebarSource, /aria-controls="activity-log-drawer"/);
+  assert.match(sidebarSource, /aria-expanded=\{activityOpen\}/);
+  assert.match(syncSource, /id="activity-log-drawer"[\s\S]*?role="region"[\s\S]*?aria-label="Logs"[\s\S]*?tabIndex=\{-1\}/);
+  assert.match(syncSource, /\{activityOpen && \(\s*<LogPanel/);
+  assert.match(syncSource, /requestAnimationFrame\(\(\) => logDrawerRef\.current\?\.focus\(\)\)/);
+  assert.match(syncSource, /document\.getElementById\("activity-log-trigger"\)\?\.focus\(\)/);
+});
+
 test("the log tail is not dropped by the scroll events its own pinning queues", () => {
   // The last pin landed at 1000; the list has grown by two lines since.
   const pinnedScrollTop = 1000;

@@ -156,8 +156,7 @@ export default function LogPanel({
   const clock24 = usePreference("clock24");
   // One formatter for the whole list, not one per line per render.
   // `toLocaleTimeString` builds and throws away an Intl.DateTimeFormat on every
-  // call, and this list re-renders on every incoming log event — including
-  // while the drawer is closed, where none of it is visible.
+  // call, and this list re-renders on every incoming log event while open.
   const formatter = useMemo(() => {
     void clock24;
     return new Intl.DateTimeFormat(undefined, clockOptions(true));
@@ -346,13 +345,9 @@ export default function LogPanel({
           </button>
         )}
         {error && (
-          /* The drawer is mounted for the life of the window, so this box is
-             inserted the moment a read fails and is never part of the first
-             render — it announces rather than sitting as a named region.
-             Polite, not assertive: the drawer is clipped shut until the user
-             opens it, and one of the reads that can fail is started by a mount
-             effect, so an assertive role would interrupt at app start about a
-             panel nobody had opened. Nothing here blocks anything. */
+          /* The box can appear after a read fails. It announces instead of
+             sitting as a named region. Polite, not assertive: a failed read
+             does not block the rest of the application. */
           <Notice severity="danger" timing="progress" className="log-load-error">
             Could not load retained logs: {error}
           </Notice>

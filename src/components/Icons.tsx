@@ -45,6 +45,7 @@ export type IconName =
   | "paw"
   | "plus"
   | "puzzle"
+  | "range"
   | "refresh"
   | "settings"
   | "sidebar-collapse"
@@ -405,6 +406,27 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           stroke="none"
           d="M2 2h16v2H2ZM2 4h2v6H2ZM16 4h2v6H16ZM4 8h4v2H4ZM18 8h4v2H18ZM6 10h2v6H6ZM20 10h2v6H20ZM2 14h4v2H2ZM16 14h4v2H16ZM2 16h2v6H2ZM16 16h2v6H16ZM4 20h12v2H4Z"
         />
+      )}
+      {name === "range" && (
+        /* An empty span: the rail's window held open with nothing in it. The
+           state it marks is not "no commits" — that is the sibling rail, which
+           wears `git-commit` — but "none in *this* window", the only one of the
+           three empty rails that paging could ever change. So the mark has to
+           say span, not absence.
+
+           `clock` said time instead, and at 37 ink it sat near the top of the
+           set's 15-48 band, heavier than the row it introduces.
+
+           Absence drawn as less ink does not survive here: a gapped rail, a
+           dotted rail and a dashed-out commit node measured 7, 12 and 8 against
+           a floor of 15, and all three dissolve at 14px. Facing brackets carry
+           22 across two blobs, and no other mark in the set uses the topology.
+           They also echo the bracket glyphs of the mono face this row already
+           sets its dates in, beside the very range the mark stands for. */
+        <g className="icon-pixel-fill icon-mallard-pixel" fill="currentColor" stroke="none">
+          <path d="M5 5h6v2H7v10h4v2H5Z" />
+          <path d="M19 5h-6v2h4v10h-4v2h6Z" />
+        </g>
       )}
       {name === "refresh" && (
         <g className="icon-pixel-fill" fill="currentColor" stroke="none">

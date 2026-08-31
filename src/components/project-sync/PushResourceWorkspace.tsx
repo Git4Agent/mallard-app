@@ -13,10 +13,14 @@ import Icon from "../Icons";
 import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import ProjectActivityPage from "./ProjectActivityPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
+import ProjectFileCommitImpact, {
+  projectFileDeletionCount,
+  type ProjectFileCommitImpactCounts,
+} from "./ProjectFileCommitImpact";
 import ResourceInventory from "./ResourceInventory";
 import SyncReviewTabs from "../sync-review/SyncReviewTabs";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
-import { type SyncReviewStep, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
+import { type SyncReviewStep, historyStepLabel, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
 import { categoryFor, STORAGE_BLOCKING_STATES } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { isIrrecoverableSyncError } from "./syncError";
@@ -160,6 +164,7 @@ export function pushReviewBlockers(
   threadComparison?: ThreadSyncComparison | null,
   projectContentInventory?: ProjectContentInventory | null,
   acknowledgedWarningDigests: ReadonlySet<string> = new Set(),
+  projectContentRemovals: ReadonlySet<string> = new Set(),
 ): PushReviewBlocker[] {
   const blockers: PushReviewBlocker[] = [];
   for (const entry of threadComparison?.entries ?? []) {
@@ -174,13 +179,15 @@ export function pushReviewBlockers(
     if (kind) blockers.push({ kind, step: "history", resourceId: entry.resource_id, state: entry.state });
   }
   for (const entry of projectContentInventory?.entries ?? []) {
-    const selectedEntry = selected.has(entry.descriptor.resource_id);
+    const resourceId = entry.descriptor.resource_id;
+    if (projectContentRemovals.has(resourceId)) continue;
+    const selectedEntry = selected.has(resourceId);
     const kind = pushBlockerKind(entry.state, entry.storage_present, selectedEntry);
     if (kind) {
       blockers.push({
         kind,
         step: "project_files",
-        resourceId: entry.descriptor.resource_id,
+        resourceId,
         state: entry.state,
       });
       continue;
@@ -202,12 +209,14 @@ export function pushReviewBlockingCount(
   threadComparison?: ThreadSyncComparison | null,
   projectContentInventory?: ProjectContentInventory | null,
   acknowledgedWarningDigests: ReadonlySet<string> = new Set(),
+  projectContentRemovals: ReadonlySet<string> = new Set(),
 ): number {
   return pushReviewBlockers(
     selected,
     threadComparison,
     projectContentInventory,
     acknowledgedWarningDigests,
+    projectContentRemovals,
   ).length;
 }
 
@@ -329,6 +338,34 @@ export function includeRequiredProjectContentDirectories(
   return next;
 }
 
+export function pushProjectFileCommitImpact(
+  inventory: ProjectContentInventory | null | undefined,
+  selected: ReadonlySet<string>,
+  removals: ReadonlySet<string>,
+): ProjectFileCommitImpactCounts {
+  const counts: ProjectFileCommitImpactCounts = {
+    add: 0,
+    replace: 0,
+    deleteFile: 0,
+    deleteDirectory: 0,
+  };
+  for (const entry of inventory?.entries ?? []) {
+    const resourceId = entry.descriptor.resource_id;
+    if (removals.has(resourceId)) {
+      if (entry.entry_type === "directory") counts.deleteDirectory += 1;
+      else counts.deleteFile += 1;
+      continue;
+    }
+    if (!selected.has(resourceId) || entry.entry_type === "blocked") continue;
+    if (!entry.storage_present) {
+      counts.add += 1;
+    } else if (entry.entry_type === "file" && entry.state !== "synced") {
+      counts.replace += 1;
+    }
+  }
+  return counts;
+}
+
 export default function PushResourceWorkspace({
   resources,
   selected,
@@ -402,6 +439,20 @@ export default function PushResourceWorkspace({
     () => new Set([...projectDefaults].filter((resourceId) => selectableIds.has(resourceId))),
     [projectDefaults, selectableIds],
   );
+  const projectFileImpact = useMemo(
+    () => pushProjectFileCommitImpact(
+      projectContentInventory,
+      effectiveSelected,
+      projectContentRemovals,
+    ),
+    [effectiveSelected, projectContentInventory, projectContentRemovals],
+  );
+  const deletionSignature = useMemo(
+    () => [...projectContentRemovals].sort().join("\n"),
+    [projectContentRemovals],
+  );
+  const [deletionApproved, setDeletionApproved] = useState(false);
+  useEffect(() => setDeletionApproved(false), [deletionSignature]);
 
   const counts = {
     history: countSelected(conversations, effectiveSelected) + countSelected(other, effectiveSelected),
@@ -412,6 +463,7 @@ export default function PushResourceWorkspace({
     threadComparison,
     projectContentInventory,
     acknowledgedWarningDigests,
+    projectContentRemovals,
   );
   const blockingCount = blockers.length;
   const pullHolds = pushReviewPullHolds(threadComparison);
@@ -475,6 +527,8 @@ export default function PushResourceWorkspace({
     ? "Exclude the items that can't be captured"
     : blockingCount > 0
       ? "Resolve the held items above before pushing"
+      : projectFileDeletionCount(projectFileImpact) > 0 && !deletionApproved
+        ? "Approve the selected project file deletions"
       : effectiveSelected.size === 0 && projectContentRemovals.size === 0
         ? "Nothing is selected"
         : null;
@@ -575,7 +629,7 @@ export default function PushResourceWorkspace({
       </header>
 
       <SyncReviewTabs
-        tabs={projectReviewTabs(steps, counts, warningSteps)}
+        tabs={projectReviewTabs(steps, counts, warningSteps, historyStepLabel(showProjectFiles))}
         activeId={activeStep}
         disabled={busy}
         onChange={(step) => selectStep(step as SyncReviewStep)}
@@ -711,6 +765,13 @@ export default function PushResourceWorkspace({
       </div>
 
       <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">
+        <ProjectFileCommitImpact
+          counts={projectFileImpact}
+          deletionTarget="storage"
+          deletionApproved={deletionApproved}
+          disabled={busy}
+          onDeletionApprovedChange={setDeletionApproved}
+        />
         {localBlockerSentence && (
           /* Selection-driven: ticking a row that carries an uncaptured warning
              is what makes this appear, and it appears at the same moment the
@@ -730,6 +791,22 @@ export default function PushResourceWorkspace({
              only thing that explains why Escape has stopped closing the review
              and the button under the reader's focus has gone dead. */
           <span role="status"><small>A running push finishes or fails whole — it can’t be cancelled midway.</small></span>
+        )}
+        {showProjectFiles && (
+          /* The step navigator, not a gate: Push stays live on both steps.
+             It reads forward on the sessions step and back on the files one,
+             so the footer is always "keep reviewing, or publish now". */
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={busy}
+            title={activeStep === "history" ? "Review project files next" : "Back to session selection"}
+            onClick={() => selectStep(activeStep === "history" ? "project_files" : "history")}
+          >
+            {activeStep !== "history" && <Icon name="chevron-left" size={14} />}
+            {activeStep === "history" ? "Project files" : historyStepLabel(showProjectFiles)}
+            {activeStep === "history" && <Icon name="chevron-right" size={14} />}
+          </button>
         )}
         <button
           type="button"

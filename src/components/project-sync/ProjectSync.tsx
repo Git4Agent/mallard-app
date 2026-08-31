@@ -78,6 +78,7 @@ import type {
 import StorageCatalogPage, {
   type CatalogStorageOption,
 } from "../storage-catalog/StorageCatalogPage";
+import CatalogIndexPage from "../storage-catalog/CatalogIndexPage";
 import AddCatalogScopeWorkspace from "../storage-catalog/AddCatalogScopeWorkspace";
 import { storageCatalogApi } from "../storage-catalog/api";
 import type { CatalogScopeView } from "../storage-catalog/types";
@@ -187,6 +188,7 @@ const ACTIVE_STORAGE_BY_PROJECT_KEY = "mallard.active-storage-by-project";
 const DEFAULT_PROJECT_SIDEBAR_WIDTH = 298;
 const MIN_PROJECT_SIDEBAR_WIDTH = 220;
 const MAX_PROJECT_SIDEBAR_WIDTH = 560;
+const MIN_PROJECT_WORKSPACE_WIDTH = 580;
 const FOCUS_RECONCILE_MIN_AWAY_MS = 5000;
 
 function clampSidebarWidth(width: number, maxWidth = MAX_PROJECT_SIDEBAR_WIDTH): number {
@@ -196,7 +198,7 @@ function clampSidebarWidth(width: number, maxWidth = MAX_PROJECT_SIDEBAR_WIDTH):
 function availableProjectSidebarWidth(): number {
   return Math.max(
     MIN_PROJECT_SIDEBAR_WIDTH,
-    Math.min(MAX_PROJECT_SIDEBAR_WIDTH, window.innerWidth - 420),
+    Math.min(MAX_PROJECT_SIDEBAR_WIDTH, window.innerWidth - MIN_PROJECT_WORKSPACE_WIDTH),
   );
 }
 
@@ -366,6 +368,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [catalogScopes, setCatalogScopes] = useState<CatalogScopeView[]>([]);
   const [catalogScopeId, setCatalogScopeId] = useState<string | null>(null);
   const [addingCatalogScope, setAddingCatalogScope] = useState(false);
+  const [catalogIndexOpen, setCatalogIndexOpen] = useState(false);
   const [storageIssues, setStorageIssues] = useState<Record<string, string>>({});
   const [storageEditorRequest, setStorageEditorRequest] = useState<
     | { mode: "open"; storageId: string; settingsExpanded: boolean; requestId: number }
@@ -431,6 +434,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [appMenuOpen, setAppMenuOpen] = useState(false);
   const appMenuRef = useRef<HTMLDivElement>(null);
   const activityOpenRef = useRef(false);
+  const logDrawerRef = useRef<HTMLDivElement>(null);
   const logFiltersRef = useRef({ types: logTypeFilters, level: logLevelFilter, search: logSearch });
   const logRequestRef = useRef(0);
   const sidebarResizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
@@ -669,8 +673,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   }, [logLevelFilter, logSearch, logTypeFilters]);
 
   useEffect(() => {
-    void loadActivityLogs();
-  }, [loadActivityLogs]);
+    if (activityOpen) void loadActivityLogs();
+  }, [activityOpen, loadActivityLogs]);
 
   useEffect(() => {
     const unlisten = listen<LogLine>("sync-log", (event) => {
@@ -738,7 +742,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setActivityOpen(true);
     setUnreadLogs(0);
     setLogScrollToBottomEpoch((epoch) => epoch + 1);
-    void loadActivityLogs();
   };
 
   const startLogResize = (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -841,7 +844,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const activeDraftSummary = setupDraftId
     ? setupDrafts.find((candidate) => candidate.draft_id === setupDraftId) ?? null
     : null;
-  const activeCatalogScope = catalogScopeId && !setupDraftId && !addingCatalogScope
+  const activeCatalogScope = catalogScopeId && !setupDraftId && !addingCatalogScope && !catalogIndexOpen
     ? catalogScopes.find((candidate) => candidate.scope.scope_id === catalogScopeId) ?? null
     : null;
   useEffect(() => {
@@ -873,6 +876,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     && !setupDraftId
     && (!!activeSummary
       || !!activeCatalogScope
+      || catalogIndexOpen
       || storageIndexOpen
       || settingsOpen
       || activeStorageSettingsId != null);
@@ -900,6 +904,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       const leftProjectWorkspace = current.localProjectId !== activeProjectId
         || setupDraftId != null
         || addingCatalogScope
+        || catalogIndexOpen
         || catalogScopeId != null
         || activeStorageSettingsId != null
         || pendingPush != null
@@ -911,6 +916,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     activeStorageId,
     activeStorageSettingsId,
     addingCatalogScope,
+    catalogIndexOpen,
     catalogScopeId,
     pendingPush,
     restorePlan,
@@ -940,6 +946,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setFailedPullResourceIds(new Set());
     setSetupDraftId(null);
     setAddingCatalogScope(false);
+    setCatalogIndexOpen(false);
     setCatalogScopeId(null);
     setSetupDrafts([]);
     setStorageSetupDrafts([]);
@@ -1017,6 +1024,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       hostIdentityReady: false,
     });
     setLoading(true);
+    setConversationPathAuditLoading(true);
     setStartupStage("installation");
     const failures: string[] = [];
     let nextProjects: LocalProjectRegistration[] = [];
@@ -1087,57 +1095,59 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
     if (shellRequest.current !== requestId) return unavailableResult();
     setStartupStage("projects");
-    try {
-      // Recovery above may have consumed drafts, so they are refreshed after.
-      nextProjects = await projectSyncApi.listProjects();
-      if (shellRequest.current !== requestId) return unavailableResult();
+    // Recovery can change every document below. Start independent reads only
+    // after it completes, then adopt their results in two UI phases.
+    const projectReads = Promise.allSettled([
+      projectSyncApi.listProjects(),
+      refreshSetupDrafts(requestId),
+      refreshStorageSetupDrafts(requestId),
+      refreshCatalogScopes(requestId),
+      projectSyncApi.listProjectRepositoryKinds(),
+    ] as const);
+    const providerReads = Promise.allSettled([
+      projectSyncApi.listAgentProviders(),
+      projectSyncApi.listProviderProfiles(),
+      projectSyncApi.listBindings(),
+    ] as const);
+    const [projectsResult, , , , repositoryKindsResult] = await projectReads;
+    if (shellRequest.current !== requestId) return unavailableResult();
+    if (projectsResult.status === "fulfilled") {
+      nextProjects = projectsResult.value;
       setRegistrations(nextProjects);
-    } catch (reason) {
-      failures.push(`Projects: ${errorMessage(reason)}`);
+    } else {
+      failures.push(`Projects: ${errorMessage(projectsResult.reason)}`);
       setRegistrations([]);
     }
-    await refreshSetupDrafts(requestId);
-    if (shellRequest.current !== requestId) return unavailableResult();
-    await refreshStorageSetupDrafts(requestId);
-    if (shellRequest.current !== requestId) return unavailableResult();
-    await refreshCatalogScopes(requestId);
-    if (shellRequest.current !== requestId) return unavailableResult();
-    try {
-      const nextRepositoryKinds = await projectSyncApi.listProjectRepositoryKinds();
-      if (shellRequest.current !== requestId) return unavailableResult();
-      setRepositoryKinds(nextRepositoryKinds);
-    } catch (reason) {
-      failures.push(`Repository types: ${errorMessage(reason)}`);
+    if (repositoryKindsResult.status === "fulfilled") {
+      setRepositoryKinds(repositoryKindsResult.value);
+    } else {
+      failures.push(`Repository types: ${errorMessage(repositoryKindsResult.reason)}`);
       setRepositoryKinds({});
     }
     setStartupStage("providers");
-    try {
-      const nextAgentProviders = await projectSyncApi.listAgentProviders();
-      if (shellRequest.current !== requestId) return unavailableResult();
-      setAgentProviders(nextAgentProviders);
-    } catch (reason) {
-      failures.push(`Agent providers: ${errorMessage(reason)}`);
+    const [agentProvidersResult, profilesResult, bindingsResult] = await providerReads;
+    if (shellRequest.current !== requestId) return unavailableResult();
+    if (agentProvidersResult.status === "fulfilled") {
+      setAgentProviders(agentProvidersResult.value);
+    } else {
+      failures.push(`Agent providers: ${errorMessage(agentProvidersResult.reason)}`);
       setAgentProviders([]);
     }
-    try {
-      nextProfiles = await projectSyncApi.listProviderProfiles();
-      if (shellRequest.current !== requestId) return unavailableResult();
+    if (profilesResult.status === "fulfilled") {
+      nextProfiles = profilesResult.value;
       setProfiles(nextProfiles);
-    } catch (reason) {
-      failures.push(`Profiles: ${errorMessage(reason)}`);
+    } else {
+      failures.push(`Profiles: ${errorMessage(profilesResult.reason)}`);
       setProfiles([]);
     }
-    try {
-      nextBindings = await projectSyncApi.listBindings();
-      if (shellRequest.current !== requestId) return unavailableResult();
+    if (bindingsResult.status === "fulfilled") {
+      nextBindings = bindingsResult.value;
       setBindings(nextBindings);
-    } catch (reason) {
-      failures.push(`Bindings: ${errorMessage(reason)}`);
+    } else {
+      failures.push(`Bindings: ${errorMessage(bindingsResult.reason)}`);
       setBindings([]);
     }
     setStartupStage("workspace");
-    await loadConversationPathAudits(nextBindings, requestId);
-    if (shellRequest.current !== requestId) return unavailableResult();
     setBackendError(failures.length > 0 ? failures.join(" · ") : null);
     let nextHostIdentity: HostIdentityStatus;
     try {
@@ -1169,6 +1179,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     };
     setHostIdentityShellReady(true);
     setLoading(false);
+    void loadConversationPathAudits(nextBindings, requestId);
     return { nextProjects, nextConfig, nextBindings, nextProfiles, hostIdentityReady: true };
   };
 
@@ -1507,6 +1518,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     // project or draft leaves it the same way it leaves storage settings.
     setCatalogScopeId(null);
     setAddingCatalogScope(false);
+    setCatalogIndexOpen(false);
     setStorageIndexOpen(false);
     setSettingsOpen(false);
     setStorageEditorRequest((current) => ({
@@ -1521,6 +1533,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     closeProjectSubview();
     setSetupDraftId(null);
     setAddingCatalogScope(false);
+    setCatalogIndexOpen(false);
     setCatalogScopeId(null);
     setStorageIndexOpen(false);
     setSettingsOpen(false);
@@ -1540,6 +1553,26 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     closeWorkspaceSettings();
     setSetupDraftId(null);
     setStorageIndexOpen(true);
+  };
+
+  const openProjectsIndex = () => {
+    setError(null);
+    closeWorkspaceSettings();
+    setSetupDraftId(null);
+    projectRequest.current += 1;
+    setLoading(false);
+    setActiveProjectId(null);
+    setDetail(null);
+    setInventory(null);
+    setReadiness(null);
+    setSiblingNotice(null);
+  };
+
+  const openCatalogIndex = () => {
+    setError(null);
+    closeWorkspaceSettings();
+    setSetupDraftId(null);
+    setCatalogIndexOpen(true);
   };
 
   const openSettings = () => {
@@ -1598,6 +1631,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setError(null);
     closeWorkspaceSettings();
     setSetupDraftId(null);
+    setCatalogIndexOpen(false);
     setAddingCatalogScope(true);
   };
 
@@ -1605,12 +1639,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setError(null);
     closeWorkspaceSettings();
     setSetupDraftId(null);
+    setCatalogIndexOpen(false);
     setCatalogScopeId(scopeId);
   };
 
   const completeAddCatalogScope = async (scope: CatalogScopeView, workflowEpoch: number) => {
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
     setAddingCatalogScope(false);
+    setCatalogIndexOpen(false);
     setCatalogScopeId(scope.scope.scope_id);
     notify(`${catalogScopeLabel(scope.scope, scope.profile)} added to the Catalog.`);
     await refreshCatalogScopes(undefined, workflowEpoch);
@@ -1635,7 +1671,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     try {
       await storageCatalogApi.deleteScope(scopeId, scope.scope.revision);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      if (catalogScopeId === scopeId) setCatalogScopeId(null);
+      if (catalogScopeId === scopeId) {
+        setCatalogScopeId(null);
+        setCatalogIndexOpen(true);
+      }
       await refreshCatalogScopes(undefined, workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       notify(`${label} removed — no provider or storage content touched.`);
@@ -3357,6 +3396,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     closeProjectSubview();
     setSetupDraftId(null);
     setAddingCatalogScope(false);
+    setCatalogIndexOpen(false);
     setCatalogScopeId(null);
     setStorageIndexOpen(false);
     setSettingsOpen(false);
@@ -3392,6 +3432,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     closeProjectSubview();
     setSetupDraftId(null);
     setAddingCatalogScope(false);
+    setCatalogIndexOpen(false);
     setCatalogScopeId(null);
     setStorageIndexOpen(false);
     setSettingsOpen(false);
@@ -3404,13 +3445,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       draft: loaded,
       requestId: (current?.requestId ?? 0) + 1,
     }));
-  };
-
-  /** The nav button lands on the first row; with no rows yet it opens Add. */
-  const openCatalogMenu = () => {
-    const first = catalogScopes[0]?.scope.scope_id ?? null;
-    if (first) openCatalogScope(first);
-    else beginAddCatalogScope();
   };
 
   const safePushSelection = pendingPush
@@ -3427,6 +3461,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       pendingPush.threadComparison,
       pendingPush.projectContentInventory,
       pushWarningAcknowledgements,
+      pushProjectContentRemovals,
     )
     : 0;
   const inlineStorageReview = pendingPush ? {
@@ -3721,11 +3756,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         catalogScopes={catalogScopes}
         activeCatalogScopeId={activeCatalogScope?.scope.scope_id ?? null}
         addingCatalogScope={addingCatalogScope}
+        catalogIndexOpen={catalogIndexOpen}
+        storageIndexOpen={storageIndexOpen}
         settingsOpen={settingsOpen}
         loading={loading}
         busy={busy || !!inlineStorageReview}
         activityOpen={activityOpen}
         unreadLogs={unreadLogs}
+        onOpenProjects={openProjectsIndex}
         onSelectProject={openProject}
         onRemoveProject={(id) => void removeProject(id)}
         onToggleActivity={() => {
@@ -3733,15 +3771,19 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           activityOpenRef.current = next;
           if (next) setUnreadLogs(0);
           setActivityOpen(next);
+          if (next) {
+            window.requestAnimationFrame(() => logDrawerRef.current?.focus());
+          }
         }}
         onAddProject={() => void beginAddProject()}
         onOpenStorage={openStorageWorkspace}
         onRemoveStorage={(storageId) => void removeStorage(storageId)}
         onAddStorage={openNewStorageConfiguration}
-        onOpenCatalogMenu={openCatalogMenu}
+        onOpenCatalogIndex={openCatalogIndex}
         onOpenCatalogScope={openCatalogScope}
         onAddCatalogScope={beginAddCatalogScope}
         onRemoveCatalogScope={(scopeId) => void removeCatalogScope(scopeId)}
+        onOpenStorageIndex={openStorageIndex}
         onOpenSettings={openSettings}
       />
 
@@ -3796,7 +3838,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             workflowEpoch={hostWorkflowEpoch.current}
             isWorkflowCurrent={(epoch) => hostWorkflowEpoch.current === epoch}
             busy={busy}
-            onClose={() => setAddingCatalogScope(false)}
+            onClose={openCatalogIndex}
             onCreated={(scope, epoch) => void completeAddCatalogScope(scope, epoch)}
           />
         ) : activeCatalogScope ? (
@@ -3818,8 +3860,17 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             notify={(message) => notify(message)}
             onScopeGone={() => {
               setCatalogScopeId(null);
+              setCatalogIndexOpen(true);
               void refreshCatalogScopes();
             }}
+          />
+        ) : catalogIndexOpen ? (
+          <CatalogIndexPage
+            scopes={catalogScopes}
+            busy={busy}
+            appActions={appActions}
+            onOpenScope={openCatalogScope}
+            onAddScope={beginAddCatalogScope}
           />
         ) : settingsOpen ? (
           <SettingsPage
@@ -3919,8 +3970,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         )}
 
         <div
+          ref={logDrawerRef}
+          id="activity-log-drawer"
           className={`log-drawer sync-log-drawer${activityOpen ? " open" : ""}`}
           style={{ height: activityOpen ? logHeight : undefined }}
+          role="region"
+          aria-label="Logs"
+          tabIndex={-1}
         >
           {activityOpen && (
             <div
@@ -3932,26 +3988,31 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
               onDoubleClick={() => setLogHeight(240)}
             />
           )}
-          <LogPanel
-            lines={logLines}
-            typeFilters={logTypeFilters}
-            levelFilter={logLevelFilter}
-            search={logSearchInput}
-            loading={logLoading}
-            loadingOlder={logLoadingOlder}
-            hasOlder={!!logCursor}
-            error={logLoadError}
-            scrollToBottomEpoch={logScrollToBottomEpoch}
-            onTypeFiltersChange={setLogTypeFilters}
-            onLevelFilterChange={setLogLevelFilter}
-            onSearchChange={setLogSearchInput}
-            onLoadOlder={() => logCursor && void loadActivityLogs(logCursor)}
-            onManage={openSettings}
-            onClose={() => {
-              activityOpenRef.current = false;
-              setActivityOpen(false);
-            }}
-          />
+          {activityOpen && (
+            <LogPanel
+              lines={logLines}
+              typeFilters={logTypeFilters}
+              levelFilter={logLevelFilter}
+              search={logSearchInput}
+              loading={logLoading}
+              loadingOlder={logLoadingOlder}
+              hasOlder={!!logCursor}
+              error={logLoadError}
+              scrollToBottomEpoch={logScrollToBottomEpoch}
+              onTypeFiltersChange={setLogTypeFilters}
+              onLevelFilterChange={setLogLevelFilter}
+              onSearchChange={setLogSearchInput}
+              onLoadOlder={() => logCursor && void loadActivityLogs(logCursor)}
+              onManage={openSettings}
+              onClose={() => {
+                activityOpenRef.current = false;
+                setActivityOpen(false);
+                window.requestAnimationFrame(() => {
+                  document.getElementById("activity-log-trigger")?.focus();
+                });
+              }}
+            />
+          )}
         </div>
       </div>
 

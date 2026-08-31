@@ -2697,8 +2697,9 @@ pub enum DraftStorageSelection {
 pub enum DraftRepositoryChoice {
     /// Publish a new remote repo under the draft's preallocated bundle ID.
     New,
-    /// Connect to an existing remote bundle.  A fingerprint mismatch between
-    /// checkout and remote must be explicitly acknowledged before finalize.
+    /// Connect to an existing remote bundle. Different or one-sided
+    /// fingerprints must be explicitly acknowledged before finalize. Two
+    /// absent fingerprints are a manually selected non-Git connection.
     Existing {
         storage_id: StorageId,
         bundle_id: BundleId,
@@ -5075,6 +5076,40 @@ pub enum RestoreActionType {
     Manual,
 }
 
+/// Pinned at plan time for a diverged project file: before the storage
+/// version is written, the local version is copied to this sibling path.
+/// The pull is never lossy — the copy is a plain new local file the next
+/// Push scan discovers like any other.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectFilePreservationPin {
+    /// Where the copy lands, in the same `project/…` form as the target.
+    pub copy_logical_path: LogicalPath,
+    /// Digest the copy must hold — the pinned local bytes.
+    pub local_content_sha256: String,
+    pub storage_content_sha256: String,
+    /// A verified copy left by an interrupted apply may be reused instead
+    /// of copying again.
+    pub reusable_witness: bool,
+}
+
+impl ProjectFilePreservationPin {
+    fn validate(&self, target: &LogicalPath) -> Result<(), String> {
+        validate_sha256("preservation local", &self.local_content_sha256)?;
+        validate_sha256("preservation storage", &self.storage_content_sha256)?;
+        if self.local_content_sha256 == self.storage_content_sha256 {
+            return Err("preservation pins identical local and storage bytes".to_string());
+        }
+        if !self.copy_logical_path.as_str().starts_with("project/") {
+            return Err("preservation copy must stay in the project scope".to_string());
+        }
+        if &self.copy_logical_path == target {
+            return Err("preservation copy path equals its target".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RestoreActionKind {
@@ -5085,6 +5120,10 @@ pub enum RestoreActionKind {
         logical_path: LogicalPath,
         mode: u32,
         source_mtime: u64,
+        /// `Some(_)` marks a diverged target: copy the local version to the
+        /// pinned sibling before writing the storage version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preserve: Option<ProjectFilePreservationPin>,
     },
     EnsureProjectDirectory {
         logical_path: LogicalPath,
@@ -5126,7 +5165,21 @@ impl RestoreActionKind {
 
     fn validate(&self) -> Result<(), String> {
         match self {
-            Self::WriteProjectFile { mode, .. } | Self::EnsureProjectDirectory { mode, .. } => {
+            Self::WriteProjectFile {
+                logical_path,
+                mode,
+                preserve,
+                ..
+            } => {
+                if mode & !0o777 != 0 {
+                    return Err("project-content mode contains unsafe bits".to_string());
+                }
+                if let Some(pin) = preserve {
+                    pin.validate(logical_path)?;
+                }
+                Ok(())
+            }
+            Self::EnsureProjectDirectory { mode, .. } => {
                 if mode & !0o777 != 0 {
                     Err("project-content mode contains unsafe bits".to_string())
                 } else {
@@ -5197,6 +5250,26 @@ impl RestoreAction {
                 "action '{}' requires explicit approval",
                 self.action_id
             ));
+        }
+        if let RestoreActionKind::WriteProjectFile {
+            preserve: Some(pin),
+            ..
+        } = &self.kind
+        {
+            // The pin restates the action's own pins; a disagreement means
+            // the plan was assembled from two different observations.
+            if self.expected_target_sha256.as_deref() != Some(pin.local_content_sha256.as_str()) {
+                return Err(format!(
+                    "action '{}' preserves bytes it does not expect on disk",
+                    self.action_id
+                ));
+            }
+            if self.source_sha256.as_deref() != Some(pin.storage_content_sha256.as_str()) {
+                return Err(format!(
+                    "action '{}' preserves against a different storage version",
+                    self.action_id
+                ));
+            }
         }
         Ok(())
     }

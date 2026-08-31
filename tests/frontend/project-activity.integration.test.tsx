@@ -7,6 +7,7 @@ import {
   activityHeaderCounts,
   BranchPicker,
   ProjectChatHistoryContent,
+  pullOperationChip,
   SessionMetrics,
   sessionDebugCopyText,
   sessionSyncPresentation,
@@ -279,6 +280,24 @@ test("the path bar hangs the branch on the section crumb and keeps one overflow"
   // as a fourth one — and a session replaces the crumb, taking the chip with it.
   assert.match(workspace, /id: "section",[\s\S]*?scope: activityHeader && activityHeader\.branches\.length > 0 \? \(\s*<BranchPicker/);
   assert.match(bar, /\{crumb\.scope\}/);
+  // A non-Git project's section crumb names the view on screen and offers the
+  // other one in its own menu — the crumb grammar every other step of this bar
+  // uses. The segmented pill this replaced sat in the leaf's position showing
+  // both faces at once while naming neither, in the form vocabulary the storage
+  // cards use rather than the bar's.
+  assert.match(workspace, /else if \(workspaceProject\.is_git_repository\) \{/);
+  assert.match(workspace, /label: workspaceSectionLabel,\s*icon: viewIcon\(activityView\),\s*tone: "section",/);
+  assert.match(workspace, /menuLabel: "Switch view",/);
+  assert.match(workspace, /menuHeader: \{\s*label: workspaceSectionLabel,/);
+  assert.match(workspace, /label: "Switch to",[\s\S]*?onSelect: \(\) => setActivityView\(otherView\),/);
+  assert.doesNotMatch(workspace, /sync-path-view-switch|activityViewSwitch/);
+  assert.match(bar, /index > 0 && <span className="sync-path-separator"[\s\S]*?>\/<\/span>/);
+  // The leaf is the page whether or not it opens a menu, so every branch that
+  // can render a leaf marks it.
+  assert.equal((bar.match(/aria-current=\{leaf \? "page" : undefined\}/g) ?? []).length, 3);
+  // The caller-owned `content` slot existed only to park that pill in the
+  // trail; with the crumb saying its own name, nothing renders through it.
+  assert.doesNotMatch(bar, /crumb\.content|sync-path-crumb-content/);
 
   // Counts ride the buttons that clear them, and stand down while that button
   // is mid-review or mid-transfer and its label is the readout.
@@ -629,6 +648,76 @@ test("fresh storage matches portable Activity rows to conversation comparisons",
 
   assert.match(reviewHtml, /aria-label="Exclude Add Git history mapping"/);
   assert.match(reviewHtml, /<input[^>]*checked=""/);
+});
+
+test("pull selection rows wear the operation chips in the files grammar", () => {
+  const chipEntry = (overrides: Record<string, unknown>) => ({
+    state: "storage_ahead",
+    compared_against_storage: true,
+    pull_decision: reviewDecision("materialize_cloud", true),
+    ...overrides,
+  }) as Parameters<typeof pullOperationChip>[0];
+  assert.equal(pullOperationChip(undefined), null);
+  assert.equal(pullOperationChip(chipEntry({})), "Update session");
+  assert.equal(
+    pullOperationChip(chipEntry({ pull_decision: reviewDecision("keep_both", true) })),
+    "Update session · keeps local copy",
+  );
+  assert.equal(
+    pullOperationChip(chipEntry({ pull_decision: reviewDecision("create_local", true) })),
+    "Add session",
+  );
+  assert.equal(
+    pullOperationChip(chipEntry({ pull_decision: reviewDecision("adopt_cloud_metadata", true) })),
+    "Mark synced",
+  );
+  assert.equal(
+    pullOperationChip(chipEntry({ pull_decision: reviewDecision("report_local_only") })),
+    null,
+    "rows the pull would not touch carry no chip",
+  );
+  assert.equal(
+    pullOperationChip(chipEntry({ compared_against_storage: false, state: "storage_only" })),
+    "Add session",
+  );
+  assert.equal(
+    pullOperationChip(chipEntry({ compared_against_storage: false, state: "diverged" })),
+    "Update session · keeps local copy",
+  );
+
+  const comparison = emptyComparison({
+    counts: { synced: 0, local: 0, storage: 0, diverged: 1, unavailable: 0, unknown: 0 },
+    entries: [{
+      provider: "codex",
+      provider_display_name: "Codex",
+      access: "bound_ready",
+      thread_id: CODEX_SESSION_ID,
+      conversation_resource_id: codexResourceId,
+      resource_id: codexResourceId,
+      display_name: codexSession.title,
+      state: "diverged",
+      local_present: true,
+      storage_present: true,
+      cloud_thread_id: CODEX_SESSION_ID,
+      compared_against_storage: true,
+      provider_thread_id: CODEX_SESSION_ID,
+      push_decision: reviewDecision("require_pull"),
+      pull_decision: reviewDecision("keep_both", true),
+    }],
+  });
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{ ...activity, git: null }}
+      comparison={comparison}
+      activeStorageName="Local storage 1"
+      selectionMode="pull"
+      selectedResourceIds={new Set([codexResourceId])}
+      selectableResourceIds={new Set([codexResourceId])}
+      onToggleResource={() => undefined}
+    />,
+  );
+  assert.match(html, />Update session · keeps local copy</);
 });
 
 test("an unlinked project still draws a badge on every row", () => {
@@ -1161,6 +1250,10 @@ test("session actions stay compact and trail the readouts", () => {
   // left stranded beside the wrong session. Capture, or an inner scroll misses.
   assert.match(placementSource, /window\.addEventListener\("scroll", dismiss, true\)/);
   assert.match(placementSource, /window\.addEventListener\("resize", dismiss\)/);
+  assert.match(
+    placementSource,
+    /panelRef\.current\s*\?\.querySelector<HTMLElement>\("button:not\(\[disabled\]\)"\)\s*\?\.focus\(\)/,
+  );
   // Portalled, so "outside the menu" has to mean outside the panel too, or the
   // first click on a Copy button dismisses the thing being clicked.
   const topLayer = readFileSync("src/components/sync-review/TopLayer.tsx", "utf8");
@@ -1169,6 +1262,7 @@ test("session actions stay compact and trail the readouts", () => {
   // placement — the catalog's copy had no placement logic at all.
   for (const page of [
     "src/components/project-sync/ProjectActivityPage.tsx",
+    "src/components/project-sync/ProjectFileDetailsMenu.tsx",
     "src/components/storage-catalog/StorageCatalogPage.tsx",
   ]) {
     const source = readFileSync(page, "utf8");
@@ -1897,6 +1991,50 @@ test("view-only rows keep their badge and copy but never a checkbox", () => {
   assert.doesNotMatch(html, /sync-history-session-title-button|aria-label="View session details"/);
 });
 
+test("stored-only sessions lead the non-git flat list under an Only-in-storage heading", () => {
+  // The Catalog page's partition grammar, applied to the flat Sessions face:
+  // stored-only rows lift into a plain "Only in <storage>" section — no
+  // frame, no fold, no count, unlike the git face's framed group — and the
+  // local half is headed "Sessions" only while the partition exists.
+  const storedOnly = {
+    ...codexSession,
+    resource_id: "codex:conversation:stored-only-1",
+    provider_session_id: null,
+    logical_thread_id: "stored-only-1",
+    transcript_path: null,
+    source: "remote_only" as const,
+    title: "Stored-only session",
+    working_directory: null,
+    actions: [],
+  };
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{ ...activity, git: null, sessions: [storedOnly, codexSession] }}
+      activeStorageName="Local storage 1"
+    />,
+  );
+  const cloudHeading = html.indexOf('sync-history-storage-name">Local storage 1');
+  const storedTitle = html.indexOf("Stored-only session");
+  const localHeading = html.indexOf("Sessions</h2>");
+  const localTitle = html.indexOf("Add Git history mapping");
+  assert.ok(cloudHeading >= 0, "the partition is named after the storage");
+  assert.ok(storedTitle > cloudHeading, "stored-only sessions render inside the partition");
+  assert.ok(localHeading > storedTitle, "the local half is headed while the partition exists");
+  assert.ok(localTitle > localHeading, "local sessions follow their heading");
+  assert.doesNotMatch(html, /sync-history-storage-only|sync-history-spine-fold|sync-history-heading-count/);
+
+  // Alone, the leaf crumb already names the page: no partition, no headings.
+  const plain = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{ ...activity, git: null, sessions: [codexSession] }}
+      activeStorageName="Local storage 1"
+    />,
+  );
+  assert.doesNotMatch(plain, /sync-history-section-heading|Sessions<\/h2>/);
+});
+
 test("session actions render from backend descriptors with disabled reasons", () => {
   const heldSession = {
     ...codexSession,
@@ -1975,18 +2113,27 @@ test("provider comparison failures render isolated warnings", () => {
 });
 
 test("a project without a bound provider profile stays in the workspace", () => {
+  let choseProfile = false;
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
       binding={null}
       activity={null}
       actionError="Provider profile path changed."
+      onChooseAgentProfile={() => { choseProfile = true; }}
     />,
   );
   assert.match(html, /role="alert"/);
   assert.match(html, /No agent profile is connected\./);
+  assert.match(html, /Choose an Agent profile to load this project’s sessions\./);
+  assert.match(html, /<button[^>]*>Choose Agent profile<\/button>/);
   assert.doesNotMatch(html, /No Codex profile is connected/);
+  assert.doesNotMatch(html, /Remove and add the project again/);
   assert.doesNotMatch(html, /Open Project Settings|Project settings/);
+  assert.equal(choseProfile, false, "server rendering must not run the action");
+
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /onChooseAgentProfile=\{\(\) => \{\s*void onConfigureBinding\(activeProject\.local_project_id\);/);
 });
 
 test("completed projects use their main row for history and only mark Git repositories", () => {
@@ -2021,11 +2168,14 @@ test("completed projects use their main row for history and only mark Git reposi
       catalogScopes={[]}
       activeCatalogScopeId={null}
       addingCatalogScope={false}
+      catalogIndexOpen={false}
+      storageIndexOpen={false}
       settingsOpen={false}
       loading={false}
       busy={false}
       activityOpen={false}
       unreadLogs={0}
+      onOpenProjects={() => undefined}
       onSelectProject={() => undefined}
       onRemoveProject={() => undefined}
       onSelectDraft={() => undefined}
@@ -2036,10 +2186,11 @@ test("completed projects use their main row for history and only mark Git reposi
       onOpenStorage={() => undefined}
       onRemoveStorage={() => undefined}
       onAddStorage={() => undefined}
-      onOpenCatalogMenu={() => undefined}
+      onOpenCatalogIndex={() => undefined}
       onOpenCatalogScope={() => undefined}
       onAddCatalogScope={() => undefined}
       onRemoveCatalogScope={() => undefined}
+      onOpenStorageIndex={() => undefined}
     />,
   );
   // The brand row and the product footer are the same mark now, so it appears
@@ -2124,11 +2275,14 @@ test("the project menu accepts multiple bound provider profiles", () => {
       catalogScopes={[]}
       activeCatalogScopeId={null}
       addingCatalogScope={false}
+      catalogIndexOpen={false}
+      storageIndexOpen={false}
       settingsOpen={false}
       loading={false}
       busy={false}
       activityOpen={false}
       unreadLogs={0}
+      onOpenProjects={() => undefined}
       onSelectProject={() => undefined}
       onRemoveProject={() => undefined}
       onSelectDraft={() => undefined}
@@ -2139,10 +2293,11 @@ test("the project menu accepts multiple bound provider profiles", () => {
       onOpenStorage={() => undefined}
       onRemoveStorage={() => undefined}
       onAddStorage={() => undefined}
-      onOpenCatalogMenu={() => undefined}
+      onOpenCatalogIndex={() => undefined}
       onOpenCatalogScope={() => undefined}
       onAddCatalogScope={() => undefined}
       onRemoveCatalogScope={() => undefined}
+      onOpenStorageIndex={() => undefined}
     />,
   );
 
@@ -2172,10 +2327,13 @@ const sidebarChrome = {
   activeCatalogScopeId: null,
   addingCatalogScope: false,
   settingsOpen: false,
+  catalogIndexOpen: false,
+  storageIndexOpen: false,
   loading: false,
   busy: false,
   activityOpen: false,
   unreadLogs: 0,
+  onOpenProjects: () => undefined,
   onSelectProject: () => undefined,
   onRemoveProject: () => undefined,
   onSelectDraft: () => undefined,
@@ -2186,10 +2344,11 @@ const sidebarChrome = {
   onOpenStorage: () => undefined,
   onRemoveStorage: () => undefined,
   onAddStorage: () => undefined,
-  onOpenCatalogMenu: () => undefined,
+  onOpenCatalogIndex: () => undefined,
   onOpenCatalogScope: () => undefined,
   onAddCatalogScope: () => undefined,
   onRemoveCatalogScope: () => undefined,
+  onOpenStorageIndex: () => undefined,
 } satisfies Partial<ComponentProps<typeof ProjectSidebar>>;
 
 test("every section heading is a disclosure and a fresh render opens all three", () => {
@@ -2356,11 +2515,14 @@ test("the Catalog pane starts empty and lists one row per added scope", () => {
         catalogScopes={scopes}
         activeCatalogScopeId={activeScopeId}
         addingCatalogScope={false}
+        catalogIndexOpen={false}
+        storageIndexOpen={false}
         settingsOpen={false}
         loading={false}
         busy={false}
         activityOpen={false}
         unreadLogs={0}
+        onOpenProjects={() => undefined}
         onSelectProject={() => undefined}
         onRemoveProject={() => undefined}
         onSelectDraft={() => undefined}
@@ -2371,10 +2533,11 @@ test("the Catalog pane starts empty and lists one row per added scope", () => {
         onOpenStorage={() => undefined}
         onRemoveStorage={() => undefined}
         onAddStorage={() => undefined}
-        onOpenCatalogMenu={() => undefined}
+        onOpenCatalogIndex={() => undefined}
         onOpenCatalogScope={() => undefined}
         onAddCatalogScope={() => undefined}
         onRemoveCatalogScope={() => undefined}
+        onOpenStorageIndex={() => undefined}
       />,
     );
   const catalogPane = (html: string) => {
@@ -2424,11 +2587,14 @@ test("an empty Storages pane prompts the way Projects and Catalog do", () => {
         catalogScopes={[]}
         activeCatalogScopeId={null}
         addingCatalogScope={false}
+        catalogIndexOpen={false}
+        storageIndexOpen={false}
         settingsOpen={false}
         loading={false}
         busy={false}
         activityOpen={false}
         unreadLogs={0}
+        onOpenProjects={() => undefined}
         onSelectProject={() => undefined}
         onRemoveProject={() => undefined}
         onSelectDraft={() => undefined}
@@ -2439,10 +2605,11 @@ test("an empty Storages pane prompts the way Projects and Catalog do", () => {
         onOpenStorage={() => undefined}
         onRemoveStorage={() => undefined}
         onAddStorage={() => undefined}
-        onOpenCatalogMenu={() => undefined}
+        onOpenCatalogIndex={() => undefined}
         onOpenCatalogScope={() => undefined}
         onAddCatalogScope={() => undefined}
         onRemoveCatalogScope={() => undefined}
+        onOpenStorageIndex={() => undefined}
       />,
     );
 
@@ -2501,11 +2668,14 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
       catalogScopes={[]}
       activeCatalogScopeId={null}
       addingCatalogScope={false}
+      catalogIndexOpen={false}
+      storageIndexOpen={false}
       settingsOpen={false}
       loading={false}
       busy
       activityOpen={false}
       unreadLogs={0}
+      onOpenProjects={() => undefined}
       onSelectProject={() => undefined}
       onRemoveProject={() => undefined}
       onSelectDraft={() => undefined}
@@ -2516,10 +2686,11 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
       onOpenStorage={() => undefined}
       onRemoveStorage={() => undefined}
       onAddStorage={() => undefined}
-      onOpenCatalogMenu={() => undefined}
+      onOpenCatalogIndex={() => undefined}
       onOpenCatalogScope={() => undefined}
       onAddCatalogScope={() => undefined}
       onRemoveCatalogScope={() => undefined}
+      onOpenStorageIndex={() => undefined}
     />,
   );
 
@@ -2635,7 +2806,10 @@ test("an empty rail is still the rail, and says which of three things happened",
   assert.doesNotMatch(emptyWindow, /No commits are available in this 30-day window/);
   assert.match(emptyWindow, /class="sync-history-commit sync-history-commit-gap"/);
   assert.match(emptyWindow, /<strong>No commits<\/strong>/);
-  assert.match(emptyWindow, /data-icon="clock"/);
+  // This is the one empty rail paging could still fill, so its mark says span,
+  // not absence: `clock` said time, and was the heaviest stroke on the row.
+  assert.match(emptyWindow, /data-icon="range"/);
+  assert.doesNotMatch(emptyWindow, /data-icon="clock"/);
   // The gap sits on the rail, so the terminus below still has a spine to end.
   assert.ok(emptyWindow.indexOf("sync-history-commit-gap") > emptyWindow.indexOf("sync-history-commit-rail"));
   assert.match(emptyWindow, /sync-history-rail-step/);

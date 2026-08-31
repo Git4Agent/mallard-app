@@ -2618,21 +2618,11 @@ fn build_project_files_inventory(
             .ok_or_else(|| {
                 "project-files discovery is missing for an eligible binding".to_string()
             })?
-            .project_inventory();
+            .project_content_inventory();
         ignored_count = discovered.ignored_count;
         blocked_count = discovered.blocked_count;
         warnings.extend(discovered.warnings.clone());
-        let candidates = discovered
-            .resources
-            .into_iter()
-            .filter(|candidate| {
-                matches!(
-                    candidate.kind,
-                    CaptureResourceKind::ProjectContentFile
-                        | CaptureResourceKind::ProjectContentDirectory
-                )
-            })
-            .collect::<Vec<_>>();
+        let candidates = discovered.resources;
         let local_inventory = inventory_from_candidates(
             binding.project_root.clone(),
             Some(project.bundle_id.clone()),
@@ -2959,6 +2949,45 @@ fn project_content_ancestor_paths(relative_path: &str) -> Vec<String> {
     let components = relative_path.split('/').collect::<Vec<_>>();
     (1..components.len())
         .map(|end| components[..end].join("/"))
+        .collect()
+}
+
+/// Raw content digests per project-content logical path in the reviewed
+/// base manifest — what the restore planner compares a diverged file's disk
+/// bytes against. Never mode-composited: a mode-only change must not force
+/// a preservation copy. An absent or unreadable base returns empty, which
+/// the planner treats as "preserve" (fail closed — never silently lose
+/// local bytes the app cannot prove are stored).
+fn project_content_base_content_digests(
+    engine: &StorageEngine,
+    bundle_id: &BundleId,
+    link: &ProjectStorageLink,
+) -> BTreeMap<mallard_domain::LogicalPath, String> {
+    let Some(base) = link.scope_bases.get(&SyncScopeKey::Project) else {
+        return BTreeMap::new();
+    };
+    let Ok(manifest) = engine.inspect_manifest_version(
+        bundle_id,
+        base.reviewed_in.revision,
+        &base.reviewed_in.commit_id,
+        base.reviewed_in.manifest_size,
+        &base.reviewed_in.manifest_sha256,
+    ) else {
+        return BTreeMap::new();
+    };
+    let Some(scope) = manifest.scope(&SyncScopeKey::Project) else {
+        return BTreeMap::new();
+    };
+    scope
+        .files
+        .iter()
+        .filter(|(_, entry)| {
+            scope
+                .resources
+                .get(&entry.resource_id)
+                .is_some_and(|descriptor| descriptor.kind == ResourceKind::ProjectContentFile)
+        })
+        .map(|(logical_path, entry)| (logical_path.clone(), entry.sha256.clone()))
         .collect()
 }
 
@@ -9778,11 +9807,16 @@ pub(super) fn plan_bundle_restore_with_progress(
     if identity.host_id != binding.host_id {
         return Err("host identity changed while preparing the Pull review".to_string());
     }
+    // Reviewed-base content digests decide which diverged project files must
+    // preserve their local bytes as a visible copy. An unavailable base
+    // yields an empty map, which fails closed to preservation.
+    let project_content_bases = project_content_base_content_digests(&engine, bundle_id, &link);
     let mut plan = engine.build_restore_plan_from_snapshot(
         provider_registry(),
         &snapshot,
         &binding,
         &resolved.homes,
+        &project_content_bases,
         now_secs(),
         identity.revision,
     )?;
@@ -13845,8 +13879,11 @@ fn resolve_draft_storage(
     }
 }
 
-fn verified_repository_identity(remote: &Option<String>, local: Option<&String>) -> bool {
-    local.is_some_and(|local| remote.as_deref() == Some(local.as_str()))
+fn repository_fingerprints_require_acknowledgement(
+    remote: Option<&str>,
+    local: Option<&str>,
+) -> bool {
+    remote != local
 }
 
 pub(super) fn inspect_setup_draft_with_repository(
@@ -13971,9 +14008,9 @@ pub(super) fn inspect_setup_draft_with_repository(
                             .to_string(),
                     ),
                 }
-            } else if !verified_repository_identity(
-                remote_fingerprint,
-                local_repository_fingerprint.as_ref(),
+            } else if repository_fingerprints_require_acknowledgement(
+                remote_fingerprint.as_deref(),
+                local_repository_fingerprint.as_deref(),
             ) && !mismatch_acknowledged
             {
                 SetupSectionStatus {
@@ -14065,9 +14102,9 @@ fn build_setup_transaction(
             let snapshot = engine.inspect(bundle_id)?;
             let machine_local_recipe = machine_local_recipe_from_manifest(&snapshot.manifest)?;
             let summary = bundle_snapshot_summary_from_snapshot(snapshot)?;
-            if !verified_repository_identity(
-                &summary.repository_fingerprint,
-                local_fingerprint.as_ref(),
+            if repository_fingerprints_require_acknowledgement(
+                summary.repository_fingerprint.as_deref(),
+                local_fingerprint.as_deref(),
             ) && !mismatch_acknowledged
             {
                 return Err(
@@ -18201,6 +18238,162 @@ mod tests {
             published.message,
             format!("Published revision {}", published.revision.unwrap())
         );
+    }
+
+    #[test]
+    fn diverged_pull_preserves_the_local_project_file_as_a_visible_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("preserve-copy-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+
+        // Machine A publishes the reviewed base: a draft and a bystander.
+        let source = register(&repo);
+        let source_root = temp.path().join("machine-a/project");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::write(source_root.join("draft.md"), b"reviewed v1\n").unwrap();
+        std::fs::write(source_root.join("stable.md"), b"steady\n").unwrap();
+        bind_and_link_test_replica(
+            &repo,
+            &source,
+            &storage_id,
+            &source_root,
+            &temp.path().join("machine-a/codex"),
+        );
+        let scanned =
+            inspect_project_files_with_repository(&repo, &source.local_project_id, &storage_id)
+                .unwrap();
+        let pushed = push_bundle_reviewed_with_repository(
+            &repo,
+            &source.local_project_id,
+            &storage_id,
+            reviewed_project_content_recipe(&scanned),
+            ProjectContentPushReview {
+                review_token: scanned.review_token.clone(),
+                removal_ids: BTreeSet::new(),
+                acknowledged_warning_digests: BTreeSet::new(),
+            },
+            None,
+            Vec::new(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(pushed.success, "{}", pushed.message);
+
+        // Machine B pulls the base, then edits the draft locally.
+        let target = register(&repo);
+        let target_root = temp.path().join("machine-b/project");
+        let target_binding = bind_and_link_test_replica(
+            &repo,
+            &target,
+            &storage_id,
+            &target_root,
+            &temp.path().join("machine-b/codex"),
+        );
+        let first = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &target.bundle_id, &target_binding)
+            .unwrap();
+        let applied = ProjectSyncService::new(&repo)
+            .apply_bundle_restore(
+                &first.plan_id,
+                first
+                    .actions
+                    .iter()
+                    .map(|action| action.action_id.clone())
+                    .collect(),
+            )
+            .unwrap();
+        assert!(applied.success, "{}", applied.message);
+        assert_eq!(
+            std::fs::read(target_root.join("draft.md")).unwrap(),
+            b"reviewed v1\n"
+        );
+        std::fs::write(target_root.join("draft.md"), b"local twist\n").unwrap();
+
+        // Machine A moves the storage side past the base.
+        std::fs::write(source_root.join("draft.md"), b"storage v2\n").unwrap();
+        let rescanned =
+            inspect_project_files_with_repository(&repo, &source.local_project_id, &storage_id)
+                .unwrap();
+        let repushed = push_bundle_reviewed_with_repository(
+            &repo,
+            &source.local_project_id,
+            &storage_id,
+            reviewed_project_content_recipe(&rescanned),
+            ProjectContentPushReview {
+                review_token: rescanned.review_token.clone(),
+                removal_ids: BTreeSet::new(),
+                acknowledged_warning_digests: BTreeSet::new(),
+            },
+            None,
+            Vec::new(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(repushed.success, "{}", repushed.message);
+
+        // B's next Pull plans the diverged draft with a preservation pin and
+        // the untouched bystander without one — the base tells them apart.
+        let second = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &target.bundle_id, &target_binding)
+            .unwrap();
+        let pin_for = |name: &str| {
+            second.actions.iter().find_map(|action| match &action.kind {
+                RestoreActionKind::WriteProjectFile {
+                    logical_path,
+                    preserve,
+                    ..
+                } if logical_path.as_str() == name => Some(preserve.clone()),
+                _ => None,
+            })
+        };
+        let draft_pin = pin_for("project/draft.md")
+            .expect("draft write action")
+            .expect("diverged draft must preserve");
+        assert_eq!(
+            draft_pin.copy_logical_path.as_str(),
+            "project/draft-local-copy.md"
+        );
+        if let Some(stable_pin) = pin_for("project/stable.md") {
+            assert!(stable_pin.is_none(), "fast-forward must not preserve");
+        }
+        let applied = ProjectSyncService::new(&repo)
+            .apply_bundle_restore(
+                &second.plan_id,
+                second
+                    .actions
+                    .iter()
+                    .map(|action| action.action_id.clone())
+                    .collect(),
+            )
+            .unwrap();
+        assert!(applied.success, "{}", applied.message);
+        assert_eq!(
+            std::fs::read(target_root.join("draft.md")).unwrap(),
+            b"storage v2\n"
+        );
+        assert_eq!(
+            std::fs::read(target_root.join("draft-local-copy.md")).unwrap(),
+            b"local twist\n"
+        );
+
+        // The copy is ordinary local content: B's next scan offers to push it.
+        let target_scan =
+            inspect_project_files_with_repository(&repo, &target.local_project_id, &storage_id)
+                .unwrap();
+        let copy_entry = target_scan
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == "draft-local-copy.md")
+            .expect("copy appears in the next scan");
+        assert_eq!(copy_entry.state, "local_only");
+        assert!(copy_entry.selected_after_scan);
+        let draft_entry = target_scan
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == "draft.md")
+            .unwrap();
+        assert_eq!(draft_entry.state, "synced");
     }
 
     #[test]
@@ -26204,9 +26397,12 @@ mod tests {
             bundle_id: bundle_id.clone(),
             display_name: first.project.display_name.clone(),
             repository_fingerprint: first.project.repository_fingerprint.clone(),
-            mismatch_acknowledged: true,
+            mismatch_acknowledged: false,
         };
         let reregister = update_setup_draft_with_repository(&fixture.repo, reregister).unwrap();
+        let inspection =
+            inspect_setup_draft_with_repository(&fixture.repo, &reregister.draft_id).unwrap();
+        assert!(inspection.can_finalize);
         let second = finalize_project_setup_with_repository(
             &fixture.repo,
             &reregister.draft_id,
@@ -27457,6 +27653,30 @@ mod tests {
             fingerprint,
             repository_url_fingerprint("https://github.com/Owner/different-repository")
         );
-        assert!(!verified_repository_identity(&None, Some(&fingerprint)));
+        assert!(repository_fingerprints_require_acknowledgement(
+            None,
+            Some(&fingerprint)
+        ));
+    }
+
+    #[test]
+    fn repository_acknowledgement_distinguishes_absent_and_conflicting_fingerprints() {
+        assert!(!repository_fingerprints_require_acknowledgement(None, None));
+        assert!(!repository_fingerprints_require_acknowledgement(
+            Some("canonical"),
+            Some("canonical")
+        ));
+        assert!(repository_fingerprints_require_acknowledgement(
+            Some("different"),
+            Some("canonical")
+        ));
+        assert!(repository_fingerprints_require_acknowledgement(
+            None,
+            Some("canonical")
+        ));
+        assert!(repository_fingerprints_require_acknowledgement(
+            Some("canonical"),
+            None
+        ));
     }
 }

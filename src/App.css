@@ -2308,6 +2308,10 @@ summary:focus-visible {
   background: var(--surface-row);
 }
 
+/* Non-Git session cards have no timeline rail, so their storage result starts
+   at the content edge instead of after the rail gutter. */
+.project-storage-card-non-git { margin-left: 0; }
+
 /* The bar matches the Uncommitted heading; only the layout differs, because
    this one can carry a repair notice mid-bar and an actions cluster at the
    end, and space-between would strand the notice in the middle. */
@@ -2935,16 +2939,10 @@ span.sync-path-crumb {
 }
 
 /* Below this the row cannot hold three names, two verbs and the branch at once.
-   The verbs give up their words first: an upload arrow with a 3 on it is still
-   unmistakably Push, and the 3 is the part you cannot infer from the icon. The
-   floor that has to survive is 580px — an 800px minimum window less the 220px
-   minimum sidebar — and everything below is dead space the window cannot reach.
-   The full label stays in each button's aria-label at every width. */
+   Keep the data-moving verbs visible. Reduce secondary path and branch detail
+   first. The floor is 580px: an 800px minimum window less the 220px minimum
+   sidebar. */
 @container sync-pathbar (max-width: 760px) {
-  .sync-path-sync-label {
-    display: none;
-  }
-
   .sync-path-sync {
     padding: 0 8px;
   }
@@ -2968,7 +2966,12 @@ span.sync-path-crumb {
   }
 
   .sync-pathbar .sync-history-branch-trigger {
-    max-width: 128px;
+    max-width: 44px;
+  }
+
+  .sync-pathbar .sync-history-branch-name,
+  .sync-pathbar .sync-history-branch-state {
+    display: none;
   }
 }
 
@@ -2986,10 +2989,8 @@ span.sync-path-crumb {
     max-width: 6ch;
   }
 
-  /* Down to a few characters and the ellipsis. The whole name stays in the
-     pill's tooltip and in its aria-label, and one row below in its menu. */
   .sync-pathbar .sync-history-branch-trigger {
-    max-width: 80px;
+    max-width: 44px;
   }
 }
 
@@ -5839,7 +5840,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 8px 10px 8px 12px;
 }
 .sync-outcome-head > svg:first-child { flex: 0 0 auto; }
 .sync-outcome-notice.success > .sync-outcome-head > svg:first-child { color: var(--green); }
@@ -6005,6 +6006,56 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 
 /* Footers are buttons only; the actions pin to the right edge. */
 .sync-inline-action-footer.sync-sync-review-footer { justify-content: flex-end; }
+
+.sync-project-file-commit-impact {
+  min-width: 0;
+  margin-right: auto;
+  display: flex;
+  flex: 1 1 360px;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-2);
+  font-size: var(--type-2xs);
+}
+
+.sync-project-file-impact-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 9px;
+}
+
+.sync-project-file-impact-counts > span {
+  white-space: nowrap;
+}
+
+.sync-project-file-impact-counts strong {
+  margin-right: 3px;
+  color: var(--text-0);
+  font-size: inherit;
+}
+
+.sync-project-file-deletion-ack {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--danger-text);
+  cursor: pointer;
+}
+
+.sync-project-file-deletion-ack > span:last-child {
+  min-width: 0;
+}
+
+@container sync-review-layout (max-width: 720px) {
+  .sync-sync-review-footer:has(.sync-project-file-commit-impact) {
+    flex-wrap: wrap;
+  }
+
+  .sync-project-file-commit-impact {
+    flex-basis: 100%;
+  }
+}
 /* Lineage numbers for support: kept out of the leading sentence and set a step
    down, so a screenshot still carries them without the banner leading on them. */
 .sync-sync-review-pull-detail {
@@ -6117,65 +6168,13 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   padding: 14px 16px 22px;
 }
 
-.sync-project-files-unscanned {
-  gap: 10px;
-  padding-top: 18px;
-}
-
-.sync-project-files-empty {
-  align-items: center;
-}
-
-.sync-project-files-toolbar,
-.sync-project-files-search,
-.sync-project-file-row-main,
-.sync-project-files-counts {
+.sync-project-files-search {
   display: flex;
   align-items: center;
 }
 
-.sync-project-files-empty {
-  width: 100%;
-  min-height: 52px;
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) auto;
-  gap: 10px;
-  padding: 4px 0;
-}
-
-.sync-project-files-empty-icon {
-  width: 32px;
-  height: 32px;
-  display: grid;
-  flex: 0 0 32px;
-  place-items: center;
-  border-radius: 8px;
-  color: var(--text-2);
-  background: var(--surface-subtle);
-}
-
-.sync-project-files-empty-copy {
-  min-width: 0;
-  flex: 1;
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.sync-project-files-empty-copy small { white-space: nowrap; }
-.sync-project-files-empty > .btn { min-height: 32px; padding: 0 11px; }
-
-.sync-project-files-page h3,
-.sync-project-files-page p { margin: 0; }
-.sync-project-files-page h3 { color: var(--text-0); font-size: var(--type-lg); }
-.sync-project-files-page p { margin-top: 2px; color: var(--text-2); font-size: var(--type-xs); }
+.sync-project-files-page p { margin: 2px 0 0; color: var(--text-2); font-size: var(--type-xs); }
 .sync-project-files-page small { color: var(--text-3); font-size: var(--type-2xs); }
-
-.sync-project-files-toolbar { justify-content: space-between; gap: 12px; }
-.sync-project-files-toolbar > .btn { margin-left: auto; }
-.sync-project-files-toolbar > .btn + .btn { margin-left: 0; }
-.sync-project-files-heading { display: flex; align-items: center; gap: 6px; }
-.sync-project-files-note { display: grid; place-items: center; color: var(--text-3); }
 
 .sync-project-files-page > .sync-pull-empty {
   min-height: 0;
@@ -6202,112 +6201,33 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-project-files-search input:focus { border-color: var(--text-2); }
 .sync-project-files-search > span { color: var(--text-3); font-size: var(--type-2xs); white-space: nowrap; }
 
-.sync-project-file-tree {
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-1);
-}
-
-.sync-project-file-row + .sync-project-file-row { border-top: 1px solid var(--border); }
-.sync-project-file-row.removal { background: color-mix(in srgb, var(--red) 7%, transparent); }
-.sync-project-file-row.blocked { opacity: .72; }
-
-.sync-project-file-row-main {
-  min-height: 42px;
-  gap: 8px;
-  padding: 5px 8px 5px calc(8px + var(--project-file-indent));
-}
-
-.sync-project-file-row-main > input,
-.sync-project-file-ack > input {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 14px;
-  accent-color: var(--text-0);
-}
-
-.sync-project-file-expand {
-  width: 18px;
-  height: 24px;
-  display: grid;
-  flex: 0 0 18px;
-  padding: 0;
-  place-items: center;
-  border: 0;
-  color: var(--text-3);
-  background: transparent;
-}
-
-button.sync-project-file-expand { cursor: pointer; }
-.sync-project-file-name {
-  min-width: 0;
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  align-items: flex-start;
-  padding: 0;
-  border: 0;
-  color: inherit;
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-}
-
-.sync-project-file-name strong {
-  max-width: 100%;
-  overflow: hidden;
-  color: var(--text-0);
-  font-size: var(--type-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sync-project-file-size {
-  color: var(--text-3);
-  font-size: var(--type-2xs);
-  white-space: nowrap;
-}
-
 .sync-project-file-warning {
   font-size: var(--type-2xs);
   white-space: nowrap;
 }
 
 .sync-project-file-warning { display: inline-flex; align-items: center; gap: 4px; color: var(--warning-text); }
-.sync-project-file-remove { min-height: 26px; padding: 0 7px; font-size: var(--type-3xs); }
-.sync-project-file-remove.active { color: var(--danger-text); }
 
-.sync-project-file-details {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 5px 10px;
-  padding: 8px 12px 10px calc(64px + var(--project-file-indent));
-  border-top: 1px dashed var(--border);
-  color: var(--text-3);
-  font-size: var(--type-2xs);
-}
+/* A card marked for removal wears the same red wash the old row wore, mixed
+   into its own surface so the border and radius stay the card's. */
+.catalog-card.removal { background: color-mix(in srgb, var(--red) 7%, var(--surface-row)); }
 
-.sync-project-file-details code { overflow-wrap: anywhere; color: var(--text-1); }
-.sync-project-file-ack,
 .sync-project-file-conflict {
   min-height: 34px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 12px 5px calc(64px + var(--project-file-indent));
+  padding: 5px 12px 5px 40px;
   border-top: 1px dashed var(--border);
   color: var(--text-2);
   font-size: var(--type-2xs);
 }
 
-/* The blocked row's marker is a notice, but it is a strip inside a row rather
-   than a box on a page: it keeps the dashed divider and the row's indent and
-   drops the frame, the corners, the fill and the trailing margin. Compounded
-   so it outranks `.notice.warning`, which would otherwise paint a rounded
-   amber capsule with a dashed top edge crossing three solid ones. It stays a
-   strip beside `.sync-project-file-ack`, which shares this rule and is still a
-   plain label. */
+/* The blocked row's marker is a notice, but it is a strip inside a card
+   rather than a box on a page: it keeps the dashed divider and the card's
+   inset and drops the frame, the corners, the fill and the trailing margin.
+   Compounded so it outranks `.notice.warning`, which would otherwise paint a
+   rounded amber capsule with a dashed top edge crossing three solid ones. */
 .notice.sync-project-file-conflict {
   margin: 0;
   border: 0;
@@ -6325,14 +6245,50 @@ button.sync-project-file-expand { cursor: pointer; }
 .sync-project-files-scan-summary summary { cursor: pointer; }
 .sync-project-files-scan-summary p { margin: 5px 0 0 16px; font-size: var(--type-2xs); }
 
-.sync-project-files-counts {
-  justify-content: space-between;
-  gap: 10px;
+/* The Files activity list's directory band: one per folder that directly
+   holds files, labelled with the full relative path so nesting needs no
+   indentation. */
+.sync-project-files-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  /* The band parts two card lists, so it needs air on both sides: the
+     page's 12px block gap alone left it riding the cards' borders. */
+  margin: 10px 2px 8px;
+  padding: 0 6px;
   color: var(--text-1);
-  font-size: var(--type-2xs);
+}
+/* The band's selection control sits in the rows' own checkbox column, to the
+   pixel; the counter chip closes the line at the card edge. */
+.sync-project-files-group-heading > .sync-sync-row-choice {
+  flex: 0 0 auto;
+  margin-left: 5px;
 }
 
-.sync-project-files-counts small { margin-left: auto; }
+.sync-project-files-group-heading > .sync-sync-review-selected {
+  margin-left: auto;
+}
+
+.sync-project-files-group-heading > svg { flex: 0 0 auto; color: var(--text-3); }
+.sync-project-files-group-heading > strong {
+  color: var(--text-0);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-semibold);
+}
+.sync-project-files-group-heading > small { color: var(--text-3); font-size: var(--type-2xs); }
+
+/* The storage side this Mac does not hold leads the list under the same
+   section heading the catalog and sessions pages use. This page spaces its
+   children with its own 12px flex gap, so the shared heading sheds its stack
+   margins here and takes the bands' 2+6px inset; the sums land where the
+   catalog page lands — 18px above a heading, 6px from heading to a bare card
+   list. */
+.sync-project-files-page > .sync-history-section-heading {
+  margin: 6px 2px -6px;
+  padding: 0 6px;
+}
+
 .sync-history-older-group {
   border: 1px solid var(--border);
   overflow: hidden;
@@ -7829,7 +7785,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --text-0: #f6f1e6;
   --text-1: #d8d2c5;
   --text-2: #a59d8f;
-  --text-3: #756e62;
+  --text-3: var(--text-2);
   --accent: #efe7d4;
   --accent-glow: rgba(239, 231, 212, 0.15);
   --primary: #efe7d4;
@@ -7944,7 +7900,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --text-0: #1e1817;
   --text-1: #3d332e;
   --text-2: #6f6159;
-  --text-3: #96877d;
+  --text-3: var(--text-2);
   --accent: #2a211d;
   --accent-glow: rgba(82, 58, 43, 0.12);
   --primary: #2a211d;
@@ -8359,6 +8315,21 @@ summary {
 .sync-sync-row-choice input:checked::before,
 .sync-sync-review-workspace .sync-resource-select input:checked::before,
 .sync-sync-review-workspace .sync-pull-item-select input:checked::before {
+  background: var(--text-0);
+}
+
+/* A folder checkbox mid-selection: the dash, in the tick's own ink — same
+   box, no fill, the checked treatment one state earlier. Only the row-choice
+   box ever goes indeterminate (the files review's folder bands). */
+.sync-sync-row-choice input:indeterminate {
+  border-color: var(--border-strong);
+}
+
+.sync-sync-row-choice input:indeterminate::before {
+  height: 2px;
+  border-radius: 1px;
+  transform: scale(1);
+  clip-path: none;
   background: var(--text-0);
 }
 

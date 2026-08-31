@@ -10,9 +10,13 @@ import Icon from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import ProjectActivityPage from "./ProjectActivityPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
+import ProjectFileCommitImpact, {
+  projectFileDeletionCount,
+  type ProjectFileCommitImpactCounts,
+} from "./ProjectFileCommitImpact";
 import SyncReviewTabs from "../sync-review/SyncReviewTabs";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
-import { type SyncReviewStep, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
+import { type SyncReviewStep, historyStepLabel, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
 import { providerLabel } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { isIrrecoverableSyncError } from "./syncError";
@@ -20,10 +24,10 @@ import type { PullApplyPhase, PullReviewSelection } from "./pullReviewFlow";
 import {
   buildPullReviewItems,
   buildPullReviewSelection,
-  defaultSelected,
   itemKindLabel,
   includeRequiredPullProjectDirectories,
   pendingIds,
+  recommendedPullSelection,
   requiredPullProjectDirectoryIds,
   keepsLocalConversation,
   requiresApproval,
@@ -80,6 +84,51 @@ export function pullSelectableResourceIds(
       && !requiresManualResolution(item)
     ))
     .map((item) => item.resourceId));
+}
+
+export function pullProjectFileCommitImpact(
+  items: PullReviewItem[],
+  selected: ReadonlySet<string>,
+): ProjectFileCommitImpactCounts {
+  const counts: ProjectFileCommitImpactCounts = {
+    add: 0,
+    replace: 0,
+    deleteFile: 0,
+    deleteDirectory: 0,
+  };
+  for (const item of items) {
+    if (!selected.has(item.resourceId)) continue;
+    switch (item.projectContentOperation) {
+      case "add":
+      case "create_directory":
+        counts.add += 1;
+        break;
+      case "replace":
+        counts.replace += 1;
+        break;
+      case "delete_file":
+        counts.deleteFile += 1;
+        break;
+      case "delete_directory":
+        counts.deleteDirectory += 1;
+        break;
+      default:
+        break;
+    }
+  }
+  return counts;
+}
+
+/** The generic row's operation, in the files review's chip grammar. Rows
+ * whose verbs live elsewhere (conversations, manual reviews) return null. */
+function itemOperationChip(item: PullReviewItem): string | null {
+  const action = item.restoreActions[0];
+  if (!action) return null;
+  if (action.kind.kind === "write_file") {
+    return action.expected_target_sha256 ? "Replace file" : "Add file";
+  }
+  if (action.kind.kind === "merge_file") return "Merge file";
+  return null;
 }
 
 function ItemList({
@@ -182,6 +231,11 @@ function ItemList({
                 <strong>{item.title}</strong>
                 <span>{itemKindLabel(item)}{item.provider ? ` · ${providerLabel(item.provider)}` : ""}</span>
               </span>
+              {itemOperationChip(item) && (
+                <span className="sync-history-branch-state history-only" title={item.detail}>
+                  {itemOperationChip(item)}
+                </span>
+              )}
               {status && <span className={`sync-pull-item-status ${status.toLowerCase().replace(/\s+/g, "-")}`}>{status}</span>}
             </button>
             {expanded && (
@@ -242,11 +296,25 @@ export default function RestorePlanView({
   )), [items]);
   const showProjectFiles = plan.project_content_eligibility?.state === "eligible" || projectContentItems.length > 0;
   const reviewSteps = useMemo(() => syncReviewSteps(showProjectFiles), [showProjectFiles]);
-  const knownItems = useRef(new Set<string>());
   const [activeStep, setActiveStep] = useState<SyncReviewStep>("history");
-  const [selected, setSelected] = useState<Set<string>>(() => new Set(
-    items.filter(defaultSelected).map((item) => item.resourceId),
-  ));
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const projectFileImpact = useMemo(
+    () => pullProjectFileCommitImpact(projectContentItems, selected),
+    [projectContentItems, selected],
+  );
+  const deletionSignature = useMemo(
+    () => projectContentItems
+      .filter((item) => (
+        selected.has(item.resourceId)
+        && (item.projectContentOperation === "delete_file" || item.projectContentOperation === "delete_directory")
+      ))
+      .map((item) => item.resourceId)
+      .sort()
+      .join("\n"),
+    [projectContentItems, selected],
+  );
+  const [deletionApproved, setDeletionApproved] = useState(false);
+  useEffect(() => setDeletionApproved(false), [deletionSignature]);
 
   useEffect(() => {
     const currentIds = new Set(items.map((item) => item.resourceId));
@@ -255,12 +323,10 @@ export default function RestorePlanView({
         currentIds.has(resourceId) && !completedResourceIds.has(resourceId)
       )));
       for (const item of items) {
-        if (!knownItems.current.has(item.resourceId) && defaultSelected(item)) next.add(item.resourceId);
         if (failedResourceIds.has(item.resourceId)) next.add(item.resourceId);
       }
       return includeRequiredPullProjectDirectories(items, next);
     });
-    knownItems.current = currentIds;
   }, [items, completedResourceIds, failedResourceIds]);
 
   const selection = useMemo(
@@ -306,6 +372,8 @@ export default function RestorePlanView({
     ? null
     : activityHistoryInUse && !reviewListReady
       ? "Loading storage changes…"
+      : projectFileDeletionCount(projectFileImpact) > 0 && !deletionApproved
+        ? "Approve the selected project file deletions"
       : null;
 
   // The storage-card Pull button is the same control as the footer primary,
@@ -339,7 +407,7 @@ export default function RestorePlanView({
     else next.add(resourceId);
     return includeRequiredPullProjectDirectories(items, next);
   });
-  const recommendedIds = new Set(items.filter(defaultSelected).map((item) => item.resourceId));
+  const recommendedIds = new Set(items.filter(recommendedPullSelection).map((item) => item.resourceId));
   // The history step hosts every non-file item: sessions in the list, agent
   // setup & tools in the details row at the bottom of the same panel.
   const stepItems = activeStep === "project_files"
@@ -444,6 +512,7 @@ export default function RestorePlanView({
         localPresent: Boolean(action?.expected_target_sha256 || action?.expected_target_mode != null),
         storagePresent: item.projectContentOperation !== "delete_file" && item.projectContentOperation !== "delete_directory",
         operation: item.projectContentOperation ?? undefined,
+        preservedCopyPath: item.projectContentPreservedCopy ?? undefined,
       };
     });
   return (
@@ -475,7 +544,7 @@ export default function RestorePlanView({
       </header>
 
       <SyncReviewTabs
-        tabs={projectReviewTabs(reviewSteps, counts, warningSteps)}
+        tabs={projectReviewTabs(reviewSteps, counts, warningSteps, historyStepLabel(showProjectFiles))}
         activeId={activeStep}
         disabled={busy}
         onChange={(step) => setActiveStep(step as SyncReviewStep)}
@@ -563,15 +632,6 @@ export default function RestorePlanView({
               selectedIds={selected}
               requiredIds={requiredProjectDirectories}
               disabled={busy || finalReady}
-              onSelectSafe={() => setSelected((current) => includeRequiredPullProjectDirectories(
-                items,
-                new Set([
-                  ...current,
-                  ...projectContentItems
-                    .filter((item) => item.projectContentOperation === "add" || item.projectContentOperation === "create_directory")
-                    .map((item) => item.resourceId),
-                ]),
-              ))}
               onToggle={toggle}
               onBulkToggle={(resourceIds, shouldSelect) => setSelected((current) => {
                 if (!projectContentEligible) return current;
@@ -589,6 +649,13 @@ export default function RestorePlanView({
       </div>
 
       <footer className="sync-pull-apply-bar sync-inline-action-footer sync-sync-review-footer">
+        <ProjectFileCommitImpact
+          counts={projectFileImpact}
+          deletionTarget="local"
+          deletionApproved={deletionApproved}
+          disabled={busy}
+          onDeletionApprovedChange={setDeletionApproved}
+        />
         {busy && (
           /* Same contract as Push: no safe mid-write abort exists, so the
              sealed exits are named instead of leaving a cancel to hunt for.
@@ -596,6 +663,21 @@ export default function RestorePlanView({
              flips — the one explanation for the button going dead under the
              reader's focus and Escape no longer closing the review. */
           <span role="status"><small>A running pull finishes or fails whole — it can’t be cancelled midway.</small></span>
+        )}
+        {showProjectFiles && (
+          /* The step navigator, not a gate: Pull stays live on both steps —
+             the same footer contract the Push review carries. */
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={busy}
+            title={activeStep === "history" ? "Review project files next" : "Back to session selection"}
+            onClick={() => setActiveStep(activeStep === "history" ? "project_files" : "history")}
+          >
+            {activeStep !== "history" && <Icon name="chevron-left" size={14} />}
+            {activeStep === "history" ? "Project files" : historyStepLabel(showProjectFiles)}
+            {activeStep === "history" && <Icon name="chevron-right" size={14} />}
+          </button>
         )}
         <button
           type="button"

@@ -116,12 +116,30 @@ test("every status badge reads on the paper of its own theme", () => {
         `${token} is ${colour} on ${theme}, ${measured.toFixed(2)}:1 against ${surface} — needs 4.5`,
       );
     }
-    // The three no-verdict badges stay quiet on purpose, but still have to
-    // clear the bar that actually governs non-text graphics.
+    // Tertiary text remains quiet, but it is still normal-size copy throughout
+    // the app and must clear the text contrast floor on every opaque surface.
     const neutral = resolve("--text-3", tokens);
-    assert.ok(
-      contrast(neutral, surface) >= 3,
-      `--text-3 is ${contrast(neutral, surface).toFixed(2)}:1 on ${theme}`,
-    );
+    for (const surfaceToken of [
+      "--bg-0",
+      "--bg-2",
+      "--bg-3",
+      "--bg-4",
+      "--button-bg",
+      "--button-bg-hover",
+      "--button-bg-active",
+      "--surface-card",
+      "--surface-row",
+      "--surface-row-hover",
+      "--surface-row-active",
+      "--surface-popover",
+      "--surface-footer",
+    ]) {
+      const opaqueSurface = resolve(surfaceToken, tokens);
+      const measured = contrast(neutral, opaqueSurface);
+      assert.ok(
+        measured >= 4.5,
+        `--text-3 is ${measured.toFixed(2)}:1 on ${surfaceToken} in ${theme}`,
+      );
+    }
   }
 });

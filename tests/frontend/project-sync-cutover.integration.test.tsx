@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import StartupLoadingScreen from "../../src/components/project-sync/StartupLoadingScreen";
-import { repositoryFingerprintMatches } from "../../src/components/project-sync/model";
+import {
+  repositoryFingerprintMatches,
+  repositoryFingerprintsRequireAcknowledgement,
+} from "../../src/components/project-sync/model";
 import { expandHomePath } from "../../src/profilePath";
 import { PROJECT_SYNC_SCHEMA } from "../../src/types";
 import {
@@ -70,6 +73,15 @@ test("project setup accepts only the current canonical repository fingerprint", 
   assert.equal(repositoryFingerprintMatches("legacy-dot-git", "canonical"), false);
   assert.equal(repositoryFingerprintMatches("different-repository", "canonical"), false);
   assert.equal(repositoryFingerprintMatches(null, "canonical"), false);
+});
+
+test("project setup acknowledges only conflicting repository fingerprints", () => {
+  assert.equal(repositoryFingerprintsRequireAcknowledgement(null, null), false);
+  assert.equal(repositoryFingerprintsRequireAcknowledgement(undefined, null), false);
+  assert.equal(repositoryFingerprintsRequireAcknowledgement("canonical", "canonical"), false);
+  assert.equal(repositoryFingerprintsRequireAcknowledgement("different", "canonical"), true);
+  assert.equal(repositoryFingerprintsRequireAcknowledgement(null, "canonical"), true);
+  assert.equal(repositoryFingerprintsRequireAcknowledgement("canonical", null), true);
 });
 
 test("the production Tauri handler exposes current sync and shared log commands", () => {
@@ -150,6 +162,7 @@ test("the sidebar rail is sized by its own width, never by the window", () => {
 
 test("the path bar's trail is sized by the bar, never by the window", () => {
   const css = readFileSync("src/App.css", "utf8");
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   // The bar is the window less the sidebar, so a viewport share is a far
   // bigger share of the row than it reads as. At `max-width: 30vw` the session
   // title's floor came out wider than both ancestors had between them: the
@@ -181,6 +194,34 @@ test("the path bar's trail is sized by the bar, never by the window", () => {
     );
   }
   assert.match(css, /\n\.sync-path-crumb-toggle \{[^}]*flex: 0 0 auto;/);
+  assert.doesNotMatch(
+    css,
+    /\.sync-path-sync-label\s*\{[^}]*display:\s*none/,
+    "compact layouts must keep Push and Pull visible",
+  );
+  assert.match(shell, /const MIN_PROJECT_WORKSPACE_WIDTH = 580;/);
+  assert.match(shell, /window\.innerWidth - MIN_PROJECT_WORKSPACE_WIDTH/);
+  assert.match(css, /\.sync-pathbar \.sync-history-branch-name,[\s\S]*?display: none;/);
+});
+
+test("top-level navigation opens stable index pages", () => {
+  const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+
+  assert.match(sidebar, /> Projects[\s\S]*?onClick=\{onOpenCatalogIndex\}/);
+  assert.match(sidebar, /onClick=\{onOpenProjects\}/);
+  assert.match(sidebar, /onClick=\{onOpenStorageIndex\}/);
+  assert.doesNotMatch(sidebar, /primaryStorageId|onOpenCatalogMenu/);
+
+  assert.match(shell, /const openProjectsIndex = \(\) => \{[\s\S]*?setActiveProjectId\(null\);/);
+  assert.match(shell, /const openCatalogIndex = \(\) => \{[\s\S]*?setCatalogIndexOpen\(true\);/);
+  assert.match(shell, /catalogIndexOpen \? \(\s*<CatalogIndexPage/);
+  assert.match(shell, /storageIndexOpen \? \(\s*<StorageIndexPage/);
+  assert.doesNotMatch(shell, /const openCatalogMenu/);
+
+  assert.match(workspace, /className="sync-storage-index-list" aria-label="Projects"/);
+  assert.match(workspace, /onClick=\{\(\) => onSelectProject\(project\.local_project_id\)\}/);
 });
 
 test("App imports one complete global stylesheet", () => {
@@ -311,6 +352,54 @@ test("the shell verifies host identity and relies on backend auto-registration",
   assert.match(setupWorkspace, /mountedRef\.current && isWorkflowCurrent\(workflowEpoch\)/);
   assert.match(setupWorkspace, /if \(!workflowIsActive\(\)\) return;\s*onFinalized\(detail, workflowEpoch\)/);
   assert.doesNotMatch(workspace, /Host settings/);
+});
+
+test("startup overlaps independent reads and defers conversation path audits", () => {
+  const source = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const loadShell = source.slice(
+    source.indexOf("  const loadShell = async"),
+    source.indexOf("\n  const storageFailureMessage"),
+  );
+  const configRead = loadShell.indexOf("await projectSyncApi.getConfig()");
+  const recovery = loadShell.indexOf("await projectSyncApi.recoverStartupState()");
+  const projectReads = loadShell.indexOf("const projectReads = Promise.allSettled([");
+  const providerReads = loadShell.indexOf("const providerReads = Promise.allSettled([");
+  const firstBatchWait = loadShell.indexOf("await projectReads");
+  const providerBatchWait = loadShell.indexOf("await providerReads");
+  const verificationRead = loadShell.lastIndexOf(
+    "await projectSyncApi.getHostIdentityStatus()",
+  );
+  const shellReady = loadShell.indexOf("setHostIdentityShellReady(true)");
+  const deferredAudit = loadShell.indexOf(
+    "void loadConversationPathAudits(nextBindings, requestId)",
+  );
+
+  assert.ok(configRead >= 0 && configRead < recovery);
+  assert.ok(recovery < projectReads);
+  assert.ok(projectReads < providerReads && providerReads < firstBatchWait);
+  assert.ok(firstBatchWait < providerBatchWait && providerBatchWait < verificationRead);
+
+  for (const request of [
+    "projectSyncApi.listProjects()",
+    "refreshSetupDrafts(requestId)",
+    "refreshStorageSetupDrafts(requestId)",
+    "refreshCatalogScopes(requestId)",
+    "projectSyncApi.listProjectRepositoryKinds()",
+  ]) {
+    const index = loadShell.indexOf(request, projectReads);
+    assert.ok(index > projectReads && index < providerReads, `${request} must start in projectReads`);
+  }
+  for (const request of [
+    "projectSyncApi.listAgentProviders()",
+    "projectSyncApi.listProviderProfiles()",
+    "projectSyncApi.listBindings()",
+  ]) {
+    const index = loadShell.indexOf(request, providerReads);
+    assert.ok(index > providerReads && index < firstBatchWait, `${request} must start in providerReads`);
+  }
+
+  assert.doesNotMatch(loadShell, /await loadConversationPathAudits/);
+  assert.ok(shellReady >= 0 && shellReady < deferredAudit);
 });
 
 test("the startup screen communicates minimal, staged loading progress", () => {

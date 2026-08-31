@@ -24,6 +24,7 @@ import { isIrrecoverableSyncError } from "../../src/components/project-sync/sync
 import {
   buildPullReviewItems,
   buildPullReviewSelection,
+  recommendedPullSelection,
 } from "../../src/components/project-sync/pullReviewModel";
 import {
   applyPullReview,
@@ -273,9 +274,77 @@ test("keep-both is one reviewed action with no second resolution payload", () =>
   );
 
   const html = renderReview(plan);
-  assert.match(html, /Keep both/);
+  assert.match(html, /Not selected/);
   assert.match(html, /Select Conversation/);
+  assert.match(html, /Use recommended selection \(1\)/);
   assert.doesNotMatch(html, /radiogroup|Fork and overwrite|Discard the local branch/);
+});
+
+test("a mixed Pull starts empty and selecting one project file restores only that file", () => {
+  const conversation = conversationAction("materialize_cloud");
+  const plan: RestorePlan = {
+    ...restorePlan,
+    project_content_eligibility: {
+      state: "eligible",
+      reason: "Not inside a Git work tree.",
+    },
+    actions: [{
+      action_id: "write-ghost-story",
+      resource_id: "file-ghost-story",
+      kind: {
+        kind: "write_project_file",
+        logical_path: "project/ghost_story.docx",
+        mode: 0o644,
+        source_mtime: 1,
+      },
+      target_path: "/Users/test/project/gam2/ghost_story.docx",
+      source_sha256: "d".repeat(64),
+      expected_target_sha256: null,
+      requires_explicit_approval: true,
+    }],
+    conversation_actions: [conversation],
+    conversation_review: [
+      conversationRow("materialize_cloud", conversation.action_id, null, "Stored conversation"),
+    ],
+  };
+  const items = buildPullReviewItems(plan);
+  const recommendedIds = items
+    .filter(recommendedPullSelection)
+    .map((item) => item.resourceId);
+  // The stored-only file is an add — nothing local replaced — so the files
+  // step's Recommended now offers it alongside the conversation.
+  assert.deepEqual(recommendedIds, [conversation.source_resource_id, "file-ghost-story"]);
+
+  const html = renderReview(plan);
+  assert.match(html, /aria-label="Sessions, 0 selected"/);
+  assert.match(html, /aria-label="Project files, 0 selected"/);
+  assert.match(html, /aria-label="Use recommended selection \(1\)"/);
+
+  const selection = buildPullReviewSelection(
+    items,
+    new Set(["file-ghost-story"]),
+    new Set(),
+    new Set(),
+  );
+  assert.deepEqual(selection, {
+    resourceIds: ["file-ghost-story"],
+    restoreActionIds: ["write-ghost-story"],
+  });
+
+  const outcome = buildPullOutcome({
+    projectId: binding.local_project_id,
+    plan,
+    result: result({ applied_action_ids: ["write-ghost-story"] }),
+    readiness: { bundle_id: binding.bundle_id, state: "ready", issues: [] },
+    items,
+    completedResourceIds: new Set(["file-ghost-story"]),
+  });
+  assert.deepEqual(outcome.stats[0], {
+    icon: "download",
+    value: "1",
+    label: "restored",
+  });
+  assert.deepEqual(outcome.rows.map((row) => row.title), ["ghost_story.docx"]);
 });
 
 test("blocked conversation evidence is visible but cannot be selected", () => {

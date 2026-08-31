@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
@@ -11,16 +12,18 @@ import type {
 import ProjectFilesReviewPage from "../../src/components/project-sync/ProjectFilesReviewPage";
 import PushResourceWorkspace, {
   includeRequiredProjectContentDirectories,
+  pushProjectFileCommitImpact,
+  pushReviewBlockingCount,
   requiredProjectContentDirectoryIds,
 } from "../../src/components/project-sync/PushResourceWorkspace";
-import RestorePlanView from "../../src/components/project-sync/RestorePlanView";
+import RestorePlanView, { pullProjectFileCommitImpact } from "../../src/components/project-sync/RestorePlanView";
 import SyncReviewTabs from "../../src/components/sync-review/SyncReviewTabs";
 import { projectReviewTabs, syncReviewSteps } from "../../src/components/project-sync/reviewSteps";
 import { applyPullReview } from "../../src/components/project-sync/pullReviewFlow";
 import {
   buildPullReviewItems,
-  defaultSelected,
   includeRequiredPullProjectDirectories,
+  recommendedPullSelection,
 } from "../../src/components/project-sync/pullReviewModel";
 
 function descriptor(
@@ -158,11 +161,25 @@ test("an explicit Push scan presents new entries selected and locks both directo
       onPush={() => undefined}
     />,
   );
-  assert.match(html, /New · selected after scan/);
-  assert.match(html, /required directory/);
-  assert.match(html, /3 entr(?:y|ies)/);
+  // Push rows carry no state chip: the checked tick and the status mark say
+  // everything the old "New · selected after scan" caption said.
+  assert.doesNotMatch(html, /New · selected after scan|SELECTED AFTER SCAN/i);
+  assert.match(html, /sync-thread-sync-indicator local/);
+  // The directories draw no cards of their own: the full-path band speaks
+  // for them and the required-ancestor rule keeps them riding their files.
+  // The band's control is the rows' own checkbox — here ticked, since every
+  // file is selected — with the counter chip at the band's edge; the old
+  // check-circle/trash icon pair is gone.
+  assert.match(html, /sync-project-files-group-heading/);
+  assert.match(html, />docs\/specs\/</);
+  assert.match(html, /aria-label="1 of 1 selected in docs\/specs"/);
+  assert.match(html, /aria-label="Exclude every file in docs\/specs"[^>]*checked/);
+  assert.doesNotMatch(html, /Select all files in|Clear the .* selection|sync-sync-review-icon-action[\s\S]{0,400}folder/);
+  assert.equal(html.match(/catalog-card/g)?.length, 1, "only the file draws a card");
+  assert.match(html, /aria-label="Include docs\/specs\/a\.md"[^>]*checked/);
+  assert.match(html, /1 entry/);
   assert.match(html, /2 ignored · 1 blocked/);
-  assert.doesNotMatch(html, /sync-project-file-selection-placeholder|type="checkbox"/);
+  assert.doesNotMatch(html, /sync-project-file-selection-placeholder/);
   assert.doesNotMatch(html, /Exact entries selected|Scanning cannot prove/);
 });
 
@@ -188,7 +205,203 @@ test("Project file controls stay on the dedicated page", () => {
   assert.doesNotMatch(html, /<strong>Project files<\/strong>|Rescan|Search files/);
 });
 
-test("before Scan, Push uses a compact optional-files action", () => {
+test("the footer carries the step navigator beside Push, forward then back", () => {
+  const selected = new Set(inventory.entries.map((candidate) => candidate.descriptor.resource_id));
+  const render = (activeStep: "history" | "project_files") => renderToStaticMarkup(
+    <PushResourceWorkspace
+      resources={inventory.entries.map((candidate) => candidate.descriptor)}
+      selected={selected}
+      projectDefaults={selected}
+      busy={false}
+      error={null}
+      projectContentInventory={inventory}
+      projectContentScanned
+      showProjectFiles
+      activeStep={activeStep}
+      onToggle={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+    />,
+  );
+  const onSessions = render("history");
+  assert.match(onSessions, /title="Review project files next"/);
+  assert.match(onSessions, />Push<\/button>/, "Push stays live beside the navigator");
+  const onFiles = render("project_files");
+  assert.match(onFiles, /title="Back to session selection"/);
+  assert.match(onFiles, />Push<\/button>/);
+});
+
+test("warnings acknowledge through the catalog chip, and removal is the card's trash", () => {
+  const warned = entry("file-w", "file", "notes/api_key.txt");
+  warned.warning_code = "possible_secret";
+  warned.warning_digest = "w".repeat(64);
+  const stored = entry("file-s", "file", "notes/old_draft.md");
+  stored.storage_present = true;
+  stored.state = "synced";
+  const rows = [warned, stored].map((candidate) => ({
+    resourceId: candidate.descriptor.resource_id,
+    relativePath: candidate.relative_path,
+    entryType: candidate.entry_type as "file",
+    state: candidate.state,
+    size: candidate.size,
+    mode: candidate.mode,
+    sourceMtime: candidate.source_mtime,
+    localPresent: candidate.local_present,
+    storagePresent: candidate.storage_present,
+    selectedAfterScan: candidate.selected_after_scan,
+    warningCode: candidate.warning_code,
+    warningDigest: candidate.warning_digest,
+  }));
+  const html = renderToStaticMarkup(
+    <ProjectFilesReviewPage
+      mode="push"
+      eligibility={{ state: "eligible", reason: "Not inside a Git work tree." }}
+      rows={rows}
+      selectedIds={new Set(["file-w", "file-s"])}
+      removalIds={new Set()}
+      onToggle={() => undefined}
+      onToggleRemoval={() => undefined}
+      onToggleWarning={() => undefined}
+    />,
+  );
+  assert.match(html, /catalog-card-ack/);
+  assert.match(html, /Credential-shaped content<\/strong> — notes\/api_key\.txt/);
+  assert.match(html, />Mark reviewed</);
+  assert.match(html, /aria-label="Remove notes\/old_draft\.md from storage"/);
+  assert.match(html, /data-icon="trash"/);
+
+  const removing = renderToStaticMarkup(
+    <ProjectFilesReviewPage
+      mode="push"
+      eligibility={{ state: "eligible", reason: "Not inside a Git work tree." }}
+      rows={rows}
+      selectedIds={new Set(["file-w"])}
+      removalIds={new Set(["file-s"])}
+      onToggle={() => undefined}
+      onToggleRemoval={() => undefined}
+      onToggleWarning={() => undefined}
+    />,
+  );
+  assert.match(removing, /catalog-card removal/);
+  assert.match(removing, />Removes from storage</);
+  assert.match(removing, /aria-label="Keep notes\/old_draft\.md in storage"/);
+});
+
+test("project file commits count operations and gate selected deletions", () => {
+  const storedFile = {
+    ...entry("file-old", "file", "old.txt"),
+    state: "storage_only" as const,
+    local_present: false,
+    storage_present: true,
+  };
+  const storedDirectory = {
+    ...entry("dir-old", "directory", "old"),
+    state: "storage_only" as const,
+    local_present: false,
+    storage_present: true,
+  };
+  const removalInventory = {
+    ...inventory,
+    entries: [storedFile, storedDirectory],
+  };
+  const removals = new Set(["file-old", "dir-old"]);
+  assert.deepEqual(
+    pushProjectFileCommitImpact(removalInventory, new Set(), removals),
+    { add: 0, replace: 0, deleteFile: 1, deleteDirectory: 1 },
+  );
+  assert.equal(
+    pushReviewBlockingCount(new Set(), undefined, removalInventory, new Set(), removals),
+    0,
+  );
+
+  const html = renderToStaticMarkup(
+    <PushResourceWorkspace
+      resources={removalInventory.entries.map((candidate) => candidate.descriptor)}
+      selected={new Set()}
+      projectDefaults={new Set()}
+      busy={false}
+      error={null}
+      projectContentInventory={removalInventory}
+      projectContentScanned
+      projectContentRemovals={removals}
+      showProjectFiles
+      activeStep="project_files"
+      onToggle={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+    />,
+  );
+  assert.match(html, /<strong>0<\/strong> Add/);
+  assert.match(html, /<strong>0<\/strong> Replace/);
+  assert.match(html, /<strong>1<\/strong> Delete files/);
+  assert.match(html, /<strong>1<\/strong> Delete folders/);
+  assert.match(html, /Approve removal of 1 file and 1 folder from storage\./);
+  assert.match(html, /title="Approve the selected project file deletions"/);
+
+  const deletionPlan: RestorePlan = {
+    ...pullPlan,
+    actions: [
+      ...pullPlan.actions,
+      {
+        action_id: "delete-old-file",
+        resource_id: "delete-file",
+        kind: {
+          kind: "delete_project_file",
+          logical_path: "project/old.txt",
+          last_sha256: "d".repeat(64),
+        },
+        target_path: "/tmp/project-b/old.txt",
+        requires_explicit_approval: true,
+      },
+      {
+        action_id: "delete-old-directory",
+        resource_id: "delete-directory",
+        kind: { kind: "delete_project_directory", logical_path: "project/old" },
+        target_path: "/tmp/project-b/old",
+        requires_explicit_approval: true,
+      },
+    ],
+  };
+  const deletionItems = buildPullReviewItems(deletionPlan);
+  assert.deepEqual(
+    pullProjectFileCommitImpact(deletionItems, new Set(["delete-file", "delete-directory"])),
+    { add: 0, replace: 0, deleteFile: 1, deleteDirectory: 1 },
+  );
+
+  const pullSource = readFileSync("src/components/project-sync/RestorePlanView.tsx", "utf8");
+  assert.match(pullSource, /projectFileDeletionCount\(projectFileImpact\) > 0 && !deletionApproved/);
+  assert.match(pullSource, /<ProjectFileCommitImpact[\s\S]*?deletionTarget="local"/);
+});
+
+test("file review details reuse the project copyable popover", () => {
+  const html = renderToStaticMarkup(
+    <ProjectFilesReviewPage
+      mode="push"
+      eligibility={{ state: "eligible", reason: "Not inside a Git work tree." }}
+      rows={[{
+        resourceId: "file-design",
+        relativePath: "doc/test-design.md",
+        entryType: "file",
+        state: "synced",
+        size: 18,
+        mode: 0o644,
+        sourceMtime: 1,
+        localPresent: true,
+        storagePresent: true,
+      }]}
+      selectedIds={new Set(["file-design"])}
+      onToggle={() => undefined}
+    />,
+  );
+  assert.match(html, /aria-label="Show details for doc\/test-design\.md"/);
+  assert.match(html, /aria-haspopup="dialog"/);
+  assert.match(html, /<strong>File details<\/strong>/);
+  assert.match(html, /<span>Modified<\/span>/);
+  assert.match(html, />Copy all<\/button>/);
+  assert.doesNotMatch(html, /sync-project-file-details/);
+});
+
+test("opening the files step scans by itself — no interstitial, just the scaffold", () => {
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
       resources={[]}
@@ -206,8 +419,14 @@ test("before Scan, Push uses a compact optional-files action", () => {
       onScanProjectFiles={() => undefined}
     />,
   );
-  assert.match(html, /Files outside Git/);
-  assert.match(html, /Scan files/);
+  // The step is the opt-in: entering it starts the scan, so there is no
+  // "Files outside Git" page and no Scan button to press first. The scaffold
+  // itself sits behind LoadingScaffold's anti-flicker gate, which a static
+  // render never passes — what this render CAN prove is that the interstitial
+  // is gone and nothing claims "No changes" before the scan has spoken.
+  assert.doesNotMatch(html, /Files outside Git|Scan files/);
+  assert.doesNotMatch(html, /No changes/);
+  assert.match(html, /Rescan/, "the bar's retry survives a failed first scan");
   assert.doesNotMatch(html, />Optional|Nothing is uploaded|New eligible files|Review them before continuing/);
   assert.doesNotMatch(html, /a\.md/);
 });
@@ -224,10 +443,13 @@ test("an empty file review keeps only the action and state", () => {
     />,
   );
 
-  assert.match(html, /Project files/);
+  assert.match(html, /aria-label="Project files"/, "the section keeps its name without a heading row");
   assert.match(html, /Rescan/);
   assert.match(html, /No changes/);
-  assert.doesNotMatch(html, /Search files|0 entries|0 selected|No eligible entries|Scanning cannot prove/);
+  // The one-line bar keeps its search box (disabled — nothing to filter) and
+  // hides the tally rather than printing "0 entries".
+  assert.match(html, /placeholder="Search files…"[^>]*disabled/);
+  assert.doesNotMatch(html, /0 entries|0 selected|No eligible entries|Scanning cannot prove|<h3/);
 });
 
 const binding: ProjectBinding = {
@@ -289,10 +511,17 @@ const pullPlan: RestorePlan = {
 test("Pull project content starts as keep-local and selecting a nested file requires its folders", () => {
   const items = buildPullReviewItems(pullPlan);
   assert.ok(items.every((item) => item.category === "project_content"));
-  assert.ok(items.every((item) => !defaultSelected(item)));
+  // Nothing starts selected — but the header's Recommended now knows the
+  // files step's safe set: adds and new directories, never a replace or a
+  // delete. (Every project-content action requires explicit approval by
+  // backend policy, so the gate is the operation; pressing Recommended is
+  // the review.) This absorbed the toolbar's "Select safe additions".
+  assert.deepEqual(
+    items.filter(recommendedPullSelection).map((item) => item.resourceId).sort(),
+    ["dir-docs", "dir-specs", "file-a"],
+  );
   const selected = includeRequiredPullProjectDirectories(items, new Set(["file-a"]));
   assert.deepEqual([...selected].sort(), ["dir-docs", "dir-specs", "file-a"]);
-
   const html = renderToStaticMarkup(
     <RestorePlanView
       projectName="Project B"
@@ -313,19 +542,23 @@ test("Pull project content starts as keep-local and selecting a nested file requ
   );
 
   assert.equal((html.match(/role="tab"/g) ?? []).length, 2);
-  const history = html.indexOf(">Git &amp; sessions<");
+  const history = html.indexOf(">Sessions<");
   const projectFiles = html.indexOf(">Project files<");
   assert.ok(history >= 0 && history < projectFiles, "history stays the first step");
   assert.doesNotMatch(html, />Review</);
-  assert.match(html, /aria-selected="true"[^>]*aria-label="Git &amp; sessions, 0 selected"/);
+  assert.match(html, /aria-selected="true"[^>]*aria-label="Sessions, 0 selected"/);
   assert.match(html, /id="sync-review-history-panel"/);
   assert.match(html, />No session changes</);
   assert.doesNotMatch(html, /sync-project-files-page/, "the file review stays on its own step");
+  // The third smart-select is gone for good: the header's Recommended is the
+  // safe selection now, and the toolbar is a search bar again.
+  assert.doesNotMatch(html, /Select safe additions/);
   assert.match(
     html,
     /class="btn btn-primary sync-pull-apply-button">/,
     "undecided file entries keep Pull available so keep-local can advance the base",
   );
+  assert.match(html, /title="Review project files next"/, "the footer carries the step navigator");
 
   const filesHtml = renderToStaticMarkup(
     <ProjectFilesReviewPage
@@ -370,10 +603,120 @@ test("Pull project content starts as keep-local and selecting a nested file requ
       onToggle={() => undefined}
     />,
   );
-  assert.match(filesHtml, /aria-label="Apply docs"/);
-  assert.match(filesHtml, /Create folder · 2 descendants/);
-  assert.match(filesHtml, /<strong>0 selected<\/strong>/);
-  assert.match(filesHtml, /<small>3 local<\/small>/, "every entry starts as keep-local");
+  // The folders draw no cards: the full-path band and its subtree cluster
+  // speak for them, and approving the file rides the required-ancestor rule.
+  assert.match(filesHtml, />docs\/specs\/</);
+  assert.match(filesHtml, /aria-label="0 of 1 selected in docs\/specs"/, "every entry starts as keep-local");
+  assert.equal(filesHtml.match(/catalog-card/g)?.length, 1, "only the file draws a card");
+  assert.match(filesHtml, /aria-label="Apply docs\/specs\/a\.md"/);
+  assert.match(filesHtml, />Add file</);
+});
+
+test("generic pull rows wear the same operation chips", () => {
+  const genericPlan: RestorePlan = {
+    ...pullPlan,
+    plan_id: "plan-generic",
+    project_content_eligibility: undefined,
+    actions: [
+      {
+        action_id: "write-state",
+        resource_id: "state-config",
+        kind: { kind: "write_file", logical_path: "codex/state/config.json" },
+        target_path: "/tmp/codex/config.json",
+        source_sha256: "c".repeat(64),
+        requires_explicit_approval: false,
+      },
+      {
+        action_id: "replace-state",
+        resource_id: "state-notes",
+        kind: { kind: "write_file", logical_path: "codex/state/notes.md" },
+        target_path: "/tmp/codex/notes.md",
+        source_sha256: "c".repeat(64),
+        expected_target_sha256: "d".repeat(64),
+        requires_explicit_approval: true,
+      },
+    ],
+  };
+  const html = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="Project B"
+      plan={genericPlan}
+      binding={binding}
+      readiness={null}
+      restoreResult={null}
+      phase="idle"
+      supportLoading={false}
+      completedActionIds={new Set()}
+      completedResourceIds={new Set()}
+      failedResourceIds={new Set()}
+      busy={false}
+      error={null}
+      onApply={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  assert.match(html, />Add file</);
+  assert.match(html, />Replace file</);
+});
+
+test("a diverged pull row carries and names its preserved copy", () => {
+  const preservedPlan: RestorePlan = {
+    ...pullPlan,
+    plan_id: "plan-preserve",
+    actions: [
+      {
+        action_id: "write-diverged",
+        resource_id: "file-d",
+        kind: {
+          kind: "write_project_file",
+          logical_path: "project/draft.md",
+          mode: 0o644,
+          source_mtime: 1,
+          preserve: {
+            copy_logical_path: "project/draft-local-copy.md",
+            local_content_sha256: "d".repeat(64),
+            storage_content_sha256: "e".repeat(64),
+            reusable_witness: false,
+          },
+        },
+        target_path: "/tmp/project-b/draft.md",
+        source_sha256: "e".repeat(64),
+        expected_target_sha256: "d".repeat(64),
+        requires_explicit_approval: true,
+      },
+    ],
+  };
+  const items = buildPullReviewItems(preservedPlan);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].projectContentOperation, "replace");
+  assert.equal(items[0].projectContentPreservedCopy, "draft-local-copy.md");
+
+  const filesHtml = renderToStaticMarkup(
+    <ProjectFilesReviewPage
+      mode="pull"
+      eligibility={pullPlan.project_content_eligibility!}
+      rows={[
+        {
+          resourceId: "file-d",
+          relativePath: "draft.md",
+          entryType: "file",
+          state: "replace",
+          mode: 0o644,
+          sourceMtime: 1,
+          localPresent: true,
+          storagePresent: true,
+          operation: "replace",
+          preservedCopyPath: "draft-local-copy.md",
+        },
+      ]}
+      selectedIds={new Set(["file-d"])}
+      onToggle={() => undefined}
+    />,
+  );
+  assert.ok(
+    filesHtml.includes("Replace file · keeps local copy"),
+    "the row names the non-lossy replace",
+  );
 });
 
 test("confirming keep-local still submits an empty approved set so Pull can advance its base", async () => {

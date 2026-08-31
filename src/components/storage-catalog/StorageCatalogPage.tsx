@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import Icon, { type IconName } from "../Icons";
@@ -130,6 +130,17 @@ function actionVerb(label: string): string {
   return "Update";
 }
 
+/** The row's operation label, in the files review's chip grammar — "Install
+ * skill", "Update pet · keeps local copy" — so every pull review names its
+ * operations in one voice. The full backend sentence stays in the tooltip
+ * and the choice list. */
+function actionChipLabel(label: string, kindNoun: string): string {
+  if (label.startsWith("Keep local as")) return `Update ${kindNoun} · keeps local copy`;
+  if (label.startsWith("Overwrite")) return `Overwrite ${kindNoun}`;
+  if (label.startsWith("Install")) return `Install ${kindNoun}`;
+  return `Update ${kindNoun}`;
+}
+
 /** The indicator's colour class, keyed by badge — the project's own pairing. */
 const TONE: Record<string, string> = {
   synced: "synced",
@@ -191,8 +202,16 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const placement = useDebugPopoverPlacement(rootRef, panelRef, open, () => setOpen(false));
+  const menuId = useId();
+  const closeMenu = useCallback((restoreFocus = false) => {
+    setOpen(false);
+    if (restoreFocus) {
+      window.requestAnimationFrame(() => triggerRef.current?.focus());
+    }
+  }, []);
+  const placement = useDebugPopoverPlacement(rootRef, panelRef, open, closeMenu);
 
   useEffect(() => {
     if (!open) return;
@@ -202,22 +221,31 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
       const target = event.target;
       if (!(target instanceof Node)) return;
       if (rootRef.current?.contains(target) || panelRef.current?.contains(target)) return;
-      setOpen(false);
+      closeMenu();
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (rootRef.current?.contains(target) || panelRef.current?.contains(target)) return;
+      closeMenu();
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       /* This layer consumed Escape; the Push/Pull review listens on window
          and must not also close and discard the whole review. */
+      event.preventDefault();
       event.stopPropagation();
-      setOpen(false);
+      closeMenu(true);
     };
     document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("focusin", onFocusIn);
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, [open]);
+  }, [closeMenu, open]);
 
   useEffect(() => {
     if (!copied) return;
@@ -249,13 +277,19 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
   return (
     <div ref={rootRef} className="sync-history-debug-menu">
       <button
+        ref={triggerRef}
         type="button"
         className="btn btn-ghost sync-history-session-detail-action"
         title="Paths and digests"
         aria-label={`Paths and digests for ${row.display_name}`}
         aria-haspopup="dialog"
+        aria-controls={menuId}
         aria-expanded={open}
-        onClick={() => { setCopied(null); setOpen(!open); }}
+        onClick={() => {
+          setCopied(null);
+          if (open) closeMenu();
+          else setOpen(true);
+        }}
       >
         <Icon name="info" size={13} />
       </button>
@@ -264,6 +298,7 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
           not .sync-main's scrollport. */}
       <TopLayer>
         <div
+          id={menuId}
           ref={panelRef}
           className="sync-history-debug-popover"
           style={placement
@@ -291,6 +326,7 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
                 type="button"
                 className="sync-history-debug-copy"
                 title={`Copy ${entry.label.toLowerCase()}`}
+                aria-label={`Copy ${entry.label.toLowerCase()}`}
                 onClick={() => {
                   void writeClipboardText(entry.value)
                     .then(() => setCopied(entry.label))
@@ -307,6 +343,11 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
               </button>
             ))}
           </div>
+          <span className="sync-visually-hidden" role="status" aria-live="polite">
+            {copied === "__failed__"
+              ? "Could not copy."
+              : copied ? `${copied} copied.` : ""}
+          </span>
         </div>
 
       </TopLayer>
@@ -437,6 +478,7 @@ function ResourceCard({
   storageName,
   storageRevision,
   provider,
+  kindNoun,
   onOpenApp,
   onOpenTerminal,
   preview,
@@ -455,6 +497,8 @@ function ResourceCard({
   storageName: string | null;
   storageRevision: number | null;
   provider: CatalogProviderKey;
+  /** The scope's kind, lowercased, for the operation chip: "skill", "pet"… */
+  kindNoun: string;
   /** The session card's launch pair, minus the session: the provider mark
    * opens the desktop app on this row's profile home, and Terminal opens the
    * provider CLI there — both at the default path. */
@@ -526,7 +570,7 @@ function ResourceCard({
                 title={`${action.chosen} — choose a different local action`}
                 onClick={action.onToggle}
               >
-                {actionVerb(action.chosen)}
+                {actionChipLabel(action.chosen, kindNoun)}
                 <Icon name={action.expanded ? "chevron-up" : "chevron-down"} size={10} />
               </button>
               {action.expanded && (
@@ -570,7 +614,9 @@ function ResourceCard({
               )}
             </span>
           ) : (
-            <span className="catalog-row-action" title={action.chosen}>{actionVerb(action.chosen)}</span>
+            <span className="sync-history-branch-state history-only" title={action.chosen}>
+              {actionVerb(action.chosen)}
+            </span>
           ))}
         </div>
         {/* Line one's right-hand run, read across from a session's: the
@@ -1303,6 +1349,22 @@ export default function StorageCatalogPage({
     : pushReviewUnacknowledged
       ? "Acknowledge the selected warnings before pushing"
       : undefined;
+  const pullReviewBlocked = pullPlan?.items.some((item) => {
+    const resourceId = item.item.resource_id;
+    const actionId = pullChoice[resourceId];
+    const action = item.item.actions.find((candidate) => candidate.action_id === actionId);
+    return pullSelected.has(resourceId)
+      && action?.requires_destructive_approval
+      && !pullAcks.has(resourceId);
+  }) ?? false;
+  const pullReviewApplyDisabled = busy
+    || pullSelected.size === 0
+    || pullReviewBlocked;
+  const pullReviewDisabledReason = pullSelected.size === 0
+    ? `Select at least one ${kind.label.toLowerCase()} to pull`
+    : pullReviewBlocked
+      ? "Acknowledge the selected overwrite before pulling"
+      : undefined;
   const bar = (
     <SyncPathBar
       crumbs={crumbs}
@@ -1344,15 +1406,19 @@ export default function StorageCatalogPage({
               type="button"
               className={`sync-path-sync${mode.kind === "pull" ? " active" : ""}`}
               aria-expanded={mode.kind === "pull"}
-              disabled={syncDisabled || pullRows.length === 0}
-              title={syncDisabledReason}
-              onClick={() => void openPull()}
+              disabled={mode.kind === "pull"
+                ? pullReviewApplyDisabled
+                : syncDisabled || pullRows.length === 0}
+              title={mode.kind === "pull" ? pullReviewDisabledReason : syncDisabledReason}
+              onClick={() => void (mode.kind === "pull" ? runPull() : openPull())}
             >
               <Icon name="download" size={14} />
               <span className="sync-path-sync-label">Pull</span>
-              {counts.pull > 0 && mode.kind !== "pull" && (
-                <span className="sync-path-count" aria-hidden="true">{counts.pull}</span>
-              )}
+              {mode.kind === "pull"
+                ? <span className="sync-path-count" aria-hidden="true">{pullSelected.size}</span>
+                : counts.pull > 0 && (
+                  <span className="sync-path-count" aria-hidden="true">{counts.pull}</span>
+                )}
             </button>
             <button
               type="button"
@@ -1490,6 +1556,7 @@ export default function StorageCatalogPage({
                         storageName={storageName}
                         storageRevision={storageRevision}
                         provider={scope.scope.provider}
+                        kindNoun={kind.label.toLowerCase()}
                         onOpenApp={openProfileApp}
                         onOpenTerminal={openProfileTerminal}
                         preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
@@ -1582,8 +1649,7 @@ export default function StorageCatalogPage({
         .find((candidate) => candidate.action_id === actionId)?.requires_destructive_approval ?? false;
     };
     const claimed = reviewItems.filter((item) => item.conflicting_claims.length > 0);
-    const blocked = reviewItems.some((item) => pullSelected.has(item.item.resource_id)
-      && needsAck(item) && !pullAcks.has(item.item.resource_id));
+    const blocked = pullReviewBlocked;
     return (
       <>
         {bar}
@@ -1653,6 +1719,7 @@ export default function StorageCatalogPage({
                         storageName={storageName}
                         storageRevision={storageRevision}
                         provider={scope.scope.provider}
+                        kindNoun={kind.label.toLowerCase()}
                         onOpenApp={openProfileApp}
                         onOpenTerminal={openProfileTerminal}
                         preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
@@ -1728,7 +1795,7 @@ export default function StorageCatalogPage({
               <button
                 type="button"
                 className="btn btn-primary sync-pull-apply-button"
-                disabled={busy || pullSelected.size === 0 || blocked}
+                disabled={pullReviewApplyDisabled}
                 onClick={() => void runPull()}
               >
                 <ThreadStatusIcon status="cloud-outstanding" size={16} />
@@ -1742,6 +1809,55 @@ export default function StorageCatalogPage({
   }
 
   // ---- the list ----------------------------------------------------------
+
+  /* Stored-only rows lead the page, the way the activity page leads with its
+     storage-only sessions: what is not on this Mac is the one thing the list
+     cannot say row by row, so it gets said by position. A row that is nowhere
+     at all (a link whose content vanished on both sides) stays in the kind's
+     own section — "not in the storage" would be the wrong heading for it. */
+  const cloudRows = rows.filter((row) => !row.local_present && row.remote_present);
+  const localRows = rows.filter((row) => row.local_present || !row.remote_present);
+
+  const renderRow = (row: CatalogScopeRow) => {
+    const forkable = forkableKind && row.local_present && !!row.resource_id;
+    const forkOpen = forkable && forkFor === row.resource_id;
+    const kindPhrase = resourceKindPhrase(scope.scope.resource_kind, row.scope_label);
+    return (
+      <ResourceCard
+        key={row.row_id}
+        row={row}
+        storageName={storageName}
+        storageRevision={storageRevision}
+        provider={scope.scope.provider}
+        kindNoun={kind.label.toLowerCase()}
+        onOpenApp={openProfileApp}
+        onOpenTerminal={openProfileTerminal}
+        preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
+        onReveal={() => reveal(row)}
+        onFork={forkableKind ? () => {
+          setForkError(null);
+          setForkFor(forkOpen ? null : row.resource_id!);
+        } : undefined}
+        forkOpen={forkOpen}
+        forkTitle={`Fork ${row.display_name} — duplicate this ${kindPhrase} under a new name`}
+        footer={forkOpen && (
+          <ForkDrawer
+            displayName={row.display_name}
+            seed={forkSeed(row)}
+            maxLength={petKind ? 64 : 128}
+            busy={busy}
+            error={forkError}
+            onEdited={() => setForkError(null)}
+            onSubmit={(name) => void runFork(row, name)}
+            onClose={() => {
+              setForkError(null);
+              setForkFor(null);
+            }}
+          />
+        )}
+      />
+    );
+  };
 
   return (
     <>
@@ -1844,54 +1960,34 @@ export default function StorageCatalogPage({
           </div>
         ) : (
           <section className="profile-links-section" aria-label={label}>
-            {/* The project's own section heading: what the list is, in the
-                same shape at the same weight. No count — every row already
-                wears the same provider mark, so a mark-plus-number chip here
-                read as one more row rather than a summary. */}
-            <div className="sync-history-section-heading">
-              <h2><Icon name={kind.icon} size={14} />{kind.plural}</h2>
-            </div>
-            <div className="sync-history-thread-list">
-              {rows.map((row) => {
-                const forkable = forkableKind && row.local_present && !!row.resource_id;
-                const forkOpen = forkable && forkFor === row.resource_id;
-                const kindPhrase = resourceKindPhrase(scope.scope.resource_kind, row.scope_label);
-                return (
-                  <ResourceCard
-                    key={row.row_id}
-                    row={row}
-                    storageName={storageName}
-                    storageRevision={storageRevision}
-                    provider={scope.scope.provider}
-                    onOpenApp={openProfileApp}
-                    onOpenTerminal={openProfileTerminal}
-                    preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
-                    onReveal={() => reveal(row)}
-                    onFork={forkableKind ? () => {
-                      setForkError(null);
-                      setForkFor(forkOpen ? null : row.resource_id!);
-                    } : undefined}
-                    forkOpen={forkOpen}
-                    forkTitle={`Fork ${row.display_name} — duplicate this ${kindPhrase} under a new name`}
-                    footer={forkOpen && (
-                      <ForkDrawer
-                        displayName={row.display_name}
-                        seed={forkSeed(row)}
-                        maxLength={petKind ? 64 : 128}
-                        busy={busy}
-                        error={forkError}
-                        onEdited={() => setForkError(null)}
-                        onSubmit={(name) => void runFork(row, name)}
-                        onClose={() => {
-                          setForkError(null);
-                          setForkFor(null);
-                        }}
-                      />
-                    )}
-                  />
-                );
-              })}
-            </div>
+            {/* Two plain sections, one list broken in two: the same heading
+                shape at the same weight, the same cards at the same rhythm.
+                No counts on either heading — every row already wears the same
+                provider mark, so a mark-plus-number chip here read as one more
+                row rather than a summary. */}
+            {cloudRows.length > 0 && (
+              <>
+                <div className="sync-history-section-heading">
+                  <h2>
+                    <Icon name="cloud" size={14} />
+                    Only in <span className="sync-history-storage-name">{storageName ?? "storage"}</span>
+                  </h2>
+                </div>
+                <div className="sync-history-thread-list">
+                  {cloudRows.map(renderRow)}
+                </div>
+              </>
+            )}
+            {localRows.length > 0 && (
+              <>
+                <div className="sync-history-section-heading">
+                  <h2><Icon name={kind.icon} size={14} />{kind.plural}</h2>
+                </div>
+                <div className="sync-history-thread-list">
+                  {localRows.map(renderRow)}
+                </div>
+              </>
+            )}
           </section>
         )}
       </main>

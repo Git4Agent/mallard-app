@@ -22,9 +22,9 @@ use mallard_domain::{
     ApplyReceipt, BindingState, BundleDirectoryEntry, BundleFileEntry, BundleHead, BundleId,
     BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleScope, BundleSnapshot,
     CapturedWith, CloudThreadId, ConversationThread, LogicalPath, PlanId, PortableOrigin,
-    ProjectBinding, ProviderKey, ResourceDescriptor, ResourceId, ResourceKind, RestoreAction,
-    RestoreActionKind, RestorePlan, StorageId, SyncScopeKey, Tombstone, TombstoneTarget,
-    BUNDLE_SCHEMA, RESTORE_PLAN_SCHEMA,
+    ProjectBinding, ProjectFilePreservationPin, ProviderKey, ResourceDescriptor, ResourceId,
+    ResourceKind, RestoreAction, RestoreActionKind, RestorePlan, StorageId, SyncScopeKey,
+    Tombstone, TombstoneTarget, BUNDLE_SCHEMA, RESTORE_PLAN_SCHEMA,
 };
 
 use crate::storage_core::{
@@ -1261,12 +1261,16 @@ impl<S: ObjectStore> BundleEngine<S> {
     /// planner owns them for every provider. Provider-state files are
     /// planned only for bound providers with a resolved home; unbound and
     /// unknown provider scopes stay view-only and untouched.
+    #[allow(clippy::too_many_arguments)]
     pub fn build_restore_plan_from_snapshot(
         &self,
         registry: &ProviderRegistry,
         snapshot: &BundleSnapshot,
         binding: &ProjectBinding,
         provider_homes: &BTreeMap<ProviderKey, String>,
+        // Reviewed-base content digests per project-content logical path. A
+        // diverged file absent from this map preserves its local bytes.
+        project_content_bases: &BTreeMap<LogicalPath, String>,
         created_at: u64,
         expected_host_identity_revision: u64,
     ) -> Result<RestorePlan, String> {
@@ -1284,6 +1288,7 @@ impl<S: ObjectStore> BundleEngine<S> {
         let plan_id = PlanId::parse(random_named_id("plan")?)?;
         let mut actions = Vec::new();
         let mut target_owners = BTreeMap::<String, LogicalPath>::new();
+        let mut copy_claims = BTreeSet::<LogicalPath>::new();
 
         for (scope_key, scope) in &snapshot.manifest.scopes {
             let scope_home = match scope_key {
@@ -1436,7 +1441,20 @@ impl<S: ObjectStore> BundleEngine<S> {
                     PlannedOutcome::Action => {}
                 };
                 let target = planned.target.as_ref().expect("file action has a target");
-                let kind = restore_kind_for_file(logical_path, descriptor, entry)?;
+                let preserve = if descriptor.kind == ResourceKind::ProjectContentFile {
+                    plan_project_file_preservation(
+                        logical_path,
+                        entry,
+                        planned.target_digest.as_deref(),
+                        project_content_bases,
+                        scope,
+                        &mut copy_claims,
+                        binding,
+                    )?
+                } else {
+                    None
+                };
+                let kind = restore_kind_for_file(logical_path, descriptor, entry, preserve)?;
                 let requires_explicit_approval = action_needs_explicit_approval(
                     descriptor,
                     planned.target_digest.as_deref(),
@@ -2217,6 +2235,7 @@ mod tests {
                 &snapshot,
                 &binding,
                 &provider_homes,
+                &std::collections::BTreeMap::new(),
                 100,
                 0,
             )
@@ -2259,6 +2278,276 @@ mod tests {
             .receipts
             .iter()
             .any(|receipt| receipt.status == ActionStatus::Applied));
+        // No reviewed base was supplied, so the diverged target fails closed
+        // to preservation: the local bytes survive as a visible sibling.
+        assert_eq!(
+            fs::read(target.join("CLAUDE-local-copy.md")).unwrap(),
+            b"target edits"
+        );
+    }
+
+    #[test]
+    fn project_copy_file_names_suffix_before_the_extension() {
+        assert_eq!(
+            project_copy_file_name("ghost_story.docx", 1),
+            "ghost_story-local-copy.docx"
+        );
+        assert_eq!(
+            project_copy_file_name("ghost_story.docx", 2),
+            "ghost_story-local-copy-2.docx"
+        );
+        assert_eq!(project_copy_file_name("Makefile", 1), "Makefile-local-copy");
+        // A leading dot is a name, not an extension boundary.
+        assert_eq!(project_copy_file_name(".envrc", 1), ".envrc-local-copy");
+        assert_eq!(
+            project_copy_file_name("archive.tar.gz", 1),
+            "archive.tar-local-copy.gz"
+        );
+        let long = format!("{}.md", "x".repeat(200));
+        let copy = project_copy_file_name(&long, 1);
+        assert!(copy.starts_with(&"x".repeat(96)));
+        assert!(copy.ends_with("-local-copy.md"));
+        assert!(copy.len() < 128);
+    }
+
+    /// One diverged publish: storage holds "storage v2", the target holds
+    /// local edits, and the reviewed base is the caller's to supply.
+    fn diverged_project_fixture(
+        temp: &tempfile::TempDir,
+        target_bytes: &[u8],
+    ) -> (
+        BundleEngine<LocalObjectStore>,
+        BundleSnapshot,
+        ProjectBinding,
+    ) {
+        let source = temp.path().join("source-project");
+        let target = temp.path().join("target-project");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        write(&source.join("draft.md"), b"storage v2");
+        write(&target.join("draft.md"), target_bytes);
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let resource_id = inventory
+            .resources
+            .iter()
+            .find(|resource| resource.display_name == "draft.md")
+            .unwrap()
+            .resource_id
+            .clone();
+        let recipe = recipe_for([resource_id]);
+        let id = bundle_id(41);
+        let engine = BundleEngine::open(
+            LocalObjectStore::open(temp.path().join("store")).unwrap(),
+            storage_id(),
+        )
+        .unwrap();
+        publish_captured(
+            &engine,
+            identity(id.clone(), "Diverged project"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        let snapshot = engine.inspect(&id).unwrap();
+        let binding = active_binding(id, &target);
+        (engine, snapshot, binding)
+    }
+
+    fn draft_write_action(plan: &RestorePlan) -> &RestoreAction {
+        plan.actions
+            .iter()
+            .find(|action| {
+                matches!(&action.kind, RestoreActionKind::WriteProjectFile { logical_path, .. }
+                    if logical_path.as_str() == "project/draft.md")
+            })
+            .unwrap()
+    }
+
+    fn preservation_pin(action: &RestoreAction) -> Option<&domain::ProjectFilePreservationPin> {
+        match &action.kind {
+            RestoreActionKind::WriteProjectFile { preserve, .. } => preserve.as_ref(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn diverged_project_file_preserves_the_local_version_beside_the_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, snapshot, binding) = diverged_project_fixture(&temp, b"local twist");
+        // The base pins a third version: local != base != storage.
+        let bases = BTreeMap::from([(
+            LogicalPath::parse("project/draft.md").unwrap(),
+            sha256_hex(b"reviewed v1"),
+        )]);
+        let plan = engine
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &BTreeMap::new(),
+                &bases,
+                100,
+                0,
+            )
+            .unwrap();
+        let action = draft_write_action(&plan);
+        let pin = preservation_pin(action).expect("diverged file must preserve");
+        assert_eq!(
+            pin.copy_logical_path.as_str(),
+            "project/draft-local-copy.md"
+        );
+        assert_eq!(pin.local_content_sha256, sha256_hex(b"local twist"));
+        assert_eq!(pin.storage_content_sha256, sha256_hex(b"storage v2"));
+        assert!(!pin.reusable_witness);
+        let approved = BTreeSet::from([action.action_id.clone()]);
+        let mut bytes = engine.byte_source(&snapshot, None, None);
+        let result = engine
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut bytes,
+                &binding,
+                &BTreeMap::new(),
+                &plan,
+                &approved,
+                &temp.path().join("backups"),
+                101,
+            )
+            .unwrap();
+        let target = temp.path().join("target-project");
+        assert_eq!(fs::read(target.join("draft.md")).unwrap(), b"storage v2");
+        assert_eq!(
+            fs::read(target.join("draft-local-copy.md")).unwrap(),
+            b"local twist"
+        );
+        assert!(result
+            .receipts
+            .iter()
+            .any(|receipt| receipt.status == ActionStatus::Applied));
+    }
+
+    #[test]
+    fn fast_forward_project_file_skips_preservation_when_local_matches_base() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, snapshot, binding) = diverged_project_fixture(&temp, b"reviewed v1");
+        let bases = BTreeMap::from([(
+            LogicalPath::parse("project/draft.md").unwrap(),
+            sha256_hex(b"reviewed v1"),
+        )]);
+        let plan = engine
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &BTreeMap::new(),
+                &bases,
+                100,
+                0,
+            )
+            .unwrap();
+        assert!(preservation_pin(draft_write_action(&plan)).is_none());
+    }
+
+    #[test]
+    fn occupied_copy_paths_reuse_witnesses_or_take_the_next_suffix() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, snapshot, binding) = diverged_project_fixture(&temp, b"local twist");
+        let target = temp.path().join("target-project");
+        // A verified copy from an interrupted apply is reused as a witness.
+        write(&target.join("draft-local-copy.md"), b"local twist");
+        let plan = engine
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                100,
+                0,
+            )
+            .unwrap();
+        let pin = preservation_pin(draft_write_action(&plan)).unwrap();
+        assert_eq!(
+            pin.copy_logical_path.as_str(),
+            "project/draft-local-copy.md"
+        );
+        assert!(pin.reusable_witness);
+        // A foreign occupant pushes the copy to the next suffix.
+        write(&target.join("draft-local-copy.md"), b"someone else's file");
+        let plan = engine
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                100,
+                0,
+            )
+            .unwrap();
+        let pin = preservation_pin(draft_write_action(&plan)).unwrap();
+        assert_eq!(
+            pin.copy_logical_path.as_str(),
+            "project/draft-local-copy-2.md"
+        );
+        assert!(!pin.reusable_witness);
+    }
+
+    #[test]
+    fn apply_refuses_a_copy_target_that_changed_after_planning() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, snapshot, binding) = diverged_project_fixture(&temp, b"local twist");
+        let plan = engine
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                100,
+                0,
+            )
+            .unwrap();
+        let action = draft_write_action(&plan);
+        let target = temp.path().join("target-project");
+        write(
+            &target.join("draft-local-copy.md"),
+            b"landed after the plan",
+        );
+        let approved = BTreeSet::from([action.action_id.clone()]);
+        let mut bytes = engine.byte_source(&snapshot, None, None);
+        let result = engine
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut bytes,
+                &binding,
+                &BTreeMap::new(),
+                &plan,
+                &approved,
+                &temp.path().join("backups"),
+                101,
+            )
+            .unwrap();
+        let receipt = result
+            .receipts
+            .iter()
+            .find(|receipt| receipt.action_id == action.action_id)
+            .unwrap();
+        assert_eq!(receipt.status, ActionStatus::Failed);
+        assert!(receipt
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("preservation copy target changed"));
+        // Neither side moved: the local bytes and the foreign occupant stand.
+        assert_eq!(fs::read(target.join("draft.md")).unwrap(), b"local twist");
+        assert_eq!(
+            fs::read(target.join("draft-local-copy.md")).unwrap(),
+            b"landed after the plan"
+        );
     }
 
     /// Store wrapper recording every staged/metadata key and every write so
@@ -2857,6 +3146,7 @@ mod tests {
                 &snapshot,
                 &binding,
                 &provider_homes,
+                &std::collections::BTreeMap::new(),
                 100,
                 0,
             )
@@ -2917,6 +3207,7 @@ mod tests {
                 &snapshot,
                 &binding,
                 &provider_homes,
+                &std::collections::BTreeMap::new(),
                 102,
                 0,
             )
@@ -3063,6 +3354,7 @@ mod tests {
                 &snapshot,
                 &binding,
                 &provider_homes,
+                &std::collections::BTreeMap::new(),
                 100,
                 0,
             )
@@ -3084,6 +3376,7 @@ mod tests {
                 &snapshot,
                 &binding,
                 &provider_homes,
+                &std::collections::BTreeMap::new(),
                 101,
                 0,
             )
@@ -3102,6 +3395,7 @@ mod tests {
                 &snapshot,
                 &binding,
                 &provider_homes,
+                &std::collections::BTreeMap::new(),
                 102,
                 0,
             )
@@ -3184,6 +3478,7 @@ fn restore_kind_for_file(
     logical_path: &LogicalPath,
     descriptor: &ResourceDescriptor,
     entry: &BundleFileEntry,
+    preserve: Option<ProjectFilePreservationPin>,
 ) -> Result<RestoreActionKind, String> {
     Ok(match descriptor.kind {
         ResourceKind::Conversation => {
@@ -3196,6 +3491,7 @@ fn restore_kind_for_file(
             logical_path: logical_path.clone(),
             mode: entry.mode.unwrap_or(0o600) & 0o777,
             source_mtime: entry.source_mtime,
+            preserve,
         },
         _ if descriptor.apply_policy == ApplyPolicy::Merge => RestoreActionKind::MergeFile {
             logical_path: logical_path.clone(),
@@ -3229,6 +3525,149 @@ fn action_id_for(
 /// Map one project-scope logical path to its machine target. `project/`
 /// content lands under the canonical project root; `requirements/` and
 /// `dependencies/` entries have no safe materializer and stay manual.
+/// Candidate copy names for a preserved diverged file: the suffix lands
+/// before the final extension (`ghost.docx` → `ghost-local-copy.docx`,
+/// then `ghost-local-copy-2.docx`…), matching the Catalog's `-local-copy`
+/// convention. The stem is trimmed so the component stays well under the
+/// logical-path component cap.
+fn project_copy_file_name(file_name: &str, attempt: usize) -> String {
+    let (stem, extension) = match file_name.rfind('.') {
+        Some(index) if index > 0 => file_name.split_at(index),
+        _ => (file_name, ""),
+    };
+    let mut stem = stem.to_string();
+    while stem.len() > 96 {
+        stem.pop();
+    }
+    if attempt <= 1 {
+        format!("{stem}-local-copy{extension}")
+    } else {
+        format!("{stem}-local-copy-{attempt}{extension}")
+    }
+}
+
+const MAX_COPY_NAME_ATTEMPTS: usize = 32;
+
+/// Decide whether a planned project-file write must preserve the local
+/// version first, and mint the pin if so. `None` means a plain write: the
+/// target is absent, already holds the storage bytes, or matches the
+/// reviewed base (a fast-forward). An unknown base fails closed to
+/// preservation — when the plan cannot prove the local bytes are stored, it
+/// keeps them.
+fn plan_project_file_preservation(
+    logical_path: &LogicalPath,
+    entry: &BundleFileEntry,
+    target_digest: Option<&str>,
+    project_content_bases: &BTreeMap<LogicalPath, String>,
+    scope: &BundleScope,
+    copy_claims: &mut BTreeSet<LogicalPath>,
+    binding: &ProjectBinding,
+) -> Result<Option<ProjectFilePreservationPin>, String> {
+    let Some(local_digest) = target_digest else {
+        return Ok(None);
+    };
+    if local_digest == entry.sha256 {
+        return Ok(None);
+    }
+    if project_content_bases.get(logical_path).map(String::as_str) == Some(local_digest) {
+        return Ok(None);
+    }
+    let (parent, file_name) = match logical_path.as_str().rfind('/') {
+        Some(index) => logical_path.as_str().split_at(index + 1),
+        None => return Err(format!("'{}' is not project content", logical_path)),
+    };
+    for attempt in 1..=MAX_COPY_NAME_ATTEMPTS {
+        let candidate = LogicalPath::parse(format!(
+            "{parent}{}",
+            project_copy_file_name(file_name, attempt)
+        ))?;
+        if scope.files.contains_key(&candidate)
+            || scope.directories.contains_key(&candidate)
+            || copy_claims.contains(&candidate)
+        {
+            continue;
+        }
+        let candidate_target = project_content_target(&candidate, binding)?;
+        let reusable_witness = match inspect_restore_target(&candidate_target) {
+            Ok(state) => match state.digest {
+                // A verified copy from an interrupted apply: reuse it.
+                Some(digest) if digest == local_digest => true,
+                // Occupied by anything else: this name is taken.
+                Some(_) => continue,
+                None => false,
+            },
+            // Unreadable (symlink, special file): the name is unusable.
+            Err(_) => continue,
+        };
+        copy_claims.insert(candidate.clone());
+        return Ok(Some(ProjectFilePreservationPin {
+            copy_logical_path: candidate,
+            local_content_sha256: local_digest.to_string(),
+            storage_content_sha256: entry.sha256.clone(),
+            reusable_witness,
+        }));
+    }
+    Err(format!(
+        "could not find an unused preservation copy name beside '{}'",
+        logical_path
+    ))
+}
+
+/// Copy the diverged local file to its pinned sibling before the storage
+/// version overwrites it. A verified copy already in place — left by an
+/// interrupted earlier apply — is reused; anything else at the copy path is
+/// a refusal, mirroring "restore target changed after planning".
+fn preserve_local_project_copy(
+    target: &Path,
+    pin: &ProjectFilePreservationPin,
+    binding: &ProjectBinding,
+    before: &RestoreTargetState,
+) -> Result<(), String> {
+    if before.digest.as_deref() != Some(pin.local_content_sha256.as_str()) {
+        return Err("restore target changed after planning".to_string());
+    }
+    let copy_target = project_content_target(&pin.copy_logical_path, binding)?;
+    // The copy is project content by construction, so the containment guard
+    // needs no provider homes.
+    validate_target_for_logical(
+        &copy_target,
+        &pin.copy_logical_path,
+        binding,
+        &BTreeMap::new(),
+    )?;
+    let existing = inspect_restore_target(&copy_target)?;
+    match &existing.digest {
+        Some(digest) if digest.as_str() == pin.local_content_sha256 => return Ok(()),
+        Some(_) => {
+            return Err("preservation copy target changed after planning".to_string());
+        }
+        None => {}
+    }
+    let size = before
+        .size
+        .ok_or_else(|| "restore target vanished before preservation".to_string())?;
+    let mut reader = open_read_only_no_follow(
+        target,
+        &format!("preservation source '{}'", target.display()),
+    )?;
+    write_target_atomic_from_reader(
+        &copy_target,
+        &mut reader,
+        size,
+        &pin.local_content_sha256,
+        before.mode.unwrap_or(0o600),
+        Some(&existing),
+    )?;
+    if let Ok(metadata) = fs::symlink_metadata(target) {
+        if let Ok(modified) = metadata.modified() {
+            if let Ok(elapsed) = modified.duration_since(std::time::UNIX_EPOCH) {
+                set_path_mtime_best_effort(&copy_target, elapsed.as_secs());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn map_project_logical_target(
     logical_path: &LogicalPath,
     binding: &ProjectBinding,
@@ -4714,6 +5153,13 @@ impl<S: ObjectStore> BundleEngine<S> {
             && matches!(action.kind, RestoreActionKind::WriteProjectFile { .. })
         {
             return Err("project-file mode changed after planning".to_string());
+        }
+        if let RestoreActionKind::WriteProjectFile {
+            preserve: Some(pin),
+            ..
+        } = &action.kind
+        {
+            preserve_local_project_copy(&target, pin, binding, &before)?;
         }
         // Pinned no-op: the plan proved what these bytes would be, and the
         // target already holds them — finish without touching the payload.

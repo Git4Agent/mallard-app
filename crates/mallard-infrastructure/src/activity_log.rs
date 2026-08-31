@@ -407,6 +407,31 @@ impl ActivityLogStore {
         let _guard = log_io_guard()?;
         self.ensure_root()?;
         let _process_guard = self.lock_file()?;
+        let (removed_files, reclaimed_bytes) = self.cleanup_files_unlocked(request, now)?;
+        Ok(ActivityLogCleanupResult {
+            removed_files,
+            reclaimed_bytes,
+            stats: self.stats_unlocked()?,
+        })
+    }
+
+    fn cleanup_without_stats_at(
+        &self,
+        request: &ActivityLogCleanupRequest,
+        now: u64,
+    ) -> Result<(), String> {
+        let _guard = log_io_guard()?;
+        self.ensure_root()?;
+        let _process_guard = self.lock_file()?;
+        self.cleanup_files_unlocked(request, now)?;
+        Ok(())
+    }
+
+    fn cleanup_files_unlocked(
+        &self,
+        request: &ActivityLogCleanupRequest,
+        now: u64,
+    ) -> Result<(usize, u64), String> {
         let policy = self.load_policy_unlocked()?;
         let mut files = self.log_files()?;
         files.sort_by(|left, right| left.name.cmp(&right.name));
@@ -457,11 +482,7 @@ impl ActivityLogStore {
             }
         }
 
-        Ok(ActivityLogCleanupResult {
-            removed_files,
-            reclaimed_bytes,
-            stats: self.stats_unlocked()?,
-        })
+        Ok((removed_files, reclaimed_bytes))
     }
 
     #[cfg(not(test))]
@@ -484,7 +505,9 @@ impl ActivityLogStore {
             })
             .unwrap_or(false);
         if should_clean {
-            let _ = self.cleanup(&ActivityLogCleanupRequest::default());
+            // Scheduled retention needs file dates and sizes, not entry timestamps.
+            let _ =
+                self.cleanup_without_stats_at(&ActivityLogCleanupRequest::default(), now_millis());
         }
     }
 
@@ -1021,6 +1044,38 @@ mod tests {
             .unwrap();
         assert_eq!(result.removed_files, 1);
         assert_eq!(result.stats.file_count, 1);
+    }
+
+    #[test]
+    fn scheduled_cleanup_enforces_retention_without_collecting_stats() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ActivityLogStore::from_home_dir(temp.path()).unwrap();
+        store
+            .append(&entry(
+                timestamp("2026-06-01", 1),
+                ActivityLogType::System,
+                ActivityLogLevel::Info,
+                "old",
+            ))
+            .unwrap();
+        store
+            .append(&entry(
+                timestamp("2026-07-20", 1),
+                ActivityLogType::System,
+                ActivityLogLevel::Info,
+                "active",
+            ))
+            .unwrap();
+
+        store
+            .cleanup_without_stats_at(
+                &ActivityLogCleanupRequest::default(),
+                timestamp("2026-07-20", 12),
+            )
+            .unwrap();
+
+        assert!(!store.root().join("activity-2026-06-01-000.jsonl").exists());
+        assert!(store.root().join("activity-2026-07-20-000.jsonl").is_file());
     }
 
     #[test]

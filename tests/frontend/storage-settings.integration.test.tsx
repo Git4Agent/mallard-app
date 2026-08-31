@@ -862,7 +862,7 @@ test("the storage page is a rooted trail; the sidebar opens it and removes direc
   assert.match(shell, /onRemoveStorage=\{\(storageId\) => void removeStorage\(storageId\)\}/);
   assert.match(shell, /onClearStorage=\{\(storageId\) => void clearStorageData\(storageId\)\}/);
   assert.match(shell, /storageIndexOpen \? \(\s*<StorageIndexPage/);
-  assert.match(shell, /\(!!activeSummary\s*\|\| !!activeCatalogScope\s*\|\| storageIndexOpen\s*\|\| settingsOpen\s*\|\| activeStorageSettingsId != null\)/);
+  assert.match(shell, /\(!!activeSummary\s*\|\| !!activeCatalogScope\s*\|\| catalogIndexOpen\s*\|\| storageIndexOpen\s*\|\| settingsOpen\s*\|\| activeStorageSettingsId != null\)/);
   // Removing the storage whose page is open lands on the trail's root.
   assert.match(shell, /if \(activeStorageSettingsId === storageId\) setStorageIndexOpen\(true\);/);
 
@@ -1101,7 +1101,7 @@ test("storage draft rows reach the index and the shell resumes them by fetching 
 
   assert.match(shell, /const \[storageSetupDrafts, setStorageSetupDrafts\] = useState<StorageSetupDraft\[\]>\(\[\]\);/);
   assert.match(shell, /const refreshStorageSetupDrafts = async/);
-  assert.match(shell, /await refreshStorageSetupDrafts\(requestId\);/);
+  assert.match(shell, /Promise\.allSettled\(\[[\s\S]*refreshStorageSetupDrafts\(requestId\),/);
   assert.match(shell, /drafts=\{storageSetupDrafts\}/);
   assert.match(shell, /onOpenStorageDraft=\{\(draftId\) => void openStorageSetupDraft\(draftId\)\}/);
   // The fetch happens in the shell so the workspace request handler stays

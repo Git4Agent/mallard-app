@@ -269,11 +269,14 @@ interface Props {
   catalogScopes: CatalogScopeView[];
   activeCatalogScopeId: string | null;
   addingCatalogScope: boolean;
+  catalogIndexOpen: boolean;
+  storageIndexOpen: boolean;
   settingsOpen: boolean;
   loading: boolean;
   busy: boolean;
   activityOpen: boolean;
   unreadLogs: number;
+  onOpenProjects: () => void;
   onSelectProject: (projectId: string) => void;
   onRemoveProject: (projectId: string) => void;
   onSelectDraft: (draftId: string) => void;
@@ -285,10 +288,11 @@ interface Props {
   onDiscardStorageDraft: (draftId: string) => void;
   onRemoveStorage: (storageId: string) => void;
   onAddStorage: () => void;
-  onOpenCatalogMenu: () => void;
+  onOpenCatalogIndex: () => void;
   onOpenCatalogScope: (scopeId: string) => void;
   onAddCatalogScope: () => void;
   onRemoveCatalogScope: (scopeId: string) => void;
+  onOpenStorageIndex: () => void;
   onOpenSettings: () => void;
 }
 
@@ -305,11 +309,14 @@ export default function ProjectSidebar({
   catalogScopes,
   activeCatalogScopeId,
   addingCatalogScope,
+  catalogIndexOpen,
+  storageIndexOpen,
   settingsOpen,
   loading,
   busy,
   activityOpen,
   unreadLogs,
+  onOpenProjects,
   onSelectProject,
   onRemoveProject,
   onSelectDraft,
@@ -321,10 +328,11 @@ export default function ProjectSidebar({
   onDiscardStorageDraft,
   onRemoveStorage,
   onAddStorage,
-  onOpenCatalogMenu,
+  onOpenCatalogIndex,
   onOpenCatalogScope,
   onAddCatalogScope,
   onRemoveCatalogScope,
+  onOpenStorageIndex,
   onOpenSettings,
 }: Props) {
   const [sectionLayout, setSectionLayout] = useState<SectionLayout>(storedSectionLayout);
@@ -668,10 +676,6 @@ export default function ProjectSidebar({
     };
   };
 
-  const primaryStorageId = activeStorageId && storages.some((storage) => storage.id === activeStorageId)
-    ? activeStorageId
-    : storages[0]?.id ?? null;
-
   /* What a closed heading must still say: the attention draft and the
      profile-less project are the two flags the Projects rows draw, and the
      storage rows draw theirs from the issue map. Catalog rows have no flagged
@@ -698,25 +702,25 @@ export default function ProjectSidebar({
         <nav className="sync-primary-nav" aria-label="Project sync navigation">
           <button
             type="button"
-            className={!activeStorageId && !activeCatalogScopeId && !addingCatalogScope && !settingsOpen ? "active" : undefined}
-            onClick={() => activeProjectId && onSelectProject(activeProjectId)}
+            className={!activeStorageId && !activeCatalogScopeId && !addingCatalogScope && !catalogIndexOpen && !storageIndexOpen && !settingsOpen ? "active" : undefined}
+            onClick={onOpenProjects}
             disabled={busy}
           >
             <Icon name="folder" size={15} /> Projects
           </button>
           <button
             type="button"
-            className={activeCatalogScopeId || addingCatalogScope ? "active" : undefined}
-            onClick={onOpenCatalogMenu}
+            className={activeCatalogScopeId || addingCatalogScope || catalogIndexOpen ? "active" : undefined}
+            onClick={onOpenCatalogIndex}
             disabled={busy}
           >
             <Icon name="catalog" size={15} /> Catalog
           </button>
           <button
             type="button"
-            className={activeStorageId ? "active" : undefined}
-            onClick={() => primaryStorageId && onOpenStorage(primaryStorageId, false)}
-            disabled={busy || !primaryStorageId}
+            className={activeStorageId || storageIndexOpen ? "active" : undefined}
+            onClick={onOpenStorageIndex}
+            disabled={busy}
           >
             <Icon name="drive" size={15} /> Storages
           </button>
@@ -729,9 +733,11 @@ export default function ProjectSidebar({
             <Icon name="settings" size={15} /> Settings
           </button>
           <button
+            id="activity-log-trigger"
             type="button"
             className={activityOpen ? "active" : undefined}
             onClick={onToggleActivity}
+            aria-controls="activity-log-drawer"
             aria-expanded={activityOpen}
           >
             <Icon name="activity" size={15} /> Logs

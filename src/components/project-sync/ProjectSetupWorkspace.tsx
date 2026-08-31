@@ -25,6 +25,7 @@ import {
   formatRelativeTime,
   projectLabel,
   repositoryFingerprintMatches,
+  repositoryFingerprintsRequireAcknowledgement,
 } from "./model";
 
 interface Props {
@@ -961,7 +962,7 @@ export default function ProjectSetupWorkspace({
               </div>
             )}
             {usesExistingRepo && draft.repository.kind === "existing"
-              && !repositoryFingerprintMatches(
+              && repositoryFingerprintsRequireAcknowledgement(
                 draft.repository.repository_fingerprint,
                 repositoryFingerprint,
               ) && (

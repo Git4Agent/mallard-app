@@ -2669,7 +2669,7 @@ mod tests {
                 .state
         };
         assert_eq!(state_of("review"), Some(CatalogLinkState::InSync));
-        assert_eq!(state_of("notes"), Some(CatalogLinkState::UnreviewedRemote));
+        assert_eq!(state_of("notes"), Some(CatalogLinkState::LocalMissing));
         assert_eq!(state_of("extra"), Some(CatalogLinkState::New));
 
         // B pushes its own skill: one repository, a manifest of three.

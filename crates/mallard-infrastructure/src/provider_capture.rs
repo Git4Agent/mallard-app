@@ -211,6 +211,13 @@ struct DiscoveredResource {
     conversation: Option<DiscoveredConversationMeta>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct DiscoveryDiagnostics {
+    warnings: Vec<String>,
+    ignored_count: usize,
+    blocked_count: usize,
+}
+
 /// One full provider walk. Fields stay private to this module: callers hold
 /// a Discovery opaquely and feed it back into the inventory/capture views,
 /// sharing the walk (and derived candidates such as the filtered session
@@ -222,6 +229,7 @@ pub struct Discovery {
     warnings: Vec<String>,
     ignored_count: usize,
     blocked_count: usize,
+    project_content_diagnostics: DiscoveryDiagnostics,
     excluded_subagent_session_ids: BTreeMap<domain::ProviderKey, BTreeSet<String>>,
     excluded_subagent_resource_ids: BTreeSet<String>,
 }
@@ -263,6 +271,18 @@ impl Discovery {
             combined.blocked_count = combined
                 .blocked_count
                 .saturating_add(discovery.blocked_count);
+            combined
+                .project_content_diagnostics
+                .warnings
+                .extend(discovery.project_content_diagnostics.warnings);
+            combined.project_content_diagnostics.ignored_count = combined
+                .project_content_diagnostics
+                .ignored_count
+                .saturating_add(discovery.project_content_diagnostics.ignored_count);
+            combined.project_content_diagnostics.blocked_count = combined
+                .project_content_diagnostics
+                .blocked_count
+                .saturating_add(discovery.project_content_diagnostics.blocked_count);
             for (provider, session_ids) in discovery.excluded_subagent_session_ids {
                 combined
                     .excluded_subagent_session_ids
@@ -289,6 +309,28 @@ impl Discovery {
             warnings: self.warnings.clone(),
             ignored_count: self.ignored_count,
             blocked_count: self.blocked_count,
+        }
+    }
+
+    /// Project-content-only descriptor and diagnostic view. Provider warnings
+    /// and provider exclusions remain on the complete inventory that owns them.
+    pub fn project_content_inventory(&self) -> ProjectInventory {
+        ProjectInventory {
+            resources: self
+                .resources
+                .values()
+                .filter(|candidate| {
+                    matches!(
+                        candidate.descriptor.kind,
+                        CaptureResourceKind::ProjectContentFile
+                            | CaptureResourceKind::ProjectContentDirectory
+                    )
+                })
+                .map(|candidate| candidate.descriptor.clone())
+                .collect(),
+            warnings: self.project_content_diagnostics.warnings.clone(),
+            ignored_count: self.project_content_diagnostics.ignored_count,
+            blocked_count: self.project_content_diagnostics.blocked_count,
         }
     }
 
@@ -967,11 +1009,17 @@ pub fn discover_full(
         warnings: Vec::new(),
         ignored_count: 0,
         blocked_count: 0,
+        project_content_diagnostics: DiscoveryDiagnostics::default(),
         excluded_subagent_session_ids: BTreeMap::new(),
         excluded_subagent_resource_ids: BTreeSet::new(),
     };
     if request.include_project_content {
         discover_generic_project_content(request, &canonical_project, &mut discovery)?;
+        discovery.project_content_diagnostics = DiscoveryDiagnostics {
+            warnings: discovery.warnings.clone(),
+            ignored_count: discovery.ignored_count,
+            blocked_count: discovery.blocked_count,
+        };
     }
     for (provider, home) in &request.provider_homes {
         let adapter = registry.require(provider)?;
@@ -2357,6 +2405,71 @@ mod tests {
     }
 
     #[test]
+    fn project_content_inventory_excludes_provider_resources_and_diagnostics() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let codex = temp.path().join("codex");
+        let claude = temp.path().join("claude");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::create_dir_all(&codex).unwrap();
+        fs::create_dir_all(&claude).unwrap();
+        write(&project.join("notes.md"), b"project notes");
+        write(
+            &codex.join("sessions/2026/08/30/rollout-project.jsonl"),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-a\",\"cwd\":{}}}}}\n",
+                serde_json::to_string(project.to_str().unwrap()).unwrap()
+            )
+            .as_bytes(),
+        );
+        write(
+            &claude.join("projects/source/wrong-session.jsonl"),
+            format!(
+                concat!(
+                    "{{\"type\":\"user\",\"uuid\":\"user-a\",",
+                    "\"parentUuid\":null,\"sessionId\":\"actual-session\",",
+                    "\"cwd\":{},\"message\":{{\"role\":\"user\",",
+                    "\"content\":\"test request\"}}}}\n"
+                ),
+                serde_json::to_string(project.to_str().unwrap()).unwrap(),
+            )
+            .as_bytes(),
+        );
+
+        let request = CaptureRequest {
+            project_root: project.clone(),
+            provider_homes: BTreeMap::from([(codex_key(), codex), (claude_key(), claude)]),
+            include_project_content: true,
+            excluded_content_roots: vec![project.join("missing-exclusion")],
+        };
+        let discovery = discover_full(registry(), &request).unwrap();
+        let complete = discovery.project_inventory();
+        assert!(complete
+            .resources
+            .iter()
+            .any(|resource| resource.resource_id == "codex:session:thread-a"));
+        assert!(complete
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("ignored Claude session")));
+
+        let project_content = discovery.project_content_inventory();
+        assert!(project_content.resources.iter().all(|resource| matches!(
+            resource.kind,
+            CaptureResourceKind::ProjectContentFile | CaptureResourceKind::ProjectContentDirectory
+        )));
+        assert!(project_content
+            .resources
+            .iter()
+            .any(|resource| resource.display_name == "notes.md"));
+        assert_eq!(project_content.ignored_count, 1);
+        assert_eq!(project_content.blocked_count, 0);
+        assert_eq!(project_content.warnings.len(), 1);
+        assert!(project_content.warnings[0].contains("excluded project-content root"));
+        assert!(!project_content.warnings[0].contains("Claude session"));
+    }
+
+    #[test]
     fn codex_and_claude_membership_requires_the_exact_home() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("repo");
@@ -2966,6 +3079,7 @@ mod tests {
             warnings: Vec::new(),
             ignored_count: 0,
             blocked_count: 0,
+            project_content_diagnostics: DiscoveryDiagnostics::default(),
             excluded_subagent_session_ids: BTreeMap::new(),
             excluded_subagent_resource_ids: BTreeSet::new(),
         }

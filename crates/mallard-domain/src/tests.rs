@@ -1356,6 +1356,7 @@ fn executable_restore_actions_cannot_be_implicitly_approved() {
             logical_path: LogicalPath::parse("project/docs/README.md").unwrap(),
             mode: 0o644,
             source_mtime: 1,
+            preserve: None,
         },
         target_path: None,
         source_sha256: None,

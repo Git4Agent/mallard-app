@@ -803,9 +803,18 @@ export interface BundleFetchProgress {
   total_bytes: number;
 }
 
+/** Pinned at plan time for a diverged project file: the local version is
+ * copied to this sibling before the storage version is written. */
+export interface ProjectFilePreservationPin {
+  copy_logical_path: string;
+  local_content_sha256: string;
+  storage_content_sha256: string;
+  reusable_witness: boolean;
+}
+
 export type RestoreActionKind =
   | { kind: "write_file"; logical_path: string }
-  | { kind: "write_project_file"; logical_path: string; mode: number; source_mtime: number }
+  | { kind: "write_project_file"; logical_path: string; mode: number; source_mtime: number; preserve?: ProjectFilePreservationPin | null }
   | { kind: "ensure_project_directory"; logical_path: string; mode: number; source_mtime: number }
   | { kind: "delete_project_file"; logical_path: string; last_sha256: string }
   | { kind: "delete_project_directory"; logical_path: string }

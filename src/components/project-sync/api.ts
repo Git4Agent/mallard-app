@@ -204,8 +204,13 @@ export const projectSyncApi = {
   getPushDestinationStatus: (localProjectId: string, storageId: string) =>
     invoke<PushDestinationStatus>("get_push_destination_status", { localProjectId, storageId }),
 
-  inspectProjectFiles: (localProjectId: string, storageId: string) =>
-    invoke<ProjectContentInventory>("inspect_project_files", { localProjectId, storageId }),
+  inspectProjectFiles: (localProjectId: string, storageId: string) => {
+    const request = { localProjectId, storageId };
+    return projectSyncSingleFlight(
+      JSON.stringify(["inspect_project_files", request]),
+      () => invoke<ProjectContentInventory>("inspect_project_files", request),
+    );
+  },
 
   pushBundle: (
     localProjectId: string,

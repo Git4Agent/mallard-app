@@ -372,7 +372,9 @@ export default function SyncPathBar({
                   opens its switcher on the chevron — one crumb, two targets,
                   which is how a breadcrumb ancestor is expected to behave. */}
               {interactive && menu && crumb.onActivate ? (
-                <span className={`${className} split`}>
+                // Where you are is a property of the position, not of what the
+                // crumb can do: a leaf that opens a menu is still the page.
+                <span className={`${className} split`} aria-current={leaf ? "page" : undefined}>
                   <button
                     type="button"
                     className="sync-path-crumb-link"
@@ -421,6 +423,7 @@ export default function SyncPathBar({
                   disabled={crumb.disabled}
                   title={crumb.title}
                   aria-label={crumb.ariaLabel}
+                  aria-current={leaf ? "page" : undefined}
                   aria-haspopup={menu ? "menu" : undefined}
                   aria-expanded={menu ? open : undefined}
                   aria-controls={menu && open ? menuId : undefined}

@@ -27,6 +27,9 @@ export interface PullReviewItem {
   projectContentPath: string | null;
   projectContentEntryType: "file" | "directory" | null;
   projectContentOperation: "add" | "replace" | "create_directory" | "delete_file" | "delete_directory" | null;
+  /** Project-relative path the local version is copied to before a diverged
+   *  replace — the pull is never lossy. */
+  projectContentPreservedCopy: string | null;
 }
 
 const NON_DIRECT_RESTORE_KINDS = new Set(["manual"]);
@@ -91,6 +94,7 @@ function restoreActionCopy(action: RestoreAction): {
   projectContentPath?: string;
   projectContentEntryType?: "file" | "directory";
   projectContentOperation?: PullReviewItem["projectContentOperation"];
+  projectContentPreservedCopy?: string | null;
 } {
   const kind = action.kind.kind;
   const provider = "provider" in action.kind ? action.kind.provider : null;
@@ -112,6 +116,9 @@ function restoreActionCopy(action: RestoreAction): {
       projectContentPath: projectPath,
       projectContentEntryType: "file",
       projectContentOperation: action.expected_target_sha256 ? "replace" : "add",
+      projectContentPreservedCopy: action.kind.preserve
+        ? action.kind.preserve.copy_logical_path.replace(/^project\//, "")
+        : null,
     };
   }
   if (kind === "ensure_project_directory") {
@@ -192,6 +199,7 @@ export function buildPullReviewItems(plan: RestorePlan): PullReviewItem[] {
       projectContentPath: null,
       projectContentEntryType: null,
       projectContentOperation: null,
+      projectContentPreservedCopy: null,
     };
     items.set(resourceId, item);
     return item;
@@ -210,6 +218,7 @@ export function buildPullReviewItems(plan: RestorePlan): PullReviewItem[] {
     if (copy.projectContentPath) item.projectContentPath = copy.projectContentPath;
     if (copy.projectContentEntryType) item.projectContentEntryType = copy.projectContentEntryType;
     if (copy.projectContentOperation) item.projectContentOperation = copy.projectContentOperation;
+    if (copy.projectContentPreservedCopy) item.projectContentPreservedCopy = copy.projectContentPreservedCopy;
   }
 
   const actionsById = new Map(plan.conversation_actions.map((action) => [action.action_id, action]));
@@ -317,8 +326,18 @@ export function requiresManualResolution(item: PullReviewItem): boolean {
       && !keepsLocalConversation(item));
 }
 
-export function defaultSelected(item: PullReviewItem): boolean {
-  if (item.category === "project_content") return false;
+export function recommendedPullSelection(item: PullReviewItem): boolean {
+  if (item.category === "project_content") {
+    /* The files step's safe selection: operations that only add — nothing
+       local is replaced or deleted. Every project-content action carries
+       requires_explicit_approval (the backend reviews all file writes), so
+       the gate here is the operation, and the review header's Recommended
+       is the explicit review. This absorbed the toolbar's separate "Select
+       safe additions" button, which was this exact predicate under a third
+       icon. */
+    return item.projectContentOperation === "add"
+      || item.projectContentOperation === "create_directory";
+  }
   const actions = item.restoreActions.filter((action) => !NON_DIRECT_RESTORE_KINDS.has(action.kind.kind));
   return (actions.length > 0 || item.conversationActions.length > 0)
     && actions.every((action) => !action.requires_explicit_approval);

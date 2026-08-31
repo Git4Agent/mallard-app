@@ -122,11 +122,8 @@ fn emit_activity_log<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn query_activity_logs(query: ActivityLogQuery) -> Result<ActivityLogPage, String> {
     let store = activity_log_store()?;
-    run_log_io(move || {
-        let _ = store.cleanup(&ActivityLogCleanupRequest::default());
-        store.query(&query)
-    })
-    .await
+    // Appends enforce retention. Keep this read path free of a second cleanup scan.
+    run_log_io(move || store.query(&query)).await
 }
 
 #[tauri::command]
