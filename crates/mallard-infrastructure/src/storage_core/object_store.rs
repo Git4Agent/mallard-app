@@ -182,6 +182,18 @@ pub trait ObjectStore: Send + Sync {
         max_bytes: u64,
     ) -> Result<Option<StoredMetadata>, String>;
 
+    /// Fetch several small objects' bytes; results line up with `keys`.
+    /// Remote stores override this with a bounded-concurrency implementation.
+    fn get_metadata_many(
+        &self,
+        keys: &[ObjectKey],
+        max_bytes: u64,
+    ) -> Result<Vec<Option<StoredMetadata>>, String> {
+        keys.iter()
+            .map(|key| self.get_metadata(key, max_bytes))
+            .collect()
+    }
+
     fn stage_verified(
         &self,
         key: &ObjectKey,

@@ -30,9 +30,16 @@ export interface PullReviewItem {
   /** Project-relative path the local version is copied to before a diverged
    *  replace — the pull is never lossy. */
   projectContentPreservedCopy: string | null;
+  /** Storage-side size of the bytes an apply would write, when known. */
+  projectContentSize: number | null;
 }
 
 const NON_DIRECT_RESTORE_KINDS = new Set(["manual"]);
+const VISIBLE_PULL_CONVERSATION_ACTIONS = new Set([
+  "materialize_cloud",
+  "keep_both",
+  "create_local",
+]);
 
 function humanize(value: string): string {
   return value
@@ -86,6 +93,16 @@ function finalPathPart(value: string): string {
   return parts[parts.length - 1] ?? value;
 }
 
+function isPinnedProjectContentNoop(action: RestoreAction): boolean {
+  if (action.kind.kind === "ensure_project_directory") {
+    return action.expected_target_mode === action.kind.mode;
+  }
+  return action.kind.kind === "write_project_file"
+    && action.materialized_sha256 != null
+    && action.materialized_sha256 === action.expected_target_sha256
+    && action.expected_target_mode === action.kind.mode;
+}
+
 function restoreActionCopy(action: RestoreAction): {
   title: string;
   detail: string;
@@ -95,6 +112,7 @@ function restoreActionCopy(action: RestoreAction): {
   projectContentEntryType?: "file" | "directory";
   projectContentOperation?: PullReviewItem["projectContentOperation"];
   projectContentPreservedCopy?: string | null;
+  projectContentSize?: number | null;
 } {
   const kind = action.kind.kind;
   const provider = "provider" in action.kind ? action.kind.provider : null;
@@ -119,6 +137,7 @@ function restoreActionCopy(action: RestoreAction): {
       projectContentPreservedCopy: action.kind.preserve
         ? action.kind.preserve.copy_logical_path.replace(/^project\//, "")
         : null,
+      projectContentSize: action.source_size ?? null,
     };
   }
   if (kind === "ensure_project_directory") {
@@ -200,12 +219,19 @@ export function buildPullReviewItems(plan: RestorePlan): PullReviewItem[] {
       projectContentEntryType: null,
       projectContentOperation: null,
       projectContentPreservedCopy: null,
+      projectContentSize: null,
     };
     items.set(resourceId, item);
     return item;
   };
 
   for (const action of plan.actions) {
+    if (isPinnedProjectContentNoop(action)) continue;
+    if (
+      action.kind.kind === "manual"
+      || action.kind.kind === "delete_project_file"
+      || action.kind.kind === "delete_project_directory"
+    ) continue;
     const copy = restoreActionCopy(action);
     const item = ensure(
       action.resource_id,
@@ -219,10 +245,12 @@ export function buildPullReviewItems(plan: RestorePlan): PullReviewItem[] {
     if (copy.projectContentEntryType) item.projectContentEntryType = copy.projectContentEntryType;
     if (copy.projectContentOperation) item.projectContentOperation = copy.projectContentOperation;
     if (copy.projectContentPreservedCopy) item.projectContentPreservedCopy = copy.projectContentPreservedCopy;
+    if (copy.projectContentSize != null) item.projectContentSize = copy.projectContentSize;
   }
 
   const actionsById = new Map(plan.conversation_actions.map((action) => [action.action_id, action]));
   for (const row of plan.conversation_review) {
+    if (!VISIBLE_PULL_CONVERSATION_ACTIONS.has(row.action)) continue;
     const detail = conversationActionDetail(row);
     const item = ensure(
       row.resource_id,

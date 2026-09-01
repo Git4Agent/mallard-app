@@ -311,7 +311,7 @@ URL, and fails closed for a missing, malformed, symlinked, oversized, or
 over-permissive file. `.env.local` is covered by the repository's `*.local`
 ignore rule and must never be committed.
 
-The current rollout fixtures have a hard `codex-cli 0.147.x` prerequisite. The
+The current rollout fixtures have a hard `codex-cli 0.152.x` prerequisite. The
 test rejects another CLI version before making a model request; update the
 current-format fixture in place before moving the gate to another version.
 
@@ -336,25 +336,30 @@ fixtures directly.
 The test runs exactly 25 Codex CLI turns with no retry path: five real,
 provider-backed `gpt-5.6-luna` conversation turns at low reasoning effort and
 twenty deterministic loopback headless resumes. The count is deliberately a
-CLI-turn count; the revision-1 tool-using turn can require more than one
+CLI-turn count; the first content tool-using turn can require more than one
 provider HTTP exchange. The scenario exercises two isolated machine homes
-through project revision 10, including paginated dependency histories,
+through project revision 11, including paginated dependency histories,
 reviewed Push/Pull, stale-plan rejection, divergence in both directions, Keep
-Both, and a no-op fixed point. The same topology also shares and updates nested
-Codex skills and fake v1/v2 pets through the storage Library without additional
-provider-backed turns.
+Both, and a no-op fixed point. It then clears the local-folder storage through
+the production operation on both replicas, proves both Codex homes are
+unchanged, republishes the same ten conversations as fresh revision 1, and
+reaches a new fixed point before the Library and resume phases. The same
+topology also shares and updates nested Codex skills and fake v1/v2 pets
+through the storage Library without additional provider-backed turns.
 
 For all ten final aliases in both homes, the test first resolves and pages the
 exact history through the production Codex history and Session Detail paths.
 It then runs public `codex exec --json resume --ephemeral` against a one-request
 HTTP server bound to literal `127.0.0.1`. The recorder validates the complete
 ordered history Codex sent for that exact alias before returning a fixed SSE
-response. Each verifier operates on a disposable snapshot because Codex 0.147
+response. Each verifier operates on a disposable snapshot because Codex 0.152
 appends a turn even with `--ephemeral`; both authoritative homes must remain
 byte-identical.
 
-The exact API gate passed on August 19, 2026: all five provider-backed turns
-and twenty loopback resumes completed in one 75.91-second Rust test run.
+The Codex 0.152 API gate passed on September 1, 2026: all five provider-backed
+turns and twenty loopback resumes completed in one 65.67-second Rust test run.
+The earlier Codex 0.147 gate completed the same turn count in 75.91 seconds on
+August 19, 2026.
 
 See [`docs/PLAN_LIVE_CODEX_INTEGRATION_TEST.md`](./docs/PLAN_LIVE_CODEX_INTEGRATION_TEST.md)
 for the API topology, POC evidence, revision matrix, and safety assertions.
@@ -374,7 +379,7 @@ you intend to pay for three Sonnet 5 turns:
 MALLARD_RUN_LIVE_CLAUDE_TUZI_E2E=1 npm run test:live-claude-tuzi-e2e
 ```
 
-The runner requires Node.js 20.15.0 or newer and exactly Claude Code 2.1.235.
+The runner requires Node.js 20.15.0 or newer and exactly Claude Code 2.1.250.
 Before Cargo starts, it validates `.env.local` as a bounded, no-follow,
 mode-`0600` three-field JSON document and performs a bounded authenticated
 catalog lookup for exact model ID `claude-sonnet-5`. It never passes the key
@@ -385,15 +390,19 @@ Claude child as `ANTHROPIC_API_KEY`.
 The test makes exactly three Claude model-turn processes with automatic
 retries disabled, no fallback model, no tools, `--effort low`, a 1,024-token
 output limit, and a USD 0.05 Claude client cap per process. It creates a real
-session on replica A, publishes revision 1, pulls and reidentifies it onto
-replica B, resumes the relocated transcript through Tuzi, and publishes
-revision 2. Replica A then resumes its stale base independently. The test
+session on replica A, publishes content revision 2 after setup registration
+revision 1, pulls and reidentifies it onto replica B, resumes the relocated
+transcript through Tuzi, and publishes revision 3. Replica A then resumes its
+stale base independently. The test
 requires Push to be blocked, reviews a divergent Pull offering exactly one
 Keep Both action, preserves A's local continuation byte-for-byte, publishes
-both lineages as revision 3, and reconciles exact bindings, comparison rows,
-provider UUIDs, and root-level Claude JSONLs on both replicas. It finishes by
-applying reviewed empty Pull plans and proving no-op Pushes and byte-identical
-storage.
+both lineages as revision 4, and reconciles exact bindings, comparison rows,
+provider UUIDs, and root-level Claude JSONLs on both replicas. It applies
+reviewed empty Pull plans and proves no-op Pushes, then clears storage through
+the production operation on both replicas. Replica A republishes the same two
+conversations as fresh revision 1, replica B pulls them, and the test verifies
+unchanged Claude homes, semantic digests, lineage digests, identities, and
+cross-replica topology.
 
 All Claude homes, projects, process homes, Mallard repositories, and storage
 are private temporary roots. The test uses fixed synthetic markers and sends
@@ -404,13 +413,11 @@ privacy, and full-depth no-follow state scans. The USD caps are client-side
 estimates; Tuzi's final consumption log remains authoritative, including for
 failed or disconnected calls.
 
-The final gate passed on August 19, 2026 with `1 passed, 0 failed`; the Rust
-body completed in 13.47 seconds and the complete package command in 18.14
-seconds. During implementation, one earlier execution completed only its
-first paid turn before a local plan-action assertion failed; the final
-three-turn execution then passed. Neither execution automatically retried.
-Check the Tuzi consumption log for the four development turns before running
-the paid gate again.
+The Claude Code 2.1.250 gate passed on September 1, 2026 with `1 passed, 0
+failed`; the Rust body completed in 32.33 seconds. The earlier Claude Code
+2.1.235 gate passed on August 19, 2026. No execution automatically retried.
+The Tuzi consumption log remains authoritative for the earlier development
+turns and the current three-turn certification run.
 
 See [`docs/PLAN_LIVE_CLAUDE_TUZI_INTEGRATION_TEST.md`](./docs/PLAN_LIVE_CLAUDE_TUZI_INTEGRATION_TEST.md)
 for the research, one-turn POC evidence, three-revision implementation, cost
@@ -440,8 +447,9 @@ initialize its nested sandbox; the test still keeps Codex itself at
 detects the known nested-Seatbelt failure with a bounded, no-provider preflight
 before starting Cargo and prints a fixed ordinary-Terminal instruction.
 Implementation, protocol POCs, and the complete ignored live gate are verified.
-The exact keyless gate passed on August 19, 2026 with `1 passed, 0 failed, 7
-filtered` in 90.48 seconds. Every model-shaped response came from the one local
+The current native-format gate requires Codex CLI `0.152.x`. The exact keyless
+gate passed on August 31, 2026 with `1 passed, 0 failed, 7 filtered` in 53.60
+seconds. Every model-shaped response came from the one local
 aimock child; the run used no provider account, credential, remote model, GPU,
 or external model request.
 
@@ -457,12 +465,12 @@ The aimock scenario adds native Codex pagination coverage. One bounded
 `thread/start`/`thread/fork` operations, which must consume no Responses
 request. Five source turns, five native app-server graph turns, seven later
 graph-mutation turns, and twenty final history-resume turns make 37
-deterministic turns and exactly 38 local `/v1/responses` requests. R1 uses two
-intentional scenario legs with the same prompt marker: an ordinary
-`exec_command` function call invokes the reviewed `apply_patch` command, then
-an exact tool-result call ID selects the fixed final response. Every other
-prompt marker is unique, and every fixed response is selected only after the
-mock validates the complete ordered marker history.
+deterministic turns and exactly 38 local `/v1/responses` requests. The first
+content turn uses two intentional scenario legs with the same prompt marker:
+an ordinary `exec_command` function call invokes the reviewed `apply_patch`
+command, then an exact tool-result call ID selects the fixed final response.
+Every other prompt marker is unique, and every fixed response is selected only
+after the mock validates the complete ordered marker history.
 Mallard planning may additionally start bounded, ephemeral Codex app-server
 children only to allocate native UUIDv7 thread IDs. Those children perform no
 turn, disable plugins, run under disposable provider/process homes, inherit no
@@ -480,11 +488,16 @@ and an immutable whole-file checkpoint hides the displaced physical alias only
 while its exact bytes still match the reviewed source. Missing evidence, a
 read failure, or any later append fails open and surfaces that retained branch
 in review, Activity, and Session Detail; publishing it creates a direct
-binding. Revision 10 proves this for a referenced root, revision 7 proves the
+binding. Revision 11 proves this for a referenced root, revision 8 proves the
 same copy-on-write rule for an unreferenced P2 control, and a focused backend
 regression exercises a changed retained branch plus repeated R1-to-R2
 displacement. Providers without Codex's physical rollout graph retain their
 existing in-place update behavior.
+
+After the revision-11 fixed point, the live flow clears the whole disposable
+storage through the production storage-reset operation. It proves that both
+replicas forget remote acceptance without changing local Codex state, then
+republishes all ten conversations at a fresh revision 1 and converges again.
 
 The native POC also proved that
 `history_base.end_ordinal_exclusive` is a global top-level rollout boundary,
@@ -521,7 +534,7 @@ npm install
 MALLARD_RUN_LIVE_CLAUDE_AIMOCK_E2E=1 npm run test:live-claude-aimock-e2e
 ```
 
-The current native-format gate requires exactly Claude Code `2.1.235`,
+The current native-format gate requires exactly Claude Code `2.1.250`,
 `@copilotkit/aimock` `1.39.0`, Node.js 20.15.0 or newer, and the mock model
 identifier `claude-sonnet-4-6`. The runner strips inherited provider,
 provider-home, endpoint, and proxy state before Cargo starts. Each Claude
@@ -532,20 +545,24 @@ so the child receives the fixed non-secret placeholder
 `X-Api-Key`; `Authorization` and alternate credential headers are forbidden.
 This is credentialless local-mock testing, not a headerless or keyless flow.
 
-The scenario creates five real source turns across two isolated Claude homes
-and five Mallard revisions. Revision 1 performs a real `Read` tool round;
-later turns exercise Pull relocation and reidentification, native resume on a
-second canonical project path, divergence in both directions, both Keep Both
-flows, three final cloud lineages, paged Session Detail history, and reviewed
-revision-5 no-op Push/Pull. Six additional snapshot resumes verify every final
-lineage from both replicas without changing either authoritative Claude home.
+The scenario creates five real source turns across two isolated Claude homes.
+Setup publishes a registration-only revision 1, and the source turns publish
+content revisions 2 through 6. The first content turn performs a real `Read`
+tool round; later turns exercise Pull relocation and reidentification, native
+resume on a second canonical project path, divergence in both directions,
+both Keep Both flows, three final cloud lineages, paged Session Detail history,
+and reviewed revision-6 no-op Push/Pull. Six additional snapshot resumes
+verify every final lineage from both replicas without changing either
+authoritative Claude home. The flow then clears the whole disposable storage,
+proves both homes unchanged, republishes all three conversations at a fresh
+revision 1, and verifies one incremental cursor append.
 
-The accounting is exact: 11 Claude model-turn processes make 12 authenticated
-`POST /v1/messages?beta=true` requests, because the revision-1 tool round uses
-two Messages calls. Claude Code 2.1.235 also makes one credential-free
+The accounting is exact: 12 Claude model-turn processes make 13 authenticated
+`POST /v1/messages?beta=true` requests, because the first content tool round
+uses two Messages calls. Claude Code 2.1.250 also makes one credential-free
 `HEAD /api/hello` compatibility probe per process. The raw boundary therefore
-requires exactly 23 requests: 12 model requests plus 11 probes. The Messages
-requests are separately reconciled with all 12 semantic aimock scenarios. Any
+requires exactly 25 requests: 13 model requests plus 12 probes. The Messages
+requests are separately reconciled with all 13 semantic aimock scenarios. Any
 duplicate scenario, other route or method, extra request, upgrade, wrong key,
 credential-bearing probe, history mismatch, or exposed tool makes the audit
 fail. No upstream, proxy, recorder, remote fixture, or retry path is
@@ -556,10 +573,9 @@ The package runner and Rust target also perform their own bounded, isolated
 traffic, and make no request to aimock; the exact process budget above is
 deliberately the model-turn budget.
 
-The fully hardened gate passed on August 19, 2026: `1 passed, 0 failed`; the
-Rust test body completed in 12.91 seconds (14.80 seconds for the package
-command), with all 11 Claude model-turn processes, 12 model requests, and 11
-native hello probes accounted for.
+The fully hardened gate passed on August 31, 2026: `1 passed, 0 failed`; the
+Rust test body completed in 19.27 seconds, with all 12 Claude model-turn
+processes, 13 model requests, and 12 native hello probes accounted for.
 
 See [`docs/PLAN_LIVE_CLAUDE_AIMOCK_INTEGRATION_TEST.md`](./docs/PLAN_LIVE_CLAUDE_AIMOCK_INTEGRATION_TEST.md)
 for the initial POC evidence, five-revision matrix, final history oracle,

@@ -25,7 +25,7 @@ pub use project_sync::service::{
     ProjectSyncService, PushApproval, PushDestinationPullReason, PushDestinationStatus,
     PushReviewContext, RestoreResult, SessionDetailError, SessionDetailErrorCode,
     SessionEventDetail, SessionTimelineEventKind, SessionToolCategory, SetupDraftInspection,
-    ThreadSyncComparison, ThreadSyncState,
+    StorageDataClearResult, ThreadSyncComparison, ThreadSyncState,
 };
 pub use storage_catalog::adapters::{CmdOutput, PluginProcessRunner};
 pub use storage_catalog::domain::{

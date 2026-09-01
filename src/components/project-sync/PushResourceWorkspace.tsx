@@ -4,6 +4,7 @@ import type {
   BundleRecipe,
   LocalProjectSummary,
   ProjectBinding,
+  ProjectContentEntry,
   ProjectContentInventory,
   ProjectResourceDescriptor,
   ThreadSyncComparison,
@@ -23,6 +24,7 @@ import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import { type SyncReviewStep, historyStepLabel, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
 import { categoryFor, STORAGE_BLOCKING_STATES } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
+import { isPushReviewDecision } from "../sync-review/pullReviewStatus";
 import { isIrrecoverableSyncError } from "./syncError";
 
 export interface PushReviewBlocker {
@@ -57,7 +59,6 @@ interface Props {
   onToggle: (resourceId: string) => void;
   onSelectionChange?: (selected: Set<string>) => void;
   onScanProjectFiles?: () => void;
-  onToggleProjectContentRemoval?: (resourceId: string) => void;
   onToggleProjectContentWarning?: (warningDigest: string) => void;
   onClose: () => void;
   onPush: () => void;
@@ -75,6 +76,10 @@ function groupForStep(step: SyncReviewStep, resources: ProjectResourceDescriptor
   // the tools/requirements rows at the bottom of the same panel.
   if (step === "project_files") return resources.filter((resource) => categoryFor(resource) === "project_files");
   return resources.filter((resource) => categoryFor(resource) !== "project_files");
+}
+
+function isLocalOutstandingProjectContent(entry: ProjectContentEntry): boolean {
+  return entry.local_present && (entry.state === "local_only" || entry.state === "local_ahead");
 }
 
 function pushBlockerKind(
@@ -390,7 +395,6 @@ export default function PushResourceWorkspace({
   onToggle,
   onSelectionChange,
   onScanProjectFiles,
-  onToggleProjectContentRemoval,
   onToggleProjectContentWarning,
   onClose,
   onPush,
@@ -427,6 +431,36 @@ export default function PushResourceWorkspace({
     () => resources.filter((resource) => categoryFor(resource) === "tools"),
     [resources],
   );
+  const visibleConversationResourceIds = useMemo(
+    () => new Set((threadComparison?.entries ?? [])
+      .filter((entry) => (
+        entry.local_present
+        && (entry.state === "local_only" || entry.state === "local_ahead")
+        && isPushReviewDecision(entry.push_decision)
+      ))
+      .map((entry) => entry.resource_id)),
+    [threadComparison],
+  );
+  const visibleConversations = useMemo(
+    () => conversations.filter((resource) => visibleConversationResourceIds.has(resource.resource_id)),
+    [conversations, visibleConversationResourceIds],
+  );
+  const visibleProjectContentEntries = useMemo(
+    () => (projectContentInventory?.entries ?? []).filter(isLocalOutstandingProjectContent),
+    [projectContentInventory],
+  );
+  const visibleProjectFileResourceIds = useMemo(
+    () => new Set(visibleProjectContentEntries.map((entry) => entry.descriptor.resource_id)),
+    [visibleProjectContentEntries],
+  );
+  const visibleProjectFiles = useMemo(
+    () => projectFiles.filter((resource) => visibleProjectFileResourceIds.has(resource.resource_id)),
+    [projectFiles, visibleProjectFileResourceIds],
+  );
+  const visibleResources = useMemo(
+    () => [...visibleConversations, ...other, ...visibleProjectFiles],
+    [other, visibleConversations, visibleProjectFiles],
+  );
   const selectableIds = useMemo(
     () => pushSelectableResourceIds(resources, threadComparison, projectContentInventory),
     [projectContentInventory, resources, threadComparison],
@@ -455,9 +489,10 @@ export default function PushResourceWorkspace({
   useEffect(() => setDeletionApproved(false), [deletionSignature]);
 
   const counts = {
-    history: countSelected(conversations, effectiveSelected) + countSelected(other, effectiveSelected),
-    project_files: countSelected(projectFiles, effectiveSelected),
+    history: countSelected(visibleConversations, effectiveSelected) + countSelected(other, effectiveSelected),
+    project_files: countSelected(visibleProjectFiles, effectiveSelected),
   };
+  const visibleSelectedCount = counts.history + counts.project_files;
   const blockers = pushReviewBlockers(
     effectiveSelected,
     threadComparison,
@@ -471,13 +506,15 @@ export default function PushResourceWorkspace({
   const localBlockingCount = blockingCount - storageBlockingCount;
   const warningSteps = new Set<SyncReviewStep>();
   blockers.forEach((blocker) => warningSteps.add(blocker.step));
-  // One banner covers everything a Pull would clear plus anything locally
-  // stuck: held threads and storage blockers describe the same situation, so
-  // they share a count instead of stacking two callouts that say Pull twice.
   const heldConversationCount = new Set([
     ...pullHolds.map((entry) => entry.resource_id),
-    ...blockers.filter((blocker) => blocker.kind === "storage").map((blocker) => blocker.resourceId),
+    ...blockers
+      .filter((blocker) => blocker.kind === "storage" && blocker.step === "history")
+      .map((blocker) => blocker.resourceId),
   ]).size;
+  const heldProjectFileCount = new Set(blockers
+    .filter((blocker) => blocker.kind === "storage" && blocker.step === "project_files")
+    .map((blocker) => blocker.resourceId)).size;
   /* The banner zone that heads the review scroll. Everything in it is derived
      from the plan, never from the selection: this zone sits above the list, so
      a banner that appeared on a checkbox click would shove the row out from
@@ -507,12 +544,23 @@ export default function PushResourceWorkspace({
         : undefined,
     });
   }
-  /* Plan-derived is not the same as present-at-open. Half of the held count
-     comes from the project-content inventory, which for a project without Git
-     history is null until the reader presses "Scan project files" — so the
-     zone can go from nothing to a banner on a click, and a region would let
-     that happen in silence. Standing only if it was there when the review
-     opened. */
+  if (heldProjectFileCount > 0) {
+    banners.push({
+      key: "project-file-pull-holds",
+      severity: "warning",
+      mark: <ThreadStatusIcon status="cloud-outstanding" size={16} />,
+      title: `${heldProjectFileCount} project file${heldProjectFileCount === 1 ? "" : "s"} ${heldProjectFileCount === 1 ? "requires" : "require"} Pull`,
+      message: "Storage has newer file changes. Review them before pushing local project files.",
+      action: onPull
+        ? (
+          <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>Open Pull review</button>
+        )
+        : undefined,
+    });
+  }
+  /* Plan-derived is not the same as present-at-open. Project-file holds come
+     from an inventory that can be null until the scan starts, so the zone can
+     appear after the review opens. Standing only if it was there at open. */
   const bannersAtOpen = useRef<boolean | null>(null);
   if (bannersAtOpen.current === null) bannersAtOpen.current = banners.length > 0;
   const bannerTiming: NoticeTiming = bannersAtOpen.current
@@ -529,7 +577,7 @@ export default function PushResourceWorkspace({
       ? "Resolve the held items above before pushing"
       : projectFileDeletionCount(projectFileImpact) > 0 && !deletionApproved
         ? "Approve the selected project file deletions"
-      : effectiveSelected.size === 0 && projectContentRemovals.size === 0
+      : visibleSelectedCount === 0 && projectContentRemovals.size === 0
         ? "Nothing is selected"
         : null;
 
@@ -557,7 +605,7 @@ export default function PushResourceWorkspace({
     commitSelection(next);
   };
   const useRecommendedForStep = () => {
-    const group = groupForStep(activeStep, resources);
+    const group = groupForStep(activeStep, visibleResources);
     const next = new Set(effectiveSelected);
     group.forEach((resource) => next.delete(resource.resource_id));
     group.forEach((resource) => {
@@ -566,7 +614,7 @@ export default function PushResourceWorkspace({
     commitSelection(next);
   };
   const clearStep = () => {
-    const group = groupForStep(activeStep, resources);
+    const group = groupForStep(activeStep, visibleResources);
     const next = new Set(effectiveSelected);
     group.forEach((resource) => {
       const projectEntry = projectContentInventory?.entries.find((entry) => (
@@ -578,14 +626,14 @@ export default function PushResourceWorkspace({
     });
     commitSelection(next);
   };
-  const selectableConversationIds = new Set(conversations
+  const selectableConversationIds = new Set(visibleConversations
     .filter((resource) => selectableIds.has(resource.resource_id))
     .map((resource) => resource.resource_id));
   const requiredProjectDirectories = requiredProjectContentDirectoryIds(
     projectContentInventory,
     effectiveSelected,
   );
-  const projectFileRows: ProjectFileReviewRow[] = (projectContentInventory?.entries ?? []).map((entry) => ({
+  const projectFileRows: ProjectFileReviewRow[] = visibleProjectContentEntries.map((entry) => ({
     resourceId: entry.descriptor.resource_id,
     relativePath: entry.relative_path,
     entryType: entry.entry_type,
@@ -601,7 +649,7 @@ export default function PushResourceWorkspace({
     warningCode: entry.warning_code,
     warningDigest: entry.warning_digest,
   }));
-  const currentGroup = groupForStep(activeStep, resources);
+  const currentGroup = groupForStep(activeStep, visibleResources);
   const currentDefaults = currentGroup.filter((resource) => safeProjectDefaults.has(resource.resource_id));
   const currentMatchesDefaults = currentGroup.every((resource) => (
     effectiveSelected.has(resource.resource_id) === safeProjectDefaults.has(resource.resource_id)
@@ -620,7 +668,7 @@ export default function PushResourceWorkspace({
           busy={busy}
           recommendedTitle={`Use the recommended ${activeStep === "history" ? "session" : "project file"} selection (${recommendedCount})`}
           recommendedAriaLabel={`Use recommended selection (${recommendedCount})`}
-          recommendedDisabled={safeProjectDefaults.size === 0 || currentMatchesDefaults}
+          recommendedDisabled={currentDefaults.length === 0 || currentMatchesDefaults}
           onRecommended={useRecommendedForStep}
           clearDisabled={countSelected(currentGroup, effectiveSelected) === 0}
           onClear={clearStep}
@@ -683,7 +731,7 @@ export default function PushResourceWorkspace({
                   comparisonOverride={threadComparison}
                 />
               ) : (
-                <ResourceInventory resources={conversations} selected={effectiveSelected} selectableResourceIds={selectableConversationIds} disabled={busy} onToggle={toggleResource} />
+                <ResourceInventory resources={visibleConversations} selected={effectiveSelected} selectableResourceIds={selectableConversationIds} disabled={busy} onToggle={toggleResource} />
               )}
               {/* No disclosure wrapper here: `other` is exactly the `tools`
                   category, so ResourceInventory renders one group whose own
@@ -707,6 +755,7 @@ export default function PushResourceWorkspace({
           {activeStep === "project_files" && (
             <ProjectFilesReviewPage
               mode="push"
+              projectRoot={projectContentInventory?.project_root}
               eligibility={projectContentInventory?.eligibility ?? {
                 state: project?.is_git_repository ? "git_managed" : "eligible",
                 reason: project?.is_git_repository
@@ -734,7 +783,6 @@ export default function PushResourceWorkspace({
                 });
                 commitSelection(next);
               }}
-              onToggleRemoval={onToggleProjectContentRemoval}
               onToggleWarning={onToggleProjectContentWarning}
               onReviewPull={onPull}
             />

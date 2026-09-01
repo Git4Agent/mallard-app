@@ -215,7 +215,7 @@ function render(props: {
   );
 }
 
-test("Push selection folds the new decisions into existing task cards", () => {
+test("Push selection shows only ready local-outstanding task cards", () => {
   const html = render({
     selectionMode: "push",
     entries: [healthyEntry, blockedEntry, divergedEntry],
@@ -225,12 +225,10 @@ test("Push selection folds the new decisions into existing task cards", () => {
 
   assert.equal((html.match(/type="checkbox"/g) ?? []).length, 1);
   assert.match(html, /aria-label="Exclude Test task"/);
-  assert.doesNotMatch(html, /aria-label="(Include|Exclude) Older codec task"/);
-  assert.match(html, /data-thread-status="unavailable"/);
-  assert.match(html, /Mallard can&#x27;t safely capture this Codex session\. It still opens on this computer\./);
-  assert.match(html, /Pull required/);
-  assert.match(html, /Pull will keep both histories as independent sessions/);
-  assert.equal((html.match(/aria-label="Open in Codex"/g) ?? []).length, 3);
+  assert.doesNotMatch(html, /Older codec task|Changed on both machines/);
+  assert.doesNotMatch(html, /data-thread-status="(?:unavailable|divergent)"/);
+  assert.doesNotMatch(html, /Pull required|Pull will keep both histories/);
+  assert.equal((html.match(/aria-label="Open in Codex"/g) ?? []).length, 1);
 });
 
 test("Pull selection presents divergence as the single keep-both action", () => {

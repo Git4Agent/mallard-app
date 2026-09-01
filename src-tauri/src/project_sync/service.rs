@@ -77,8 +77,11 @@ use mallard_infrastructure::conversation_sync::{
 };
 use mallard_infrastructure::credential_redaction;
 use mallard_infrastructure::jsonl_tail_io;
+use mallard_infrastructure::payload::PayloadBytes;
 pub use mallard_infrastructure::persistence::ProjectSyncMetadataResetResult;
-use mallard_infrastructure::persistence::{LocalStateRepository, StorageSyncMetadataResetResult};
+use mallard_infrastructure::persistence::{
+    ConfigMutation, ConfigTransactionError, LocalStateRepository, StorageSyncMetadataResetResult,
+};
 pub use mallard_infrastructure::project_activity::ProjectActivity;
 use mallard_infrastructure::project_activity::{
     self, ProviderAccessState, ResolvedActivityProject,
@@ -408,6 +411,28 @@ impl<'a> ProjectSyncService<'a> {
     ) -> Result<BundleSnapshot, String> {
         let (_, engine) = storage_engine(self.repository, storage_id)?;
         engine.inspect(bundle_id)
+    }
+
+    pub fn clear_storage_data(
+        &self,
+        storage_id: &StorageId,
+        expected_config_revision: u64,
+    ) -> Result<StorageDataClearResult, String> {
+        let machine_home = self
+            .repository
+            .root()
+            .parent()
+            .ok_or("Mallard state has no machine-home parent")?;
+        let catalog_repository =
+            crate::storage_catalog::persistence::CatalogStateRepository::from_home_dir(
+                machine_home.to_path_buf(),
+            )?;
+        clear_storage_data_with_repositories(
+            self.repository,
+            &catalog_repository,
+            storage_id,
+            expected_config_revision,
+        )
     }
 }
 
@@ -816,6 +841,9 @@ pub struct ProjectOperationResult {
     pub results: Vec<OperationResourceResult>,
 }
 
+/// Discovery facts for one remote bundle, built from its tag alone — no
+/// head or manifest reads. Advisory as of the bundle's last publish; flows
+/// that act on a listed bundle re-verify it with a live inspect.
 #[derive(Serialize, Clone, Debug)]
 pub struct BundleSnapshotSummary {
     pub storage_id: StorageId,
@@ -832,11 +860,7 @@ pub struct BundleSnapshotSummary {
     pub providers: Vec<ProviderKey>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository_fingerprint: Option<String>,
-    pub resources: Vec<ResourceDescriptor>,
-    pub recipe: BundleRecipe,
     pub fetched_at: u64,
-    #[serde(default)]
-    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -962,11 +986,11 @@ pub(super) fn get_host_identity_status_with_repository(
         .map(host_identity_status)
 }
 
-pub(super) fn project_storage_log_labels(
+pub(super) fn project_storage_log_context(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
-) -> (String, String) {
+) -> (String, String, Option<BundleId>) {
     let config = repository.load_config().ok();
     let project = config
         .as_ref()
@@ -984,7 +1008,11 @@ pub(super) fn project_storage_log_labels(
         .map(|storage| storage.name.clone())
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| storage_id.to_string());
-    (project, storage)
+    let bundle_id = config
+        .as_ref()
+        .and_then(|config| config.project(local_project_id))
+        .map(|project| project.bundle_id.clone());
+    (project, storage, bundle_id)
 }
 
 pub(super) fn storage_log_label(
@@ -1978,7 +2006,7 @@ fn storage_data_clear_result(
 ) -> StorageDataClearResult {
     let local_records_removed = local
         .scope_bases_removed
-        .saturating_add(local.conversation_checkpoints_removed)
+        .saturating_add(local.conversation_acceptances_removed)
         .saturating_add(local.materializations_removed)
         .saturating_add(local.journal_operations_removed)
         .saturating_add(local.restore_plans_removed)
@@ -3377,29 +3405,24 @@ pub(super) fn list_remote_bundle_snapshots_with_repository(
 fn list_bundle_snapshots_with_engine(
     engine: &StorageEngine,
 ) -> Result<Vec<BundleSnapshotSummary>, String> {
-    let mut cursor = None;
-    let mut inspected = 0_usize;
-    let mut snapshots = Vec::new();
-    loop {
-        let page = engine.list_remote_bundles(cursor.as_deref(), 100)?;
-        for bundle in page.bundles {
-            inspected = inspected.saturating_add(1);
-            if inspected > 10_000 {
-                return Err(
-                    "remote bundle inspection exceeds the 10,000 bundle safety limit".to_string(),
-                );
-            }
-            let snapshot = engine.inspect(&bundle.bundle_id)?;
-            snapshots.push(bundle_snapshot_summary_from_snapshot(snapshot)?);
-        }
-        let Some(next) = page.next_cursor else {
-            break;
-        };
-        if cursor.as_deref() == Some(next.as_str()) {
-            return Err("remote bundle cursor did not advance".to_string());
-        }
-        cursor = Some(next);
-    }
+    let fetched_at = now_secs();
+    let mut snapshots = engine
+        .list_remote_bundles()?
+        .into_iter()
+        .map(|bundle| BundleSnapshotSummary {
+            storage_id: engine.storage_id().clone(),
+            bundle_id: bundle.bundle_id,
+            display_name: bundle.display_name,
+            kind: bundle.kind,
+            revision: bundle.revision,
+            updated_at: bundle.updated_at,
+            resource_count: bundle.resources as usize,
+            registration_only: bundle.registration_only,
+            providers: bundle.providers,
+            repository_fingerprint: bundle.repository_fingerprint,
+            fetched_at,
+        })
+        .collect::<Vec<_>>();
     snapshots.sort_by(|left, right| {
         right
             .updated_at
@@ -3557,46 +3580,6 @@ fn inspect_from_storage(
     let (_, engine) = storage_engine(repository, storage_id)?;
     let snapshot = engine.inspect(bundle_id)?;
     Ok((engine, snapshot))
-}
-
-fn bundle_snapshot_summary_from_snapshot(
-    snapshot: BundleSnapshot,
-) -> Result<BundleSnapshotSummary, String> {
-    snapshot.validate()?;
-    let storage_id = snapshot.storage_id;
-    let fetched_at = snapshot.fetched_at;
-    let manifest = snapshot.manifest;
-    let registration_only = manifest.is_registration_only();
-    let providers = manifest
-        .provider_scopes()
-        .map(|(provider, _)| provider.clone())
-        .collect::<Vec<_>>();
-    let resources = manifest
-        .all_resources()
-        .map(|(_, descriptor)| descriptor.clone())
-        .collect::<Vec<_>>();
-    let mut recipe = BundleRecipe::default();
-    for scope in manifest.scopes.values() {
-        for (resource_id, entry) in &scope.recipe.entries {
-            recipe.entries.insert(resource_id.clone(), entry.clone());
-        }
-    }
-    Ok(BundleSnapshotSummary {
-        storage_id,
-        bundle_id: manifest.bundle.bundle_id,
-        display_name: manifest.bundle.display_name,
-        kind: manifest.bundle.kind,
-        revision: manifest.revision,
-        updated_at: manifest.updated_at,
-        resource_count: resources.len(),
-        registration_only,
-        providers,
-        repository_fingerprint: manifest.bundle.repository_fingerprint,
-        resources,
-        recipe,
-        fetched_at,
-        warnings: Vec::new(),
-    })
 }
 
 /// The provider-native session id inside a `<provider>:session:<component>`
@@ -4929,6 +4912,7 @@ fn provider_thread_review(
     if supports_cursor {
         let document = repository.load_conversation_bindings()?;
         let (local_threads, _) = build_local_threads(&document)?;
+        let mut seed_candidates: Vec<(ThreadId, ConversationCheckpoint)> = Vec::new();
         for (thread_id, local) in &local_threads {
             let Some(local_binding) = &local.binding else {
                 continue;
@@ -5011,35 +4995,57 @@ fn provider_thread_review(
                 }
                 Ok(row.revision)
             })?;
-            if let Some(storage_id) = storage_id {
-                let checkpoint = ConversationCheckpoint {
-                    generation: 0,
-                    accepted: None,
-                    accepted_local_tail: None,
-                    observed_tail: seeded.observed_tail.clone(),
-                    physical: PhysicalMappingState::Ready {
-                        root_mapping: seeded.mapping.clone(),
-                        raw_range_pin,
+            if storage_id.is_some() {
+                seed_candidates.push((
+                    thread_id.clone(),
+                    ConversationCheckpoint {
+                        generation: 0,
+                        accepted: None,
+                        accepted_local_tail: None,
+                        observed_tail: seeded.observed_tail.clone(),
+                        physical: PhysicalMappingState::Ready {
+                            root_mapping: seeded.mapping.clone(),
+                            raw_range_pin,
+                        },
+                        prefix_witness: seeded.prefix_witness.clone(),
+                        binding_revision,
                     },
-                    prefix_witness: seeded.prefix_witness.clone(),
-                    binding_revision,
-                };
+                ));
+            }
+        }
+        // Every first-contact checkpoint lands through one config
+        // transaction: the link is resolved once, an already-present
+        // checkpoint is never replaced, and nothing is written when every
+        // candidate was already present or the link is gone.
+        if let Some(storage_id) = storage_id {
+            if !seed_candidates.is_empty() {
                 let scope = SyncScopeKey::Provider(provider.clone());
-                let thread_id = thread_id.clone();
-                repository.mutate_config(|config| {
-                    let Some(link) = config.links.iter_mut().find(|link| {
-                        link.local_project_id == binding.local_project_id
-                            && &link.storage_id == storage_id
-                    }) else {
-                        return Ok(());
-                    };
-                    link.conversation_checkpoints
-                        .entry(scope.clone())
-                        .or_default()
-                        .entry(thread_id.clone())
-                        .or_insert(checkpoint.clone());
-                    Ok(())
-                })?;
+                repository
+                    .transact_config(|config| {
+                        let Some(link) = config.links.iter_mut().find(|link| {
+                            link.local_project_id == binding.local_project_id
+                                && &link.storage_id == storage_id
+                        }) else {
+                            return Ok::<_, String>(ConfigMutation::Unchanged(()));
+                        };
+                        let threads = link
+                            .conversation_checkpoints
+                            .entry(scope.clone())
+                            .or_default();
+                        let mut inserted = false;
+                        for (thread_id, checkpoint) in &seed_candidates {
+                            if !threads.contains_key(thread_id) {
+                                threads.insert(thread_id.clone(), checkpoint.clone());
+                                inserted = true;
+                            }
+                        }
+                        if inserted {
+                            Ok(ConfigMutation::Changed(()))
+                        } else {
+                            Ok(ConfigMutation::Unchanged(()))
+                        }
+                    })
+                    .map_err(config_transaction_error)?;
             }
         }
     }
@@ -5331,14 +5337,17 @@ fn provider_thread_review(
         }
     }
 
-    // Checkpoint maintenance: persist each advanced observation so the next
-    // Refresh rides the new cursor instead of re-deriving from the last
-    // applied pin. Generation compare-and-swap skips any checkpoint a
-    // concurrent operation moved, a Detached mapping is never reattached by
-    // observation, byte-identical replacements are skipped, and `accepted`
-    // never changes here.
+    // Checkpoint maintenance: persist every advanced observation in one
+    // config transaction so the next Refresh rides the new cursors instead
+    // of re-deriving from the last applied pins. Known no-ops and Detached
+    // checkpoints are excluded before the transaction; each remaining
+    // candidate then re-checks the live document. Generation
+    // compare-and-swap skips any checkpoint a concurrent operation moved, a
+    // Detached mapping is never reattached by observation, byte-identical
+    // replacements are skipped, and `accepted` never changes here.
     let mut maintained: BTreeMap<ThreadId, u64> = BTreeMap::new();
     if let Some(storage_id) = storage_id {
+        let mut candidates: Vec<(ThreadId, Option<u64>, ConversationCheckpoint)> = Vec::new();
         for (thread_id, seeded) in &cursor_refreshed {
             let Some(pin) = cursor_observations
                 .get(thread_id)
@@ -5384,35 +5393,55 @@ fn provider_thread_review(
                 continue;
             }
             let expected_generation = stored.map(|checkpoint| checkpoint.generation);
+            candidates.push((thread_id.clone(), expected_generation, replacement));
+        }
+        if !candidates.is_empty() {
             let scope = SyncScopeKey::Provider(provider.clone());
-            let thread_id = thread_id.clone();
-            let replacement_generation = replacement.generation;
-            let persisted = repository.mutate_config(|config| {
-                let Some(link) = config.links.iter_mut().find(|link| {
-                    link.local_project_id == binding.local_project_id
-                        && &link.storage_id == storage_id
-                }) else {
-                    return Ok(false);
-                };
-                let threads = link
-                    .conversation_checkpoints
-                    .entry(scope.clone())
-                    .or_default();
-                match (threads.get(&thread_id), expected_generation) {
-                    (Some(stored), Some(expected)) if stored.generation == expected => {
-                        threads.insert(thread_id.clone(), replacement.clone());
-                        Ok(true)
+            let (applied, _) = repository
+                .transact_config(|config| {
+                    let mut applied: BTreeMap<ThreadId, u64> = BTreeMap::new();
+                    let Some(link) = config.links.iter_mut().find(|link| {
+                        link.local_project_id == binding.local_project_id
+                            && &link.storage_id == storage_id
+                    }) else {
+                        return Ok::<_, String>(ConfigMutation::Unchanged(applied));
+                    };
+                    let threads = link
+                        .conversation_checkpoints
+                        .entry(scope.clone())
+                        .or_default();
+                    for (thread_id, expected_generation, replacement) in &candidates {
+                        match (threads.get(thread_id), expected_generation) {
+                            (Some(stored), Some(expected)) if stored.generation == *expected => {
+                                if matches!(stored.physical, PhysicalMappingState::Detached { .. })
+                                {
+                                    continue;
+                                }
+                                if stored.observed_tail == replacement.observed_tail
+                                    && stored.physical == replacement.physical
+                                    && stored.prefix_witness == replacement.prefix_witness
+                                    && stored.binding_revision == replacement.binding_revision
+                                {
+                                    continue;
+                                }
+                                threads.insert(thread_id.clone(), replacement.clone());
+                                applied.insert(thread_id.clone(), replacement.generation);
+                            }
+                            (None, None) => {
+                                threads.insert(thread_id.clone(), replacement.clone());
+                                applied.insert(thread_id.clone(), replacement.generation);
+                            }
+                            _ => {}
+                        }
                     }
-                    (None, None) => {
-                        threads.insert(thread_id.clone(), replacement.clone());
-                        Ok(true)
+                    if applied.is_empty() {
+                        Ok(ConfigMutation::Unchanged(applied))
+                    } else {
+                        Ok(ConfigMutation::Changed(applied))
                     }
-                    _ => Ok(false),
-                }
-            })?;
-            if persisted {
-                maintained.insert(thread_id, replacement_generation);
-            }
+                })
+                .map_err(config_transaction_error)?;
+            maintained = applied;
         }
     }
 
@@ -5584,7 +5613,7 @@ fn provider_thread_review(
                 raw_range_pin: captured.map(|captured| RawRangePin {
                     start_byte_offset: 0,
                     end_byte_offset: captured.transcript.bytes.len() as u64,
-                    range_sha256: hex_digest(Sha256::digest(&captured.transcript.bytes).as_slice()),
+                    range_sha256: captured.transcript.bytes.sha256().to_string(),
                 }),
                 verified_acceptance: None,
             }
@@ -5815,9 +5844,7 @@ fn provider_thread_review(
         let expected_local_target = local
             .and_then(|local| local.captured.as_ref())
             .map(|captured| {
-                TargetExpectation::Sha256(hex_digest(
-                    Sha256::digest(&captured.transcript.bytes).as_slice(),
-                ))
+                TargetExpectation::Sha256(captured.transcript.bytes.sha256().to_string())
             })
             .or_else(|| {
                 local.and_then(|local| candidate_pins.get(local.resource_id.as_str()).cloned())
@@ -6470,9 +6497,9 @@ fn store_candidate_pins_from_capture(
                 Some(super::session_watch_service::StoredCandidatePin {
                     resource_id: resource_id.clone(),
                     depends_on: vec![source_path],
-                    expected_local_target: TargetExpectation::Sha256(hex_digest(
-                        Sha256::digest(&transcript.bytes).as_slice(),
-                    )),
+                    expected_local_target: TargetExpectation::Sha256(
+                        transcript.bytes.sha256().to_string(),
+                    ),
                 })
             })
             .collect();
@@ -7652,6 +7679,55 @@ fn captured_conversation_for_action<'a>(
     Ok((conversation, transcript))
 }
 
+fn take_captured_conversation_for_action(
+    captured: &mut provider_capture::CapturedResources,
+    action: &ConversationPlanAction,
+) -> Result<
+    (
+        provider_capture::CapturedConversation,
+        provider_capture::CapturedFile,
+        BTreeMap<String, provider_capture::CapturedFile>,
+    ),
+    String,
+> {
+    let resource_id = action
+        .source_resource_id
+        .as_ref()
+        .ok_or_else(|| "conversation Push action lacks a captured source".to_string())?;
+    let conversation = captured
+        .conversations
+        .remove(resource_id.as_str())
+        .ok_or_else(|| {
+            format!(
+                "reviewed conversation source '{}' is no longer capturable",
+                resource_id
+            )
+        })?;
+    let transcript = captured
+        .files
+        .remove(&conversation.transcript_logical_path)
+        .ok_or_else(|| {
+            format!(
+                "reviewed conversation source '{}' lost its transcript",
+                resource_id
+            )
+        })?;
+    let mut sidecars = BTreeMap::new();
+    for sidecar in &conversation.sidecar_files {
+        let file = captured
+            .files
+            .remove(&sidecar.logical_path)
+            .ok_or_else(|| {
+                format!(
+                    "captured conversation '{}' lost sidecar '{}'",
+                    resource_id, sidecar.logical_path
+                )
+            })?;
+        sidecars.insert(sidecar.logical_path.clone(), file);
+    }
+    Ok((conversation, transcript, sidecars))
+}
+
 /// The Claude wire-form publication set: the redacted transcript
 /// (certified `redact(w) == w`), the genuine wire fold over those bytes,
 /// and the wire re-analysis facts the cloud row publishes. All fields are
@@ -7675,7 +7751,7 @@ fn conversation_thread_from_capture(
     conversation: &provider_capture::CapturedConversation,
     artifact: Option<&StandaloneConversationArtifact>,
     claude_wire: Option<&ClaudeWirePublication>,
-    published_bytes: &[u8],
+    published_bytes: &PayloadBytes,
     published_by: &PortableOrigin,
     updated_at: u64,
 ) -> Result<(ConversationThread, ResourceDescriptor, LogicalPath), String> {
@@ -7715,7 +7791,7 @@ fn conversation_thread_from_capture(
             // The artifact's head is the last canonical message of the
             // flattened chain; re-derive it from the analyzed output rather
             // than the leaf capture.
-            let analysis = analyze_codex_transcript(published_bytes);
+            let analysis = analyze_codex_transcript(published_bytes.as_bytes());
             match analysis.lineage {
                 CodecLineage::Complete { chain, .. } => {
                     chain.last().map(|message| message.message_id.clone())
@@ -7766,11 +7842,11 @@ fn conversation_thread_from_capture(
     // first-user fallback), so it passes the same scrub as transcript
     // content before it becomes cloud metadata.
     let transcript_title = if artifact.is_some() {
-        first_codex_user_summary(published_bytes)
+        first_codex_user_summary(published_bytes.as_bytes())
     } else if claude_wire.is_some() {
         provider_registry()
             .require(&action.provider)?
-            .summarize_bytes(published_bytes)?
+            .summarize_bytes(published_bytes.as_bytes())?
             .title
     } else {
         None
@@ -7830,7 +7906,7 @@ fn conversation_thread_from_capture(
     portable_descriptor.apply_policy = ApplyPolicy::SafeFile;
     portable_descriptor.metadata.insert(
         "content_sha256".to_string(),
-        hex_digest(Sha256::digest(published_bytes).as_slice()),
+        published_bytes.sha256().to_string(),
     );
     Ok((thread, portable_descriptor, logical_path))
 }
@@ -7927,7 +8003,7 @@ fn build_publish_request(
     binding: &ProjectBinding,
     homes: &BTreeMap<ProviderKey, String>,
     recipe: &BundleRecipe,
-    captured: &provider_capture::CapturedResources,
+    mut captured: provider_capture::CapturedResources,
     previous: Option<&BundleSnapshot>,
     expected_head: PublishExpectation,
     actions: &[ConversationPlanAction],
@@ -7947,7 +8023,7 @@ fn build_publish_request(
             .map(str::to_string),
     };
     let previous_manifest = previous.map(|snapshot| &snapshot.manifest);
-    let captured_descriptors = provider_capture::domain_resources(captured)?;
+    let captured_descriptors = provider_capture::domain_resources(&captured)?;
     // Conversation resources never travel through the generic file path:
     // strip them from the flat selection before scope reconciliation and add
     // the reviewed conversation set per provider scope below.
@@ -8012,7 +8088,7 @@ fn build_publish_request(
             mallard_infrastructure::bundle_engine::reconcile_scope_content(
                 &scope_recipe,
                 &scope_descriptors,
-                captured,
+                &captured,
                 previous_scope.as_ref(),
                 updated_at,
             )?;
@@ -8026,7 +8102,7 @@ fn build_publish_request(
             }
             let logical_path = LogicalPath::parse(captured_file.logical_path.clone())?;
             let resource_id = ResourceId::parse(captured_file.resource_id.clone())?;
-            let digest = hex_digest(Sha256::digest(&captured_file.bytes).as_slice());
+            let digest = captured_file.bytes.sha256();
             let can_retain = retained_files.get(&logical_path).is_some_and(|entry| {
                 entry.resource_id == resource_id
                     && entry.sha256 == digest
@@ -8142,7 +8218,8 @@ fn build_publish_request(
                 action.action_id, action.provider
             )
         })?;
-        let (conversation, transcript) = captured_conversation_for_action(captured, action)?;
+        let (conversation, transcript, mut sidecar_files) =
+            take_captured_conversation_for_action(&mut captured, action)?;
         // Push actions always name a registered local thread (D5).
         let local_thread_id = action.thread_id.clone().ok_or_else(|| {
             format!(
@@ -8294,7 +8371,7 @@ fn build_publish_request(
                 ));
             }
         }
-        let (artifact, seeded, claude_wire) = if is_codex {
+        let (mut artifact, seeded, claude_wire) = if is_codex {
             // Operation-level Windows gate: the path-map root grammar is
             // checked before any rollout bytes are parsed.
             validate_pathmap_root("project root", &binding.project_root)?;
@@ -8304,7 +8381,7 @@ fn build_publish_request(
                     action.action_id
                 )
             })?;
-            let source = captured_transcript_source(conversation)?;
+            let source = captured_transcript_source(&conversation)?;
             let lookup = codex_rollout_lookup(Path::new(provider_home));
             let resolved_root = codex_history_graph::resolve_codex_root(&source, &lookup)?;
             let leaf_bytes = jsonl_tail_io::read_bounded(&source)?;
@@ -8354,7 +8431,7 @@ fn build_publish_request(
             // Operation-level Windows gate: the path-map root grammar is
             // checked before any transcript bytes are parsed.
             validate_pathmap_root("project root", &binding.project_root)?;
-            let source = captured_transcript_source(conversation)?;
+            let source = captured_transcript_source(&conversation)?;
             let analysis = mallard_infrastructure::providers::SessionAnalysis {
                 source_provider_session_id: conversation.source_thread_id.clone(),
                 source_cwd: conversation.source_cwd.clone(),
@@ -8533,9 +8610,9 @@ fn build_publish_request(
         // its complete emitted body here; Claude bytes carry their
         // certificate from the redaction step above.
         let published_wire: credential_redaction::RedactedWireBytes =
-            match (&artifact, &claude_wire) {
+            match (&mut artifact, &claude_wire) {
                 (Some(artifact), _) => credential_redaction::shared()
-                    .certify_wire_document(artifact.root_bytes.clone())
+                    .certify_wire_document(std::mem::take(&mut artifact.root_bytes))
                     .map_err(|error| format!("conversation '{}': {error}", result_thread_id))?,
                 (None, Some(wire)) => wire.bytes.clone(),
                 (None, None) => {
@@ -8545,14 +8622,14 @@ fn build_publish_request(
                     ))
                 }
             };
-        let published_bytes: Vec<u8> = published_wire.into_bytes();
+        let published_bytes = published_wire.into_bytes();
         let (thread, descriptor, logical_path) = conversation_thread_from_capture(
             previous_thread.as_ref(),
             action,
             &result_thread_id,
             local_binding,
             descriptor,
-            conversation,
+            &conversation,
             artifact.as_ref(),
             claude_wire.as_ref(),
             &published_bytes,
@@ -8568,7 +8645,7 @@ fn build_publish_request(
         }
         let resource_id = descriptor.resource_id.clone();
         scope.resources.insert(resource_id.clone(), descriptor);
-        let digest = hex_digest(Sha256::digest(&published_bytes).as_slice());
+        let digest = published_bytes.sha256().to_string();
         let retained_entry = previous_manifest
             .and_then(|manifest| manifest.scope(&scope_key))
             .and_then(|previous_scope| previous_scope.files.get(&logical_path));
@@ -8595,12 +8672,12 @@ fn build_publish_request(
         }
         // Sidecars travel with the conversation resource.
         for sidecar in &conversation.sidecar_files {
-            let Some(sidecar_file) = captured.files.get(&sidecar.logical_path) else {
-                return Err(format!(
+            let sidecar_file = sidecar_files.remove(&sidecar.logical_path).ok_or_else(|| {
+                format!(
                     "captured conversation '{}' lost sidecar '{}'",
                     resource_id, sidecar.logical_path
-                ));
-            };
+                )
+            })?;
             let sidecar_logical = mallard_domain::cloud_conversation_sidecar_path(
                 &action.provider,
                 &result_thread_id,
@@ -8610,7 +8687,7 @@ fn build_publish_request(
             // Sidecars were scrubbed at capture; the certificate here is
             // the fail-closed publish gate over what actually ships.
             let sidecar_bytes = credential_redaction::shared()
-                .certify_wire_document(sidecar_file.bytes.clone())
+                .certify_wire_document(sidecar_file.bytes)
                 .map_err(|error| {
                     format!(
                         "conversation '{}' sidecar '{}': {error}",
@@ -8674,7 +8751,7 @@ fn build_publish_request(
         let artifact_sha256 = artifact
             .as_ref()
             .map(|artifact| artifact.artifact_sha256.clone())
-            .unwrap_or_else(|| hex_digest(Sha256::digest(&published_bytes).as_slice()));
+            .unwrap_or_else(|| published_bytes.sha256().to_string());
         let operation_id = ConversationOperationId::parse(generated_named_id("operation")?)?;
         let checkpoint = ConversationCheckpoint {
             generation: 0,
@@ -8696,7 +8773,7 @@ fn build_publish_request(
                     },
                 },
                 None => {
-                    let source = captured_transcript_source(conversation)?;
+                    let source = captured_transcript_source(&conversation)?;
                     let consumed = transcript.bytes.len() as u64;
                     let window = consumed.min(4_096);
                     PhysicalMappingState::Ready {
@@ -8762,7 +8839,7 @@ fn build_publish_request(
                     artifact_sha256: artifact
                         .as_ref()
                         .map(|artifact| artifact.artifact_sha256.clone())
-                        .unwrap_or_else(|| hex_digest(Sha256::digest(&published_bytes).as_slice())),
+                        .unwrap_or_else(|| published_bytes.sha256().to_string()),
                     tail_before: action.pins.tail.accepted.clone(),
                     tail_after: published_tail,
                     planned_relation: action.pins.tail.classification()?,
@@ -9000,7 +9077,7 @@ fn publish_reviewed(
     project: &LocalProjectRegistration,
     binding: &ProjectBinding,
     recipe: &BundleRecipe,
-    captured: &provider_capture::CapturedResources,
+    captured: provider_capture::CapturedResources,
     observed: Option<(
         BundleSnapshot,
         mallard_infrastructure::bundle_engine::HeadToken,
@@ -9063,7 +9140,7 @@ fn publish_reviewed(
     // itself; the other reviewed actions still publish, and every skipped
     // thread keeps its previous cloud state in the manifest.
     let revalidate = |action: &ConversationPlanAction| -> Result<(), String> {
-        let (conversation, transcript) = captured_conversation_for_action(captured, action)?;
+        let (conversation, transcript) = captured_conversation_for_action(&captured, action)?;
         if action
             .source_resource_id
             .as_ref()
@@ -9096,8 +9173,10 @@ fn publish_reviewed(
         let raw_range = match &action.pins.tail.raw_range {
             Some(pin) => {
                 let source = captured_transcript_source(conversation)?;
-                let bytes = jsonl_tail_io::read_bounded(&source)
-                    .unwrap_or_else(|_| transcript.bytes.clone());
+                let live_bytes = jsonl_tail_io::read_bounded(&source).ok();
+                let bytes = live_bytes
+                    .as_deref()
+                    .unwrap_or_else(|| transcript.bytes.as_bytes());
                 if pin.end_byte_offset > bytes.len() as u64 {
                     None
                 } else {
@@ -9172,9 +9251,7 @@ fn publish_reviewed(
                     raw_range,
                 },
                 target: ConversationTargetPins {
-                    local: TargetExpectation::Sha256(hex_digest(
-                        Sha256::digest(&transcript.bytes).as_slice(),
-                    )),
+                    local: TargetExpectation::Sha256(transcript.bytes.sha256().to_string()),
                     provider_state: Vec::new(),
                 },
                 codec: conversation.lineage_codec.clone(),
@@ -9372,64 +9449,13 @@ pub(super) fn push_bundle_reviewed_with_progress(
     }
     on_phase("discover local state", phase_started.elapsed());
     let phase_started = Instant::now();
-    let mut push_recipe = requested_recipe;
-    remove_excluded_codex_subagents_from_recipe(
-        &mut push_recipe,
-        discovery.excluded_subagent_resource_ids(),
-    );
-    let stored_generic_entries = stored_destination_recipe
-        .as_ref()
-        .map(|recipe| {
-            recipe
-                .entries
-                .iter()
-                .filter(|(resource_id, _)| {
-                    mallard_domain::is_project_content_resource_id(resource_id)
-                })
-                .map(|(resource_id, entry)| (resource_id.clone(), entry.clone()))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
-    for resource_id in &project_content_review.removal_ids {
-        if !stored_generic_entries.contains_key(resource_id) {
-            return Err(format!(
-                "project-content removal '{}' is not currently stored for this destination",
-                resource_id
-            ));
-        }
-        if push_recipe.entries.contains_key(resource_id) {
-            return Err(format!(
-                "project-content removal '{}' is also selected for publication",
-                resource_id
-            ));
-        }
-    }
-    for (resource_id, entry) in &stored_generic_entries {
-        if !push_recipe.entries.contains_key(resource_id)
-            && !project_content_review.removal_ids.contains(resource_id)
-        {
-            push_recipe
-                .entries
-                .insert(resource_id.clone(), entry.clone());
-        }
-    }
-
-    let requested_generic_ids = push_recipe
-        .entries
-        .keys()
-        .filter(|resource_id| mallard_domain::is_project_content_resource_id(resource_id))
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let generic_selection_changed = requested_generic_ids
-        != stored_generic_entries
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>()
-        || !project_content_review.removal_ids.is_empty();
-    on_phase("reconcile selection and recipe", phase_started.elapsed());
-    let phase_started = Instant::now();
     let (_, engine) = storage_engine(repository, storage_id)?;
     let observed = engine.inspect_optional_with_token(&project.bundle_id)?;
+    let remote_project_content = observed
+        .as_ref()
+        .map(|(snapshot, _)| project_content_versions(&snapshot.manifest))
+        .transpose()?
+        .unwrap_or_default();
     let has_stored_bound_conversation = observed.as_ref().is_some_and(|(snapshot, _)| {
         snapshot
             .manifest
@@ -9447,6 +9473,63 @@ pub(super) fn push_bundle_reviewed_with_progress(
         );
     }
     on_phase("inspect remote head", phase_started.elapsed());
+    let phase_started = Instant::now();
+    let mut push_recipe = requested_recipe;
+    remove_excluded_codex_subagents_from_recipe(
+        &mut push_recipe,
+        discovery.excluded_subagent_resource_ids(),
+    );
+    let saved_project_content_entries = stored_destination_recipe
+        .as_ref()
+        .map(|recipe| {
+            recipe
+                .entries
+                .iter()
+                .filter(|(resource_id, _)| {
+                    mallard_domain::is_project_content_resource_id(resource_id)
+                })
+                .map(|(resource_id, entry)| (resource_id.clone(), entry.clone()))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    for resource_id in &project_content_review.removal_ids {
+        if !saved_project_content_entries.contains_key(resource_id) {
+            return Err(format!(
+                "project-content removal '{}' is not currently stored for this destination",
+                resource_id
+            ));
+        }
+        if push_recipe.entries.contains_key(resource_id) {
+            return Err(format!(
+                "project-content removal '{}' is also selected for publication",
+                resource_id
+            ));
+        }
+    }
+    for (resource_id, entry) in &saved_project_content_entries {
+        if remote_project_content.contains_key(resource_id)
+            && !push_recipe.entries.contains_key(resource_id)
+            && !project_content_review.removal_ids.contains(resource_id)
+        {
+            push_recipe
+                .entries
+                .insert(resource_id.clone(), entry.clone());
+        }
+    }
+
+    let requested_project_content_ids = push_recipe
+        .entries
+        .keys()
+        .filter(|resource_id| mallard_domain::is_project_content_resource_id(resource_id))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let project_content_selection_changed = requested_project_content_ids
+        != saved_project_content_entries
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+        || !project_content_review.removal_ids.is_empty();
+    on_phase("reconcile selection and recipe", phase_started.elapsed());
     let mut phase_started = Instant::now();
     let mut reviewed_inventory = None;
     if let Some(review_token) = project_content_review.review_token.as_deref() {
@@ -9474,7 +9557,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
             .iter()
             .map(|entry| (entry.descriptor.resource_id.clone(), entry))
             .collect::<BTreeMap<_, _>>();
-        for resource_id in requested_generic_ids.clone() {
+        for resource_id in requested_project_content_ids.clone() {
             let entry = entries_by_id.get(&resource_id).ok_or_else(|| {
                 format!(
                     "selected project-content resource '{}' was not in the reviewed scan",
@@ -9487,7 +9570,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
                     resource_id
                 ));
             }
-            if !entry.local_present && !stored_generic_entries.contains_key(&resource_id) {
+            if !entry.local_present && !saved_project_content_entries.contains_key(&resource_id) {
                 return Err(format!(
                     "new project-content resource '{}' disappeared after review",
                     resource_id
@@ -9552,7 +9635,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
         reviewed_inventory = Some(inventory);
         on_phase("verify reviewed project files", phase_started.elapsed());
         phase_started = Instant::now();
-    } else if generic_selection_changed {
+    } else if project_content_selection_changed {
         return Err(
             "Scan and review Project files before changing stored project content".to_string(),
         );
@@ -9588,7 +9671,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
         &project,
         &binding,
         &push_recipe,
-        &capture,
+        capture,
         observed,
         conversation_push_plan_id.as_ref(),
         &approved_conversation_action_ids,
@@ -10025,7 +10108,7 @@ fn local_target_expectation_for_action(
             })
         })
         .and_then(|conversation| captured.files.get(&conversation.transcript_logical_path))
-        .map(|file| TargetExpectation::Sha256(hex_digest(Sha256::digest(&file.bytes).as_slice())))
+        .map(|file| TargetExpectation::Sha256(file.bytes.sha256().to_string()))
         .unwrap_or(TargetExpectation::Absent)
 }
 
@@ -11467,22 +11550,31 @@ pub(super) fn apply_bundle_restore_with_progress(
     on_phase("validate reviewed plan", phase_started.elapsed());
     let phase_started = Instant::now();
     let mut byte_source = engine.byte_source(&snapshot, Some(object_cache()), Some(on_progress));
-    // Metadata-only adoptions never download or journal: each is one atomic
-    // whole-document SyncConfig replacement.
+    // Metadata-only adoptions never download or journal: the whole batch is
+    // one revisioned config transaction.
     let (metadata_actions, materializing_actions): (Vec<_>, Vec<_>) = approved_conversation_actions
         .into_iter()
         .partition(|selected| {
             selected.action.action == ConversationPlanActionType::AdoptCloudMetadata
         });
     let mut conversation_receipts = Vec::new();
-    for selected in metadata_actions {
-        match adopt_cloud_metadata_action(repository, &plan, &selected.action, applied_at) {
-            Ok(receipt) => conversation_receipts.push(receipt),
-            Err(message) => conversation_receipts.push(failed_conversation_receipt(
-                &selected.action,
-                message,
-                applied_at,
-            )?),
+    let metadata_plan_actions = metadata_actions
+        .iter()
+        .map(|selected| selected.action.clone())
+        .collect::<Vec<_>>();
+    match adopt_cloud_metadata_actions(repository, &plan, &metadata_plan_actions, applied_at) {
+        Ok(receipts) => conversation_receipts.extend(receipts),
+        // The transaction itself failed during validation or persistence:
+        // no adoption was committed, and every action reports the one
+        // operation-level error instead of claiming per-thread success.
+        Err(message) => {
+            for action in &metadata_plan_actions {
+                conversation_receipts.push(failed_conversation_receipt(
+                    action,
+                    message.clone(),
+                    applied_at,
+                )?);
+            }
         }
     }
     let (prepared_conversations, prepare_failures, session_views) =
@@ -11828,102 +11920,158 @@ pub(super) fn apply_bundle_restore_with_progress(
     Ok(result)
 }
 
-/// Apply one metadata-only adoption: accept the verified cloud value into
-/// the destination checkpoint and advance the scope base, as a single
-/// journal-free atomic `SyncConfig` replacement.
-fn adopt_cloud_metadata_action(
+/// Collapse a config transaction failure to the repository's error string.
+/// Batch closures report per-item outcomes as data, so both arms carry the
+/// same operation-level message type.
+fn config_transaction_error(error: ConfigTransactionError<String>) -> String {
+    match error {
+        ConfigTransactionError::Mutation(message)
+        | ConfigTransactionError::Persistence(message) => message,
+    }
+}
+
+/// Apply every approved metadata-only adoption in one revisioned config
+/// transaction: each accepts its verified cloud value into the destination
+/// checkpoint and advances the scope base. A stale or missing thread fails
+/// its own receipt without rejecting valid siblings; the document is written
+/// once when at least one adoption applied, and a transaction failure
+/// commits nothing.
+fn adopt_cloud_metadata_actions(
     repository: &LocalStateRepository,
     plan: &RestorePlan,
-    action: &ConversationPlanAction,
+    actions: &[ConversationPlanAction],
     applied_at: u64,
-) -> Result<ApplyReceipt, String> {
-    // Adopt actions always operate on a registered local thread (D5).
-    let local_thread_id = action
-        .thread_id
-        .clone()
-        .ok_or_else(|| "conversation adoption lacks its local thread id".to_string())?;
-    let cloud_tail = action
-        .pins
-        .tail
-        .cloud
-        .clone()
-        .ok_or_else(|| "conversation adoption lacks its pinned cloud tail".to_string())?;
-    // The local column accepts the reviewed local observation: adoption runs
-    // only on Sync relations, where classification proved it equivalent to
-    // the accepted cloud value in its own form.
-    let accepted_local_tail = action
-        .pins
-        .tail
-        .local
-        .clone()
-        .ok_or_else(|| "conversation adoption lacks its pinned local tail".to_string())?;
-    let scope = SyncScopeKey::Provider(action.provider.clone());
-    let mut config = repository.load_config()?;
-    {
-        let link = config
-            .links
-            .iter_mut()
-            .find(|link| {
-                link.local_project_id == action.pins.context.local_project_id
-                    && link.storage_id == plan.storage_id
-            })
-            .ok_or_else(|| {
-                "conversation adoption requires a registered storage link".to_string()
-            })?;
-        let threads = link
-            .conversation_checkpoints
-            .entry(scope.clone())
-            .or_default();
-        let checkpoint = threads.get_mut(&local_thread_id).ok_or_else(|| {
-            "conversation adoption requires an existing destination checkpoint".to_string()
-        })?;
-        if Some(checkpoint.generation) != action.pins.tail.checkpoint_generation {
-            return Err(
-                "conversation adoption checkpoint advanced after review; refresh and pull again"
-                    .to_string(),
-            );
-        }
-        let accepted = mallard_domain::AcceptedConversationVersion {
-            artifact_sha256: checkpoint
-                .accepted
-                .as_ref()
-                .map(|accepted| accepted.artifact_sha256.clone())
-                .unwrap_or_else(|| hex_digest(Sha256::digest([]).as_slice())),
-            accepted_at_commit_id: action.pins.revision.commit_id.clone(),
-            accepted_at_manifest_sha256: action.pins.revision.manifest_sha256.clone(),
-            portable_tail: cloud_tail.clone(),
-        };
-        checkpoint.accepted = Some(accepted);
-        checkpoint.accepted_local_tail = Some(accepted_local_tail.clone());
-        checkpoint.observed_tail = accepted_local_tail;
-        checkpoint.generation = checkpoint.generation.saturating_add(1);
-        link.scope_bases.entry(scope).and_modify(|base| {
-            base.scope_revision = action.pins.revision.scope_revision.max(base.scope_revision);
-            base.scope_sha256 = action.pins.revision.scope_sha256.clone();
-            base.reviewed_in = RepositoryBase {
-                revision: action.pins.revision.bundle_revision,
-                commit_id: action.pins.revision.commit_id.clone(),
-                manifest_sha256: action.pins.revision.manifest_sha256.clone(),
-                manifest_size: base.reviewed_in.manifest_size.max(1),
-            };
-            base.last_pull_at = Some(applied_at);
-        });
+) -> Result<Vec<ApplyReceipt>, String> {
+    if actions.is_empty() {
+        return Ok(Vec::new());
     }
-    config.revision = config.revision.saturating_add(1);
-    repository.install_config_snapshot(config)?;
-    Ok(ApplyReceipt {
-        action_id: action.action_id.clone(),
-        resource_id: conversation_resource_id(&action.provider, &local_thread_id)?,
-        action_type: RestoreActionType::MaterializeConversation,
-        logical_path: None,
-        source_sha256: None,
-        target_path: None,
-        target_sha256_after: None,
-        status: ActionStatus::Applied,
-        applied_at,
-        error: None,
-        conversation: None,
-    })
+    struct PreparedAdoption {
+        local_thread_id: ThreadId,
+        cloud_tail: PortableConversationTail,
+        accepted_local_tail: PortableConversationTail,
+        resource_id: ResourceId,
+    }
+    // Action-local fields are validated before the transaction; a prepared
+    // slot of `Err` is already that action's failed outcome.
+    let prepared =
+        actions
+            .iter()
+            .map(|action| {
+                // Adopt actions always operate on a registered local thread (D5).
+                let local_thread_id = action
+                    .thread_id
+                    .clone()
+                    .ok_or_else(|| "conversation adoption lacks its local thread id".to_string())?;
+                let cloud_tail = action.pins.tail.cloud.clone().ok_or_else(|| {
+                    "conversation adoption lacks its pinned cloud tail".to_string()
+                })?;
+                // The local column accepts the reviewed local observation:
+                // adoption runs only on Sync relations, where classification
+                // proved it equivalent to the accepted cloud value in its own
+                // form.
+                let accepted_local_tail = action.pins.tail.local.clone().ok_or_else(|| {
+                    "conversation adoption lacks its pinned local tail".to_string()
+                })?;
+                let resource_id = conversation_resource_id(&action.provider, &local_thread_id)?;
+                Ok(PreparedAdoption {
+                    local_thread_id,
+                    cloud_tail,
+                    accepted_local_tail,
+                    resource_id,
+                })
+            })
+            .collect::<Vec<Result<PreparedAdoption, String>>>();
+    let (outcomes, _) = repository
+        .transact_config(|config| {
+            let mut changed = false;
+            let mut outcomes: Vec<Result<ResourceId, String>> = Vec::with_capacity(actions.len());
+            for (action, prepared) in actions.iter().zip(&prepared) {
+                let outcome = (|| {
+                    let prepared = prepared.as_ref().map_err(Clone::clone)?;
+                    let scope = SyncScopeKey::Provider(action.provider.clone());
+                    let link = config
+                        .links
+                        .iter_mut()
+                        .find(|link| {
+                            link.local_project_id == action.pins.context.local_project_id
+                                && link.storage_id == plan.storage_id
+                        })
+                        .ok_or_else(|| {
+                            "conversation adoption requires a registered storage link".to_string()
+                        })?;
+                    let checkpoint = link
+                        .conversation_checkpoints
+                        .get_mut(&scope)
+                        .and_then(|threads| threads.get_mut(&prepared.local_thread_id))
+                        .ok_or_else(|| {
+                            "conversation adoption requires an existing destination checkpoint"
+                                .to_string()
+                        })?;
+                    if Some(checkpoint.generation) != action.pins.tail.checkpoint_generation {
+                        return Err(
+                            "conversation adoption checkpoint advanced after review; refresh \
+                             and pull again"
+                                .to_string(),
+                        );
+                    }
+                    let accepted = mallard_domain::AcceptedConversationVersion {
+                        artifact_sha256: checkpoint
+                            .accepted
+                            .as_ref()
+                            .map(|accepted| accepted.artifact_sha256.clone())
+                            .unwrap_or_else(|| hex_digest(Sha256::digest([]).as_slice())),
+                        accepted_at_commit_id: action.pins.revision.commit_id.clone(),
+                        accepted_at_manifest_sha256: action.pins.revision.manifest_sha256.clone(),
+                        portable_tail: prepared.cloud_tail.clone(),
+                    };
+                    checkpoint.accepted = Some(accepted);
+                    checkpoint.accepted_local_tail = Some(prepared.accepted_local_tail.clone());
+                    checkpoint.observed_tail = prepared.accepted_local_tail.clone();
+                    checkpoint.generation = checkpoint.generation.saturating_add(1);
+                    link.scope_bases.entry(scope).and_modify(|base| {
+                        base.scope_revision =
+                            action.pins.revision.scope_revision.max(base.scope_revision);
+                        base.scope_sha256 = action.pins.revision.scope_sha256.clone();
+                        base.reviewed_in = RepositoryBase {
+                            revision: action.pins.revision.bundle_revision,
+                            commit_id: action.pins.revision.commit_id.clone(),
+                            manifest_sha256: action.pins.revision.manifest_sha256.clone(),
+                            manifest_size: base.reviewed_in.manifest_size.max(1),
+                        };
+                        base.last_pull_at = Some(applied_at);
+                    });
+                    Ok(prepared.resource_id.clone())
+                })();
+                changed |= outcome.is_ok();
+                outcomes.push(outcome);
+            }
+            if changed {
+                Ok::<_, String>(ConfigMutation::Changed(outcomes))
+            } else {
+                Ok(ConfigMutation::Unchanged(outcomes))
+            }
+        })
+        .map_err(config_transaction_error)?;
+    actions
+        .iter()
+        .zip(outcomes)
+        .map(|(action, outcome)| match outcome {
+            Ok(resource_id) => Ok(ApplyReceipt {
+                action_id: action.action_id.clone(),
+                resource_id,
+                action_type: RestoreActionType::MaterializeConversation,
+                logical_path: None,
+                source_sha256: None,
+                target_path: None,
+                target_sha256_after: None,
+                status: ActionStatus::Applied,
+                applied_at,
+                error: None,
+                conversation: None,
+            }),
+            Err(message) => failed_conversation_receipt(action, message, applied_at),
+        })
+        .collect()
 }
 
 fn committed_conversation_receipt(
@@ -12767,7 +12915,8 @@ pub(super) fn get_project_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
 ) -> Result<Option<ProjectDetail>, String> {
-    let config = repository.load_config()?;
+    let snapshot = repository.load_project_state_snapshot()?;
+    let config = snapshot.config;
     let Some(project) = config.project(local_project_id).cloned() else {
         return Ok(None);
     };
@@ -12776,12 +12925,9 @@ pub(super) fn get_project_with_repository(
         .into_iter()
         .filter(|link| &link.local_project_id == local_project_id)
         .collect();
-    let binding = repository
-        .load_bindings()?
-        .for_project(local_project_id)
-        .cloned();
-    let materializations = repository
-        .load_materializations()?
+    let binding = snapshot.bindings.for_project(local_project_id).cloned();
+    let materializations = snapshot
+        .materializations
         .records
         .into_iter()
         .filter(|record| &record.local_project_id == local_project_id)
@@ -14101,9 +14247,9 @@ fn build_setup_transaction(
             let engine = engine_for_storage_config(&storage.storage)?;
             let snapshot = engine.inspect(bundle_id)?;
             let machine_local_recipe = machine_local_recipe_from_manifest(&snapshot.manifest)?;
-            let summary = bundle_snapshot_summary_from_snapshot(snapshot)?;
+            let remote_fingerprint = snapshot.manifest.bundle.repository_fingerprint.clone();
             if repository_fingerprints_require_acknowledgement(
-                summary.repository_fingerprint.as_deref(),
+                remote_fingerprint.as_deref(),
                 local_fingerprint.as_deref(),
             ) && !mismatch_acknowledged
             {
@@ -14114,8 +14260,8 @@ fn build_setup_transaction(
             }
             (
                 bundle_id.clone(),
-                summary.display_name.clone(),
-                summary.repository_fingerprint.clone().or(local_fingerprint),
+                snapshot.manifest.bundle.display_name.clone(),
+                remote_fingerprint.or(local_fingerprint),
                 machine_local_recipe,
             )
         }
@@ -17727,6 +17873,176 @@ mod tests {
             }
         }
         recipe
+    }
+
+    #[test]
+    fn storage_clear_drops_recipe_only_project_content_and_republishes_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let catalog =
+            CatalogStateRepository::from_home_dir(temp.path().join("catalog-home")).unwrap();
+        let storage_id = StorageId::parse("cleared-project-files-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::write(project_root.join("draft.md"), b"first draft\n").unwrap();
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+
+        let provider_thread_id = "019fc001-0000-7000-8000-000000000001";
+        let session_path = codex_home.join("sessions/2026/08/31").join(format!(
+            "rollout-2026-08-31T01-00-00-{provider_thread_id}.jsonl"
+        ));
+        std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &session_path,
+            command_test_transcript(
+                provider_thread_id,
+                &project_root,
+                &[("message-1", "user", "first draft")],
+            ),
+        )
+        .unwrap();
+
+        let first_files =
+            inspect_project_files_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let old_file_id = first_files
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == "draft.md")
+            .unwrap()
+            .descriptor
+            .resource_id
+            .clone();
+        let first_review =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let mut first_approval = PushApproval::recommended(&first_review, &storage_id);
+        first_approval
+            .recipe
+            .entries
+            .extend(reviewed_project_content_recipe(&first_files).entries);
+        first_approval.project_content_review_token = first_files.review_token;
+        let first_push = ProjectSyncService::new(&repo)
+            .push_reviewed(&project.local_project_id, &storage_id, first_approval)
+            .unwrap();
+        assert!(first_push.success, "{}", first_push.message);
+
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let first_snapshot = engine.inspect(&project.bundle_id).unwrap();
+        assert!(first_snapshot
+            .manifest
+            .scope(&SyncScopeKey::Project)
+            .unwrap()
+            .resources
+            .contains_key(&old_file_id));
+        let cloud_thread_id = first_snapshot
+            .manifest
+            .all_conversations()
+            .find_map(|(_, thread_id, thread)| {
+                (thread.source_thread_id.as_deref() == Some(provider_thread_id))
+                    .then_some(thread_id.clone())
+            })
+            .unwrap();
+
+        std::fs::rename(
+            project_root.join("draft.md"),
+            project_root.join("renamed.md"),
+        )
+        .unwrap();
+        let expected_config_revision = repo.load_config().unwrap().revision;
+        clear_storage_data_with_repositories(
+            &repo,
+            &catalog,
+            &storage_id,
+            expected_config_revision,
+        )
+        .unwrap();
+        assert!(engine
+            .inspect_optional(&project.bundle_id)
+            .unwrap()
+            .is_none());
+        let cleared_config = repo.load_config().unwrap();
+        assert!(
+            project_link(&cleared_config, &project.local_project_id, &storage_id)
+                .unwrap()
+                .recipe
+                .as_ref()
+                .unwrap()
+                .entries
+                .contains_key(&old_file_id)
+        );
+
+        let second_files =
+            inspect_project_files_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        assert!(second_files
+            .entries
+            .iter()
+            .all(|entry| entry.descriptor.resource_id != old_file_id));
+        let new_file_id = second_files
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == "renamed.md")
+            .unwrap()
+            .descriptor
+            .resource_id
+            .clone();
+        let second_review =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let session = second_review
+            .thread_comparison
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .find(|entry| entry.provider_thread_id.as_deref() == Some(provider_thread_id))
+            .unwrap();
+        assert_eq!(session.state, ThreadSyncState::LocalOnly);
+        assert_eq!(
+            session.push_decision.action,
+            ConversationReviewAction::CreateCloud
+        );
+
+        let mut second_approval = PushApproval::recommended(&second_review, &storage_id);
+        second_approval
+            .recipe
+            .entries
+            .retain(|resource_id, _| !mallard_domain::is_project_content_resource_id(resource_id));
+        second_approval
+            .recipe
+            .entries
+            .extend(reviewed_project_content_recipe(&second_files).entries);
+        second_approval.project_content_review_token = second_files.review_token;
+        let second_push = ProjectSyncService::new(&repo)
+            .push_reviewed(&project.local_project_id, &storage_id, second_approval)
+            .unwrap();
+        assert!(second_push.success, "{}", second_push.message);
+
+        let republished = engine.inspect(&project.bundle_id).unwrap();
+        let project_scope = republished.manifest.scope(&SyncScopeKey::Project).unwrap();
+        assert!(project_scope.resources.contains_key(&new_file_id));
+        assert!(!project_scope.resources.contains_key(&old_file_id));
+        assert!(republished
+            .manifest
+            .all_conversations()
+            .any(|(_, thread_id, thread)| {
+                thread_id == &cloud_thread_id
+                    && thread.source_thread_id.as_deref() == Some(provider_thread_id)
+            }));
+
+        let config = repo.load_config().unwrap();
+        let recipe = project_link(&config, &project.local_project_id, &storage_id)
+            .unwrap()
+            .recipe
+            .as_ref()
+            .unwrap();
+        assert!(recipe.entries.contains_key(&new_file_id));
+        assert!(!recipe.entries.contains_key(&old_file_id));
     }
 
     #[test]
@@ -26673,7 +26989,7 @@ mod tests {
         std::fs::write(&base_rollout, &base_before).unwrap();
         fixture
             .repo
-            .install_config_snapshot(config_at_first)
+            .install_journaled_config_snapshot(config_at_first)
             .unwrap();
         fixture
             .repo
@@ -26921,7 +27237,7 @@ mod tests {
         std::fs::write(&base_rollout, &retained_after).unwrap();
         fixture
             .repo
-            .install_config_snapshot(config_at_retained_push)
+            .install_journaled_config_snapshot(config_at_retained_push)
             .unwrap();
         fixture
             .repo
@@ -27076,7 +27392,7 @@ mod tests {
         std::fs::write(&base_rollout, &base_before).unwrap();
         fixture
             .repo
-            .install_config_snapshot(config_at_first)
+            .install_journaled_config_snapshot(config_at_first)
             .unwrap();
         fixture
             .repo

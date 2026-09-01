@@ -720,6 +720,192 @@ test("pull selection rows wear the operation chips in the files grammar", () => 
   assert.match(html, />Update session · keeps local copy</);
 });
 
+test("Pull review shows only cloud-outstanding and divergent sessions", () => {
+  const scenarios: Array<{
+    key: string;
+    title: string;
+    state: ThreadSyncEntry["state"];
+    source: "local_only" | "remote_only";
+    pullAction: ConversationReviewAction;
+    visible: boolean;
+  }> = [
+    { key: "stored", title: "Stored session", state: "storage_only", source: "remote_only", pullAction: "create_local", visible: true },
+    { key: "newer-stored", title: "Newer stored session", state: "storage_ahead", source: "local_only", pullAction: "materialize_cloud", visible: true },
+    { key: "diverged", title: "Diverged session", state: "diverged", source: "local_only", pullAction: "keep_both", visible: true },
+    { key: "local", title: "Local session", state: "local_ahead", source: "local_only", pullAction: "report_push_eligible", visible: false },
+    { key: "synced", title: "Synced session", state: "synced", source: "local_only", pullAction: "no_changes", visible: false },
+    { key: "blocked", title: "Unavailable session", state: "unavailable", source: "local_only", pullAction: "report_local_only", visible: false },
+  ];
+  const sessionRows = scenarios.map((scenario, index) => {
+    const nativeId = `019f7798-5437-7632-9dbc-${String(index + 1).padStart(12, "0")}`;
+    return {
+      ...codexSession,
+      resource_id: `codex:conversation:${nativeId}`,
+      provider_session_id: scenario.source === "remote_only" ? null : nativeId,
+      logical_thread_id: nativeId,
+      source: scenario.source,
+      title: scenario.title,
+      started_at: codexSession.started_at + index,
+      ended_at: codexSession.ended_at + index,
+      transcript_path: scenario.source === "remote_only" ? null : CODEX_TRANSCRIPT_PATH,
+      working_directory: scenario.source === "remote_only" ? null : codexSession.working_directory,
+      actions: scenario.source === "remote_only" ? [] : codexActions(),
+    };
+  });
+  const comparison = emptyComparison({
+    entries: scenarios.map((scenario, index): ThreadSyncEntry => {
+      const session = sessionRows[index];
+      return {
+        provider: "codex",
+        provider_display_name: "Codex",
+        access: "bound_ready",
+        thread_id: session.logical_thread_id,
+        conversation_resource_id: session.resource_id,
+        resource_id: session.resource_id,
+        display_name: scenario.title,
+        state: scenario.state,
+        local_present: scenario.source !== "remote_only",
+        storage_present: true,
+        cloud_thread_id: session.logical_thread_id,
+        compared_against_storage: true,
+        provider_thread_id: session.provider_session_id,
+        push_decision: reviewDecision("no_changes"),
+        pull_decision: reviewDecision(scenario.pullAction, scenario.visible),
+      };
+    }),
+  });
+  const commits = scenarios.flatMap((scenario, index) => {
+    if (scenario.source === "remote_only") return [];
+    return [{
+      sha: String(index + 1).repeat(40),
+      short_sha: String(index + 1).repeat(7),
+      committed_at: activity.window_end - index,
+      subject: `Commit ${scenario.title}`,
+      session_refs: [{ resource_id: sessionRows[index].resource_id }],
+    }];
+  });
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{
+        ...activity,
+        sessions: sessionRows,
+        git: { ...activity.git, commits, unique_session_count: sessionRows.length },
+        unmapped: [{ resource_id: sessionRows[0].resource_id, reason: "No local commit" }],
+        older: null,
+      }}
+      comparison={comparison}
+      activeStorageName="Local storage 1"
+      selectionMode="pull"
+      selectableResourceIds={new Set(sessionRows.map((session) => session.resource_id))}
+    />,
+  );
+
+  assert.equal((html.match(/data-thread-status="cloud-outstanding"/g) ?? []).length, 2);
+  assert.equal((html.match(/data-thread-status="divergent"/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /data-thread-status="(?:synced|local-outstanding|pending|conflict|unavailable|unknown)"/);
+  for (const scenario of scenarios) {
+    if (scenario.visible) assert.match(html, new RegExp(scenario.title));
+    else {
+      assert.doesNotMatch(html, new RegExp(scenario.title));
+      assert.doesNotMatch(html, new RegExp(`Commit ${scenario.title}`));
+    }
+  }
+});
+
+test("Push review shows only ready local-outstanding sessions", () => {
+  const scenarios: Array<{
+    title: string;
+    state: ThreadSyncEntry["state"];
+    source: "local_only" | "remote_only";
+    pushAction: ConversationReviewAction;
+    selectable: boolean;
+    visible: boolean;
+  }> = [
+    { title: "New local session", state: "local_only", source: "local_only", pushAction: "create_cloud", selectable: true, visible: true },
+    { title: "Newer local session", state: "local_ahead", source: "local_only", pushAction: "publish", selectable: true, visible: true },
+    { title: "Held local session", state: "local_ahead", source: "local_only", pushAction: "require_pull", selectable: false, visible: false },
+    { title: "Stored session", state: "storage_only", source: "remote_only", pushAction: "not_pushable", selectable: false, visible: false },
+    { title: "Diverged session", state: "diverged", source: "local_only", pushAction: "require_pull", selectable: false, visible: false },
+    { title: "Synced session", state: "synced", source: "local_only", pushAction: "no_changes", selectable: false, visible: false },
+    { title: "Blocked local session", state: "local_only", source: "local_only", pushAction: "blocked", selectable: false, visible: false },
+  ];
+  const sessionRows = scenarios.map((scenario, index) => {
+    const nativeId = `019f7798-5437-7632-9dbc-${String(index + 20).padStart(12, "0")}`;
+    return {
+      ...codexSession,
+      resource_id: `codex:conversation:${nativeId}`,
+      provider_session_id: scenario.source === "remote_only" ? null : nativeId,
+      logical_thread_id: nativeId,
+      source: scenario.source,
+      title: scenario.title,
+      started_at: codexSession.started_at + index,
+      ended_at: codexSession.ended_at + index,
+      transcript_path: scenario.source === "remote_only" ? null : CODEX_TRANSCRIPT_PATH,
+      working_directory: scenario.source === "remote_only" ? null : codexSession.working_directory,
+      actions: scenario.source === "remote_only" ? [] : codexActions(),
+    };
+  });
+  const comparison = emptyComparison({
+    entries: scenarios.map((scenario, index): ThreadSyncEntry => {
+      const session = sessionRows[index];
+      return {
+        provider: "codex",
+        provider_display_name: "Codex",
+        access: "bound_ready",
+        thread_id: session.logical_thread_id,
+        conversation_resource_id: session.resource_id,
+        resource_id: session.resource_id,
+        display_name: scenario.title,
+        state: scenario.state,
+        local_present: scenario.source !== "remote_only",
+        storage_present: scenario.state !== "local_only",
+        cloud_thread_id: scenario.source === "remote_only" ? session.logical_thread_id : null,
+        compared_against_storage: true,
+        provider_thread_id: session.provider_session_id,
+        push_decision: reviewDecision(scenario.pushAction, scenario.selectable),
+        pull_decision: reviewDecision("no_changes"),
+      };
+    }),
+  });
+  const commits = scenarios.flatMap((scenario, index) => {
+    if (scenario.source === "remote_only" || index === 0) return [];
+    return [{
+      sha: String(index + 1).repeat(40),
+      short_sha: String(index + 1).repeat(7),
+      committed_at: activity.window_end - index,
+      subject: `Commit ${scenario.title}`,
+      session_refs: [{ resource_id: sessionRows[index].resource_id }],
+    }];
+  });
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{
+        ...activity,
+        sessions: sessionRows,
+        git: { ...activity.git, commits, unique_session_count: sessionRows.length },
+        unmapped: [{ resource_id: sessionRows[0].resource_id, reason: "No local commit" }],
+        older: null,
+      }}
+      comparison={comparison}
+      activeStorageName="Local storage 1"
+      selectionMode="push"
+      selectableResourceIds={new Set(sessionRows.map((session) => session.resource_id))}
+    />,
+  );
+
+  assert.equal((html.match(/data-thread-status="local-outstanding"/g) ?? []).length, 2);
+  assert.doesNotMatch(html, /data-thread-status="(?:synced|cloud-outstanding|divergent|pending|conflict|unavailable|unknown)"/);
+  for (const scenario of scenarios) {
+    if (scenario.visible) assert.match(html, new RegExp(scenario.title));
+    else {
+      assert.doesNotMatch(html, new RegExp(scenario.title));
+      assert.doesNotMatch(html, new RegExp(`Commit ${scenario.title}`));
+    }
+  }
+});
+
 test("an unlinked project still draws a badge on every row", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent {...contentDefaults} activity={activity} />,
@@ -1786,7 +1972,7 @@ test("unavailable sessions explain why they cannot be synced", () => {
   assert.doesNotMatch(html, /can.t tell which copy is newer/);
 });
 
-test("assignment-conflicted sessions stay visible but cannot be selected for sync", () => {
+test("Push review hides assignment-conflicted sessions", () => {
   const reason = "Codex Desktop assigns this thread here, but its authoritative home belongs to another live Codex Desktop project.";
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
@@ -1805,8 +1991,8 @@ test("assignment-conflicted sessions stay visible but cannot be selected for syn
     />,
   );
 
-  assert.match(html, /Add Git history mapping/);
-  assert.match(html, new RegExp(`aria-label="Unavailable for sync\\. ${reason.replace(/\./g, "\\.")}"`));
+  assert.doesNotMatch(html, /Add Git history mapping/);
+  assert.doesNotMatch(html, new RegExp(reason.replace(/\./g, "\\.")));
   assert.doesNotMatch(html, /sync-sync-row-choice/);
 });
 
@@ -1931,7 +2117,7 @@ test("mixed-provider rows sort deterministically and never collide on native ids
   assert.doesNotMatch(codexInput, /checked=""/);
 });
 
-test("view-only rows keep their badge and copy but never a checkbox", () => {
+test("Pull review hides view-only rows but keeps their provider notice", () => {
   const claudeRemote = {
     ...codexSession,
     resource_id: "claude:conversation:claude-thread-1",
@@ -1970,17 +2156,14 @@ test("view-only rows keep their badge and copy but never a checkbox", () => {
       }}
       activeStorageName="Local storage 1"
       selectionMode="pull"
-      // Even a listed resource id must not produce a checkbox without
-      // bound-ready access: visibility is not permission.
+      // A listed resource ID cannot override the Pull status filter.
       selectableResourceIds={new Set([claudeRemote.resource_id, unsupportedRemote.resource_id])}
     />,
   );
 
   assert.equal((html.match(/type="checkbox"/g) ?? []).length, 0);
   assert.doesNotMatch(html, /sync-sync-selectable-row/);
-  assert.match(html, /class="sync-history-branch-state history-only"[^>]*>View only</);
-  assert.match(html, /View only — connect a Claude profile to sync this session\./);
-  assert.match(html, /View only — this Mallard version has no adapter for mystery sessions\./);
+  assert.doesNotMatch(html, /Claude remote session|Unknown provider session/);
   assert.doesNotMatch(html, /aria-label="Copy transcript file"/);
   // The per-provider notice explains the access state once, with the backend's
   // detail carried along — now as one item in the page's single notice zone
@@ -2074,6 +2257,24 @@ test("session actions render from backend descriptors with disabled reasons", ()
     <ProjectChatHistoryContent
       {...contentDefaults}
       activity={{ ...activity, git: null, sessions: [localSession, heldSession] }}
+      comparison={emptyComparison({
+        entries: [localSession, heldSession].map((session): ThreadSyncEntry => ({
+          provider: "codex",
+          provider_display_name: "Codex",
+          access: "bound_ready",
+          thread_id: session.logical_thread_id,
+          conversation_resource_id: session.resource_id,
+          resource_id: session.resource_id,
+          display_name: session.title,
+          state: "local_only",
+          local_present: true,
+          storage_present: false,
+          compared_against_storage: true,
+          provider_thread_id: session.provider_session_id,
+          push_decision: reviewDecision("create_cloud", true),
+          pull_decision: reviewDecision("report_local_only"),
+        })),
+      })}
       selectionMode="push"
       selectableResourceIds={new Set()}
     />,
@@ -2787,12 +2988,12 @@ test("a fetch in flight moves the node and nothing else", () => {
   assert.equal(stamp(busy), stamp(ready));
 });
 
-test("nothing older draws a floor, not a control that would reload the page", () => {
+test("nothing older draws no terminal footer or reload control", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent {...contentDefaults} activity={{ ...activity, older: null }} />,
   );
   assert.doesNotMatch(html, /sync-history-rail-step/);
-  assert.match(html, /<p class="sync-history-rail-floor">[^<]*· nothing earlier<\/p>/);
+  assert.doesNotMatch(html, /sync-history-rail-floor|nothing earlier/);
 });
 
 test("an empty rail is still the rail, and says which of three things happened", () => {
@@ -2884,14 +3085,16 @@ test("a review pages too, and the fold waits until paging is spent", () => {
   assert.doesNotMatch(spent, /sync-history-rail-step/);
   assert.match(spent, /Older activity/);
   assert.match(spent, /A thread no session row reaches/);
-  // "nothing earlier" is browse's last word, never a review's.
+  // A spent review uses the remainder fold, never a terminal footer.
   assert.doesNotMatch(spent, /nothing earlier/);
 });
 
-test("browse keeps its floor, because nothing catches what paging misses there", () => {
+test("non-git browse also omits the terminal footer", () => {
   const html = renderToStaticMarkup(
-    <ProjectChatHistoryContent {...contentDefaults} activity={{ ...activity, older: null }} />,
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{ ...activity, git: null, older: null }}
+    />,
   );
-  assert.match(html, /sync-history-rail-floor/);
-  assert.match(html, /nothing earlier/);
+  assert.doesNotMatch(html, /sync-history-rail-floor|nothing earlier/);
 });

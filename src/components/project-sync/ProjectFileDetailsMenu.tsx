@@ -6,6 +6,7 @@ import { useDebugPopoverPlacement } from "../sync-review/debugPopoverPlacement";
 
 interface Props {
   relativePath: string;
+  projectRoot?: string | null;
   entryTypeLabel: string;
   mode?: string | null;
   modified?: string | null;
@@ -20,6 +21,7 @@ interface Props {
  */
 export default function ProjectFileDetailsMenu({
   relativePath,
+  projectRoot = null,
   entryTypeLabel,
   mode = null,
   modified = null,
@@ -40,8 +42,12 @@ export default function ProjectFileDetailsMenu({
     if (restoreFocus) window.requestAnimationFrame(() => triggerRef.current?.focus());
   };
   const placement = useDebugPopoverPlacement(rootRef, panelRef, open, () => closeMenu());
+  const pathSeparator = projectRoot?.includes("\\") && !projectRoot.includes("/") ? "\\" : "/";
+  const absolutePath = projectRoot
+    ? `${projectRoot.replace(/[\\/]+$/, "")}${pathSeparator}${relativePath.replace(/[\\/]/g, pathSeparator)}`
+    : relativePath;
   const values = [
-    { key: "path", label: "Path", value: relativePath },
+    { key: "path", label: "Path", value: absolutePath },
     { key: "type", label: "Type", value: entryTypeLabel },
     ...(mode ? [{ key: "mode", label: "Mode", value: mode }] : []),
     ...(modified ? [{ key: "modified", label: "Modified", value: modified }] : []),

@@ -2,11 +2,13 @@
 //! synchronizing through one real Mallard local-folder repository.
 //!
 //! The credentialless target owns one strict loopback aimock process, one
-//! bounded Claude version probe, and eleven public Claude model-turn CLI
+//! bounded Claude version probe, and twelve public Claude model-turn CLI
 //! processes. It creates five source revisions, resolves Keep Both in both
-//! directions, and reopens all three final histories from both replicas.
+//! directions, reopens all three final histories from both replicas, resets
+//! and republishes storage, and proves one incremental cursor append.
 //! A separately gated paid Tuzi target reuses the production Mallard oracles
-//! for a smaller three-turn create, relocated-resume, and divergent-Pull flow.
+//! for a smaller three-turn create, relocated-resume, divergent-Pull, and
+//! storage-reset flow.
 //! Every filesystem root, provider home, and credential-shaped value used by
 //! either fixture is disposable. Both tests are ignored and independently
 //! gated so neither can contact an account or inspect a real Claude profile
@@ -26,6 +28,7 @@ use mallard_infrastructure::providers::{
     SessionAdapter, SessionCountQuality, SessionTimelineContext, SessionTimelineEventKind,
     SessionTimelineQuery, SessionToolCallStatus, SessionToolCategory,
 };
+use mallard_infrastructure::session_path_map::SessionPathMapper;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -39,7 +42,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri_app_lib::{
     ProjectActivity, ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest,
     ProjectSyncService, PushApproval, PushDestinationPullReason, PushDestinationStatus,
-    RestoreResult, SessionDetailErrorCode, ThreadSyncComparison, ThreadSyncState,
+    RestoreResult, SessionDetailErrorCode, StorageDataClearResult, ThreadSyncComparison,
+    ThreadSyncState,
 };
 use walkdir::WalkDir;
 
@@ -48,7 +52,8 @@ const MODEL: &str = "claude-sonnet-4-6";
 const LIVE_TUZI_TEST_GATE: &str = "MALLARD_RUN_LIVE_CLAUDE_TUZI_E2E";
 const LIVE_TUZI_MODEL: &str = "claude-sonnet-5";
 const LIVE_TUZI_SOURCE_SESSION_ID: &str = "018f3f2e-7b91-7ad0-8000-000000000301";
-const EXPECTED_CLAUDE_VERSION: &str = "2.1.235 (Claude Code)";
+const EXPECTED_AIMOCK_CLAUDE_VERSION: &str = "2.1.250 (Claude Code)";
+const EXPECTED_TUZI_CLAUDE_VERSION: &str = "2.1.250 (Claude Code)";
 const PLACEHOLDER_API_KEY: &str = "mallard-local-aimock-placeholder";
 const INHERITED_SECRET_MARKER: &str = "mallard-inherited-secret-sentinel";
 const READ_TOOL_CALL_ID: &str = "mallard_claude_read_r1";
@@ -281,7 +286,7 @@ fn remove_sensitive_environment(command: &mut Command) {
         .env("no_proxy", "127.0.0.1");
 }
 
-fn assert_supported_claude_version(process_home: &Path) {
+fn assert_supported_claude_version(process_home: &Path, expected_version: &str) {
     let mut command = closed_command("claude");
     remove_sensitive_environment(&mut command);
     let mut child = command
@@ -340,7 +345,7 @@ fn assert_supported_claude_version(process_home: &Path) {
         String::from_utf8(stdout)
             .expect("Claude Code version output must be UTF-8")
             .trim(),
-        EXPECTED_CLAUDE_VERSION,
+        expected_version,
         "Claude Code changed; re-prove the native transcript contract before updating this gate"
     );
     assert!(stderr.is_empty(), "Claude Code version probe wrote stderr");
@@ -2323,6 +2328,22 @@ fn push(
     )
 }
 
+fn clear_storage_for_replica(
+    repository: &LocalStateRepository,
+    service: &ProjectSyncService<'_>,
+    storage_id: &StorageId,
+) -> StorageDataClearResult {
+    let expected_config_revision = redacted(
+        repository.load_config(),
+        "cannot load config before storage clear",
+    )
+    .revision;
+    redacted(
+        service.clear_storage_data(storage_id, expected_config_revision),
+        "cannot clear storage through the production service",
+    )
+}
+
 fn conversation_binding(
     repository: &LocalStateRepository,
     project_id: &LocalProjectId,
@@ -2974,6 +2995,44 @@ fn timeline_history(
     history
 }
 
+fn claude_record_shape_synopsis(bytes: &[u8]) -> String {
+    let mut shapes = BTreeMap::<String, usize>::new();
+    for raw in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|raw| !raw.is_empty())
+        .take(256)
+    {
+        let Ok(record) = serde_json::from_slice::<Value>(raw) else {
+            *shapes.entry("malformed".to_string()).or_default() += 1;
+            continue;
+        };
+        let record_type = record.get("type").and_then(Value::as_str).unwrap_or("-");
+        let role = record
+            .pointer("/message/role")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let blocks = record
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|block| block.get("type").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("+")
+            })
+            .unwrap_or_else(|| "-".to_string());
+        *shapes
+            .entry(format!("{record_type}/{role}/{blocks}"))
+            .or_default() += 1;
+    }
+    shapes
+        .into_iter()
+        .map(|(shape, count)| format!("{shape}={count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn assert_transcript_structure_and_history(
     claude_home: &Path,
     project_root: &Path,
@@ -3020,13 +3079,23 @@ fn assert_transcript_structure_and_history(
         Some(provider_thread_id)
     );
     assert_eq!(analysis.source_cwd.as_deref(), Some(cwd.as_ref()));
-    assert_eq!(
-        analysis
-            .lineage
-            .chain()
-            .expect("Claude lineage is complete")
-            .len(),
-        expected_durable_records
+    let durable_records = analysis
+        .lineage
+        .chain()
+        .expect("Claude lineage is complete")
+        .len();
+    // Claude Code 2.1.250 can link the final tool-round response either
+    // through the tool-result row or directly through the tool-use row. The
+    // latter leaves exactly that result off the active ancestry; the timeline
+    // checks below still require the tool result and its marker.
+    assert!(
+        durable_records == expected_durable_records
+            || durable_records.saturating_add(1) == expected_durable_records,
+        "Claude active-lineage record count changed: expected {} or {}, got {}; shapes: {}",
+        expected_durable_records.saturating_sub(1),
+        expected_durable_records,
+        durable_records,
+        claude_record_shape_synopsis(&bytes),
     );
     assert_eq!(
         timeline_history(&adapter, &path, project_root, provider_thread_id),
@@ -3060,12 +3129,40 @@ fn assert_transcript_structure_and_history(
     let detail = adapter
         .read_event_detail(&path, &index, &tools[0].event_id)
         .expect("cannot expand production Claude Read detail");
+    let source_project_root = read_marker_path
+        .parent()
+        .expect("Read marker path has no project parent");
+    let expected_argument_path =
+        if project_root == source_project_root || provider_thread_id == FOREIGN_DECOY_SESSION_ID {
+            read_marker_path.to_path_buf()
+        } else {
+            project_root.join(
+                read_marker_path
+                    .file_name()
+                    .expect("Read marker path has no file name"),
+            )
+        };
+    let arguments = detail
+        .arguments
+        .as_deref()
+        .expect("Claude Read detail has no arguments");
+    let arguments_value = serde_json::from_str::<Value>(arguments)
+        .expect("Claude Read detail arguments are not JSON");
+    let actual_argument_path = arguments_value
+        .get("file_path")
+        .and_then(Value::as_str)
+        .map(Path::new)
+        .expect("Claude Read detail has no file_path");
     assert!(
-        detail.arguments.as_deref().is_some_and(
-            |arguments| arguments.contains(read_marker_path.to_string_lossy().as_ref())
-        ),
-        "Claude Read detail lost its exact fixture path"
+        actual_argument_path == expected_argument_path,
+        "Claude Read detail has the wrong local path presentation"
     );
+    if expected_argument_path != read_marker_path {
+        assert!(
+            !actual_argument_path.starts_with(source_project_root),
+            "Claude Read detail retained the source project path after relocation"
+        );
+    }
     assert!(
         detail
             .result
@@ -3209,18 +3306,20 @@ fn session_detail_history(
     let source_project_root = read_marker_path
         .parent()
         .expect("Read marker path has no project parent");
-    let expected_argument_path = if source_project_root == project_root {
-        "./read-marker.txt".to_string()
-    } else {
-        read_marker_path.to_string_lossy().into_owned()
-    };
-    assert!(
-        arguments.contains(&expected_argument_path),
+    let arguments_value = serde_json::from_str::<Value>(arguments)
+        .expect("Session Detail Read arguments are not JSON");
+    assert_eq!(
+        arguments_value.get("file_path").and_then(Value::as_str),
+        Some("./read-marker.txt"),
         "Session Detail Read arguments have the wrong local path presentation"
     );
     assert!(
         !arguments.contains(project_root.to_string_lossy().as_ref()),
         "Session Detail exposed the selected replica's absolute project root"
+    );
+    assert!(
+        !arguments.contains(source_project_root.to_string_lossy().as_ref()),
+        "Session Detail exposed the source replica's absolute project root"
     );
     assert!(detail
         .result
@@ -3614,16 +3713,70 @@ fn lineage_of(bytes: &[u8]) -> mallard_infrastructure::conversation_codec::Codec
     analysis.lineage
 }
 
-/// The wire-form lineage of local transcript bytes: what the cloud row and
-/// every pulled materialization carry after credential redaction. Local
-/// bytes with detectable credentials fold differently from their wire form
-/// by design.
-fn wire_lineage_of(bytes: &[u8]) -> mallard_infrastructure::conversation_codec::CodecLineage {
+/// The lineage expected after local bytes are path-encoded, redacted, and
+/// decoded for a destination binding. The destination provider identity is
+/// restamped after decoding, as it is in the production Pull path.
+fn relocated_lineage_of(
+    bytes: &[u8],
+    source_root: &Path,
+    destination_root: &Path,
+    process_home: &Path,
+    source_provider_thread_id: &str,
+    destination_provider_thread_id: &str,
+) -> mallard_infrastructure::conversation_codec::CodecLineage {
     let text = std::str::from_utf8(bytes).expect("Claude transcript is UTF-8");
+    let source_mapper = SessionPathMapper::new(
+        source_root.to_str().expect("source project path is UTF-8"),
+        None,
+        process_home.to_str(),
+    )
+    .expect("build source path mapper");
+    let mut encoded = String::with_capacity(text.len());
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            encoded.push('\n');
+        }
+        if line.trim().is_empty() {
+            encoded.push_str(line);
+        } else {
+            encoded.push_str(
+                &source_mapper
+                    .encode_jsonl_line_gated(line)
+                    .expect("path-encode Claude transcript line"),
+            );
+        }
+    }
     let (redacted, _changed_lines) = mallard_infrastructure::credential_redaction::shared()
-        .redact_jsonl_text(text)
+        .redact_jsonl_text(&encoded)
         .expect("transcript redacts cleanly");
-    lineage_of(redacted.as_bytes())
+    let destination_mapper = SessionPathMapper::new(
+        destination_root
+            .to_str()
+            .expect("destination project path is UTF-8"),
+        None,
+        process_home.to_str(),
+    )
+    .expect("build destination path mapper");
+    let mut relocated = String::with_capacity(redacted.len());
+    for (index, line) in redacted.split('\n').enumerate() {
+        if index > 0 {
+            relocated.push('\n');
+        }
+        if line.trim().is_empty() {
+            relocated.push_str(line);
+            continue;
+        }
+        let mut value = destination_mapper
+            .decode_jsonl_line_verified(line)
+            .expect("path-decode Claude transcript line");
+        if value.get("sessionId").and_then(Value::as_str) == Some(source_provider_thread_id) {
+            value["sessionId"] = Value::String(destination_provider_thread_id.to_string());
+        }
+        relocated.push_str(
+            &serde_json::to_string(&value).expect("serialize relocated Claude transcript line"),
+        );
+    }
+    lineage_of(relocated.as_bytes())
 }
 
 #[test]
@@ -3759,7 +3912,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         "the decoy fixture no longer exercises a lossy Claude bucket collision"
     );
 
-    assert_supported_claude_version(&process_home);
+    assert_supported_claude_version(&process_home, EXPECTED_AIMOCK_CLAUDE_VERSION);
     let read_marker_path = project_a.join("read-marker.txt");
     // The Read tool ingests this file verbatim, so its planted (fake)
     // credentials ride the transcript's tool-result record into every
@@ -4093,13 +4246,19 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &read_marker_path,
     );
     let destination_r1_bytes = transcript_bytes(&claude_home_b, &project_b, &provider_primary_b);
-    // B materializes the wire form: identical chain identities, content
-    // redacted — so its lineage equals the wire fold of A's local bytes,
-    // and the planted credentials never arrive.
+    // B materializes the relocated wire form: identical chain identities,
+    // source-root paths decoded to B, and credential content redacted.
     assert_eq!(
         lineage_of(&destination_r1_bytes),
-        wire_lineage_of(&source_r1_bytes),
-        "production Claude relocation changed lineage or semantics beyond redaction"
+        relocated_lineage_of(
+            &source_r1_bytes,
+            &project_a,
+            &project_b,
+            &process_home,
+            SOURCE_SESSION_ID,
+            &provider_primary_b,
+        ),
+        "production Claude relocation changed lineage or semantics beyond path mapping and redaction"
     );
     assert_excludes(
         &destination_r1_bytes,
@@ -4573,6 +4732,115 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         "Claude model-turn process budget changed"
     );
 
+    // Start a fresh storage epoch through the production clear operation.
+    // The remote delete occurs once; both replicas separately discard their
+    // accepted bases before the synchronized local sessions are republished.
+    eprintln!("live Claude phase: storage reset and session republish");
+    let claude_home_a_before_reset = tree_digest_inventory(&claude_home_a);
+    let claude_home_b_before_reset = tree_digest_inventory(&claude_home_b);
+    let project_before_reset = redacted(
+        service_a.inspect_bundle(&storage_id, &bundle_id),
+        "cannot inspect revision-6 Claude bundle before storage reset",
+    );
+    let conversations_before_reset = project_before_reset
+        .manifest
+        .all_conversations()
+        .map(|(_, cloud_id, thread)| {
+            (
+                cloud_id.clone(),
+                (
+                    thread.provider.clone(),
+                    thread.lineage_digest.clone(),
+                    thread.semantic_digest.clone(),
+                    thread.message_count,
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(conversations_before_reset.len(), 3);
+
+    let reset_a = clear_storage_for_replica(&repository_a, &service_a, &storage_id);
+    assert!(reset_a.repository_objects_deleted > 0);
+    assert_eq!(reset_a.library_objects_deleted, 0);
+    assert_eq!(reset_a.project_links_reset, 1);
+    assert_eq!(reset_a.catalog_links_reset, 0);
+    let reset_b = clear_storage_for_replica(&repository_b, &service_b, &storage_id);
+    assert_eq!(reset_b.repository_objects_deleted, 0);
+    assert_eq!(reset_b.library_objects_deleted, 0);
+    assert_eq!(reset_b.project_links_reset, 1);
+    assert_eq!(reset_b.catalog_links_reset, 0);
+    assert!(service_a.inspect_bundle(&storage_id, &bundle_id).is_err());
+    assert_eq!(
+        tree_digest_inventory(&claude_home_a),
+        claude_home_a_before_reset
+    );
+    assert_eq!(
+        tree_digest_inventory(&claude_home_b),
+        claude_home_b_before_reset
+    );
+
+    let reset_push = push(&service_a, &project_id_a, &storage_id);
+    assert!(reset_push.success, "{}", reset_push.message);
+    assert_eq!(reset_push.revision, Some(1));
+    let (_, reset_pull) = pull_and_apply(&service_b, &storage_id, &bundle_id, &binding_b);
+    assert!(reset_pull.preserved_threads.is_empty());
+    let project_after_reset = redacted(
+        service_a.inspect_bundle(&storage_id, &bundle_id),
+        "cannot inspect republished Claude bundle",
+    );
+    assert_eq!(project_after_reset.head.revision, 1);
+    let conversations_after_reset = project_after_reset
+        .manifest
+        .all_conversations()
+        .map(|(_, cloud_id, thread)| {
+            (
+                cloud_id.clone(),
+                (
+                    thread.provider.clone(),
+                    thread.lineage_digest.clone(),
+                    thread.semantic_digest.clone(),
+                    thread.message_count,
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(conversations_after_reset, conversations_before_reset);
+    let reset_topology_a = assert_exact_replica_topology(
+        &repository_a,
+        &service_a,
+        &binding_a,
+        &project_id_a,
+        &storage_id,
+        &claude_home_a,
+        &project_a,
+        &expected_cloud_ids,
+        1,
+        "replica A after storage reset",
+    );
+    let reset_topology_b = assert_exact_replica_topology(
+        &repository_b,
+        &service_b,
+        &binding_b,
+        &project_id_b,
+        &storage_id,
+        &claude_home_b,
+        &project_b,
+        &expected_cloud_ids,
+        1,
+        "replica B after storage reset",
+    );
+    assert_eq!(reset_topology_a.by_cloud, topology_a.by_cloud);
+    assert_eq!(reset_topology_b.by_cloud, topology_b.by_cloud);
+    assert_cross_replica_topology(&reset_topology_a, &reset_topology_b, &expected_cloud_ids);
+    assert_eq!(
+        tree_digest_inventory(&claude_home_a),
+        claude_home_a_before_reset
+    );
+    assert_eq!(
+        tree_digest_inventory(&claude_home_b),
+        claude_home_b_before_reset
+    );
+
     // Cursor parity: a warm comparison reads zero Claude transcript bytes,
     // a real resumed CLI turn extends the checkpoint cursor through the
     // probe window plus the appended bytes only, and the extended
@@ -4932,7 +5200,7 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
 
     // Fail before reading the real credential if this native-format contract
     // has not been proven for the installed Claude Code version.
-    assert_supported_claude_version(&process_home);
+    assert_supported_claude_version(&process_home, EXPECTED_TUZI_CLAUDE_VERSION);
     let provider = load_live_tuzi_connection();
     let sensitive = provider.protected_needles();
     let _home_guard = EnvironmentGuard::set("HOME", &process_home);
@@ -4958,8 +5226,9 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
     let mut process_count = 0_usize;
     let mut reported_cost_usd = 0.0_f64;
 
-    // Revision 1: create one real, zero-tool Sonnet 5 session on A and
-    // publish it through the reviewed production Push path.
+    // Setup publishes registration-only revision 1. Content revision 2:
+    // create one real, zero-tool Sonnet 5 session on A and publish it through
+    // the reviewed production Push path.
     let first = finish_setup(
         &service_a,
         &project_a,
@@ -4995,7 +5264,7 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
     let source_r1_bytes = transcript_bytes(&claude_home_a, &project_a, LIVE_TUZI_SOURCE_SESSION_ID);
     let source_r1_lineage = lineage_of(&source_r1_bytes);
     let first_push = push(&service_a, &project_id_a, &storage_id);
-    assert_eq!(first_push.revision, Some(1));
+    assert_eq!(first_push.revision, Some(2));
     let logical_primary_a =
         logical_thread_id(&repository_a, &project_id_a, LIVE_TUZI_SOURCE_SESSION_ID);
     let cloud_primary = cloud_thread_id_of(&repository_a, &project_id_a, &logical_primary_a);
@@ -5003,14 +5272,14 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
         logical_primary_a.as_str(),
         LIVE_TUZI_SOURCE_SESSION_ID,
         cloud_primary.as_str(),
-        "replica-A paid revision-1 conversation",
+        "replica-A paid content-revision-2 conversation",
     );
     assert_eq!(
         root_level_transcript_stems(&claude_home_a, &project_a),
         BTreeSet::from([LIVE_TUZI_SOURCE_SESSION_ID.to_string()])
     );
     let r1_resource = mallard_domain::conversation_resource_id(&claude_key(), &logical_primary_a)
-        .expect("derive paid revision-1 Claude resource ID");
+        .expect("derive paid content-revision-2 Claude resource ID");
     session_detail_text_history(
         &service_a,
         &project_id_a,
@@ -5043,7 +5312,7 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
         &r1_machine_identity_needles,
     );
 
-    // Revision 2: B performs a reviewed Pull, gets new local/provider
+    // Content revision 3: B performs a reviewed Pull, gets new local/provider
     // identities, resumes the production-relocated transcript through Tuzi,
     // and publishes the remote continuation.
     let second = finish_setup(
@@ -5088,7 +5357,7 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
         logical_primary_b.as_str(),
         &provider_primary_b,
         cloud_primary.as_str(),
-        "replica-B paid revision-1 conversation",
+        "replica-B paid content-revision-2 conversation",
     );
     assert_live_text_transcript(
         &claude_home_b,
@@ -5133,7 +5402,7 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
     );
     let destination_r2_bytes = transcript_bytes(&claude_home_b, &project_b, &provider_primary_b);
     let r2_resource = mallard_domain::conversation_resource_id(&claude_key(), &logical_primary_b)
-        .expect("derive paid revision-2 Claude resource ID");
+        .expect("derive paid content-revision-3 Claude resource ID");
     session_detail_text_history(
         &service_b,
         &project_id_b,
@@ -5142,7 +5411,7 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
         &r2_history,
     );
     let second_push = push(&service_b, &project_id_b, &storage_id);
-    assert_eq!(second_push.revision, Some(2));
+    assert_eq!(second_push.revision, Some(3));
 
     // A independently resumes its stale base. Push must be blocked, the
     // divergent Pull must offer exactly one reviewed Keep Both, and apply
@@ -5260,11 +5529,11 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
         &r3_history,
     );
 
-    // Revision 3 publishes the two lineages. B pulls the added preserved
+    // Content revision 4 publishes the two lineages. B pulls the added preserved
     // lineage without replacing its stable provider identity, then both
     // replicas prove reviewed Pull and Push fixed points.
     let third_push = push(&service_a, &project_id_a, &storage_id);
-    assert_eq!(third_push.revision, Some(3));
+    assert_eq!(third_push.revision, Some(4));
     let preserved_cloud =
         cloud_thread_id_of(&repository_a, &project_id_a, &keep.preserved_thread_id);
     assert_ne!(preserved_cloud, cloud_primary);
@@ -5278,7 +5547,7 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
     assert_eq!(
         transcript_bytes(&claude_home_b, &project_b, &provider_primary_b),
         destination_r2_bytes,
-        "revision-3 Pull rewrote B's primary paid transcript"
+        "content-revision-4 Pull rewrote B's primary paid transcript"
     );
     let preserved_local_b = local_thread_of_cloud(&repository_b, &project_id_b, &preserved_cloud);
     let preserved_provider_b = provider_thread_id(&repository_b, &project_id_b, &preserved_local_b);
@@ -5310,11 +5579,11 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
         .collect::<BTreeSet<_>>();
     assert_eq!(expected_cloud_ids.len(), 2);
     let storage_before_noops = tree_digest_inventory(&storage_root);
-    assert_pull_is_no_op(&service_a, &storage_id, &bundle_id, &binding_a, 3);
-    assert_pull_is_no_op(&service_b, &storage_id, &bundle_id, &binding_b, 3);
+    assert_pull_is_no_op(&service_a, &storage_id, &bundle_id, &binding_a, 4);
+    assert_pull_is_no_op(&service_b, &storage_id, &bundle_id, &binding_b, 4);
     for (service, project_id) in [(&service_a, &project_id_a), (&service_b, &project_id_b)] {
         let no_op = push(service, project_id, &storage_id);
-        assert_eq!(no_op.revision, Some(3));
+        assert_eq!(no_op.revision, Some(4));
         assert_eq!(no_op.resources_changed, Some(0));
     }
     assert_eq!(tree_digest_inventory(&storage_root), storage_before_noops);
@@ -5325,7 +5594,7 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
         )
         .head
         .revision,
-        3
+        4
     );
     let topology_a = assert_exact_replica_topology(
         &repository_a,
@@ -5336,7 +5605,7 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
         &claude_home_a,
         &project_a,
         &expected_cloud_ids,
-        3,
+        4,
         "paid replica A",
     );
     let topology_b = assert_exact_replica_topology(
@@ -5348,10 +5617,117 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
         &claude_home_b,
         &project_b,
         &expected_cloud_ids,
-        3,
+        4,
         "paid replica B",
     );
     assert_cross_replica_topology(&topology_a, &topology_b, &expected_cloud_ids);
+
+    eprintln!("live paid Claude phase: storage reset and session republish");
+    let claude_home_a_before_reset = tree_digest_inventory(&claude_home_a);
+    let claude_home_b_before_reset = tree_digest_inventory(&claude_home_b);
+    let project_before_reset = redacted(
+        service_a.inspect_bundle(&storage_id, &bundle_id),
+        "cannot inspect paid Claude bundle before storage reset",
+    );
+    let conversations_before_reset = project_before_reset
+        .manifest
+        .all_conversations()
+        .map(|(_, cloud_id, thread)| {
+            (
+                cloud_id.clone(),
+                (
+                    thread.provider.clone(),
+                    thread.lineage_digest.clone(),
+                    thread.semantic_digest.clone(),
+                    thread.message_count,
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(conversations_before_reset.len(), 2);
+
+    let reset_a = clear_storage_for_replica(&repository_a, &service_a, &storage_id);
+    assert!(reset_a.repository_objects_deleted > 0);
+    assert_eq!(reset_a.library_objects_deleted, 0);
+    assert_eq!(reset_a.project_links_reset, 1);
+    assert_eq!(reset_a.catalog_links_reset, 0);
+    let reset_b = clear_storage_for_replica(&repository_b, &service_b, &storage_id);
+    assert_eq!(reset_b.repository_objects_deleted, 0);
+    assert_eq!(reset_b.library_objects_deleted, 0);
+    assert_eq!(reset_b.project_links_reset, 1);
+    assert_eq!(reset_b.catalog_links_reset, 0);
+    assert!(service_a.inspect_bundle(&storage_id, &bundle_id).is_err());
+    assert_eq!(
+        tree_digest_inventory(&claude_home_a),
+        claude_home_a_before_reset
+    );
+    assert_eq!(
+        tree_digest_inventory(&claude_home_b),
+        claude_home_b_before_reset
+    );
+
+    let reset_push = push(&service_a, &project_id_a, &storage_id);
+    assert!(reset_push.success, "{}", reset_push.message);
+    assert_eq!(reset_push.revision, Some(1));
+    let (_, reset_pull) = pull_and_apply(&service_b, &storage_id, &bundle_id, &binding_b);
+    assert!(reset_pull.preserved_threads.is_empty());
+    let project_after_reset = redacted(
+        service_a.inspect_bundle(&storage_id, &bundle_id),
+        "cannot inspect republished paid Claude bundle",
+    );
+    assert_eq!(project_after_reset.head.revision, 1);
+    let conversations_after_reset = project_after_reset
+        .manifest
+        .all_conversations()
+        .map(|(_, cloud_id, thread)| {
+            (
+                cloud_id.clone(),
+                (
+                    thread.provider.clone(),
+                    thread.lineage_digest.clone(),
+                    thread.semantic_digest.clone(),
+                    thread.message_count,
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(conversations_after_reset, conversations_before_reset);
+    let reset_topology_a = assert_exact_replica_topology(
+        &repository_a,
+        &service_a,
+        &binding_a,
+        &project_id_a,
+        &storage_id,
+        &claude_home_a,
+        &project_a,
+        &expected_cloud_ids,
+        1,
+        "paid replica A after storage reset",
+    );
+    let reset_topology_b = assert_exact_replica_topology(
+        &repository_b,
+        &service_b,
+        &binding_b,
+        &project_id_b,
+        &storage_id,
+        &claude_home_b,
+        &project_b,
+        &expected_cloud_ids,
+        1,
+        "paid replica B after storage reset",
+    );
+    assert_eq!(reset_topology_a.by_cloud, topology_a.by_cloud);
+    assert_eq!(reset_topology_b.by_cloud, topology_b.by_cloud);
+    assert_cross_replica_topology(&reset_topology_a, &reset_topology_b, &expected_cloud_ids);
+    assert_eq!(
+        tree_digest_inventory(&claude_home_a),
+        claude_home_a_before_reset
+    );
+    assert_eq!(
+        tree_digest_inventory(&claude_home_b),
+        claude_home_b_before_reset
+    );
+
     assert_eq!(
         process_count, EXPECTED_LIVE_TUZI_PROCESSES,
         "paid Claude process budget changed"

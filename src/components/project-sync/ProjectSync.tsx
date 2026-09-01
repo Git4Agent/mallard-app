@@ -3511,28 +3511,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         })}
         onSelectionChange={setPushSelected}
         onScanProjectFiles={() => void scanPendingProjectFiles()}
-        onToggleProjectContentRemoval={(resourceId) => {
-          setPushProjectContentRemovals((current) => {
-            const next = new Set(current);
-            if (next.has(resourceId)) {
-              next.delete(resourceId);
-              const entry = pendingPush.projectContentInventory?.entries.find((candidate) => (
-                candidate.descriptor.resource_id === resourceId
-              ));
-              if (entry?.selected_in_recipe) {
-                setPushSelected((selection) => new Set(selection).add(resourceId));
-              }
-            } else {
-              next.add(resourceId);
-              setPushSelected((selection) => {
-                const selected = new Set(selection);
-                selected.delete(resourceId);
-                return selected;
-              });
-            }
-            return next;
-          });
-        }}
         onToggleProjectContentWarning={(warningDigest) => setPushWarningAcknowledgements((current) => {
           const next = new Set(current);
           if (next.has(warningDigest)) next.delete(warningDigest);
@@ -3595,6 +3573,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         error={restoreError}
         onApply={(selection) => void applyReview(selection)}
         onBack={closePullReview}
+        onRefreshPlan={() => void planRestore(
+          restorePlan.storage_id,
+          restoreBinding.bundle_id,
+          restoreBinding,
+          restoreProjectName,
+        )}
         onUnlinkStorage={() => {
           void unlinkStorage(
             restoreBinding.local_project_id,

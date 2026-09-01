@@ -24,6 +24,11 @@ import ProviderMark from "../sync-review/ProviderMark";
 import { writeClipboardText } from "../sync-review/clipboard";
 import TopLayer from "../sync-review/TopLayer";
 import { useDebugPopoverPlacement } from "../sync-review/debugPopoverPlacement";
+import {
+  isPullReviewStatus,
+  isPushReviewDecision,
+  isPushReviewStatus,
+} from "../sync-review/pullReviewStatus";
 import { formatCompactNumber, formatSessionDetailTimestamp, type OpenSessionDetailRequest } from "./session-detail/sessionDetailModel";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 
@@ -1519,17 +1524,28 @@ export function ProjectChatHistoryContent({
   const [uncommittedCollapsed, setUncommittedCollapsed] = useState(false);
   const [storageOnlyCollapsed, setStorageOnlyCollapsed] = useState(false);
   const label = projectLabel(project);
-  const sessions = useMemo(
+  const allSessions = useMemo(
     () => [...(activity?.sessions ?? [])].sort(compareSessions),
     [activity?.sessions],
-  );
-  const sessionsByResource = useMemo(
-    () => new Map(sessions.map((session) => [session.resource_id, session])),
-    [sessions],
   );
   const syncIndex = useMemo(
     () => indexSessionSyncEntries(comparison?.entries ?? []),
     [comparison?.entries],
+  );
+  const sessions = useMemo(() => {
+    if (!selectionMode) return allSessions;
+    return allSessions.filter((session) => {
+      const entry = syncEntryForSession(session, syncIndex);
+      if (!entry) return false;
+      const status = sessionSyncPresentation(entry, "storage").status;
+      return selectionMode === "pull"
+        ? isPullReviewStatus(status)
+        : isPushReviewStatus(status) && isPushReviewDecision(entry.push_decision);
+    });
+  }, [allSessions, selectionMode, syncIndex]);
+  const sessionsByResource = useMemo(
+    () => new Map(sessions.map((session) => [session.resource_id, session])),
+    [sessions],
   );
   const syncBySessionResource = useMemo(() => {
     const matched = new Map<string, ThreadSyncEntry>();
@@ -1562,7 +1578,8 @@ export function ProjectChatHistoryContent({
   // promises a commit is coming; one that does map to a commit still renders
   // on the rail, because the rail records which sessions produced the commit
   // and that stays true wherever the transcript is.
-  const unmappedReferences = activity?.unmapped ?? [];
+  const unmappedReferences = (activity?.unmapped ?? [])
+    .filter((reference) => sessionsByResource.has(reference.resource_id));
   const storageOnlyReferences = unmappedReferences.filter((reference) => sessionsByResource.get(reference.resource_id)?.source === "remote_only");
   const uncommittedReferences = unmappedReferences.filter((reference) => sessionsByResource.get(reference.resource_id)?.source !== "remote_only");
   /* The non-git flat list's own split of the same fact, session-typed rather
@@ -1574,6 +1591,10 @@ export function ProjectChatHistoryContent({
     if (!selectionMode) return [];
     return (comparison?.entries ?? []).filter((entry) => (
       (entry.local_present || entry.storage_present)
+      && (selectionMode === "pull"
+        ? isPullReviewStatus(sessionSyncPresentation(entry, "storage").status)
+        : isPushReviewStatus(sessionSyncPresentation(entry, "storage").status)
+          && isPushReviewDecision(entry.push_decision))
       && !matchedSyncEntries.has(entry)
     ));
   }, [comparison?.entries, selectionMode, matchedSyncEntries]);
@@ -1639,14 +1660,34 @@ export function ProjectChatHistoryContent({
       onReviewPull={onReviewPull} />
     );
   };
-  const orderedReferences = (references: { resource_id: string }[]) => [...references].sort((left, right) => {
-    const leftSession = sessionsByResource.get(left.resource_id);
-    const rightSession = sessionsByResource.get(right.resource_id);
-    if (!leftSession || !rightSession) return left.resource_id.localeCompare(right.resource_id);
-    return rightSession.ended_at - leftSession.ended_at
-      || leftSession.started_at - rightSession.started_at
-      || left.resource_id.localeCompare(right.resource_id);
-  });
+  const orderedReferences = (references: { resource_id: string }[]) => references
+    .filter((reference) => sessionsByResource.has(reference.resource_id))
+    .sort((left, right) => {
+      const leftSession = sessionsByResource.get(left.resource_id);
+      const rightSession = sessionsByResource.get(right.resource_id);
+      if (!leftSession || !rightSession) return left.resource_id.localeCompare(right.resource_id);
+      return rightSession.ended_at - leftSession.ended_at
+        || leftSession.started_at - rightSession.started_at
+        || left.resource_id.localeCompare(right.resource_id);
+    });
+  const commits = useMemo(() => {
+    const candidates = activity?.git?.commits ?? [];
+    if (!selectionMode) return candidates;
+    return candidates.filter((commit) => (
+      commit.session_refs.some((reference) => sessionsByResource.has(reference.resource_id))
+    ));
+  }, [activity?.git?.commits, selectionMode, sessionsByResource]);
+  const selectionReviewEmpty = selectionMode != null
+    && comparison != null
+    && sessions.length === 0
+    && olderEntries.length === 0
+    && activity?.older == null
+    && !canShowLess;
+  const showGitTimeline = !selectionMode
+    || uncommittedReferences.length > 0
+    || commits.length > 0
+    || activity?.older != null
+    || canShowLess;
   const toggleCommit = (sha: string) => {
     setCollapsedCommitShas((current) => {
       const next = new Set(current);
@@ -1802,7 +1843,20 @@ export function ProjectChatHistoryContent({
           ) : null
         ) : (
           <>
-            {activity.git && storageOnlyReferences.length > 0 && (
+            {selectionReviewEmpty && (
+              <div className="sync-pull-empty">
+                <Icon name="check-circle" size={16} />
+                <span>
+                  <strong>{selectionMode === "push" ? "Nothing to push" : "No session changes"}</strong>
+                  <small>
+                    {selectionMode === "push"
+                      ? "No local session changes are ready to push."
+                      : "Sessions already match this storage."}
+                  </small>
+                </span>
+              </div>
+            )}
+            {!selectionReviewEmpty && activity.git && storageOnlyReferences.length > 0 && (
               /* Above the timeline, not on it: these rows have no commit and no
                  local file, so the group draws the timeline's frame treatment
                  but no rail segment. The rows are the ordinary session card —
@@ -1825,7 +1879,7 @@ export function ProjectChatHistoryContent({
                 )}
               </section>
             )}
-            {activity.git ? (
+            {!selectionReviewEmpty && (activity.git ? (showGitTimeline ? (
               <div className={`sync-history-timeline${uncommittedReferences.length > 0 ? " has-uncommitted" : ""}`}>
                 {uncommittedReferences.length > 0 && (
                   <section className={`sync-history-uncommitted${uncommittedCollapsed ? " collapsed" : ""}`} aria-labelledby="uncommitted-heading">
@@ -1843,8 +1897,9 @@ export function ProjectChatHistoryContent({
                     )}
                   </section>
                 )}
-                <section className="sync-history-commit-section" aria-label={`First-parent commits on ${activity.git.selected_branch}`}>
-                  {activity.git.commits.length === 0 ? (
+                {(selectionMode !== "pull" || commits.length > 0) && (
+                  <section className="sync-history-commit-section" aria-label={`First-parent commits on ${activity.git.selected_branch}`}>
+                  {commits.length === 0 ? (
                     /* An empty rail is still the rail: the gap draws as a card
                        on it, so the page keeps the spine every other state is
                        read against, and the terminus below still has something
@@ -1870,7 +1925,7 @@ export function ProjectChatHistoryContent({
                       </li>
                     </ol>
                   ) : (
-                    <ol className="sync-history-commit-rail">{activity.git.commits.map((commit) => {
+                    <ol className="sync-history-commit-rail">{commits.map((commit) => {
                       const commitUrl = githubCommitUrl(activity.git?.github_repository_url, commit.sha);
                       const references = orderedReferences(commit.session_refs);
                       const collapsed = collapsedCommitShas.has(commit.sha);
@@ -1923,19 +1978,15 @@ export function ProjectChatHistoryContent({
                       );
                     })}</ol>
                   )}
-                </section>
+                  </section>
+                )}
                 {/* The paging control ends the rail it pages. A review pages
                     too, so an out-of-window thread arrives as a
-                    real row rather than as an entry in a fold. The floor stays
-                    browse-only: in a review "nothing earlier" is not the last
-                    word, because the Older activity fold below catches
-                    whatever paging cannot reach. */}
+                    real row rather than as an entry in a fold. */}
                 <RailFoot older={activity.older ?? null} canShowLess={canShowLess} busy={loadingMore}
                   railed onLoadMore={onLoadMore} onShowLess={onShowLess} />
-                {!activity.older && !canShowLess && !selectionMode
-                  && <p className="sync-history-rail-floor">{windowRange} · nothing earlier</p>}
               </div>
-            ) : (
+            ) : null) : (
               <section>
                 {/* The flat list partitions the way the Catalog page and the
                     Files face do: stored-only sessions lead under the shared
@@ -1980,10 +2031,8 @@ export function ProjectChatHistoryContent({
                     suppressed and the row keeps the list's own left edge. */}
                 <RailFoot older={activity.older ?? null} canShowLess={canShowLess} busy={loadingMore}
                   railed={false} onLoadMore={onLoadMore} onShowLess={onShowLess} />
-                {!activity.older && !canShowLess && !selectionMode
-                  && <p className="sync-history-rail-floor no-rail">{windowRange} · nothing earlier</p>}
               </section>
-            )}
+            ))}
             {/* The catcher, not the route. Paging reaches out-of-window
                 threads, so this stays out of the way while
                 anything is still loadable — a fold offering the same rows the
@@ -1995,7 +2044,7 @@ export function ProjectChatHistoryContent({
                 loaded, and whatever is still here is exactly that remainder —
                 which a review must offer or it would silently drop
                 candidates. */}
-            {selectionMode && !activity.older && olderEntries.length > 0 && (
+            {!selectionReviewEmpty && selectionMode && !activity.older && olderEntries.length > 0 && (
               <section className="sync-history-older" aria-label="Older activity">
                 <details className="sync-history-older-group">
                   <summary>

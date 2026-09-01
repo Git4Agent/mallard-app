@@ -2,11 +2,13 @@ import type { IconName } from "../Icons";
 import { clockOptions } from "../../clock";
 import { errorMessage } from "../../storageError";
 import type { ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
+import { isPullReviewStatus } from "../sync-review/pullReviewStatus";
 import type {
   CatalogPullAction,
   CatalogProviderKey,
   CatalogResourceKind,
   CatalogScope,
+  CatalogScopePullItem,
   CatalogScopeRow,
   LocalCatalogProfile,
 } from "./types";
@@ -131,11 +133,21 @@ export function rowPushable(row: CatalogScopeRow): boolean {
 }
 
 export function rowPullable(row: CatalogScopeRow): boolean {
-  if (!row.remote_present) return false;
-  return row.state === "storage_changed"
-    || row.state === "local_missing"
-    || row.state === "diverged"
-    || row.state === "unreviewed_remote";
+  return row.remote_present && isPullReviewStatus(rowStatus(row));
+}
+
+/** Keep one Catalog Pull plan's visible and selectable rows aligned. */
+export function filterCatalogPullReviewItems(
+  items: readonly CatalogScopePullItem[],
+  rows: readonly CatalogScopeRow[],
+): CatalogScopePullItem[] {
+  const rowsByResource = new Map(rows
+    .filter((row): row is CatalogScopeRow & { resource_id: string } => Boolean(row.resource_id))
+    .map((row) => [row.resource_id, row]));
+  return items.filter((item) => {
+    const row = rowsByResource.get(item.item.resource_id);
+    return row != null && rowPullable(row);
+  });
 }
 
 /** The exact time a row last moved, and which side moved it. Local time wins

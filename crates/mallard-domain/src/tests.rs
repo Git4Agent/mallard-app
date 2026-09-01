@@ -1363,6 +1363,7 @@ fn executable_restore_actions_cannot_be_implicitly_approved() {
         expected_target_sha256: None,
         expected_target_mode: None,
         materialized_sha256: None,
+        source_size: None,
         requires_explicit_approval: false,
     };
     assert!(action.validate().unwrap_err().contains("explicit approval"));

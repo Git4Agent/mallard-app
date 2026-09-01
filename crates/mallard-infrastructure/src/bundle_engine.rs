@@ -15,6 +15,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
+use crate::payload::PayloadBytes;
 use crate::provider_capture::CapturedResources;
 use crate::providers::ProviderRegistry;
 use mallard_domain::{
@@ -29,13 +30,14 @@ use mallard_domain::{
 
 use crate::storage_core::{
     open_read_only_no_follow, parse_json_bytes, parse_json_reader, repository_object_key,
-    sha256_reader, validate_bundle_relative_object_key, CasExpectation, CasOutcome, ExpectedObject,
-    ObjectPrefix, ObjectStore, StageOutcome, VerifiedBody, HEAD_FILE, MAX_LIST_PAGE,
-    REPOSITORY_PREFIX, TAG_FILE,
+    repository_tag_key, sha256_reader, validate_bundle_relative_object_key, CasExpectation,
+    CasOutcome, ExpectedObject, ObjectPrefix, ObjectStore, StageOutcome, VerifiedBody, HEAD_FILE,
+    MAX_LIST_PAGE, REPOSITORY_TAGS_PREFIX,
 };
 
 const MAX_BUNDLE_HEAD_BYTES: u64 = 64 * 1024;
 const MAX_BUNDLE_TAG_BYTES: u64 = 64 * 1024;
+const MAX_LISTED_BUNDLES: usize = 10_000;
 const DEFAULT_PLAN_LIFETIME_SECS: u64 = 24 * 60 * 60;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,7 +67,7 @@ pub struct PublishedBundle {
 #[derive(Clone, Debug)]
 pub struct CapturedBundleFile {
     pub resource_id: ResourceId,
-    pub bytes: Vec<u8>,
+    pub bytes: PayloadBytes,
     pub source_mtime: u64,
     pub mode: Option<u32>,
 }
@@ -433,6 +435,11 @@ struct CommitRecord {
     published_by_origin: PortableOrigin,
 }
 
+/// The discovery record for one bundle, rewritten on every successful
+/// publish. It carries every fact listing needs so discovery never reads
+/// heads or manifests; the facts are advisory as of the last publish that
+/// managed to write the tag — acting flows (link, connect, pull) always
+/// re-verify against the live head.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 struct BundleTag {
     schema_version: u32,
@@ -443,6 +450,10 @@ struct BundleTag {
     updated_at: u64,
     resources: u64,
     files: u64,
+    registration_only: bool,
+    providers: Vec<ProviderKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repository_fingerprint: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -454,13 +465,10 @@ pub struct RemoteBundleSummary {
     pub updated_at: u64,
     pub resources: u64,
     pub files: u64,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RemoteBundlePage {
-    pub bundles: Vec<RemoteBundleSummary>,
+    pub registration_only: bool,
+    pub providers: Vec<ProviderKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
+    pub repository_fingerprint: Option<String>,
 }
 
 pub struct BundleEngine<S> {
@@ -472,6 +480,10 @@ impl<S: ObjectStore> BundleEngine<S> {
     pub fn open(store: S, storage_id: StorageId) -> Result<Self, String> {
         crate::storage_core::ensure_storage_marker(&store)?;
         Ok(Self { store, storage_id })
+    }
+
+    pub fn storage_id(&self) -> &StorageId {
+        &self.storage_id
     }
 
     pub fn read_head(
@@ -636,7 +648,7 @@ impl<S: ObjectStore> BundleEngine<S> {
     /// can log where a slow Push actually spends its time.
     pub fn publish_with_progress(
         &self,
-        request: PublishBundleRequest,
+        mut request: PublishBundleRequest,
         on_progress: &mut dyn FnMut(FetchProgress),
         on_phase: &mut dyn FnMut(&str, Duration),
     ) -> Result<PublishedBundle, String> {
@@ -686,14 +698,14 @@ impl<S: ObjectStore> BundleEngine<S> {
         on_phase("publish: read head", phase_started.elapsed());
 
         // Captured payloads are attempt-invariant: the CAS loop refetches
-        // only the head and manifest, never the request. Hashing a payload,
-        // building its entry, and copying its upload buffer therefore happen
-        // once here — a contended publish reuses them instead of paying a
-        // fresh pass over every payload on each retry.
+        // only the head and manifest, never the request. Capture already
+        // bound each immutable allocation to its digest; moving that body
+        // into its entry here lets every CAS attempt and upload batch share
+        // the same allocation.
         let mut prepared_captures = BTreeMap::new();
-        for (scope_key, input) in &request.writable_scopes {
+        for (scope_key, input) in &mut request.writable_scopes {
             let mut prepared = BTreeMap::new();
-            for (path, captured) in &input.captured_files {
+            for (path, captured) in std::mem::take(&mut input.captured_files) {
                 if captured.mode.is_some_and(|mode| mode & !0o777 != 0) {
                     return Err(format!("bundle file '{}' has unsafe mode bits", path));
                 }
@@ -703,9 +715,9 @@ impl<S: ObjectStore> BundleEngine<S> {
                         path, captured.resource_id
                     ));
                 }
-                let digest = sha256_hex(&captured.bytes);
+                let digest = captured.bytes.sha256().to_string();
                 prepared.insert(
-                    path.clone(),
+                    path,
                     (
                         BundleFileEntry {
                             resource_id: captured.resource_id.clone(),
@@ -715,11 +727,11 @@ impl<S: ObjectStore> BundleEngine<S> {
                             object_key: format!("_objects/{}", digest),
                             mode: captured.mode,
                         },
-                        Bytes::from(captured.bytes.clone()),
+                        captured.bytes.into_bytes(),
                     ),
                 );
             }
-            prepared_captures.insert(scope_key, prepared);
+            prepared_captures.insert(scope_key.clone(), prepared);
         }
 
         const MAX_CAS_ATTEMPTS: usize = 4;
@@ -1174,57 +1186,48 @@ impl<S: ObjectStore> BundleEngine<S> {
         Ok(Some(manifest))
     }
 
-    /// Cursor-paginated remote discovery. The cursor is the last returned
-    /// bundle ID, not a mutable global catalog offset.
-    pub fn list_remote_bundles(
-        &self,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<RemoteBundlePage, String> {
-        if limit == 0 || limit > 500 {
-            return Err("bundle page limit must be between 1 and 500".to_string());
-        }
-        let after = cursor.map(BundleId::parse).transpose()?;
-        let prefix = ObjectPrefix::parse(REPOSITORY_PREFIX)?;
-        let mut object_cursor = None;
+    /// One-pass remote discovery over the flat tag namespace, sorted by
+    /// bundle ID. Cost scales with bundle count, never with payload objects;
+    /// tag reads go through the store's bounded-concurrency metadata fetch.
+    pub fn list_remote_bundles(&self) -> Result<Vec<RemoteBundleSummary>, String> {
+        let prefix = ObjectPrefix::parse(REPOSITORY_TAGS_PREFIX)?;
         let mut tag_keys = Vec::new();
-        let mut observed = 0_usize;
+        let mut object_cursor = None;
         loop {
             let page = self
                 .store
                 .list(&prefix, object_cursor.as_deref(), MAX_LIST_PAGE)?;
-            observed = observed.saturating_add(page.keys.len());
-            if observed > 1_000_000 {
-                return Err("remote bundle listing exceeds one million objects".to_string());
+            tag_keys.extend(page.keys);
+            if tag_keys.len() > MAX_LISTED_BUNDLES {
+                return Err(format!(
+                    "remote bundle listing exceeds the {}-bundle safety limit",
+                    MAX_LISTED_BUNDLES
+                ));
             }
-            tag_keys.extend(
-                page.keys
-                    .into_iter()
-                    .filter(|key| key.as_str().ends_with("/_tag.json")),
-            );
             let Some(next) = page.next_cursor else {
                 break;
             };
             object_cursor = Some(next);
         }
 
-        let mut summaries = Vec::new();
-        for key in tag_keys {
+        let stored_tags = self
+            .store
+            .get_metadata_many(&tag_keys, MAX_BUNDLE_TAG_BYTES)?;
+        let mut summaries = Vec::with_capacity(tag_keys.len());
+        for (key, stored) in tag_keys.iter().zip(stored_tags) {
             let Some(bundle_component) = key
                 .as_str()
-                .strip_prefix(&format!("{}/", REPOSITORY_PREFIX))
-                .and_then(|rest| rest.strip_suffix("/_tag.json"))
+                .strip_prefix(&format!("{}/", REPOSITORY_TAGS_PREFIX))
+                .and_then(|rest| rest.strip_suffix(".json"))
             else {
-                continue;
+                return Err(format!(
+                    "unexpected object '{}' in the bundle tag namespace",
+                    key
+                ));
             };
             let bundle_id = BundleId::parse(bundle_component.to_string())?;
-            if after.as_ref().is_some_and(|after| &bundle_id <= after) {
-                continue;
-            }
-            let stored = self
-                .store
-                .get_metadata(&key, MAX_BUNDLE_TAG_BYTES)?
-                .ok_or_else(|| format!("listed bundle tag '{}' disappeared", key))?;
+            let stored =
+                stored.ok_or_else(|| format!("listed bundle tag '{}' disappeared", key))?;
             let tag: BundleTag = parse_json_bytes(&stored.bytes, "bundle tag")?;
             if tag.schema_version != BUNDLE_SCHEMA || tag.bundle_id != bundle_id {
                 return Err(format!("bundle tag '{}' has inconsistent identity", key));
@@ -1237,16 +1240,13 @@ impl<S: ObjectStore> BundleEngine<S> {
                 updated_at: tag.updated_at,
                 resources: tag.resources,
                 files: tag.files,
+                registration_only: tag.registration_only,
+                providers: tag.providers,
+                repository_fingerprint: tag.repository_fingerprint,
             });
         }
         summaries.sort_by(|a, b| a.bundle_id.cmp(&b.bundle_id));
-        let has_more = summaries.len() > limit;
-        summaries.truncate(limit);
-        let next_cursor = has_more.then(|| summaries.last().unwrap().bundle_id.to_string());
-        Ok(RemoteBundlePage {
-            bundles: summaries,
-            next_cursor,
-        })
+        Ok(summaries)
     }
 
     /// Build a restore plan from a verified current-schema manifest.
@@ -1339,6 +1339,7 @@ impl<S: ObjectStore> BundleEngine<S> {
                     expected_target_sha256: None,
                     expected_target_mode,
                     materialized_sha256: None,
+                    source_size: None,
                     requires_explicit_approval: true,
                 });
             }
@@ -1475,6 +1476,7 @@ impl<S: ObjectStore> BundleEngine<S> {
                         .then_some(planned.target_mode)
                         .flatten(),
                     materialized_sha256: Some(entry.sha256.clone()),
+                    source_size: Some(entry.size),
                     requires_explicit_approval,
                 });
             }
@@ -1527,6 +1529,7 @@ impl<S: ObjectStore> BundleEngine<S> {
                             expected_target_sha256: Some(last_sha256),
                             expected_target_mode: target_state.mode,
                             materialized_sha256: None,
+                            source_size: None,
                             requires_explicit_approval: true,
                         });
                     }
@@ -1567,6 +1570,7 @@ impl<S: ObjectStore> BundleEngine<S> {
                             expected_target_sha256: None,
                             expected_target_mode,
                             materialized_sha256: None,
+                            source_size: None,
                             requires_explicit_approval: true,
                         });
                     }
@@ -1634,9 +1638,15 @@ impl<S: ObjectStore> BundleEngine<S> {
             updated_at: manifest.updated_at,
             resources: manifest.all_resources().count() as u64,
             files: manifest.all_files().count() as u64,
+            registration_only: manifest.is_registration_only(),
+            providers: manifest
+                .provider_scopes()
+                .map(|(provider, _)| provider.clone())
+                .collect(),
+            repository_fingerprint: manifest.bundle.repository_fingerprint.clone(),
         };
         let bytes = serde_json::to_vec(&tag).map_err(|e| format!("serialize bundle tag: {}", e))?;
-        let key = repository_object_key(&manifest.bundle.bundle_id, TAG_FILE)?;
+        let key = repository_tag_key(&manifest.bundle.bundle_id)?;
         for _ in 0..4 {
             let expectation = match self.store.get_metadata(&key, MAX_BUNDLE_TAG_BYTES)? {
                 Some(existing) => CasExpectation::Match(existing.etag),
@@ -1717,7 +1727,7 @@ mod tests {
     };
     use crate::storage_core::{
         ImmutablePutOutcome, LocalObjectStore, ObjectKey, StoreListPage, StoredMetadata,
-        STORAGE_MARKER_KEY,
+        REPOSITORY_PREFIX, STORAGE_MARKER_KEY,
     };
     use mallard_domain::{LocalProjectId, RecipeEntry, ReplicaId};
 
@@ -1898,7 +1908,7 @@ mod tests {
                 }
                 let path = LogicalPath::parse(file.logical_path.clone())?;
                 let resource_id = ResourceId::parse(file.resource_id.clone())?;
-                let digest = sha256_hex(&file.bytes);
+                let digest = file.bytes.sha256().to_string();
                 let mode = Some(file.mode & 0o777);
                 let retained = previous_scope
                     .and_then(|scope| scope.files.get(&path))
@@ -2067,10 +2077,16 @@ mod tests {
         let repository_root = store_root.join(format!("{}/{}", REPOSITORY_PREFIX, id));
         assert!(store_root.join(STORAGE_MARKER_KEY).is_file());
         assert!(repository_root.join(HEAD_FILE).is_file());
-        assert!(repository_root.join(TAG_FILE).is_file());
+        assert!(store_root
+            .join(REPOSITORY_TAGS_PREFIX)
+            .join(format!("{}.json", id))
+            .is_file());
         assert!(repository_root.join("_manifests").is_dir());
         assert!(repository_root.join("_commits").is_dir());
         assert!(repository_root.join("_objects").is_dir());
+        let listed = engine.list_remote_bundles().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(!listed[0].registration_only);
         assert_eq!(
             fs::metadata(repository_root.join(&first.snapshot.head.manifest_key))
                 .unwrap()
@@ -2151,10 +2167,66 @@ mod tests {
             .any(|(_, _, tombstone)| matches!(tombstone.target, TombstoneTarget::Resource { .. })));
     }
 
+    /// Forces tiny list pages so the one-pass listing's internal store
+    /// cursor loop is exercised without seeding ten thousand objects.
+    struct SmallListPageStore {
+        inner: LocalObjectStore,
+    }
+
+    impl ObjectStore for SmallListPageStore {
+        fn get_metadata(
+            &self,
+            key: &ObjectKey,
+            max_bytes: u64,
+        ) -> Result<Option<StoredMetadata>, String> {
+            self.inner.get_metadata(key, max_bytes)
+        }
+
+        fn stage_verified(
+            &self,
+            key: &ObjectKey,
+            expected: &ExpectedObject,
+        ) -> Result<StageOutcome, String> {
+            self.inner.stage_verified(key, expected)
+        }
+
+        fn put_immutable(
+            &self,
+            key: &ObjectKey,
+            bytes: &[u8],
+        ) -> Result<ImmutablePutOutcome, String> {
+            self.inner.put_immutable(key, bytes)
+        }
+
+        fn compare_and_swap(
+            &self,
+            key: &ObjectKey,
+            expectation: &CasExpectation,
+            bytes: &[u8],
+        ) -> Result<CasOutcome, String> {
+            self.inner.compare_and_swap(key, expectation, bytes)
+        }
+
+        fn delete(&self, key: &ObjectKey) -> Result<(), String> {
+            self.inner.delete(key)
+        }
+
+        fn list(
+            &self,
+            prefix: &ObjectPrefix,
+            cursor: Option<&str>,
+            limit: usize,
+        ) -> Result<StoreListPage, String> {
+            self.inner.list(prefix, cursor, limit.min(100))
+        }
+    }
+
     #[test]
-    fn remote_bundle_listing_pages_more_than_one_thousand_bundles() {
+    fn remote_bundle_listing_is_one_pass_over_the_flat_tag_namespace() {
         let temp = tempfile::tempdir().unwrap();
-        let store = LocalObjectStore::open(temp.path().join("store")).unwrap();
+        let store = SmallListPageStore {
+            inner: LocalObjectStore::open(temp.path().join("store")).unwrap(),
+        };
         for number in 1..=1_005_u64 {
             let id = bundle_id(number);
             let tag = BundleTag {
@@ -2166,29 +2238,42 @@ mod tests {
                 updated_at: number,
                 resources: 1,
                 files: 1,
+                registration_only: number == 1,
+                providers: vec![claude_key()],
+                repository_fingerprint: Some("b".repeat(64)),
             };
-            let key = repository_object_key(&id, TAG_FILE).unwrap();
             store
                 .compare_and_swap(
-                    &key,
+                    &repository_tag_key(&id).unwrap(),
                     &CasExpectation::Absent,
                     &serde_json::to_vec(&tag).unwrap(),
                 )
                 .unwrap();
         }
+        // Bundle payload objects never influence discovery: heads live
+        // outside the tag namespace and are invisible to the listing.
+        store
+            .compare_and_swap(
+                &repository_object_key(&bundle_id(1), HEAD_FILE).unwrap(),
+                &CasExpectation::Absent,
+                b"{}",
+            )
+            .unwrap();
+
         let engine = BundleEngine::open(store, storage_id()).unwrap();
-        let mut cursor = None;
-        let mut listed = Vec::new();
-        loop {
-            let page = engine.list_remote_bundles(cursor.as_deref(), 113).unwrap();
-            listed.extend(page.bundles.into_iter().map(|bundle| bundle.bundle_id));
-            let Some(next) = page.next_cursor else {
-                break;
-            };
-            cursor = Some(next);
-        }
+        let listed = engine.list_remote_bundles().unwrap();
         assert_eq!(listed.len(), 1_005);
-        assert!(listed.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(listed
+            .windows(2)
+            .all(|pair| pair[0].bundle_id < pair[1].bundle_id));
+        let first = &listed[0];
+        assert!(first.registration_only);
+        assert!(!listed[1].registration_only);
+        assert_eq!(first.providers, vec![claude_key()]);
+        assert_eq!(
+            first.repository_fingerprint.as_deref(),
+            Some("b".repeat(64).as_str())
+        );
     }
 
     #[test]
@@ -2395,6 +2480,7 @@ mod tests {
             )
             .unwrap();
         let action = draft_write_action(&plan);
+        assert_eq!(action.source_size, Some("storage v2".len() as u64));
         let pin = preservation_pin(action).expect("diverged file must preserve");
         assert_eq!(
             pin.copy_logical_path.as_str(),
@@ -2559,6 +2645,7 @@ mod tests {
         inner: LocalObjectStore,
         keys: Arc<Mutex<Vec<String>>>,
         puts: Arc<Mutex<Vec<String>>>,
+        put_pointers: Arc<Mutex<Vec<(String, usize)>>>,
         cas_writes: Arc<Mutex<Vec<String>>>,
     }
 
@@ -2568,6 +2655,7 @@ mod tests {
                 inner: LocalObjectStore::open(root).unwrap(),
                 keys: Arc::new(Mutex::new(Vec::new())),
                 puts: Arc::new(Mutex::new(Vec::new())),
+                put_pointers: Arc::new(Mutex::new(Vec::new())),
                 cas_writes: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -2575,6 +2663,7 @@ mod tests {
         fn reset(&self) {
             self.keys.lock().unwrap().clear();
             self.puts.lock().unwrap().clear();
+            self.put_pointers.lock().unwrap().clear();
             self.cas_writes.lock().unwrap().clear();
         }
 
@@ -2589,6 +2678,16 @@ mod tests {
                 .collect()
         }
 
+        fn payload_put_pointers(&self) -> Vec<usize> {
+            self.put_pointers
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(key, _)| key.contains("/_objects/"))
+                .map(|(_, pointer)| *pointer)
+                .collect()
+        }
+
         fn put_count(&self) -> usize {
             self.puts.lock().unwrap().len()
         }
@@ -2597,8 +2696,8 @@ mod tests {
             self.cas_writes.lock().unwrap().len()
         }
 
-        /// Repository object reads that are payloads — heads, tags, and
-        /// manifests are metadata and excluded.
+        /// Repository object reads that are payloads — heads, discovery
+        /// tags, and manifests are metadata and excluded.
         fn payload_gets(&self) -> usize {
             self.keys
                 .lock()
@@ -2607,7 +2706,7 @@ mod tests {
                 .filter(|key| {
                     key.contains("/repositories/")
                         && !key.ends_with("/_head.json")
-                        && !key.ends_with("/_tag.json")
+                        && !key.contains("/_tags/")
                         && !key.contains("/_manifests/")
                 })
                 .count()
@@ -2651,6 +2750,10 @@ mod tests {
             bytes: &[u8],
         ) -> Result<ImmutablePutOutcome, String> {
             self.puts.lock().unwrap().push(key.as_str().to_string());
+            self.put_pointers
+                .lock()
+                .unwrap()
+                .push((key.as_str().to_string(), bytes.as_ptr() as usize));
             self.inner.put_immutable(key, bytes)
         }
 
@@ -2913,6 +3016,13 @@ mod tests {
         let snapshot = engine.inspect(&bundle_id(7)).unwrap();
         assert_eq!(snapshot.manifest.revision, 1);
         assert!(snapshot.manifest.is_registration_only());
+
+        // Listing reads the claim's tag alone: registration-only and the
+        // fingerprint surface without touching the head or manifest.
+        let listed = engine.list_remote_bundles().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].registration_only);
+        assert_eq!(listed[0].repository_fingerprint, Some("a".repeat(64)));
     }
 
     #[test]
@@ -2953,6 +3063,46 @@ mod tests {
         for entry in file_entries {
             assert_eq!(entry.object_key, shared_key);
         }
+    }
+
+    #[test]
+    fn publish_reuses_the_capture_allocation_at_the_store_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-project");
+        fs::create_dir_all(&source).unwrap();
+        write(&source.join("payload.bin"), &vec![0x5a; 64 * 1024]);
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let recipe = recipe_for(
+            inventory
+                .resources
+                .iter()
+                .map(|resource| resource.resource_id.clone()),
+        );
+        let captured = capture_recipe(registry(), &request, &recipe).unwrap();
+        let capture_pointer = captured
+            .files
+            .values()
+            .next()
+            .unwrap()
+            .bytes
+            .as_bytes()
+            .as_ptr() as usize;
+        let store = CountingStore::open(&temp.path().join("store"));
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+
+        publish_captured(
+            &engine,
+            identity(bundle_id(48), "Allocation"),
+            &recipe,
+            &captured,
+            None,
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(store.payload_put_pointers(), vec![capture_pointer]);
     }
 
     #[test]
@@ -3468,6 +3618,7 @@ fn manual_action(resource_id: &ResourceId, message: &str) -> Result<RestoreActio
         expected_target_sha256: None,
         expected_target_mode: None,
         materialized_sha256: None,
+        source_size: None,
         requires_explicit_approval: true,
     };
     action.validate()?;

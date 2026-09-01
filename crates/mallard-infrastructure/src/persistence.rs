@@ -104,7 +104,7 @@ pub struct StorageSyncMetadataResetResult {
     pub config_revision: u64,
     pub links_reset: u64,
     pub scope_bases_removed: u64,
-    pub conversation_checkpoints_removed: u64,
+    pub conversation_acceptances_removed: u64,
     pub materializations_removed: u64,
     pub journal_operations_removed: u64,
     pub restore_plans_removed: u64,
@@ -132,6 +132,15 @@ pub struct LocalStateWipeResult {
     pub existed: bool,
     pub files_removed: u64,
     pub bytes_removed: u64,
+}
+
+/// Project-facing machine state read under one persistence lock. The config
+/// document is loaded once and validates both dependent documents.
+#[derive(Clone, Debug)]
+pub struct LocalProjectStateSnapshot {
+    pub config: SyncConfig,
+    pub bindings: MachineProjectState,
+    pub materializations: Materializations,
 }
 
 struct PersistenceGuard {
@@ -588,9 +597,12 @@ impl LocalStateRepository {
     }
 
     /// Install one journaled whole-document `SyncConfig` after-state exactly
-    /// as recorded. Metadata-only Pull actions and journaled operations both
-    /// commit through this single atomic replacement.
-    pub fn install_config_snapshot(&self, document: SyncConfig) -> Result<(), String> {
+    /// as recorded: validated, atomically written, and never re-revisioned.
+    /// Journal recovery is the only caller — the caller proves the current
+    /// document equals the journaled before-state, so an exact replacement
+    /// can never overwrite intervening config changes. Ordinary service
+    /// mutations go through the revisioned `transact_config` instead.
+    pub fn install_journaled_config_snapshot(&self, document: SyncConfig) -> Result<(), String> {
         let _guard = persistence_guard(&self.root)?;
         document.validate()?;
         write_json_atomic(&self.root, &self.config_path(), &document, MAX_CONFIG_BYTES)
@@ -639,6 +651,19 @@ impl LocalStateRepository {
     pub fn load_config(&self) -> Result<SyncConfig, String> {
         let _guard = persistence_guard(&self.root)?;
         self.load_config_unlocked()
+    }
+
+    pub fn load_project_state_snapshot(&self) -> Result<LocalProjectStateSnapshot, String> {
+        let _guard = persistence_guard(&self.root)?;
+        let identity = self.load_or_create_host_identity_unlocked()?;
+        let config = self.load_config_unlocked()?;
+        let bindings = self.load_bindings_unlocked(&config, &identity)?;
+        let materializations = self.load_materializations_unlocked(&config)?;
+        Ok(LocalProjectStateSnapshot {
+            config,
+            bindings,
+            materializations,
+        })
     }
 
     /// Full-document optimistic save used by storage/settings UI.  The
@@ -1041,7 +1066,7 @@ impl LocalStateRepository {
 
         let mut links_reset = 0_u64;
         let mut scope_bases_removed = 0_u64;
-        let mut conversation_checkpoints_removed = 0_u64;
+        let mut conversation_acceptances_removed = 0_u64;
         let mut config_changed = false;
         for link in config
             .links
@@ -1050,16 +1075,24 @@ impl LocalStateRepository {
         {
             links_reset = links_reset.saturating_add(1);
             scope_bases_removed = scope_bases_removed.saturating_add(link.scope_bases.len() as u64);
-            conversation_checkpoints_removed = conversation_checkpoints_removed.saturating_add(
-                link.conversation_checkpoints
-                    .values()
-                    .map(|threads| threads.len() as u64)
-                    .sum::<u64>(),
-            );
-            config_changed |=
-                !link.scope_bases.is_empty() || !link.conversation_checkpoints.is_empty();
+            // A storage clear invalidates remote acceptance only. Keep the
+            // local cursor and physical mapping that distinguish preserved
+            // provider aliases from newly discovered local sessions.
+            let acceptances_removed = link
+                .conversation_checkpoints
+                .values_mut()
+                .flat_map(|threads| threads.values_mut())
+                .filter_map(|checkpoint| {
+                    checkpoint.accepted.take().map(|_| {
+                        checkpoint.accepted_local_tail = None;
+                        checkpoint.generation = checkpoint.generation.saturating_add(1);
+                    })
+                })
+                .count() as u64;
+            conversation_acceptances_removed =
+                conversation_acceptances_removed.saturating_add(acceptances_removed);
+            config_changed |= !link.scope_bases.is_empty() || acceptances_removed > 0;
             link.scope_bases.clear();
-            link.conversation_checkpoints.clear();
         }
 
         let materialization_count = materializations.records.len();
@@ -1140,7 +1173,7 @@ impl LocalStateRepository {
                 config_revision: config.revision,
                 links_reset,
                 scope_bases_removed,
-                conversation_checkpoints_removed,
+                conversation_acceptances_removed,
                 materializations_removed,
                 journal_operations_removed,
                 restore_plans_removed: restore_plan_ids.len() as u64,
@@ -2767,12 +2800,14 @@ fn write_bytes_atomic(
 mod tests {
     use super::*;
     use mallard_domain::{
-        generated_named_id, BindingState, BundleId, BundleRecipe, ConversationMaterializationState,
+        generated_named_id, AcceptedConversationVersion, BindingState, BundleId, BundleRecipe,
+        CanonicalConversationMessage, ConversationCheckpoint, ConversationMaterializationState,
         LocalConversationBinding, LocalProjectRegistration, LocalProviderProfileId,
-        MaterializationId, MaterializationRecord, MaterializationStatus, PlanId,
-        PreservedProvenance, ProjectBinding, ProjectStorageLink, ProviderKey, ProviderProfile,
-        RepositoryBase, RootTailLayout, ScopeBase, StorageConfig, StorageId, StorageKind,
-        SyncScopeKey, TailPartitionKind, ThreadId, LOCAL_SCHEMA, PORTABLE_TAIL_CODEC_V1,
+        MaterializationId, MaterializationRecord, MaterializationStatus, MessageId,
+        PhysicalMappingState, PlanId, PreservedProvenance, ProjectBinding, ProjectStorageLink,
+        ProviderKey, ProviderProfile, RepositoryBase, RootTailLayout, ScopeBase, StorageConfig,
+        StorageId, StorageKind, SyncScopeKey, TailPartitionKind, ThreadId, LOCAL_SCHEMA,
+        PORTABLE_TAIL_CODEC_V1,
     };
     use std::collections::BTreeMap;
 
@@ -2971,6 +3006,25 @@ mod tests {
     }
 
     #[test]
+    fn project_state_snapshot_loads_related_documents() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let identity = repo.load_or_create_host_identity().unwrap();
+        install_bound_project(&repo, &temp, &identity);
+
+        let snapshot = repo.load_project_state_snapshot().unwrap();
+
+        assert_eq!(snapshot.config.projects, vec![project()]);
+        assert_eq!(snapshot.bindings.bindings.len(), 1);
+        assert_eq!(snapshot.bindings.bindings[0].host_id, identity.host_id);
+        assert_eq!(
+            snapshot.bindings.bindings[0].local_project_id,
+            snapshot.config.projects[0].local_project_id
+        );
+        assert!(snapshot.materializations.records.is_empty());
+    }
+
+    #[test]
     fn project_sync_metadata_reset_forgets_derived_state_and_keeps_user_bytes_and_setup() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
@@ -3124,6 +3178,17 @@ mod tests {
         let replica_id = install_bound_project(&repo, &temp, &identity);
         let local_project_id = LocalProjectId::parse("project-a").unwrap();
         let storage_id = StorageId::parse("storage-a").unwrap();
+        let logical_thread_id = ThreadId::parse("thread-preserved").unwrap();
+        let observed_tail = mallard_domain::compute_portable_conversation_tail(
+            TailPartitionKind::WholeThread,
+            0,
+            &[CanonicalConversationMessage {
+                message_id: MessageId::parse("message-preserved").unwrap(),
+                parent_message_id: None,
+                semantic_fingerprint: "f".repeat(64),
+            }],
+        )
+        .unwrap();
         repo.mutate_config(|config| {
             config.storages.push(StorageConfig {
                 id: storage_id.clone(),
@@ -3138,6 +3203,56 @@ mod tests {
                 local_dir: temp.path().join("storage").to_string_lossy().into_owned(),
                 supports_conditional_writes: None,
             });
+            config.links.push(ProjectStorageLink {
+                local_project_id: local_project_id.clone(),
+                storage_id: storage_id.clone(),
+                bundle_id: project().bundle_id,
+                recipe: Some(BundleRecipe::default()),
+                scope_bases: BTreeMap::from([(
+                    SyncScopeKey::provider(codex_key()),
+                    ScopeBase {
+                        scope: SyncScopeKey::provider(codex_key()),
+                        scope_revision: 1,
+                        scope_sha256: "c".repeat(64),
+                        reviewed_in: RepositoryBase {
+                            revision: 1,
+                            commit_id: "commit-clear".to_string(),
+                            manifest_sha256: "d".repeat(64),
+                            manifest_size: 1,
+                        },
+                        binding_revision: 0,
+                        last_pull_at: Some(1),
+                        last_push_at: None,
+                    },
+                )]),
+                project_content_preferences: Default::default(),
+                conversation_checkpoints: BTreeMap::from([(
+                    SyncScopeKey::provider(codex_key()),
+                    BTreeMap::from([(
+                        logical_thread_id.clone(),
+                        ConversationCheckpoint {
+                            generation: 5,
+                            accepted: Some(AcceptedConversationVersion {
+                                artifact_sha256: "a".repeat(64),
+                                accepted_at_commit_id: "commit-clear".to_string(),
+                                accepted_at_manifest_sha256: "d".repeat(64),
+                                portable_tail: observed_tail.clone(),
+                            }),
+                            accepted_local_tail: Some(observed_tail.clone()),
+                            observed_tail: observed_tail.clone(),
+                            physical: PhysicalMappingState::Detached {
+                                expected_provider_thread_id: "provider-thread-preserved"
+                                    .to_string(),
+                                expected_binding_revision: 0,
+                            },
+                            prefix_witness: None,
+                            binding_revision: 0,
+                        },
+                    )]),
+                )]),
+                pinned: true,
+                created_at: 1,
+            });
             Ok(())
         })
         .unwrap();
@@ -3147,7 +3262,7 @@ mod tests {
                 replica_id: replica_id.clone(),
                 local_project_id: local_project_id.clone(),
                 provider_profile_id: LocalProviderProfileId::parse("profile-a").unwrap(),
-                thread_id: ThreadId::parse("thread-preserved").unwrap(),
+                thread_id: logical_thread_id.clone(),
                 cloud_thread_id: None,
                 forked_from: None,
                 preserved: Some(PreservedProvenance {
@@ -3198,6 +3313,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.materializations_removed, 1);
+        assert_eq!(result.scope_bases_removed, 1);
+        assert_eq!(result.conversation_acceptances_removed, 1);
         assert!(repo.load_materializations().unwrap().records.is_empty());
         let bindings = repo.load_conversation_bindings().unwrap();
         assert_eq!(bindings.bindings.len(), 1);
@@ -3208,6 +3325,26 @@ mod tests {
                 ordinal: 3,
             })
         );
+        let config = repo.load_config().unwrap();
+        let link = config
+            .links
+            .iter()
+            .find(|link| link.local_project_id == local_project_id && link.storage_id == storage_id)
+            .unwrap();
+        assert!(link.scope_bases.is_empty());
+        let checkpoint = &link.conversation_checkpoints[&SyncScopeKey::provider(codex_key())]
+            [&logical_thread_id];
+        assert_eq!(checkpoint.generation, 6);
+        assert!(checkpoint.accepted.is_none());
+        assert!(checkpoint.accepted_local_tail.is_none());
+        assert_eq!(checkpoint.observed_tail, observed_tail);
+        assert!(matches!(
+            checkpoint.physical,
+            PhysicalMappingState::Detached {
+                ref expected_provider_thread_id,
+                expected_binding_revision: 0,
+            } if expected_provider_thread_id == "provider-thread-preserved"
+        ));
     }
 
     #[test]

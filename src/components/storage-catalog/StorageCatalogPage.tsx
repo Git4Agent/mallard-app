@@ -21,6 +21,7 @@ import {
   catalogKindMeta,
   providerLabel,
   catalogScopeLabel,
+  filterCatalogPullReviewItems,
   rowPullable,
   rowPushable,
   rowStamp,
@@ -886,6 +887,12 @@ export default function StorageCatalogPage({
     }
     return map;
   }, [rows]);
+  const pullReviewItems = useMemo(
+    () => filterCatalogPullReviewItems(pullPlan?.items ?? [], rows),
+    [pullPlan, rows],
+  );
+  const pullReviewSelectedCount = pullReviewItems
+    .filter((item) => pullSelected.has(item.item.resource_id)).length;
 
   /* The loaded page carries the profile at its current revision; the prop
      stands in before the first load. Rename pins the fresh revision. */
@@ -1079,11 +1086,12 @@ export default function StorageCatalogPage({
     try {
       await ensureLink();
       const plan = await storageCatalogApi.preparePull(scope.scope.scope_id, storageId, null);
+      const reviewItems = filterCatalogPullReviewItems(plan.items, rows);
       setPullPlan(plan);
-      setPullSelected(new Set(plan.items
+      setPullSelected(new Set(reviewItems
         .filter((item) => item.item.default_action_id)
         .map((item) => item.item.resource_id)));
-      setPullChoice(Object.fromEntries(plan.items
+      setPullChoice(Object.fromEntries(reviewItems
         .filter((item) => item.item.default_action_id)
         .map((item) => [item.item.resource_id, item.item.default_action_id as string])));
       setPullAcks(new Set());
@@ -1098,16 +1106,20 @@ export default function StorageCatalogPage({
   const runPull = async () => {
     if (!pullPlan) return;
     const choices: Record<string, string> = {};
-    for (const resourceId of pullSelected) {
+    const reviewItems = filterCatalogPullReviewItems(pullPlan.items, rows);
+    for (const item of reviewItems) {
+      const resourceId = item.item.resource_id;
+      if (!pullSelected.has(resourceId)) continue;
       const actionId = pullChoice[resourceId];
       if (actionId) choices[resourceId] = actionId;
     }
+    const acknowledgements = [...pullAcks].filter((resourceId) => choices[resourceId] != null);
     setBusy(true);
     setError(null);
     setFailures([]);
     setProgress(`Pulling ${Object.keys(choices).length} ${Object.keys(choices).length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase()}…`);
     try {
-      const outcome = await storageCatalogApi.applyPull(pullPlan.plan_id, choices, [...pullAcks]);
+      const outcome = await storageCatalogApi.applyPull(pullPlan.plan_id, choices, acknowledgements);
       setMode({ kind: "list" });
       setPullPlan(null);
       await load();
@@ -1349,7 +1361,7 @@ export default function StorageCatalogPage({
     : pushReviewUnacknowledged
       ? "Acknowledge the selected warnings before pushing"
       : undefined;
-  const pullReviewBlocked = pullPlan?.items.some((item) => {
+  const pullReviewBlocked = pullReviewItems.some((item) => {
     const resourceId = item.item.resource_id;
     const actionId = pullChoice[resourceId];
     const action = item.item.actions.find((candidate) => candidate.action_id === actionId);
@@ -1358,9 +1370,9 @@ export default function StorageCatalogPage({
       && !pullAcks.has(resourceId);
   }) ?? false;
   const pullReviewApplyDisabled = busy
-    || pullSelected.size === 0
+    || pullReviewSelectedCount === 0
     || pullReviewBlocked;
-  const pullReviewDisabledReason = pullSelected.size === 0
+  const pullReviewDisabledReason = pullReviewSelectedCount === 0
     ? `Select at least one ${kind.label.toLowerCase()} to pull`
     : pullReviewBlocked
       ? "Acknowledge the selected overwrite before pulling"
@@ -1415,7 +1427,7 @@ export default function StorageCatalogPage({
               <Icon name="download" size={14} />
               <span className="sync-path-sync-label">Pull</span>
               {mode.kind === "pull"
-                ? <span className="sync-path-count" aria-hidden="true">{pullSelected.size}</span>
+                ? <span className="sync-path-count" aria-hidden="true">{pullReviewSelectedCount}</span>
                 : counts.pull > 0 && (
                   <span className="sync-path-count" aria-hidden="true">{counts.pull}</span>
                 )}
@@ -1486,9 +1498,7 @@ export default function StorageCatalogPage({
 
   if (mode.kind === "push" && pushPlan) {
     const selectableRows = pushPlan.rows.filter((row) => row.row.selectable);
-    const visibleRows = pushPlan.rows.filter((row) => (
-      row.row.selectable || row.row.relation === "matching"
-    ));
+    const visibleRows = selectableRows;
     const heldRows = pushPlan.rows.filter((row) => row.row.held_for_pull);
     return (
       <>
@@ -1634,10 +1644,7 @@ export default function StorageCatalogPage({
   // ---- Pull review -------------------------------------------------------
 
   if (mode.kind === "pull" && pullPlan) {
-    /* Rows already settled — in sync, or deliberately kept local — stay out
-       of the review; the review is the work, not the inventory. */
-    const reviewItems = pullPlan.items.filter((item) => item.item.disposition.kind !== "already_matching"
-      && item.item.disposition.kind !== "kept_local");
+    const reviewItems = pullReviewItems;
     const chosenLabel = (item: (typeof reviewItems)[number]) => {
       const actionId = pullChoice[item.item.resource_id];
       const action = item.item.actions.find((candidate) => candidate.action_id === actionId);
@@ -1658,22 +1665,22 @@ export default function StorageCatalogPage({
             <header className="sync-inline-action-header sync-sync-review-header">
               <div className="sync-sync-review-title"><h2 id="catalog-pull-title">Pull review</h2></div>
               <SyncReviewSelectionBar
-                count={pullSelected.size}
+                count={pullReviewSelectedCount}
                 total={reviewItems.length}
                 busy={busy}
                 recommendedTitle={`Use the recommended local actions (${reviewItems.length})`}
                 recommendedAriaLabel={`Use recommended selection (${reviewItems.length})`}
                 recommendedDisabled={busy}
                 onRecommended={() => {
-                  setPullSelected(new Set(pullPlan.items
+                  setPullSelected(new Set(reviewItems
                     .filter((item) => item.item.default_action_id)
                     .map((item) => item.item.resource_id)));
-                  setPullChoice(Object.fromEntries(pullPlan.items
+                  setPullChoice(Object.fromEntries(reviewItems
                     .filter((item) => item.item.default_action_id)
                     .map((item) => [item.item.resource_id, item.item.default_action_id as string])));
                   setPullAcks(new Set());
                 }}
-                clearDisabled={pullSelected.size === 0}
+                clearDisabled={pullReviewSelectedCount === 0}
                 onClear={() => setPullSelected(new Set())}
                 close={{ ariaLabel: "Close Pull review", onClose: () => setMode({ kind: "list" }) }}
               />
@@ -1799,7 +1806,7 @@ export default function StorageCatalogPage({
                 onClick={() => void runPull()}
               >
                 <ThreadStatusIcon status="cloud-outstanding" size={16} />
-                Pull {pullSelected.size}
+                Pull {pullReviewSelectedCount}
               </button>
             </footer>
           </section>

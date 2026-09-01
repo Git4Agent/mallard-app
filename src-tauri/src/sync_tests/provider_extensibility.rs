@@ -191,7 +191,7 @@ fn unregistered_provider_scope_is_carried_unchanged_through_a_publish() {
                 future_path.clone(),
                 CapturedBundleFile {
                     resource_id: future_resource.clone(),
-                    bytes: b"future provider state\n".to_vec(),
+                    bytes: b"future provider state\n".to_vec().into(),
                     source_mtime: 10,
                     mode: Some(0o600),
                 },

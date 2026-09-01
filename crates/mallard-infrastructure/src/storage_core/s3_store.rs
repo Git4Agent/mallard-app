@@ -968,6 +968,61 @@ impl ObjectStore for S3ObjectStore {
         self.run("get metadata", self.get_metadata_async(key, max_bytes))
     }
 
+    /// Bounded-concurrency metadata reads. Order matches `keys`; the first
+    /// failure aborts and drains every remaining request.
+    fn get_metadata_many(
+        &self,
+        keys: &[ObjectKey],
+        max_bytes: u64,
+    ) -> Result<Vec<Option<StoredMetadata>>, String> {
+        if keys.len() <= 1 {
+            return keys
+                .iter()
+                .map(|key| self.get_metadata(key, max_bytes))
+                .collect();
+        }
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::app_settings::cloud_transfer_concurrency(),
+        ));
+        self.run("bulk get metadata", async {
+            let mut join_set = tokio::task::JoinSet::new();
+            for (index, key) in keys.iter().cloned().enumerate() {
+                let store = self.clone();
+                let semaphore = semaphore.clone();
+                join_set.spawn(async move {
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| "bulk metadata concurrency gate closed".to_string())?;
+                    Ok::<_, String>((index, store.get_metadata_async(&key, max_bytes).await?))
+                });
+            }
+            let mut results: Vec<Option<Option<StoredMetadata>>> = Vec::new();
+            results.resize_with(keys.len(), || None);
+            while let Some(joined) = join_set.join_next().await {
+                let worker_result = match joined {
+                    Ok(result) => result,
+                    Err(error) => {
+                        abort_and_drain(&mut join_set).await;
+                        return Err(format!("bulk metadata worker failed: {}", error));
+                    }
+                };
+                let (index, metadata) = match worker_result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        abort_and_drain(&mut join_set).await;
+                        return Err(error);
+                    }
+                };
+                results[index] = Some(metadata);
+            }
+            Ok(results
+                .into_iter()
+                .map(|slot| slot.expect("every bulk-metadata index resolves"))
+                .collect())
+        })
+    }
+
     fn stage_verified(
         &self,
         key: &ObjectKey,

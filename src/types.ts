@@ -719,10 +719,7 @@ export interface BundleSnapshotSummary extends RemoteBundleSummary {
   storage_id: string;
   /** A registration-only repo: linked but never pushed — nothing to pull yet. */
   registration_only?: boolean;
-  resources?: ProjectResourceDescriptor[];
-  recipe?: BundleRecipe;
   fetched_at?: number;
-  warnings?: string[];
 }
 
 /** Post-setup convergence detection for one project × storage link. */
@@ -832,6 +829,8 @@ export interface RestoreAction {
   expected_target_mode?: number | null;
   /** Digest of the bytes apply would write; equal to expected_target_sha256 for an already-synced no-op. */
   materialized_sha256?: string | null;
+  /** Size of the storage-side bytes this action would write; absent for deletes and directories. */
+  source_size?: number | null;
   requires_explicit_approval: boolean;
 }
 

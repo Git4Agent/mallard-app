@@ -5,6 +5,7 @@ import type {
   RestoreResult,
 } from "../../types";
 import { errorMessage } from "../../storageError";
+import { buildPullReviewItems, restoreActionIds } from "./pullReviewModel";
 
 export interface PullReviewApi {
   planRestore: (storageId: string, bundleId: string, binding: ProjectBinding) => Promise<RestorePlan>;
@@ -50,13 +51,9 @@ export interface PullReviewApplyResult {
   failedPhase: "restoring" | "verifying" | null;
 }
 
-/**
- * Informational rows need no approval, but blocked rows still need a visible
- * review. Metadata adoption is a real local mutation and must be selected.
- */
+/** A review opens only when it contains storage-side or divergent work. */
 export function hasPendingRestoreMutations(plan: RestorePlan): boolean {
-  if (plan.actions.length > 0 || plan.conversation_actions.length > 0) return true;
-  return plan.conversation_review.some((row) => row.action === "blocked");
+  return buildPullReviewItems(plan).some((item) => restoreActionIds(item).length > 0);
 }
 
 /**

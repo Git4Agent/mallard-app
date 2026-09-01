@@ -5537,17 +5537,6 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   color: var(--text-2);
 }
 
-/* Nothing older: no control, so no rail. The rail already ends at the last
-   commit's fold, and a segment below it would be a connector to a commit that
-   does not exist. */
-.sync-history-rail-floor {
-  margin: 3px 0 0 var(--sync-history-card-offset, 0px);
-  padding: 0 12px;
-  color: var(--text-2);
-  font-size: var(--type-2xs);
-  font-variant-numeric: tabular-nums;
-}
-
 /* The empty window, drawn as a card on the rail so the page keeps its spine
    where the data stops. Dashed and muted, because it marks an absence — but a
    card, because the rail must not break. */
@@ -6248,35 +6237,68 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 /* The Files activity list's directory band: one per folder that directly
    holds files, labelled with the full relative path so nesting needs no
    indentation. */
-.sync-project-files-group-heading {
+/* The shared folder tile: every directory — "Project root" included — is a
+   framed container with a header strip, on the activity face and in both
+   reviews. Rows are the two-line session-grammar cards, riding the shipped
+   thread-list wrapper (whose scoped rules own the card grid's spacing) with
+   the gap collapsed so borders join, the commit-section way. The
+   storage-only partition leads as the cloud-tinted tile. */
+.sync-project-file-tile {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-row);
+}
+
+.sync-project-file-tile-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 30px;
-  /* The band parts two card lists, so it needs air on both sides: the
-     page's 12px block gap alone left it riding the cards' borders. */
-  margin: 10px 2px 8px;
-  padding: 0 6px;
-  color: var(--text-1);
-}
-/* The band's selection control sits in the rows' own checkbox column, to the
-   pixel; the counter chip closes the line at the card edge. */
-.sync-project-files-group-heading > .sync-sync-row-choice {
-  flex: 0 0 auto;
-  margin-left: 5px;
+  min-height: 38px;
+  padding: 2px 12px;
+  border-bottom: 1px solid var(--border-mid);
+  background: var(--surface-subtle);
 }
 
-.sync-project-files-group-heading > .sync-sync-review-selected {
-  margin-left: auto;
-}
-
-.sync-project-files-group-heading > svg { flex: 0 0 auto; color: var(--text-3); }
-.sync-project-files-group-heading > strong {
+.sync-project-file-tile-head > svg { flex: 0 0 auto; color: var(--text-2); }
+/* The label wears the section headings' pixel face and size — the tile head
+   is this page's "Only in <storage>" row, and the two must read as one
+   voice across the Sessions and Files faces. */
+.sync-project-file-tile-head > strong {
   color: var(--text-0);
-  font-size: var(--type-sm);
+  font-size: var(--type-md);
+}
+/* The pixel face is for chrome. A directory path or storage name came out of
+   the user's data, so it reads in the normal face even inside the label —
+   the same carve-out the section heading gives its storage name. */
+.sync-project-file-tile-head > strong > span {
+  font-family: var(--font-sans);
   font-weight: var(--weight-semibold);
 }
-.sync-project-files-group-heading > small { color: var(--text-3); font-size: var(--type-2xs); }
+.sync-project-file-tile-head > small { color: var(--text-3); font-size: var(--type-2xs); }
+
+.sync-project-file-tile.cloud {
+  border-color: color-mix(in srgb, var(--thread-status-cloud) 35%, var(--border));
+}
+.sync-project-file-tile.cloud > .sync-project-file-tile-head {
+  background: color-mix(in srgb, var(--thread-status-cloud) 7%, var(--surface-subtle));
+}
+
+.sync-project-file-tile > .sync-history-thread-list { gap: 0; }
+.sync-project-file-tile .sync-history-thread-card {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.sync-project-file-tile .sync-history-thread-card + .sync-history-thread-card {
+  border-top: 1px solid var(--border-mid);
+}
+
+/* The merged cloud tile keeps each row's directory as a quiet prefix. */
+.sync-project-file-tile .sync-history-thread-title > strong > span {
+  color: var(--text-3);
+  font-weight: var(--weight-regular);
+}
 
 /* The storage side this Mac does not hold leads the list under the same
    section heading the catalog and sessions pages use. This page spaces its
@@ -8012,6 +8034,7 @@ body {
 .sync-sync-review-header h1,
 .sync-sync-review-header h2,
 .sync-history-section-heading h2,
+.sync-project-file-tile-head > strong,
 .sync-history-branch-state,
 .sync-history-preserved-badge,
 .sync-sync-review-tabs > button,

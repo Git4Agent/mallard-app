@@ -573,7 +573,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
         CapturedFile {
             logical_path: transcript_path,
             resource_id,
-            bytes: local_transcript,
+            bytes: local_transcript.into(),
             source_mtime: 20,
             mode: 0o600,
         },
@@ -600,7 +600,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
         CapturedFile {
             logical_path: diverged_transcript_path,
             resource_id: diverged_resource_id,
-            bytes: diverged_transcript,
+            bytes: diverged_transcript.into(),
             source_mtime: 20,
             mode: 0o600,
         },

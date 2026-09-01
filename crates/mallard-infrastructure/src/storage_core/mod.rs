@@ -32,6 +32,11 @@ use std::io::{BufReader, Read};
 pub const MALLARD_ROOT: &str = ".mallard";
 pub const STORAGE_MARKER_KEY: &str = ".mallard/_storage.json";
 pub const REPOSITORY_PREFIX: &str = ".mallard/v1/repositories";
+/// Flat discovery namespace: one tag object per bundle. Listing it costs
+/// bundle count, never payload-object count, so tags live beside the bundle
+/// prefixes rather than inside them. `_tags` can never collide with a bundle
+/// component because bundle IDs are exactly 32 hex characters.
+pub const REPOSITORY_TAGS_PREFIX: &str = ".mallard/v1/repositories/_tags";
 pub const LIBRARY_PREFIX: &str = ".mallard/v1/library";
 pub const LOCAL_STORAGE_LOCK: &str = ".storage.lock";
 pub const HEAD_FILE: &str = "_head.json";
@@ -195,7 +200,6 @@ fn validate_relative_object_key_characters(value: &str, label: &str) -> Result<(
 pub(crate) fn validate_bundle_relative_object_key(value: &str) -> Result<(), String> {
     validate_relative_object_key_characters(value, "bundle-relative object key")?;
     if !(value == HEAD_FILE
-        || value == TAG_FILE
         || value.starts_with("_manifests/")
         || value.starts_with("_commits/")
         || value.starts_with("_objects/")
@@ -207,10 +211,16 @@ pub(crate) fn validate_bundle_relative_object_key(value: &str) -> Result<(), Str
 }
 
 /// The only constructor for repository object keys. The relative part must
-/// stay inside the bundle namespace allowlist.
+/// stay inside the bundle namespace allowlist; discovery tags are not
+/// bundle-relative — they have their own constructor below.
 pub fn repository_object_key(bundle_id: &BundleId, relative: &str) -> Result<ObjectKey, String> {
     validate_bundle_relative_object_key(relative)?;
     ObjectKey::parse(format!("{}/{}/{}", REPOSITORY_PREFIX, bundle_id, relative))
+}
+
+/// The only constructor for one bundle's discovery tag key.
+pub fn repository_tag_key(bundle_id: &BundleId) -> Result<ObjectKey, String> {
+    ObjectKey::parse(format!("{}/{}.json", REPOSITORY_TAGS_PREFIX, bundle_id))
 }
 
 fn validate_library_relative_object_key(value: &str) -> Result<(), String> {
@@ -284,6 +294,17 @@ impl ObjectStore for ConfiguredObjectStore {
         match self {
             Self::Local(store) => store.get_metadata(key, max_bytes),
             Self::S3(store) => store.get_metadata(key, max_bytes),
+        }
+    }
+
+    fn get_metadata_many(
+        &self,
+        keys: &[ObjectKey],
+        max_bytes: u64,
+    ) -> Result<Vec<Option<StoredMetadata>>, String> {
+        match self {
+            Self::Local(store) => store.get_metadata_many(keys, max_bytes),
+            Self::S3(store) => store.get_metadata_many(keys, max_bytes),
         }
     }
 
@@ -388,6 +409,18 @@ mod tests {
         assert!(repository_object_key(&id, &format!("_objects/{}", digest)).is_ok());
         assert!(repository_object_key(&id, "_objects/../escape").is_err());
         assert!(repository_object_key(&id, "_payloads/unknown-namespace").is_err());
+    }
+
+    #[test]
+    fn discovery_tags_live_in_the_flat_namespace_only() {
+        let id = bundle_id(7);
+        assert_eq!(
+            repository_tag_key(&id).unwrap().as_str(),
+            format!(".mallard/v1/repositories/_tags/{}.json", id)
+        );
+        // The per-bundle namespace no longer admits a tag object.
+        assert!(repository_object_key(&id, TAG_FILE).is_err());
+        assert!(ObjectPrefix::parse(REPOSITORY_TAGS_PREFIX).is_ok());
     }
 
     #[test]

@@ -142,7 +142,7 @@ export default function BundleConnectionDialog({
                   </span>
                   <span className="sync-bundle-choice-meta">
                     <strong>rev {match.revision ?? "—"}</strong>
-                    <span>{match.resource_count ?? match.resources?.length ?? 0} resources</span>
+                    <span>{match.resource_count ?? 0} resources</span>
                     <small>{formatRelativeTime(match.updated_at)}</small>
                   </span>
                 </button>

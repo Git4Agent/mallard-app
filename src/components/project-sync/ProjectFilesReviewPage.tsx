@@ -7,7 +7,11 @@ import Notice from "../notice/Notice";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 import { formatDateTime } from "../../clock";
 import { formatBytes } from "../../format";
-import { STORAGE_BLOCKING_STATES } from "./model";
+import {
+  PROJECT_FILE_CARD_RENDER_LIMIT,
+  STORAGE_BLOCKING_STATES,
+  fileKindLabel,
+} from "./model";
 import ProjectFileDetailsMenu from "./ProjectFileDetailsMenu";
 
 export type ProjectFileReviewEntryType = "file" | "directory" | "blocked";
@@ -34,6 +38,7 @@ export interface ProjectFileReviewRow {
 
 interface Props {
   mode: "push" | "pull";
+  projectRoot?: string | null;
   eligibility: ProjectFileSyncEligibility;
   rows: ProjectFileReviewRow[];
   selectedIds: ReadonlySet<string>;
@@ -53,8 +58,6 @@ interface Props {
   onToggleWarning?: (warningDigest: string) => void;
   onReviewPull?: () => void;
 }
-
-const MAX_RENDERED_ROWS = 500;
 
 function parentPath(path: string): string {
   const separator = path.lastIndexOf("/");
@@ -127,7 +130,11 @@ function rowPresentation(
     case "diverged":
       return { icon: "divergent", tone: "diverged", sentence: "Changed here and in storage. Review before syncing." };
     case "missing":
-      return { icon: "unavailable", tone: "unavailable", sentence: "In the sync recipe but missing from this folder." };
+      return {
+        icon: "cloud-outstanding",
+        tone: "storage",
+        sentence: "Not in this folder. It remains in storage. Pull to download it here, or remove it during Push.",
+      };
     default:
       return { icon: "unknown", tone: "unknown", sentence: "State unknown. Rescan to compare." };
   }
@@ -194,6 +201,7 @@ interface ReviewFileGroup {
 
 export default function ProjectFilesReviewPage({
   mode,
+  projectRoot = null,
   eligibility,
   rows,
   selectedIds,
@@ -240,7 +248,7 @@ export default function ProjectFilesReviewPage({
     () => (normalizedSearch
       ? cardRows.filter((row) => row.relativePath.toLocaleLowerCase().includes(normalizedSearch))
       : cardRows
-    ).slice(0, MAX_RENDERED_ROWS),
+    ).slice(0, PROJECT_FILE_CARD_RENDER_LIMIT),
     [cardRows, normalizedSearch],
   );
 
@@ -256,13 +264,17 @@ export default function ProjectFilesReviewPage({
       .map((directory) => ({ directory, cards: byDirectory.get(directory)! }));
   }, [shownCards]);
 
-  /* The band's cluster covers the whole subtree — files and the directory
-     resources riding along — the way the review header's cluster covers the
-     step. Counts speak for the selectable files; directories select
-     implicitly with them. */
-  const subtreeRows = (directory: string) => rows.filter((row) => (
-    row.relativePath === directory || row.relativePath.startsWith(`${directory}/`)
-  ));
+  /* A folder tile's control covers its whole subtree — files and the
+     directory resources riding along — the way the review header's controls
+     cover the step. The root tile is the one exception: its scope is the
+     files directly at the root, because "" as a subtree would swallow the
+     whole project. Counts speak for the selectable files; directories
+     select implicitly with them. */
+  const subtreeRows = (directory: string) => (directory === ""
+    ? rows.filter((row) => row.relativePath.lastIndexOf("/") < 0)
+    : rows.filter((row) => (
+      row.relativePath === directory || row.relativePath.startsWith(`${directory}/`)
+    )));
   const subtreeSelection = (directory: string) => {
     const files = subtreeRows(directory).filter((row) => (
       row.entryType !== "directory" && rowIsSelectable(row, mode, eligible) && !removalIds.has(row.resourceId)
@@ -386,6 +398,14 @@ export default function ProjectFilesReviewPage({
         <div className="sync-history-session-details">
           <div className="sync-history-session-summary">
             <div className="sync-history-thread-meta" aria-label={`${row.relativePath} details`}>
+              <span
+                className="sync-history-thread-metric"
+                data-tooltip={`Kind · ${isDirectory ? "Folder" : fileKindLabel(row.relativePath)}`}
+                tabIndex={0}
+              >
+                <Icon name={isDirectory ? "folder" : "file"} size={12} />
+                <b>{isDirectory ? "Folder" : fileKindLabel(row.relativePath)}</b>
+              </span>
               {size != null
                 ? (
                   <span
@@ -402,6 +422,7 @@ export default function ProjectFilesReviewPage({
           <div className="sync-history-row-clickables">
             <ProjectFileDetailsMenu
               relativePath={row.relativePath}
+              projectRoot={projectRoot}
               entryTypeLabel={isDirectory ? "Directory" : row.entryType === "blocked" ? "Blocked entry" : "Regular file"}
               mode={displayMode}
               modified={row.sourceMtime == null ? null : formatDateTime(row.sourceMtime * 1_000)}
@@ -459,37 +480,43 @@ export default function ProjectFilesReviewPage({
     );
   };
 
-  const renderBand = (directory: string) => {
+  const renderTileHead = (directory: string) => {
     const { picked, total } = subtreeSelection(directory);
     const all = total > 0 && picked === total;
     const verb = all ? "Exclude" : mode === "pull" ? "Apply" : "Include";
+    const spoken = directory === "" ? "the project root" : directory;
     return (
-      <div className="sync-project-files-group-heading">
+      <div className="sync-project-file-tile-head">
         {/* The folder's own row control: the same checkbox its rows wear —
             ticked, unticked, or a dash while the folder is partly selected —
-            and one click applies or clears the subtree. The icon pair this
-            replaces spent a check-circle the header already means something
-            else by, and a trash that reads as deletion on a page where a
-            card's trash really deletes from storage. The counter chip stays,
-            moved to the band's far edge. */}
-        <label className="sync-sync-row-choice" title={`${verb} every file in ${directory}/`}>
-          <input
-            type="checkbox"
-            checked={all}
-            ref={(node) => { if (node) node.indeterminate = picked > 0 && picked < total; }}
-            disabled={disabled || !eligible || total === 0}
-            aria-label={`${verb} every file in ${directory}`}
-            onChange={() => setSubtree(directory, !all)}
-          />
-        </label>
-        <Icon name="folder" size={14} />
-        <strong>{directory}/</strong>
+            and one click applies or clears the subtree. An icon pair here
+            would spend a check-circle the header already means something
+            else by ("use the recommended selection"), and a trash that
+            reads as deletion on a page where a card's trash really deletes
+            from storage. The counter chip closes the strip. */}
+        {eligible && (
+          <label className="sync-sync-row-choice" title={`${verb} every file in ${spoken}`}>
+            <input
+              type="checkbox"
+              checked={all}
+              ref={(node) => { if (node) node.indeterminate = picked > 0 && picked < total; }}
+              disabled={disabled || total === 0}
+              aria-label={`${verb} every file in ${spoken}`}
+              onChange={() => setSubtree(directory, !all)}
+            />
+          </label>
+        )}
+        <Icon name={directory === "" ? "git-folder" : "folder"} size={14} />
+        {/* "Project root" is chrome and keeps the pixel face; a path is the
+            user's data and reads in the normal face, via the head's span
+            carve-out. */}
+        <strong>{directory === "" ? "Project root" : <span>{directory}/</span>}</strong>
         <small>{groupFacts(directory)}</small>
         <span
           className="sync-sync-review-selected"
           style={{ "--review-count-digits": String(total).length } as CSSProperties}
-          aria-label={`${picked} of ${total} selected in ${directory}`}
-          title={`${picked} of ${total} selected in ${directory}/`}
+          aria-label={`${picked} of ${total} selected in ${spoken}`}
+          title={`${picked} of ${total} selected in ${spoken}`}
         >
           <b>{picked}</b>/{total}
         </span>
@@ -523,7 +550,9 @@ export default function ProjectFilesReviewPage({
           disabled={rows.length === 0}
         />
         {rows.length > 0 && <span>{cardRows.length} entr{cardRows.length === 1 ? "y" : "ies"}</span>}
-        {mode === "push" && onScan && (
+        {onScan && (
+          /* Both directions: on Push this re-walks the folder; on Pull it
+             rebuilds the plan against the storage's current head. */
           <button type="button" className="btn btn-ghost" onClick={onScan} disabled={disabled || loading || !eligible}>
             <Icon name="refresh" size={14} className={loading ? "icon-spin" : undefined} /> {loading ? "Scanning…" : "Rescan"}
           </button>
@@ -539,15 +568,15 @@ export default function ProjectFilesReviewPage({
       ) : (
         <>
           {groups.map((group) => (
-            <div key={group.directory || "(root)"}>
-              {group.directory !== "" && renderBand(group.directory)}
+            <div key={group.directory || "(root)"} className="sync-project-file-tile">
+              {renderTileHead(group.directory)}
               <div className="sync-history-thread-list flat">
                 {group.cards.map(renderCard)}
               </div>
             </div>
           ))}
-          {shownCards.length >= MAX_RENDERED_ROWS && cardRows.length > shownCards.length && (
-            <div className="sync-project-file-limit">First {MAX_RENDERED_ROWS} shown. Search to narrow the list.</div>
+          {shownCards.length >= PROJECT_FILE_CARD_RENDER_LIMIT && cardRows.length > shownCards.length && (
+            <div className="sync-project-file-limit">First {PROJECT_FILE_CARD_RENDER_LIMIT} shown. Search to narrow the list.</div>
           )}
         </>
       )}

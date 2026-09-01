@@ -8,12 +8,15 @@ import {
   CATALOG_KINDS,
   actionLabel,
   catalogScopeLabel,
+  filterCatalogPullReviewItems,
   rowStatus,
   rowStatusLabel,
 } from "../../src/components/storage-catalog/model";
 import type {
   CatalogPullAction,
+  CatalogResourceKind,
   CatalogScope,
+  CatalogScopePullItem,
   CatalogScopeRow,
   CatalogScopeView,
 } from "../../src/components/storage-catalog/types";
@@ -153,6 +156,51 @@ test("first-contact Catalog rows use the same storage and conflict states as ses
   assert.equal(
     rowStatusLabel(noCommonBase, "Vault"),
     "Changed here and in Vault. Review before syncing.",
+  );
+});
+
+test("Catalog Pull review keeps only cloud-outstanding and divergent rows", () => {
+  const cases: Array<{
+    id: string;
+    kind: CatalogResourceKind;
+    state: NonNullable<CatalogScopeRow["state"]>;
+    relation: CatalogScopePullItem["item"]["relation"];
+    localPresent: boolean;
+    visible: boolean;
+  }> = [
+    { id: "skill-cloud", kind: "agent_skill", state: "storage_changed", relation: "storage_changed", localPresent: true, visible: true },
+    { id: "plugin-cloud", kind: "plugin_install_intent", state: "local_missing", relation: "storage_only", localPresent: false, visible: true },
+    { id: "pet-v1-diverged", kind: "codex_pet_v1", state: "diverged", relation: "changed_both", localPresent: true, visible: true },
+    { id: "pet-v2-diverged", kind: "codex_pet_v2", state: "unreviewed_remote", relation: "storage_only", localPresent: true, visible: true },
+    { id: "matching", kind: "agent_skill", state: "in_sync", relation: "matching", localPresent: true, visible: false },
+    { id: "local", kind: "plugin_install_intent", state: "local_changed", relation: "local_changed", localPresent: true, visible: false },
+    { id: "blocked", kind: "codex_pet_v1", state: "blocked", relation: "blocked", localPresent: true, visible: false },
+  ];
+  const rows: CatalogScopeRow[] = cases.map((candidate) => ({
+    row_id: `resource:${candidate.id}`,
+    display_name: candidate.id,
+    resource_id: candidate.id,
+    state: candidate.state,
+    local_present: candidate.localPresent,
+    remote_present: true,
+    warnings: [],
+  }));
+  const items: CatalogScopePullItem[] = cases.map((candidate) => ({
+    item: {
+      resource_id: candidate.id,
+      kind: candidate.kind,
+      display_name: candidate.id,
+      provider: "codex",
+      relation: candidate.relation,
+      disposition: { kind: "executable" },
+      actions: [],
+    },
+    conflicting_claims: [],
+  }));
+
+  assert.deepEqual(
+    filterCatalogPullReviewItems(items, rows).map((item) => item.item.resource_id),
+    cases.filter((candidate) => candidate.visible).map((candidate) => candidate.id),
   );
 });
 
@@ -353,7 +401,7 @@ test("every row is the activity card: badge, name as the door, facts, one ⓘ", 
   assert.doesNotMatch(page, /Reviewed this warning — |I understand this replaces/);
   // The count rides the verb at the point of commitment.
   assert.match(page, /Push \{pushSelected\.size\}/);
-  assert.match(page, /Pull \{pullSelected\.size\}/);
+  assert.match(page, /Pull \{pullReviewSelectedCount\}/);
 });
 
 test("pet rows wear the preview tile, and stored-only previews arrive lazily", () => {
@@ -390,7 +438,8 @@ test("Push and Pull are page verbs with one review each, and link on the way", (
   assert.match(page, /await ensureLink\(\);[\s\S]*storageCatalogApi\.preparePush\(scope\.scope\.scope_id, storageId\)/);
   assert.match(page, /storageCatalogApi\.applyPush\(pushPlan\.plan_id, selected, \[\.\.\.pushAcks\]\)/);
   assert.match(page, /await ensureLink\(\);[\s\S]*storageCatalogApi\.preparePull\(scope\.scope\.scope_id, storageId, null\)/);
-  assert.match(page, /storageCatalogApi\.applyPull\(pullPlan\.plan_id, choices, \[\.\.\.pullAcks\]\)/);
+  assert.match(page, /storageCatalogApi\.applyPull\(pullPlan\.plan_id, choices, acknowledgements\)/);
+  assert.match(page, /const reviewItems = filterCatalogPullReviewItems\(pullPlan\.items, rows\);[\s\S]*for \(const item of reviewItems\)/);
   // The reviews are the project's own review chrome.
   assert.match(page, /SyncReviewSelectionBar/);
   assert.match(page, /sync-inline-push-review sync-sync-review-workspace/);
@@ -441,7 +490,7 @@ test("the active path-bar Push commits the reviewed selection without rebuilding
   assert.match(page, /mode\.kind === "push"[\s\S]*?sync-path-count[\s\S]*?pushSelected\.size/);
 });
 
-test("the active path-bar Pull commits the reviewed selection without rebuilding it", () => {
+test("the active path-bar Pull commits only the visible reviewed selection", () => {
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
 
   assert.match(
@@ -454,20 +503,18 @@ test("the active path-bar Pull commits the reviewed selection without rebuilding
   );
   assert.match(
     page,
-    /const pullReviewApplyDisabled = busy\s*\|\| pullSelected\.size === 0\s*\|\| pullReviewBlocked;/,
+    /const pullReviewApplyDisabled = busy\s*\|\| pullReviewSelectedCount === 0\s*\|\| pullReviewBlocked;/,
   );
   assert.match(page, /disabled=\{pullReviewApplyDisabled\}\s*onClick=\{\(\) => void runPull\(\)\}/);
-  assert.match(page, /mode\.kind === "pull"[\s\S]*?sync-path-count[\s\S]*?pullSelected\.size/);
+  assert.match(page, /mode\.kind === "pull"[\s\S]*?sync-path-count[\s\S]*?pullReviewSelectedCount/);
 });
 
-test("Push review keeps matching resources visible but outside its selection", () => {
+test("Push review shows only local-outstanding skills, plugin intents, and pets", () => {
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
 
   assert.match(page, /const selectableRows = pushPlan\.rows\.filter\(\(row\) => row\.row\.selectable\);/);
-  assert.match(
-    page,
-    /const visibleRows = pushPlan\.rows\.filter\(\(row\) => \(\s*row\.row\.selectable \|\| row\.row\.relation === "matching"\s*\)\);/,
-  );
+  assert.match(page, /const visibleRows = selectableRows;/);
+  assert.doesNotMatch(page, /row\.row\.selectable \|\| row\.row\.relation === "matching"/);
   assert.match(page, /total=\{selectableRows\.length\}/);
   assert.match(page, /onRecommended=\{\(\) => setPushSelected\(new Set\(selectableRows\.map/);
   assert.match(page, /\{visibleRows\.map\(\(planRow\) => \{/);

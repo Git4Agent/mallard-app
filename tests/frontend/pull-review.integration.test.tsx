@@ -226,7 +226,7 @@ test("a replacement storage history offers unlinking without gating Pull", () =>
   assert.doesNotMatch(primary, /data-icon="download"/);
 });
 
-test("only actionable or blocked conversation rows keep a Pull review open", () => {
+test("only cloud-side or divergent conversation actions keep a Pull review open", () => {
   const plan = (
     rows: ConversationReviewRow[],
     actions: ConversationPlanAction[] = [],
@@ -237,11 +237,13 @@ test("only actionable or blocked conversation rows keep a Pull review open", () 
     conversation_review: rows,
   });
 
+  const adopt = conversationAction("adopt_cloud_metadata");
   assert.equal(hasPendingRestoreMutations(plan([
     conversationRow("no_changes"),
+    conversationRow("adopt_cloud_metadata", adopt.action_id),
     conversationRow("report_push_eligible"),
     conversationRow("report_local_only"),
-  ])), false);
+  ], [adopt])), false);
   const materialize = conversationAction("materialize_cloud");
   assert.equal(hasPendingRestoreMutations(plan(
     [conversationRow("materialize_cloud", materialize.action_id)],
@@ -249,7 +251,7 @@ test("only actionable or blocked conversation rows keep a Pull review open", () 
   )), true);
   assert.equal(hasPendingRestoreMutations(plan([
     conversationRow("blocked", null, "unknown_evidence"),
-  ])), true);
+  ])), false);
 });
 
 test("keep-both is one reviewed action with no second resolution payload", () => {
@@ -347,7 +349,7 @@ test("a mixed Pull starts empty and selecting one project file restores only tha
   assert.deepEqual(outcome.rows.map((row) => row.title), ["ghost_story.docx"]);
 });
 
-test("blocked conversation evidence is visible but cannot be selected", () => {
+test("blocked conversation evidence stays out of Pull review", () => {
   const plan = {
     ...restorePlan,
     actions: [],
@@ -356,9 +358,11 @@ test("blocked conversation evidence is visible but cannot be selected", () => {
   };
   const items = buildPullReviewItems(plan);
 
+  assert.deepEqual(items, []);
   assert.deepEqual(pullSelectableResourceIds(items, new Set(), new Set()), new Set());
   const html = renderReview(plan);
-  assert.match(html, /Can&#x27;t sync/);
+  assert.doesNotMatch(html, /Can&#x27;t sync/);
+  assert.match(html, /Nothing to pull/);
   assert.doesNotMatch(html, /Select Conversation/);
 });
 

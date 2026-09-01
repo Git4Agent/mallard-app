@@ -312,7 +312,7 @@ pub fn publish_request(
         );
         let captured = CapturedBundleFile {
             resource_id: resource_id.clone(),
-            bytes: spec.transcript.clone(),
+            bytes: spec.transcript.clone().into(),
             source_mtime: spec.updated_at,
             mode: Some(0o600),
         };

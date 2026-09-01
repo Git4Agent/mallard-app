@@ -153,7 +153,8 @@ impl FetchProgressEmitter {
 
 #[tauri::command]
 pub async fn get_project_sync_config() -> Result<SyncConfig, String> {
-    load_project_sync_config_with_repository(&repository()?)
+    let repository = repository()?;
+    run_blocking(move || load_project_sync_config_with_repository(&repository)).await
 }
 
 #[tauri::command]
@@ -208,7 +209,8 @@ pub async fn test_r2_storage(
 
 #[tauri::command]
 pub async fn list_storage_setup_drafts() -> Result<StorageSetupDraftList, String> {
-    list_storage_setup_drafts_with_repository(&repository()?)
+    let repository = repository()?;
+    run_blocking(move || list_storage_setup_drafts_with_repository(&repository)).await
 }
 
 #[tauri::command]
@@ -227,7 +229,8 @@ pub async fn create_storage_setup_draft(
 pub async fn get_storage_setup_draft(
     draft_id: StorageSetupDraftId,
 ) -> Result<Option<StorageSetupDraftView>, String> {
-    get_storage_setup_draft_with_repository(&repository()?, &draft_id)
+    let repository = repository()?;
+    run_blocking(move || get_storage_setup_draft_with_repository(&repository, &draft_id)).await
 }
 
 #[tauri::command]
@@ -244,7 +247,8 @@ pub async fn update_storage_setup_draft(
 
 #[tauri::command]
 pub async fn discard_storage_setup_draft(draft_id: StorageSetupDraftId) -> Result<bool, String> {
-    discard_storage_setup_draft_with_repository(&repository()?, &draft_id)
+    let repository = repository()?;
+    run_blocking(move || discard_storage_setup_draft_with_repository(&repository, &draft_id)).await
 }
 
 #[tauri::command]
@@ -270,7 +274,8 @@ pub fn launch_r2_agent_setup(provider: String, instruction: String) -> Result<()
 
 #[tauri::command]
 pub async fn get_host_identity_status() -> Result<HostIdentityStatus, String> {
-    get_host_identity_status_with_repository(&repository()?)
+    let repository = repository()?;
+    run_blocking(move || get_host_identity_status_with_repository(&repository)).await
 }
 
 #[tauri::command]
@@ -279,8 +284,12 @@ pub async fn save_project_sync_config(
     config: SyncConfig,
 ) -> Result<SyncConfig, String> {
     let repository = repository()?;
-    let storage_change = project_sync_config_storage_change(&repository, &config);
-    let result = save_project_sync_config_with_repository(&repository, config);
+    let (storage_change, result) = run_blocking(move || {
+        let storage_change = project_sync_config_storage_change(&repository, &config);
+        let result = save_project_sync_config_with_repository(&repository, config);
+        Ok((storage_change, result))
+    })
+    .await?;
     if let Some((event, message, storage_id, storage_name)) = storage_change {
         let log = ActivityLogScope::new(ActivityLogType::Storage)
             .storage(&storage_id, Some(&storage_name));
@@ -337,7 +346,8 @@ pub async fn recover_startup_state(app: tauri::AppHandle) -> Result<(), String> 
 pub async fn get_project(
     local_project_id: LocalProjectId,
 ) -> Result<Option<ProjectDetail>, String> {
-    get_project_with_repository(&repository()?, &local_project_id)
+    let repository = repository()?;
+    run_blocking(move || get_project_with_repository(&repository, &local_project_id)).await
 }
 
 #[tauri::command]
@@ -632,7 +642,8 @@ pub async fn execute_project_session_action(
 
 #[tauri::command]
 pub async fn remove_local_project(local_project_id: LocalProjectId) -> Result<bool, String> {
-    remove_local_project_with_repository(&repository()?, &local_project_id)
+    let repository = repository()?;
+    run_blocking(move || remove_local_project_with_repository(&repository, &local_project_id)).await
 }
 
 #[tauri::command]
@@ -687,15 +698,18 @@ pub async fn clear_storage_data(
     expected_config_revision: u64,
 ) -> Result<StorageDataClearResult, String> {
     let repository = repository()?;
-    let storage_name = repository
-        .load_config()?
-        .storages
-        .iter()
-        .find(|storage| storage.id == storage_id)
-        .map(|storage| storage.name.clone())
-        .ok_or_else(|| format!("unknown storage '{}'", storage_id))?;
-    let catalog_repository =
-        crate::storage_catalog::persistence::CatalogStateRepository::from_user_home()?;
+    let label_repository = repository.clone();
+    let label_storage_id = storage_id.clone();
+    let storage_name = run_blocking(move || {
+        label_repository
+            .load_config()?
+            .storages
+            .iter()
+            .find(|storage| storage.id == label_storage_id)
+            .map(|storage| storage.name.clone())
+            .ok_or_else(|| format!("unknown storage '{}'", label_storage_id))
+    })
+    .await?;
     let storage_for_work = storage_id.clone();
     let log =
         ActivityLogScope::new(ActivityLogType::Storage).storage(&storage_id, Some(&storage_name));
@@ -706,12 +720,8 @@ pub async fn clear_storage_data(
         "Clearing all Mallard-managed data from storage…",
     );
     let result = run_blocking(move || {
-        clear_storage_data_with_repositories(
-            &repository,
-            &catalog_repository,
-            &storage_for_work,
-            expected_config_revision,
-        )
+        ProjectSyncService::new(&repository)
+            .clear_storage_data(&storage_for_work, expected_config_revision)
     })
     .await;
     match &result {
@@ -740,19 +750,24 @@ pub async fn rename_local_project(
     local_alias: Option<String>,
     expected_revision: u64,
 ) -> Result<LocalProjectRegistration, String> {
-    rename_local_project_with_repository(
-        &repository()?,
-        &local_project_id,
-        local_alias,
-        expected_revision,
-    )
+    let repository = repository()?;
+    run_blocking(move || {
+        rename_local_project_with_repository(
+            &repository,
+            &local_project_id,
+            local_alias,
+            expected_revision,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn save_project_link(
     request: SaveProjectLinkRequest,
 ) -> Result<ProjectStorageLink, String> {
-    save_project_link_with_repository(&repository()?, request)
+    let repository = repository()?;
+    run_blocking(move || save_project_link_with_repository(&repository, request)).await
 }
 
 #[tauri::command]
@@ -761,7 +776,10 @@ pub async fn connect_project_to_remote_bundle(
     request: ConnectProjectBundleRequest,
 ) -> Result<ProjectDetail, String> {
     let repository = repository()?;
-    let storage = storage_log_label(&repository, &request.storage_id);
+    let label_repository = repository.clone();
+    let label_storage_id = request.storage_id.clone();
+    let storage =
+        run_blocking(move || Ok(storage_log_label(&label_repository, &label_storage_id))).await?;
     let log = ActivityLogScope::new(ActivityLogType::Configuration)
         .project(&request.local_project_id, None)
         .storage(&request.storage_id, Some(&storage));
@@ -803,7 +821,11 @@ pub async fn remove_project_link(
     local_project_id: LocalProjectId,
     storage_id: StorageId,
 ) -> Result<bool, String> {
-    remove_project_link_with_repository(&repository()?, &local_project_id, &storage_id)
+    let repository = repository()?;
+    run_blocking(move || {
+        remove_project_link_with_repository(&repository, &local_project_id, &storage_id)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -837,7 +859,8 @@ pub async fn create_provider_profile(
 
 #[tauri::command]
 pub async fn list_project_bindings() -> Result<Vec<ProjectBinding>, String> {
-    list_project_bindings_with_repository(&repository()?)
+    let repository = repository()?;
+    run_blocking(move || list_project_bindings_with_repository(&repository)).await
 }
 
 #[tauri::command]
@@ -897,7 +920,8 @@ pub async fn repair_codex_conversation_paths(
 pub async fn save_project_binding(
     request: SaveProjectBindingRequest,
 ) -> Result<ProjectBinding, String> {
-    save_project_binding_with_repository(&repository()?, request)
+    let repository = repository()?;
+    run_blocking(move || save_project_binding_with_repository(&repository, request)).await
 }
 
 #[tauri::command]
@@ -944,8 +968,17 @@ pub async fn push_bundle(
     approved_conversation_action_ids: Option<Vec<ActionId>>,
 ) -> Result<ProjectOperationResult, String> {
     let repository = repository()?;
-    let (project, storage) =
-        project_storage_log_labels(&repository, &local_project_id, &storage_id);
+    let context_repository = repository.clone();
+    let context_project_id = local_project_id.clone();
+    let context_storage_id = storage_id.clone();
+    let (project, storage, bundle_id) = run_blocking(move || {
+        Ok(project_storage_log_context(
+            &context_repository,
+            &context_project_id,
+            &context_storage_id,
+        ))
+    })
+    .await?;
     let log = ActivityLogScope::new(ActivityLogType::Push)
         .project(&local_project_id, Some(&project))
         .storage(&storage_id, Some(&storage));
@@ -958,20 +991,16 @@ pub async fn push_bundle(
     let worker_app = app.clone();
     let worker_log = log.clone();
     let selected_count = recipe.entries.len();
-    let mut upload_progress = repository
-        .load_config()
-        .ok()
-        .and_then(|config| config.project(&local_project_id).cloned())
-        .map(|project| {
-            FetchProgressEmitter::new(
-                app.clone(),
-                log.clone(),
-                "push",
-                storage_id.clone(),
-                storage.clone(),
-                project.bundle_id,
-            )
-        });
+    let mut upload_progress = bundle_id.map(|bundle_id| {
+        FetchProgressEmitter::new(
+            app.clone(),
+            log.clone(),
+            "push",
+            storage_id.clone(),
+            storage.clone(),
+            bundle_id,
+        )
+    });
     let total_started = Instant::now();
     let result = run_blocking(move || {
         worker_log.emit(
@@ -1063,8 +1092,17 @@ pub async fn plan_bundle_restore(
     binding: ProjectBinding,
 ) -> Result<RestorePlan, String> {
     let repository = repository()?;
-    let (project, storage) =
-        project_storage_log_labels(&repository, &binding.local_project_id, &storage_id);
+    let context_repository = repository.clone();
+    let context_project_id = binding.local_project_id.clone();
+    let context_storage_id = storage_id.clone();
+    let (project, storage, _) = run_blocking(move || {
+        Ok(project_storage_log_context(
+            &context_repository,
+            &context_project_id,
+            &context_storage_id,
+        ))
+    })
+    .await?;
     let log = ActivityLogScope::new(ActivityLogType::Pull)
         .project(&binding.local_project_id, Some(&project))
         .storage(&storage_id, Some(&storage));
@@ -1162,8 +1200,17 @@ pub async fn apply_bundle_restore(
     approved_action_ids: Vec<ActionId>,
 ) -> Result<RestoreResult, String> {
     let repository = repository()?;
-    let log_repository = repository.clone();
-    let plan_for_log = repository.load_restore_plan(&plan_id).ok();
+    let log_context_repository = repository.clone();
+    let log_plan_id = plan_id.clone();
+    let (plan_for_log, storage_for_log) = run_blocking(move || {
+        let plan = log_context_repository.load_restore_plan(&log_plan_id).ok();
+        let storage = plan
+            .as_ref()
+            .map(|plan| storage_log_label(&log_context_repository, &plan.storage_id));
+        Ok((plan, storage))
+    })
+    .await?;
+    let binding_repository = repository.clone();
     let log = ActivityLogScope::new(ActivityLogType::Pull);
     log.emit(
         &app,
@@ -1175,7 +1222,9 @@ pub async fn apply_bundle_restore(
         ),
     );
     let mut fetch_progress = plan_for_log.as_ref().map(|plan| {
-        let storage = storage_log_label(&repository, &plan.storage_id);
+        let storage = storage_for_log
+            .clone()
+            .unwrap_or_else(|| plan.storage_id.to_string());
         FetchProgressEmitter::new(
             app.clone(),
             log.clone().storage(&plan.storage_id, Some(&storage)),
@@ -1257,11 +1306,15 @@ pub async fn apply_bundle_restore(
                 ),
             );
             if operation.success {
-                match plan_for_log
-                    .as_ref()
-                    .ok_or_else(|| "restore plan is unavailable".to_string())
-                    .and_then(|plan| current_binding_for_restore_plan(&log_repository, plan))
-                {
+                let plan_for_binding = plan_for_log.clone();
+                let binding = run_blocking(move || {
+                    let plan = plan_for_binding
+                        .as_ref()
+                        .ok_or_else(|| "restore plan is unavailable".to_string())?;
+                    current_binding_for_restore_plan(&binding_repository, plan)
+                })
+                .await;
+                match binding {
                     Ok(binding) => {
                         log.emit(
                             &app,
@@ -1349,8 +1402,17 @@ pub async fn prepare_push_review(
     storage_id: StorageId,
 ) -> Result<PushReviewContext, String> {
     let repository = repository()?;
-    let (project, storage) =
-        project_storage_log_labels(&repository, &local_project_id, &storage_id);
+    let context_repository = repository.clone();
+    let context_project_id = local_project_id.clone();
+    let context_storage_id = storage_id.clone();
+    let (project, storage, _) = run_blocking(move || {
+        Ok(project_storage_log_context(
+            &context_repository,
+            &context_project_id,
+            &context_storage_id,
+        ))
+    })
+    .await?;
     let log = ActivityLogScope::new(ActivityLogType::Push)
         .project(&local_project_id, Some(&project))
         .storage(&storage_id, Some(&storage));
@@ -1432,7 +1494,8 @@ pub async fn get_push_destination_status(
 
 #[tauri::command]
 pub async fn list_setup_drafts() -> Result<SetupDraftList, String> {
-    list_setup_drafts_with_repository(&repository()?)
+    let repository = repository()?;
+    run_blocking(move || list_setup_drafts_with_repository(&repository)).await
 }
 
 #[tauri::command]
@@ -1446,7 +1509,8 @@ pub async fn create_setup_draft(project_root: String) -> Result<CreateSetupDraft
 
 #[tauri::command]
 pub async fn get_setup_draft(draft_id: SetupDraftId) -> Result<Option<ProjectSetupDraft>, String> {
-    get_setup_draft_with_repository(&repository()?, &draft_id)
+    let repository = repository()?;
+    run_blocking(move || get_setup_draft_with_repository(&repository, &draft_id)).await
 }
 
 #[tauri::command]
@@ -1457,7 +1521,8 @@ pub async fn update_setup_draft(draft: ProjectSetupDraft) -> Result<ProjectSetup
 
 #[tauri::command]
 pub async fn discard_setup_draft(draft_id: SetupDraftId) -> Result<bool, String> {
-    discard_setup_draft_with_repository(&repository()?, &draft_id)
+    let repository = repository()?;
+    run_blocking(move || discard_setup_draft_with_repository(&repository, &draft_id)).await
 }
 
 #[tauri::command]

@@ -43,7 +43,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri_app_lib::{
     ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSyncService,
     PushApproval, PushDestinationPullReason, PushDestinationStatus, RestoreResult,
-    SessionTimelineEventKind, SessionToolCategory, ThreadSyncComparison, ThreadSyncState,
+    SessionTimelineEventKind, SessionToolCategory, StorageDataClearResult, ThreadSyncComparison,
+    ThreadSyncState,
 };
 use walkdir::WalkDir;
 
@@ -122,7 +123,7 @@ const MAX_APP_SERVER_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_APP_SERVER_MESSAGES: usize = 4_096;
 const MAX_AIMOCK_CONTROL_BYTES: u64 = 512 * 1024;
 const AIMOCK_START_TIMEOUT: Duration = Duration::from_secs(30);
-const EXPECTED_CODEX_VERSION_PREFIX: &str = "codex-cli 0.147.";
+const EXPECTED_CODEX_VERSION_PREFIX: &str = "codex-cli 0.152.";
 const EXPECTED_SOURCE_CODEX_TURNS: usize = 5;
 const EXPECTED_GRAPH_APP_SERVER_TURNS: usize = 5;
 const EXPECTED_GRAPH_MUTATION_TURNS: usize = 7;
@@ -196,7 +197,7 @@ fn assert_supported_codex_version() {
     let version = String::from_utf8(output.stdout).expect("Codex version must be UTF-8");
     assert!(
         version.trim().starts_with(EXPECTED_CODEX_VERSION_PREFIX),
-        "the live fixture requires Codex 0.147.x; update the current-format writer before running against another version"
+        "the live fixture requires Codex 0.152.x; update the current-format writer before running against another version"
     );
     assert_codex_home_has_no_sensitive_state(&codex_home, &[]);
     assert_process_home_has_no_sensitive_state(&process_home, &[]);
@@ -1458,13 +1459,14 @@ fn run_codex(
             MAX_CONVERSATION_FILE_BYTES,
             "revision-1 Codex rollout",
         );
-        let patch_keys = try_patch_apply_change_keys(&rollout).unwrap_or_else(|reason| {
+        let file_change_keys = try_file_change_keys(&rollout).unwrap_or_else(|reason| {
             panic!(
-                "revision-1 patch evidence failed ({reason}); events: {event_synopsis}; stderr: {stderr_synopsis}"
+                "revision-1 file-change evidence failed ({reason}); rollout: {}; events: {event_synopsis}; stderr: {stderr_synopsis}",
+                rollout_shape_synopsis(&rollout),
             )
         });
         assert!(
-            local_patch_change_key_candidates(
+            local_file_change_key_candidates(
                 project_root,
                 match access {
                     CodexRunAccess::WorkspaceWrite { additional_dir } => additional_dir,
@@ -1472,8 +1474,8 @@ fn run_codex(
                 },
             )
             .iter()
-            .any(|expected| expected == &patch_keys),
-            "revision-1 patch keys did not exactly match the requested fixtures; events: {event_synopsis}; stderr: {stderr_synopsis}"
+            .any(|expected| expected == &file_change_keys),
+            "revision-1 file-change keys did not exactly match the requested fixtures; events: {event_synopsis}; stderr: {stderr_synopsis}"
         );
     }
 
@@ -2272,7 +2274,7 @@ fn session_meta_record(
             "timestamp": "2026-08-18T00:00:00Z",
             "cwd": cwd.to_string_lossy(),
             "originator": "codex_exec",
-            "cli_version": "0.147.0",
+            "cli_version": "0.152.0",
             "source": "exec",
             "model_provider": PROVIDER_ID,
             "base_instructions": null,
@@ -2961,7 +2963,7 @@ fn write_native_paginated_graph(
         .expect("fork native P1");
 
     // Materialize the first fork's local turn before its source advances.
-    // Codex 0.147 hydrates a fork lazily when its first turn starts; keeping
+    // Codex 0.152 hydrates a fork lazily when its first turn starts; keeping
     // the source at the reviewed cutoff until that hydration completes makes
     // the persisted history_base boundary stable and exact.
     app_server
@@ -3008,7 +3010,7 @@ fn write_native_paginated_graph(
         .expect("stop native Codex graph app-server");
 
     // `turn/completed` precedes the final provider-rollout bookkeeping flush
-    // in Codex 0.147. Re-read after orderly app-server shutdown and pin fork
+    // in Codex 0.152. Re-read after orderly app-server shutdown and pin fork
     // assertions to the durable parent boundary, while proving the early
     // completed-turn prefix was never rewritten.
     let p1_durable_bytes = read_bounded_file(
@@ -3788,7 +3790,7 @@ fn run_headless_history_verification(
         "headless verification did not emit the fixed loopback acknowledgement"
     );
 
-    // Codex 0.147 appends to an existing rollout despite --ephemeral. Always
+    // Codex 0.152 appends to an existing rollout despite --ephemeral. Always
     // use a fresh disposable snapshot, prove the exact target was resumed and
     // extended there, and leave authoritative isolated history untouched.
     let rollout_after = read_bounded_file(
@@ -3987,6 +3989,22 @@ fn push(
     )
 }
 
+fn clear_storage_for_replica(
+    repository: &LocalStateRepository,
+    service: &ProjectSyncService<'_>,
+    storage_id: &StorageId,
+) -> StorageDataClearResult {
+    let expected_config_revision = redacted(
+        repository.load_config(),
+        "cannot load config before storage clear",
+    )
+    .revision;
+    redacted(
+        service.clear_storage_data(storage_id, expected_config_revision),
+        "cannot clear storage through the production service",
+    )
+}
+
 fn provider_thread_id(
     repository: &LocalStateRepository,
     project_id: &LocalProjectId,
@@ -4086,38 +4104,70 @@ fn assert_bytes_exclude_path(bytes: &[u8], path: &Path, label: &str) {
     );
 }
 
-fn try_patch_apply_change_keys(bytes: &[u8]) -> Result<BTreeSet<String>, &'static str> {
-    let mut patches = Vec::new();
+fn try_file_change_keys(bytes: &[u8]) -> Result<BTreeSet<String>, &'static str> {
+    let mut file_changes = Vec::new();
     for raw in bytes
         .split(|byte| *byte == b'\n')
         .filter(|raw| !raw.is_empty())
     {
         let record: Value = serde_json::from_slice(raw).map_err(|_| "malformed_rollout_jsonl")?;
-        let payload = record.get("payload").unwrap_or(&record);
-        if payload.get("type").and_then(Value::as_str) != Some("patch_apply_end") {
+        if record.get("type").and_then(Value::as_str) != Some("event_msg") {
             continue;
         }
-        if payload.get("success").and_then(Value::as_bool) != Some(true) {
-            return Err("patch_not_successful");
+        let payload = record.get("payload").ok_or("item_payload_missing")?;
+        if payload.get("type").and_then(Value::as_str) != Some("item_completed") {
+            continue;
         }
-        let changes = payload
+        let item = payload.get("item").ok_or("completed_item_missing")?;
+        if item.get("type").and_then(Value::as_str) != Some("FileChange") {
+            continue;
+        }
+        if item.get("status").and_then(Value::as_str) != Some("completed") {
+            return Err("file_change_not_completed");
+        }
+        let changes = item
             .get("changes")
             .and_then(Value::as_object)
-            .ok_or("patch_changes_missing")?;
-        patches.push(changes.keys().cloned().collect::<BTreeSet<_>>());
+            .ok_or("file_change_paths_missing")?;
+        file_changes.push(changes.keys().cloned().collect::<BTreeSet<_>>());
     }
-    if patches.len() != 1 {
-        return Err("patch_count_not_one");
+    if file_changes.len() != 1 {
+        return Err("file_change_count_not_one");
     }
-    patches.pop().ok_or("patch_count_not_one")
+    file_changes.pop().ok_or("file_change_count_not_one")
 }
 
-fn patch_apply_change_keys(bytes: &[u8]) -> BTreeSet<String> {
-    try_patch_apply_change_keys(bytes)
-        .unwrap_or_else(|reason| panic!("path-bearing rollout patch evidence failed: {reason}"))
+fn rollout_shape_synopsis(bytes: &[u8]) -> String {
+    let mut shapes = BTreeMap::<String, usize>::new();
+    for raw in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|raw| !raw.is_empty())
+        .take(256)
+    {
+        let Ok(record) = serde_json::from_slice::<Value>(raw) else {
+            *shapes.entry("malformed".to_string()).or_default() += 1;
+            continue;
+        };
+        let outer = record.get("type").and_then(Value::as_str).unwrap_or("-");
+        let payload = record.get("payload").unwrap_or(&record);
+        let inner = payload.get("type").and_then(Value::as_str).unwrap_or("-");
+        let name = payload.get("name").and_then(Value::as_str).unwrap_or("-");
+        *shapes.entry(format!("{outer}/{inner}/{name}")).or_default() += 1;
+    }
+    shapes
+        .into_iter()
+        .map(|(shape, count)| format!("{shape}={count}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
-fn local_patch_change_key_candidates(
+fn file_change_keys(bytes: &[u8]) -> BTreeSet<String> {
+    try_file_change_keys(bytes).unwrap_or_else(|reason| {
+        panic!("path-bearing rollout file-change evidence failed: {reason}")
+    })
+}
+
+fn local_file_change_key_candidates(
     project_root: &Path,
     outside_root: &Path,
 ) -> Vec<BTreeSet<String>> {
@@ -4145,17 +4195,17 @@ fn local_patch_change_key_candidates(
         .collect()
 }
 
-fn assert_local_patch_change_keys(bytes: &[u8], project_root: &Path, outside_root: &Path) {
-    let actual = patch_apply_change_keys(bytes);
+fn assert_local_file_change_keys(bytes: &[u8], project_root: &Path, outside_root: &Path) {
+    let actual = file_change_keys(bytes);
     assert!(
-        local_patch_change_key_candidates(project_root, outside_root)
+        local_file_change_key_candidates(project_root, outside_root)
             .iter()
             .any(|expected| expected == &actual),
-        "materialized rollout patch keys do not exactly match the local and outside fixtures"
+        "materialized rollout file-change keys do not exactly match the local and outside fixtures"
     );
 }
 
-fn assert_portable_patch_change_keys(bytes: &[u8], outside_root: &Path) {
+fn assert_portable_file_change_keys(bytes: &[u8], outside_root: &Path) {
     let expected = IN_PROJECT_FIXTURES
         .iter()
         .map(|(relative, _)| format!("/__mallard_root__/{relative}"))
@@ -4166,8 +4216,8 @@ fn assert_portable_patch_change_keys(bytes: &[u8], outside_root: &Path) {
         )
         .collect::<BTreeSet<_>>();
     assert!(
-        patch_apply_change_keys(bytes) == expected,
-        "portable rollout patch keys did not tokenize only in-project fixtures"
+        file_change_keys(bytes) == expected,
+        "portable rollout file-change keys did not tokenize only in-project fixtures"
     );
 }
 
@@ -4183,7 +4233,7 @@ fn assert_raw_rollout_paths(
         MAX_CONVERSATION_FILE_BYTES,
         "live path rollout",
     );
-    assert_local_patch_change_keys(&bytes, expected_project_root, outside_root);
+    assert_local_file_change_keys(&bytes, expected_project_root, outside_root);
     for (relative, _) in IN_PROJECT_FIXTURES {
         let spellings = fixture_path_spellings(expected_project_root, relative);
         assert!(
@@ -4276,7 +4326,7 @@ fn assert_portable_rollout_paths(
         storage_root,
         cloud_thread_id,
     );
-    assert_portable_patch_change_keys(&bytes, outside_root);
+    assert_portable_file_change_keys(&bytes, outside_root);
     for (relative, _) in IN_PROJECT_FIXTURES {
         let token_path = format!("/__mallard_root__/{relative}");
         assert!(
@@ -5188,12 +5238,20 @@ fn storage_digest_inventory(storage_root: &Path) -> BTreeMap<PathBuf, [u8; 32]> 
 fn assert_fixed_point(comparison: &ThreadSyncComparison, revision: u64) {
     assert_eq!(comparison.revision, Some(revision));
     assert_eq!(comparison.base_revision, Some(revision));
+    let states =
+        comparison
+            .entries
+            .iter()
+            .fold(BTreeMap::<String, usize>::new(), |mut counts, entry| {
+                *counts.entry(format!("{:?}", entry.state)).or_default() += 1;
+                counts
+            });
     assert!(
         comparison
             .entries
             .iter()
             .all(|entry| entry.state == ThreadSyncState::Synced),
-        "fixed-point comparison still has applicable thread work"
+        "fixed-point comparison still has applicable thread work: {states:?}"
     );
     assert_eq!(comparison.counts.diverged, 0);
     assert_eq!(comparison.counts.local, 0);
@@ -5689,12 +5747,6 @@ fn current_codex_nested_file_edit_paths_survive_wire_projection() {
     let target_thread_id = fixture_uuid(0x402);
     let inside_paths = canonical_fixture_paths(&project1, &IN_PROJECT_FIXTURES);
     let outside_paths = canonical_fixture_paths(&project1_external, &OUTSIDE_PROJECT_FIXTURES);
-    let input = inside_paths
-        .iter()
-        .chain(outside_paths.iter())
-        .map(|path| path.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ");
     let changes = json!({
         (inside_paths[0].to_string_lossy().into_owned()): {"type": "add"},
         (inside_paths[1].to_string_lossy().into_owned()): {"type": "add"},
@@ -5703,8 +5755,6 @@ fn current_codex_nested_file_edit_paths_survive_wire_projection() {
     });
     let user_message_id = fixture_uuid(0x404);
     let assistant_message_id = fixture_uuid(0x405);
-    let tool_message_id = fixture_uuid(0x406);
-    let tool_output_message_id = fixture_uuid(0x407);
     let turn = [
         json!({
             "timestamp": "2026-08-18T00:00:01Z",
@@ -5719,36 +5769,17 @@ fn current_codex_nested_file_edit_paths_survive_wire_projection() {
         }),
         json!({
             "timestamp": "2026-08-18T00:00:02Z",
-            "type": "response_item",
-            "payload": {
-                "type": "custom_tool_call",
-                "id": tool_message_id,
-                "parent_id": user_message_id,
-                "call_id": "exec-path-fixture",
-                "name": "exec",
-                "input": input,
-            },
-        }),
-        json!({
-            "timestamp": "2026-08-18T00:00:02Z",
             "type": "event_msg",
             "payload": {
-                "type": "patch_apply_end",
-                "call_id": "nested-patch-path-fixture",
-                "success": true,
-                "status": "completed",
-                "changes": changes.clone(),
-            },
-        }),
-        json!({
-            "timestamp": "2026-08-18T00:00:02Z",
-            "type": "response_item",
-            "payload": {
-                "type": "custom_tool_call_output",
-                "id": tool_output_message_id,
-                "parent_id": tool_message_id,
-                "call_id": "exec-path-fixture",
-                "output": "done",
+                "type": "item_completed",
+                "thread_id": source_thread_id,
+                "turn_id": "turn-path-fixture",
+                "item": {
+                    "type": "FileChange",
+                    "id": "file-change-path-fixture",
+                    "status": "completed",
+                    "changes": changes.clone(),
+                },
             },
         }),
         json!({
@@ -5757,7 +5788,7 @@ fn current_codex_nested_file_edit_paths_survive_wire_projection() {
             "payload": {
                 "type": "message",
                 "id": assistant_message_id,
-                "parent_id": tool_output_message_id,
+                "parent_id": user_message_id,
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": "MALLARD_BASE"}],
                 "phase": "final_answer",
@@ -5767,7 +5798,7 @@ fn current_codex_nested_file_edit_paths_survive_wire_projection() {
     let mut records = vec![session_meta_record(&source_thread_id, &project1, None)];
     records.extend(turn);
     let source_bytes = encode_rollout_records(records);
-    assert_local_patch_change_keys(&source_bytes, &project1, &project1_external);
+    assert_local_file_change_keys(&source_bytes, &project1, &project1_external);
     let source_rollout = root.path().join("source.jsonl");
     std::fs::write(&source_rollout, &source_bytes).expect("write source path fixture rollout");
     assert_offline_path_timeline(
@@ -5775,7 +5806,7 @@ fn current_codex_nested_file_edit_paths_survive_wire_projection() {
         &project1,
         &project1,
         &project1_external,
-        "exec-path-fixture",
+        "file-change-path-fixture",
     );
 
     let no_bases = |_: &str| Ok(None);
@@ -5790,7 +5821,7 @@ fn current_codex_nested_file_edit_paths_survive_wire_projection() {
         None,
     )
     .expect("encode current Codex path fixture");
-    assert_portable_patch_change_keys(&wire.root_bytes, &project1_external);
+    assert_portable_file_change_keys(&wire.root_bytes, &project1_external);
     for (relative, _) in IN_PROJECT_FIXTURES {
         assert!(byte_slice_contains(
             &wire.root_bytes,
@@ -5818,7 +5849,7 @@ fn current_codex_nested_file_edit_paths_survive_wire_projection() {
         None,
     )
     .expect("decode current Codex path fixture");
-    assert_local_patch_change_keys(&target.root_bytes, &project1_copy, &project1_external);
+    assert_local_file_change_keys(&target.root_bytes, &project1_copy, &project1_external);
     let target_rollout = root.path().join("target.jsonl");
     std::fs::write(&target_rollout, &target.root_bytes).expect("write target path fixture rollout");
     for path in canonical_fixture_paths(&project1_copy, &IN_PROJECT_FIXTURES) {
@@ -5843,7 +5874,7 @@ fn current_codex_nested_file_edit_paths_survive_wire_projection() {
         &project1_copy,
         &project1_copy,
         &project1_external,
-        "nested-patch-path-fixture",
+        "file-change-path-fixture",
     );
 }
 
@@ -5981,8 +6012,9 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     }
     let mut codex_turn_count = 0;
 
-    // Replica A creates a real thread and publishes revision 1.
-    eprintln!("live Codex phase: conversation revisions 1-5");
+    // Setup publishes the registration-only revision 1. Content revisions
+    // 2-6 exercise the first conversation and its divergent branches.
+    eprintln!("live Codex phase: conversation revisions 2-6");
     let first = finish_setup(
         &service1,
         &project1,
@@ -6045,10 +6077,10 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         "copying project fixtures changed an outside file"
     );
     let first_push = push(&service1, &project_id1, &storage_id);
-    assert_eq!(first_push.revision, Some(1));
+    assert_eq!(first_push.revision, Some(2));
     let logical_thread = logical_thread_id(&repository1, &project_id1, &provider_thread1);
     let session_resource = mallard_domain::conversation_resource_id(&codex_key(), &logical_thread)
-        .expect("derive revision-1 conversation resource ID");
+        .expect("derive first-content conversation resource ID");
     // Decoupling: the manifest row's identity was minted at push apply in
     // its own cloud namespace, distinct from the pusher's local id; the
     // pairing lives only in this machine's binding row.
@@ -6083,8 +6115,8 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         &path_needles,
     );
 
-    // Replica B links the existing repository, pulls revision 1, resumes the
-    // materialized task, and publishes its branch as revision 2.
+    // Replica B links the existing repository, pulls content revision 2,
+    // resumes the materialized task, and publishes its branch as revision 3.
     let second = finish_setup(
         &service2,
         &project1_copy,
@@ -6144,14 +6176,14 @@ fn live_codex_aimock_setup_push_pull_divergence() {
             service1.compare_threads(&project_id1, &storage_id),
             "cannot compare replica A after initial Pull",
         ),
-        1,
+        2,
     );
     assert_fixed_point(
         &redacted(
             service2.compare_threads(&project_id2, &storage_id),
             "cannot compare replica B after initial Pull",
         ),
-        1,
+        2,
     );
     let resumed2 = run_codex(
         &mut codex_turn_count,
@@ -6166,7 +6198,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     );
     assert_eq!(resumed2, provider_thread2);
     let second_push = push(&service2, &project_id2, &storage_id);
-    assert_eq!(second_push.revision, Some(2));
+    assert_eq!(second_push.revision, Some(3));
     assert_portable_rollout_paths(
         &service2,
         &storage_id,
@@ -6186,9 +6218,9 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         &path_needles,
     );
 
-    // Replica A advances from its revision-1 base. Push is gated until the
-    // divergent revision-2 Pull is reviewed with Keep Both, after which the
-    // retained local branch is published as revision 3.
+    // Replica A advances from its revision-2 base. Push is gated until the
+    // divergent revision-3 Pull is reviewed with Keep Both, after which the
+    // retained local branch is published as revision 4.
     let resumed1 = run_codex(
         &mut codex_turn_count,
         &provider,
@@ -6244,7 +6276,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         .iter()
         .all(|entry| entry.state != ThreadSyncState::Diverged));
     let third_push = push(&service1, &project_id1, &storage_id);
-    assert_eq!(third_push.revision, Some(3));
+    assert_eq!(third_push.revision, Some(4));
     assert_portable_state_is_safe(
         &service1,
         &storage_id,
@@ -6254,7 +6286,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         &path_needles,
     );
 
-    // Replica B pulls revision 3, retaining the stable logical primary ID
+    // Replica B pulls revision 4, retaining the stable logical primary ID
     // and materializing A's first preserved branch.
     let (_, third_pull) = pull_and_apply(&service2, &storage_id, &bundle_id, &binding2);
     assert!(third_pull.preserved_threads.is_empty());
@@ -6280,8 +6312,8 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         provider_thread_id(&repository2, &project_id2, &first_preserved_on_b_local);
     assert_rollout_cwd(&myconf2, &first_preserved_on_b, &project1_copy);
 
-    // Starting from the shared revision-3 primary, A and B independently
-    // resume their provider aliases. A publishes first as revision 4; B is
+    // Starting from the shared revision-4 primary, A and B independently
+    // resume their provider aliases. A publishes first as revision 5; B is
     // then correctly gated as divergent.
     let first_remote_alias = first_keep_both.remote_provider_thread_id.clone();
     let resumed4 = run_codex(
@@ -6309,7 +6341,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     );
     assert_eq!(resumed5, provider_thread2);
     let fourth_push = push(&service1, &project_id1, &storage_id);
-    assert_eq!(fourth_push.revision, Some(4));
+    assert_eq!(fourth_push.revision, Some(5));
     assert_portable_state_is_safe(
         &service1,
         &storage_id,
@@ -6320,8 +6352,8 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     );
 
     // Replica B reviews the reverse-direction divergence with Keep Both. Its
-    // local branch moves to a fresh logical ID, A's revision-4 branch becomes
-    // the stable primary, and both are published as revision 5 without a
+    // local branch moves to a fresh logical ID, A's revision-5 branch becomes
+    // the stable primary, and both are published as revision 6 without a
     // sixth provider-backed Codex CLI turn.
     assert_divergent_push_gate(
         &service2,
@@ -6363,7 +6395,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         "the first preserved branch changed identity during the second Keep Both"
     );
     let fifth_push = push(&service2, &project_id2, &storage_id);
-    assert_eq!(fifth_push.revision, Some(5));
+    assert_eq!(fifth_push.revision, Some(6));
     assert_portable_state_is_safe(
         &service2,
         &storage_id,
@@ -6373,8 +6405,8 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         &path_needles,
     );
 
-    // A accepts revision 5. Both replicas are now at the same fixed point,
-    // and a reviewed no-op Push from either replica must not create revision 6.
+    // A accepts revision 6. Both replicas are now at the same fixed point,
+    // and a reviewed no-op Push from either replica must not create revision 7.
     let (_, fifth_pull) = pull_and_apply(&service1, &storage_id, &bundle_id, &binding1);
     assert!(fifth_pull.preserved_threads.is_empty());
     let second_preserved_cloud = cloud_thread_id_of(
@@ -6414,7 +6446,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
             service1.compare_threads(&project_id1, &storage_id),
             "cannot compare replica A at fixed point",
         ),
-        5,
+        6,
     );
     assert_pull_is_no_op(&service1, &storage_id, &bundle_id, &binding1);
     assert_pull_is_no_op(&service2, &storage_id, &bundle_id, &binding2);
@@ -6423,11 +6455,11 @@ fn live_codex_aimock_setup_push_pull_divergence() {
             service2.compare_threads(&project_id2, &storage_id),
             "cannot compare replica B at fixed point",
         ),
-        5,
+        6,
     );
     for (service, project_id) in [(&service1, &project_id1), (&service2, &project_id2)] {
         let no_op = push(service, project_id, &storage_id);
-        assert_eq!(no_op.revision, Some(5));
+        assert_eq!(no_op.revision, Some(6));
         assert_eq!(no_op.resources_changed, Some(0));
     }
     assert_eq!(
@@ -6437,7 +6469,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         )
         .head
         .revision,
-        5
+        6
     );
     assert_portable_state_is_safe(
         &service1,
@@ -6452,9 +6484,9 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         "live source conversation phase changed its Codex CLI process budget"
     );
 
-    // Revision 6: create a five-root native 0.147 paginated DAG on replica A
+    // Revision 7: create a five-root native 0.152 paginated DAG on replica A
     // through one bounded app-server. No rollout is directly written here.
-    eprintln!("live Codex phase: paginated graph revisions 6-10");
+    eprintln!("live Codex phase: paginated graph revisions 7-11");
     let graph = write_native_paginated_graph(&provider, &myconf1, &machine1_home, &project1);
     let p1_initial_bytes = read_bounded_file(
         &graph.nodes["p1"].path,
@@ -6462,7 +6494,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         "initial P1 rollout",
     );
     let sixth_push = push(&service1, &project_id1, &storage_id);
-    assert_eq!(sixth_push.revision, Some(6));
+    assert_eq!(sixth_push.revision, Some(7));
 
     let graph_threads = [
         (
@@ -6544,19 +6576,19 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     assert_fixed_point(
         &redacted(
             service1.compare_threads(&project_id1, &storage_id),
-            "cannot compare replica A at revision 6",
+            "cannot compare replica A at revision 7",
         ),
-        6,
+        7,
     );
     assert_fixed_point(
         &redacted(
             service2.compare_threads(&project_id2, &storage_id),
-            "cannot compare replica B at revision 6",
+            "cannot compare replica B at revision 7",
         ),
-        6,
+        7,
     );
 
-    // Revision 7: A has one local-only advance and one side of a divergence;
+    // Revision 8: A has one local-only advance and one side of a divergence;
     // B has one cloud-only advance and the other divergent side. A prepares
     // before B publishes so the reviewed head pin itself is exercised.
     run_paginated_mutation(
@@ -6611,7 +6643,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         "GRAPH_B_DIVERGENT",
     );
     let seventh_push = push(&service2, &project_id2, &storage_id);
-    assert_eq!(seventh_push.revision, Some(7));
+    assert_eq!(seventh_push.revision, Some(8));
     assert_stale_push_rejected(&service1, &project_id1, &storage_id, &stale_a_review);
     let mixed_a = wait_for_thread_states(
         &service1,
@@ -6710,7 +6742,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     assert_rollout_cwd(&myconf1, &p2_on_a_after_pull, &project1);
     let seventh_post_pull_a = redacted(
         service1.compare_threads(&project_id1, &storage_id),
-        "cannot compare replica A after revision-7 copy-on-write Pull",
+        "cannot compare replica A after revision-8 copy-on-write Pull",
     );
     assert!(
         seventh_post_pull_a
@@ -6723,7 +6755,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     // Revision 8 publishes A's surviving P1 advance and its preserved P3
     // branch, then B materializes both without another provider-backed turn.
     let eighth_push = push(&service1, &project_id1, &storage_id);
-    assert_eq!(eighth_push.revision, Some(8));
+    assert_eq!(eighth_push.revision, Some(9));
     let (_, eighth_pull) = pull_and_apply(&service2, &storage_id, &bundle_id, &binding2);
     assert!(eighth_pull.preserved_threads.is_empty());
     let p3_preserved_cloud = cloud_thread_id_of(
@@ -6739,19 +6771,19 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     assert_fixed_point(
         &redacted(
             service1.compare_threads(&project_id1, &storage_id),
-            "cannot compare replica A at revision 8",
+            "cannot compare replica A at revision 9",
         ),
-        8,
+        9,
     );
     assert_fixed_point(
         &redacted(
             service2.compare_threads(&project_id2, &storage_id),
-            "cannot compare replica B at revision 8",
+            "cannot compare replica B at revision 9",
         ),
-        8,
+        9,
     );
 
-    // Revision 9 reverses the conflict direction. B also advances P0; its
+    // Revision 10 reverses the conflict direction. B also advances P0; its
     // fresh review must keep that safe local work eligible while holding P4.
     let p4_on_a = provider_thread_id(&repository1, &project_id1, &graph_threads["p4"]);
     let p4_on_b = provider_thread_id(&repository2, &project_id2, &graph_threads_b["p4"]);
@@ -6795,7 +6827,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         PushDestinationStatus::Ready { .. }
     ));
     let ninth_push = push(&service1, &project_id1, &storage_id);
-    assert_eq!(ninth_push.revision, Some(9));
+    assert_eq!(ninth_push.revision, Some(10));
     assert_stale_push_rejected(&service2, &project_id2, &storage_id, &stale_b_review);
     let mixed_b = wait_for_thread_states(
         &service2,
@@ -6857,10 +6889,10 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         "reverse divergent Pull overwrote the unrelated LocalAhead P0"
     );
 
-    // Revision 10 publishes B's P0 and preserved P4 work; A pulls it and the
+    // Revision 11 publishes B's P0 and preserved P4 work; A pulls it and the
     // complete project conversation set reaches a stable no-op fixed point.
     let tenth_push = push(&service2, &project_id2, &storage_id);
-    assert_eq!(tenth_push.revision, Some(10));
+    assert_eq!(tenth_push.revision, Some(11));
     let p0_on_a_before_pull = provider_thread_id(&repository1, &project_id1, &graph_threads["p0"]);
     assert_eq!(
         p0_on_a_before_pull, graph.nodes["p0"].provider_thread_id,
@@ -6869,23 +6901,23 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     let p0_dependency_bytes_before = read_bounded_file(
         &graph.nodes["p0"].path,
         MAX_CONVERSATION_FILE_BYTES,
-        "native P0 dependency before revision-10 Pull",
+        "native P0 dependency before revision-11 Pull",
     );
     let (_, tenth_pull) = pull_and_apply(&service1, &storage_id, &bundle_id, &binding1);
     assert!(tenth_pull.preserved_threads.is_empty());
     let p0_on_a_after_pull = provider_thread_id(&repository1, &project_id1, &graph_threads["p0"]);
     assert_ne!(
         p0_on_a_after_pull, p0_on_a_before_pull,
-        "revision-10 Pull overwrote a provider alias still used as history_base"
+        "revision-11 Pull overwrote a provider alias still used as history_base"
     );
     assert_eq!(
         read_bounded_file(
             &graph.nodes["p0"].path,
             MAX_CONVERSATION_FILE_BYTES,
-            "native P0 dependency after revision-10 Pull",
+            "native P0 dependency after revision-11 Pull",
         ),
         p0_dependency_bytes_before,
-        "revision-10 Pull changed the frozen physical ancestor"
+        "revision-11 Pull changed the frozen physical ancestor"
     );
     let mut relocated_p0_history = graph.nodes["p0"].expected.clone();
     relocated_p0_history.extend(marker_turn("GRAPH_USER_B_ROOT_LOCAL", "GRAPH_B_ROOT_LOCAL"));
@@ -6897,7 +6929,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     );
     let final_comparison_a = redacted(
         service1.compare_threads(&project_id1, &storage_id),
-        "cannot compare replica A at revision 10",
+        "cannot compare replica A at revision 11",
     );
     assert!(
         final_comparison_a.entries.iter().all(|entry| {
@@ -6909,20 +6941,20 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         }),
         "unchanged displaced native alias reappeared at the final fixed point"
     );
-    assert_fixed_point(&final_comparison_a, 10);
+    assert_fixed_point(&final_comparison_a, 11);
     assert_fixed_point(
         &redacted(
             service2.compare_threads(&project_id2, &storage_id),
-            "cannot compare replica B at revision 10",
+            "cannot compare replica B at revision 11",
         ),
-        10,
+        11,
     );
     let storage_before_fixed_point_noops = storage_digest_inventory(&mystorage1);
     assert_pull_is_no_op(&service1, &storage_id, &bundle_id, &binding1);
     assert_pull_is_no_op(&service2, &storage_id, &bundle_id, &binding2);
     for (service, project_id) in [(&service1, &project_id1), (&service2, &project_id2)] {
         let no_op = push(service, project_id, &storage_id);
-        assert_eq!(no_op.revision, Some(10));
+        assert_eq!(no_op.revision, Some(11));
         assert_eq!(no_op.resources_changed, Some(0));
     }
     assert_eq!(
@@ -6930,18 +6962,110 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         storage_before_fixed_point_noops,
         "fixed-point project Push/Pull created or replaced storage objects"
     );
+
+    // Start a fresh storage epoch through the same destructive operation as
+    // the UI. Each replica must forget its own accepted base; only the first
+    // call has remote objects left to delete.
+    eprintln!("live Codex phase: storage reset and session republish");
+    let codex_home_a_before_reset = storage_digest_inventory(&myconf1);
+    let codex_home_b_before_reset = storage_digest_inventory(&myconf2);
+    let project_before_reset = redacted(
+        service1.inspect_bundle(&storage_id, &bundle_id),
+        "cannot inspect revision-11 bundle before storage reset",
+    );
+    let conversations_before_reset = project_before_reset
+        .manifest
+        .all_conversations()
+        .map(|(_, cloud_id, thread)| {
+            (
+                cloud_id.clone(),
+                (
+                    thread.provider.clone(),
+                    thread.lineage_digest.clone(),
+                    thread.semantic_digest.clone(),
+                    thread.message_count,
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(conversations_before_reset.len(), 10);
+
+    let reset_a = clear_storage_for_replica(&repository1, &service1, &storage_id);
+    assert!(reset_a.repository_objects_deleted > 0);
+    assert_eq!(reset_a.library_objects_deleted, 0);
+    assert_eq!(reset_a.project_links_reset, 1);
+    assert_eq!(reset_a.catalog_links_reset, 0);
+    let reset_b = clear_storage_for_replica(&repository2, &service2, &storage_id);
+    assert_eq!(reset_b.repository_objects_deleted, 0);
+    assert_eq!(reset_b.library_objects_deleted, 0);
+    assert_eq!(reset_b.project_links_reset, 1);
+    assert_eq!(reset_b.catalog_links_reset, 0);
+    assert!(service1.inspect_bundle(&storage_id, &bundle_id).is_err());
+    assert_eq!(
+        storage_digest_inventory(&myconf1),
+        codex_home_a_before_reset
+    );
+    assert_eq!(
+        storage_digest_inventory(&myconf2),
+        codex_home_b_before_reset
+    );
+
+    let reset_push = push(&service1, &project_id1, &storage_id);
+    assert!(reset_push.success, "{}", reset_push.message);
+    assert_eq!(reset_push.revision, Some(1));
+    let (_, reset_pull) = pull_and_apply(&service2, &storage_id, &bundle_id, &binding2);
+    assert!(reset_pull.preserved_threads.is_empty());
+    assert_fixed_point(
+        &redacted(
+            service1.compare_threads(&project_id1, &storage_id),
+            "cannot compare replica A after storage reset",
+        ),
+        1,
+    );
+    assert_fixed_point(
+        &redacted(
+            service2.compare_threads(&project_id2, &storage_id),
+            "cannot compare replica B after storage reset",
+        ),
+        1,
+    );
+    assert_eq!(
+        storage_digest_inventory(&myconf1),
+        codex_home_a_before_reset
+    );
+    assert_eq!(
+        storage_digest_inventory(&myconf2),
+        codex_home_b_before_reset
+    );
+
     let project_before_library = redacted(
         service1.inspect_bundle(&storage_id, &bundle_id),
-        "cannot inspect revision-10 bundle",
+        "cannot inspect republished bundle",
     );
-    assert_eq!(project_before_library.head.revision, 10);
+    assert_eq!(project_before_library.head.revision, 1);
+    let conversations_after_reset = project_before_library
+        .manifest
+        .all_conversations()
+        .map(|(_, cloud_id, thread)| {
+            (
+                cloud_id.clone(),
+                (
+                    thread.provider.clone(),
+                    thread.lineage_digest.clone(),
+                    thread.semantic_digest.clone(),
+                    thread.message_count,
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(conversations_after_reset, conversations_before_reset);
     let project_repository_root = mystorage1.join(".mallard/v1/repositories");
     let project_objects_before_library = storage_snapshot(&project_repository_root);
 
     // Exercise skills and both Codex pet formats through the production
     // storage-Library service in the same two machine/provider homes and the
     // same local-folder store. Library repositories are independent of the
-    // project bundle and must not advance its revision-10 head.
+    // project bundle and must not advance its republished revision-1 head.
     eprintln!("live Codex phase: storage Library skills and pets");
     let catalog_user1 = root.path().join("catalog-user1");
     let catalog_user2 = root.path().join("catalog-user2");
@@ -6973,7 +7097,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     );
     assert_eq!(
         project_after_library.manifest, project_before_library.manifest,
-        "storage-Library activity changed the revision-10 project manifest"
+        "storage-Library activity changed the republished project manifest"
     );
     assert_eq!(
         storage_snapshot(&project_repository_root),
@@ -6983,7 +7107,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
 
     // Native descendants remain pinned to their exact serialized prefix:
     // the later P1 append must not leak into P3/P4 or invalidate their base.
-    // Revision 10 relocates the pulled P0 primary to a fresh provider alias,
+    // Revision 11 relocates the pulled P0 primary to a fresh provider alias,
     // leaving this native P0 byte-for-byte intact as their physical base.
     let p1_after = read_bounded_file(
         &graph.nodes["p1"].path,
@@ -7083,7 +7207,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         &project_id2,
         &p4_keep_both.preserved_thread_id,
     );
-    // The preserved P4 branch was pushed at revision 10; its fresh cloud
+    // The preserved P4 branch was pushed at revision 11; its fresh cloud
     // identity is the final rendezvous value.
     let p4_preserved_cloud = cloud_thread_id_of(
         &repository2,

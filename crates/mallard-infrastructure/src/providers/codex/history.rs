@@ -429,8 +429,11 @@ impl RolloutParser {
                     }
                     Some("AgentMessage")
                         if normalized_type(item.get("phase").and_then(Value::as_str))
-                            == "finalanswer" =>
+                            != "commentary" =>
                     {
+                        // Current Codex can omit the phase on the completed
+                        // final AgentMessage. Match the timeline projection:
+                        // only explicit commentary is not a response.
                         self.agent_message_count = self.agent_message_count.saturating_add(1);
                     }
                     _ => {}
@@ -2775,7 +2778,6 @@ mod tests {
                         "item": {
                             "type": "AgentMessage",
                             "id": "agent-final",
-                            "phase": "final_answer",
                             "content": [{"type": "text", "text": "Done."}]
                         }
                     }

@@ -25,6 +25,10 @@ export const STORAGE_BLOCKING_STATES: ReadonlySet<string> = new Set([
   "diverged",
 ]);
 
+/** One project-file policy for every grouped card list. Search still examines
+ * the complete inventory; this bounds only the rendered result. */
+export const PROJECT_FILE_CARD_RENDER_LIMIT = 500;
+
 export function projectLabel(project: { display_name: string; local_alias?: string | null }): string {
   return project.local_alias?.trim() || project.display_name;
 }
@@ -73,6 +77,47 @@ const APPLY_POLICY_LABELS: Record<string, string> = {
   manual_only: "Manual apply only",
   never: "Never applied",
 };
+
+/** The file rows' Kind readout, Finder's vocabulary for the common suspects.
+ * An unknown extension stays honest and terse: the extension, uppercased. */
+const FILE_KIND_LABELS: Record<string, string> = {
+  md: "Markdown",
+  txt: "Text",
+  doc: "Word",
+  docx: "Word",
+  pdf: "PDF",
+  sh: "Shell",
+  py: "Python",
+  js: "JavaScript",
+  ts: "TypeScript",
+  json: "JSON",
+  yaml: "YAML",
+  yml: "YAML",
+  toml: "TOML",
+  html: "HTML",
+  css: "CSS",
+  csv: "CSV",
+  png: "PNG image",
+  jpg: "JPEG image",
+  jpeg: "JPEG image",
+  gif: "GIF image",
+  svg: "SVG image",
+  webp: "WebP image",
+  psd: "Photoshop",
+  wav: "WAV audio",
+  mp3: "MP3 audio",
+  mp4: "MP4 video",
+  mov: "QuickTime video",
+  zip: "ZIP archive",
+  gz: "Gzip archive",
+};
+
+export function fileKindLabel(name: string): string {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0 || dot === name.length - 1) return "File";
+  const extension = name.slice(dot + 1).toLocaleLowerCase();
+  return FILE_KIND_LABELS[extension] ?? extension.toUpperCase();
+}
 
 export function kindLabel(kind: ProjectResourceKind): string {
   return KIND_LABELS[kind];

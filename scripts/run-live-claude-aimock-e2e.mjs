@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const requiredAimockVersion = "1.39.0";
-const requiredClaudeVersion = "2.1.235";
+const requiredClaudeVersion = "2.1.250";
 const minimumNodeVersion = [20, 15, 0];
 const maximumVersionOutputBytes = 64 * 1024;
 const versionTimeoutMs = 15_000;

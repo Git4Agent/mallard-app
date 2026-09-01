@@ -7,7 +7,7 @@
 mod support;
 
 use mallard_domain::{StorageConfig, StorageId, StorageKind};
-use support::catalog_flow::{run_catalog_flow, CatalogFlowInputs};
+use support::catalog_flow::{run_catalog_flow_with_storage_reset, CatalogFlowInputs};
 
 #[test]
 fn skills_and_codex_pets_round_trip_update_and_preserve_divergence() {
@@ -61,7 +61,7 @@ fn skills_and_codex_pets_round_trip_update_and_preserve_divergence() {
         b"catalog-e2e-auth-b-must-not-travel".to_vec(),
     ];
 
-    let report = run_catalog_flow(CatalogFlowInputs {
+    let report = run_catalog_flow_with_storage_reset(CatalogFlowInputs {
         machine_home_a: &machine_home_a,
         machine_home_b: &machine_home_b,
         user_home_a: &user_home_a,
@@ -73,7 +73,7 @@ fn skills_and_codex_pets_round_trip_update_and_preserve_divergence() {
     });
 
     assert_eq!(report.repository_count, 3);
-    assert_eq!(report.kind_repository_revisions, vec![5, 5, 10]);
+    assert_eq!(report.kind_repository_revisions, vec![5, 5, 7]);
     assert_eq!(report.native_provider_process_calls, 0);
     assert!(report.injected_inventory_calls > 0);
     assert_eq!(

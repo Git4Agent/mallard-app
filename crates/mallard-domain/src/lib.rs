@@ -5214,6 +5214,11 @@ pub struct RestoreAction {
     /// time; apply falls back to fetching the object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub materialized_sha256: Option<String>,
+    /// Size of the storage-side bytes this action would write, for the
+    /// review's readout. `None` for actions that write nothing (deletes,
+    /// directories, manual rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_size: Option<u64>,
     pub requires_explicit_approval: bool,
 }
 

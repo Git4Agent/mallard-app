@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
@@ -165,12 +164,12 @@ test("an explicit Push scan presents new entries selected and locks both directo
   // everything the old "New · selected after scan" caption said.
   assert.doesNotMatch(html, /New · selected after scan|SELECTED AFTER SCAN/i);
   assert.match(html, /sync-thread-sync-indicator local/);
-  // The directories draw no cards of their own: the full-path band speaks
-  // for them and the required-ancestor rule keeps them riding their files.
-  // The band's control is the rows' own checkbox — here ticked, since every
-  // file is selected — with the counter chip at the band's edge; the old
-  // check-circle/trash icon pair is gone.
-  assert.match(html, /sync-project-files-group-heading/);
+  // The directories draw no cards of their own: the folder's framed tile
+  // speaks for them and the required-ancestor rule keeps them riding their
+  // files. The tile head's control is the rows' own checkbox — here ticked,
+  // since every file is selected — with the counter chip closing the strip;
+  // the old check-circle/trash icon pair is gone.
+  assert.match(html, /sync-project-file-tile-head/);
   assert.match(html, />docs\/specs\/</);
   assert.match(html, /aria-label="1 of 1 selected in docs\/specs"/);
   assert.match(html, /aria-label="Exclude every file in docs\/specs"[^>]*checked/);
@@ -287,7 +286,59 @@ test("warnings acknowledge through the catalog chip, and removal is the card's t
   assert.match(removing, /aria-label="Keep notes\/old_draft\.md in storage"/);
 });
 
-test("project file commits count operations and gate selected deletions", () => {
+test("Push review shows only local-outstanding project files", () => {
+  const cases = [
+    { id: "local-only", state: "local_only" as const, local: true, storage: false, visible: true },
+    { id: "local-ahead", state: "local_ahead" as const, local: true, storage: true, visible: true },
+    { id: "synced", state: "synced" as const, local: true, storage: true, visible: false },
+    { id: "storage-only", state: "storage_only" as const, local: false, storage: true, visible: false },
+    { id: "storage-ahead", state: "storage_ahead" as const, local: true, storage: true, visible: false },
+    { id: "diverged", state: "diverged" as const, local: true, storage: true, visible: false },
+    { id: "missing", state: "missing" as const, local: false, storage: true, visible: false },
+    { id: "blocked", state: "blocked" as const, local: true, storage: false, visible: false },
+    { id: "unknown", state: "unknown" as const, local: true, storage: false, visible: false },
+  ];
+  const mixedInventory: ProjectContentInventory = {
+    ...inventory,
+    entries: cases.map((candidate) => ({
+      ...entry(`file-${candidate.id}`, "file", `doc/${candidate.id}.md`),
+      state: candidate.state,
+      local_present: candidate.local,
+      storage_present: candidate.storage,
+      blocked_reason: candidate.state === "blocked" ? "Unreadable file." : null,
+    })),
+  };
+  const selected = new Set(mixedInventory.entries.map((candidate) => candidate.descriptor.resource_id));
+  const html = renderToStaticMarkup(
+    <PushResourceWorkspace
+      resources={mixedInventory.entries.map((candidate) => candidate.descriptor)}
+      selected={selected}
+      projectDefaults={selected}
+      busy={false}
+      error={null}
+      projectContentInventory={mixedInventory}
+      projectContentScanned
+      showProjectFiles
+      activeStep="project_files"
+      onToggle={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+    />,
+  );
+
+  assert.equal((html.match(/class="sync-thread-sync-indicator local"/g) ?? []).length, 2);
+  assert.match(html, /aria-label="2 of 2 selected"/);
+  assert.match(html, />2 entries</);
+  assert.doesNotMatch(html, /aria-label="Remove .* from storage"/);
+  for (const candidate of cases) {
+    const pattern = new RegExp(`${candidate.id}\\.md`);
+    if (candidate.visible) assert.match(html, pattern);
+    else assert.doesNotMatch(html, pattern);
+  }
+  assert.match(html, />3 project files require Pull</);
+});
+
+test("Push gates storage deletions and Pull omits conflict deletions", () => {
   const storedFile = {
     ...entry("file-old", "file", "old.txt"),
     state: "storage_only" as const,
@@ -364,19 +415,20 @@ test("project file commits count operations and gate selected deletions", () => 
   };
   const deletionItems = buildPullReviewItems(deletionPlan);
   assert.deepEqual(
-    pullProjectFileCommitImpact(deletionItems, new Set(["delete-file", "delete-directory"])),
-    { add: 0, replace: 0, deleteFile: 1, deleteDirectory: 1 },
+    deletionItems.map((item) => item.resourceId),
+    ["dir-docs", "dir-specs", "file-a"],
   );
-
-  const pullSource = readFileSync("src/components/project-sync/RestorePlanView.tsx", "utf8");
-  assert.match(pullSource, /projectFileDeletionCount\(projectFileImpact\) > 0 && !deletionApproved/);
-  assert.match(pullSource, /<ProjectFileCommitImpact[\s\S]*?deletionTarget="local"/);
+  assert.deepEqual(
+    pullProjectFileCommitImpact(deletionItems, new Set(["delete-file", "delete-directory"])),
+    { add: 0, replace: 0, deleteFile: 0, deleteDirectory: 0 },
+  );
 });
 
 test("file review details reuse the project copyable popover", () => {
   const html = renderToStaticMarkup(
     <ProjectFilesReviewPage
       mode="push"
+      projectRoot="/tmp/project-a"
       eligibility={{ state: "eligible", reason: "Not inside a Git work tree." }}
       rows={[{
         resourceId: "file-design",
@@ -396,6 +448,7 @@ test("file review details reuse the project copyable popover", () => {
   assert.match(html, /aria-label="Show details for doc\/test-design\.md"/);
   assert.match(html, /aria-haspopup="dialog"/);
   assert.match(html, /<strong>File details<\/strong>/);
+  assert.match(html, /<code>\/tmp\/project-a\/doc\/test-design\.md<\/code>/);
   assert.match(html, /<span>Modified<\/span>/);
   assert.match(html, />Copy all<\/button>/);
   assert.doesNotMatch(html, /sync-project-file-details/);
@@ -508,6 +561,63 @@ const pullPlan: RestorePlan = {
   ],
 };
 
+test("Pull review omits project content that already matches storage", () => {
+  const digest = "c".repeat(64);
+  const noOpPlan: RestorePlan = {
+    ...pullPlan,
+    plan_id: "plan-project-file-noop",
+    actions: [
+      {
+        action_id: "ensure-same",
+        resource_id: "directory-same",
+        kind: {
+          kind: "ensure_project_directory",
+          logical_path: "project/doc",
+          mode: 0o755,
+          source_mtime: 1,
+        },
+        target_path: "/tmp/project-b/doc",
+        expected_target_mode: 0o755,
+        requires_explicit_approval: true,
+      },
+      {
+        action_id: "write-same",
+        resource_id: "file-same",
+        kind: {
+          kind: "write_project_file",
+          logical_path: "project/ghost_story.docx",
+          mode: 0o644,
+          source_mtime: 1,
+        },
+        target_path: "/tmp/project-b/ghost_story.docx",
+        source_sha256: digest,
+        materialized_sha256: digest,
+        expected_target_sha256: digest,
+        expected_target_mode: 0o644,
+        requires_explicit_approval: true,
+      },
+      {
+        action_id: "write-new",
+        resource_id: "file-new",
+        kind: {
+          kind: "write_project_file",
+          logical_path: "project/cold-joke.md",
+          mode: 0o644,
+          source_mtime: 1,
+        },
+        target_path: "/tmp/project-b/cold-joke.md",
+        source_sha256: "d".repeat(64),
+        materialized_sha256: "d".repeat(64),
+        requires_explicit_approval: true,
+      },
+    ],
+  };
+
+  const items = buildPullReviewItems(noOpPlan);
+  assert.deepEqual(items.map((item) => item.resourceId), ["file-new"]);
+  assert.equal(items[0]?.projectContentOperation, "add");
+});
+
 test("Pull project content starts as keep-local and selecting a nested file requires its folders", () => {
   const items = buildPullReviewItems(pullPlan);
   assert.ok(items.every((item) => item.category === "project_content"));
@@ -538,6 +648,7 @@ test("Pull project content starts as keep-local and selecting a nested file requ
       error={null}
       onApply={() => undefined}
       onBack={() => undefined}
+      onRefreshPlan={() => undefined}
     />,
   );
 
@@ -682,6 +793,7 @@ test("a diverged pull row carries and names its preserved copy", () => {
         target_path: "/tmp/project-b/draft.md",
         source_sha256: "e".repeat(64),
         expected_target_sha256: "d".repeat(64),
+        source_size: 4_096,
         requires_explicit_approval: true,
       },
     ],
@@ -690,6 +802,7 @@ test("a diverged pull row carries and names its preserved copy", () => {
   assert.equal(items.length, 1);
   assert.equal(items[0].projectContentOperation, "replace");
   assert.equal(items[0].projectContentPreservedCopy, "draft-local-copy.md");
+  assert.equal(items[0].projectContentSize, 4_096, "the storage-side size rides the plan into the row");
 
   const filesHtml = renderToStaticMarkup(
     <ProjectFilesReviewPage

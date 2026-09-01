@@ -8,7 +8,11 @@ import type {
   ProjectResourceDescriptor,
   ResourceSyncState,
 } from "../../src/types";
-import { ProjectFilesActivityView } from "../../src/components/project-sync/ProjectFilesActivityPage";
+import {
+  ProjectFilesActivityView,
+  buildProjectFilesActivityProjection,
+} from "../../src/components/project-sync/ProjectFilesActivityPage";
+import { PROJECT_FILE_CARD_RENDER_LIMIT } from "../../src/components/project-sync/model";
 
 /* The Files face of a non-git project's activity page: read-only cards in
    the catalog grammar, the storage-only partition on top, and directory
@@ -88,6 +92,7 @@ function renderView(inventory: ProjectContentInventory | null, loading = false, 
       storageName="Attic R2"
       loading={loading}
       error={error}
+      onRescan={() => undefined}
       onRevealPath={() => undefined}
     />,
   );
@@ -104,34 +109,116 @@ test("file inspections share concurrent native work", () => {
   assert.match(inspectProjectFiles, /\["inspect_project_files", request\]/);
 });
 
+test("the activity list searches the full inventory but renders at most 500 file cards", () => {
+  const files = Array.from(
+    { length: PROJECT_FILE_CARD_RENDER_LIMIT + 7 },
+    (_, index) => {
+      const cloudOnly = index % 2 === 0;
+      const path = index === PROJECT_FILE_CARD_RENDER_LIMIT + 6
+        ? "deep/needle-after-limit.md"
+        : `folder-${index % 12}/file-${String(index).padStart(4, "0")}.md`;
+      return entry(
+        `file-${index}`,
+        path,
+        cloudOnly ? "storage_only" : "local_only",
+        cloudOnly ? { local_present: false, storage_present: true } : {},
+      );
+    },
+  );
+  const directories = Array.from({ length: 20 }, (_, index) => ({
+    ...entry(`directory-${index}`, `folder-${index}`, "synced"),
+    entry_type: "directory" as const,
+    descriptor: {
+      ...descriptor(`directory-${index}`, `folder-${index}`),
+      kind: "project_content_directory" as const,
+    },
+  }));
+
+  const markup = renderView(inventoryWith([...directories, ...files]));
+  assert.equal(
+    markup.split("sync-history-thread-card").length - 1,
+    PROJECT_FILE_CARD_RENDER_LIMIT,
+    "cloud and local groups share one file-card budget",
+  );
+  assert.match(markup, /sync-project-file-limit/);
+  assert.match(
+    markup,
+    new RegExp(`First ${PROJECT_FILE_CARD_RENDER_LIMIT} of ${files.length} files shown\\. Search to narrow the list\\.`),
+  );
+
+  const completeProjection = buildProjectFilesActivityProjection(files, "");
+  const completeVisibleCount = completeProjection.cloudEntries.length
+    + completeProjection.localGroups.reduce((sum, group) => sum + group.entries.length, 0);
+  assert.equal(completeProjection.matchingCount, files.length);
+  assert.equal(completeVisibleCount, PROJECT_FILE_CARD_RENDER_LIMIT);
+  assert.ok(completeProjection.cloudEntries.length > 0, "the bounded result retains cloud rows");
+  assert.ok(completeProjection.localGroups.length > 0, "the bounded result retains local groups");
+
+  const narrowedProjection = buildProjectFilesActivityProjection(files, "needle-after-limit");
+  const narrowedEntries = [
+    ...narrowedProjection.cloudEntries,
+    ...narrowedProjection.localGroups.flatMap((group) => group.entries),
+  ];
+  assert.equal(narrowedProjection.matchingCount, 1, "search runs before the render cap");
+  assert.equal(narrowedEntries[0]?.relative_path, "deep/needle-after-limit.md");
+
+  const source = readFileSync("src/components/project-sync/ProjectFilesActivityPage.tsx", "utf8");
+  assert.match(source, /useDeferredValue\(search\)/, "large-inventory search uses deferred input");
+});
+
 test("storage-only files lead the list under an Only-in-storage heading", () => {
   const markup = renderView(inventoryWith([
     entry("file-local", "cold-joke.md", "local_only"),
     entry("file-cloud", "press-kit.pdf", "storage_only", { local_present: false, storage_present: true }),
     entry("file-cloud-deep", "archive/interview.md", "storage_only", { local_present: false, storage_present: true }),
   ]));
-  // The catalog page's own partition grammar: the shared section heading with
-  // the storage name in the running face, and a "Project files" heading over
-  // the local half while the partition exists. No counts, no phrase — the
-  // rows' own badges carry "Pull to download it here".
-  const cloudHeading = markup.indexOf('sync-history-storage-name">Attic R2');
-  const localHeading = markup.indexOf("Project files</h2>");
+  // The ledger grammar: the storage-only partition is one cloud-tinted tile
+  // leading the page, its head naming the storage in the running face — no
+  // counts, no phrase; the rows' own badges carry "Pull to download it here".
+  // Nested cloud files keep their directory as a quiet prefix inside it, and
+  // the local half follows as framed tiles headed "Project root" and by path.
+  const cloudTile = markup.indexOf("sync-project-file-tile cloud");
+  const cloudName = markup.indexOf('sync-history-storage-name">Attic R2');
   const cloudFile = markup.indexOf("press-kit.pdf");
-  const cloudBand = markup.indexOf("archive/");
+  const cloudPrefix = markup.indexOf("archive/");
+  const rootTile = markup.indexOf("Project root");
   const localFile = markup.indexOf("cold-joke.md");
-  assert.match(markup, /sync-history-section-heading/);
-  assert.ok(cloudHeading >= 0, "the storage-only partition is named after the storage");
-  assert.ok(cloudFile > cloudHeading, "cloud files render inside the partition");
-  assert.ok(cloudBand > cloudHeading && cloudBand < localFile, "a cloud-only folder bands inside the partition");
-  assert.ok(localHeading > cloudFile && localHeading < localFile, "the local half is headed while the partition exists");
-  assert.ok(localFile > cloudFile, "local files follow the partition");
-  assert.doesNotMatch(markup, /sync-project-files-cloud-block|sync-project-files-cloud-heading|Pull to download<\/small>/);
+  assert.ok(cloudTile >= 0, "the storage-only partition is a cloud-tinted tile");
+  assert.ok(cloudName > cloudTile, "the tile head names the storage");
+  assert.ok(cloudFile > cloudName, "cloud files render inside the tile");
+  assert.ok(cloudPrefix > cloudName && cloudPrefix < rootTile, "a nested cloud file keeps its path prefix inside the tile");
+  assert.ok(rootTile > cloudFile, "the local half follows as its own tile");
+  assert.ok(localFile > rootTile, "local files render inside the Project root tile");
+  assert.doesNotMatch(markup, /sync-history-section-heading|Project files<\/h2>|Pull to download<\/small>/);
 
-  // Alone, the leaf crumb already names the page: no partition, no headings.
+  // Alone, the local tiles stand without any cloud partition.
   const unpartitioned = renderView(inventoryWith([
     entry("file-local", "cold-joke.md", "local_only"),
   ]));
-  assert.doesNotMatch(unpartitioned, /sync-history-section-heading|Project files<\/h2>/);
+  assert.doesNotMatch(unpartitioned, /sync-project-file-tile cloud|sync-history-section-heading/);
+  assert.match(unpartitioned, />Project root</);
+  assert.match(unpartitioned, / Rescan</, "the bar carries its own rescan beside the tally");
+});
+
+test("missing local files remain actionable storage copies", () => {
+  const markup = renderView(inventoryWith([
+    entry("file-missing", "doc/test-design.md", "missing", {
+      local_present: false,
+      storage_present: true,
+      base_present: true,
+      local_digest: null,
+      storage_digest: "b".repeat(64),
+      base_digest: "b".repeat(64),
+    }),
+  ]));
+
+  assert.match(markup, /sync-history-storage-name">Attic R2/);
+  assert.match(markup, /data-thread-status="cloud-outstanding"/);
+  assert.match(
+    markup,
+    /Not in this folder\. It remains in Attic R2\. Pull to download it here, or remove it during Push\./,
+  );
+  assert.doesNotMatch(markup, /data-thread-status="unavailable"/);
 });
 
 test("the activity list is read-only and directories band instead of nesting", () => {
@@ -148,12 +235,15 @@ test("the activity list is read-only and directories band instead of nesting", (
   ]));
   assert.ok(!markup.includes("checkbox"), "no selection controls on the activity face");
   assert.ok(!markup.includes("Mark reviewed"), "no acknowledgement chips outside a review");
-  assert.ok(markup.includes("notes/</strong>"), "a folder that holds files gets a band");
-  assert.ok(markup.includes("notes/drafts/</strong>"), "a nested folder bands with its full path");
-  assert.ok(markup.includes("2 files"), "the band counts the files directly inside it");
+  // The head's label is pixel-face chrome; the path inside it is the user's
+  // data and rides the sans carve-out span, like the storage name beside it.
+  assert.ok(markup.includes("<span>notes/</span></strong>"), "a folder that holds files heads its own tile");
+  assert.ok(markup.includes("<span>notes/drafts/</span></strong>"), "a nested folder tiles with its full path");
+  assert.ok(markup.includes("2 files"), "the tile head counts the files directly inside it");
   assert.ok(markup.includes("Executable"), "warning files keep their chip");
-  // The directory entry itself draws no card: only the band names it.
-  assert.equal(markup.split("sync-history-thread-card").length - 1, 4, "one card per file, none per directory");
+  // The directory entry itself draws no card: only its tile head names it.
+  assert.equal(markup.split("sync-history-thread-card").length - 1, 4, "one two-row card per file, none per directory");
+  assert.match(markup, /Kind · Markdown|>Markdown</, "the readout line carries the kind chip");
 });
 
 test("file details reuse the project copyable popover", () => {
@@ -167,6 +257,7 @@ test("file details reuse the project copyable popover", () => {
   assert.match(markup, new RegExp(`id="${controlledPanel}"`));
   assert.match(markup, /<strong>File details<\/strong>/);
   assert.match(markup, /Click a value to copy it\./);
+  assert.match(markup, /<code>\/tmp\/project-a\/doc\/test-design\.md<\/code>/);
   assert.match(markup, />Copy all<\/button>/);
   assert.doesNotMatch(markup, /sync-project-file-details/);
 });

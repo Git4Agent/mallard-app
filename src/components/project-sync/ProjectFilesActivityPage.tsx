@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import type {
   LocalProjectSummary,
   ProjectContentEntry,
@@ -11,6 +11,7 @@ import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/Thre
 import { formatBytes } from "../../format";
 import { formatDateTime } from "../../clock";
 import { errorMessage } from "../../storageError";
+import { PROJECT_FILE_CARD_RENDER_LIMIT, fileKindLabel } from "./model";
 import { projectSyncApi } from "./api";
 import { ProjectFilesLockedNotice } from "./ProjectFilesReviewPage";
 import ProjectFileDetailsMenu from "./ProjectFileDetailsMenu";
@@ -20,6 +21,12 @@ import ProjectFileDetailsMenu from "./ProjectFileDetailsMenu";
  * selection, acknowledgement, and removal are review vocabulary, so this page
  * carries none of it — statuses, reveals, and readouts only, the same
  * standing-list contract as the Sessions face beside it.
+ *
+ * Every file is a two-line session-grammar card — Kind and Size ride the
+ * readout line the way a session's messages and tokens do — and every
+ * folder is a framed tile with a header strip, the storage-only partition
+ * leading as the cloud-tinted tile. Hierarchy is containment, never
+ * floating headings.
  */
 
 /** What this page hands the workspace path bar: its refresh, nothing else. */
@@ -60,7 +67,11 @@ function filePresentation(
     case "diverged":
       return { icon: "divergent", tone: "diverged", sentence: `Changed here and in ${storageName}. Review before syncing.` };
     case "missing":
-      return { icon: "unavailable", tone: "unavailable", sentence: "In the sync recipe but missing from this folder." };
+      return {
+        icon: "cloud-outstanding",
+        tone: "storage",
+        sentence: `Not in this folder. It remains in ${storageName}. Pull to download it here, or remove it during Push.`,
+      };
     default:
       return { icon: "unknown", tone: "unknown", sentence: "State unknown. Rescan to compare." };
   }
@@ -84,14 +95,14 @@ function formatMode(mode?: number | null): string | null {
   return mode == null ? null : `0${mode.toString(8).padStart(3, "0")}`;
 }
 
-/** One directory band's worth of rows: the files directly inside it. */
+/** One framed tile's worth of rows: the files directly inside a directory. */
 interface FileGroup {
   directory: string;
   entries: ProjectContentEntry[];
 }
 
 /** Root files first, then each directory that directly holds files, in path
- * order — the flat full-path banding the review's folder treatment uses. */
+ * order — the flat full-path grouping the review's folder treatment uses. */
 function groupByDirectory(entries: ProjectContentEntry[]): FileGroup[] {
   const byDirectory = new Map<string, ProjectContentEntry[]>();
   for (const entry of entries) {
@@ -104,32 +115,55 @@ function groupByDirectory(entries: ProjectContentEntry[]): FileGroup[] {
     .map((directory) => ({ directory, entries: byDirectory.get(directory)! }));
 }
 
-function groupFacts(group: FileGroup): string {
-  const bytes = group.entries.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
-  const count = `${group.entries.length} file${group.entries.length === 1 ? "" : "s"}`;
+/** Search the complete file inventory, then apply one global card budget
+ * before the cloud/local partition and directory grouping. */
+export function buildProjectFilesActivityProjection(
+  fileEntries: ProjectContentEntry[],
+  normalizedSearch: string,
+) {
+  const matchingEntries = normalizedSearch
+    ? fileEntries.filter((entry) => (
+      entry.relative_path.toLocaleLowerCase().includes(normalizedSearch)
+    ))
+    : fileEntries;
+  const visibleEntries = matchingEntries.slice(0, PROJECT_FILE_CARD_RENDER_LIMIT);
+  const cloudEntries = visibleEntries.filter((entry) => (
+    !entry.local_present && entry.storage_present
+  ));
+  const localEntries = visibleEntries.filter((entry) => (
+    entry.local_present || !entry.storage_present
+  ));
+  return {
+    matchingCount: matchingEntries.length,
+    cloudEntries,
+    localGroups: groupByDirectory(localEntries),
+  };
+}
+
+function groupFacts(entries: ProjectContentEntry[]): string {
+  const bytes = entries.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
+  const count = `${entries.length} file${entries.length === 1 ? "" : "s"}`;
   return bytes > 0 ? `${count} · ${formatBytes(bytes)}` : count;
 }
 
-function FileGroupHeading({ group }: { group: FileGroup }) {
-  return (
-    <div className="sync-project-files-group-heading">
-      <Icon name="folder" size={14} />
-      <strong>{group.directory}/</strong>
-      <small>{groupFacts(group)}</small>
-    </div>
-  );
-}
-
-function FileActivityCard({ entry, storageName, projectRoot, onRevealPath }: {
+/** One file, the two-line session-grammar card: title line (status mark,
+ * name, chips, reveal), then the readout line — Kind and Size chips where a
+ * session carries its messages and tokens, the rule, the details popover,
+ * and the stamp closing the row. Rows in the merged cloud tile keep their
+ * directory as a quiet prefix, so a nested storage-only file still says
+ * where it lands. */
+function FileActivityCard({ entry, storageName, projectRoot, onRevealPath, withPathPrefix = false }: {
   entry: ProjectContentEntry;
   storageName: string;
   projectRoot: string;
   onRevealPath?: (path: string) => void;
+  withPathPrefix?: boolean;
 }) {
   const presentation = filePresentation(entry, storageName);
   const warningLabel = entry.warning_code
     ? WARNING_LABELS[entry.warning_code] ?? entry.warning_code.replace(/_/g, " ")
     : null;
+  const directory = parentPath(entry.relative_path);
   return (
     <article className="sync-history-thread-card catalog-card">
       <div className="sync-history-thread-topline">
@@ -142,7 +176,10 @@ function FileActivityCard({ entry, storageName, projectRoot, onRevealPath }: {
           >
             <ThreadStatusIcon status={presentation.icon} size={18} />
           </span>
-          <strong title={entry.relative_path}>{fileName(entry.relative_path)}</strong>
+          <strong title={entry.relative_path}>
+            {withPathPrefix && directory !== "" && <span>{directory}/</span>}
+            {fileName(entry.relative_path)}
+          </strong>
           {entry.blocked_reason && (
             <span className="sync-history-branch-state history-only" title={entry.blocked_reason}>Blocked</span>
           )}
@@ -168,6 +205,13 @@ function FileActivityCard({ entry, storageName, projectRoot, onRevealPath }: {
       <div className="sync-history-session-details">
         <div className="sync-history-session-summary">
           <div className="sync-history-thread-meta" aria-label={`${entry.relative_path} details`}>
+            <span
+              className="sync-history-thread-metric"
+              data-tooltip={`Kind · ${fileKindLabel(entry.relative_path)}`}
+              tabIndex={0}
+            >
+              <Icon name="file" size={12} /><b>{fileKindLabel(entry.relative_path)}</b>
+            </span>
             {entry.size != null
               ? (
                 <span
@@ -184,6 +228,7 @@ function FileActivityCard({ entry, storageName, projectRoot, onRevealPath }: {
           <div className="sync-history-row-clickables">
             <ProjectFileDetailsMenu
               relativePath={entry.relative_path}
+              projectRoot={projectRoot}
               entryTypeLabel={entry.entry_type === "blocked" ? "Blocked entry" : "Regular file"}
               mode={formatMode(entry.mode)}
               modified={entry.source_mtime == null ? null : formatDateTime(entry.source_mtime * 1_000)}
@@ -212,34 +257,30 @@ export function ProjectFilesActivityView({
   storageName,
   loading,
   error,
+  onRescan,
   onRevealPath,
 }: {
   inventory: ProjectContentInventory | null;
   storageName: string;
   loading: boolean;
   error: string | null;
+  onRescan?: () => void;
   onRevealPath?: (path: string) => void;
 }) {
   const [search, setSearch] = useState("");
-  const normalizedSearch = search.trim().toLocaleLowerCase();
-  /* Directory rows carry no bytes and no per-file identity, and the bands
+  const deferredSearch = useDeferredValue(search);
+  const normalizedSearch = deferredSearch.trim().toLocaleLowerCase();
+  /* Directory rows carry no bytes and no per-file identity, and the tiles
      already speak for the folders — files (and blocked candidates) are the
-     cards. */
+     rows. */
   const fileEntries = useMemo(
     () => (inventory?.entries ?? []).filter((entry) => entry.entry_type !== "directory"),
     [inventory],
   );
-  const shownEntries = useMemo(
-    () => (normalizedSearch
-      ? fileEntries.filter((entry) => entry.relative_path.toLocaleLowerCase().includes(normalizedSearch))
-      : fileEntries),
+  const { matchingCount, cloudEntries, localGroups } = useMemo(
+    () => buildProjectFilesActivityProjection(fileEntries, normalizedSearch),
     [fileEntries, normalizedSearch],
   );
-  /* The storage side this Mac does not hold leads the list, the way the
-     sessions face leads with its storage-only group. */
-  const cloudGroups = groupByDirectory(shownEntries.filter((entry) => !entry.local_present && entry.storage_present));
-  const localGroups = groupByDirectory(shownEntries.filter((entry) => entry.local_present || !entry.storage_present));
-  const cloudCount = cloudGroups.reduce((sum, group) => sum + group.entries.length, 0);
 
   if (error) {
     return (
@@ -272,23 +313,6 @@ export function ProjectFilesActivityView({
     );
   }
 
-  const renderGroups = (groups: FileGroup[]) => groups.map((group) => (
-    <div key={group.directory || "(root)"}>
-      {group.directory !== "" && <FileGroupHeading group={group} />}
-      <div className="sync-history-thread-list flat">
-        {group.entries.map((entry) => (
-          <FileActivityCard
-            key={entry.descriptor.resource_id}
-            entry={entry}
-            storageName={storageName}
-            projectRoot={inventory.project_root}
-            onRevealPath={onRevealPath}
-          />
-        ))}
-      </div>
-    </div>
-  ));
-
   return (
     <section className="sync-project-files-page" aria-label="Project files">
       {fileEntries.length > 0 && (
@@ -307,6 +331,11 @@ export function ProjectFilesActivityView({
             aria-label="Search project file paths"
           />
           <span>{fileEntries.length} entr{fileEntries.length === 1 ? "y" : "ies"}</span>
+          {onRescan && (
+            <button type="button" className="btn btn-ghost" onClick={onRescan} disabled={loading}>
+              <Icon name="refresh" size={14} className={loading ? "icon-spin" : undefined} /> {loading ? "Scanning…" : "Rescan"}
+            </button>
+          )}
         </div>
       )}
       {fileEntries.length === 0 ? (
@@ -316,27 +345,57 @@ export function ProjectFilesActivityView({
         </div>
       ) : (
         <>
-          {/* The catalog page's own partition grammar: the shared section
-              heading, storage named in the running face, no counts and no
-              phrase — each row's badge already says "Pull to download it
-              here" against the storage by name. The local half takes a
-              heading only while the partition exists; alone, the leaf crumb
-              already names it. */}
-          {cloudCount > 0 && (
-            <div className="sync-history-section-heading">
-              <h2>
+          {cloudEntries.length > 0 && (
+            <div className="sync-project-file-tile cloud">
+              {/* No counts and no phrase in the head — each row's badge
+                  already says "Pull to download it here" against the storage
+                  by name. */}
+              <div className="sync-project-file-tile-head">
                 <Icon name="cloud" size={14} />
-                Only in <span className="sync-history-storage-name">{storageName}</span>
-              </h2>
+                <strong>Only in <span className="sync-history-storage-name">{storageName}</span></strong>
+              </div>
+              <div className="sync-history-thread-list">
+                {cloudEntries.map((entry) => (
+                  <FileActivityCard
+                    key={entry.descriptor.resource_id}
+                    entry={entry}
+                    storageName={storageName}
+                    projectRoot={inventory.project_root}
+                    onRevealPath={onRevealPath}
+                    withPathPrefix
+                  />
+                ))}
+              </div>
             </div>
           )}
-          {cloudCount > 0 && renderGroups(cloudGroups)}
-          {cloudCount > 0 && localGroups.length > 0 && (
-            <div className="sync-history-section-heading">
-              <h2><Icon name="file" size={14} />Project files</h2>
+          {localGroups.map((group) => (
+            <div key={group.directory || "(root)"} className="sync-project-file-tile">
+              <div className="sync-project-file-tile-head">
+                <Icon name={group.directory === "" ? "git-folder" : "folder"} size={14} />
+                {/* "Project root" is chrome and keeps the pixel face; a path
+                    is the user's data and reads in the normal face, via the
+                    head's span carve-out. */}
+                <strong>{group.directory === "" ? "Project root" : <span>{group.directory}/</span>}</strong>
+                <small>{groupFacts(group.entries)}</small>
+              </div>
+              <div className="sync-history-thread-list">
+                {group.entries.map((entry) => (
+                  <FileActivityCard
+                    key={entry.descriptor.resource_id}
+                    entry={entry}
+                    storageName={storageName}
+                    projectRoot={inventory.project_root}
+                    onRevealPath={onRevealPath}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+          {matchingCount > PROJECT_FILE_CARD_RENDER_LIMIT && (
+            <div className="sync-project-file-limit">
+              First {PROJECT_FILE_CARD_RENDER_LIMIT} of {matchingCount} files shown. Search to narrow the list.
             </div>
           )}
-          {renderGroups(localGroups)}
         </>
       )}
       {(inventory.ignored_count > 0 || inventory.blocked_count > 0 || inventory.warnings.length > 0) && (
@@ -395,6 +454,7 @@ export default function ProjectFilesActivityPage({
       storageName={activeStorageName?.trim() || "storage"}
       loading={loading}
       error={error}
+      onRescan={() => setScanEpoch((epoch) => epoch + 1)}
       onRevealPath={onRevealPath}
     />
   );

@@ -203,7 +203,7 @@ fn install_journaled_sync_config(
     if &current != before {
         return Err("sync config is neither the journaled before nor after state".to_string());
     }
-    repository.install_config_snapshot(after.clone())
+    repository.install_journaled_config_snapshot(after.clone())
 }
 
 /// Complete journaled publication payloads with the exact coordinates the

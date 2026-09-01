@@ -19,8 +19,8 @@ use tauri_app_lib::{
     CatalogActionOutcome, CatalogLinkState, CatalogPullActionKind, CatalogPullApproval,
     CatalogPullDisposition, CatalogPushApproval, CatalogResourceId, CatalogResourceKindTag,
     CatalogResourceRelation, CatalogResourceRepositoryId, CatalogScopeId, CatalogScopePullPlan,
-    CatalogScopePushPlan, CmdOutput, CodexPetFormat, PluginProcessRunner, ProviderKey,
-    StorageCatalogService, CATALOG_SCHEMA,
+    CatalogScopePushPlan, CmdOutput, CodexPetFormat, PluginProcessRunner, ProjectSyncService,
+    ProviderKey, StorageCatalogService, CATALOG_SCHEMA,
 };
 use walkdir::WalkDir;
 
@@ -63,20 +63,29 @@ struct ScopeSet {
 
 struct Replica {
     service: StorageCatalogService,
+    machine_home: PathBuf,
     codex_home: PathBuf,
     scopes: ScopeSet,
 }
 
 fn recommended_push_approval(plan: &CatalogScopePushPlan) -> CatalogPushApproval {
+    let selected_resource_ids = plan
+        .rows
+        .iter()
+        .filter(|row| row.row.selected_by_default)
+        .map(|row| row.row.resource_id.clone())
+        .collect::<Vec<_>>();
+    let acknowledged_warning_digests = plan
+        .rows
+        .iter()
+        .filter(|row| row.row.selected_by_default)
+        .flat_map(|row| row.row.warnings.iter())
+        .map(|warning| warning.digest.clone())
+        .collect();
     CatalogPushApproval {
         plan_id: plan.plan_id.clone(),
-        selected_resource_ids: plan
-            .rows
-            .iter()
-            .filter(|row| row.row.selected_by_default)
-            .map(|row| row.row.resource_id.clone())
-            .collect(),
-        acknowledged_warning_digests: Vec::new(),
+        selected_resource_ids,
+        acknowledged_warning_digests,
     }
 }
 
@@ -232,6 +241,7 @@ fn create_replica(
     };
     Replica {
         service,
+        machine_home: machine_home.to_path_buf(),
         codex_home: canonical_codex_home,
         scopes,
     }
@@ -871,8 +881,130 @@ struct KindFlow {
     resource_ids: BTreeSet<CatalogResourceId>,
 }
 
+fn skill_inventory(a: &Replica, b: &Replica, names: &[&str]) -> BTreeMap<String, TreeSnapshot> {
+    let mut inventory = BTreeMap::new();
+    for (replica_name, replica) in [("a", a), ("b", b)] {
+        for name in names {
+            inventory.insert(
+                format!("{replica_name}/skills/{name}"),
+                snapshot_tree(&skill_path(replica, name)),
+            );
+        }
+    }
+    inventory
+}
+
+fn clear_replica_storage(replica: &Replica, storage_id: &StorageId, expect_remote_content: bool) {
+    let repository = LocalStateRepository::from_home_dir(&replica.machine_home)
+        .expect("open replica state for storage clear");
+    let expected_config_revision = repository
+        .load_config()
+        .expect("load storage-clear config")
+        .revision;
+    let result = ProjectSyncService::new(&repository)
+        .clear_storage_data(storage_id, expected_config_revision)
+        .expect("clear storage through the production service");
+
+    assert_eq!(result.repository_objects_deleted, 0);
+    assert_eq!(result.catalog_links_reset, 1);
+    assert_eq!(result.project_links_reset, 0);
+    if expect_remote_content {
+        assert!(result.library_objects_deleted > 0);
+    } else {
+        assert_eq!(result.library_objects_deleted, 0);
+    }
+}
+
+fn reset_and_republish_skills(
+    a: &Replica,
+    b: &Replica,
+    storage_id: &StorageId,
+    expected_resource_ids: &BTreeSet<CatalogResourceId>,
+) -> u64 {
+    let local_before_reset = skill_inventory(a, b, &[ALPHA, BETA]);
+
+    clear_replica_storage(a, storage_id, true);
+    clear_replica_storage(b, storage_id, false);
+
+    for replica in [a, b] {
+        assert!(replica
+            .service
+            .list_storage_repositories(storage_id)
+            .expect("list repositories after storage clear")
+            .is_empty());
+    }
+    assert_eq!(
+        skill_inventory(a, b, &[ALPHA, BETA]),
+        local_before_reset,
+        "storage clear changed a local skill tree"
+    );
+
+    let push = a
+        .service
+        .prepare_push(&a.scopes.skills, storage_id)
+        .expect("prepare skill republish after storage clear");
+    assert_eq!(
+        push.rows
+            .iter()
+            .map(|row| row.row.resource_id.clone())
+            .collect::<BTreeSet<_>>(),
+        *expected_resource_ids
+    );
+    for row in &push.rows {
+        assert_eq!(row.row.relation, CatalogResourceRelation::LocalOnly);
+        assert!(row.row.selectable);
+        assert!(row.row.selected_by_default);
+        assert!(!row.row.held_for_pull);
+    }
+    let outcome = a
+        .service
+        .apply_push(recommended_push_approval(&push))
+        .expect("republish skills after storage clear");
+    assert!(outcome.published);
+    assert_eq!(outcome.revision, Some(1));
+
+    let pull = prepare_pull(b, &b.scopes.skills, storage_id, BTreeMap::new());
+    assert_eq!(
+        pull.items
+            .iter()
+            .map(|item| item.item.resource_id.clone())
+            .collect::<BTreeSet<_>>(),
+        *expected_resource_ids
+    );
+    for item in &pull.items {
+        assert_eq!(item.item.relation, CatalogResourceRelation::Matching);
+        assert_eq!(
+            item.item.disposition,
+            CatalogPullDisposition::AlreadyMatching
+        );
+        assert!(item.item.actions.is_empty());
+        assert!(item.item.default_action_id.is_none());
+    }
+    let outcome = b
+        .service
+        .apply_pull(recommended_pull_approval(&pull))
+        .expect("accept republished matching skills");
+    assert!(outcome.remote_accepted);
+    assert!(outcome
+        .results
+        .iter()
+        .all(|result| result.outcome == CatalogActionOutcome::AlreadyMatching));
+    assert_eq!(
+        skill_inventory(a, b, &[ALPHA, BETA]),
+        local_before_reset,
+        "skill republish changed a matching local tree"
+    );
+
+    1
+}
+
 #[allow(clippy::too_many_lines)]
-fn run_skill_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> KindFlow {
+fn run_skill_flow(
+    a: &Replica,
+    b: &Replica,
+    storage_id: &StorageId,
+    reset_storage_mid_flow: bool,
+) -> KindFlow {
     let mut revision = 0_u64;
     let alpha_v1 = write_skill(a, ALPHA, "alpha-v1-from-a");
     let beta_v1 = write_skill(b, BETA, "beta-v1-from-b");
@@ -889,15 +1021,15 @@ fn run_skill_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> KindFlow 
         revision,
     );
 
-    // B links second: the storage already holds alpha, which B has never
-    // reviewed, so the link routes to Pull.
+    // B links second: the storage already holds alpha, but B has no local
+    // copy, so the row is LocalMissing and the link routes to Pull.
     link_scope(b, &b.scopes.skills, storage_id, "review_pull");
     assert_row_state(
         b,
         &b.scopes.skills,
         storage_id,
         ALPHA,
-        CatalogLinkState::UnreviewedRemote,
+        CatalogLinkState::LocalMissing,
     );
     pull_resource(
         b,
@@ -990,6 +1122,15 @@ fn run_skill_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> KindFlow 
         CatalogActionOutcome::Updated,
     );
     assert_tree(&skill_path(a, BETA), &beta_v2);
+
+    if reset_storage_mid_flow {
+        revision = reset_and_republish_skills(
+            a,
+            b,
+            storage_id,
+            &BTreeSet::from([alpha_id.clone(), beta_id.clone()]),
+        );
+    }
 
     // Alpha diverges. A wins the storage race; B's local branch is preserved.
     let alpha_a_winner = write_skill(a, ALPHA, "alpha-v3-a-storage-winner");
@@ -1709,7 +1850,23 @@ fn assert_storage_privacy(storage_root: &Path, needles: &[Vec<u8>]) -> usize {
 /// preservation, materialization, and fixed-point behavior for two isolated
 /// Codex homes. It is safe to call after a conversation flow because the
 /// Library namespace is independent of project bundle heads.
+#[allow(dead_code)]
 pub fn run_catalog_flow(inputs: CatalogFlowInputs<'_>) -> CatalogFlowReport {
+    run_catalog_flow_inner(inputs, false)
+}
+
+/// Run the deterministic catalog flow with a whole-storage clear between the
+/// ordinary update phase and the divergence phase. Use only with a dedicated
+/// storage because the clear also removes project repositories by design.
+#[allow(dead_code)]
+pub fn run_catalog_flow_with_storage_reset(inputs: CatalogFlowInputs<'_>) -> CatalogFlowReport {
+    run_catalog_flow_inner(inputs, true)
+}
+
+fn run_catalog_flow_inner(
+    inputs: CatalogFlowInputs<'_>,
+    reset_storage_mid_flow: bool,
+) -> CatalogFlowReport {
     for (label, path) in [
         ("machine A home", inputs.machine_home_a),
         ("machine B home", inputs.machine_home_b),
@@ -1745,7 +1902,7 @@ pub fn run_catalog_flow(inputs: CatalogFlowInputs<'_>) -> CatalogFlowReport {
         calls.clone(),
     );
 
-    let skills = run_skill_flow(&a, &b, &inputs.storage.id);
+    let skills = run_skill_flow(&a, &b, &inputs.storage.id, reset_storage_mid_flow);
     let injected_inventory_calls = calls.load(Ordering::Relaxed);
     assert!(
         injected_inventory_calls > 0,

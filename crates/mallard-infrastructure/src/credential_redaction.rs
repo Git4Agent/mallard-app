@@ -39,6 +39,8 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 
+use crate::payload::PayloadBytes;
+
 /// The single compiled-in ruleset codec this binary carries.
 pub const REDACTION_CODEC_V1: &str = "mallard.redact.v1";
 
@@ -1082,24 +1084,28 @@ impl RedactionRuleset {
     /// (spliced into the raw text, formatting preserved); anything else
     /// takes the line-delimited path. Non-UTF-8 bytes pass through
     /// unchanged (documented residual: the detector is textual).
-    pub fn redact_document(&self, bytes: &[u8]) -> Result<(Vec<u8>, bool), String> {
-        let Ok(text) = std::str::from_utf8(bytes) else {
-            return Ok((bytes.to_vec(), false));
+    pub fn redact_document(&self, bytes: Vec<u8>) -> Result<(Vec<u8>, bool), String> {
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return Ok((bytes, false));
         };
         if text.trim().is_empty() {
-            return Ok((bytes.to_vec(), false));
+            return Ok((bytes, false));
         }
         if let Some(value) = parse_single_json_value(text) {
             let replacements = self.collect_replacements(&value);
             if replacements.is_empty() {
-                return Ok((bytes.to_vec(), false));
+                return Ok((bytes, false));
             }
             let spliced = apply_json_replacements(text, &replacements);
             self.verify_spliced_document(text, &spliced)?;
             return Ok((spliced.into_bytes(), true));
         }
         let (redacted, changed_lines) = self.redact_jsonl_text(text)?;
-        Ok((redacted.into_bytes(), changed_lines > 0))
+        if changed_lines == 0 {
+            Ok((bytes, false))
+        } else {
+            Ok((redacted.into_bytes(), true))
+        }
     }
 
     fn verify_spliced_document(&self, original: &str, spliced: &str) -> Result<(), String> {
@@ -1123,8 +1129,12 @@ impl RedactionRuleset {
     /// certificate in the `RedactedWireBytes` newtype. Conversation publish
     /// paths accept only the newtype, so unredacted bytes are
     /// unrepresentable at the boundary.
-    pub fn certify_wire_document(&self, bytes: Vec<u8>) -> Result<RedactedWireBytes, String> {
-        let Ok(text) = std::str::from_utf8(&bytes) else {
+    pub fn certify_wire_document(
+        &self,
+        bytes: impl Into<PayloadBytes>,
+    ) -> Result<RedactedWireBytes, String> {
+        let bytes = bytes.into();
+        let Ok(text) = std::str::from_utf8(bytes.as_bytes()) else {
             return Ok(RedactedWireBytes { bytes });
         };
         if let Some(value) = parse_single_json_value(text) {
@@ -1169,7 +1179,7 @@ impl RedactionRuleset {
 /// `certify_wire_document`; conversation publish paths require this type.
 #[derive(Clone, Debug)]
 pub struct RedactedWireBytes {
-    bytes: Vec<u8>,
+    bytes: PayloadBytes,
 }
 
 impl RedactedWireBytes {
@@ -1177,7 +1187,7 @@ impl RedactedWireBytes {
         &self.bytes
     }
 
-    pub fn into_bytes(self) -> Vec<u8> {
+    pub fn into_bytes(self) -> PayloadBytes {
         self.bytes
     }
 }
@@ -2130,7 +2140,9 @@ mod tests {
     #[test]
     fn single_json_value_documents_are_field_aware_and_format_preserving() {
         let document = "{\n  \"todos\": [\n    {\"text\": \"rotate sk-ant-api03-abcdefghijklmnop\", \"itemId\": \"A7fK9q2ZpX4mW8vB1cN6dR3sT5uY0hgJx\"}\n  ]\n}\n";
-        let (redacted, changed) = shared().redact_document(document.as_bytes()).unwrap();
+        let (redacted, changed) = shared()
+            .redact_document(document.as_bytes().to_vec())
+            .unwrap();
         assert!(changed);
         assert_eq!(
             String::from_utf8(redacted).unwrap(),
@@ -2141,7 +2153,9 @@ mod tests {
     #[test]
     fn non_json_documents_take_the_raw_line_pass() {
         let env_file = "APP=demo\nDB_PASSWORD=hunter2\nDEBUG=1\n";
-        let (redacted, changed) = shared().redact_document(env_file.as_bytes()).unwrap();
+        let (redacted, changed) = shared()
+            .redact_document(env_file.as_bytes().to_vec())
+            .unwrap();
         assert!(changed);
         assert_eq!(
             String::from_utf8(redacted).unwrap(),
@@ -2152,17 +2166,27 @@ mod tests {
     #[test]
     fn non_utf8_documents_pass_through_unchanged() {
         let bytes = [0xff, 0xfe, 0x00, 0x41];
-        let (redacted, changed) = shared().redact_document(&bytes).unwrap();
+        let (redacted, changed) = shared().redact_document(bytes.to_vec()).unwrap();
         assert!(!changed);
         assert_eq!(redacted, bytes);
     }
 
     #[test]
+    fn unchanged_documents_retain_the_input_allocation() {
+        let bytes = b"{\"content\":\"plain text\"}\n".to_vec();
+        let pointer = bytes.as_ptr();
+        let (redacted, changed) = shared().redact_document(bytes).unwrap();
+        assert!(!changed);
+        assert_eq!(redacted.as_ptr(), pointer);
+    }
+
+    #[test]
     fn certification_accepts_fixpoints_and_rejects_planted_secrets() {
         let clean = "{\"content\":\"uses <password> and <anthropic-api-key>\"}\n";
-        shared()
-            .certify_wire_document(clean.as_bytes().to_vec())
-            .unwrap();
+        let clean_payload = PayloadBytes::from(clean.as_bytes().to_vec());
+        let clean_pointer = clean_payload.as_bytes().as_ptr();
+        let certified = shared().certify_wire_document(clean_payload).unwrap();
+        assert_eq!(certified.as_bytes().as_ptr(), clean_pointer);
         let dirty = "{\"content\":\"sk-ant-api03-abcdefghijklmnop\"}\n";
         let error = shared()
             .certify_wire_document(dirty.as_bytes().to_vec())

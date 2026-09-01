@@ -398,7 +398,7 @@ test("blocked resources cannot enter a published recipe", () => {
 });
 
 test("the push review is one screen: header actions, list, Push in the footer", () => {
-  const resource = memoryResource("review");
+  const resource = { ...memoryResource("review"), category: "tools" as const };
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
       resources={[resource]}

@@ -15,6 +15,7 @@ use std::time::UNIX_EPOCH;
 use walkdir::{DirEntry, WalkDir};
 
 use crate::conversation_codec::CodecLineage;
+use crate::payload::PayloadBytes;
 use mallard_domain::{self as domain, hex_lower, sha256_hex};
 
 const MAX_DISCOVERED_FILES: usize = 20_000;
@@ -85,7 +86,7 @@ pub struct ProjectInventory {
 pub struct CapturedFile {
     pub logical_path: String,
     pub resource_id: String,
-    pub bytes: Vec<u8>,
+    pub bytes: PayloadBytes,
     pub source_mtime: u64,
     /// Portable permission bits. Set-id and other non-permission bits are
     /// always stripped; Windows capture uses 0o600.
@@ -182,9 +183,6 @@ struct SourceFile {
     physical_path: PathBuf,
     logical_path: String,
     opaque_content: bool,
-    /// Derived indexes retain the physical source only for containment and
-    /// freshness validation; these filtered bytes are what enter the bundle.
-    derived_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -448,11 +446,8 @@ fn capture_resource(
         .iter()
         .zip(item.file_meta.iter().copied())
     {
-        let bytes = match &source.derived_bytes {
-            Some(bytes) => bytes.clone(),
-            None => fs::read(&source.physical_path)
-                .map_err(|e| format!("read '{}': {}", source.physical_path.display(), e))?,
-        };
+        let bytes = fs::read(&source.physical_path)
+            .map_err(|e| format!("read '{}': {}", source.physical_path.display(), e))?;
         crate::sync_metrics::record_transcript_bytes_read(
             &source.physical_path,
             bytes.len() as u64,
@@ -476,7 +471,7 @@ fn capture_resource(
         };
         let bytes = if scrub {
             crate::credential_redaction::shared()
-                .redact_document(&bytes)
+                .redact_document(bytes)
                 .map_err(|error| {
                     format!(
                         "resource '{}' failed credential redaction in '{}': {}",
@@ -487,7 +482,8 @@ fn capture_resource(
         } else {
             bytes
         };
-        if let Some(secret) = detect_secret_material(&bytes) {
+        let bytes = PayloadBytes::from(bytes);
+        if let Some(secret) = detect_secret_material(bytes.as_bytes()) {
             if source.opaque_content {
                 warnings.push(format!(
                     "{} may contain {} (opaque user content requires review)",
@@ -634,11 +630,7 @@ fn capture_from_discovery_with_workers(
             )?;
             let meta = fs::metadata(&source.physical_path)
                 .map_err(|e| format!("inspect '{}': {}", source.physical_path.display(), e))?;
-            let content_len = source
-                .derived_bytes
-                .as_ref()
-                .map(|bytes| bytes.len() as u64)
-                .unwrap_or(meta.len());
+            let content_len = meta.len();
             if content_len > file_limit {
                 return Err(format!(
                     "resource '{}' file '{}' exceeds {} bytes",
@@ -1079,7 +1071,6 @@ fn install_provider_discovery(
             physical_path: session.physical_path,
             logical_path: transcript_logical.clone(),
             opaque_content: true,
-            derived_bytes: None,
         }];
         let mut logical_paths = vec![transcript_logical.clone()];
         let mut blocked_reason = session.blocked_reason;
@@ -1099,7 +1090,6 @@ fn install_provider_discovery(
                 physical_path: sidecar.physical_path,
                 logical_path: logical.clone(),
                 opaque_content: true,
-                derived_bytes: None,
             });
             logical_paths.push(logical.clone());
             sidecar_refs.push(CapturedSidecarRef {
@@ -1147,7 +1137,6 @@ fn install_provider_discovery(
                 physical_path: file.physical_path,
                 logical_path: format!("state/providers/{}/{}", provider, file.logical_suffix),
                 opaque_content: true,
-                derived_bytes: None,
             })
             .collect::<Vec<_>>();
         if files.is_empty() {
@@ -1461,7 +1450,6 @@ fn add_project_content_file(
                 physical_path: path.to_path_buf(),
                 logical_path,
                 opaque_content: true,
-                derived_bytes: None,
             }],
             conversation: None,
         },
@@ -2888,7 +2876,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let captured = capture_selected(registry(), &first_request, &selected).unwrap();
         assert_eq!(
-            captured.files["project/docs/specs/a.md"].bytes,
+            captured.files["project/docs/specs/a.md"].bytes.as_bytes(),
             b"portable spec"
         );
         assert!(captured.directories.contains_key("project/docs"));
@@ -3105,7 +3093,6 @@ mod tests {
             physical_path: physical,
             logical_path: format!("state/codex/{name}"),
             opaque_content: opaque,
-            derived_bytes: None,
         }
     }
 
@@ -3245,7 +3232,6 @@ mod tests {
                 physical_path: physical,
                 logical_path: format!("state/codex/big-{index:02}.bin"),
                 opaque_content: false,
-                derived_bytes: None,
             });
         }
         let discovery = synthetic_discovery(vec![("big", files)]);

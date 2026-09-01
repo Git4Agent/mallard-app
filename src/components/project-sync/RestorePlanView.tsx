@@ -53,6 +53,9 @@ interface Props {
   error: string | null;
   onApply: (selection: PullReviewSelection) => void;
   onBack: () => void;
+  /** Rebuilds the plan against the storage's current head — the files
+   *  page's Rescan. */
+  onRefreshPlan?: () => void;
   onUnlinkStorage?: () => void;
   onResetMetadata?: () => void;
   /**
@@ -277,6 +280,7 @@ export default function RestorePlanView({
   error,
   onApply,
   onBack,
+  onRefreshPlan,
   onUnlinkStorage,
   onResetMetadata,
   onPrimaryChange,
@@ -510,6 +514,7 @@ export default function RestorePlanView({
         mode: action && "mode" in action.kind ? action.kind.mode : action?.expected_target_mode,
         sourceMtime: action && "source_mtime" in action.kind ? action.kind.source_mtime : null,
         localPresent: Boolean(action?.expected_target_sha256 || action?.expected_target_mode != null),
+        size: item.projectContentSize,
         storagePresent: item.projectContentOperation !== "delete_file" && item.projectContentOperation !== "delete_directory",
         operation: item.projectContentOperation ?? undefined,
         preservedCopyPath: item.projectContentPreservedCopy ?? undefined,
@@ -624,6 +629,8 @@ export default function RestorePlanView({
           {activeStep === "project_files" && (
             <ProjectFilesReviewPage
               mode="pull"
+              projectRoot={binding.canonical_project_root || binding.project_root}
+              onScan={onRefreshPlan}
               eligibility={plan.project_content_eligibility ?? {
                 state: "unknown",
                 reason: "Project-file eligibility was not recorded in this Pull plan.",

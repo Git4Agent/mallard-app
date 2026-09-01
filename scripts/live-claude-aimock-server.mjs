@@ -440,6 +440,36 @@ function readToolCall(message, contract) {
   );
 }
 
+function replayedReadToolCall(message, contract) {
+  if (message?.role !== "assistant" || message.tool_calls?.length !== 1) {
+    return false;
+  }
+  const call = message.tool_calls[0];
+  if (
+    call?.id !== contract.call_id ||
+    call?.type !== "function" ||
+    call?.function?.name !== "Read" ||
+    typeof call?.function?.arguments !== "string"
+  ) {
+    return false;
+  }
+  let argumentsValue;
+  try {
+    argumentsValue = JSON.parse(call.function.arguments);
+  } catch {
+    return false;
+  }
+  const filePath = argumentsValue?.file_path;
+  return (
+    isRecord(argumentsValue) &&
+    Object.keys(argumentsValue).length === 1 &&
+    isBoundedString(filePath, MAX_PATH_BYTES) &&
+    isAbsolute(filePath) &&
+    resolve(filePath) === filePath &&
+    basename(filePath) === basename(contract.file_path)
+  );
+}
+
 function readToolResult(message, contract) {
   return (
     message?.role === "tool" &&
@@ -471,6 +501,9 @@ function validateReadRound(request, scenario, contract) {
   );
   const toolCallIndexes = messages.flatMap((message, index) =>
     readToolCall(message, contract) ? [index] : [],
+  );
+  const replayedToolCallIndexes = messages.flatMap((message, index) =>
+    replayedReadToolCall(message, contract) ? [index] : [],
   );
   const toolResultIndexes = messages.flatMap((message, index) =>
     readToolResult(message, contract) ? [index] : [],
@@ -509,13 +542,16 @@ function validateReadRound(request, scenario, contract) {
       toolResultIndexes.length === 0
     );
   }
+  // Pull path-maps the historical Read argument to the destination project.
+  // The Rust flow checks that exact destination; the mock keeps the provider
+  // request strict on call identity, argument shape, and file name.
   return (
     promptIndexes.length === 1 &&
     responseIndex >= 0 &&
-    toolCallIndexes.length === 1 &&
+    replayedToolCallIndexes.length === 1 &&
     toolResultIndexes.length === 1 &&
-    promptIndexes[0] < toolCallIndexes[0] &&
-    toolCallIndexes[0] < toolResultIndexes[0] &&
+    promptIndexes[0] < replayedToolCallIndexes[0] &&
+    replayedToolCallIndexes[0] < toolResultIndexes[0] &&
     toolResultIndexes[0] < responseIndex
   );
 }

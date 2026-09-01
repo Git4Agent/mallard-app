@@ -301,6 +301,26 @@ test("history validation requires exact markers, the Read round, and only Read e
   assert.equal(accepted.read_round_match, true);
   assert.equal(accepted.tools_ok, true);
 
+  const relocatedMessages = structuredClone(messages);
+  relocatedMessages[1].tool_calls[0].function.arguments = JSON.stringify({
+    file_path: "/private/tmp/replica-b/mallard-claude-read-marker.txt",
+  });
+  const relocatedReplay = validateScenarioRequest(
+    document,
+    subject,
+    normalizedRequest(relocatedMessages),
+  );
+  assert.equal(relocatedReplay.history_match, true);
+  assert.equal(relocatedReplay.read_round_match, true);
+
+  const resultOnlyReplay = validateScenarioRequest(
+    document,
+    subject,
+    normalizedRequest([messages[0], messages[2], messages[3], messages[4]]),
+  );
+  assert.equal(resultOnlyReplay.history_match, false);
+  assert.equal(resultOnlyReplay.read_round_match, false);
+
   const missingRead = validateScenarioRequest(
     document,
     subject,
