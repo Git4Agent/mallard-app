@@ -10,7 +10,7 @@ use crate::providers::traits::{
     DiscoveredProviderState, DiscoveredSession, DiscoveredSidecar, DiscoveredStateFile,
     SessionDiscovery, SessionDiscoveryContext,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
@@ -72,6 +72,7 @@ pub(super) fn discover(
     }
     let mut session_ids = BTreeSet::new();
     let mut root_buckets = BTreeSet::<PathBuf>::new();
+    let mut canonical_cwds = BTreeMap::new();
     for entry in WalkDir::new(&projects)
         .follow_links(false)
         .min_depth(2)
@@ -96,7 +97,7 @@ pub(super) fn discover(
                 continue;
             }
         };
-        if !session_home_is_project_root(context.project_root, &meta.cwd) {
+        if !session_home_is_project_root(context.project_root, &meta.cwd, &mut canonical_cwds) {
             continue;
         }
         session_ids.insert(meta.session_id.clone());

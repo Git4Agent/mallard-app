@@ -9,8 +9,6 @@ import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
-  ActivityLogLevel,
-  ActivityLogType,
   AppTheme,
   BundleFetchProgress,
   BundleRecipe,
@@ -44,8 +42,8 @@ import type {
 import { PROJECT_SYNC_SCHEMA } from "../../types";
 import Icon from "../Icons";
 import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
-import LogPanel, { ACTIVITY_LOG_TYPES } from "../LogPanel";
 import BundleConnectionDialog from "./BundleConnectionDialog";
+import ActivityLogDrawer from "./ActivityLogDrawer";
 import SettingsPage from "./SettingsPage";
 import { getPreference } from "../../preferences";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
@@ -114,6 +112,8 @@ interface Props {
   theme: AppTheme;
   onThemeChange: (theme: AppTheme) => void;
 }
+
+const MAX_LIVE_LOG_LINES = 2_000;
 
 const EMPTY_CONFIG: SyncConfig = {
   schema: PROJECT_SYNC_SCHEMA,
@@ -317,31 +317,6 @@ function defaultProfileIds(): Record<ProviderKey, string> {
   return {};
 }
 
-function logMatchesFilters(
-  line: LogLine,
-  types: readonly ActivityLogType[],
-  level: ActivityLogLevel | "all",
-  search = "",
-): boolean {
-  const needle = search.trim().toLocaleLowerCase();
-  return types.includes(line.type ?? "system")
-    && (level === "all" || line.level === level)
-    && (!needle
-      || line.message.toLocaleLowerCase().includes(needle)
-      || !!line.event?.toLocaleLowerCase().includes(needle));
-}
-
-function mergeLogLines(...groups: LogLine[][]): LogLine[] {
-  const entries = new Map<string, LogLine>();
-  for (const line of groups.flat()) {
-    const key = line.id ?? `${line.ts}:${line.level}:${line.type ?? "system"}:${line.message}`;
-    entries.set(key, line);
-  }
-  return [...entries.values()].sort((left, right) => (
-    left.ts - right.ts || (left.id ?? "").localeCompare(right.id ?? "")
-  ));
-}
-
 export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [config, setConfig] = useState<SyncConfig>(EMPTY_CONFIG);
   const [registrations, setRegistrations] = useState<LocalProjectRegistration[]>([]);
@@ -413,18 +388,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   // What produced the current Pull outcome, so Recheck can rebuild the banner
   // against fresh readiness instead of replanning the whole Pull.
   const pullOutcomeInputs = useRef<Parameters<typeof buildPullOutcome>[0] | null>(null);
-  const [logLines, setLogLines] = useState<LogLine[]>([]);
-  const [logTypeFilters, setLogTypeFilters] = useState<ActivityLogType[]>(() => [...ACTIVITY_LOG_TYPES]);
-  const [logLevelFilter, setLogLevelFilter] = useState<ActivityLogLevel | "all">("all");
-  const [logSearchInput, setLogSearchInput] = useState("");
-  const [logSearch, setLogSearch] = useState("");
-  const [logCursor, setLogCursor] = useState<string | null>(null);
-  const [logLoading, setLogLoading] = useState(true);
-  const [logLoadingOlder, setLogLoadingOlder] = useState(false);
-  const [logLoadError, setLogLoadError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
   const [logScrollToBottomEpoch, setLogScrollToBottomEpoch] = useState(0);
+  const [logRefreshEpoch, setLogRefreshEpoch] = useState(0);
   const [logHeight, setLogHeight] = useState(240);
   const [resizingLog, setResizingLog] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(storedSidebarWidth);
@@ -435,8 +402,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const appMenuRef = useRef<HTMLDivElement>(null);
   const activityOpenRef = useRef(false);
   const logDrawerRef = useRef<HTMLDivElement>(null);
-  const logFiltersRef = useRef({ types: logTypeFilters, level: logLevelFilter, search: logSearch });
-  const logRequestRef = useRef(0);
+  const liveLogLinesRef = useRef<LogLine[]>([]);
+  const liveLogSubscribersRef = useRef(new Set<(line: LogLine) => void>());
   const sidebarResizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
 
   const [setupDrafts, setSetupDrafts] = useState<SetupDraftSummary[]>([]);
@@ -555,14 +522,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     activityOpenRef.current = activityOpen;
   }, [activityOpen]);
 
-  useEffect(() => {
-    logFiltersRef.current = { types: logTypeFilters, level: logLevelFilter, search: logSearch };
-  }, [logLevelFilter, logSearch, logTypeFilters]);
+  const readLiveLogLines = useCallback((): readonly LogLine[] => liveLogLinesRef.current, []);
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => setLogSearch(logSearchInput), 180);
-    return () => window.clearTimeout(timer);
-  }, [logSearchInput]);
+  const subscribeToLiveLogLines = useCallback((subscriber: (line: LogLine) => void) => {
+    liveLogSubscribersRef.current.add(subscriber);
+    return () => liveLogSubscribersRef.current.delete(subscriber);
+  }, []);
 
   useEffect(() => {
     try {
@@ -624,64 +589,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     return () => window.removeEventListener("resize", fitLogToWindow);
   }, []);
 
-  const loadActivityLogs = useCallback(async (cursor: string | null = null) => {
-    const requestId = ++logRequestRef.current;
-    const startedAt = Date.now();
-    const loadingOlder = cursor !== null;
-    if (loadingOlder) {
-      setLogLoadingOlder(true);
-    } else {
-      setLogLoading(true);
-      setLogLines([]);
-    }
-    setLogLoadError(null);
-    if (logTypeFilters.length === 0) {
-      setLogCursor(null);
-      setLogLines([]);
-      setLogLoading(false);
-      setLogLoadingOlder(false);
-      return;
-    }
-    try {
-      const page = await projectSyncApi.queryActivityLogs({
-        types: logTypeFilters,
-        levels: logLevelFilter === "all" ? [] : [logLevelFilter],
-        search: logSearch.trim() || null,
-        cursor,
-        limit: 500,
-      });
-      if (requestId !== logRequestRef.current) return;
-      setLogCursor(page.next_cursor ?? null);
-      setLogLines((current) => {
-        const next = loadingOlder
-          ? mergeLogLines(page.entries, current)
-          : mergeLogLines(
-            page.entries,
-            current.filter((line) => line.ts >= startedAt
-              && logMatchesFilters(line, logTypeFilters, logLevelFilter, logSearch)),
-          );
-        return next.slice(-2_000);
-      });
-    } catch (reason) {
-      if (requestId === logRequestRef.current) setLogLoadError(errorMessage(reason));
-    } finally {
-      if (requestId === logRequestRef.current) {
-        setLogLoading(false);
-        setLogLoadingOlder(false);
-      }
-    }
-  }, [logLevelFilter, logSearch, logTypeFilters]);
-
-  useEffect(() => {
-    if (activityOpen) void loadActivityLogs();
-  }, [activityOpen, loadActivityLogs]);
-
   useEffect(() => {
     const unlisten = listen<LogLine>("sync-log", (event) => {
-      const filters = logFiltersRef.current;
-      if (logMatchesFilters(event.payload, filters.types, filters.level, filters.search)) {
-        setLogLines((current) => mergeLogLines(current, [event.payload]).slice(-2_000));
+      const retained = liveLogLinesRef.current;
+      retained.push(event.payload);
+      if (retained.length > MAX_LIVE_LOG_LINES) {
+        retained.splice(0, retained.length - MAX_LIVE_LOG_LINES);
       }
+      for (const subscriber of liveLogSubscribersRef.current) subscriber(event.payload);
       if (!activityOpenRef.current) setUnreadLogs((current) => Math.min(99, current + 1));
     });
     return () => {
@@ -3859,7 +3774,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         ) : settingsOpen ? (
           <SettingsPage
             appActions={appActions}
-            onLogsChanged={() => void loadActivityLogs()}
+            onLogsChanged={() => setLogRefreshEpoch((epoch) => epoch + 1)}
           />
         ) : storageIndexOpen ? (
           <StorageIndexPage
@@ -3953,51 +3868,25 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           />
         )}
 
-        <div
-          ref={logDrawerRef}
-          id="activity-log-drawer"
-          className={`log-drawer sync-log-drawer${activityOpen ? " open" : ""}`}
-          style={{ height: activityOpen ? logHeight : undefined }}
-          role="region"
-          aria-label="Logs"
-          tabIndex={-1}
-        >
-          {activityOpen && (
-            <div
-              className="log-resizer"
-              role="separator"
-              aria-label="Resize log"
-              aria-orientation="horizontal"
-              onMouseDown={startLogResize}
-              onDoubleClick={() => setLogHeight(240)}
-            />
-          )}
-          {activityOpen && (
-            <LogPanel
-              lines={logLines}
-              typeFilters={logTypeFilters}
-              levelFilter={logLevelFilter}
-              search={logSearchInput}
-              loading={logLoading}
-              loadingOlder={logLoadingOlder}
-              hasOlder={!!logCursor}
-              error={logLoadError}
-              scrollToBottomEpoch={logScrollToBottomEpoch}
-              onTypeFiltersChange={setLogTypeFilters}
-              onLevelFilterChange={setLogLevelFilter}
-              onSearchChange={setLogSearchInput}
-              onLoadOlder={() => logCursor && void loadActivityLogs(logCursor)}
-              onManage={openSettings}
-              onClose={() => {
-                activityOpenRef.current = false;
-                setActivityOpen(false);
-                window.requestAnimationFrame(() => {
-                  document.getElementById("activity-log-trigger")?.focus();
-                });
-              }}
-            />
-          )}
-        </div>
+        <ActivityLogDrawer
+          open={activityOpen}
+          height={logHeight}
+          refreshEpoch={logRefreshEpoch}
+          scrollToBottomEpoch={logScrollToBottomEpoch}
+          drawerRef={logDrawerRef}
+          onStartResize={startLogResize}
+          onResetHeight={() => setLogHeight(240)}
+          onManage={openSettings}
+          onClose={() => {
+            activityOpenRef.current = false;
+            setActivityOpen(false);
+            window.requestAnimationFrame(() => {
+              document.getElementById("activity-log-trigger")?.focus();
+            });
+          }}
+          readLiveLines={readLiveLogLines}
+          subscribeToLiveLines={subscribeToLiveLogLines}
+        />
       </div>
 
       {pendingBundleConnection && pendingConnectionProject && pendingConnectionStorage && (

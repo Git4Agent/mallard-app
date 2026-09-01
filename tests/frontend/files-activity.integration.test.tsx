@@ -93,6 +93,7 @@ function renderView(inventory: ProjectContentInventory | null, loading = false, 
       loading={loading}
       error={error}
       onRescan={() => undefined}
+      onOpenFile={() => undefined}
       onRevealPath={() => undefined}
     />,
   );
@@ -189,6 +190,8 @@ test("storage-only files lead the list under an Only-in-storage heading", () => 
   assert.ok(cloudPrefix > cloudName && cloudPrefix < rootTile, "a nested cloud file keeps its path prefix inside the tile");
   assert.ok(rootTile > cloudFile, "the local half follows as its own tile");
   assert.ok(localFile > rootTile, "local files render inside the Project root tile");
+  assert.match(markup, /class="sync-history-session-title-button" title="Open cold-joke\.md"/);
+  assert.doesNotMatch(markup, /title="Open press-kit\.pdf"/);
   assert.doesNotMatch(markup, /sync-history-section-heading|Project files<\/h2>|Pull to download<\/small>/);
 
   // Alone, the local tiles stand without any cloud partition.

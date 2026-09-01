@@ -17,6 +17,7 @@ use crate::provider_capture::{
 };
 use mallard_domain::{ConversationFileRole, ProviderKey};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::Path;
 use walkdir::WalkDir;
 
@@ -108,6 +109,7 @@ impl SessionAdapter for TestProviderAdapter {
         if !sessions_root.exists() {
             return Ok(discovery);
         }
+        let mut canonical_cwds = BTreeMap::new();
         for entry in WalkDir::new(&sessions_root)
             .follow_links(false)
             .max_depth(2)
@@ -129,7 +131,7 @@ impl SessionAdapter for TestProviderAdapter {
                     continue;
                 }
             };
-            if !session_home_is_project_root(context.project_root, &meta.cwd) {
+            if !session_home_is_project_root(context.project_root, &meta.cwd, &mut canonical_cwds) {
                 continue;
             }
             discovery.sessions.push(DiscoveredSession {

@@ -1743,12 +1743,17 @@ pub(crate) fn validated_session_metadata(
 /// The exact-home ownership predicate: a session belongs to the project
 /// iff its authoritative home canonicalizes to the project root itself.
 /// A subdirectory is a different project; containment never confers
-/// ownership.
-pub(crate) fn session_home_is_project_root(project_root: &Path, cwd: &Path) -> bool {
-    match fs::canonicalize(cwd) {
-        Ok(canonical_cwd) => canonical_cwd == project_root,
-        Err(_) => false,
-    }
+/// ownership. The cache is scoped to one discovery pass.
+pub(crate) fn session_home_is_project_root(
+    project_root: &Path,
+    cwd: &Path,
+    canonical_cwds: &mut BTreeMap<PathBuf, Option<PathBuf>>,
+) -> bool {
+    canonical_cwds
+        .entry(cwd.to_path_buf())
+        .or_insert_with(|| fs::canonicalize(cwd).ok())
+        .as_deref()
+        == Some(project_root)
 }
 
 #[derive(Deserialize)]
@@ -1798,15 +1803,16 @@ fn insert_resource(discovery: &mut Discovery, resource: DiscoveredResource) -> R
     Ok(())
 }
 
+/// Inspect files under an approved root that the caller already canonicalized.
 pub(crate) fn inspect_candidate_files(
-    approved_root: &Path,
+    canonical_approved_root: &Path,
     files: &[PathBuf],
 ) -> Result<(), String> {
-    inspect_candidate_files_with_limit(approved_root, files, MAX_FILE_BYTES)
+    inspect_candidate_files_with_limit(canonical_approved_root, files, MAX_FILE_BYTES)
 }
 
 pub(crate) fn inspect_candidate_files_with_limit(
-    approved_root: &Path,
+    canonical_approved_root: &Path,
     files: &[PathBuf],
     max_file_bytes: u64,
 ) -> Result<(), String> {
@@ -1816,10 +1822,8 @@ pub(crate) fn inspect_candidate_files_with_limit(
     if files.len() > MAX_DISCOVERED_FILES {
         return Err(format!("resource exceeds {} files", MAX_DISCOVERED_FILES));
     }
-    let canonical_root = fs::canonicalize(approved_root)
-        .map_err(|e| format!("resolve '{}': {}", approved_root.display(), e))?;
     for file in files {
-        reject_unsafe_ancestors(file, &canonical_root)?;
+        reject_unsafe_ancestors(file, canonical_approved_root)?;
         let meta = fs::symlink_metadata(file)
             .map_err(|e| format!("inspect '{}': {}", file.display(), e))?;
         if meta.file_type().is_symlink() || !meta.is_file() {
@@ -1846,8 +1850,7 @@ pub(crate) fn inspect_candidate_files_with_limit(
             }
         }
         let relative = file
-            .strip_prefix(&canonical_root)
-            .or_else(|_| file.strip_prefix(approved_root))
+            .strip_prefix(canonical_approved_root)
             .map_err(|_| format!("'{}' escapes approved root", file.display()))?;
         for component in relative.components() {
             if let Component::Normal(name) = component {
@@ -2324,6 +2327,45 @@ mod tests {
 
     fn claude_key() -> domain::ProviderKey {
         domain::ProviderKey::parse("claude").unwrap()
+    }
+
+    #[test]
+    fn session_home_membership_caches_each_distinct_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let canonical_project = fs::canonicalize(&project).unwrap();
+        let equivalent_cwd = project.join("..").join("project");
+        let missing_cwd = temp.path().join("missing");
+        let mut canonical_cwds = BTreeMap::new();
+
+        assert!(session_home_is_project_root(
+            &canonical_project,
+            &equivalent_cwd,
+            &mut canonical_cwds,
+        ));
+        assert!(session_home_is_project_root(
+            &canonical_project,
+            &equivalent_cwd,
+            &mut canonical_cwds,
+        ));
+        assert!(!session_home_is_project_root(
+            &canonical_project,
+            &missing_cwd,
+            &mut canonical_cwds,
+        ));
+        assert!(!session_home_is_project_root(
+            &canonical_project,
+            &missing_cwd,
+            &mut canonical_cwds,
+        ));
+
+        assert_eq!(canonical_cwds.len(), 2);
+        assert_eq!(
+            canonical_cwds.get(&equivalent_cwd),
+            Some(&Some(canonical_project))
+        );
+        assert_eq!(canonical_cwds.get(&missing_cwd), Some(&None));
     }
 
     #[test]

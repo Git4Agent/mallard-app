@@ -41,6 +41,7 @@ interface PageProps {
   activeStorageName?: string | null;
   refreshEpoch: number;
   onHeaderModelChange?: (model: FilesActivityHeaderModel | null) => void;
+  onOpenFile?: (relativePath: string) => void;
   onRevealPath?: (path: string) => void;
 }
 
@@ -152,10 +153,11 @@ function groupFacts(entries: ProjectContentEntry[]): string {
  * and the stamp closing the row. Rows in the merged cloud tile keep their
  * directory as a quiet prefix, so a nested storage-only file still says
  * where it lands. */
-function FileActivityCard({ entry, storageName, projectRoot, onRevealPath, withPathPrefix = false }: {
+function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevealPath, withPathPrefix = false }: {
   entry: ProjectContentEntry;
   storageName: string;
   projectRoot: string;
+  onOpenFile?: (relativePath: string) => void;
   onRevealPath?: (path: string) => void;
   withPathPrefix?: boolean;
 }) {
@@ -176,10 +178,22 @@ function FileActivityCard({ entry, storageName, projectRoot, onRevealPath, withP
           >
             <ThreadStatusIcon status={presentation.icon} size={18} />
           </span>
-          <strong title={entry.relative_path}>
-            {withPathPrefix && directory !== "" && <span>{directory}/</span>}
-            {fileName(entry.relative_path)}
-          </strong>
+          {entry.local_present && onOpenFile ? (
+            <button
+              type="button"
+              className="sync-history-session-title-button"
+              title={`Open ${entry.relative_path}`}
+              onClick={() => onOpenFile(entry.relative_path)}
+            >
+              {withPathPrefix && directory !== "" && <span>{directory}/</span>}
+              {fileName(entry.relative_path)}
+            </button>
+          ) : (
+            <strong title={entry.relative_path}>
+              {withPathPrefix && directory !== "" && <span>{directory}/</span>}
+              {fileName(entry.relative_path)}
+            </strong>
+          )}
           {entry.blocked_reason && (
             <span className="sync-history-branch-state history-only" title={entry.blocked_reason}>Blocked</span>
           )}
@@ -258,6 +272,7 @@ export function ProjectFilesActivityView({
   loading,
   error,
   onRescan,
+  onOpenFile,
   onRevealPath,
 }: {
   inventory: ProjectContentInventory | null;
@@ -265,6 +280,7 @@ export function ProjectFilesActivityView({
   loading: boolean;
   error: string | null;
   onRescan?: () => void;
+  onOpenFile?: (relativePath: string) => void;
   onRevealPath?: (path: string) => void;
 }) {
   const [search, setSearch] = useState("");
@@ -361,6 +377,7 @@ export function ProjectFilesActivityView({
                     entry={entry}
                     storageName={storageName}
                     projectRoot={inventory.project_root}
+                    onOpenFile={onOpenFile}
                     onRevealPath={onRevealPath}
                     withPathPrefix
                   />
@@ -385,6 +402,7 @@ export function ProjectFilesActivityView({
                     entry={entry}
                     storageName={storageName}
                     projectRoot={inventory.project_root}
+                    onOpenFile={onOpenFile}
                     onRevealPath={onRevealPath}
                   />
                 ))}
@@ -416,6 +434,7 @@ export default function ProjectFilesActivityPage({
   activeStorageName = null,
   refreshEpoch,
   onHeaderModelChange,
+  onOpenFile,
   onRevealPath,
 }: PageProps) {
   const [inventory, setInventory] = useState<ProjectContentInventory | null>(null);
@@ -455,6 +474,7 @@ export default function ProjectFilesActivityPage({
       loading={loading}
       error={error}
       onRescan={() => setScanEpoch((epoch) => epoch + 1)}
+      onOpenFile={onOpenFile}
       onRevealPath={onRevealPath}
     />
   );

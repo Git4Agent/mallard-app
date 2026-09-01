@@ -701,6 +701,11 @@ export default function ProjectLinksWorkspace({
     setRevealError(null);
     void revealItemInDir(path).catch((reason) => setRevealError(errorMessage(reason)));
   };
+  const openProjectFile = (localProjectId: string, relativePath: string) => {
+    setRevealError(null);
+    void projectSyncApi.openProjectMarkdownPath(localProjectId, relativePath)
+      .catch((reason) => setRevealError(errorMessage(reason)));
+  };
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [projectAliasDraft, setProjectAliasDraft] = useState("");
   // The activity list speaks through the path bar: it owns the branches and the
@@ -3303,6 +3308,7 @@ export default function ProjectLinksWorkspace({
                 activeStorageName={storages.find((storage) => storage.id === activeStorageId)?.name ?? null}
                 refreshEpoch={historyRefreshEpoch}
                 onHeaderModelChange={handleFilesActivityHeaderChange}
+                onOpenFile={(relativePath) => openProjectFile(activeProject.local_project_id, relativePath)}
                 onRevealPath={revealPath}
               />
             ) : (

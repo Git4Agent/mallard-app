@@ -22,6 +22,7 @@ pub(super) fn discover(
     let mut discovery = SessionDiscovery::default();
     let mut selected_thread_ids = BTreeSet::new();
     let mut by_session: BTreeMap<String, usize> = BTreeMap::new();
+    let mut canonical_cwds = BTreeMap::new();
     let mut visited_entries = 0_usize;
     let mut visited_files = 0_usize;
     for directory in ["sessions", "archived_sessions"] {
@@ -63,7 +64,7 @@ pub(super) fn discover(
                     continue;
                 }
             };
-            if !session_home_is_project_root(context.project_root, &meta.cwd) {
+            if !session_home_is_project_root(context.project_root, &meta.cwd, &mut canonical_cwds) {
                 continue;
             }
             if meta.is_internal_subagent {
