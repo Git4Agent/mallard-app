@@ -1677,7 +1677,7 @@ fn glob_path_matches(pattern: &str, value: &str) -> bool {
 /// shared scanner never searches arbitrary JSON for identity fields.
 pub(crate) struct ParsedSessionMetadata {
     pub session_id: String,
-    pub cwd: String,
+    pub authorized_home: String,
     pub is_internal_subagent: bool,
 }
 
@@ -1707,7 +1707,7 @@ pub(crate) fn scan_session_metadata_with(
         if let Some(metadata) = parse_record(&line) {
             return validated_session_metadata(
                 metadata.session_id,
-                metadata.cwd,
+                metadata.authorized_home,
                 metadata.is_internal_subagent,
             );
         }
@@ -1717,41 +1717,41 @@ pub(crate) fn scan_session_metadata_with(
 
 pub(crate) fn validated_session_metadata(
     id: String,
-    cwd: String,
+    authorized_home: String,
     is_internal_subagent: bool,
 ) -> Result<crate::providers::SessionFileMetadata, String> {
     if id.is_empty()
         || id.len() > 512
         || id.chars().any(char::is_control)
-        || cwd.is_empty()
-        || cwd.len() > 4096
-        || cwd.chars().any(char::is_control)
+        || authorized_home.is_empty()
+        || authorized_home.len() > 4096
+        || authorized_home.chars().any(char::is_control)
     {
-        return Err("invalid session ID or cwd".to_string());
+        return Err("invalid session ID or authorized home".to_string());
     }
-    let cwd = PathBuf::from(cwd);
-    if !cwd.is_absolute() {
-        return Err("session cwd is not absolute".to_string());
+    let authorized_home = PathBuf::from(authorized_home);
+    if !authorized_home.is_absolute() {
+        return Err("session authorized home is not absolute".to_string());
     }
     Ok(crate::providers::SessionFileMetadata {
         session_id: id,
-        cwd,
+        authorized_home,
         is_internal_subagent,
     })
 }
 
 /// The exact-home ownership predicate: a session belongs to the project
-/// iff its authoritative home canonicalizes to the project root itself.
+/// iff its authorized home canonicalizes to the project root itself.
 /// A subdirectory is a different project; containment never confers
 /// ownership. The cache is scoped to one discovery pass.
 pub(crate) fn session_home_is_project_root(
     project_root: &Path,
-    cwd: &Path,
-    canonical_cwds: &mut BTreeMap<PathBuf, Option<PathBuf>>,
+    authorized_home: &Path,
+    canonical_homes: &mut BTreeMap<PathBuf, Option<PathBuf>>,
 ) -> bool {
-    canonical_cwds
-        .entry(cwd.to_path_buf())
-        .or_insert_with(|| fs::canonicalize(cwd).ok())
+    canonical_homes
+        .entry(authorized_home.to_path_buf())
+        .or_insert_with(|| fs::canonicalize(authorized_home).ok())
         .as_deref()
         == Some(project_root)
 }

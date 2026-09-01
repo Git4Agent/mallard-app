@@ -59,7 +59,7 @@ fn parse_test_session_metadata(line: &[u8]) -> Option<ParsedSessionMetadata> {
     }
     Some(ParsedSessionMetadata {
         session_id: record.session_id,
-        cwd: record.cwd,
+        authorized_home: record.cwd,
         is_internal_subagent: false,
     })
 }
@@ -109,7 +109,7 @@ impl SessionAdapter for TestProviderAdapter {
         if !sessions_root.exists() {
             return Ok(discovery);
         }
-        let mut canonical_cwds = BTreeMap::new();
+        let mut canonical_homes = BTreeMap::new();
         for entry in WalkDir::new(&sessions_root)
             .follow_links(false)
             .max_depth(2)
@@ -131,7 +131,11 @@ impl SessionAdapter for TestProviderAdapter {
                     continue;
                 }
             };
-            if !session_home_is_project_root(context.project_root, &meta.cwd, &mut canonical_cwds) {
+            if !session_home_is_project_root(
+                context.project_root,
+                &meta.authorized_home,
+                &mut canonical_homes,
+            ) {
                 continue;
             }
             discovery.sessions.push(DiscoveredSession {

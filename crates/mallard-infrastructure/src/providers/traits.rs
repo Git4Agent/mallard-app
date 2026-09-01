@@ -75,7 +75,10 @@ pub struct ProviderDescriptor {
 #[derive(Clone, Debug)]
 pub struct SessionFileMetadata {
     pub session_id: String,
-    pub cwd: PathBuf,
+    /// The session's immutable ownership home, established when the session
+    /// was authorized. Later per-turn `cwd` values are mutable execution
+    /// context — activity metadata that never moves the session.
+    pub authorized_home: PathBuf,
     pub is_internal_subagent: bool,
 }
 

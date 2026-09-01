@@ -72,7 +72,7 @@ pub(super) fn discover(
     }
     let mut session_ids = BTreeSet::new();
     let mut root_buckets = BTreeSet::<PathBuf>::new();
-    let mut canonical_cwds = BTreeMap::new();
+    let mut canonical_homes = BTreeMap::new();
     for entry in WalkDir::new(&projects)
         .follow_links(false)
         .min_depth(2)
@@ -97,7 +97,11 @@ pub(super) fn discover(
                 continue;
             }
         };
-        if !session_home_is_project_root(context.project_root, &meta.cwd, &mut canonical_cwds) {
+        if !session_home_is_project_root(
+            context.project_root,
+            &meta.authorized_home,
+            &mut canonical_homes,
+        ) {
             continue;
         }
         session_ids.insert(meta.session_id.clone());
@@ -106,9 +110,11 @@ pub(super) fn discover(
         // recorded home. A foreign bucket holding a resumed-into-root
         // session fails this self-consistency check, and its memory stays
         // with its own directory-project.
-        if let (Some(parent), Some(cwd_text)) = (entry.path().parent(), meta.cwd.to_str()) {
+        if let (Some(parent), Some(home_text)) =
+            (entry.path().parent(), meta.authorized_home.to_str())
+        {
             if parent.file_name().and_then(|name| name.to_str())
-                == Some(encode_claude_project_path(cwd_text).as_str())
+                == Some(encode_claude_project_path(home_text).as_str())
             {
                 root_buckets.insert(parent.to_path_buf());
             }

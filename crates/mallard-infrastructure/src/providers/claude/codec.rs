@@ -139,82 +139,113 @@ struct ChainRecord {
     fingerprint: String,
 }
 
+/// The identity-relevant projection of one transcript record, shared by the
+/// full-value observers and the bounded metadata scan so the two parse
+/// strategies cannot drift apart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IdentityParts {
+    pub(crate) session_id: Option<String>,
+    /// Non-empty `cwd` text; the empty-string filter is already applied.
+    pub(crate) cwd: Option<String>,
+    pub(crate) is_chain: bool,
+    pub(crate) is_durable_metadata: bool,
+}
+
+/// Extract identity parts from a parsed record. `None` skips the record
+/// entirely: non-objects and thinking-only assistant rows — the only records
+/// the Desktop projection removes — are invisible to identity.
+pub(crate) fn identity_parts_from_value(value: &Value) -> Option<IdentityParts> {
+    let object = value.as_object()?;
+    if is_thinking_only_record(object) {
+        return None;
+    }
+    let sidechain = object
+        .get("isSidechain")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let meta = object
+        .get("isMeta")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Some(IdentityParts {
+        session_id: object
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        cwd: object
+            .get("cwd")
+            .and_then(Value::as_str)
+            .filter(|cwd| !cwd.is_empty())
+            .map(str::to_string),
+        is_chain: is_chain_record(object),
+        is_durable_metadata: matches!(
+            object.get("type").and_then(Value::as_str),
+            Some("user") | Some("assistant") | Some("system")
+        ) && !sidechain
+            && !meta,
+    })
+}
+
 /// The provider identity carried by a Claude transcript's active session.
 ///
-/// Claude resume/fork files copy historical records without restamping their
-/// `sessionId` or `cwd`, so the last projected chain record selects the active
-/// session ID. Within one session ID, however, `cwd` is per-turn shell state;
-/// the authoritative home is the first non-empty cwd in that session's current
-/// chain-record segment. A new session ID resets the home, while later records
-/// for the same session cannot move it.
+/// Two facts are deliberately separated. The **authorized home** is immutable
+/// session ownership, established when the leaf session was authorized; the
+/// per-turn `cwd` on later records is mutable execution context — activity
+/// metadata that must never move the session. Claude resume/fork files copy
+/// historical records without restamping their `sessionId` or `cwd`, so the
+/// last projected chain record selects the active session ID, and the
+/// authorized home is the first non-empty `cwd` in that ID's final
+/// chain-record segment. A session whose authorized home cannot be proven is
+/// owned by nobody: `leaf_identity` returns no home rather than falling back
+/// to drift.
 #[derive(Default)]
 pub(crate) struct ClaudeSessionIdentityTracker {
     last_session_id: Option<String>,
     last_cwd: Option<String>,
-    last_metadata_identity: Option<(String, String)>,
+    first_metadata_identity: Option<(String, String)>,
     leaf_session_id: Option<String>,
-    leaf_cwd: Option<String>,
-    leaf_home_session_id: Option<String>,
-    leaf_session_home: Option<String>,
+    authorized_home_session_id: Option<String>,
+    authorized_home: Option<String>,
     saw_chain_record: bool,
 }
 
 impl ClaudeSessionIdentityTracker {
-    /// Observe one raw or already-projected record. Thinking-only assistant
-    /// rows are the only records the Desktop projection removes entirely;
-    /// every other projection change leaves identity and chain membership
-    /// unchanged.
+    /// Observe one raw or already-projected record.
     pub(crate) fn observe(&mut self, value: &Value) {
-        let Some(object) = value.as_object() else {
-            return;
-        };
-        if is_thinking_only_record(object) {
-            return;
+        if let Some(parts) = identity_parts_from_value(value) {
+            self.observe_parts(parts);
         }
-        let session_id = object
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+    }
+
+    /// The single identity state machine; both parse strategies feed it.
+    pub(crate) fn observe_parts(&mut self, parts: IdentityParts) {
+        let IdentityParts {
+            session_id,
+            cwd,
+            is_chain,
+            is_durable_metadata,
+        } = parts;
         if let Some(observed) = &session_id {
             self.last_session_id = Some(observed.clone());
         }
-        let cwd = object
-            .get("cwd")
-            .and_then(Value::as_str)
-            .filter(|cwd| !cwd.is_empty())
-            .map(str::to_string);
         if let Some(observed) = &cwd {
             self.last_cwd = Some(observed.clone());
         }
-        let is_durable_metadata = matches!(
-            object.get("type").and_then(Value::as_str),
-            Some("user") | Some("assistant") | Some("system")
-        ) && !object
-            .get("isSidechain")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-            && !object
-                .get("isMeta")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-        if is_durable_metadata {
+        if is_durable_metadata && self.first_metadata_identity.is_none() {
             if let (Some(session_id), Some(cwd)) = (&session_id, &cwd) {
-                self.last_metadata_identity = Some((session_id.clone(), cwd.clone()));
+                self.first_metadata_identity = Some((session_id.clone(), cwd.clone()));
             }
         }
-        if is_chain_record(object) {
+        if is_chain {
             self.saw_chain_record = true;
             let effective_session_id = session_id.clone().or_else(|| self.last_session_id.clone());
-            if self.leaf_home_session_id != effective_session_id {
-                self.leaf_home_session_id = effective_session_id;
-                self.leaf_session_home = cwd.clone();
-            } else if self.leaf_session_home.is_none() {
-                self.leaf_session_home = cwd.clone();
+            if self.authorized_home_session_id != effective_session_id {
+                self.authorized_home_session_id = effective_session_id;
+                self.authorized_home = cwd;
+            } else if self.authorized_home.is_none() {
+                self.authorized_home = cwd;
             }
-            // Preserve the established leaf field-fallback behavior while the
-            // separate session-home state above ignores same-session cwd drift.
             self.leaf_session_id = session_id;
-            self.leaf_cwd = cwd;
         }
     }
 
@@ -225,23 +256,477 @@ impl ClaudeSessionIdentityTracker {
     pub(crate) fn leaf_identity(&self) -> (Option<String>, Option<String>) {
         if !self.saw_chain_record {
             return self
-                .last_metadata_identity
+                .first_metadata_identity
                 .clone()
-                .map_or((None, None), |(session_id, cwd)| {
-                    (Some(session_id), Some(cwd))
+                .map_or((None, None), |(session_id, home)| {
+                    (Some(session_id), Some(home))
                 });
         }
         let session_id = self
             .leaf_session_id
             .clone()
             .or_else(|| self.last_session_id.clone());
-        let cwd =
-            if session_id.is_some() && self.leaf_home_session_id.as_ref() == session_id.as_ref() {
-                self.leaf_session_home.clone()
+        // Only the authorized home confers ownership. When the leaf session's
+        // home was never established, the session is unowned — never homed by
+        // the last cwd drift happened to leave behind.
+        let authorized_home =
+            if session_id.is_some() && self.authorized_home_session_id == session_id {
+                self.authorized_home.clone()
             } else {
-                self.leaf_cwd.clone().or_else(|| self.last_cwd.clone())
+                None
             };
-        (session_id, cwd)
+        (session_id, authorized_home)
+    }
+}
+
+/// One transcript line parsed to exactly the fields identity reads; serde
+/// skips every other field — the multi-megabyte content bodies above all —
+/// without materializing it. Field extraction is lenient the way
+/// `Value::get(..).and_then(as_..)` is: a wrong-typed field reads as absent,
+/// never as a parse failure, so this arm ignores exactly the lines the
+/// `Value` arm ignores (invalid JSON) and no others.
+#[derive(Default)]
+pub(crate) struct ClaudeScanRecord {
+    session_id: Option<String>,
+    cwd: Option<String>,
+    record_type: Option<String>,
+    is_sidechain: bool,
+    is_meta: bool,
+    /// `uuid` key presence — `is_chain_record` counts even a present null.
+    has_uuid: bool,
+    /// `Some` iff `message.content` was an array: each element's `type`
+    /// string, or `None` for elements without a string `type`.
+    content_block_types: Option<Vec<Option<String>>>,
+    /// The line was a JSON object. Non-objects are skipped, matching the
+    /// `Value` arm's early return.
+    is_object: bool,
+}
+
+impl ClaudeScanRecord {
+    pub(crate) fn into_identity_parts(self) -> Option<IdentityParts> {
+        if !self.is_object || self.is_thinking_only() {
+            return None;
+        }
+        let durable = matches!(
+            self.record_type.as_deref(),
+            Some("user") | Some("assistant") | Some("system") | Some("attachment")
+        );
+        let is_durable_metadata = matches!(
+            self.record_type.as_deref(),
+            Some("user") | Some("assistant") | Some("system")
+        ) && !self.is_sidechain
+            && !self.is_meta;
+        Some(IdentityParts {
+            session_id: self.session_id,
+            cwd: self.cwd.filter(|cwd| !cwd.is_empty()),
+            is_chain: durable && !self.is_sidechain && self.has_uuid,
+            is_durable_metadata,
+        })
+    }
+
+    fn is_thinking_only(&self) -> bool {
+        self.record_type.as_deref() == Some("assistant")
+            && self.content_block_types.as_ref().is_some_and(|blocks| {
+                !blocks.is_empty()
+                    && blocks.iter().all(|block_type| {
+                        matches!(
+                            block_type.as_deref(),
+                            Some("thinking") | Some("redacted_thinking")
+                        )
+                    })
+            })
+    }
+}
+
+/// Map keys the scan record reads, decoded without allocating.
+enum ScanField {
+    SessionId,
+    Cwd,
+    Type,
+    IsSidechain,
+    IsMeta,
+    Uuid,
+    Message,
+    Content,
+    Other,
+}
+
+impl<'de> serde::Deserialize<'de> for ScanField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct FieldVisitor;
+        impl serde::de::Visitor<'_> for FieldVisitor {
+            type Value = ScanField;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a field name")
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(match value {
+                    "sessionId" => ScanField::SessionId,
+                    "cwd" => ScanField::Cwd,
+                    "type" => ScanField::Type,
+                    "isSidechain" => ScanField::IsSidechain,
+                    "isMeta" => ScanField::IsMeta,
+                    "uuid" => ScanField::Uuid,
+                    "message" => ScanField::Message,
+                    "content" => ScanField::Content,
+                    _ => ScanField::Other,
+                })
+            }
+        }
+        deserializer.deserialize_str(FieldVisitor)
+    }
+}
+
+/// Mirrors `Value::as_str`: any non-string value is consumed and reads as
+/// `None`.
+struct LenientString(Option<String>);
+
+impl<'de> serde::Deserialize<'de> for LenientString {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct StringVisitor;
+        impl<'de> serde::de::Visitor<'de> for StringVisitor {
+            type Value = Option<String>;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("any JSON value")
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(Some(value.to_string()))
+            }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(None)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                while map
+                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(None)
+            }
+        }
+        deserializer
+            .deserialize_any(StringVisitor)
+            .map(LenientString)
+    }
+}
+
+/// Mirrors `Value::as_bool`: any non-boolean value is consumed and reads as
+/// `None`.
+struct LenientBool(Option<bool>);
+
+impl<'de> serde::Deserialize<'de> for LenientBool {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BoolVisitor;
+        impl<'de> serde::de::Visitor<'de> for BoolVisitor {
+            type Value = Option<bool>;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("any JSON value")
+            }
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(Some(value))
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(None)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                while map
+                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(None)
+            }
+        }
+        deserializer.deserialize_any(BoolVisitor).map(LenientBool)
+    }
+}
+
+/// One content block reduced to `block.get("type").and_then(as_str)`: a
+/// non-object element, or one without a string `type`, reads as `None`.
+struct ScanBlock(Option<String>);
+
+impl<'de> serde::Deserialize<'de> for ScanBlock {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BlockVisitor;
+        impl<'de> serde::de::Visitor<'de> for BlockVisitor {
+            type Value = Option<String>;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a content block")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut block_type = None;
+                while let Some(field) = map.next_key::<ScanField>()? {
+                    if matches!(field, ScanField::Type) {
+                        block_type = map.next_value::<LenientString>()?.0;
+                    } else {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+                Ok(block_type)
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(None)
+            }
+        }
+        deserializer.deserialize_any(BlockVisitor).map(ScanBlock)
+    }
+}
+
+/// `message.content` reduced to block types: `Some` iff it was an array,
+/// mirroring `Value::as_array`.
+struct ScanContent(Option<Vec<Option<String>>>);
+
+impl<'de> serde::Deserialize<'de> for ScanContent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ContentVisitor;
+        impl<'de> serde::de::Visitor<'de> for ContentVisitor {
+            type Value = Option<Vec<Option<String>>>;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("message content")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut block_types = Vec::new();
+                while let Some(block) = seq.next_element::<ScanBlock>()? {
+                    block_types.push(block.0);
+                }
+                Ok(Some(block_types))
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                while map
+                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(None)
+            }
+        }
+        deserializer
+            .deserialize_any(ContentVisitor)
+            .map(ScanContent)
+    }
+}
+
+/// `message` reduced to its content block types; a non-object message reads
+/// as no content.
+struct ScanMessage(Option<Vec<Option<String>>>);
+
+impl<'de> serde::Deserialize<'de> for ScanMessage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MessageVisitor;
+        impl<'de> serde::de::Visitor<'de> for MessageVisitor {
+            type Value = Option<Vec<Option<String>>>;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a message object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut content = None;
+                while let Some(field) = map.next_key::<ScanField>()? {
+                    if matches!(field, ScanField::Content) {
+                        content = map.next_value::<ScanContent>()?.0;
+                    } else {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+                Ok(content)
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(None)
+            }
+        }
+        deserializer
+            .deserialize_any(MessageVisitor)
+            .map(ScanMessage)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ClaudeScanRecord {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct RecordVisitor;
+        impl<'de> serde::de::Visitor<'de> for RecordVisitor {
+            type Value = ClaudeScanRecord;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a transcript record")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut record = ClaudeScanRecord {
+                    is_object: true,
+                    ..ClaudeScanRecord::default()
+                };
+                while let Some(field) = map.next_key::<ScanField>()? {
+                    match field {
+                        ScanField::SessionId => {
+                            record.session_id = map.next_value::<LenientString>()?.0;
+                        }
+                        ScanField::Cwd => record.cwd = map.next_value::<LenientString>()?.0,
+                        ScanField::Type => {
+                            record.record_type = map.next_value::<LenientString>()?.0;
+                        }
+                        ScanField::IsSidechain => {
+                            record.is_sidechain =
+                                map.next_value::<LenientBool>()?.0.unwrap_or(false);
+                        }
+                        ScanField::IsMeta => {
+                            record.is_meta = map.next_value::<LenientBool>()?.0.unwrap_or(false);
+                        }
+                        ScanField::Uuid => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                            record.has_uuid = true;
+                        }
+                        ScanField::Message => {
+                            record.content_block_types = map.next_value::<ScanMessage>()?.0;
+                        }
+                        ScanField::Content | ScanField::Other => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(record)
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(ClaudeScanRecord::default())
+            }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(ClaudeScanRecord::default())
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(ClaudeScanRecord::default())
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(ClaudeScanRecord::default())
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(ClaudeScanRecord::default())
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(ClaudeScanRecord::default())
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(ClaudeScanRecord::default())
+            }
+        }
+        deserializer.deserialize_any(RecordVisitor)
     }
 }
 
@@ -477,6 +962,83 @@ pub(crate) fn semantic_record_fingerprint(mut value: Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn scan_record_identity_parts_match_the_value_extraction() {
+        let cases = [
+            json!({"type":"user","uuid":"u1","sessionId":"s","cwd":"/p"}),
+            json!({"type":"assistant","uuid":"a1","sessionId":"s","cwd":"/p",
+                "message":{"content":[{"type":"thinking","thinking":"x"}]}}),
+            json!({"type":"assistant","uuid":"a1",
+                "message":{"content":[{"type":"thinking"},{"type":"redacted_thinking"}]}}),
+            json!({"type":"assistant","uuid":"a1",
+                "message":{"content":[{"type":"thinking"},{"type":"text","text":"t"}]}}),
+            json!({"type":"assistant","uuid":"a1","message":{"content":[]}}),
+            json!({"type":"assistant","uuid":"a1","message":{"content":"plain"}}),
+            json!({"type":"assistant","uuid":"a1","message":{"content":[["nested"]]}}),
+            json!({"type":"assistant","uuid":"a1","message":{"content":[{"type":5}]}}),
+            json!({"type":"assistant","uuid":"a1","message":"not-an-object"}),
+            json!({"type":"user","uuid":null,"sessionId":"s","cwd":"/p"}),
+            json!({"type":"user","sessionId":"s","cwd":"/p"}),
+            json!({"type":"user","uuid":"u1","isSidechain":true,"sessionId":"s","cwd":"/p"}),
+            json!({"type":"user","uuid":"u1","isMeta":true,"sessionId":"s","cwd":"/p"}),
+            json!({"type":"attachment","uuid":"at1","cwd":"/p"}),
+            json!({"type":"summary","sessionId":"s","cwd":"/p"}),
+            json!({"type":"user","uuid":"u1","sessionId":123,"cwd":42}),
+            json!({"type":"user","uuid":"u1","isSidechain":"true","sessionId":"s","cwd":"/p"}),
+            json!({"type":"user","uuid":"u1","sessionId":"s","cwd":""}),
+            json!(["not", "an", "object"]),
+            json!("bare string"),
+            json!(12),
+            json!(null),
+            json!({}),
+            json!({"message":{"payload":{"sessionId":"nested"}}}),
+        ];
+        for value in cases {
+            let line = value.to_string();
+            let from_value = identity_parts_from_value(&value);
+            let from_scan = serde_json::from_str::<ClaudeScanRecord>(&line)
+                .expect("the scan record consumes any JSON value")
+                .into_identity_parts();
+            assert_eq!(from_value, from_scan, "diverged on {line}");
+        }
+    }
+
+    #[test]
+    fn leaf_identity_never_homes_by_drift() {
+        let mut tracker = ClaudeSessionIdentityTracker::default();
+        tracker.observe(&json!({"type":"user","uuid":"u1","sessionId":"s1","cwd":"/home/a"}));
+        tracker
+            .observe(&json!({"type":"assistant","uuid":"a1","sessionId":"s1","cwd":"/home/a/sub"}));
+        assert_eq!(
+            tracker.leaf_identity(),
+            (Some("s1".to_string()), Some("/home/a".to_string()))
+        );
+    }
+
+    #[test]
+    fn leaf_identity_fails_closed_when_no_authorized_home_exists() {
+        // A chain record without its own sessionId cannot route ownership
+        // through file-wide last-seen state: the session ID still resolves,
+        // but the home reads as unproven instead of borrowing drift.
+        let mut tracker = ClaudeSessionIdentityTracker::default();
+        tracker.observe(&json!({"type":"user","uuid":"u1","cwd":"/home/x"}));
+        tracker.observe(&json!({"type":"diagnostic","sessionId":"s2"}));
+        let (session_id, authorized_home) = tracker.leaf_identity();
+        assert_eq!(session_id.as_deref(), Some("s2"));
+        assert_eq!(authorized_home, None);
+    }
+
+    #[test]
+    fn chainless_files_resolve_the_first_metadata_identity() {
+        let mut tracker = ClaudeSessionIdentityTracker::default();
+        tracker.observe(&json!({"type":"user","sessionId":"first","cwd":"/home/first"}));
+        tracker.observe(&json!({"type":"user","sessionId":"later","cwd":"/home/later"}));
+        assert_eq!(
+            tracker.leaf_identity(),
+            (Some("first".to_string()), Some("/home/first".to_string()))
+        );
+    }
 
     pub(crate) fn transcript(
         session: &str,

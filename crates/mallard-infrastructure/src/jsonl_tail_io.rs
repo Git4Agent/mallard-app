@@ -162,6 +162,67 @@ pub fn read_tail_window(path: &Path, mapping: &RootPhysicalMapping) -> Result<Ta
     }
 }
 
+/// Read the last `max_window_bytes` of a transcript (the whole file when it
+/// is shorter) under the module's safety contract, retrying a bounded number
+/// of times while the EOF is moving. Addressed by size rather than by a
+/// saved cursor: this is the metadata scan's bounded tail read, so the
+/// bytes are attributed as transcript bytes, not probe/append bytes.
+pub fn read_suffix_window(path: &Path, max_window_bytes: u64) -> Result<TailWindow, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let file = open_no_follow(path)?;
+    let handle_meta = file
+        .metadata()
+        .map_err(|error| format!("stat session transcript '{}': {}", path.display(), error))?;
+    if !handle_meta.is_file() {
+        return Err(format!(
+            "session transcript '{}' is not a regular file",
+            path.display()
+        ));
+    }
+    let mut file = file;
+    let mut attempts = 0;
+    loop {
+        let len_before = file
+            .metadata()
+            .map_err(|error| format!("stat session transcript '{}': {}", path.display(), error))?
+            .len();
+        if len_before > conversation_file_limit_bytes() {
+            return Err(format!(
+                "session transcript '{}' exceeds the bounded transcript limit",
+                path.display()
+            ));
+        }
+        let window_offset = len_before.saturating_sub(max_window_bytes);
+        file.seek(SeekFrom::Start(window_offset))
+            .map_err(|error| format!("seek session transcript '{}': {}", path.display(), error))?;
+        let expected = len_before - window_offset;
+        let mut bytes = Vec::with_capacity(expected as usize);
+        (&file)
+            .take(expected)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("read session transcript '{}': {}", path.display(), error))?;
+        let len_after = file
+            .metadata()
+            .map_err(|error| format!("stat session transcript '{}': {}", path.display(), error))?
+            .len();
+        if len_after == len_before && bytes.len() as u64 == expected {
+            crate::sync_metrics::record_transcript_bytes_read(path, expected);
+            return Ok(TailWindow {
+                file_len: len_before,
+                window_offset,
+                bytes,
+            });
+        }
+        attempts += 1;
+        if attempts > TAIL_WINDOW_READ_RETRIES {
+            return Err(format!(
+                "session transcript '{}' kept changing during the bounded tail read",
+                path.display()
+            ));
+        }
+    }
+}
+
 /// Read one absolute byte range of a transcript under the same no-follow
 /// contract, for re-proving an accepted-to-current raw interval after the
 /// cursor advanced. The caller must verify the overlap with bytes it
@@ -214,4 +275,40 @@ pub fn safe_record_end(bytes: &[u8]) -> u64 {
         .rposition(|byte| *byte == b'\n')
         .map(|position| position as u64 + 1)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suffix_window_addresses_the_tail_by_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("transcript.jsonl");
+        fs::write(&path, b"aaaa\nbbbb\ncccc\n").unwrap();
+
+        let whole = read_suffix_window(&path, 64).unwrap();
+        assert_eq!(whole.window_offset, 0);
+        assert_eq!(whole.file_len, 15);
+        assert_eq!(whole.bytes, b"aaaa\nbbbb\ncccc\n");
+
+        let tail = read_suffix_window(&path, 6).unwrap();
+        assert_eq!(tail.window_offset, 9);
+        assert_eq!(tail.file_len, 15);
+        assert_eq!(tail.bytes, b"\ncccc\n");
+
+        let empty = read_suffix_window(&path, 0).unwrap();
+        assert_eq!(empty.window_offset, 15);
+        assert!(empty.bytes.is_empty());
+    }
+
+    #[test]
+    fn suffix_window_rejects_non_regular_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = read_suffix_window(temp.path(), 64).unwrap_err();
+        assert!(
+            error.contains("not a regular file") || error.contains("open session transcript"),
+            "{error}"
+        );
+    }
 }

@@ -66,7 +66,7 @@ fn parse_codex_session_metadata(line: &[u8]) -> Option<ParsedSessionMetadata> {
                     .is_some_and(|source| source.contains_key("subagent"));
             Some(ParsedSessionMetadata {
                 session_id: payload.id,
-                cwd: payload.cwd,
+                authorized_home: payload.cwd,
                 is_internal_subagent,
             })
         }
@@ -263,6 +263,6 @@ mod tests {
 
         let metadata = scan_session_metadata_with(&path, parse_codex_session_metadata).unwrap();
         assert_eq!(metadata.session_id, "current-session");
-        assert_eq!(metadata.cwd, temp.path());
+        assert_eq!(metadata.authorized_home, temp.path());
     }
 }

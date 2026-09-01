@@ -1940,7 +1940,7 @@ mod activity_only_tests {
         fn scan_metadata(&self, _path: &Path) -> Result<SessionFileMetadata, String> {
             Ok(SessionFileMetadata {
                 session_id: "session-1".to_string(),
-                cwd: self.project_root.clone(),
+                authorized_home: self.project_root.clone(),
                 is_internal_subagent: false,
             })
         }

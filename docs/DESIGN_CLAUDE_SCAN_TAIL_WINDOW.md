@@ -1,6 +1,7 @@
 # Bounded Claude metadata scan: tail-window decide under authorized-home ownership
 
-- **Status:** planned 2026-09-01, not implemented
+- **Status:** IMPLEMENTED 2026-09-01 (uncommitted); corpus gate passed, constant
+  frozen — see "Measured results" at the end
 - **Baseline:** `f2cdac4` plus the current working tree (which already carries
   the PERF-031 canonicalization memo)
 - **Motivating finding:** PERF-025 in
@@ -149,6 +150,33 @@ tail, and they are the large files — decide from one window.
 Files with no chain records at all always take the full scan (the window
 cannot know the whole file lacks them), where `first_metadata_identity`
 applies.
+
+### Forks and resumes
+
+Fork behavior is unchanged and forks are the design's fast path, not a
+casualty:
+
+- A fork/`--resume` file — copied history under the parents' original ids,
+  new records under the fork's id — is the decidable shape: the id
+  transition sits near the tail, the leaf segment is the fork's own records,
+  and `authorized_home` is where the fork was launched (first cwd of the
+  fork's records), exactly as the full scan resolves it today. Nested forks
+  resolve at the last transition. A fork whose own tail has outgrown the
+  window falls back to the full scan with identical semantics.
+- In-file rewind/branching keeps one `sessionId`, so those files take the
+  fallback path; branch tolerance lives in the `claude.lineage.v1` chain
+  walk, which this design does not touch. Fork lineage, divergence
+  detection, and the tail cursor all consume the codec's full parses, not
+  this scan.
+- A session resumed into a different directory stays owned by where the
+  fork was launched — the exact-home rule and discovery's root-bucket
+  self-consistency check are untouched. Real fork files never hit the
+  deleted drift fallback (Claude Code stamps `sessionId` on every chain
+  record it writes); any corpus file that did depend on it surfaces as a
+  classified doctrine divergence in the parity harness.
+- Materialized pull files decide either way: single-id throughout → full
+  scan; preserved historical ids → window; both yield the same identity,
+  and the remapped structural cwd homes them at the project root as before.
 
 ## 4. Changes
 
@@ -302,3 +330,40 @@ at the narrow-struct 2.4× (0.54 s corpus-wide worst case against today's
 1.28 s warm). The audit's 7.8 ms bounded-head figure is not the target —
 correctness forbids head reads for single-id files. The real number is the
 corpus mix; the harness prints it before anything freezes.
+
+## 9. Measured results (2026-09-01 corpus gate, constant freeze)
+
+`claude_scan_corpus_parity_and_window_sweep` (ignored test in
+`providers/claude/mod.rs`, run `--release` against this machine's real
+`~/.claude/projects`, 114 files / 1.10 GB at the walker's depth):
+
+| Check | Result |
+| --- | --- |
+| Both-Ok identity parity | 106/106 identical |
+| Both-rejected (same class old and new) | 8 |
+| Doctrine divergences (old fallback carried a home) | **0** |
+| Acceptance divergences (record-cap etc.) | **0** |
+| Reference `Value` scan, full pass | 1.778 s |
+
+| Window | Large files decided | Bytes read | Wall |
+| --- | ---: | ---: | ---: |
+| 64 KiB | 4/112 | 1094 MB | 0.571 s |
+| 256 KiB | 8/111 | 1104 MB | 0.564 s |
+| 1 MiB | 14/99 | 1152 MB | 0.584 s |
+| 4 MiB | 18/63 | 1118 MB | 0.618 s |
+
+**Frozen: `SCAN_TAIL_WINDOW_BYTES = 256 KiB`, single tier, no widen.**
+
+Read honestly: this corpus is dominated by single-id sessions, so the decide
+rate is low (7% of large files) and the wall win — 1.778 s → 0.564 s, 3.2× —
+comes almost entirely from the narrow-record parse. The window tier is kept
+because it is free at this size (wall-optimal in the sweep, ~1% byte
+overhead), it is the piece that bounds the worst case a fallback cannot — a
+huge resumed transcript with a fresh leaf segment reads one window instead of
+its full size — and freshly-resumed files are exactly what a
+new-session-triggered inventory rebuild rescans. A widen tier is refused by
+the data: 4 MiB decides 18/63 while adding bytes and wall over 256 KiB.
+
+The doctrine cutover measurably changed nothing on this corpus: every file
+the old drift fallback could have homed differently either agrees or was
+already rejected by both implementations.

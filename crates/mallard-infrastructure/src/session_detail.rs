@@ -834,7 +834,7 @@ fn resolve_local_session(
                 "The local session identity changed since discovery.",
             ));
         }
-        if !cwd_belongs_to_project(&native.cwd, &resolved.project_root) {
+        if !cwd_belongs_to_project(&native.authorized_home, &resolved.project_root) {
             return Err(SessionDetailError::new(
                 SessionDetailErrorCode::OwnershipChanged,
                 "The session no longer belongs to the selected project.",
