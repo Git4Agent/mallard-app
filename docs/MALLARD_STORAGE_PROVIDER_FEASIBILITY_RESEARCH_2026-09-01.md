@@ -10,6 +10,10 @@
 
 **Decision status:** Dropbox is feasible after a capability probe; OneDrive is conditional; Google Drive is blocked by the current consistency contract
 
+**Dropbox probe:** The [shared/team namespace proof of concept](DROPBOX_SHARED_TEAM_NAMESPACE_POC_2026-09-02.md) has offline protocol coverage. Its live two-account Dropbox run is pending.
+
+**OneDrive probe:** The [user App Folder proof of concept](ONEDRIVE_USER_APP_FOLDER_POC_2026-09-02.md) has offline permission and cross-mode stale-session coverage. Its live personal and business runs are pending.
+
 ## Executive recommendation
 
 > **Recommendation:** Keep R2 as the primary team-capable storage. Test Dropbox first. Test OneDrive next, with separate personal, business, and SharePoint probes. Do not ship Google Drive as an R2-equivalent transport until Google documents an atomic stale-write precondition or Mallard adopts a different publication protocol.

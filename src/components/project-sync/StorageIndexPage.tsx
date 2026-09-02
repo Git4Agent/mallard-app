@@ -1,16 +1,18 @@
 import Icon from "../Icons";
 import type { ProjectStorageLink, StorageConfig, StorageSetupDraft } from "../../types";
 import SyncPathBar, { type PathBarMenuGroup } from "../sync-review/SyncPathBar";
+import LandingPicker, { type LandingCard } from "./LandingPicker";
 import { storageSubtitle } from "./ProjectLinksWorkspace";
 
 /**
  * The page the storage trail is rooted at: every storage page begins its path
  * with a Storages crumb, and a crumb has to lead somewhere real. This is that
- * somewhere — one row per configured storage, each opening its page.
+ * somewhere — one door per configured storage, each opening its page.
  *
  * The sidebar lists the same storages as a shortcut rail; this page is the
  * destination those shortcuts skip past, so it stays a plain index: no
- * per-row menus, no editors. Every verb lives on the storage's own page.
+ * per-card menus, no editors. Every verb but Add lives on the storage's own
+ * page.
  */
 
 interface Props {
@@ -39,107 +41,75 @@ export default function StorageIndexPage({
   onOpenStorageDraft,
   onAddStorage,
 }: Props) {
+  const cards: LandingCard[] = [
+    ...storages.map((storage): LandingCard => {
+      const name = storage.name || "(unnamed)";
+      const issue = storageIssues[storage.id] ?? null;
+      const linked = links.filter((link) => link.storage_id === storage.id).length;
+      return {
+        key: storage.id,
+        icon: storage.kind === "local" ? "drive" : "cloud",
+        title: name,
+        ariaLabel: issue ? `Open ${name}. Storage issue: ${issue}` : `Open ${name}`,
+        location: storageSubtitle(storage),
+        /* The tally and the issue word are the card's two facts; the word is
+           the second channel beyond colour (WCAG 1.4.1), and it stays one
+           word because the issue itself is a sentence that would give way
+           to nothing on a card — the accessible name carries it whole. */
+        detail: (
+          <span className="landing-picker-card-chips">
+            <span className="sync-storage-repo-chip">
+              <span>Projects</span>
+              <b>{linked}</b>
+            </span>
+            {issue && (
+              <span className="sync-storage-index-warning">
+                <Icon name="alert-triangle" size={12} aria-hidden="true" />
+                <span>Issue</span>
+              </span>
+            )}
+          </span>
+        ),
+        onOpen: () => onOpenStorage(storage.id),
+      };
+    }),
+    // A persisted setup draft is content too: badged, tally-less, opening
+    // its draft — and never leaking a secret (the view arrives redacted).
+    ...drafts.map((draft): LandingCard => {
+      const name = draft.storage.name || "(unnamed)";
+      return {
+        key: draft.draft_id,
+        icon: draft.storage.kind === "local" ? "drive" : "cloud",
+        title: name,
+        ariaLabel: `Continue setting up ${name} — resumable storage draft`,
+        location: "Setup not finished — not connected to Mallard yet",
+        detail: (
+          <span className="landing-picker-card-chips">
+            <span className="sync-draft-badge">Draft</span>
+          </span>
+        ),
+        onOpen: () => onOpenStorageDraft(draft.draft_id),
+      };
+    }),
+  ];
   return (
     <>
       <SyncPathBar
         crumbs={[{ id: "storages", label: "Storages", icon: "drive", tone: "root" }]}
         overflow={appActions}
         overflowLabel="App actions"
-        actions={(
-          <button
-            type="button"
-            className="sync-path-sync"
-            disabled={busy}
-            onClick={onAddStorage}
-          >
-            <Icon name="plus" size={14} />
-            <span className="sync-path-sync-label">Add storage</span>
-          </button>
-        )}
         ariaLabel="Storages path"
       />
-      <main className="sync-main sync-project-links-page sync-storage-index-page">
-        <section className="profile-links-section" aria-label="Storages">
-          {storages.length === 0 && drafts.length === 0 ? (
-            <div className="profile-links-empty">
-              <Icon name="drive" size={24} />
-              <span>Add a storage to choose where projects sync.</span>
-              <button type="button" className="btn" onClick={onAddStorage} disabled={busy}>
-                <Icon name="plus" size={15} /> Add storage
-              </button>
-            </div>
-          ) : (
-            <div className="sync-storage-index-list">
-              {storages.map((storage) => {
-                const name = storage.name || "(unnamed)";
-                const subtitle = storageSubtitle(storage);
-                const issue = storageIssues[storage.id] ?? null;
-                const linked = links.filter((link) => link.storage_id === storage.id).length;
-                return (
-                  <button
-                    key={storage.id}
-                    type="button"
-                    className="sync-storage-index-row"
-                    disabled={busy}
-                    onClick={() => onOpenStorage(storage.id)}
-                    title={issue ? `Open ${name} — ${issue}` : `Open ${name}`}
-                    aria-label={issue ? `Open ${name}. Storage issue: ${issue}` : `Open ${name}`}
-                  >
-                    <span className="sync-storage-repository-icon">
-                      <Icon name={storage.kind === "local" ? "drive" : "cloud"} size={14} />
-                    </span>
-                    <span className="sync-storage-index-copy">
-                      <strong>{name}</strong>
-                      <small>{subtitle}</small>
-                    </span>
-                    {/* The word provides a second channel beyond colour
-                        (WCAG 1.4.1). It stays
-                        one word because the issue itself is a sentence — R2
-                        connection prose runs past a hundred characters — and
-                        this row is a grid whose name column would give way to
-                        it; the sentence keeps to the title and the accessible
-                        name, which already carry it. */}
-                    {issue && (
-                      <span className="sync-storage-index-warning">
-                        <Icon name="alert-triangle" size={12} aria-hidden="true" />
-                        <span>Issue</span>
-                      </span>
-                    )}
-                    <span className="sync-storage-repo-chip">
-                      <span>Projects</span>
-                      <b>{linked}</b>
-                    </span>
-                    <Icon name="chevron-right" size={12} className="sync-storage-index-open" aria-hidden="true" />
-                  </button>
-                );
-              })}
-              {drafts.map((draft) => {
-                const name = draft.storage.name || "(unnamed)";
-                return (
-                  <button
-                    key={draft.draft_id}
-                    type="button"
-                    className="sync-storage-index-row"
-                    disabled={busy}
-                    onClick={() => onOpenStorageDraft(draft.draft_id)}
-                    title={`Continue setting up ${name}`}
-                    aria-label={`Continue setting up ${name} — resumable storage draft`}
-                  >
-                    <span className="sync-storage-repository-icon">
-                      <Icon name={draft.storage.kind === "local" ? "drive" : "cloud"} size={14} />
-                    </span>
-                    <span className="sync-storage-index-copy">
-                      <strong>{name}</strong>
-                      <small>Setup not finished — not connected to Mallard yet</small>
-                    </span>
-                    <span className="sync-draft-badge">Draft</span>
-                    <Icon name="chevron-right" size={12} className="sync-storage-index-open" aria-hidden="true" />
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </section>
+      <main className="sync-main sync-project-links-page sync-landing-page">
+        <LandingPicker
+          title="Storages"
+          count={cards.length === 1 ? "1 on this machine" : `${cards.length} on this machine`}
+          actionLabel="Add storage…"
+          emptyTitle="No storages yet"
+          busy={busy}
+          onAction={onAddStorage}
+          cards={cards}
+        />
       </main>
     </>
   );

@@ -764,25 +764,25 @@ test("the Storages index lists every storage as a row that opens its page", () =
   assert.match(html, /sync-pathbar sync-titlebar/);
   assert.match(html, /sync-path-crumb root leaf[^>]*aria-current="page"/);
   assert.match(html, /aria-label="Storages path"/);
-  assert.match(html, /sync-path-sync-label">Add storage/);
+  assert.match(html, /landing-picker-head[\s\S]*?class="btn btn-primary"[^>]*>[\s\S]*?Add storage…/);
   assert.match(html, /aria-label="App actions"/);
 
-  // Rows: name, subtitle, linked-project tally; the issue marks its row.
-  assert.match(html, /aria-label="Open Local storage 1"[\s\S]*?<strong>Local storage 1<\/strong><small>~\/storage<\/small>/);
+  // Cards: name, location, linked-project tally; the issue marks its card.
+  assert.match(html, /aria-label="Open Local storage 1"[\s\S]*?<strong>Local storage 1<\/strong>[\s\S]*?landing-picker-card-location">~\/storage</);
   assert.match(html, /sync-storage-repo-chip[^>]*><span>Projects<\/span><b>2<\/b>/);
   assert.match(html, /aria-label="Open R2 storage\. Storage issue: Bucket unreachable"/);
   assert.match(html, /sync-storage-index-warning/);
   assert.match(html, /sync-storage-repo-chip[^>]*><span>Projects<\/span><b>0<\/b>/);
 
-  // A persisted setup draft is a row too: badged, chip-less, opening its
+  // A persisted setup draft is a card too: badged, tally-less, opening its
   // draft — and never leaking a secret (the view arrives redacted).
   assert.match(html, /aria-label="Continue setting up Half-typed R2 — resumable storage draft"/);
-  assert.match(html, /<strong>Half-typed R2<\/strong><small>Setup not finished — not connected to Mallard yet<\/small>/);
+  assert.match(html, /<strong>Half-typed R2<\/strong>[\s\S]*?landing-picker-card-location">Setup not finished — not connected to Mallard yet</);
   assert.match(html, /sync-draft-badge">Draft/);
   assert.equal((html.match(/sync-storage-repo-chip/g) ?? []).length, 2);
 });
 
-test("the Storages index offers Add storage as its empty state", () => {
+test("the Storages index says what is missing and offers Add storage, with no explainer", () => {
   const html = renderToStaticMarkup(
     <StorageIndexPage
       storages={[]}
@@ -797,9 +797,10 @@ test("the Storages index offers Add storage as its empty state", () => {
     />,
   );
 
-  assert.match(html, /profile-links-empty/);
-  assert.match(html, /Add a storage to choose where projects sync\./);
-  assert.doesNotMatch(html, /sync-storage-index-row/);
+  assert.match(html, /landing-picker-empty/);
+  assert.match(html, /No storages yet/);
+  assert.match(html, /Add storage…/);
+  assert.doesNotMatch(html, /Add a storage to choose|landing-picker-card"/);
 
   // A draft alone is content: the empty state yields to its row.
   const draftsOnly = renderToStaticMarkup(
@@ -822,7 +823,7 @@ test("the Storages index offers Add storage as its empty state", () => {
       onAddStorage={() => undefined}
     />,
   );
-  assert.doesNotMatch(draftsOnly, /profile-links-empty/);
+  assert.doesNotMatch(draftsOnly, /landing-picker-empty/);
   assert.match(draftsOnly, /<strong>\(unnamed\)<\/strong>/);
 });
 

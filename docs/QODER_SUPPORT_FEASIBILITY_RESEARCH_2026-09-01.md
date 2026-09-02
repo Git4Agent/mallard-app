@@ -13,6 +13,15 @@
 **Session restore PoC:**
 [Qoder session restore proof of concept](QODER_SESSION_RESTORE_POC_2026-09-02.md)
 
+**CLI resume PoC:**
+[Qoder CLI resume proof-of-concept study](QODER_CLI_RESUME_POC_2026-09-02.md)
+
+**Custom-provider PoC:**
+[Qoder CLI custom-provider and Tuzi proof of concept](QODER_CUSTOM_PROVIDER_POC_2026-09-02.md)
+
+**Fork-mechanisms PoC:**
+[Qoder fork mechanisms research and proof of concept](QODER_FORK_MECHANISMS_RESEARCH_2026-09-02.md)
+
 ## Executive decision
 
 > **Recommendation:** Add Qoder in stages. First, add the safe provider capability gate and local Activity adapter. Make standalone user Skills the first portable-resource candidate, after the installed Qoder app passes a Skill-root probe. Add plugin install intent only when a separately installed Qoder CLI passes an exact contract probe. Do not release Qoder session restore until a disposable two-home test proves that Qoder can discover, open, and continue a restored task without Mallard copying or editing Qoder's application database.
@@ -26,6 +35,8 @@ Qoder support is technically possible, but the three requested resource classes 
 | Plugin install intent | Conditional | Require a public Qoder CLI contract | Qoder CLI documents JSON inventory, marketplaces, install, update, enable, and disable commands. The installed Qoder app does not provide that CLI on this machine. |
 | Local session discovery and Activity | Medium | Prototype after the safe sync-capability gate | Qoder writes structured JSONL transcripts. The observed layout and record set differ from the detailed Qoder IDE example. |
 | Session capture as a non-restorable backup | Medium | Omit unless a separate backup product is approved | File capture is possible. It is not session portability until Qoder can consume the restored data. |
+| Raw session resume in Qoder CLI | Partial, version-pinned | Keep disabled | CLI `1.1.40` lists a restored synthetic session, and a separate fresh native session resumes successfully. Authenticated continuation from copied files is not proved. |
+| Fork Qoder history | Transcript-only PoC | Keep disabled and separate from exact restore | SDK `1.0.32` can fork a synthetic main transcript without authentication, but it omits broader task state and the negative corpus found dangling progress references and sidechain-parent detachment. |
 | Session restore and resume in the Qoder app | Unproved | Block production release | The app also keeps task references in an application database. No public task-import interface is documented. |
 | Open an existing task in the Qoder app | Unproved | Omit the action | The reviewed public deep-link and CLI documentation does not define a Qoder app action that opens an existing task by ID. |
 | Qoder pets | Excluded | No work | Pet support was removed from this scope. |
@@ -210,7 +221,14 @@ The observed main transcript contained these record types:
 
 Across the observed `user` and `assistant` record variants, fields included a session ID, record UUID, parent UUID, time, working directory, message, permission mode, origin, and related request identifiers. These fields were not present in every variant.
 
-The transcript contained multiple `active-leaf` records. Their `leafUuid`, `explicit`, timestamp, and session fields make them branch-tip candidates. The inspection did not prove whether the last record, latest timestamp, or `explicit` value controls Qoder's selected branch. Treat this structure as a branch graph, but keep active-lineage presentation blocked until the branch probe proves the authoritative selection rule.
+The transcript contained multiple `active-leaf` records. Their `leafUuid`,
+`explicit`, timestamp, and session fields make them branch-tip candidates. The
+initial home inspection did not prove selection. A later SDK `1.0.32` reader
+probe proved that the last matching record in file order wins for that SDK
+projection. The CLI `1.1.40` package trace adds separate persisted-candidate
+and fallback rules. No public raw-file contract or authenticated branch product
+test exists. Treat the structure as a branch graph and keep active-lineage
+presentation blocked.
 
 Sanitized attachment metadata indicated Skill inventory, Hook, system-context, and agent-listing categories. Attachment bodies were not recorded. Attachments can contain executable-resource details and system context. They must receive the same privacy, size, and warning treatment as message and tool records.
 
@@ -408,8 +426,10 @@ The codec must:
 - Parse only the fields needed for identity, ancestry, timestamps, event presentation, and structural path mapping.
 - Treat unknown record types and unknown fields as opaque data.
 - Reject malformed JSON, conflicting session IDs, duplicate UUIDs, cycles, self-parenting, and invalid branch references.
-- Treat `active-leaf` records as branch-tip candidates until the disposable branch probe proves which record is authoritative.
-- Follow `parentUuid` from the proved authoritative leaf only after that rule is version-gated.
+- Treat `active-leaf` records as branch-tip candidates. Version-gate the SDK
+  file-order rule and the different CLI fallback policy.
+- Follow `parentUuid` from the selected leaf only after the complete branch,
+  compaction, sidechain, team, and metadata corpus passes.
 - Keep non-active branches for exact restore, but exclude them from the default active timeline.
 - Give branch and incomplete-result warnings without inventing missing parentage.
 - Increment the codec version when Qoder changes structural semantics.
@@ -848,7 +868,8 @@ Until this gate is complete, use only documented files, public CLI or SDK interf
 2. Make Codex and Claude return `true` and Qoder return `false`.
 3. Short-circuit portable review before cursor seeding, cloud transcript reads, eligibility analysis, planning, or publication.
 4. Add Qoder discovery and metadata validation.
-5. Add the Qoder codec. Show active-branch lineage only after the authoritative `active-leaf` rule passes the versioned probe.
+5. Add the Qoder codec. Show active-branch lineage only after the complete
+   versioned lineage corpus and authenticated branch test pass.
 6. Add bounded summaries, timeline indexes, pages, and event detail.
 7. Add snapshot-instability blockers.
 8. Register Qoder as `activity_only`.
@@ -932,7 +953,7 @@ All probes must use temporary user homes, temporary Qoder configuration director
 | Create one task | One stable session ID maps to the main transcript and allowed sidecars. |
 | Continue task | Existing session ID continues and the snapshot change is understood. |
 | Rename task | Determine which public file or API owns the display name. |
-| Branch from response | Record every `active-leaf` candidate after each branch and restart. Prove whether file order, timestamp, or `explicit` selects the visible branch. |
+| Branch from response | Confirm the version-pinned file-order rule, persisted-candidate validation, fallback ordering, sidechain/team/metadata leaves, compaction, and restart behavior. |
 | Fork task | Original and fork have distinct valid identities and shared ancestry is handled. |
 | Compact task | Compression sidecar and main transcript remain a consistent restorable unit. |
 | Run subagent | All required subagent sidecars are discovered and restored. |

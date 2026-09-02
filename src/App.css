@@ -3683,6 +3683,182 @@ span.sync-path-crumb {
   font-size: var(--type-lg);
 }
 
+/* ── Landing picker: Projects, Catalog, Storages ─────────────────────
+   The root of each nav section when nothing in it is selected: a heading,
+   the count, the one Add verb, and a door per entry. Rendered from the
+   registry alone — every fact on a card comes off the config the sidebar
+   already holds. No scan, count, or stamp is read for these pages, so they
+   cost what the sidebar costs. */
+.landing-picker {
+  width: 100%;
+}
+
+.landing-picker-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin: 0 0 14px;
+}
+
+.landing-picker-head h1 {
+  margin: 0;
+  color: var(--text-0);
+  font-size: var(--type-xl);
+}
+
+.landing-picker-count {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.landing-picker-head > .btn {
+  margin-left: auto;
+}
+
+.landing-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* One box per project, in the card grammar; the whole box is the door. */
+.landing-picker-card {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 13px 16px 12px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
+  background: var(--surface-row);
+  box-shadow: var(--shadow-card);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 90ms steps(2, end);
+}
+
+.landing-picker-card:hover:not(:disabled) {
+  background: var(--surface-row-hover);
+}
+
+.landing-picker-card:active:not(:disabled) {
+  box-shadow: none;
+  transform: translate(1px, 1px);
+}
+
+.landing-picker-card-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.landing-picker-card-title > svg {
+  flex: 0 0 auto;
+  color: var(--text-2);
+}
+
+.landing-picker-card-title > strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-0);
+  font-family: var(--font-display);
+  font-size: var(--type-lg);
+  font-weight: var(--weight-bold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.landing-picker-card-marks {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 8px;
+  color: var(--text-2);
+}
+
+/* A location is an identifier: a path, a bucket, a home — mono, one line,
+   cut at the end. */
+.landing-picker-card-location {
+  overflow: hidden;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.landing-picker-card-detail {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  color: var(--text-2);
+  font-family: var(--font-display);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-medium);
+}
+
+.landing-picker-card-detail.muted {
+  color: var(--text-3);
+}
+
+/* A storage card's facts are chips — the linked-project tally, the issue
+   word, the draft badge — on the same row the detail line would take. */
+.landing-picker-card-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Nothing listed: the mark, the fact, the one action. */
+.landing-picker-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 64px 20px 10px;
+  text-align: center;
+}
+
+.landing-picker-empty h1 {
+  margin: 6px 0 0;
+  color: var(--text-0);
+  font-size: var(--type-2xl);
+}
+
+.landing-picker-empty > .btn {
+  margin-top: 8px;
+}
+
+.landing-picker-mark {
+  width: 72px;
+  height: 72px;
+  display: grid;
+  place-items: center;
+  border: var(--box-border);
+  border-radius: 22px;
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+}
+
+.landing-picker-mark img {
+  width: 44px;
+  height: 44px;
+  image-rendering: pixelated;
+}
+
+:root[data-theme="dark"] .landing-picker-mark img {
+  filter: brightness(0) invert(1);
+}
+
 .profile-links-heading-actions {
   display: flex;
   flex-direction: column;

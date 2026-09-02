@@ -41,6 +41,7 @@ import ConversationPathRepairNotice, {
 } from "./ConversationPathRepairNotice";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import ProviderMark from "../sync-review/ProviderMark";
+import ProjectPicker from "./ProjectPicker";
 import type { SessionHeaderModel } from "./session-detail/SessionDetailPage";
 import type { PullRequiredCopy } from "./PushResourceWorkspace";
 import SyncOutcomeNotice from "./SyncOutcomeNotice";
@@ -2228,21 +2229,20 @@ export default function ProjectLinksWorkspace({
 
   if (!workspaceProject && !editingStorage && !newProjectSetup) {
     return (
-      <main className="sync-main sync-project-links-page sync-git-info-page">
-        <section className="profile-links-section" aria-labelledby="git-info-heading">
-          <div className="profile-links-heading">
-            <div className="profile-links-copy">
-              <h1 id="git-info-heading" className="settings-section-title">Project history</h1>
-              <div className="profile-links-subtitle">Select a completed project to view its Codex history.</div>
-            </div>
-          </div>
-          <NoticeZone
-            items={agentSetupNotices}
-            subject="notes about storage setup"
-            timing="standing"
-            label="Notes about storage setup"
-          />
-        </section>
+      <main className="sync-main sync-project-links-page sync-landing-page">
+        <NoticeZone
+          items={agentSetupNotices}
+          subject="notes about storage setup"
+          timing="standing"
+          label="Notes about storage setup"
+        />
+        <ProjectPicker
+          projects={projects}
+          profiles={profiles}
+          storages={storages}
+          onAddProject={onAddProject}
+          onSelectProject={onSelectProject}
+        />
       </main>
     );
   }

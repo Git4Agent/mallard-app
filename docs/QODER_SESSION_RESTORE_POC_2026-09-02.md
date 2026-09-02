@@ -10,18 +10,22 @@
 
 **Scope:** Qoder session capture, transport, discovery, and restore mechanics
 
-**Out of scope:** Qoder pets, production integration, credentials, settings,
-memory, application-database modification, and private Qoder interfaces
+**Out of scope:** Qoder pets, production integration, credential capture or
+export, settings, memory, application-database modification, and private Qoder
+interfaces
 
 **Related research:**
-[Qoder support feasibility research](QODER_SUPPORT_FEASIBILITY_RESEARCH_2026-09-01.md)
+[Qoder support feasibility research](QODER_SUPPORT_FEASIBILITY_RESEARCH_2026-09-01.md),
+[Qoder CLI resume proof-of-concept study](QODER_CLI_RESUME_POC_2026-09-02.md),
+[Qoder CLI custom-provider and Tuzi proof of concept](QODER_CUSTOM_PROVIDER_POC_2026-09-02.md),
+and [Qoder fork mechanisms research and proof of concept](QODER_FORK_MECHANISMS_RESEARCH_2026-09-02.md)
 
 ## Executive result
 
-The proof produced three useful results:
+The proof produced four useful results:
 
 1. Mallard-controlled file mechanics are feasible. A synthetic harness captures
-   and restores a complete six-file task group, preserves the source UUID,
+   and restores the reviewed six-file task group, preserves the source UUID,
    blocks reviewed-state conflicts, and limits path changes to approved JSON
    value tokens. All 15 tests pass.
 2. The public Qoder Agent SDK can import the main transcript and subagent
@@ -30,6 +34,31 @@ The proof produced three useful results:
 3. Qoder CLI `1.1.40` can list one synthetic session from a clean, disposable
    `QODER_CONFIG_DIR`. This proves local discovery only. It does not prove
    resume, sidecar consumption, or desktop-app discovery.
+4. A user-operated authenticated test created one fresh native session and
+   resumed its exact UUID in a second CLI process. The response recovered a
+   source-only marker, and the same transcript changed and grew. This proves
+   native resume only. It does not prove restore of copied files.
+
+A later dedicated CLI resume PoC ran an isolated `--resume` invocation. It
+reached Qoder authentication and preserved the six-member set, sizes, and
+SHA-256 content. The tested CLI attempts authentication first but can defer the
+failure and continue through source resolution. A differential product probe
+confirmed source access before the final login error. The result still does not
+prove complete transcript use, sidecar use, or semantic resume.
+
+The separate native-session test returned
+`AUTHENTICATED_NATIVE_RESUME_PASS`. The first run displayed a macOS Keychain
+availability dialog because the runner supplied the ignored value
+`QODER_FORCE_FILE_STORAGE=1`. The corrected runner supplies the exact value
+`true` and blocks the observed `security` command. A corrected product rerun is
+still required to prove command-level Keychain avoidance.
+
+A live Tuzi recheck on 2 September 2026 also passed. `GET /v1/models`
+returned HTTP `200` with 836 model identifiers, including `deepseek-chat`.
+One bounded `POST /v1/chat/completions` request returned HTTP `200` with one
+non-empty choice. This was a direct Tuzi API test. It did not start Qoder or
+resume a session. A Tuzi key cannot replace the separate Qoder authentication
+that is required for Qoder model continuation and provider routing.
 
 These results do not prove Qoder task restore. Qoder App has a separate
 application database and user-interface projections. Qoder does not publish an
@@ -45,7 +74,11 @@ The correct release state is:
 | Synthetic exact materialization | Pass | PoC evidence only |
 | SDK transcript import and readback | Pass, limited | SDK runtime only |
 | Qoder CLI clean-home discovery | Pass, limited | Diagnostic evidence only |
-| Qoder CLI authenticated resume | Not run | Blocked pending a disposable test account |
+| Qoder CLI unauthenticated resume boundary | Pass, limited | Authentication gate observed; six-member content manifest preserved |
+| Qoder CLI authenticated native resume | Pass, limited | Fresh native source only; same UUID, marker recovery, and transcript growth |
+| Qoder CLI command-level Keychain avoidance | Unproved after correction | First run reached a Keychain probe; corrected runner requires a product rerun |
+| Direct Tuzi API availability | Pass, live, limited | Provider prerequisite only; no Qoder or session evidence |
+| Qoder CLI authenticated resume through Tuzi | Blocked | Native Qoder resume passed, but no Qoder-to-Tuzi request ran |
 | Qoder App clean-home discovery and continue | Not run | Blocked pending disposable macOS environments |
 | Qoder App database and UI projection rebuild | Unproved | Production blocker |
 | Production Qoder session restore | No-go | Keep disabled |
@@ -655,28 +688,40 @@ Result terms:
 
 - **Pass — synthetic:** the local harness proves the stated Mallard behavior.
 - **Pass — product:** a public Qoder product performed the narrow stated task.
+- **Pass, version-pinned:** the result applies only to the tested package
+  version.
+- **Pass — live, limited:** a live external service performed only the stated
+  bounded request.
 - **Partial:** one layer passes, but a required product contract is absent.
+- **Does not pass:** the tested product path omits required data or behavior.
 - **Unproved:** no authoritative rule or product result exists.
 - **Blocked:** the test cannot run safely in the current environment.
 
 | Gate | Result | Evidence | Production consequence |
 | --- | --- | --- | --- |
+| Synthetic sandbox boundary | Pass — synthetic | Exact temporary-root name and marker checks block unsafe access and cleanup | Reimplement the boundary with Rust handle-relative operations. |
 | Stable multi-file capture | Pass — synthetic | Two reads and three membership views; add, remove, replace, mutate, and symlink tests | Reimplement with Rust handle-relative traversal and limits. |
-| Complete sidecar materialization | Pass — synthetic | Six reviewed members stage, apply, and recapture | The real Qoder sidecar set is still version-specific. |
+| Reviewed six-member materialization | Pass — synthetic | Six reviewed JSON and JSONL members stage, apply, and recapture | This is not proof of a complete Qoder sidecar contract or file-history capture. |
 | Source UUID preservation | Pass — synthetic | File names, directories, known fields, plan, and mapping keep one UUID | Do not add UUID remapping. |
 | New-mapping collision detection | Partial | Existing transcript or task directory blocks | A process-wide or provider-coordinated uniqueness lock is still required. |
 | Existing mapped update | Pass — synthetic | Complete identity, size, and digest pins block a stale target | Integrate Mallard revision, digest, expiry, and approval pins. |
 | `active-leaf` discovery | Pass — synthetic | All candidates are reported | Do not select a visible branch. |
-| `active-leaf` authority | Unproved | No public Qoder rule | Production branch-aware restore remains blocked. |
+| `active-leaf` SDK reader projection | Pass, version-pinned | SDK `1.0.32` read-only branch probe; last matching file-order record wins | Do not extrapolate to authenticated CLI resume. |
+| `active-leaf` CLI resume authority | Partial, version-pinned | CLI `1.1.40` package trace defines persisted-candidate and fallback behavior; no authenticated branch product test | Production branch-aware restore remains blocked. |
 | Structural-only path mapping | Partial | Selected tokens change and free-form history does not | Real Qoder field allowlists and cross-path integrity remain unproved. |
 | Known integrity-field blocker | Pass — synthetic | Synthetic `signature` blocks path mapping | The name list is not a complete integrity schema. |
 | SDK transcript import | Pass — product | 25 offline assertions | Valid only for an SDK-controlled session store. |
 | SDK sidecar import | Does not pass | State, compression, and task sidecars are ignored | SDK import cannot replace complete task materialization. |
 | Clean Qoder CLI list | Pass — product | CLI `1.1.40` lists one synthetic session | Human output is not a stable production inventory contract. |
-| Clean Qoder CLI resume | Unproved | Authentication and model execution were outside this proof | Requires a disposable account and recorded continuation test. |
+| Clean Qoder CLI auth boundary | Pass — product | `--resume` reaches the final login error and preserves member set, sizes, and SHA-256 content; a differential probe proves source access | Does not prove complete transcript use, sidecar use, or semantic continuation. |
+| Isolated-profile Qoder CLI native semantic resume | Pass, version-pinned, limited | One user-operated fresh session resumed in a second process with the same UUID, marker recovery, and transcript growth | Does not prove operating-system isolation, copied restore, sidecar use, or active-leaf authority. |
+| Command-level native Keychain avoidance | Unproved after correction | First user run used the ignored value `1` and displayed a Keychain availability dialog | Rerun with `QODER_FORCE_FILE_STORAGE=true` and the blocking `security` guard. |
+| Direct Tuzi API compatibility | Pass — live, limited | Model list returned `200` with 836 identifiers; `deepseek-chat` was present; one chat request returned `200` with one non-empty choice | This proves a provider prerequisite only. It does not involve Qoder or session restore. |
+| Qoder CLI provider configuration parsing | Pass, version-pinned | CLI `1.1.40` accepted a Tuzi-shaped direct-provider configuration before Qoder authentication stopped startup | The setting is not a reviewed public Qoder contract. |
+| Clean Qoder CLI semantic resume through Tuzi | Blocked | Direct Tuzi and native Qoder resume pass separately, but no Qoder-to-Tuzi request ran | Requires a combined authenticated, persistent, exact-path marker test and restart test. |
 | Clean Qoder App task discovery | Blocked | No supported app-home selector or disposable macOS environment | Required before production release. |
 | Qoder App continuation | Blocked | No isolated task can be opened safely | Required before production release. |
-| Qoder App projection rebuild | Blocked | No documented index rebuild or import contract | Required product decision and acceptance test. |
+| Qoder App projection rebuild | Unproved | No documented index rebuild or import contract | Required product decision and acceptance test. |
 
 ## 11. Why the desktop test did not run
 
@@ -846,9 +891,12 @@ npm install \
   zod
 ```
 
-The CLI discovery probe used the same controls for
-`@qoder-ai/qodercli@1.1.40`. It invoked the package's `bundle/qodercli.js`
-directly. It did not run `postinstall` or the desktop-aware npm dispatcher.
+The CLI discovery and resume-boundary probes used the same controls for
+`@qoder-ai/qodercli@1.1.40`. They invoked the package's `bundle/qodercli.js`
+directly. They did not run `postinstall` or the desktop-aware npm dispatcher.
+
+The dedicated resume study and executable harness are in
+[Qoder CLI resume proof-of-concept study](QODER_CLI_RESUME_POC_2026-09-02.md).
 
 The actual probes also supplied empty temporary npm user and global
 configuration files and a separate temporary cache. Do not use a real Qoder
@@ -873,9 +921,10 @@ Tauri command, Rust type, TypeScript type, schema, or dependency.
 
 The PoC validates a useful set of Mallard filesystem mechanics. It also
 confirms that the SDK import path is narrower than a complete Qoder task. Qoder
-CLI can discover a restored synthetic transcript, but resume and sidecar use
-remain unproved. The remaining failures are product-contract and
-clean-environment failures, not small implementation gaps.
+CLI can discover a restored synthetic transcript and reaches its authentication
+gate for `--resume`. Authenticated copied-transcript and sidecar use remain
+unproved. The remaining failures are product-contract and clean-environment
+failures, not small implementation gaps.
 
 Production Qoder session restore is not ready. Keep it disabled until a clean
 Qoder App can discover, open, continue, restart, and recapture a restored task

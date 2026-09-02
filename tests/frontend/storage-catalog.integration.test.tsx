@@ -237,7 +237,9 @@ test("the Catalog index is a stable root with empty and populated states", () =>
   );
   assert.match(empty, /aria-label="Catalog path"/);
   assert.match(empty, />Catalog</);
-  assert.match(empty, /Add Catalog resource/);
+  assert.match(empty, /No Catalog resources yet/);
+  assert.match(empty, /Add Catalog resource…/);
+  assert.doesNotMatch(empty, /Add a resource to sync/);
 
   const populated = renderToStaticMarkup(
     <CatalogIndexPage
@@ -248,9 +250,13 @@ test("the Catalog index is a stable root with empty and populated states", () =>
       onAddScope={() => undefined}
     />,
   );
-  assert.match(populated, /sync-storage-index-row/);
-  assert.match(populated, /Skills · conf2/);
-  assert.match(populated, /\/Users\/user\/codex-conf2/);
+  assert.match(populated, /landing-picker-card"/);
+  // The door is named by the scope label; the card itself shows the kind, the
+  // profile, and the profile's home as its location.
+  assert.match(populated, /aria-label="Open Skills · conf2"/);
+  assert.match(populated, /<strong>Skills<\/strong>/);
+  assert.match(populated, /landing-picker-card-location">~\/codex-conf2</);
+  assert.doesNotMatch(populated, /sync-storage-index-row/);
 });
 
 function renderScopePage() {
