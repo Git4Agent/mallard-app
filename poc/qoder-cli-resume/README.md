@@ -13,8 +13,17 @@ This PoC gives a narrow result for Qoder CLI `1.1.40`:
 - A user-operated test created a fresh native session and resumed its exact
   UUID in a second authenticated CLI process. The response recovered the
   source-only marker, and the same transcript changed and grew.
-- The authenticated result does not prove copied-transcript loading, sidecar
-  loading, active-leaf selection, or Mallard restore.
+- Direct UUID lookup from a second unrelated working directory did not find
+  the source-path bucket.
+- Moving the source bucket to a verified backup and making a byte-exact copy
+  under the destination-path key let a new process resume the same UUID and
+  recover the marker. No structural path rewrite was applied.
+- A session-only copy from isolated home A to an independently authenticated,
+  initially empty home B also resumed the same UUID and recovered the marker.
+  Authentication and machine state did not move with the session.
+- The authenticated result does not prove a physical two-machine transfer,
+  the real Mallard transport, sidecar consumption, active-leaf authority, or
+  Mallard production restore.
 
 The production verdict is `POC_ONLY`. Do not enable Mallard Qoder session
 restore from this result.
@@ -32,13 +41,18 @@ structured success, the CLI returned the same session ID, the second response
 recovered the marker, and the transcript changed and grew. Cleanup completed,
 and no temporary profile was retained.
 
-The same run displayed a macOS Keychain availability dialog. The runner had
-set `QODER_FORCE_FILE_STORAGE=1`, but CLI `1.1.40` checks for the exact string
-`true`. Thus, the run proves native semantic resume but does not prove that
-Qoder avoided Keychain access. The corrected runner uses
-`QODER_FORCE_FILE_STORAGE=true`, puts a blocking `security` command first in
-`PATH`, and fails if that command is invoked. A new user run is required to
-close this no-Keychain-access check.
+The first same-path run displayed a macOS Keychain availability dialog because
+the runner used `QODER_FORCE_FILE_STORAGE=1`. CLI `1.1.40` checks for the exact
+string `true`. The corrected cross-path run used
+`QODER_FORCE_FILE_STORAGE=true`, put a blocking `security` command first in
+`PATH`, and observed no command attempt or Keychain dialog.
+
+The complete cross-path and App results are in the
+[focused PoC report](../../docs/QODER_CROSS_PATH_AND_APP_RESUME_POC_2026-09-02.md).
+
+The same report includes the clean-home transfer result
+`AUTHENTICATED_CLEAN_HOME_CROSS_PATH_TRANSFER_PASS`. It is the closest PoC for
+the Mallard machine-A push and machine-B pull flow.
 
 The guarded product run has `ok: false`. This result is expected. The CLI
 attempted background network and process operations through intercepted
@@ -204,7 +218,7 @@ node --test \
   poc/qoder-cli-resume/qoder-cli-authenticated-resume.test.mjs
 ```
 
-Current result: 19 passed, zero failed, and zero skipped.
+Current result: 22 passed, zero failed, and zero skipped.
 
 The 10 tests cover:
 
@@ -222,11 +236,13 @@ The 10 tests cover:
 - relative CLI-path rejection; and
 - Qoder CLI package-version rejection.
 
-The nine authenticated-runner tests use a mock CLI. They cover separate
+The 12 authenticated-runner tests use a mock CLI. They cover separate
 source and resume processes, marker-channel isolation, environment filtering,
 exact transcript growth, exact file-storage configuration, native Keychain
-command rejection, bundle pinning, interrupt cleanup, retained-state opt-in,
-and forced termination after excess output.
+command rejection, direct cross-path execution, destination-bucket
+materialization, a session-only two-clean-home transfer, bundle pinning,
+interrupt cleanup, retained-state opt-in, and forced termination after excess
+output.
 
 ## Run the read-only SDK probe
 
@@ -278,25 +294,18 @@ Do not disable the guard to make the result green.
 
 This PoC does not prove:
 
-- no-Keychain-access behavior in a corrected product run;
-- that authenticated resume reads a copied or restored transcript;
+- the same transfer on two physical machines;
+- the real Mallard push, storage, review, and pull pipeline;
 - that resume reads `state.json`, compression state, or subagent sidecars;
 - which active-leaf record authenticated Qoder CLI `1.1.40` treats as
   authoritative;
-- that Qoder can continue from the restored leaf;
-- that a copied or restored continued session keeps the same UUID;
-- that a copied or restored turn appends to the expected JSONL file;
 - that the Qoder App discovers or continues the CLI session;
 - that the bucket algorithm stays compatible in another Qoder version; or
 - that JavaScript interception blocks every native egress path.
 
 ## Required next gate
 
-First, rerun the corrected native-resume smoke test and confirm that no
-Keychain dialog appears. This closes only the version-pinned command-level
-Keychain check.
-
-Then run the raw-restore authenticated gate in a disposable operating-system
+Run the clean-home authenticated gate in a disposable operating-system
 account or VM with enforced egress recording and a disposable Qoder account.
 Capture these facts:
 

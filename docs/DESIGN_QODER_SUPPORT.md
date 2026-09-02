@@ -1,440 +1,401 @@
-# Design: Qoder support in Mallard
+# Design: Qoder CLI support in Mallard
 
-**Status:** proposed; implementation-ready for the minimum release only
+**Status:** proposed. Implementation can start. Production enablement is
+blocked until all mandatory release gates pass.
 
 **Date:** 2026-09-02
 
-**Audience:** Mallard maintainers, reviewers, and release owners
+**Product scope:** cross-path Qoder CLI sessions, standalone user Skills, and
+native plugin install intent.
 
-**Scope:** a minimum Qoder release, plus explicit gates for later plugins and
-session portability
+**Provider order:** Qoder is the first agent-provider choice.
 
-**Explicit exclusion:** Qoder pet support
+**Compatibility:** clean schema-1 cutover. There is no migration, legacy
+execution path, dual writer, alias, or downgrade support.
 
-**Current session-restore decision:** no-go
-
-**Current custom-provider decision:** no-go
-
-**Current fork decision:** no-go
-
-**Supersedes for production design:**
-[Qoder support feasibility research](QODER_SUPPORT_FEASIBILITY_RESEARCH_2026-09-01.md).
-The feasibility report and the four PoC reports remain evidence records.
+**Excluded:** Qoder pets, Qoder App task restore, session fork,
+custom-provider configuration, and Tuzi credentials.
 
 ## 1. Decision
 
-Mallard will add Qoder as a built-in provider through separate capability
-gates. Mallard will not use one global `qoder_supported` switch.
+Qoder is not inherently non-portable. The earlier design used too broad a
+definition of portability. It required Qoder App database projection rebuild
+and arbitrary path relocation before it would support Qoder sessions. Neither
+feature is necessary for Qoder CLI session resume.
 
-The implementation must stay small. The first production change will add only:
+Mallard will implement this contract:
 
-1. A Qoder profile and first-place Qoder choice in agent-provider selectors.
-2. Read-only local Qoder CLI session Activity.
-3. An exact-session **Open in Terminal** action through the public Qoder CLI.
-4. Standalone Qoder user Skills in the Library.
+> Mallard captures one complete and stable Qoder CLI session group, maps
+> project-root paths with the existing portable path token, pushes it through
+> the schema-1 bundle model, pulls it into a different and independently
+> authenticated Qoder CLI profile at the selected destination project path,
+> preserves the Qoder session UUID, and resumes the same session through the
+> public Qoder CLI.
 
-The first change will not add Qoder conversation resources to Push or Pull. It
-will not add a portable-session codec, sidecar materializer, App database
-adapter, plugin command, fork command, custom provider, or pet type.
+The first production Qoder release has five mandatory functions:
 
-The release sequence is:
+1. Show Qoder first in agent-provider choices.
+2. Show exact-project Qoder CLI sessions in Activity.
+3. Push, Pull, and resume eligible Qoder CLI sessions.
+4. Push and Pull standalone Qoder user Skills.
+5. Push and Pull Qoder plugin install intent. Pull uses the native Qoder CLI
+   and verifies the result with new JSON inventory.
 
-1. Ship the minimum release: profile, read-only Activity, exact native CLI
-   resume, and standalone user Skills.
-2. Add Qoder plugin install intent only after Qoder supplies, or Mallard proves,
-   a supported machine-readable inventory contract.
-3. Complete the provider-neutral session foundation.
-4. Enable exact-path Qoder CLI session portability only after all session gates
-   pass.
-5. Enable Qoder App task portability only after the App rebuilds the required
-   projections without a database copy or edit.
-6. Consider cross-path restore, history fork, and custom-model integration as
-   separate later products.
+Qoder pets are not supported. Mallard adds no Qoder pet enum value, resource
+kind, scanner, storage object, preview, or UI row.
 
-Qoder is the product-preferred agent provider. The backend returns Qoder first,
-and the setup UI focuses or selects that first entry for a new setup. This is a
-presentation and setup-default rule. It does not auto-bind an unreviewed home,
-enable Qoder session Push or Pull, or change an existing project binding.
+Development changes can land in stages with Qoder disabled. Register Qoder in
+the production UI only after sessions, Skills, plugins, and the credential
+boundary pass their complete release gates.
 
-The current capability state is:
+## 2. Why the current PoC did not prove portability
 
-| Capability | Product state | Decision |
-| --- | --- | --- |
-| Qoder profile registration | Ready to design and implement | Add a built-in `qoder` descriptor, return it first, and require explicit profile binding. |
-| Local task discovery | Conditional | Enable only for positively identified, tested transcript dialects. |
-| Local Activity summary and detail | Conditional | Enable after ownership, bounds, malformed-input, and branch-warning tests pass. |
-| Active-branch Activity | Blocked | Do not identify a current branch until the applicable Qoder surface proves its rule. |
-| Open local session in Qoder CLI | Conditional minimum feature | Use the public CLI only, after command, version, ownership, and logging gates pass. This resumes an existing local session and does not copy it. |
-| Open an exact task in Qoder App | Blocked | The reviewed public deep links create tasks; they do not open an existing task by ID. |
-| Qoder session Push and Pull | Disabled | Copied-session continuation, complete membership, and App projection rebuild are not proved. |
-| Standalone user Skills | Conditional first portable resource | Ship after an exact two-home load test for the named Qoder surface. |
-| Plugin install intent | Conditional later resource | The public commands exist, but current public docs do not define machine-readable list output. |
-| Qoder custom provider or Tuzi | Disabled | Direct Tuzi access passed, but Qoder-to-Tuzi execution did not. The direct provider settings shape is not public. |
-| Qoder history fork | Disabled | The PoC proves a transcript transform, not a complete task fork. |
-| Qoder pets | Excluded | Add no Qoder pet type, capability, scanner, preview, or UI. |
+The authenticated native-resume PoC proved this flow:
 
-The backend must enforce every disabled state. Hiding a frontend control is not
-a safety boundary.
+```text
+Qoder CLI process 1 creates session S in profile A
+  -> Qoder CLI process 2 resumes session S in profile A
+```
 
-## 2. Product outcome
+It did not prove this flow:
 
-### 2.1 Minimum-release user outcome
+```text
+Qoder CLI profile A on source machine
+  -> Mallard stable capture
+  -> project-root path encoding
+  -> Mallard Push
+  -> schema-1 storage
+  -> Mallard Pull
+  -> project-root path decoding and destination-bucket materialization
+  -> clean Qoder CLI profile B on destination machine
+  -> qoder --resume S
+```
 
-A user sees Qoder first in each agent-provider choice. The user can bind a
-Qoder profile to a Mallard project. Mallard can show local, project-owned Qoder
-CLI sessions in Activity when their format is supported. Each row states that
-Qoder session sync is unavailable. The Push and Pull reviews do not offer Qoder
-session rows.
+The difference is material:
 
-If a supported public Qoder CLI is present, Activity offers an explicit **Open
-in Terminal with Qoder** action. The action resumes the exact selected local
-session. It does not copy, fork, or prove that the session is portable.
+- Native resume proves that Qoder can continue its own existing local state.
+- Portable restore proves that Mallard captured every required member, kept a
+  coherent snapshot, mapped only valid project-root path occurrences,
+  rejected UUID collisions, materialized it safely, and produced state that
+  Qoder consumes.
+- Qoder App discovery is a separate claim. It depends on App projections.
+  Mallard does not make that claim in this release.
 
-In the Library, a user can bind a Qoder profile and synchronize standalone user
-Skills after the two-home gate passes. Qoder is the first provider choice.
-Qoder plugins remain unavailable until the plugin inventory and apply gates
-pass. The Library never offers Qoder pets.
+The current Mallard code also has concrete gaps:
 
-### 2.2 Later user outcome
+- `provider_capture.rs` checks a file and later reads it by path. It does not
+  prove that the transcript and sidecars form one stable snapshot.
+- Push supports sidecar objects, but generic sidecar redaction can change
+  bytes. Qoder resume needs provider re-analysis after every path-map and
+  redaction transformation.
+- Pull preparation fetches the transcript but carries only sidecar names.
+- Pull apply computes transcript and optional provider-index targets, not a
+  complete Qoder session group.
+- `conversation_materialization.rs` validates every sidecar as one JSON
+  value. Qoder can have JSON, JSONL, and opaque members.
+- `service.rs` has Codex-versus-Claude branches. A third provider can enter
+  the Claude branch by mistake.
+- new local conversation materialization normally mints a provider UUID.
+  Qoder exact restore must preserve the source UUID.
+- current conversation comparison does not make sidecar-only changes part of
+  Qoder session identity.
 
-Future Qoder session support must have a narrow, truthful label:
+These are implementation gaps. They are not proof that Qoder sessions cannot
+be portable.
 
-- **Qoder CLI session** when only the CLI round trip passes.
-- **Qoder task** only when Qoder App list, open, continue, restart, and recapture
-  pass.
-- **Same-path restore only** until structural relocation passes independently.
+## 3. Product boundary
 
-Mallard must not call a captured but non-restorable task a portable session.
-Mallard must not relabel a fork as restore.
+### 3.1 Included
 
-## 3. Goals and non-goals
-
-### 3.1 Goals
-
-- Add Qoder without changing Codex or Claude behavior.
-- Keep ProjectSync provider registration compile-time and typed.
-- Keep the Storage Catalog independent from ProjectSync.
-- Discover only Qoder sessions that belong to the exact bound project.
-- Keep Qoder Activity useful when session portability is disabled.
-- Synchronize only standalone user Skills from a proved user root.
-- Represent plugins as install intent. Never copy plugin payloads.
-- Preserve immutable publication, SHA-256 verification, reviewed plans,
-  compare-and-swap heads, backups, journals, and stale-plan checks.
-- Build the common session primitives that a safe third provider needs.
-- Fail closed for unknown Qoder versions, dialects, sidecars, paths, and native
-  command output.
-
-### 3.2 Non-goals for the first Qoder release
-
-- Qoder session Push, Pull, restore, or backup.
-- Qoder App database import, copy, repair, or mutation.
-- Cross-path Qoder session restore.
-- Qoder task or history fork.
-- Qoder custom-provider configuration or Tuzi credential management.
-- Qoder memory, rules, commands, Hooks, connectors, agents, or subagents as
-  independent portable resources.
-- Project-level `.qoder` configuration or project Skills as provider-home
-  state.
-- Qoder cloud sessions, Remote Control, Teleport, or Cloud Agent state.
-- Qoder pet support.
-- A dynamic Mallard provider plug-in ABI.
-- Use of an executable hidden inside the Qoder App bundle.
-- Compatibility readers, dual writes, or migrations for old Mallard schemas.
-
-## 4. Terms and evidence rules
-
-### 4.1 Product terms
-
-Qoder uses different terms on different surfaces. Mallard uses these terms
-consistently:
-
-| Term | Meaning in this design |
+| Surface | First-release behavior |
 | --- | --- |
-| Qoder App | The desktop Qoder product and its application state. |
-| Qoder IDE | The earlier or separate Editor and Quest documentation surface. |
-| Qoder CLI | The public `qoder` command-line product. |
-| Qoder Agent SDK | The TypeScript or Python SDK and its paired CLI runtime. |
-| Session | Mallard's provider-neutral persisted conversation. |
-| Qoder task | User-facing Qoder App term for a conversation. |
-| Transcript | The main JSONL history file. |
-| Sidecar | Session-owned state outside the main transcript. |
-| Projection | Qoder App state derived into its separate application database. |
-| Exact restore | Restore with the same Qoder UUID and no semantic change. |
-| Fork | Create a new Qoder UUID from selected source history. |
+| Provider setup | Show Qoder first and require explicit review of the selected Qoder profile. |
+| Activity | Discover and inspect only exact-project, supported Qoder CLI sessions. |
+| Session Push | Capture and publish one eligible, stable, complete Qoder CLI session group. |
+| Session Pull | Restore the complete group into the selected Qoder CLI profile and map it to the reviewed destination project path. |
+| Session resume | Resume the restored source UUID with the public Qoder CLI. |
+| User Skills | Review, Push, Pull, and verify standalone Skills below the selected Qoder user Skill root. |
+| Plugins | Review and transport semantic plugin install intent; use the native CLI for destination install or update. |
 
-A result for Qoder CLI does not prove Qoder App behavior. A result for the
-Agent SDK does not prove Qoder CLI or App behavior.
+### 3.2 Initial session limits
 
-### 4.2 Evidence labels
+- Qoder CLI only.
+- One exact supported Qoder CLI version at first.
+- Exact source UUID preservation.
+- POSIX source and destination project roots accepted by the existing Mallard
+  path-map grammar.
+- The existing `mallard.pathmap.v1` wire token maps source project-root paths
+  to the destination root. UUIDs are not rewritten.
+- JSON and JSONL members use bounded structural transforms. Unchanged lines
+  and members remain byte-identical.
+- Qoder is stopped for session capture and apply.
+- Only a closed, versioned, product-proved member grammar is eligible.
+- Ambiguous branches and unproved advanced state are visibly ineligible.
+- Divergence blocks. The first release does not use Keep Both or create a
+  Qoder fork.
+- Destination authentication is independent. It never travels in Mallard.
 
-Every compatibility entry, test record, and release note must use one of these
-labels:
+### 3.3 Not included
 
-| Label | Meaning | Production use |
+- Qoder App task discovery, import, open, resume, sidebar rebuild, or
+  projection rebuild.
+- Any read or write of Qoder App databases, WAL, shared-memory files, cookies,
+  local storage, or login state.
+- Qoder `--fork-session`, App branch creation, SDK transcript fork, or a
+  Mallard fork action.
+- Project-level `.qoder/skills` as provider-home state.
+- Plugin payload, cache, repository, runtime data, or private registry copy.
+- Plugin uninstall, disable, or enable-state synchronization.
+- Qoder memory, rules, commands, Hooks, MCP configuration, agents, or
+  subagents as independent portable resources.
+- Qoder custom-model or custom-provider configuration.
+- Tuzi endpoint, key, model, or credential synchronization.
+- Qoder pets.
+- A dynamic Mallard provider plugin ABI.
+- An executable hidden inside `Qoder.app`.
+
+## 4. Evidence baseline
+
+### 4.1 Authenticated CLI resume
+
+The supplied PoC used `@qoder-ai/qodercli` `1.1.40` with bundle SHA-256:
+
+```text
+a5b9d9f116c16c512fd3000a62cb87e6d7e72ff4edbb196e24773834cef13eba
+```
+
+| Check | Result | Meaning |
 | --- | --- | --- |
-| `documented` | Current official Qoder documentation defines the behavior. | Candidate contract after a product test. |
-| `product_proved` | A pinned Qoder product completed the stated isolated test. | Valid only for the tested version, surface, operating system, and fixture. |
-| `package_observed` | Static package inspection found the behavior. | Diagnostic only. It cannot enable a capability. |
-| `synthetic` | A Mallard-controlled harness proved Mallard mechanics. | It does not prove Qoder consumption. |
-| `unproved` | No applicable contract or completed test exists. | Fail closed. |
+| Source command | Pass | The first process created a persistent marker session. |
+| Resume command | Pass | A second process resumed the same session ID. |
+| Marker recovery | Pass | The resumed model recovered prior semantic context. |
+| Transcript growth | Pass | Continuation wrote new history. |
+| Isolated Qoder home | Pass | The runner selected an isolated profile. |
+| Exact working directory | Pass | Both processes used one project directory. |
+| Tools, MCP, built-in Skills | Disabled | The test isolated native continuation. |
+| Mallard copy | Not proved | The session stayed in profile A. |
+| Sidecar consumption | Not proved | No profile-to-profile restore ran. |
+| Cross-path destination-bucket resume | Pass, limited | A later PoC resumed one simple native session at path B after byte-exact bucket relocation within the same profile. |
+| Qoder App resume | Not proved | The App was outside the test. |
 
-Do not combine two partial results into one stronger result. For example,
-direct Tuzi success plus native Qoder resume does not prove Qoder resume through
-Tuzi.
+Correct conclusion:
 
-### 4.3 Tested evidence baseline
+```text
+native same-profile Qoder CLI resume: proved for the tested build
+Mallard copied-session Qoder CLI resume: mandatory release gate
+```
 
-The current PoCs used these versions:
+### 4.2 Synthetic session restore
 
-- Qoder App `0.1.4` for installed-product and local-layout observations.
-- Qoder runtime metadata `1.1.35` in observed App task records.
-- `@qoder-ai/qodercli` `1.1.40`.
-- `@qoder-ai/qoder-agent-sdk` `1.0.32`.
-- macOS ARM64.
-
-Qoder's release notes identify CLI `1.1.40` as the 2026-09-01 release. These
-versions are evidence baselines. They are not broad compatibility ranges.
-
-## 5. Current PoC result
-
-The PoCs prove useful mechanics. They do not make production restore ready.
-
-| Gate | Result | Design consequence |
+| Gate | Result | Production use |
 | --- | --- | --- |
-| Synthetic sandbox boundary | Pass | Keep the marker and canonical-boundary controls in every destructive fixture. |
-| Stable multi-file capture | Pass, synthetic | Move the two-pass group protocol into production Rust before session portability. |
-| Six-member sidecar materialization | Pass, synthetic | Keep as a fixture only. File-history and other state make the real membership larger. |
-| Source UUID preservation | Pass, synthetic | Exact restore must preserve the source UUID. |
-| New UUID collision detection | Partial | Add destination-wide serialization and every reachable Qoder namespace. |
-| Existing mapped update | Pass, synthetic | Keep identity, size, digest, member-set, profile, and project pins. |
+| Sandbox boundary | Pass | Keep marker and canonical-boundary checks. |
+| Multi-file mutation detection | Pass, synthetic | Port the algorithm to Rust and test real Qoder output. |
+| Six-member materialization | Pass, synthetic | Do not assume that six members are complete. |
+| Source UUID preservation | Pass, synthetic | Make UUID preservation a provider rule. |
+| New UUID collision detection | Partial | Add destination-wide locking and recheck. |
+| Existing mapped update pins | Pass, synthetic | Reuse identity, size, digest, and revision pins. |
 | `active-leaf` candidate discovery | Pass, synthetic | Candidate discovery is not branch authority. |
-| SDK active-leaf projection | Pass, limited | It defines SDK `1.0.32` behavior only. It is not the App rule. |
-| Structural-only path mapping | Partial, synthetic | Do not enable cross-path restore. Real Qoder fields and integrity rules remain unproved. |
-| Integrity-field protection | Pass, synthetic | Keep the blocker. The tested field list is not a complete Qoder schema. |
-| SDK transcript import | Pass, limited | It can mirror main and subagent history. It is not full task import. |
-| SDK sidecar import | Does not pass | The public external store holds history only. |
-| Clean Qoder CLI discovery | Pass, limited | CLI `1.1.40` listed one restored synthetic transcript. Human output is not an inventory API. |
-| Authenticated native CLI resume | Pass, limited | A fresh native session resumed with the same UUID, recovered a marker, and grew its transcript. No copied restore occurred. |
-| Corrected no-Keychain command run | Unproved | The first run used the wrong file-storage value. Do not make a production no-Keychain claim. |
-| Clean copied-session CLI resume | Unproved | This remains a release blocker. |
-| Clean Qoder App discovery and continue | Blocked | No supported App-home selector or disposable App environment was available. |
-| Qoder App projection rebuild | Unproved | Do not copy or edit the application database. |
-| Direct Tuzi model request | Pass, live, limited | This proves Tuzi only. It does not prove Qoder integration. |
-| Qoder-to-Tuzi request | Unproved | Keep custom-provider support disabled. |
-| SDK standalone history fork | Pass, transcript-only | Keep fork separate and disabled. |
-| Production Qoder session restore | No-go | Keep backend capability disabled. |
+| Structural path mapping | Partial, synthetic | Reuse Mallard's proved mapper, then prove Qoder member and integrity semantics in a product test. |
+| SDK transcript import | Pass, limited | It does not import complete Qoder task state. |
+| SDK sidecar import | Does not pass | Do not use the SDK store as the restore engine. |
+| Clean CLI discovery | Pass, limited | Listing does not prove semantic continuation. |
+| Clean CLI copied-session resume | Not proved | This is the decisive session release test. |
 
-The test count is not a production-readiness metric. The current suite mixes
-synthetic, mocked, package-pinned, and narrow product tests.
+A later version-pinned PoC proved one narrower cross-path mechanism. Qoder CLI
+`1.1.40` did not find a source-bucket session from an unrelated project path.
+It did resume the same UUID and recover prior context after the unchanged
+simple session group was placed in the destination path's Qoder project
+bucket. This proves that destination-bucket materialization is viable for the
+tested session. It does not prove Mallard's path-map transform, a clean profile
+B, the complete member grammar, or production restore.
 
-## 6. Architecture
+### 4.3 Plugin contract check
+
+Qoder documents JSON output for `plugins list` and `plugins marketplace list`.
+It also documents user, project, and local scopes and native plugin and
+marketplace commands. See [Qoder CLI Plugins](https://docs.qoder.com/cli/plugins)
+and [Qoder CLI Plugin Reference](https://docs.qoder.com/cli/plugins-reference).
+
+A local check of Qoder CLI `1.1.40` used a fresh temporary profile:
+
+- both JSON inventory commands returned `[]` for an empty profile;
+- a user-scoped local fixture reported ID, name, source, version, scope,
+  enabled state, install path, time, description, and resource summaries;
+- a marketplace reported name, typed source, install location, update time,
+  and automatic-update state;
+- a marketplace plugin used `name@marketplace-name` and reported user scope.
+
+This is `package_observed` evidence for one version. It supports the adapter
+design. A committed sanitized fixture and product test remain the release
+authority.
+
+### 4.4 Evidence labels
+
+| Label | Meaning |
+| --- | --- |
+| `documented` | Current official Qoder documentation states the behavior. |
+| `product_proved` | A disposable installed product passed an end-to-end test. |
+| `package_observed` | A pinned package showed the behavior, but it is not a published stable contract. |
+| `synthetic` | Mallard-owned fixtures proved mechanics only. |
+| `unproved` | No sufficient contract or product test exists. |
+
+Do not promote `package_observed` or `synthetic` evidence to a public
+compatibility claim without the named product gate.
+
+## 5. User flow
+
+### 5.1 Source machine
+
+The user binds a reviewed Qoder CLI profile to a project. Qoder is the first
+provider shown. Mallard inventories Qoder sessions and classifies each one as
+eligible, ineligible, or invalid.
+
+For an eligible session, Push review shows:
+
+- provider `Qoder`;
+- bounded user-visible name;
+- session state;
+- `Project-root paths will map to the destination project`;
+- file and byte totals for the complete group;
+- warnings for executable or credential-shaped content;
+- the normal immutable-publication review.
+
+Mallard requires Qoder to be stopped. It captures the complete group twice and
+publishes only when group membership and every file remain stable.
+
+### 5.2 Destination machine
+
+The user binds another Qoder CLI profile and selects the destination checkout
+for the same project. Its absolute path can differ from the source path. The
+destination profile is authenticated independently with file-backed
+credential storage and has no object that owns the source UUID.
+
+Pull review shows `/__mallard_root__ -> <reviewed destination project>` and the
+complete target group. The source absolute root is machine-local and does not
+travel in the bundle. A source-side review can show its own physical project
+root mapping to `/__mallard_root__`; a clean destination cannot show that
+source path. Apply decodes the portable path token, stages and validates all
+members, rechecks collisions, installs sidecars before the transcript,
+recaptures the group, and saves the binding only after verification.
+
+The user selects **Open in Terminal with Qoder**. Mallard starts the public CLI
+with the selected profile, project, and restored UUID. Qoder resumes the
+transported session.
+
+### 5.3 Library
+
+- Skills shows standalone user Skills only.
+- Plugins shows portable user-scope marketplace plugin intent.
+- Pulling a Skill writes the reviewed directory tree.
+- Pulling plugin intent invokes Qoder's native manager and verifies the result
+  with new JSON inventory.
+- No Qoder pet choice exists.
+
+## 6. Architecture and minimum common changes
 
 Qoder crosses two independent Mallard subsystems:
 
 ```mermaid
 flowchart LR
-    QH["Selected Qoder profile"]
+    QP["Selected Qoder CLI profile"]
 
     subgraph PS["ProjectSync"]
         QA["Qoder SessionAdapter"]
-        ACT["Local Activity"]
-        SYNC["Conversation Push/Pull"]
+        QG["Portable session-group adapter"]
+        PM["Existing path mapper"]
+        AC["Activity"]
+        CP["Stable group capture"]
+        PB["Schema-1 bundle"]
+        MA["Journaled group apply"]
+        RS["CLI resume"]
     end
 
     subgraph SC["Storage Library"]
-        QC["Qoder Catalog adapter"]
+        CA["Qoder CatalogProviderAdapter"]
         SK["Standalone user Skills"]
-        PL["Plugin install intent"]
+        PI["Plugin install intent"]
     end
 
-    QH --> QA --> ACT
-    QA -. "disabled until restore gates pass" .-> SYNC
-    QH --> QC --> SK
-    QC -. "disabled until structured inventory passes" .-> PL
+    QP --> QA --> AC
+    QA --> QG --> CP --> PM --> PB --> MA --> RS
+    QP --> CA --> SK
+    CA --> PI
 ```
 
-ProjectSync and the Library must not share provider profiles, provider enums,
-plans, or persistence records. They can share only neutral validated primitives
-and the registered default-profile description where an existing boundary
-allows it.
+ProjectSync owns project bindings, conversations, Activity, Push/Pull, and
+resume. The Library owns provider-global Skills and plugin intent. They do not
+share provider enums, profiles, plans, or persistence documents.
 
-### 6.1 ProjectSync extension point
+### 6.1 Reused ProjectSync parts
 
-ProjectSync already has:
+- open validated conversation `ProviderKey`;
+- compile-time `ProviderRegistry` and `SessionAdapter`;
+- schema-1 `ConversationThread`;
+- one `Transcript` plus typed `Sidecar` roles;
+- individual immutable objects and SHA-256 entries;
+- compare-and-swap storage heads;
+- reviewed Push and Pull plans;
+- bindings, checkpoints, receipts, revisions, and expiry checks;
+- journaled multi-target materialization;
+- Activity and generic native-action UI.
 
-- An open validated `mallard_domain::ProviderKey`.
-- A compiled `ProviderRegistry`.
-- A `SessionAdapter` boundary for discovery, codecs, Activity, targets, and
-  safe actions.
-- Provider-driven setup and Activity descriptors.
-- Generic remote preservation for unknown provider slices.
+### 6.2 Reused Library parts
 
-The production registry currently contains Codex and Claude. Qoder must be a
-built-in adapter and one registry entry. Mallard must not load provider code
-from a bundle or user manifest.
+- bounded no-follow Skill-tree capture;
+- Skill content identities;
+- `PluginInstallIntentResource`;
+- provider-native plugin adapters;
+- reviewed plans and warnings;
+- target locks, journals, backups, and post-apply checks;
+- local-folder and S3/R2 storage through one catalog model.
 
-Full session sync is not fully provider-neutral. The ProjectSync service still
-contains Codex or Claude policy for wire transforms, cursors, ID allocation,
-cloud-only eligibility, path mapping, indexes, materialization, post-Pull
-behavior, and launch flows. The session watcher also has fixed provider roots.
+### 6.3 Unavoidable common conversation changes
 
-Do not add a third set of Qoder branches. Complete the provider-neutral
-foundation before Qoder session portability.
+1. Capture one session as a stable multi-file group.
+2. Apply the existing project-root wire mapping to every supported JSON and
+   JSONL group member.
+3. Publish Qoder transcript and sidecars under a provider-owned group codec.
+4. Fetch, validate, and materialize all Pull members, not only the transcript.
+5. Preserve the source Qoder UUID and enforce destination-wide collision
+   protection.
+6. Require a proved complete-group successor relation before a higher message
+   count becomes Local Outstanding or Cloud Outstanding.
 
-### 6.2 Storage Catalog extension point
+The Library needs a third closed provider adapter and profile/scope values. It
+does not need a new resource type or storage protocol.
 
-The Library intentionally has a separate closed provider type. It currently
-contains only Codex and Claude. It also has a closed Skill scope and a closed
-capability matrix.
+### 6.4 Qoder delta from Codex and Claude
 
-The Library already provides the correct core controls:
+Use the current Codex/Claude behavior unless this table names a Qoder-specific
+difference.
 
-- Bounded, deterministic, no-follow Skill tree capture.
-- SHA-256 content identities.
-- Plugin install intent without plugin payload transport.
-- Reviewed Push and Pull plans.
-- Revision, digest, expiry, and trust checks.
-- Journaled apply, backups, and post-apply verification.
-- Structured native command arguments, timeouts, and bounded output.
-
-Qoder extends this closed domain. It does not reuse ProjectSync provider types.
-
-### 6.3 Capability state flow
-
-```mermaid
-stateDiagram-v2
-    [*] --> Unavailable
-    Unavailable --> ActivityOnly: discovery and ownership corpus passes
-    ActivityOnly --> Skills: two-home Skill load passes
-    Skills --> PluginIntent: structured inventory and App visibility pass
-    PluginIntent --> CliExactRestore: complete copied-session CLI matrix passes
-    CliExactRestore --> AppExactRestore: App projection matrix passes
-    AppExactRestore --> CrossPathRestore: typed relocation matrix passes
-
-    note right of ActivityOnly
-      Session Push and Pull remain disabled.
-    end note
-```
-
-This diagram shows release order. Each capability remains independently
-disableable. A failure in a later capability does not disable a safe earlier
-capability.
-
-## 7. Minimum-release design
-
-### 7.1 Release contents
-
-The minimum release has four user-visible functions:
-
-| Function | Included behavior | Explicit boundary |
-| --- | --- | --- |
-| Provider choice | Show Qoder first in Project setup and Library setup. | Do not change an existing project. Do not bind a home without review. |
-| Local Activity | List, summarize, and inspect exact-project Qoder CLI sessions from a selected profile. | Do not publish, download, restore, or edit a Qoder session. |
-| Terminal resume | Resume the selected local UUID with the selected Qoder home and exact project path. | Do not authenticate, copy, fork, or open an App task. |
-| User Skills | Push and Pull reviewed standalone Skills under the selected Qoder user Skill root. | Do not include project Skills, plugin payloads, plugin state, settings, or pets. |
-
-The release must not change:
-
-- The bundle schema for conversations.
-- Conversation wire codecs.
-- Conversation sidecar materialization.
-- Local-folder or S3/R2 transport.
-- Qoder application databases.
-- Codex or Claude provider behavior.
-
-### 7.2 Small ProjectSync capability
-
-Do not add a general capability framework for the first release. Add one
-serialized mode to `ProviderDescriptor`:
-
-```rust
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ConversationMode {
-    ActivityOnly,
-    Portable,
-}
-
-pub struct ProviderDescriptor {
-    // Existing fields.
-    pub conversation_mode: ConversationMode,
-}
-```
-
-Set the values as follows:
-
-| Provider | `conversation_mode` |
+| Concern | Qoder design |
 | --- | --- |
-| Qoder | `activity_only` |
-| Codex | `portable` |
-| Claude | `portable` |
-| Test provider | Set explicitly for each test. Use `activity_only` by default. |
+| Setup and profile binding | Reuse the same reviewed project/provider binding. Show Qoder first. |
+| Discovery and Activity | Reuse the provider registry, generic DTOs, filters, detail views, and action route. |
+| Push and Pull review | Reuse current plans, revisions, expiry, selections, outcomes, and single-flight rules. |
+| Portable path form | Reuse `SessionPathMapper`, `mallard.pathmap.v1`, the wire/local checkpoint pair, and first-contact wire comparison. |
+| Storage | Reuse schema-1 manifests, immutable objects, heads, local-folder storage, and S3/R2. |
+| Restore | Reuse staging, target locks, journals, backups, rollback, receipts, and recovery. |
+| Conflict handling | Reuse normal classifications. Hide only Keep Both because Qoder UUID rewriting is not proved. |
+| Session payload | Qoder adds a complete multi-file session group; current Codex is transcript-centric and Claude has a smaller sidecar grammar. |
+| Native identity | Preserve the source Qoder UUID on Create Local and scan the full Qoder CLI profile for collisions. |
+| Destination layout | Compute the Qoder project bucket from the reviewed destination root. |
+| Resume | Reuse the generic session-action route, but Qoder supplies pinned arguments and file-backed credential environment. |
+| Library | Reuse current Skill and plugin-intent resource flows. Add only Qoder provider/scope and native JSON commands. |
 
-Registration means that the adapter can supply local Activity. The existing
-`available_actions` result continues to define native actions. The existing
-Library capability matrix continues to define portable Library resource kinds.
-Therefore, the first release does not need a second capability object.
+Do not create a parallel Qoder review screen, persistence document, storage
+namespace, reconciliation engine, or Tauri command family.
 
-Add one backend helper:
+## 7. Provider registration and order
 
-```rust
-fn require_portable_conversations(
-    registry: &ProviderRegistry,
-    provider: &ProviderKey,
-) -> Result<(), String>;
-```
+Qoder is a built-in provider. Mallard does not load provider code from a
+bundle or user manifest.
 
-The helper returns the typed product error
-`qoder_session_sync_unavailable` for Qoder. Call it before Qoder data can enter
-any of these paths:
-
-- Push candidate capture.
-- Push plan construction.
-- Immutable object publication.
-- Remote-only conversation eligibility.
-- Pull plan construction.
-- Target selection.
-- Conversation materialization.
-- Provider index or cursor update.
-
-The gate must run before a transcript read for a portable operation. A second
-gate must remain at apply time. This protects saved plans and direct command
-calls. The frontend also reads `conversation_mode`, but the frontend is not the
-security boundary.
-
-Remote bundles from a future Mallard version can contain a Qoder provider
-slice. The current release can preserve and display the unknown slice through
-existing generic behavior. It must not offer a Pull action for it.
-
-### 7.3 Preferred provider order
-
-Qoder is the first agent-provider choice. Do not depend on `BTreeMap` key
-order. It currently produces lexical order.
-
-Keep the policy in the two compiled output boundaries:
-
-```rust
-fn provider_display_rank(key: &str) -> u8 {
-    match key {
-        "qoder" => 0,
-        "codex" => 10,
-        "claude" => 20,
-        _ => 100,
-    }
-}
-```
-
-`ProviderRegistry::descriptors()` sorts by this rank and then by provider key.
-The Library capability matrix returns `Qoder`, `Codex`, and `Claude` in that
-order. Set Qoder `setup_default` to `true`. The setup UI uses the first enabled
-choice as the initial focus or selection.
-
-This order is product policy. It is not a claim that Qoder has more enabled
-capabilities than Codex or Claude. Existing project bindings remain unchanged.
-
-### 7.4 Qoder descriptor
-
-The first descriptor is:
+Qoder uses the same portable-conversation product path as Codex and Claude.
+Do not add a Qoder-only Tauri command, frontend mode, or alternate review
+flow. Provider-specific eligibility and codecs stay behind the adapter.
 
 ```rust
 ProviderDescriptor {
@@ -444,264 +405,777 @@ ProviderDescriptor {
     default_profile_directory: Some(".qoder".to_string()),
     setup_default: true,
     cli_launcher: None,
-    conversation_mode: ConversationMode::ActivityOnly,
 }
 ```
 
-Keep `cli_launcher` empty in the first patch. That field starts a provider with
-a new prompt during setup. The minimum release needs only the session action,
-which resumes an existing local session. This avoids an extra authentication
-and prompt-launch contract.
+Keep the generic setup launcher disabled for Qoder. It cannot pin the selected
+`--config-dir`, reviewed `--cwd`, or `QODER_FORCE_FILE_STORAGE=true` and would
+violate the profile and no-Keychain boundary. Resuming a reviewed session uses
+the existing generic session-action route, with Qoder constructing the
+provider-specific command and environment in the backend.
 
-The selected profile home is equivalent to the Qoder CLI configuration
-directory. The default is `$HOME/.qoder`. Mallard stores the selected profile
-path only in machine-local state. Mallard does not place it in a portable
-manifest.
+Do not depend on map key order:
 
-## 8. Local Qoder CLI Activity
-
-### 8.1 Supported surface
-
-The first adapter supports Qoder CLI only. It does not claim Qoder App task
-support. Use a product name of **Qoder CLI session** in warnings and details.
-
-Support one exact transcript dialect at a time. The first candidate is the
-fixture-proved dialect created by Qoder CLI `1.1.40` on macOS ARM64. Do not
-combine these layouts in one tolerant parser:
-
-- A CLI or IDE layout with a positive `session_meta` discriminator.
-- An observed App-style layout with `workspace-directories` and
-  `runtime-config` discriminators.
-
-Add a second dialect only after it has a separate fixture, ownership rule,
-version entry, and parser tests. A mixed or unidentified record set is blocked
-with `qoder_unknown_dialect`.
-
-### 8.2 Discovery boundary
-
-Scan only this selected-home subtree:
-
-```text
-<QODER_CONFIG_DIR>/projects/
+```rust
+fn provider_display_rank(key: &str) -> u8 {
+    match key {
+        // Product policy: Qoder is the first agent-provider choice.
+        "qoder" => 0,
+        "codex" => 10,
+        "claude" => 20,
+        _ => 100,
+    }
+}
 ```
 
-Do not scan the operating-system user home, a project `.qoder` directory, the
-Qoder App data root, or a second Qoder profile.
+Use the same explicit order in the Library capability response. Qoder-first
+ordering does not change an existing binding, make Qoder exclusive, bind an
+unreviewed profile, or disable another provider.
 
-The adapter must:
+## 8. Portable Qoder CLI sessions
 
-1. Canonicalize the selected profile and bound project.
-2. Walk with the existing file-count, directory-count, depth, and byte limits.
-3. Reject symbolic links and special files.
-4. Accept only the exact transcript path grammar for the selected dialect.
-5. Parse a bounded head before it reads a complete transcript.
-6. Require a canonical lowercase UUID file name.
-7. Require every recognized session identity in the file to equal that UUID.
-8. Read the authoritative project field for that dialect.
-9. Canonicalize that field and require an exact match to the bound project.
-10. Report a blocked row when the dialect, identity, or ownership is unclear.
+### 8.1 Identity
 
-The encoded project directory name is only a search hint. It is not ownership
-evidence. A per-turn working directory is Activity context. It is not immutable
-project ownership. A multi-root session is blocked with
-`qoder_multi_root_unproved` until Qoder defines its ownership rule.
-
-### 8.3 Activity data model
-
-Reuse the existing provider-neutral Activity DTOs and resource ID grammar:
-
-```text
-state/conversations/qoder/<mallard-thread-id>/transcript.jsonl
-```
-
-This string is a Mallard logical identity only. The minimum release never
-publishes an object at that path.
-
-For each accepted local session, expose:
-
-- Provider `qoder` and display name `Qoder`.
-- The validated local Qoder UUID.
-- The bounded title or last-prompt summary when the dialect defines it.
-- Created and modified time from recognized records, with file metadata as a
-  presentation fallback only.
-- The authoritative project path through the existing sanitized display
-  contract.
-- A fixed `sync_blocked_reason`: Qoder session Push and Pull are not available.
-- Available local actions from the Qoder adapter.
-
-Do not read `state.json`, compression state, subagent state, or file-history
-objects for the minimum Activity view. Those files are required for a future
-portable consistency group, but they are not needed to inspect the main local
-conversation. The Activity adapter must not present transcript-only inspection
-as backup coverage.
-
-### 8.4 Timeline and branch behavior
-
-The first Activity parser can show supported user, assistant, and tool events
-in file order. It must label the view **Recorded history**. It must not label a
-record as the active branch.
-
-If the transcript contains branching, compaction, replacement, sidechain,
-team, or multiple active-leaf evidence that the parser cannot prove, the
-adapter must:
-
-- Keep a bounded metadata summary.
-- Add `qoder_branch_selection_unproved`.
-- Avoid a fabricated active branch.
-- Disable any action that depends on a selected leaf.
-
-The local terminal resume action can still select the whole exact session UUID.
-Qoder then applies its own native branch rule. Mallard must not promise which
-leaf Qoder will select.
-
-### 8.5 Parser limits
-
-Use the existing application settings where they already define conversation
-limits. Add Qoder-specific constants only for a Qoder grammar limit that has no
-shared equivalent.
-
-At minimum, enforce:
-
-- Maximum transcript bytes.
-- Maximum JSONL line bytes.
-- Maximum record count.
-- Maximum JSON nesting depth.
-- Maximum string bytes retained for a summary or detail.
-- Maximum normalized events per page.
-- Maximum tool input and output detail.
-
-Invalid UTF-8, an over-limit line, duplicate structural identity, or malformed
-required metadata blocks that session. One malformed session must not hide an
-unrelated safe session.
-
-Unknown fields can be ignored for read-only display only when they cannot
-change identity, project ownership, lineage, or limits. An unknown record type
-that can affect these properties blocks the session.
-
-### 8.6 Watch behavior
-
-The current watcher has roots only for Codex and Claude. For an unknown root
-set, it already takes the bounded uncached path. Keep Qoder on that uncached
-path in the minimum release. Do not add Qoder-specific watcher code.
-
-Add provider-declared watcher roots only if measured performance requires it.
-This keeps the first change small and keeps watcher state out of the Qoder
-correctness boundary.
-
-## 9. Exact local CLI resume
-
-### 9.1 Action contract
-
-The Qoder adapter offers one action:
-
-| Field | Value |
+| Identity | Purpose |
 | --- | --- |
-| ID | `open_in_terminal` |
-| Kind | `open_in_terminal` |
-| Label | `Open in Terminal with Qoder` |
-| Local requirement | Yes |
-| Session ID | Canonical UUID only |
-| Project requirement | Exact current project binding |
-| Profile requirement | Exact current Qoder profile binding |
+| Mallard cloud thread ID | Portable object identity across storages and machines. |
+| Mallard local thread ID | Machine-local binding identity. |
+| Qoder session UUID | Native identity embedded in the restored session group. |
 
-Before launch, the generic action command must reload the project binding,
-profile revision, local transcript, UUID, and authoritative ownership. If any
-value changed after Activity loaded, return `qoder_session_changed`.
+Exact restore preserves the Qoder UUID. The Mallard cloud ID does not replace
+it.
 
-The command shape is:
+### 8.2 Candidate local layout
+
+Observed Qoder versions use a group similar to:
 
 ```text
-cd <shell-quoted-project> &&
-qoder --config-dir <shell-quoted-qoder-home>
-      --cwd <shell-quoted-project>
-      --resume <shell-quoted-canonical-uuid>
+projects/<project-key>/<session-uuid>.jsonl
+projects/<project-key>/<session-uuid>/state.json
+projects/<project-key>/<session-uuid>/compression-v2/state.json
+projects/<project-key>/<session-uuid>/subagents/agent-<id>.jsonl
+projects/<project-key>/<session-uuid>/subagents/agent-<id>.meta.json
+projects/<project-key>/<session-uuid>/subagents/task-<id>.json
+file-history/<session-uuid>/<checkpoint-object>
+tasks/<session-uuid>/**
 ```
 
-Build the command from validated arguments. Do not accept command text from a
-transcript, remote object, manifest, frontend, or user-supplied provider key.
-Do not use:
+This is not the production allowlist. A product-generated corpus must classify
+every possible session-owned member for the supported version as:
 
-- `--continue`.
-- A numeric list index.
-- A session name.
-- `--session-id` as the source selector.
-- `--fork-session`.
-- An executable inside the Qoder App bundle.
-- A Qoder App deep link.
+- required persistent;
+- optional persistent;
+- referenced persistent;
+- excluded ephemeral; or
+- unsupported.
 
-The action resumes the existing local session. It can append new records after
-Qoder starts. This is normal native behavior and is not a Mallard restore.
+Locks, leases, heartbeats, queues, sockets, and temporary files are not copied
+unless a product test proves that continuation requires a specific regular
+file. An unknown member blocks the session.
 
-### 9.2 Authentication and Keychain boundary
+### 8.3 First eligible subset
 
-Mallard must not:
+The first release can use a product-proved subset. All other sessions remain
+visible with an ineligible reason.
 
-- Start `qoder login` in the background.
-- Read, copy, print, or persist Qoder credentials.
-- Pass a PAT or provider API key.
-- Inspect Qoder authentication files to decide whether to launch.
-- Reset or modify macOS Keychain.
-- Set the package-observed `QODER_FORCE_FILE_STORAGE` variable in production.
+Candidate minimum:
 
-The terminal process uses the already selected Qoder profile. Qoder owns its
-authentication prompt and credential storage. Mallard does not claim that the
-Qoder process will avoid Keychain. If a no-Keychain guarantee is a release
-requirement, keep the action disabled until Qoder documents a public control
-and the product test passes it. The PoC's private environment control is not a
-production contract.
+- one supported Qoder CLI version and transcript dialect;
+- exact project ownership;
+- one unambiguous effective leaf;
+- complete recognized transcript and required state set;
+- no unresolved subagent, compression, file-history, checkpoint, task, or
+  coordination member;
+- no unknown integrity field;
+- every path-bearing JSON or JSONL member covered by the proved path-map
+  codec;
+- no opaque member that can contain a project-root path.
 
-### 9.3 Sanitized launch audit
+If a normal Qoder-created session always requires an excluded member, that
+member becomes required in the v1 grammar. It is not silently omitted.
 
-The current `SessionActionRequest::before_launch` callback receives the exact
-shell command. That command contains the provider home, project path, and
-session UUID. Fix this before Qoder actions ship.
+Advanced forms can be added under schema 1 after their member and continuation
+corpus passes. Each incompatible grammar gets a new provider member-set or
+codec identifier.
 
-Replace the callback payload with a fixed typed event:
+### 8.4 Eligibility results
+
+Every session is eligible, ineligible, or invalid. Do not hide unsupported
+sessions.
+
+Representative reason codes:
+
+```text
+qoder_session_active
+qoder_unsupported_cli_version
+qoder_unknown_transcript_dialect
+qoder_project_ownership_unproved
+qoder_session_member_set_unknown
+qoder_session_member_missing
+qoder_active_leaf_ambiguous
+qoder_subagent_unsupported
+qoder_compression_unsupported
+qoder_checkpoint_unsupported
+qoder_task_state_unsupported
+qoder_path_map_unsupported
+qoder_path_map_collision
+qoder_path_integrity_unproved
+qoder_target_bucket_unproved
+qoder_non_posix_project_root
+qoder_session_uuid_collision
+qoder_session_special_file
+qoder_session_symlink
+qoder_session_too_large
+```
+
+Push and Pull are unavailable for an ineligible session.
+
+### 8.5 Schema-1 file mapping
+
+No new bundle resource kind is necessary.
+
+| Qoder member | Schema-1 role |
+| --- | --- |
+| main JSONL | `Transcript` |
+| root state | `Sidecar { sidecar_kind: "session-state" }` |
+| compression state | `Sidecar { sidecar_kind: "compression" }` |
+| subagent files | `Sidecar { sidecar_kind: "subagents" }` |
+| file-history objects | `Sidecar { sidecar_kind: "file-history" }` |
+| top-level task state | `Sidecar { sidecar_kind: "task-state" }` |
+
+Each sidecar keeps a safe kind-relative path below:
+
+```text
+state/conversations/qoder/<cloud-thread-id>/sidecars/<kind>/<relative-path>
+```
+
+Source profile and project-bucket paths do not become cloud object paths.
+
+### 8.6 Complete group identity
+
+Transcript-only comparison misses sidecar drift. Compute the same normalized
+member manifest in two forms:
+
+```text
+SHA-256(
+  domain = <local-v1 or wire-v1>
+  for each member sorted by role, sidecar kind, and relative path:
+    length-prefixed role
+    length-prefixed sidecar kind or empty
+    length-prefixed validated relative path
+    unsigned byte size
+    raw 32-byte content SHA-256
+)
+```
+
+Use these domain values:
+
+```text
+mallard-qoder-session-group-local-v1
+mallard-qoder-session-group-wire-v1
+```
+
+The local digest uses captured or materialized Qoder bytes. The wire digest
+uses path-encoded and redacted portable bytes. Do not include physical paths,
+project buckets, Mallard IDs, times, device, or inode values.
+
+Carry each group identity in the current `PortableConversationTail` shape:
+
+```text
+codec                     = mallard-qoder-session-group-<local|wire>-v1
+partition_kind            = whole_thread
+start_record_count        = 0
+accepted_end_record_count = canonical active-lineage message count
+accepted_tail_state       = complete group digest
+```
+
+Keep transcript evidence separate:
+
+```text
+lineage_codec   = qoder-lineage-v1
+lineage_digest  = canonical transcript lineage digest
+semantic_digest = canonical transcript semantic digest
+cloud portable tail state = complete mapped-wire group digest
+checkpoint accepted_local_tail = complete installed-local group digest
+```
+
+Mirror the current Claude two-column checkpoint contract:
+
+- `ConversationThread.portable_tail` and
+  `ConversationCheckpoint.accepted.portable_tail` hold the wire tail;
+- `ConversationCheckpoint.accepted_local_tail` holds the corresponding local
+  tail at the source or destination root;
+- `ConversationCheckpoint.observed_tail` is the current local tail;
+- Pull verifies the wire tail before decoding, computes the installed local
+  tail after materialization, and saves both;
+- a later Push re-encodes the complete local group and must reproduce the
+  accepted wire form at the accepted message boundary.
+
+First-contact adoption uses the same proof. Mallard may bind an unbound local
+Qoder UUID to a cloud thread only when the complete local group re-encodes to
+the cloud wire group and all provider, project, member, and collision checks
+pass. UUID equality alone is not adoption authority.
+
+Qoder is cursor-less. It recomputes both tails from complete stable groups and
+does not pass a group digest to the generic incremental `TailAccumulator`.
+A sidecar-only change at the same message count becomes a conservative
+divergence, not a false match.
+
+Keep `compare_conversation_tail` as the only relation table, but do not let its
+count comparison stand in for Qoder successor proof. During review, load the
+complete accepted wire group from the exact immutable historical manifest
+pinned by the checkpoint. Encode a current local candidate to wire form; a
+current cloud candidate is already in wire form. Compare accepted and
+candidate groups through the Qoder adapter.
+
+`mallard-domain::conversation_tail_relation` owns and exports the comparison
+result. The infrastructure adapter imports this type; the domain crate never
+depends on infrastructure:
+
+```rust
+pub enum SessionGroupRelation {
+    Equal,
+    StrictSuccessor,
+    Divergent,
+}
+```
+
+`StrictSuccessor` requires the same Qoder UUID, an exact accepted active-lineage
+prefix, a larger accepted message boundary, and only product-proved
+state/compression/member-set transitions. It compares old and new sidecar
+content and references, not only their digests. A transcript rewrite plus one
+new record is `Divergent`, not a successor.
+
+The same domain module also owns a non-serialized `TailSuccessorEvidence`
+value used to construct `VerifiedTailEvidence`. Existing providers select the
+current count-monotonic policy. Qoder supplies the adapter-produced local and
+cloud `SessionGroupRelation` values. Require `StrictSuccessor` before the
+central classifier can return Local Outstanding or Cloud Outstanding for a
+Qoder group codec. `Equal` supports Current and first-contact adoption.
+`Divergent` produces the normal divergent result. A missing accepted object,
+unavailable storage, unknown transition, or failed proof supplies invalid
+evidence and produces Unknown. Do not manufacture a lower message count to
+force a result.
+
+```rust
+pub enum TailSuccessorEvidence {
+    CountMonotonic,
+    CertifiedGroups {
+        accepted_to_local: SessionGroupRelation,
+        accepted_to_cloud: SessionGroupRelation,
+        local_to_cloud: SessionGroupRelation,
+    },
+}
+```
+
+For Qoder, the service computes all three relations from certified wire
+groups before it constructs `VerifiedTailEvidence`. A caller cannot supply
+independent Boolean proof flags.
+
+When both sides advanced, Qoder is `Advanced` only when the re-encoded local
+candidate and cloud candidate are the exact same certified wire group and
+both are strict successors of the accepted group. Otherwise, the result is
+`Divergent`.
+
+This needs no schema-number change. The current accepted-version record does
+not contain all coordinates that `BundleEngine::inspect_manifest_version`
+requires. Extend the schema-1 machine-local `AcceptedConversationVersion`:
+
+```rust
+pub struct AcceptedConversationVersion {
+    pub artifact_sha256: String,
+    pub accepted_at_revision: u64,
+    pub accepted_at_commit_id: String,
+    pub accepted_at_manifest_size: u64,
+    pub accepted_at_manifest_sha256: String,
+    pub portable_tail: PortableConversationTail,
+}
+```
+
+The revision, commit ID, manifest size, and manifest digest identify the exact
+historical manifest. The service passes those four values to
+`inspect_manifest_version`, then fetches and verifies every accepted Qoder
+group member from that manifest. The artifact and member digests still prove
+the payload objects.
+
+`ConversationCloudPublication` must carry the published revision and manifest
+size with its current commit ID and manifest digest. The fused publication and
+recovery path patches all four accepted historical-manifest coordinates into
+the journaled after-state atomically. It must not leave reviewed-anchor
+placeholders after a successful or recovered publication.
+
+Both new fields are required. Validation rejects revision zero and manifest
+size zero. The clean cutover has no optional-field fallback, inferred
+coordinate, or migration for an older schema-1 checkpoint.
+
+### 8.7 Wire path mapping and redaction
+
+Require the existing `wire_path_map` stamp with codec `mallard.pathmap.v1` and
+the existing `wire_redaction` stamp. Qoder must use the same portable
+project-root token as Codex and Claude:
+
+```text
+/__mallard_root__
+```
+
+Reuse `SessionPathMapper`. Do not create a second token grammar. The Qoder
+wrapper applies it according to the closed member grammar:
+
+- main and subagent JSONL: use the bounded line-level JSONL facade;
+- JSON sidecars: parse one bounded JSON value, call the gated record mapper,
+  and serialize only when a path changed;
+- opaque members: require a proved path-free format and preserve exact bytes;
+- unknown member types: block.
+
+The mapper walks JSON string values and object keys. It changes only
+boundary-valid occurrences of the source project root, its approved canonical
+alias, tilde spelling, or file-URI spelling. It preserves out-of-root paths.
+An unmatched JSONL line or JSON member remains byte-identical. Reserved-token
+input, object-key collision, malformed JSON, non-POSIX roots, or failed
+encode/decode/re-encode proof blocks the complete group.
+
+Path mapping can invalidate a provider checksum or signature. The Qoder codec
+must identify every integrity field in the supported member grammar. It may
+recompute a field only when the exact Qoder rule is product-proved. Otherwise,
+any affected integrity field makes the session ineligible.
+
+Apply the existing credential-redaction transform after path encoding, as the
+Codex and Claude wire builders do. Reparse and validate the redacted Qoder wire
+group. Require identity, graph, member references, active leaf, and provider
+state semantics to remain valid. A member with opaque, signed, or
+integrity-sensitive content must be a redaction fixpoint unless the exact
+transformation rule is product-proved. Block when the Qoder codec cannot prove
+that the transformed group remains resumable.
+
+Compute member digests and the complete group digest from canonical wire
+bytes. On Pull, verify wire bytes first, decode paths to the reviewed
+destination project root, validate the resulting Qoder group, and then stage
+local bytes.
+
+### 8.8 Minimal adapter extension
+
+Do not add Qoder branches throughout `service.rs`. Add one narrow companion
+interface:
+
+```rust
+pub trait PortableSessionGroupAdapter: Send + Sync {
+    fn rediscover_members(
+        &self,
+        context: &SessionDiscoveryContext<'_>,
+        session_id: &str,
+    ) -> Result<Vec<DiscoveredSessionMember>, String>;
+
+    fn classify_eligibility(
+        &self,
+        group: &CapturedSessionGroup,
+    ) -> Result<EligibleSessionGroup, SessionPortabilityBlocker>;
+
+    fn compute_local_group_tail(
+        &self,
+        group: &EligibleSessionGroup,
+    ) -> Result<PortableConversationTail, String>;
+
+    fn encode_portable_wire(
+        &self,
+        group: &EligibleSessionGroup,
+        path_mapper: &SessionPathMapper,
+    ) -> Result<CertifiedPortableGroup, SessionPortabilityBlocker>;
+
+    fn compute_wire_group_tail(
+        &self,
+        group: &CertifiedPortableGroup,
+    ) -> Result<PortableConversationTail, String>;
+
+    fn compare_wire_groups(
+        &self,
+        accepted: &CertifiedPortableGroup,
+        candidate: &CertifiedPortableGroup,
+    ) -> Result<SessionGroupRelation, SessionPortabilityBlocker>;
+
+    fn decode_portable_wire(
+        &self,
+        group: &CertifiedPortableGroup,
+        path_mapper: &SessionPathMapper,
+    ) -> Result<DecodedSessionGroup, SessionPortabilityBlocker>;
+
+    fn destination_session_id(
+        &self,
+        source_session_id: &str,
+    ) -> Result<String, String>;
+
+    fn check_destination_collision(
+        &self,
+        provider_home: &Path,
+        project_root: &Path,
+        session_id: &str,
+    ) -> Result<(), SessionPortabilityBlocker>;
+
+    fn verify_member(
+        &self,
+        request: &SessionMemberVerificationRequest<'_>,
+    ) -> Result<(), String>;
+
+    fn verify_group(
+        &self,
+        request: &SessionGroupVerificationRequest<'_>,
+    ) -> Result<(), String>;
+}
+```
+
+Expose it through `SessionAdapter` with a default `None`. Codex and Claude
+remain unchanged. Qoder returns its session-group adapter.
+
+The Qoder adapter owns format, membership, UUID, ownership, active-leaf,
+target-layout, collision-namespace, member-validation, and group-verification
+rules. The common core owns safe I/O, bounds, stable capture, object digests,
+review, storage, locks, journals, backups, rollback, bindings, and receipts.
+
+### 8.9 Qoder provider module
+
+```text
+crates/mallard-infrastructure/src/providers/qoder/
+  mod.rs
+  compatibility.rs
+  discovery.rs
+  codec.rs
+  portable.rs
+  materialization.rs
+  history.rs
+  actions.rs
+```
+
+`discovery.rs`:
+
+- searches only supported CLI roots below the selected profile;
+- treats an encoded project bucket as a location hint, not ownership proof;
+- proves exact project ownership from supported content;
+- validates filename and embedded UUIDs;
+- enumerates the complete allowed group;
+- rejects links, special files, unsafe components, excessive depth, count,
+  and bytes;
+- never enters Qoder App data.
+
+`codec.rs`:
+
+- parses one exact transcript dialect;
+- bounds lines, records, depth, strings, and total bytes;
+- validates session IDs, message UUIDs, parents, logical parents, and record
+  types;
+- preserves original bytes;
+- produces Activity data and transcript digests;
+- applies only a product-proved active-leaf rule;
+- marks ambiguity ineligible.
+
+`portable.rs` classifies membership, rejects unknown members, applies the
+existing path-map and redaction gates, computes the wire-group digest,
+preserves UUID, and blocks Keep Both.
+
+`materialization.rs` computes the Qoder project bucket from the reviewed
+destination root, derives targets, checks all CLI collision namespaces,
+validates mapped members and references, orders commits, and verifies the
+installed group.
+
+`history.rs` uses generic Activity DTOs and exposes only proved metrics.
+
+`actions.rs` builds exact public CLI resume.
+
+### 8.10 Stable group capture
+
+Require Qoder to be stopped. A Mallard lock is not sufficient because Qoder
+does not honor it.
+
+1. Resolve the supported layout.
+2. Ask the adapter for complete membership.
+3. Reject unknown members before content parsing.
+4. Open every member without following links.
+5. Require a regular file and allowed link count.
+6. Record handle identity, mode, link count, size, modification time, and
+   change time.
+7. Read through the retained handle under all limits and hash it.
+8. Restat the retained handle.
+9. Re-enumerate all participating directories.
+10. Repeat the complete pass.
+11. Require equal names, roles, identities, modes, link counts, sizes, times,
+    and digests.
+12. Parse only retained stable buffers.
+13. Confirm that no Qoder process started for the selected profile.
+
+Addition, removal, rename, replacement, in-place change, same-size change,
+hard-link change, parent substitution, or symlink substitution blocks the
+whole group. Do not retry until a quiet interval appears. The user closes
+Qoder and retries explicitly.
+
+### 8.11 Push
+
+Generalize provider publication preparation:
+
+```rust
+struct PreparedConversationPublication {
+    wire_members: Vec<PreparedPortableMember>,
+    wire_tail: PortableConversationTail,
+    accepted_local_tail: PortableConversationTail,
+    head_message_id: MessageId,
+    message_count: u64,
+    lineage_digest: String,
+    semantic_digest: String,
+    wire_redaction: ConversationWireRedaction,
+    wire_path_map: Option<ConversationWirePathMap>,
+}
+```
+
+Qoder returns the canonical mapped wire transcript and sidecars, the normal
+path-map and redaction stamps, and the wire/local session-group tail pair.
+Before publication, verify the closed grammar, ownership, UUID, active-leaf
+eligibility, every mapped member, redacted-wire re-analysis, each digest, both
+group digests, exactly one transcript, and every required sidecar.
+
+Publish through the existing immutable object and head transaction. Add no
+Qoder-specific storage key or transport.
+
+### 8.12 Pull and materialization
+
+Change Pull preparation from transcript bytes plus sidecar names to a complete
+member vector.
+
+For every approved Qoder action:
+
+1. enumerate all `ConversationThread.files` entries;
+2. require exactly one transcript;
+3. enforce file, count, and aggregate limits before transfer;
+4. fetch and SHA-256 verify every member;
+5. reconstruct the canonical member inventory;
+6. match `mallard-qoder-session-group-wire-v1`;
+7. require the supported `mallard.pathmap.v1` and redaction stamps;
+8. verify the wire group, decode it to the reviewed destination project root,
+   and run Qoder member and cross-member validation;
+9. derive the destination Qoder project bucket from that root;
+10. fail the whole action for a missing, extra, truncated, invalid, or
+   inconsistent member.
+
+Apply through the existing conversation materializer:
+
+1. acquire a lock for the canonical Qoder profile;
+2. revalidate plan, head, binding, profile, version, path, stopped-Qoder state,
+   and collisions;
+3. stage and validate all members;
+4. write the recovery journal before mutation;
+5. back up exact reviewed targets;
+6. install state, compression, subagent, file-history, and task members;
+7. install the main transcript last;
+8. flush files and required parent directories;
+9. delete an obsolete file only with its reviewed path and digest, and delete
+   only an exact empty directory;
+10. recapture the complete installed local group and compute its local tail;
+11. re-encode that group and require the approved wire group and wire tail;
+12. save binding, the wire/local checkpoint pair, and receipt;
+13. mark the journal complete.
+
+After a crash, recovery must produce the complete approved group, the complete
+original group, or `RecoveryRequired` with backups preserved. A mixed group is
+never success.
+
+### 8.13 UUID and collisions
+
+For Qoder `CreateLocal`:
+
+```text
+destination Qoder UUID = source Qoder UUID
+```
+
+Do not call generic provider UUID minting.
+
+Before mutation, scan the supported Qoder CLI profile for the UUID across:
+
+- all supported project buckets;
+- transcript names;
+- state and compression;
+- subagent and task sidecars;
+- file-history roots and proved references;
+- top-level task state;
+- pending Mallard plans and journals;
+- Mallard bindings and receipts.
+
+Do not scan or write Qoder App projections. Any unbound match is a collision.
+Do not overwrite, choose the newest, remap, or fork.
+
+Hold the provider-home lock through install and binding commit. Recheck target
+expectations immediately before each commit.
+
+An existing mapped update must match cloud ID, source and destination UUID,
+profile and binding revisions, reviewed project mapping, full member names and
+roles, target identity, size, digest, new-target absence, and accepted group
+tail.
+
+If local and cloud groups both changed, block as divergent. Qoder Keep Both is
+not available because it needs a new UUID and a proved reference rewrite.
+
+### 8.14 Project-path and target-bucket mapping
+
+Use the same wire lifecycle as current Codex and Claude conversations:
+
+```text
+source local group
+  -> encode source project root as /__mallard_root__
+  -> redact and validate canonical wire group
+  -> immutable schema-1 bundle
+  -> verify wire group
+  -> decode /__mallard_root__ as destination project root
+  -> compute destination Qoder project bucket
+  -> materialize local group
+  -> qoder --cwd <destination-root> --resume <source-uuid>
+```
+
+Source discovery still proves that the native source session belongs to the
+bound source project. Pull does not require equal source and destination path
+spellings. It requires a reviewed destination root that passes the existing
+canonical-boundary and path-map checks.
+
+The target bucket is a Qoder layout concern, not a cloud identity. Derive it
+inside `qoder/materialization.rs` from the destination root and the pinned CLI
+compatibility rule. Do not copy the source bucket name, search every bucket as
+a substitute, or expose the bucket key in the manifest.
+
+The version-pinned cross-path PoC proved destination-bucket relocation for one
+simple session without content mapping. The production gate is stronger. It
+must prove the complete mapped wire lifecycle with different source and
+destination profiles and paths. It must also prove that Qoder recognizes the
+mapped group, recovers prior context, writes new records with destination
+paths, restarts, and remains recapturable.
+
+## 9. Activity, resume, and credentials
+
+### 9.1 Activity
+
+Activity uses the same parser and eligibility rules as Push. It is not a
+second interpretation of Qoder state.
+
+- selected profile only;
+- supported Qoder CLI roots only;
+- exact project ownership;
+- no App database;
+- bounded metadata scan before full parse;
+- duplicate UUIDs blocked;
+- malformed sessions isolated;
+- prompts and tool content absent from the cache.
+
+Rows show provider, bounded title, proved metrics, eligibility, project
+ownership, path-map blockers, and branch only when proved. The minimal release
+can use uncached Qoder discovery. Push always performs a fresh stable capture.
+
+### 9.2 Resume action
+
+For the pinned CLI `1.1.40` contract, use only:
+
+```text
+QODER_FORCE_FILE_STORAGE=true \
+  qoder --config-dir <selected-home> --cwd <destination-project> --resume <uuid>
+```
+
+Qoder documents these flags in the
+[CLI reference](https://docs.qoder.com/cli/cli-reference).
+
+Do not use `--continue`, a numeric selector, `--session-id`, `--fork-session`,
+an App deep link, or an App-internal executable.
+
+Before launch, re-resolve the profile, executable, version, project ownership,
+UUID uniqueness, installed group, and journal state. The frontend sends an
+opaque action ID. The backend constructs and shell-quotes every argument.
+
+### 9.3 No-Keychain contract
+
+Mallard and the Qoder process that Mallard starts must not read from or write
+to macOS Keychain.
+
+Session capture and materialization need no Qoder model credential. The user
+authenticates the destination profile separately. The independent login and
+each Qoder process that Mallard starts, including a version probe, must use
+`QODER_FORCE_FILE_STORAGE=true` with the exact pinned CLI `1.1.40` bundle.
+Package inspection shows that the value must be the exact string `true`;
+values such as `1` do not select this branch. This mode stores the encrypted
+credential file below the selected Qoder profile and bypasses the observed
+native `security` command probe.
+
+This variable is package-observed behavior, not a published cross-version
+contract. Pin it to the tested CLI version and bundle digest. Block login and
+resume if the compatibility record does not authorize the exact executable.
+The release test must intercept the observed `security` command and perform an
+OS-level Keychain access audit. A changed credential implementation requires a
+new compatibility record and audit.
+
+The encrypted credential file is machine-local provider authentication. The
+session and Library allowlists exclude it. Mallard does not open, copy, hash,
+log, back up, or delete it.
+
+The no-Keychain rule also applies to every Library subprocess: plugin and
+marketplace inventory, add, refresh, install, update, post-inventory, and the
+plugin-load product test. The Qoder Catalog adapter sets the same file-storage
+environment and selected `--config-dir` for every invocation.
+
+Mallard never captures or transports:
+
+- access or refresh tokens;
+- API keys;
+- cookies;
+- login databases;
+- Keychain records;
+- machine or installation IDs;
+- custom-provider or Tuzi credentials.
+
+The terminal resume action is mandatory. Before release, a disposable account
+test must prove that the pinned file-backed mode does not read or write
+Keychain during login, source creation, Pull verification, resume, restart, or
+cleanup. The environment variable alone is not proof.
+
+The earlier Keychain error was an authentication-storage problem, not session
+corruption. Keep credential handling separate from session transport.
+
+### 9.4 Logging
+
+Do not persist the exact Qoder shell command. The current launch callback
+accepts the exact command and `commands.rs` records it. Passing a safe label
+through that callback would create a false command record.
+
+Replace the internal callback value with a typed launch-audit value:
 
 ```rust
 pub enum SessionLaunchAudit {
-    OpenInApp,
-    OpenInTerminal,
+    ExactCommand(String),
+    QoderResume,
 }
 ```
 
-The service already knows the validated provider key. The activity log records
-only the provider, fixed action kind, outcome, and generated operation ID. It
-must not record command text, paths, UUIDs, titles, prompts, or CLI output.
-
-Update Codex and Claude to use the same typed callback. Their command behavior
-does not change.
-
-## 10. Qoder user Skills
-
-### 10.1 Portable root
-
-The minimum Library support includes only direct child directories of:
+Codex and Claude wrap their current command value in `ExactCommand`. The Qoder
+adapter emits `QoderResume` immediately before it starts the separately built,
+validated, and quoted command. The Tauri command boundary maps only that typed
+variant to this fixed event:
 
 ```text
-<QODER_CONFIG_DIR>/skills/<skill-name>/
+qoder_session_resume_started
 ```
 
-Each Skill requires:
+The enum is internal and does not change a serialized DTO or command
+signature. Do not log the Qoder home, project path, UUID, marker, prompt,
+output, credential mode, environment, or exact command.
+
+## 10. Standalone Qoder user Skills
+
+### 10.1 Root and scope
+
+Qoder documents user Skills at:
 
 ```text
 <QODER_CONFIG_DIR>/skills/<skill-name>/SKILL.md
 ```
 
-Exclude:
+The default profile uses `~/.qoder/skills`. Project Skills live under
+`.qoder/skills` and are outside provider-home scope. See
+[Qoder CLI Skills](https://docs.qoder.com/cli/Skills).
 
-- `<project>/.qoder/skills/**`.
-- Any project-relative Skill root.
-- Plugin package directories and plugin-contributed Skills.
-- Cache, data, settings, log, memory, and authentication paths.
-- Symbolic links and special files.
+Capture only direct Skill directories under the selected profile's `skills`
+root. Exclude project Skills, plugin-owned Skills, settings, auth, MCP, Hooks,
+plugin state, logs, memory, models, temporary files, links, and special files.
 
-Use the existing bounded Skill tree capture, content identity, warning,
-review, reconciliation, journal, backup, apply, and verification code.
-
-### 10.2 Catalog domain extension
-
-Extend only the existing closed types:
+### 10.2 Schema-1 extension
 
 ```rust
 pub enum ProviderKey {
@@ -718,788 +1192,316 @@ pub enum AgentSkillScope {
 }
 ```
 
-Use this stable root-class token:
+Use:
 
 ```text
-provider/qoder
+provider = qoder
+scope = qoder_user
+root class = provider/qoder
+resource kind = agent_skill
 ```
 
-Set `QoderUser.provider()` to `ProviderKey::Qoder`. Use `Qoder` as the scope
-label. Do not add a resource kind. Qoder Skills use the existing
-`AgentSkill` kind.
+Reuse the existing Skill resource and transport.
 
-Change the ownership rule to:
+### 10.3 Validation and apply
+
+Reuse safe tree capture, content identity, warnings, review, publication,
+reconciliation, journal, backup, apply, and verification.
+
+After generic validation, validate Qoder front matter without rewriting bytes:
+
+- required `name`;
+- required `description`;
+- lowercase letters, numbers, and hyphens only in `name`;
+- `name` at most 64 characters;
+- `description` at most 1024 characters;
+- directory name equals declared name;
+- regular `SKILL.md` inside the captured root.
+
+Qoder documents these metadata limits. Unknown fields remain reviewed content.
+
+### 10.4 Plugin ownership
+
+Run native plugin inventory before Skill inventory. Use canonical plugin
+install roots from typed output to exclude Skills within plugin-owned trees.
+Do not classify by name. Do not read private Qoder registry files.
+
+If plugin ownership inventory is unavailable, truncated, malformed, or from an
+unsupported version, block Qoder Skill inventory. This prevents export of one
+part of a plugin as a standalone Skill.
+
+### 10.5 Skill release test
+
+1. Create disposable profiles A and B.
+2. Put one valid standalone Skill in A.
+3. Confirm that Qoder CLI loads it.
+4. Install a fixture plugin that contributes a Skill.
+5. Confirm that Mallard excludes the plugin Skill.
+6. Push the standalone Skill.
+7. Pull it into B.
+8. Verify exact files, modes, and digest.
+9. Confirm that Qoder CLI loads it from B.
+10. Mutate B after review and confirm apply blocks.
+
+## 11. Qoder plugin install intent
+
+### 11.1 Portable model
+
+Reuse `PluginInstallIntentResource`. It describes how Qoder should install a
+plugin. It does not contain plugin code.
+
+Store only provider, source-qualified canonical plugin ID, marketplace
+namespace, credential-free portable Git source and immutable ref when proved,
+resolution policy, and semantic intent digest.
+
+Never store payload files, cache, runtime data, marketplace clones,
+plugin-owned Skills, generated MCP or Hook configuration, enablement state,
+local paths, credentials, settings, or App projections.
+
+Only installed, user-scope, source-qualified marketplace plugins are eligible
+for automatic portability. Local, project, bundled, App-owned, unqualified,
+and local-path sources are ineligible or manual-only.
+
+### 11.2 Capability matrix
 
 | Provider | Agent Skill | Plugin intent | Pet v1 | Pet v2 |
 | --- | ---: | ---: | ---: | ---: |
-| Qoder | Yes | No | No | No |
+| Qoder | Yes | Yes | No | No |
 | Codex | Yes | Yes | Yes | Yes |
 | Claude | Yes | Yes | No | No |
 
-This table is the first-release Library capability matrix. The backend derives
-the UI choices from it.
+The backend derives UI choices from this table.
 
-### 10.3 Skill and plugin separation
+### 11.3 Native adapter and JSON
 
-The current Skill inventory calls plugin discovery first. A missing or
-unsupported Qoder plugin command must not block user Skills.
+Add `QoderCatalogAdapter` to the required adapter registry. Use the public
+executable, selected profile, structured arguments, null stdin, bounded
+output, and timeout.
 
-Use the current profile only. Call plugin discovery before Skill scanning only
-when that provider owns `PluginInstallIntent`. Qoder does not own that kind in
-the minimum release. Therefore, Qoder Skill inventory performs no native CLI
-call.
-
-Add a `QoderCatalogAdapter` only to satisfy the closed adapter registry. Its
-plugin methods return the typed blocker `qoder_plugin_support_unavailable`.
-No first-release path calls these methods.
-
-This is smaller than making every plugin method optional. Revisit the trait
-only when Qoder plugin intent becomes eligible.
-
-### 10.4 Qoder Skill validation
-
-The Qoder Skills documentation defines YAML front matter with required `name`
-and `description` fields. Apply these checks after the generic safe-tree scan:
-
-- `name` contains only lowercase letters, digits, and hyphens.
-- `name` is at most 64 characters.
-- `description` is at most 1024 characters.
-- The directory name equals `name`.
-- `SKILL.md` is a regular file inside the captured root.
-
-Keep valid bytes unchanged. Do not normalize or rewrite YAML or Markdown.
-Unknown front-matter fields remain part of the reviewed content.
-
-The existing executable-content and credential-shaped warnings still apply.
-A warning needs the existing explicit acknowledgement. It is not a proof that
-the content is safe.
-
-### 10.5 Two-home acceptance gate
-
-Before release, use two disposable Qoder CLI profiles:
-
-1. Create a synthetic Skill in profile A.
-2. Confirm that the supported Qoder CLI loads it.
-3. Push it through the Library.
-4. Review and Pull it into empty profile B.
-5. Confirm exact reviewed files, modes, and digest.
-6. Confirm that the same supported Qoder CLI loads it from profile B.
-7. Change one destination file after review and confirm that apply blocks.
-8. Remove only the disposable roots after marker and boundary checks pass.
-
-The test must not use `~/.qoder`.
-
-## 11. Minimum-release data flow
-
-### 11.1 Activity and resume
-
-```mermaid
-sequenceDiagram
-    actor User
-    participant UI as Mallard Activity
-    participant Core as ProjectSync service
-    participant Adapter as Qoder adapter
-    participant Home as Selected Qoder home
-    participant Terminal
-
-    User->>UI: Open Activity
-    UI->>Core: Get project Activity
-    Core->>Adapter: Discover exact bound project
-    Adapter->>Home: Bounded, no-follow transcript read
-    Home-->>Adapter: Recognized local JSONL
-    Adapter-->>Core: Local Activity rows
-    Core-->>UI: Rows marked Activity only
-    User->>UI: Open in Terminal with Qoder
-    UI->>Core: Opaque action ID and resource ID
-    Core->>Adapter: Revalidate local ownership
-    Adapter->>Terminal: Public qoder --resume command
-    Terminal-->>User: Native Qoder process
+```text
+QODER_FORCE_FILE_STORAGE=true \
+  qoder --config-dir <home> plugins marketplace list --json
+QODER_FORCE_FILE_STORAGE=true \
+  qoder --config-dir <home> plugins list --json
 ```
 
-No remote storage, bundle, or materializer participates in this flow.
+The exact compatibility fixture parses marketplace name and source, installed
+qualified ID, namespace, scope, enabled state for presentation, version,
+install root for ownership, and resource summaries. Local paths and times do
+not enter portable intent.
 
-### 11.2 Skill Push and Pull
+### 11.4 Output truncation fix
 
-```mermaid
-flowchart LR
-    A["Selected Qoder profile"] --> B["Qoder user Skill root"]
-    B --> C["Existing safe Skill scanner"]
-    C --> D["Existing reviewed Library plan"]
-    D --> E["Existing immutable storage"]
-    E --> F["Existing reviewed Pull plan"]
-    F --> G["Existing journaled Skill apply"]
-    G --> H["Second selected Qoder profile"]
-```
-
-The only new data values are the Qoder Catalog provider and the `QoderUser`
-Skill scope. The Skill payload format and storage transport do not change.
-
-## 12. Minimum-release failure behavior
-
-| Condition | Result |
-| --- | --- |
-| Qoder home does not exist | Profile setup blocks. No directory is created during discovery. |
-| Qoder project tree does not exist | Activity returns no Qoder sessions. Other providers remain available. |
-| Unknown transcript dialect | Show a blocked local candidate without content. |
-| Project ownership is absent or mismatched | Do not show it as a session for this project. Record a sanitized blocker count. |
-| Duplicate UUID in reachable Qoder buckets | Disable resume for all duplicates. Do not choose newest. |
-| Branch authority is unclear | Show recorded history with a branch warning. Do not claim an active leaf. |
-| CLI is missing | Terminal shows a non-secret launch failure, or the action is disabled when a reliable probe exists. Activity remains available. |
-| Qoder asks for authentication | The user handles or cancels the native prompt. Mallard stores nothing. |
-| User requests Qoder session Push or Pull | Backend returns `qoder_session_sync_unavailable` before transcript capture. |
-| User opens Qoder plugin scope | Qoder plugin scope is absent. A direct command returns `qoder_plugin_support_unavailable`. |
-| Qoder Skill root is absent | Show an empty scope. Create it only during an approved Pull. |
-| Qoder Skill changes after review | Existing digest and revision checks block apply. |
-| Qoder pet resource is encountered | Treat it as unsupported. Never map it to a Qoder target. |
-
-## 13. Qoder plugin install intent: later design
-
-### 13.1 Current decision
-
-Do not include Qoder plugins in the minimum release.
-
-Qoder documents plugin list, install, update, and marketplace commands. The
-reviewed public documentation does not define a machine-readable schema for
-plugin or marketplace inventory. Human terminal output is not a production
-data contract.
-
-Mallard must not scrape columns or terminal formatting. Mallard also must not
-inspect private Qoder cache files as an inventory API.
-
-### 13.2 Required external contract
-
-Enable Qoder plugin intent only when one of these conditions is true:
-
-1. Qoder documents a stable JSON inventory command and schema.
-2. A supported Qoder SDK exposes the same inventory with stable typed fields.
-3. Qoder provides another public machine-readable interface that completes the
-   same contract.
-
-The contract must return:
-
-- Canonical plugin ID.
-- Marketplace or source namespace.
-- User scope.
-- Installed state.
-- Enabled state when it affects use.
-- Observed version or immutable source revision.
-- Stable Git source identity for portable resolution.
-- Enough data to distinguish built-in, bundled, local, project, and user
-  plugins.
-
-The contract must also define exact install, update, and source-registration
-arguments. It must define success independently from process exit status.
-
-### 13.3 Portable representation
-
-Reuse `PluginInstallIntentResource`. Store only semantic install intent:
-
-- Provider `qoder`.
-- Source-qualified canonical plugin ID.
-- Public Git marketplace source and revision when allowed.
-- Provider resolution policy.
-- Content digest over the canonical intent document.
-
-Never store:
-
-- Plugin payload files.
-- Plugin cache or data.
-- Hooks or generated MCP configuration.
-- Credentials, tokens, or credential-bearing URLs.
-- Local source directories.
-- Settings or enablement state.
-- App database rows.
-
-Initially accept only installed, user-scope, user-visible, Git-backed
-marketplace plugins. Exclude built-in, App-bundled, project, local, local-path,
-and unknown-source entries.
-
-### 13.4 Native apply
-
-When the external contract exists, a Qoder adapter must:
-
-1. Pin the exact public CLI path, version, and supported contract version.
-2. Read bounded JSON with `MAX_CLI_BYTES + 1` bytes.
-3. Reject output when the extra byte is present.
-4. Parse with a versioned typed schema.
-5. Re-inventory immediately before launch.
-6. Compare the result with the reviewed expected state.
-7. Run the exact native command with structured arguments and a timeout.
-8. Re-inventory after exit.
-9. Require the resulting semantic intent to equal the reviewed intent.
-
-The current output reader uses `.take(MAX_CLI_BYTES)` and then checks the
-captured length. That check cannot detect truncated output. Fix it before any
-Qoder native plugin integration.
-
-A timeout or parse failure after launch can follow a native side effect. Return
-`ReconciliationRequired`, preserve the journal, and request a fresh inventory.
-Do not automatically uninstall or roll back a plugin.
-
-## 14. Qoder session portability: future design
-
-### 14.1 Why it remains disabled
-
-The authenticated PoC proves that a second Qoder CLI `1.1.40` process can use
-`--resume <same-uuid>` for a session that the first process created in the same
-isolated profile. It does not copy a session between homes.
-
-Production restore still lacks proof for:
-
-- Complete session membership.
-- Stable multi-file capture against the real Qoder writer.
-- Sidecar and checkpoint consumption.
-- Authoritative active-leaf behavior.
-- Destination-wide UUID collision protection.
-- Exact copied-session continuation in a clean home.
-- App projection rebuild.
-- Cross-path structural mapping.
-- Crash-safe group materialization.
-
-Therefore, `conversation_mode` remains `activity_only`.
-
-### 14.2 Future adapter boundary
-
-Do not extend the minimum `SessionAdapter` with many unused mutation methods.
-When the restore gates pass, add a companion interface:
+The current reader uses `take(MAX_CLI_BYTES)` and cannot detect truncation.
+Read one extra byte:
 
 ```rust
-pub trait PortableSessionAdapter: Send + Sync {
-    fn provider(&self) -> ProviderKey;
-    fn portable_codec(&self) -> PortableCodecDescriptor;
-    fn capture_group(&self, request: &CaptureGroupRequest)
-        -> Result<CapturedSessionGroup, SessionPortabilityBlocker>;
-    fn encode_portable_group(&self, group: &CapturedSessionGroup)
-        -> Result<PortableSessionGroup, SessionPortabilityBlocker>;
-    fn plan_materialization(&self, request: &MaterializationRequest)
-        -> Result<MaterializationPlan, SessionPortabilityBlocker>;
-    fn verify_materialized_group(&self, request: &VerificationRequest)
-        -> Result<(), SessionPortabilityBlocker>;
+struct BoundedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+struct CmdOutput {
+    success: bool,
+    stdout: BoundedOutput,
+    stderr: BoundedOutput,
 }
 ```
 
-Register this interface only for providers with `conversation_mode = portable`.
-It must own:
+Do not parse truncated stdout. Bound and sanitize stderr. Do not save raw
+output.
 
-- Layout and version detection.
-- Required and optional member grammar.
-- Source UUID policy.
-- Active-leaf and compaction policy.
-- Tail and cursor behavior.
-- Portable wire encode and decode.
-- Structural path mapping.
-- Collision namespaces.
-- Index merge behavior.
-- Materialization target mapping.
-- Post-apply product verification.
-- Provider refresh or projection behavior.
+### 11.5 Native apply
 
-This removes the current Codex-or-Claude fallthrough from future Qoder work.
-Do not add `else { /* Qoder */ }` branches beside the existing `is_codex`
-branches.
+Pin profile revision, exact CLI contract, qualified ID, namespace, source,
+resolution policy, reviewed state, action, user scope, plan revision, and
+expiry.
 
-### 14.3 Candidate consistency group
+1. Acquire the profile target lock.
+2. Re-resolve the profile and executable.
+3. Verify the supported CLI version.
+4. Run fresh JSON inventory.
+5. Match the reviewed current semantic state.
+6. Add or refresh the reviewed portable marketplace when required.
+7. Install a missing qualified plugin with user scope, or update an existing
+   one when planned.
+8. Ignore human success text as proof.
+9. Run fresh JSON inventory.
+10. Require the resulting semantic intent to match the reviewed intent.
+11. Save a typed sanitized result.
 
-Observed and package-inspected Qoder versions use a group similar to:
+Use native commands for state changes. Do not edit Qoder settings or registry
+files. Do not automatically uninstall, disable, or repeat an install.
+
+A timeout, crash, malformed result, or truncated result can occur after a
+native side effect. Run fresh inventory when safe. Return
+`ReconciliationRequired` when the result is still ambiguous.
+
+### 11.6 Plugin release test
+
+Use two disposable profiles and a disposable public Git marketplace:
+
+1. Inventory A through JSON.
+2. Capture one installed user-scope qualified plugin as intent.
+3. Confirm no payload or local path enters the bundle.
+4. Pull into empty B.
+5. Add the reviewed marketplace when absent.
+6. Install the exact qualified plugin with user scope.
+7. Re-inventory and match semantic intent.
+8. Confirm Qoder loads a plugin resource in a new CLI session.
+9. Test update and post-update verification.
+10. Inject uncertain post-side-effect results and require reconciliation.
+11. Confirm plugin-owned Skills are excluded from standalone Skills.
+12. Confirm no invocation reads or writes Keychain.
+
+## 12. Security and privacy
+
+### 12.1 Allowlist
+
+Only three Qoder classes enter portable storage:
+
+1. proved eligible Qoder CLI session members;
+2. reviewed standalone user Skill trees;
+3. semantic plugin install intent.
+
+Everything else is denied by default.
+
+### 12.2 Defense-in-depth exclusions
+
+Never capture entries equivalent to:
 
 ```text
-projects/<project-key>/<session-uuid>.jsonl
-projects/<project-key>/<session-uuid>/state.json
-projects/<project-key>/<session-uuid>/compression-v2/state.json
-projects/<project-key>/<session-uuid>/subagents/agent-<id>.jsonl
-projects/<project-key>/<session-uuid>/subagents/agent-<id>.meta.json
-projects/<project-key>/<session-uuid>/subagents/task-<id>.json
-file-history/<session-uuid>/<checkpoint-object>
+.qoder/.auth/**
+.qoder/mcp-router.json
+.qoder/.qoder-app-status.json
+.qoder/installation_id
+.qoder/ipc/**
+.qoder/logs/**
+.qoder/shell-snapshots/**
+.qoder/tmp/**
+.qoder/.cache/**
+.qoder/.models/**
+.qoder/memory/**
+.qoder/settings.json
+.qoder/plugins/**
 ```
 
-These names are candidates, not a public stable schema. A production codec
-needs one closed, versioned member grammar. A recognized session with an
-unknown session-owned member must block as a complete group.
-
-Do not assume that the six files from the synthetic PoC are complete.
-File-history references can add checkpoint objects outside the task directory.
-
-### 14.4 Stable group capture
-
-Require Qoder to be stopped for the selected profile. A Mallard lock alone is
-not sufficient because Qoder does not honor it.
-
-For one session group:
-
-1. Resolve the exact supported layout.
-2. Enumerate all required and referenced members from an allowlist.
-3. Reject unknown members, links, special files, excessive hard links, and
-   out-of-root references.
-4. Open each member without following symbolic links.
-5. Record device, inode, mode, link count, size, modification time, change
-   time, and SHA-256 digest.
-6. Read every member through its retained handle under per-file and aggregate
-   limits.
-7. Restat every retained handle.
-8. Re-enumerate all participating directories.
-9. Repeat the complete pass.
-10. Compare names, roles, identities, sizes, times, link counts, and digests.
-11. Parse only the retained stable buffers.
-12. Check again that no Qoder process started for this profile.
-
-Any addition, removal, rename, replacement, in-place change, hard-link change,
-or symbolic-link substitution blocks the whole session. Do not silently retry
-until a quiet interval appears. That could combine different logical states.
-
-Compute one group digest over an ordered, domain-separated tuple for every
-member:
+Also deny App and Chromium/Electron state:
 
 ```text
-(role, validated-relative-path, size, sha256)
-```
-
-The member name and role must affect the digest. Two groups with equal bytes at
-different logical paths must not have the same group identity.
-
-### 14.5 UUID rules and collision scope
-
-Exact restore preserves the source Qoder UUID. It does not allocate a new UUID.
-
-Before new materialization, scan or reserve the UUID across every supported
-destination namespace:
-
-- All Qoder project buckets for the selected profile.
-- Main transcript names.
-- Task directories.
-- Root state and compression state.
-- Subagent and task sidecars.
-- File-history checkpoint roots.
-- Pending Mallard plans and journals.
-- Mallard conversation bindings and receipts.
-- External SDK store keys when that mode is used.
-- Qoder App projections only through a supported public inventory API.
-
-A match that is not the exact reviewed existing mapping is a hard collision.
-Do not overwrite, remap, choose the newest file, choose a list index, or use
-fork as collision recovery.
-
-Use a provider-home-wide lock or UUID reservation while planning and applying.
-Recheck the full collision set immediately before commit.
-
-For an existing mapped update, require exact equality for:
-
-- Cloud task identity.
-- Provider and source UUID.
-- Destination UUID.
-- Profile and project binding revisions.
-- Complete member names and roles.
-- Expected file identities, sizes, and digests.
-- Expected absence of every new target.
-
-### 14.6 Restore transaction
-
-An approved Qoder restore must use one group transaction:
-
-1. Revalidate plan revision, expiry, storage head, project binding, profile,
-   Qoder compatibility, stopped-Qoder state, and UUID collision set.
-2. Fetch and SHA-256 verify all immutable objects.
-3. Stage all members under a validated Mallard staging directory.
-4. Validate each member codec and the complete group digest.
-5. Write a recovery journal before target mutation.
-6. Back up only exact existing targets named in the reviewed plan.
-7. Install sidecars, state, and checkpoints first.
-8. Install the main transcript last.
-9. Flush files and required parent directories.
-10. Delete only an exact obsolete file with its reviewed digest, or an exact
-    empty directory. Never delete recursively.
-11. Recapture the complete destination group.
-12. Require group equality with the approved result.
-13. Save the binding and receipt.
-14. Mark the journal complete.
-
-After a crash, recovery must produce one of three results:
-
-- The complete approved group.
-- The complete original group.
-- `RecoveryRequired`, with backups and uncertain members preserved.
-
-A mixed group is never success.
-
-### 14.7 Exact path before cross path
-
-The first possible portable mode is **same exact project path**. The source and
-destination canonical project spelling must match.
-
-Cross-path restore is a separate later capability. It needs a versioned typed
-map of path-bearing JSON value tokens. The mapper must preserve all unselected
-bytes, including whitespace, escaping, keys, and free-form history. It must not
-use global string replacement or parse-and-reserialize the transcript.
-
-An unknown signature, integrity, hash, or authenticated field that covers a
-mapped token blocks relocation. A cross-path release needs clean-home resume,
-restart, App behavior when claimed, and exact recapture tests.
-
-### 14.8 Qoder App boundary
-
-Do not copy or edit Qoder App databases, write-ahead logs, or shared-memory
-files. They are projections with no reviewed import contract.
-
-Qoder App support remains disabled until a supported interface can:
-
-- Select an isolated App home or disposable environment.
-- Discover the restored task.
-- Rebuild required projections.
-- Detect UUID collisions.
-- Open an existing task by stable ID.
-- Continue it.
-- Survive App restart.
-- Recapture a coherent task.
-
-Current public deep links create new Chat or Quest work. They do not document
-an open-existing-task-by-ID operation.
-
-### 14.9 SDK store boundary
-
-The Qoder Agent SDK external `SessionStore` can mirror main and subagent
-history. The public contract remains history-focused and best-effort. Local
-writes continue, and a missing external entry can fall back to local storage.
-
-Treat this SDK path as a history mirror only. It does not prove:
-
-- Root task state.
-- Compression state.
-- Task sidecars.
-- File checkpoints.
-- Authentication or provider settings.
-- App projections.
-- Complete retention or deletion.
-
-Do not use the SDK store as the session portability implementation.
-
-## 15. Qoder fork: later product
-
-Resume and fork have different identity rules:
-
-- Resume keeps the existing Qoder UUID.
-- Fork creates a new Qoder UUID and selected history.
-
-The SDK fork PoC proves a standalone transcript transform. It does not prove a
-complete Qoder task fork. It omits or has unproved behavior for state,
-compression, checkpoints, task sidecars, application projections, and crash
-rollback.
-
-Do not use fork to resolve an exact-restore collision. Do not call copied or
-rewritten history a restored session.
-
-A future **Fork Qoder history** product needs all of these gates:
-
-- Public and versioned Qoder fork API or command contract.
-- Exact cut-record and selected-leaf semantics.
-- Complete parent, replacement, compaction, team, and subagent graph rules.
-- Defined state, plan, checkpoint, and file-history policy.
-- Atomic target UUID claim.
-- Target collision rejection.
-- Source immutability under concurrent append.
-- Crash-safe transaction and recovery.
-- Authenticated marker recovery in the new UUID.
-- Restart and recapture.
-- Qoder App tests if App compatibility is claimed.
-
-Until those gates pass, expose no fork control in Mallard.
-
-## 16. Qoder custom providers and Tuzi: later product
-
-The Tuzi PoC proves two separate facts:
-
-1. A direct request to the Tuzi model and chat endpoints can succeed with a
-   disposable key.
-2. Qoder CLI can resume a native Qoder session with Qoder-managed model access.
-
-It does not prove a Qoder-to-Tuzi request. Combining two independent passes
-does not prove the combined path.
-
-Qoder documents custom models through its current BYOK catalog and wizard. It
-warns users not to configure them manually in settings. The SDK can resolve a
-custom model object with provider, model, API key, URL, and style, but the
-provider must match Qoder's supported catalog and the account needs permission.
-
-The direct top-level `providers` settings shape accepted by the inspected CLI
-package is `package_observed`. Do not use it in production.
-
-The minimum release adds no custom-provider data type. A future design must
-keep these values machine-local:
-
-- Provider endpoint.
-- Account or organization identity.
-- Secret reference.
-- API key or token.
-- TLS and proxy settings.
-- Model entitlement and model name when they expose account state.
-
-Portable data can contain a non-secret intent only after Qoder documents the
-contract. Mallard must never put a Tuzi key in a bundle, command line, log,
-error, receipt, or test fixture.
-
-## 17. Security and privacy design
-
-### 17.1 Allowlist first
-
-The minimum release has two independent filesystem allowlists:
-
-| Function | Allowed root | Allowed content |
-| --- | --- | --- |
-| Activity | `<QODER_CONFIG_DIR>/projects` | Recognized main transcript JSONL files for the selected dialect |
-| Skills | `<QODER_CONFIG_DIR>/skills/<name>` | The reviewed regular-file Skill tree rooted at a valid `SKILL.md` |
-
-Everything outside these allowlists is excluded. A denylist is a second check.
-It is not permission to capture another path.
-
-### 17.2 Provider-home exclusions
-
-Never capture or publish these Qoder-home paths as profile state:
-
-```text
-.auth/**
-mcp-router.json
-.qoder-app-status.json
-installation_id
-ipc/**
-logs/**
-shell-snapshots/**
-tmp/**
-.cache/**
-.models/**
-memory/**
-settings.json
-plugins/installed_plugins_v2.json
-plugins/cache/**
-plugins/data/**
-```
-
-Also exclude every unknown top-level path. A new Qoder file stays excluded
-until it receives an explicit resource owner, safety review, and test.
-
-### 17.3 Qoder App exclusions
-
-Never copy or edit these application-state classes:
-
-```text
-auth.v1.dat
-auth.machine-id
-Cookies*
+Cookies
+Cookies-journal
 Local State
-Network Persistent State
+Network/**
 Local Storage/**
 Session Storage/**
 main.sqlite
 main.sqlite-wal
 main.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
 ```
 
-Do not discover an App root by walking broad Library directories. A future App
-feature needs an explicit supported root and public import or projection
-contract.
+The denylist does not expand the allowlist.
 
-### 17.4 Filesystem rules
+### 12.3 Threat controls
 
-Use the current Mallard safety invariants for every selected Qoder root:
-
-- Require an absolute configured path.
-- Resolve and pin the canonical root.
-- Reject `..`, empty path components, NUL, and alternate separators in
-  logical paths.
-- Reject symbolic links and special files.
-- Use no-follow opens for content.
-- Enforce file, directory, depth, line, and aggregate byte limits.
-- Keep discovery under the exact canonical root.
-- Recheck target identity and digest after user review.
-- Use atomic persistence for Mallard state.
-- Use journaled apply for Skill changes.
-- Delete only an exact reviewed file with its expected digest or an exact
-  empty directory.
-
-The Activity path is read-only. It must never repair, rename, normalize, or
-truncate a Qoder transcript.
-
-### 17.5 Content and secret rules
-
-Conversation transcripts and Skills can contain secrets. Keep the current
-review warnings and storage trust controls. Do not describe best-effort secret
-detection as proof of safety.
-
-For a future resumable opaque Qoder sidecar, choose one of two results:
-
-1. Preserve the exact bytes under an approved sensitive-content policy.
-2. Block the session when policy does not permit those bytes.
-
-Do not redact an opaque sidecar and call it resumable. A byte change can break
-unknown state or integrity fields.
-
-### 17.6 Threat controls
-
-| Threat | Required control |
+| Threat | Control |
 | --- | --- |
-| Transcript in the wrong encoded project bucket | Authoritative in-file ownership and exact canonical project match |
-| Duplicate UUID selects the wrong session | Scan all reachable supported buckets; disable action on any duplicate |
-| Malicious JSONL injects a command | Fixed action IDs; command built only from validated profile, project, and UUID |
-| Frontend enables hidden sync | Backend `conversation_mode` check before read, plan, publish, and apply |
-| Symlink escapes the Qoder home | No-follow traversal and canonical-root containment |
-| Session mutates during Activity read | Bounded read, stat checks, and stale Activity result only; revalidate before action |
-| Skill changes after review | Existing profile, target, tree, and digest pins |
-| Older Mallard reads a Qoder Catalog record | Fail closed; document the minimum compatible Mallard version |
-| Raw Qoder output leaks data | Do not capture CLI output for resume; bound and discard future plugin output after parsing |
-| Qoder auth leaks into Mallard | No login automation, token input, auth-file read, or credential logging |
+| path escape | canonical root validation and handle-relative traversal where available |
+| symlink substitution | no-follow open, retained handle, and pre/post identity checks |
+| special file | regular files and exact directories only |
+| capture race | two-pass group capture and membership rescan |
+| oversized input | line, file, group, count, depth, stdout, and stderr limits |
+| hostile JSON or JSONL | exact versioned parsers and cross-member validation |
+| human-output drift | parse JSON inventory only |
+| credential leak | strict allowlist, redaction fixpoint, URL user-info rejection, sanitized logs |
+| plugin-owned Skill export | native ownership inventory before Skill scan |
+| UUID collision | profile-wide scan under a lock |
+| stale review | identity, size, digest, revision, expiry, executable, and profile pins |
+| partial restore | stage, journal, ordered commit, exact backup, recapture, recovery |
+| ambiguous plugin side effect | post-inventory and `ReconciliationRequired` |
+| branch ambiguity | ineligible session; Mallard does not choose |
+| App corruption | never read or write App databases |
+| provider drift | exact compatibility entry and fail closed |
 
-## 18. Logging and diagnostics
+Conversation and Skill content can contain secrets or executable instructions.
+Keep explicit warning acknowledgement. Secret detection is best-effort, not
+proof of safety.
 
-Use fixed event names and typed blocker codes. Do not place provider content in
-a message string.
+## 13. Compatibility and schema policy
 
-Minimum-release events:
+### 13.1 Clean cutover
 
-```text
-qoder.discovery.completed
-qoder.discovery.blocked
-qoder.native_action.started
-qoder.native_action.failed
-qoder.skill.inventory.completed
-qoder.skill.inventory.blocked
-qoder.skill.apply.completed
-qoder.skill.apply.failed
-```
+There are no customers and no customer data to migrate. Keep all schema
+numbers at `1` and extend current value domains in place.
 
-Allowed fields:
+Do not add a migration, schema-2 reader, dual writer, legacy Qoder path, enum
+alias, optional DTO fallback, automatic cleanup command, or downgrade path.
 
-- Generated Mallard operation ID.
-- Literal provider key `qoder`.
-- Supported dialect category.
-- Count of accepted and blocked sessions.
-- Count of Skills and files.
-- Aggregate bounded byte count.
-- Duration.
-- Fixed action kind.
-- Typed blocker code.
-- Success or failure.
+Before retesting, the tester will manually remove test `~/.mallard` state and
+configured cloud test data. Mallard initializes new schema-1 documents. The
+Qoder implementation does not delete either location.
 
-Forbidden fields:
+### 13.2 Schema-1 changes
 
-- Project or profile path.
-- Session or record UUID.
-- Task title.
-- Prompt or response text.
-- Tool input or output.
-- Skill body.
-- Shell command.
-- Qoder stdout or stderr.
-- PAT, provider API key, authorization value, or environment.
-- Endpoint query string.
-- File or group digest in normal activity logs.
+ProjectSync:
 
-Use these blocker codes where applicable:
+- reuse the open conversation provider key;
+- reuse `ConversationThread`, `Transcript`, and `Sidecar`;
+- add Qoder provider and group-codec validation;
+- extend schema-1 machine-local `AcceptedConversationVersion` with required
+  `accepted_at_revision` and `accepted_at_manifest_size` coordinates;
+- require Qoder redaction evidence;
+- require the existing `mallard.pathmap.v1` stamp for Qoder;
+- keep the current Tauri provider descriptor shape.
 
-```text
-qoder_unknown_dialect
-qoder_unsupported_version
-qoder_project_ownership_unproved
-qoder_multi_root_unproved
-qoder_duplicate_session_id
-qoder_branch_selection_unproved
-qoder_session_changed
-qoder_session_sync_unavailable
-qoder_plugin_support_unavailable
-qoder_cli_contract_unverified
-qoder_cli_output_truncated
-qoder_app_projection_unavailable
-qoder_unknown_session_member
-qoder_unstable_session_group
-qoder_running
-qoder_session_id_collision
-qoder_target_changed_after_review
-qoder_integrity_field_unproved
-qoder_cross_path_unsupported
-qoder_recovery_required
-```
+The two accepted-version fields complete the existing immutable-manifest pin.
+They do not travel in the portable bundle manifest. There is no fallback for a
+checkpoint that does not contain them.
 
-The last group is reserved for future portability. The minimum release must
-not emit a restore-success event for Qoder.
+Expand the schema-1 `ConversationWirePathMap` provider rule from Claude-only
+to Claude-or-Qoder. Keep the codec value and object shape unchanged. Codex
+continues to declare the same mapping in-band; no provider gets a new path-map
+schema.
 
-## 19. Compatibility and schema policy
+Library:
 
-### 19.1 Product compatibility record
+- add `ProviderKey::Qoder`;
+- add `AgentSkillScope::QoderUser`;
+- reuse `AgentSkill` and `PluginInstallIntent`;
+- keep pet kinds Codex-only.
 
-Keep one compile-time, fixture-backed record for each enabled Qoder surface:
+Older Mallard versions can reject Qoder-containing schema-1 documents. This
+downgrade is unsupported.
 
-| Field | Purpose |
-| --- | --- |
-| Surface | CLI, SDK, App, or IDE |
-| Product version | Exact supported version for the first entry |
-| Operating system and architecture | Scope of the product proof |
-| Transcript dialect | Parser discriminator and version |
-| Member-set version | Future portable group contract |
-| Codec key and version | Parser and wire behavior |
-| Allowed operations | Activity, resume, Skill load, plugin intent, or restore |
-| Fixture corpus ID | Exact sanitized test corpus |
-| Evidence ID | Documented or product-proved result |
+### 13.3 Runtime compatibility
 
-The initial candidate is Qoder CLI `1.1.40` on macOS ARM64 for local Activity
-and native resume. Qoder App `0.1.4`, SDK `1.0.32`, and observed App runtime
-`1.1.35` are research evidence only unless a specific capability test names
-them.
+Maintain one compile-time, fixture-backed record with:
 
-Do not claim a semantic version range after one version passes. Add a range
-only after the complete corpus passes at the lower bound, upper bound, and all
-known format transitions.
+- Qoder CLI surface and exact version;
+- tested OS and architecture;
+- public executable discovery rule;
+- transcript dialect and member-set version;
+- lineage and session-group codecs;
+- source and destination project-bucket rules;
+- supported path-bearing member grammar and integrity behavior;
+- plugin JSON contract version;
+- Skill root and metadata contract;
+- supported no-Keychain authentication mode;
+- sanitized fixture IDs and evidence dates.
 
-An unknown transcript version can produce a metadata-only blocked row. It
-cannot enable resume when identity or ownership is unclear. An unknown native
-CLI version can fail visibly in Terminal, but it cannot enable a future plugin
-or restore mutation.
+Candidate first version is CLI `1.1.40`. Do not infer a semver range from one
+passing version.
 
-The Qoder App database `user_version` is diagnostic information only. It must
-not select a parser or migration.
+An unsupported version blocks session Push/Pull, resume, plugin inventory, and
+plugin apply. It also blocks Skills when plugin ownership cannot be proved. No
+fallback parses human output or private Qoder registries.
 
-### 19.2 ProjectSync schema
+## 14. API and UI
 
-ProjectSync already uses an open validated `ProviderKey`. Adding `qoder` does
-not add a new serialized enum. The minimum release does not create portable
-Qoder conversation rows. Therefore, the bundle manifest schema remains 1.
-
-`ProviderDescriptor.conversation_mode` changes the Tauri response shape. Update
-Rust, `src/types.ts`, fixtures, mocks, and frontend integration tests in one
-change. Do not add an optional frontend fallback. This repository does not keep
-an old command contract in parallel.
-
-### 19.3 Storage Catalog schema
-
-The Library has a closed serialized provider enum and Skill-scope enum. Add
-`qoder` and `qoder_user` to the current schema-1 contract. Update Rust,
-TypeScript, persisted-document fixtures, remote Catalog fixtures, and tests in
-one clean cut.
-
-Do not add a schema-2 reader, dual write, migration, or alias. The document
-shape and resource semantics do not change. The accepted enum domain changes.
-An older Mallard build can reject a schema-1 Catalog document that contains a
-Qoder resource. State the minimum compatible Mallard version in release notes
-and storage-connection help.
-
-Never silently drop an unknown Qoder resource during a downgrade. Fail closed
-and leave remote immutable objects unchanged.
-
-### 19.4 Portable identity
-
-Use these minimum-release identity components for a Qoder Skill:
-
-```text
-resource kind = agent_skill
-provider = qoder
-scope = qoder_user
-root class = provider/qoder
-declared Skill name
-directory name
-content digest
-```
-
-Do not add Qoder pets, a Qoder plugin resource, or a Qoder conversation object
-to schema 1 in the minimum release.
-
-## 20. API and UI contract
-
-### 20.1 Provider response
+### 14.1 ProjectSync response
 
 `list_agent_providers` returns Qoder first:
 
@@ -1510,309 +1512,376 @@ to schema 1 in the minimum release.
     "display_name": "Qoder",
     "profile_label": ".qoder profile",
     "default_profile_directory": ".qoder",
-    "setup_default": true,
-    "conversation_mode": "activity_only"
+    "setup_default": true
+  },
+  { "key": "codex" },
+  { "key": "claude" }
+]
+```
+
+The example omits unchanged fields.
+
+Setup shows Qoder first, proposes `~/.qoder`, requires explicit review,
+preserves multi-provider pre-enable behavior, and displays:
+
+```text
+Portable Qoder CLI sessions. Project paths map to the reviewed destination.
+```
+
+Activity and review:
+
+- show eligible, ineligible, and invalid session states;
+- on Push, show the selected local project root mapping to
+  `/__mallard_root__`;
+- on Pull, show `/__mallard_root__` mapping to the reviewed destination
+  project; never claim that a clean destination knows the source absolute
+  root;
+- offer Push/Pull only for eligible groups;
+- offer CLI resume only for verified local state;
+- omit Keep Both, Fork, and App actions;
+- never show a current branch when authority is unproved.
+
+### 14.2 Library response
+
+```json
+[
+  {
+    "provider": "qoder",
+    "kinds": ["agent_skill", "plugin_install_intent"]
   },
   {
-    "key": "codex",
-    "conversation_mode": "portable"
+    "provider": "codex",
+    "kinds": [
+      "agent_skill",
+      "plugin_install_intent",
+      "codex_pet_v1",
+      "codex_pet_v2"
+    ]
   },
   {
-    "key": "claude",
-    "conversation_mode": "portable"
+    "provider": "claude",
+    "kinds": ["agent_skill", "plugin_install_intent"]
   }
 ]
 ```
 
-The example omits unchanged Codex and Claude fields.
+The Library shows Qoder first with Skills and Plugins. It warns that plugins
+can add commands, agents, Skills, Hooks, executables, and MCP servers. It shows
+manual state for non-portable sources. It has no Qoder pet choice.
 
-### 20.2 Project setup
+The Library does not show **Open in App** for a Qoder profile. The backend
+`open_profile_in_app` match fails closed for Qoder because this release has no
+safe App profile launcher. **Open in Terminal** uses the selected
+`--config-dir` and `QODER_FORCE_FILE_STORAGE=true`; it does not start an App
+executable or use the default profile implicitly.
 
-The setup UI must:
+### 14.3 Typed errors
 
-- Show Qoder first.
-- Use Qoder as the initial focus or selection for a new agent-provider setup.
-- Show the proposed default `~/.qoder` profile path.
-- Require the same explicit profile review as other providers.
-- Label the initial support as **Activity and local resume**.
-- State **Session Push and Pull are not available**.
-- Leave existing projects and bindings unchanged.
-
-### 20.3 Project Activity
-
-The Activity UI reuses current generic rows, detail pages, and provider marks.
-The Qoder monogram fallback is sufficient. Do not add unlicensed brand art.
-
-For a Qoder row:
-
-- Use display name `Qoder`.
-- Show an `Activity only` status.
-- Keep Push and Pull controls absent or disabled with a fixed reason.
-- Offer `Open in Terminal with Qoder` only for a validated local session.
-- Show the branch warning when selection is unproved.
-- Never show an App-open action.
-
-The Pull and Push review models must use `conversation_mode`. They must not
-infer sync support from the presence of a profile or Activity row.
-
-### 20.4 Library
-
-`list_catalog_capabilities` returns Qoder first with only `agent_skill`.
-
-The Library UI must:
-
-- Show Qoder first in provider selection.
-- Offer a Qoder user Skill scope.
-- Use the existing Skill review and outcome UI.
-- Omit Qoder plugin scope.
-- Omit all Qoder pet choices.
-- Use an exhaustive provider label map. Do not label every non-Codex provider
-  as Claude.
-
-No new Tauri command is required. Use the existing generic ProjectSync and
-Library commands.
-
-## 21. Repository change plan
-
-### 21.1 ProjectSync backend
-
-| File | Minimum-release change |
-| --- | --- |
-| `crates/mallard-infrastructure/src/providers/traits.rs` | Add `ConversationMode`, add it to `ProviderDescriptor`, and replace exact-command launch audit with `SessionLaunchAudit`. |
-| `crates/mallard-infrastructure/src/providers/mod.rs` | Export the Qoder module and the two new shared types. |
-| `crates/mallard-infrastructure/src/providers/registry.rs` | Register `QoderAdapter`; return descriptors in Qoder, Codex, Claude order. |
-| `crates/mallard-infrastructure/src/providers/qoder/mod.rs` | Add the descriptor and `SessionAdapter` implementation. Return a hard error from materialization and provider-state methods. |
-| `crates/mallard-infrastructure/src/providers/qoder/discovery.rs` | Add bounded dialect detection, transcript discovery, UUID checks, and authoritative exact-project ownership. |
-| `crates/mallard-infrastructure/src/providers/qoder/codec.rs` | Parse only the accepted Qoder CLI dialect and normalize bounded Activity records. Do not implement a portable wire codec. |
-| `crates/mallard-infrastructure/src/providers/qoder/history.rs` | Build summary, metadata-only timeline index, page, and detail results. Keep branch status unproved when applicable. |
-| `crates/mallard-infrastructure/src/providers/qoder/actions.rs` | Validate and launch only exact local `--resume <uuid>` in Terminal. Emit a typed audit event. |
-| `crates/mallard-infrastructure/src/providers/codex/actions.rs` | Replace command-string audit with the typed audit event. Do not change commands. |
-| `crates/mallard-infrastructure/src/providers/claude/actions.rs` | Replace command-string audit with the typed audit event. Do not change commands. |
-| `crates/mallard-infrastructure/src/project_activity.rs` | Carry the typed launch callback through the existing generic action flow. |
-| `src-tauri/src/project_sync/service.rs` | Add the early and apply-time `conversation_mode` guards. Log typed launch events. Do not add Qoder to Codex-or-Claude portable branches. |
-| `src-tauri/src/sync_tests/provider_extensibility.rs` | Prove Qoder registration, ordering, Activity-only behavior, and portable-operation rejection. |
-
-Do not change these files for the minimum release:
-
-| File or subsystem | Reason |
-| --- | --- |
-| `crates/mallard-infrastructure/src/provider_capture.rs` portable capture path | Qoder conversations do not enter Push. |
-| `crates/mallard-infrastructure/src/conversation_materialization.rs` | Qoder conversations do not enter Pull. |
-| `crates/mallard-infrastructure/src/session_path_map.rs` | Cross-path Qoder restore is disabled. |
-| `crates/mallard-infrastructure/src/bundle_engine.rs` | Bundle publication and restore formats do not change. |
-| `src-tauri/src/project_sync/session_watch_service.rs` | Qoder uses the existing bounded uncached path. |
-| `src-tauri/src/lib.rs` | Existing generic commands are sufficient. |
-| `crates/mallard-infrastructure/src/storage_core/` | Storage transport does not change. |
-| Any Qoder App database | It is outside Mallard's supported write boundary. |
-
-### 21.2 ProjectSync frontend
-
-| File | Minimum-release change |
-| --- | --- |
-| `src/types.ts` | Add the exact `conversation_mode` union to `ProviderDescriptor`. |
-| `src/components/project-sync/ProjectSetupWorkspace.tsx` | Keep backend order, focus Qoder first, and show the Activity-only support text. |
-| `src/components/project-sync/ProjectBindingEditor.tsx` | Show Qoder profile binding and the session-sync boundary. |
-| `src/components/project-sync/ProjectLinksWorkspace.tsx` | Derive conversation Push and Pull availability from `conversation_mode`. Do not let profile presence imply portability. |
-| `src/components/project-sync/ProjectActivityPage.tsx` | Reuse the generic Qoder row, status, warning, and terminal action. |
-| `src/components/project-sync/pullReviewModel.ts` | Remove binary Codex-or-Claude labels where Qoder data can be displayed. |
-
-`src/components/sync-review/ProviderMark.tsx` already has a generic monogram
-fallback. No Qoder artwork is required.
-
-### 21.3 Storage Catalog backend
-
-| File | Minimum-release change |
-| --- | --- |
-| `src-tauri/src/storage_catalog/domain.rs` | Add `ProviderKey::Qoder` and `AgentSkillScope::QoderUser`. Allow Qoder to own only `AgentSkill`. Add no pet kind. |
-| `src-tauri/src/storage_catalog/profiles.rs` | Resolve a selected Qoder home and its canonical `skills` child. Add the default `.qoder` profile description. |
-| `src-tauri/src/storage_catalog/adapters.rs` | Put Qoder first in the served matrix. Add a Qoder adapter whose plugin methods fail closed. Fix output truncation before later plugin work. |
-| `src-tauri/src/storage_catalog/inventory.rs` | Skip native plugin discovery when the selected provider has no plugin-intent capability. Reuse the Skill scanner for `QoderUser`. |
-| `src-tauri/src/storage_catalog/service.rs` | Remove fixed two-provider iteration and preserve backend Qoder-first order. Keep kind support server-authoritative. |
-| `src-tauri/src/storage_catalog/persistence.rs` | Update schema-1 enum fixtures and round-trip tests. Do not add a migration. |
-| `src-tauri/tests/storage_catalog_e2e.rs` | Add the Qoder Skill two-profile flow with stub or disposable roots. |
-
-Keep stable schema ownership separate from runtime enablement:
-
-```rust
-fn provider_owns_kind(provider: ProviderKey, kind: CatalogResourceKindTag) -> bool;
-fn provider_enabled_kinds(provider: ProviderKey) -> &'static [CatalogResourceKindTag];
-```
-
-`provider_owns_kind` validates stored Qoder Skills even after an operational
-rollback. `provider_enabled_kinds` controls new inventory, plan, apply, and UI
-choices. Initially both permit Qoder `AgentSkill`. A rollback can disable new
-Qoder Skill operations without making stored resources invalid.
-
-### 21.4 Storage Catalog frontend
-
-| File | Minimum-release change |
-| --- | --- |
-| `src/components/storage-catalog/types.ts` | Extend `CatalogProviderKey` with `qoder`. Do not change the resource-kind union. |
-| `src/components/storage-catalog/model.ts` | Add an exhaustive `Qoder` label and remove the binary provider conditional. |
-| `src/components/storage-catalog/AddCatalogScopeWorkspace.tsx` | Preserve Qoder-first backend order and show only enabled Qoder kinds. |
-| `src/components/storage-catalog/StorageCatalogPage.tsx` | Reuse generic Skill UI. Keep pet rendering selected only by Codex pet kinds. |
-| `tests/frontend/storage-catalog.integration.test.tsx` | Prove order, Skill scope, and the absence of plugin and pet choices. |
-
-### 21.5 Documentation and fixtures
-
-Add sanitized fixtures below a new Qoder provider test-fixture directory. Each
-fixture must include a machine-readable evidence file with:
-
-- Qoder surface and exact version.
-- Operating system and architecture.
-- Transcript dialect ID.
-- Generation procedure.
-- Sanitization procedure.
-- Expected ownership, UUID, timestamps, and warnings.
-- SHA-256 manifest of fixture files.
-
-Do not commit an authentication file, provider response, private path, user
-prompt, user Skill, App database, or captured `~/.qoder` tree.
-
-After implementation, update `README.md` with the supported Qoder surface and
-the explicit session-sync limitation.
-
-## 22. Test plan
-
-### 22.1 Unit tests: ProjectSync
-
-| Area | Required cases |
-| --- | --- |
-| Descriptor | Qoder key, label, `.qoder` default, `setup_default = true`, `activity_only`, and first display rank |
-| Registry | Qoder, Codex, and Claude registered; test provider remains deterministic |
-| Dialect | Accepted exact dialect, missing discriminator, mixed dialect, unknown version |
-| UUID | Canonical UUID, uppercase, filename mismatch, record mismatch, duplicate UUID, numeric selector, malformed and overlong input |
-| Ownership | Exact canonical match, sibling prefix, symlink alias, relative path, absent field, changed field, multi-root record |
-| JSONL | Invalid UTF-8, malformed JSON, overlong line, too many records, excessive nesting, duplicate identity field |
-| History | User, assistant, tool, unknown event, bounded detail, truncation, file-order view, branch warning |
-| Action | Exact public arguments, shell quoting, absolute roots, stale binding, wrong project, duplicate UUID, fixed action ID |
-| Audit | No command, path, UUID, title, prompt, or output reaches the log callback |
-| Portable guard | Qoder blocks before capture, remote read, plan, publication, target selection, and apply |
-
-### 22.2 Integration tests: local Activity and resume
-
-Use a temporary Mallard root, Qoder profile, and project.
-
-Required cases:
-
-1. A supported exact-project Qoder session appears in Activity.
-2. A session for another project does not appear.
-3. A malformed session produces a bounded blocked item and does not hide a
-   valid session.
-4. A duplicate UUID disables resume for every duplicate.
-5. A branched transcript shows recorded history and the unproved-branch
-   warning.
-6. The generic action command rejects a remote-only Qoder row.
-7. The terminal command contains exact quoted arguments and no auth variable.
-8. No Qoder App action appears.
-9. Push review contains no Qoder conversation candidate.
-10. Pull review cannot select a remote Qoder conversation.
-11. A direct apply call fails before any target or Qoder home mutation.
-12. Codex and Claude Activity and actions remain unchanged except for sanitized
-    audit content.
-
-The command-builder test must assert absence of:
+Important codes:
 
 ```text
-QODER_FORCE_FILE_STORAGE
-QODER_PAT
---continue
---fork-session
---session-id
+qoder_unsupported_version
+qoder_unknown_dialect
+qoder_project_ownership_unproved
+qoder_session_member_set_unknown
+qoder_session_unstable
+qoder_session_uuid_collision
+qoder_active_leaf_ambiguous
+qoder_path_map_unsupported
+qoder_path_map_collision
+qoder_path_integrity_unproved
+qoder_target_bucket_unproved
+qoder_group_digest_mismatch
+qoder_recovery_required
+qoder_plugin_inventory_unavailable
+qoder_plugin_inventory_truncated
+qoder_plugin_contract_mismatch
+qoder_plugin_reconciliation_required
+qoder_skill_ownership_unproved
+qoder_keychain_boundary_unproved
 ```
 
-### 22.3 Unit and integration tests: Skills
+Messages are bounded and do not contain paths, UUIDs, prompts, native output,
+or secrets.
 
-Required cases:
+## 15. Repository change map
 
-- Qoder provider and `qoder_user` serialize and round-trip.
-- Root-class token is exactly `provider/qoder`.
-- Profile resolves only `<QODER_CONFIG_DIR>/skills`.
-- Project `.qoder/skills` is excluded.
-- A valid Skill is captured without running the Qoder CLI.
-- Missing or malformed `SKILL.md` blocks the candidate.
-- Name grammar, length, and directory-name equality are enforced.
-- Description length is enforced.
-- A symbolic link or special file blocks the candidate.
-- File-count, size, depth, and aggregate limits apply.
-- Executable and credential-shaped content needs acknowledgement.
-- A destination change after review blocks apply.
-- Journal recovery never leaves a partial accepted Skill directory.
-- Stored Qoder Skills remain readable when runtime enablement is off.
-- Qoder cannot own plugin or pet resources.
-- Qoder appears first in the capability response.
+### 15.1 ProjectSync backend
 
-### 22.4 Frontend tests
+| File | Minimum change |
+| --- | --- |
+| `crates/mallard-infrastructure/src/providers/traits.rs` | Add session-group DTOs, optional `PortableSessionGroupAdapter`, member/group verification, and typed launch-audit values. |
+| `crates/mallard-infrastructure/src/providers/mod.rs` | Export Qoder and session-group types. |
+| `crates/mallard-infrastructure/src/providers/registry.rs` | Register Qoder and use explicit Qoder, Codex, Claude order. |
+| `crates/mallard-infrastructure/src/providers/qoder/*` | Add descriptor, discovery, codec, eligibility, group and path-map wrapper, target-bucket mapping, Activity, and resume. |
+| `crates/mallard-infrastructure/src/providers/codex/actions.rs` | Wrap the existing launch command in the typed exact-command audit variant. |
+| `crates/mallard-infrastructure/src/providers/claude/actions.rs` | Wrap the existing launch command in the typed exact-command audit variant. |
+| `crates/mallard-infrastructure/src/provider_capture.rs` | Add two-pass stable group capture. |
+| `crates/mallard-infrastructure/src/conversation_materialization.rs` | Delegate member validation; validate groups; order commit; verify recapture; support exact obsolete-member deletion; carry published revision and manifest size; and patch all accepted historical-manifest coordinates atomically during publication and recovery. |
+| `crates/mallard-infrastructure/src/project_activity.rs` | Preserve bounded provider eligibility blockers as visible local rows through the existing `sync_blocked_reason`, and pass the typed launch-audit callback through the generic action route. |
+| `crates/mallard-domain/src/conversation_tail.rs` | Add Qoder session-group codec validation and the two required historical-manifest coordinates under schema 1. |
+| `crates/mallard-domain/src/conversation_tail_relation.rs` | Own and export `SessionGroupRelation` plus non-serialized `TailSuccessorEvidence`; require typed group-successor evidence for higher-count Qoder local or cloud tails while keeping one central relation table. Infrastructure imports these domain types. |
+| `crates/mallard-domain/src/lib.rs` | Require Qoder group tail, redaction stamp, and `mallard.pathmap.v1` stamp. |
+| `crates/mallard-domain/src/tests.rs` | Cover Qoder path-map provider validation, accepted historical-manifest coordinates, and typed successor evidence. |
+| `src-tauri/src/project_sync/service.rs` | Remove provider fallthroughs; write, pin, and revalidate accepted historical-manifest coordinates; reconstruct accepted groups; prepare group publication; fetch all Pull members; preserve Qoder UUID; block Keep Both; and bind after verification. |
+| `src-tauri/src/project_sync/commands.rs` | Map the typed Qoder resume audit value to a fixed event without persisting the command. |
+| `src-tauri/src/sync_tests/provider_extensibility.rs` | Prove registration, order, standard provider flow, and provider dispatch. |
+| `src-tauri/src/sync_tests/qoder_portability.rs` | Add fixture-backed Qoder parser, group, path-map, collision, historical-manifest, materialization, and recovery tests. |
+| `src-tauri/src/sync_tests/mod.rs` | Register the Qoder portability test module. |
+| `src-tauri/testdata/qoder/1.1.40/**` | Store the sanitized product-generated session/member corpus, expected local and mapped-wire manifests, and plugin/marketplace JSON fixtures. |
+| `src-tauri/tests/qoder_live_release_gate.rs` | Add the ignored disposable-account production-path test for clean-profile cross-path resume and the no-Keychain audit. |
 
-Extend the current integration suites to prove:
+### 15.2 ProjectSync frontend
 
-- Qoder is the first new-project agent-provider choice.
-- Qoder is the first Library provider choice.
-- Qoder shows the `.qoder` profile proposal.
-- Qoder shows `Activity only` and the session-sync explanation.
-- Qoder Activity rows use the correct label and generic provider mark.
-- Qoder Push and Pull controls are unavailable.
-- The exact terminal action appears only for safe local rows.
-- Qoder Skill scope is available.
-- Qoder plugin scope is absent.
-- Qoder pet choices are absent.
-- Codex-specific path repair and restart controls do not appear for Qoder.
-- Existing Codex and Claude setup, Activity, reviews, and Library scopes still
-  pass.
+| File | Minimum change |
+| --- | --- |
+| `src/components/project-sync/ProjectSetupWorkspace.tsx` | Keep backend order, show Qoder first, and explain portable path mapping. |
+| `tests/frontend/project-sync-cutover.integration.test.tsx` | Cover Qoder-first setup and the path-mapping explanation. |
+| `tests/frontend/project-activity.integration.test.tsx` | Cover Qoder Activity and backend-supplied blockers. |
+| `tests/frontend/pull-review.integration.test.tsx` | Cover generic reviewed Qoder Pull and path-map outcomes. |
+| `tests/frontend/session-detail.integration.test.tsx` | Cover backend-supplied resume and the absence of Keep Both, Fork, and App actions. |
 
-### 22.5 Product tests
+The binding editor, links workspace, Activity page, and session-detail page
+already iterate backend descriptors and actions. Do not add Qoder-specific
+production branches to them.
 
-The release needs two disposable product tests.
+### 15.3 Library backend
 
-#### Activity and native resume
+| File | Minimum change |
+| --- | --- |
+| `src-tauri/src/storage_catalog/domain.rs` | Add Qoder provider and Skill scope, Skill/plugin ownership, labels, and serialization. Keep pets Codex-only. |
+| `src-tauri/src/storage_catalog/profiles.rs` | Resolve selected Qoder home and `<home>/skills`; reject unsafe or overlapping roots. |
+| `src-tauri/src/storage_catalog/adapters.rs` | Add `QoderCatalogAdapter`, typed JSON, exact version checks, selected-home invocation, truncation detection, and explicit Qoder-first capability order. |
+| `src-tauri/src/storage_catalog/inventory.rs` | Discover Qoder plugins first, derive ownership, then scan standalone Skills. |
+| `src-tauri/src/storage_catalog/skill_tree.rs` | Enforce the Qoder-only required `name` and `description`, metadata lengths and characters, and directory-name match during capture and post-materialization verification. |
+| `src-tauri/src/storage_catalog/resource_planning.rs` | Reuse plugin planning and pin Qoder contract, source, profile, state, and scope. |
+| `src-tauri/src/storage_catalog/apply.rs` | Reuse native apply, add Qoder commands, post-inventory proof, and reconciliation behavior. |
+| `src-tauri/src/storage_catalog/service.rs` | Add closed Qoder matches for profile terminal launch and storage-repository enumeration; fail closed for App launch; keep capability mapping provider-driven. |
+| `src-tauri/tests/storage_catalog_e2e.rs` | Add two-profile Skill and plugin-intent flows. |
+| `src-tauri/tests/support/catalog_flow.rs` | Generalize the injected two-replica flow and runner from Codex-only to Qoder Skill and plugin-intent cases. |
 
-1. Create a disposable Qoder CLI profile and synthetic project.
-2. Authenticate outside Mallard with a disposable account. Do not give the
-   credential to Mallard.
-3. Create one marker session through Qoder CLI.
-4. Open Mallard with a temporary Mallard root.
-5. Bind the disposable profile and project.
-6. Confirm Activity discovery, exact UUID, title, and ownership.
-7. Use **Open in Terminal with Qoder**.
-8. Confirm that Qoder resumes the same UUID and recovers the marker.
-9. Confirm transcript growth after a second bounded prompt.
-10. Confirm that Mallard logs contain no path, UUID, marker, prompt, or output.
-11. Delete only the validated disposable roots after cleanup checks.
+### 15.4 Library frontend
 
-This test proves native local resume. It does not prove copied restore.
+| File | Minimum change |
+| --- | --- |
+| `src/components/storage-catalog/types.ts` | Add `qoder` to the closed provider union. Reuse resource kinds. |
+| `src/components/storage-catalog/model.ts` | Add exhaustive Qoder labels and capability-driven choices. |
+| `src/components/storage-catalog/AddCatalogScopeWorkspace.tsx` | Show Qoder first with Skills and Plugins. |
+| `src/components/storage-catalog/StorageCatalogPage.tsx` | Reuse Skill/plugin UI, never select pet rendering for Qoder, and omit the Qoder App control. |
+| `tests/frontend/storage-catalog.integration.test.tsx` | Cover order, both Qoder scopes, warnings, outcomes, and no pets. |
 
-#### Skill round trip
+### 15.5 No production change required
 
-Run the two-home procedure in section 10.5. Confirm that Qoder CLI loads the
-Skill in both profiles. If product support is labeled as App support, repeat
-the test in two disposable App environments. Otherwise, label it **Qoder CLI
-Skills**.
+- `crates/mallard-infrastructure/src/storage_core/`;
+- local-folder and S3/R2 implementations;
+- storage key layout;
+- `bundle_engine.rs` publication model;
+- `session_path_map.rs`; Qoder reuses its existing token and gated record
+  facades;
+- the Tauri command list;
+- Qoder App databases;
+- pet code.
 
-### 22.6 Future portability tests
+## 16. Test plan
 
-Before `conversation_mode` changes to `portable`, add:
+Use disposable homes, projects, conversations, marketplaces, and accounts.
+Never run tests against the user's real `~/.qoder`, Qoder App database,
+`~/.codex`, `~/.claude`, or `~/.mallard`.
 
-- Addition, removal, rename, replacement, in-place mutation, same-size
-  mutation, hard-link mutation, and symbolic-link substitution during capture.
-- Required, optional, unknown, and missing consistency-group members.
-- Whole-group count and byte limits.
-- Collision in every namespace from section 14.5.
-- Collision introduced after review.
-- Source UUID preservation.
-- Exact existing-mapping pins.
-- Crash injection at every journal, stage, backup, install, flush, verify,
-  binding, receipt, and cleanup boundary.
-- Branch, compaction, replacement, subagent, and checkpoint corpus.
-- Clean-home same-path create, capture, restore, resume, restart, and recapture.
-- Separate cross-path corpus before relocation is enabled.
-- App list, open, continue, restart, and projection rebuild before App support
-  is claimed.
+### 16.1 Provider and schema
 
-### 22.7 Required commands
+- Qoder descriptor through the existing provider DTO.
+- explicit Qoder-first order independent of map order.
+- schema-1 Qoder conversation acceptance.
+- required accepted manifest revision and size serialize and validate under
+  schema 1.
+- a missing coordinate, revision zero, or manifest size zero fails closed; no
+  legacy checkpoint fallback is used.
+- missing or wrong group codec rejection.
+- missing redaction stamp rejection.
+- missing or foreign Qoder path-map stamp rejection.
+- eligible, ineligible, and invalid Qoder discoveries remain visible; a
+  bounded provider blocker reaches the existing Activity
+  `sync_blocked_reason` field.
+- Qoder Catalog provider and Skill scope serialization.
+- Qoder owns Skills and plugin intent, but no pet kind.
+- unknown values fail closed.
 
-Run the smallest relevant test while editing. Before handoff, run:
+### 16.2 Parser and group
+
+- canonical and malformed UUIDs;
+- invalid UTF-8, empty or oversized line;
+- excessive records, depth, strings, files, and bytes;
+- duplicate UUID, self-parent, missing parent, cycle, foreign session;
+- unknown record type or dialect;
+- unambiguous and ambiguous active leaf;
+- required, optional, unknown, missing, and duplicate members;
+- invalid JSON, JSONL, and cross-member references;
+- digest changes on add, remove, rename, role, bytes, or size;
+- digest independence from physical home and cloud ID;
+- source-root path encoding in JSON values, object keys, nested JSON strings,
+  tilde forms, and file URIs;
+- destination-root decoding, wire re-encoding, reserved-token rejection, and
+  target-root collision rejection;
+- out-of-root path preservation and byte preservation for unchanged members;
+- affected integrity field rejection or product-proved recomputation;
+- equal complete groups;
+- path-remapped equality proved from wire groups, never by comparing local
+  bytes across roots;
+- same message-count sidecar change as divergent;
+- disallowed member addition, removal, rename, or role change as divergent;
+- valid transcript growth with product-proved state/compression changes as a
+  strict successor;
+- transcript rewrite plus a new record as divergent;
+- unknown member or state transition as invalid evidence and Unknown;
+- both local and cloud strict successors as Advanced only for the same exact
+  certified wire group, and otherwise as divergent;
+- unavailable accepted group as unknown, never outstanding;
+- accepted historical manifest lookup by exact revision, commit ID, size, and
+  digest;
+- wrong revision, wrong manifest size, wrong manifest digest, missing
+  historical manifest, missing member object, and changed member object all
+  fail closed before successor classification;
+- a valid pushed successor as Cloud Outstanding on another destination.
+
+### 16.3 Capture races
+
+- addition, removal, rename, replacement, and in-place change;
+- same-size and same-time change with new digest;
+- file-identity replacement;
+- symlink and parent substitution;
+- hard-linked checkpoint change;
+- Qoder start during capture;
+- count and byte overflow.
+
+Every case blocks the group and publishes nothing.
+
+### 16.4 Collision and planning
+
+- UUID in the target or another project bucket;
+- transcript-only, state-only, subagent-only, file-history-only, and
+  task-state-only collisions;
+- pending journal, binding, and receipt collisions;
+- collision after review;
+- changed identity, size, digest, profile, or project revision;
+- same-path and different-path mappings;
+- source canonical-alias mapping;
+- destination project-bucket derivation;
+- unsupported non-POSIX root rejection;
+- target path-map collision after review;
+- Qoder Keep Both rejection.
+
+No collision case can overwrite or remove the conflict.
+
+### 16.5 Materialization and recovery
+
+Inject failure before and after journal write, each fetch, each staged member,
+each backup, commit decision, each sidecar install, transcript install, flush,
+obsolete-member deletion, recapture, binding save, receipt save, and cleanup.
+
+After restart, require the approved group, original group, or
+`RecoveryRequired`. Never accept a mixed group.
+
+### 16.6 Session semantic corpus
+
+- linear session;
+- interrupted response;
+- multiple, missing, invalid, sidechain, team, and metadata active leaves;
+- compaction before and after selected leaf;
+- content replacements;
+- complete and interrupted subagent;
+- file checkpoint and an earlier branch cut;
+- worktree or relocation metadata;
+- restart and second continuation.
+
+The eligible subset passes applicable cases. Every excluded case reports its
+exact ineligible code.
+
+### 16.7 Skills
+
+- valid user Skill;
+- missing or malformed `SKILL.md`;
+- invalid or overlong name and description;
+- directory/name mismatch;
+- auxiliary files and scripts;
+- links, special files, nested VCS, executable and credential warnings;
+- plugin-owned Skill exclusion;
+- missing ownership inventory blocks;
+- two-home round trip;
+- target change after review;
+- crash during directory replace.
+
+### 16.8 Plugins
+
+- supported and unsupported CLI versions;
+- missing or changed executable;
+- empty and populated JSON forms;
+- marketplace source variants and duplicate names;
+- qualified ID and all scopes;
+- local plugin and local marketplace ineligible;
+- credential-bearing source rejection;
+- malformed, oversized, truncated, or changed-contract JSON;
+- nonzero exit and timeout;
+- source change after review;
+- install and update with post-inventory match;
+- zero exit with missing or mismatched post-state;
+- uncertain side effect returns reconciliation;
+- no raw output in logs or receipts.
+
+### 16.9 Frontend
+
+- Qoder first in Project and Library setup;
+- `.qoder` profile proposal;
+- reviewed local-root-to-token text on Push and token-to-destination text on
+  Pull;
+- visible Qoder ineligible and invalid rows with bounded backend-supplied
+  blocker text;
+- eligible Push/Pull and ineligible reasons;
+- no Keep Both, Fork, or App action;
+- resume only for verified local state;
+- Qoder Skills and Plugins scopes;
+- plugin execution warning;
+- Qoder profile has Terminal but no App action;
+- no Qoder pets;
+- unchanged Codex and Claude behavior.
+
+### 16.10 Copied-session product test
+
+1. Start with manually reset test Mallard and cloud state.
+2. Create source profile A and destination profile B under disposable roots.
+3. Set `QODER_FORCE_FILE_STORAGE=true` and authenticate both independently;
+   confirm that each credential file stays in its selected disposable profile.
+4. Use one exact supported Qoder CLI build.
+5. Create a persistent session in A with a random semantic marker.
+6. Record its UUID and source project path A.
+7. Stop all Qoder processes that use A.
+8. Capture through production Rust group capture.
+9. Push through the production schema-1 bundle path.
+10. Verify that B has no object that owns the UUID.
+11. Select a different absolute destination project path B.
+12. Pull through the production mapper and group materializer.
+13. Verify each wire member, local member, and group digest; require the
+    source root to be absent from mapped in-project fields and require the
+    destination root in those fields.
+14. Make profile A and normal `~/.qoder` unavailable to the runner.
+15. Start Qoder with profile B, project path B, and `--resume <uuid>`.
+16. Ask Qoder to return the source-only marker.
+17. Require the same UUID, marker, transcript growth, and destination path in
+    new structural records.
+18. Stop Qoder and recapture B as a coherent supported group.
+19. Re-encode B and require the same portable path token and valid group
+    semantics.
+20. Restart Qoder and resume again.
+21. Intercept the observed `security` command and audit reads and writes to
+    Keychain, A, normal `~/.qoder`, and App data.
+22. Run a collision variant and require zero destination writes.
+
+### 16.11 Repository checks
+
+Routine checks include the fixture-backed Qoder test:
 
 ```text
+cargo test --manifest-path src-tauri/Cargo.toml --lib sync_tests::qoder_portability
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 cargo test --manifest-path src-tauri/Cargo.toml --test storage_catalog_e2e
 npm run build
@@ -1820,239 +1889,258 @@ npm run test:frontend-integration
 npm run test:integration
 ```
 
-All tests must use temporary homes and fixture trees. Never run a test against
-the user's real `~/.qoder`, Qoder App database, `~/.codex`, `~/.claude`, or
-`~/.mallard`.
+The live disposable-account gate is an ignored test because it needs Qoder
+authentication, model access, the exact pinned bundle, and OS audit controls:
 
-## 23. Acceptance criteria
+```text
+MALLARD_QODER_CLI_BUNDLE=/absolute/path/to/qodercli.js \
+cargo test --manifest-path src-tauri/Cargo.toml \
+  --test qoder_live_release_gate -- --ignored --nocapture
+```
 
-The minimum release is complete only when every row passes:
+The harness creates two disposable Qoder profiles and two different project
+roots. Its session phase runs production capture, path encoding, publication,
+Pull decoding, destination-bucket materialization, and resume. It verifies the
+UUID, private marker, transcript growth, recapture, and portable wire
+re-encoding.
+
+Its Library phase uses the production adapter routes to:
+
+1. run the version and profile-terminal probes;
+2. load a transported standalone Skill in a new Qoder process;
+3. inventory plugins and marketplaces;
+4. add and refresh the disposable public test marketplace;
+5. install and update its user-scope fixture plugin;
+6. run post-change inventories; and
+7. load one fixture plugin resource in a new Qoder process.
+
+The harness audits every spawned Qoder process in both phases for Keychain
+reads and writes. It accepts no credential in an environment variable or
+command argument. This command supplies the live product evidence for
+`QOD-010`, `QOD-011`, `QOD-012`, `QOD-013`, and `QOD-015`. Fixture and fault
+tests supply the remaining evidence for `QOD-014` and `QOD-016`.
+
+The live gate is mandatory before a release. A passing routine
+`npm run test:integration` does not replace it.
+
+## 17. Release gate and rollout
+
+### 17.1 Mandatory production criteria
 
 | ID | Criterion |
 | --- | --- |
-| `QOD-MIN-01` | Qoder is first in Project setup and Library provider choices. |
-| `QOD-MIN-02` | A new setup proposes `.qoder` and requires explicit binding review. |
-| `QOD-MIN-03` | Only supported, exact-project Qoder CLI sessions appear in Activity. |
-| `QOD-MIN-04` | Activity does not assert an unproved active branch. |
-| `QOD-MIN-05` | Exact local terminal resume passes with the same UUID and marker. |
-| `QOD-MIN-06` | Mallard performs no login, credential read, credential write, or Keychain change. |
-| `QOD-MIN-07` | Qoder conversation Push and Pull fail before capture or remote access. |
-| `QOD-MIN-08` | A Qoder user Skill completes the two-home reviewed round trip. |
-| `QOD-MIN-09` | Qoder Skill inventory works when no Qoder CLI is on Mallard's process path. |
-| `QOD-MIN-10` | Qoder plugin and pet resource choices are absent. |
-| `QOD-MIN-11` | Logs contain no Qoder path, UUID, title, prompt, response, command, output, or secret. |
-| `QOD-MIN-12` | All committed Rust, frontend, integration, and storage tests pass. |
-| `QOD-MIN-13` | Existing Codex and Claude behavior remains correct. |
-| `QOD-MIN-14` | Release notes state Activity-only session support and the Catalog downgrade boundary. |
+| `QOD-001` | Qoder is first in ProjectSync and Library choices. |
+| `QOD-002` | One exact CLI version and compatibility record are approved. |
+| `QOD-003` | Activity discovers only exact-project supported sessions. |
+| `QOD-004` | The closed v1 member grammar is product-proved. |
+| `QOD-005` | Stable real-product multi-file capture passes all race tests. |
+| `QOD-006` | Path encoding, redaction, Qoder re-analysis, Pull decoding, and wire re-encoding pass for every eligible member. |
+| `QOD-007` | UUID preservation and profile-wide collision protection pass. |
+| `QOD-008` | Active-leaf behavior is proved for the eligible subset. |
+| `QOD-009` | Cross-path Push, Pull, target-bucket mapping, exact historical-manifest reconstruction, local/cloud strict-successor proof, group verification, and recovery pass. |
+| `QOD-010` | A clean independent profile at a different project path resumes the copied UUID and marker, grows, restarts, recaptures, and reproduces the portable wire form. |
+| `QOD-011` | Login and every Qoder subprocess do not read or write Keychain. |
+| `QOD-012` | A standalone Skill completes a reviewed two-home round trip. |
+| `QOD-013` | Plugin-owned Skills are excluded by typed native inventory. |
+| `QOD-014` | Plugin and marketplace JSON contracts are typed, bounded, versioned, and fixture-backed. |
+| `QOD-015` | User-scope marketplace install and update pass post-inventory verification. |
+| `QOD-016` | Ambiguous plugin side effects return `ReconciliationRequired`. |
+| `QOD-017` | No App data, credential, private path, raw output, or secret leaks through metadata or logs. |
+| `QOD-018` | No pet, custom-provider, Tuzi, fork, or App restore execution route exists. |
+| `QOD-019` | Schema stays 1 with no migration or legacy path. |
+| `QOD-020` | Codex, Claude, local-folder, S3/R2, frontend, backend, and release regressions pass. |
+| `QOD-021` | Product and legal review confirms that Mallard can capture, transport, restore, and resume user-owned Qoder CLI session files. |
 
-Passing `QOD-MIN-05` does not change the session portability decision. That
-criterion resumes a session already in the same local Qoder home.
+If one criterion fails, keep Qoder disabled in production.
 
-## 24. Rollout and rollback
+### 17.2 Internal implementation stages
 
-### 24.1 Change 1: safe provider contract
+These stages are not separate public products.
 
-Land first:
+1. Add session-group types, accepted historical-manifest coordinates, stable
+   capture, all-member Pull, and provider dispatch.
+2. Add the Qoder ProjectSync adapter, Activity, mapped wire group, collision
+   checks, destination-bucket materialization, typed sanitized launch audit,
+   and resume.
+3. Add Library provider/scope values, Qoder plugin adapter, Skill ownership,
+   and truncation-safe output.
+4. Run session, Skill, plugin, privacy, Keychain, and regression gates.
+5. Enable Qoder in both production registries.
 
-- `conversation_mode`.
-- Early and apply-time portable-operation guards.
-- Typed launch audit.
-- Qoder-first ordering policy.
-- Tests with a synthetic Activity-only provider.
+### 17.3 Rollback
 
-Do not register Qoder until these tests pass. This change has no Qoder data and
-does not alter Codex or Claude behavior.
+Backend disable stops new Qoder operations. It does not delete restored
+sessions or Skills, uninstall plugins, delete immutable remote resources, edit
+App data, or run a migration.
 
-### 24.2 Change 2: Qoder Activity and local resume
+Preserve incomplete journals and backups. A compatible build resolves them.
+Do not use a frontend-only flag as the safety control.
 
-Land:
+## 18. Observability
 
-- Qoder descriptor and adapter.
-- One fixture-proved CLI transcript dialect.
-- Read-only Activity.
-- Exact local Terminal resume.
-- UI status and action.
+Use typed events:
 
-Rollback:
+```text
+qoder_profile_resolved
+qoder_runtime_supported
+qoder_runtime_blocked
+qoder_session_capture_started
+qoder_session_capture_unstable
+qoder_session_ineligible
+qoder_session_plan_created
+qoder_session_apply_started
+qoder_session_apply_rolled_back
+qoder_session_apply_verified
+qoder_session_resume_started
+qoder_uuid_collision
+qoder_skill_inventory_started
+qoder_skill_inventory_completed
+qoder_skill_ownership_blocked
+qoder_plugin_inventory_started
+qoder_plugin_inventory_completed
+qoder_plugin_plan_created
+qoder_plugin_apply_started
+qoder_plugin_apply_verified
+qoder_plugin_reconciliation_required
+```
 
-- Keep the `qoder` parser and schema code.
-- Disable Qoder Activity registration or the resume action.
-- Do not edit or delete local Qoder files.
-- Keep the portable-operation guard.
+Allowed fields are generated operation ID, provider, compatibility contract,
+counts, aggregate bytes, duration, phase, typed blocker, and outcome.
 
-### 24.3 Change 3: Qoder user Skills
+Do not log prompt, response, tool content, Skill body, raw stdout/stderr,
+session or record UUID, project or profile path, plugin path, credential URL,
+auth value, secret, marker, or exact command.
 
-Land:
+Portable payload objects intentionally contain reviewed session or Skill
+content. Privacy tests check the allowlist and metadata boundary, not absence
+of user content from the protected object store.
 
-- Qoder Catalog provider and user Skill scope.
-- Stable ownership versus runtime enablement.
-- Skill-only capability.
-- Two-home test.
-- Qoder-first Library order.
+## 19. Deferred features
 
-Rollback:
+### 19.1 Qoder App
 
-- Disable new Qoder Skill inventory, plans, and apply through runtime
-  enablement.
-- Keep `ProviderKey::Qoder`, `QoderUser`, and schema ownership readable.
-- Do not remove already restored Skills.
-- Keep remote immutable resources available for inspection.
+Mallard restores the Qoder CLI source store only. It does not capture,
+register, rebuild, or verify Qoder App database projections. A restored CLI
+session is not promised to appear in Qoder App.
 
-### 24.4 Later changes
+App support needs separate profile-isolation, import/rebuild, open-by-ID,
+collision, continuation, restart, and recapture proof.
 
-Plugin intent, exact-path CLI session portability, App session portability,
-cross-path restore, fork, and custom providers each require a separate design
-review and release gate. Do not enable them with the minimum-release patch.
+### 19.2 Additional path formats
 
-### 24.5 Emergency rule
+The first release supports cross-path restore for POSIX roots and the closed
+Qoder member grammar. Windows drive paths, UNC paths, unknown member formats,
+and unproved integrity fields remain ineligible. Add them only with a
+versioned codec and product continuation corpus. Do not add global byte-string
+replacement.
 
-A backend capability disable must stop new native or filesystem mutations. It
-must not delete local or remote data. The frontend can hide the operation after
-the backend has disabled it, but a frontend-only flag is not sufficient.
+### 19.3 Fork
 
-## 25. Risks
+Qoder CLI, App, and SDK have different fork or branch mechanisms. They create
+a new identity and do not replace exact restore. Current evidence does not
+prove complete checkpoint, state, plan, sidecar, collision, rollback, and
+restart behavior.
 
-| Risk | Impact | Minimum-release control | Release effect |
-| --- | --- | --- | --- |
-| Qoder changes its local transcript format | Wrong or missing Activity data | Positive dialect and version detection; exact fixtures; fail closed | Disable affected dialect; Skills continue |
-| Encoded project buckets collide | A session appears in the wrong project | Require authoritative in-file ownership and canonical exact match | Block candidate |
-| Qoder uses duplicate UUIDs across buckets | Resume opens another session | Destination-wide read-only duplicate scan before action | Disable resume for duplicates |
-| Branch rules differ from package observations | Activity shows wrong active history | Show file-order recorded history; do not claim active leaf | Activity remains limited |
-| Native CLI changes resume arguments | Terminal action fails or behaves differently | Use only public arguments and canonical UUID; versioned product test | Disable action; Activity remains |
-| Qoder manages credentials through Keychain | User sees an unexpected native prompt | Mallard does no auth and makes no no-Keychain claim | User cancels; disable action if strict guarantee is required |
-| Catalog enum expansion breaks downgrade | Older Mallard rejects Qoder resources | Clean-cut schema policy and minimum-version notice | Fail closed; do not delete data |
-| Qoder plugins contribute Skills | A plugin-owned Skill is misclassified | Scan only the documented user root; reject links; product test; no plugin path scan | Block ambiguous candidate or delay Skills |
-| Existing Codex-or-Claude fallthrough reaches Qoder | Qoder data uses the wrong codec or target path | Early `conversation_mode` guard and negative route tests | Release blocker |
-| Sensitive content reaches logs | Privacy breach | Typed events and log scanning | Release blocker |
-| User interprets Activity as backup | False safety expectation | Persistent `Activity only` and `Session Push and Pull are not available` text | Release blocker if missing |
-| Future restore copies an incomplete group | Data loss or corrupted continuation | Separate portable adapter, complete membership, stable group capture, crash tests | Keep restore disabled |
-| Qoder App database is treated as source state | Corruption or credential leakage | Absolute App database exclusion | Keep App support disabled |
+Do not use fork to resolve an exact-restore collision. See
+[Qoder fork mechanisms research](QODER_FORK_MECHANISMS_RESEARCH_2026-09-02.md).
 
-## 26. Open questions and external dependencies
+### 19.4 Custom providers and Tuzi
 
-The minimum implementation can start after questions `Q1` through `Q4` have
-fixture-backed answers. The other questions block only later phases.
+Direct Tuzi API access passed in isolation. Qoder-to-Tuzi execution did not.
+The observed provider settings shape is not a supported portable contract.
+Credentials remain machine-local.
+
+Add no custom-provider or Tuzi schema, UI, import, or fallback. See
+[Qoder custom-provider PoC](QODER_CUSTOM_PROVIDER_POC_2026-09-02.md).
+
+## 20. Open implementation questions
 
 | ID | Question | Blocks |
 | --- | --- | --- |
-| `Q1` | Which exact Qoder CLI `1.1.40` transcript discriminator and ownership field did a disposable native session write? | Activity parser |
-| `Q2` | Does the native transcript contain one canonical UUID in every identity location used by the first parser? | Activity and resume |
-| `Q3` | Does Qoder CLI load a reviewed Skill from `<QODER_CONFIG_DIR>/skills` in two isolated profiles? | Skills |
-| `Q4` | Can a plugin-installed Skill appear as a plain direct child of the user Skill root without provenance? | Safe standalone Skill classification |
-| `Q5` | Does Qoder offer a documented no-Keychain control? | A strict no-Keychain resume guarantee, not basic Activity |
-| `Q6` | Does Qoder expose stable machine-readable plugin and marketplace inventory? | Plugin intent |
-| `Q7` | What is the complete versioned task, sidecar, checkpoint, and plan member schema? | Session portability |
-| `Q8` | What is the authoritative active-leaf and compaction rule for CLI and App? | Active-branch display and restore |
-| `Q9` | What is the supported raw-file import, registration, export, or projection rebuild interface? | Copied-session restore |
-| `Q10` | What is the UUID uniqueness scope, and is there an atomic target reservation operation? | Restore and fork |
-| `Q11` | Which path-bearing fields can change, and which integrity fields cover them? | Cross-path restore |
-| `Q12` | Can Qoder App use a disposable home and open an existing task by stable ID? | App support |
-| `Q13` | Does Qoder authorize third-party capture and restore of user-owned local task data? | Production session portability approval |
-| `Q14` | Does Qoder support Tuzi through its documented BYOK catalog for the intended account? | Custom-provider integration |
+| `Q1` | Which exact field proves project ownership in the supported dialect? | session discovery |
+| `Q2` | What is the complete persistent member grammar for each eligible form? | Push and Pull |
+| `Q3` | What is the authoritative active-leaf rule for the eligible subset? | eligibility and resume proof |
+| `Q4` | Which lock, lease, heartbeat, queue, and temporary members are safely excluded? | complete capture |
+| `Q5` | What target bucket rule is stable for the supported CLI version? | materialization |
+| `Q6` | Does `QODER_FORCE_FILE_STORAGE=true` avoid all Keychain access for the exact pinned bundle under the product and OS audit? | resume and release |
+| `Q7` | What exact JSON schemas are emitted for Git marketplaces and installed plugins? | plugin inventory |
+| `Q8` | Does `plugin@marketplace` select one source in duplicate-name install/update cases? | automatic plugin apply |
+| `Q9` | Which native roots authoritatively prove plugin-owned Skills? | safe Skill inventory |
+| `Q10` | Does Qoder authorize third-party capture, path mapping, transport, restore, and resume of user-owned CLI sessions? | release approval |
 
-Do not answer these questions from one user's production home. Use official
-contracts and disposable, sanitized product tests.
+Answer these through current official contracts and disposable sanitized
+product tests. Do not use the user's production Qoder home as a fixture.
 
-## 27. Decision record
+## 21. Decision record
 
 | ID | Decision | Reason |
 | --- | --- | --- |
-| `D1` | Qoder is the first agent-provider choice. | Product requirement. Order does not imply session portability. |
-| `D2` | The minimum release contains Activity, exact local CLI resume, and user Skills. | It gives useful Qoder support without touching portable session formats. |
-| `D3` | Use one `ConversationMode` field now. | It adds the smallest safe backend and UI boundary. |
-| `D4` | Do not add a broad shared provider-capability framework now. | ProjectSync and the Library have separate domains and existing capability mechanisms. |
-| `D5` | Keep Qoder on the uncached discovery path. | The current watcher already supports this safe fallback. |
-| `D6` | Do not add a Qoder portable-session adapter now. | Copied restore and complete session membership are unproved. |
-| `D7` | Do not change conversation bundle or transport schemas. | No Qoder conversation enters Push or Pull. |
-| `D8` | Add Qoder to the existing Catalog schema-1 enum domain. | Skill shape and semantics remain unchanged; the repository uses a clean cut, not compatibility readers. |
-| `D9` | Separate Catalog schema ownership from runtime enablement. | Rollback must not invalidate stored Qoder Skills. |
-| `D10` | Use the existing Skill resource and apply engine. | Qoder user Skills have the same reviewed directory-tree need. |
-| `D11` | Defer Qoder plugins. | No supported machine-readable inventory schema is established. |
-| `D12` | Defer Qoder App support. | No supported profile isolation, task-open, import, or projection rebuild contract is established. |
-| `D13` | Defer cross-path restore. | Structural path and integrity rules are unproved. |
-| `D14` | Keep fork separate from restore. | Fork creates a new identity; restore preserves one. |
-| `D15` | Add no custom-provider or Tuzi schema. | The combined Qoder-to-Tuzi path is unproved, and secrets are machine-local. |
-| `D16` | Add no Qoder pet support. | Explicit product scope. |
-| `D17` | Do not use `QODER_FORCE_FILE_STORAGE` in production. | It is package-observed, not a public Qoder contract. |
-| `D18` | Replace exact-command action logs with typed events. | Command text contains private paths and session identity. |
+| `D1` | Qoder is the first provider choice. | Explicit product requirement. |
+| `D2` | Qoder support includes sessions, Skills, and plugin intent. | Explicit product requirement. |
+| `D3` | The session claim includes cross-path Qoder CLI portability. | Users can resume after moving a project checkout. |
+| `D4` | Register Qoder only when all required surfaces are ready. | Partial support does not meet the requested outcome. |
+| `D5` | Keep the existing provider DTO and add one optional session-group adapter. | Qoder stays on the Codex/Claude product flow with the smallest common change. |
+| `D6` | Reuse schema-1 conversation and sidecar roles. | They already represent a multi-file group. |
+| `D7` | Preserve the source Qoder UUID. | Resume must reopen the same native session. |
+| `D8` | Reuse `mallard.pathmap.v1` and map Qoder JSON/JSONL members through a proved wrapper. | Qoder follows the existing Codex/Claude portable wire contract. |
+| `D9` | Include every member in the group digest. | Transcript-only identity misses sidecar drift. |
+| `D10` | Block Keep Both and automatic fork. | A new UUID needs a separate reference-rewrite contract. |
+| `D11` | Reuse existing Skill transport. | Qoder user Skills are reviewed directory trees. |
+| `D12` | Discover plugin ownership before Skills. | Plugin content must not become standalone Skill content. |
+| `D13` | Reuse plugin intent and post-inventory proof. | Payload and credentials remain Qoder-managed. |
+| `D14` | Qoder owns no pet kind. | Explicit exclusion. |
+| `D15` | Qoder App is not a CLI release gate. | CLI continuation is a narrower product. |
+| `D16` | Defer custom provider, Tuzi, and fork. | Their contracts do not meet this scope. |
+| `D17` | Keep schema 1 and make a clean cut. | There are no customers and test state will be reset. |
+| `D18` | Add no compatibility or legacy path. | Explicit policy and repository rule. |
+| `D19` | Enable production Qoder only after all gates pass. | The public provider must have one coherent promise. |
 
-## 28. Evidence and source ledger
+## 22. Sources
 
-### 28.1 Local research artifacts
+### 22.1 Local evidence
 
-| Evidence | Scope | Use in this design | Limitation |
-| --- | --- | --- | --- |
-| [Qoder support feasibility research](QODER_SUPPORT_FEASIBILITY_RESEARCH_2026-09-01.md) | Qoder surfaces, local layouts, Mallard extension points | Baseline architecture and risk inventory | Some local behavior is package-observed, not public contract |
-| [Qoder session restore PoC](QODER_SESSION_RESTORE_POC_2026-09-02.md) | Synthetic stable capture, sidecars, collision, mapping, SDK store | Future restore gates | Synthetic filesystem success does not prove Qoder consumption |
-| [Qoder CLI resume PoC](QODER_CLI_RESUME_POC_2026-09-02.md) | CLI discovery, resume, active leaf, isolation | Native local resume design | Same-home native resume does not prove copied restore or App behavior |
-| [Authenticated resume result](../poc/qoder-cli-resume/AUTHENTICATED_RESUME.md) | User-authorized Qoder CLI `1.1.40` run | Confirms same-UUID marker recovery in a second process | Initial no-Keychain run used the wrong private environment value; no public no-Keychain guarantee |
-| [Qoder custom-provider PoC](QODER_CUSTOM_PROVIDER_POC_2026-09-02.md) | Direct Tuzi endpoints and Qoder provider settings research | Custom-provider no-go decision | No combined Qoder-to-Tuzi success |
-| [Qoder fork mechanisms research](QODER_FORK_MECHANISMS_RESEARCH_2026-09-02.md) | CLI and SDK fork behavior | Fork separation and gates | Transcript-only transform does not prove complete task fork |
+- [Qoder support feasibility research](QODER_SUPPORT_FEASIBILITY_RESEARCH_2026-09-01.md)
+- [Qoder session restore PoC](QODER_SESSION_RESTORE_POC_2026-09-02.md)
+- [Qoder CLI resume PoC](QODER_CLI_RESUME_POC_2026-09-02.md)
+- [Qoder cross-path CLI and App resume PoC](QODER_CROSS_PATH_AND_APP_RESUME_POC_2026-09-02.md)
+- [Qoder fork mechanisms research](QODER_FORK_MECHANISMS_RESEARCH_2026-09-02.md)
+- [Qoder custom-provider PoC](QODER_CUSTOM_PROVIDER_POC_2026-09-02.md)
 
-The executable PoCs under `poc/qoder-*` are research tools. They are not
-production dependencies and must not be called by the Mallard application.
+These artifacts record evidence. This document defines the production boundary
+when an older recommendation differs.
 
-### 28.2 Official Qoder sources
+### 22.2 Official Qoder sources
 
-The following public pages were checked on 2026-09-02:
+- [Qoder CLI commands and parameters](https://docs.qoder.com/cli/cli-reference)
+- [Qoder CLI Skills](https://docs.qoder.com/cli/Skills)
+- [Qoder CLI Plugins](https://docs.qoder.com/cli/plugins)
+- [Qoder CLI Plugin Reference](https://docs.qoder.com/cli/plugins-reference)
+- [Qoder external session storage](https://docs.qoder.com/cli/sdk/session-storage)
+- [Qoder custom models](https://docs.qoder.com/cli/custom-models)
+- [Qoder App task management](https://docs.qoder.com/qoder/task-management)
+- [Qoder deep links](https://docs.qoder.com/user-guide/deeplink)
 
-| Source | Supported claim |
-| --- | --- |
-| [Qoder CLI reference](https://docs.qoder.com/cli/cli-reference) | Public `--resume`, `--cwd`, `--config-dir`, session-list, and fork options |
-| [Qoder CLI settings reference](https://docs.qoder.com/cli/settings-reference) | CLI configuration directory and documented settings surface |
-| [Qoder CLI configuration scope](https://docs.qoder.com/cli/config-scope) | User and project configuration scope |
-| [Qoder CLI sessions](https://docs.qoder.com/cli/sessions) | Public session management concepts |
-| [Qoder CLI authentication](https://docs.qoder.com/cli/authentication) | Supported authentication flows; Mallard does not own them |
-| [Qoder CLI Skills](https://docs.qoder.com/cli/Skills) | User and project Skill roots and front-matter constraints |
-| [Qoder CLI plugins reference](https://docs.qoder.com/cli/plugins-reference) | Public plugin and marketplace commands; no relied-on JSON inventory schema |
-| [Qoder SDK session control](https://docs.qoder.com/cli/sdk/session-control) | SDK resume and fork concepts |
-| [Qoder SDK session storage](https://docs.qoder.com/cli/sdk/session-storage) | External history store, local mirror, best-effort behavior, and fallback |
-| [Qoder CLI custom models](https://docs.qoder.com/cli/custom-models) | Current BYOK custom-model workflow |
-| [Qoder SDK model policy](https://docs.qoder.com/cli/sdk/model-policy) | SDK custom-model resolution fields and restrictions |
-| [Qoder CLI release notes](https://docs.qoder.com/release-notes/qoder-cli) | CLI version and release baseline |
-| [Qoder App task management](https://docs.qoder.com/qoder/task-management) | App task terminology and user flow |
-| [Qoder App settings](https://docs.qoder.com/qoder/settings) | App settings surface; not a portable task-import contract |
-| [Qoder deep links](https://docs.qoder.com/user-guide/deeplink) | Public task-creation links; no relied-on open-existing-task ID link |
-| [Qoder App Skills](https://docs.qoder.com/qoder/skills) | App Skill behavior that needs a separate product test before an App claim |
-| [Qoder IDE plugins](https://docs.qoder.com/extensions/plugins) | IDE plugin concepts; not a CLI JSON inventory contract |
+## 23. Final recommendation
 
-### 28.3 Claim-to-evidence matrix
-
-| Claim | Evidence class | Release use |
-| --- | --- | --- |
-| Qoder supports public exact-ID CLI resume | `documented` and `product_proved` for CLI `1.1.40` | Minimum local action after ownership tests |
-| A second native process can continue the same local UUID | `product_proved`, limited | Minimum local action only |
-| Qoder user Skills use a profile `skills` root | `documented` | Candidate for two-home product proof |
-| Mallard can capture a stable synthetic six-file group | `synthetic` | Future implementation technique only |
-| Six members are a complete Qoder session | `unproved` and contradicted by checkpoint observations | Never use as production completeness rule |
-| SDK external storage restores full Qoder state | Does not pass | Do not use for portability |
-| Qoder App rebuilds task projections from copied files | `unproved` | App restore disabled |
-| Current package active-leaf logic is the stable App rule | `package_observed` | Do not claim active branch |
-| Qoder exposes stable plugin JSON inventory | `unproved` in reviewed public docs | Plugin support disabled |
-| Qoder can use Tuzi through the tested account and supported settings | `unproved` | Custom provider disabled |
-| SDK transcript transform is a complete fork | Does not pass | Fork disabled |
-| Qoder avoids Keychain when Mallard launches it | `unproved` as a public contract | Mallard makes no guarantee and does no auth |
-
-## 29. Final recommendation
-
-Approve the minimum Qoder release with this exact scope:
+Implement this exact first-release scope:
 
 ```text
-Qoder first in provider choices
-+ explicit .qoder profile binding
-+ read-only exact-project Qoder CLI Activity
-+ exact local CLI resume in Terminal
++ Qoder first in provider choices
++ explicit selected .qoder profile
++ project-owned Qoder CLI Activity
++ schema-1 cross-path Qoder CLI session Push and Pull
++ existing project-root wire mapping and destination-bucket mapping
++ source-UUID-preserving clean-profile CLI resume at the destination path
 + standalone Qoder user Skills
-- Qoder session Push and Pull
-- Qoder App task open or restore
-- Qoder plugins
-- cross-path restore
-- fork
-- custom providers and Tuzi configuration
++ native Qoder plugin install intent with JSON post-verification
++ schema 1 clean cutover; no migration or legacy path
+- Qoder App task or database support
+- Keep Both or fork
+- custom provider or Tuzi integration
 - pets
 ```
 
-This is the smallest end-to-end change that gives useful Qoder support without
-claiming unproved portability. It reuses the current Activity and Skill paths,
-adds one ProjectSync mode, adds one Catalog provider and Skill scope, and keeps
-all future mutation work behind explicit evidence gates.
+This is the smallest design that meets the requested Qoder outcome. It reuses
+the existing conversation, sidecar, Skill, plugin-intent, storage, review,
+journal, path-map, and UI models. It adds the provider-specific group contract
+and the common multi-file correctness work required for Qoder CLI resume.

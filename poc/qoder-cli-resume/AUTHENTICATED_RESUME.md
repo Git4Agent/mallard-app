@@ -111,6 +111,73 @@ evidence. It does not contain the credential, random marker, prompt text, raw
 model output, session UUID, or temporary path. With `--keep`, the runner writes
 the retained root path separately so that you can inspect it.
 
+## Cross-path modes
+
+Use `--cross-path` to run the resumed process from a second unrelated empty
+directory:
+
+```sh
+node poc/qoder-cli-resume/qoder-cli-authenticated-resume.mjs \
+  --cross-path \
+  --keep \
+  --cli-bundle "$QODER_CLI_BUNDLE" \
+  --timeout-ms 600000
+```
+
+Qoder CLI `1.1.40` did not find the source UUID while the transcript stayed in
+the source-path project bucket. The version-pinned diagnostic searched the
+current project bucket and worktrees of the same repository.
+
+To test the minimum required relocation, materialize the retained source bucket
+under the destination-path key:
+
+```sh
+node poc/qoder-cli-resume/qoder-cli-authenticated-resume.mjs \
+  --materialize-retained-root /absolute/validated/retained-root \
+  --cli-bundle "$QODER_CLI_BUNDLE" \
+  --timeout-ms 600000
+```
+
+This mode moves the active source bucket to a recoverable backup inside the
+same disposable root. It copies all observed members to the destination bucket,
+verifies that the copy is byte-exact, and resumes the source UUID from the
+second path. It does not rewrite path values. Do not point this option at a
+normal Qoder home.
+
+The tested materialized result was
+`AUTHENTICATED_MATERIALIZED_CROSS_PATH_RESUME_PASS`. See the
+[focused PoC report](../../docs/QODER_CROSS_PATH_AND_APP_RESUME_POC_2026-09-02.md).
+
+## Clean-home transfer mode
+
+Use `--clean-home-transfer` for the machine-A push and machine-B pull model:
+
+```sh
+node poc/qoder-cli-resume/qoder-cli-authenticated-resume.mjs \
+  --clean-home-transfer \
+  --cli-bundle "$QODER_CLI_BUNDLE" \
+  --timeout-ms 600000
+```
+
+This mode creates two separate empty `HOME` and `QODER_CONFIG_DIR` trees. It
+also creates two different project paths. Complete the two Qoder browser login
+flows. The destination login is independent. The runner does not copy auth or
+machine state from the source.
+
+The runner creates one source session, verifies a stable session-only group,
+copies the group through a portable staging directory, and restores it under
+the destination path key. It then resumes the same UUID from the destination
+home and verifies the source-only marker and transcript growth.
+
+The 2 September 2026 live run returned
+`AUTHENTICATED_CLEAN_HOME_CROSS_PATH_TRANSFER_PASS`. It used three source
+members: the transcript, the session directory, and `state.json`. After
+resume, the destination had five members because Qoder added the compression
+directory and state file. No path rewrite was necessary.
+
+This mode simulates two machines on one physical host. It does not run the real
+Mallard storage transport. Both disposable homes are removed by default.
+
 ## Increase the operation timeout
 
 The default timeout can be too short on a slow model connection. Set a timeout
@@ -152,8 +219,8 @@ The runner:
 - creates a new operating-system temporary root with restrictive permissions;
 - places `HOME`, Qoder configuration, XDG state, and temporary files below
   that root;
-- uses an empty temporary project as the exact working directory for both
-  turns;
+- creates two separate copies of those roots in clean-home transfer mode;
+- uses empty temporary projects as the working directories;
 - does not contain runner code that reads or copies authentication from
   `~/.qoder`;
 - sets the version-specific `QODER_FORCE_FILE_STORAGE=true` control;
@@ -215,11 +282,13 @@ or model error. Use `--keep` for the next run if you need local artifacts.
 This smoke test does not prove:
 
 - Mallard capture or restore of a Qoder session;
-- restore into a different Qoder configuration directory or machine;
+- the same transfer on two physical machines;
+- the real Mallard push, storage, review, and pull pipeline;
 - stable capture or materialization of Qoder task sidecars;
 - Qoder use of state, compression, subagent, or task sidecars;
 - authoritative `active-leaf` selection rules;
-- structural path mapping or continuation after a project-path change;
+- structural path mapping or the correctness of mixed historical and current
+  path metadata;
 - source-UUID collision safety across concurrent restore operations;
 - Qoder App discovery, application-database projection rebuild, or App
   continuation;

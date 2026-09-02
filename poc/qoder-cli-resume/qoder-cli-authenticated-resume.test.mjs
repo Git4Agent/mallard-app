@@ -19,6 +19,8 @@ import {
   QODER_CLI_VERSION,
   assertPinnedQoderCliBundle,
   executeAuthenticatedResumeSmoke,
+  executeCleanHomeCrossPathTransfer,
+  executeMaterializedCrossPathResume,
 } from "./qoder-cli-authenticated-resume.mjs";
 
 const TEST_MARKER =
@@ -54,7 +56,7 @@ async function makeMockCli(t, behavior = {}) {
   await writeFile(
     script,
     `import { spawnSync } from "node:child_process";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const behavior = ${configuration};
@@ -144,15 +146,38 @@ if (args.at(-1) === "login") {
 
   if (args.includes("--resume")) {
     const sessionId = value("--resume");
-    const transcriptPath = join(projectBucket, sessionId + ".jsonl");
-    const transcript = await readFile(transcriptPath, "utf8");
+    let transcriptPath = join(projectBucket, sessionId + ".jsonl");
+    let transcript;
+    try {
+      transcript = await readFile(transcriptPath, "utf8");
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      const projectsRoot = join(configRoot, "projects");
+      for (const candidate of await readdir(projectsRoot, { withFileTypes: true })) {
+        if (!candidate.isDirectory()) continue;
+        const candidatePath = join(projectsRoot, candidate.name, sessionId + ".jsonl");
+        try {
+          transcript = await readFile(candidatePath, "utf8");
+          transcriptPath = candidatePath;
+          break;
+        } catch (candidateError) {
+          if (candidateError?.code !== "ENOENT") throw candidateError;
+        }
+      }
+    }
+    if (transcript === undefined) throw new Error("session not found");
     const marker = transcript.match(/MALLARD-QODER-RESUME-[0-9a-f]{32}/)?.[0];
     const sourcePid = Number(transcript.match(/"sourcePid":([0-9]+)/)?.[1]);
     if (!marker || sourcePid === process.pid) throw new Error("not a new process");
     if (prompt.includes(marker)) throw new Error("marker reached resume prompt");
     await appendFile(
       transcriptPath,
-      JSON.stringify({ type: "assistant", resumed: true }) + "\\n",
+      [
+        JSON.stringify({ type: "user", sessionId, cwd: projectRoot, message: prompt }),
+        JSON.stringify({ type: "assistant", sessionId, cwd: projectRoot, message: { content: [{ type: "text", text: marker }] } }),
+        JSON.stringify({ type: "active-leaf", sessionId, leafUuid: "leaf" }),
+        "",
+      ].join("\\n"),
     );
     process.stdout.write(JSON.stringify({
       type: "result",
@@ -297,6 +322,157 @@ test("proves native resume with a separate mock process", async (t) => {
     "OPENAI_API_KEY",
   ]) {
     assert.equal(serialized.includes(process.env[name]), false);
+  }
+});
+
+test("proves cross-path resume with a separate mock process", async (t) => {
+  const cliBundle = await makeMockCli(t);
+  installParentCredentialCanaries(t);
+  let isolationRoot;
+  const result = await executeAuthenticatedResumeSmoke(
+    { cliBundle, timeoutMs: 30_000, crossPath: true },
+    {
+      validateCliBundleImpl: mockValidation(cliBundle),
+      makeMarkerImpl: () => TEST_MARKER,
+      onIsolationRoot: (root) => (isolationRoot = root),
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.verdict, "AUTHENTICATED_CROSS_PATH_RESUME_PASS");
+  assert.equal(result.resume.sameSessionId, true);
+  assert.equal(result.resume.markerRecovered, true);
+  assert.equal(result.resume.processWorkingDirectoryChanged, true);
+  assert.equal(result.resume.cliWorkingDirectoryChanged, true);
+  assert.equal(result.resume.transcriptStorage, "source_project_bucket");
+  assert.equal(result.isolation.exactWorkingDirectoryReused, false);
+  assert.equal(result.isolation.distinctWorkingDirectoriesUsed, true);
+  assert.equal(result.limits.crossPathResumeProved, true);
+  assert.equal(result.cleanup.complete, true);
+  await expectMissing(isolationRoot);
+
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes(TEST_MARKER), false);
+  assert.equal(serialized.includes(TEST_SESSION_ID), false);
+  assert.equal(serialized.includes(isolationRoot), false);
+});
+
+test("proves a session-only transfer between two clean mock homes", async (t) => {
+  const cliBundle = await makeMockCli(t);
+  installParentCredentialCanaries(t);
+  let isolationRoot;
+  let pinCount = 0;
+  const messages = [];
+  const result = await executeCleanHomeCrossPathTransfer(
+    { cliBundle, timeoutMs: 30_000 },
+    {
+      validateCliBundleImpl: mockValidation(cliBundle),
+      pinCliBundleImpl: async (checkedCli) => {
+        pinCount += 1;
+        await assertPinnedQoderCliBundle(checkedCli);
+      },
+      makeMarkerImpl: () => TEST_MARKER,
+      onIsolationRoot: (root) => (isolationRoot = root),
+      report: (message) => messages.push(message),
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(
+    result.verdict,
+    "AUTHENTICATED_CLEAN_HOME_CROSS_PATH_TRANSFER_PASS",
+  );
+  assert.equal(result.productionRestoreReady, false);
+  assert.equal(result.authentication.destinationAuthenticatedIndependently, true);
+  assert.equal(result.authentication.authenticationCopied, false);
+  assert.equal(result.source.stableCapture, true);
+  assert.equal(result.source.unchangedAfterDestinationResume, true);
+  assert.equal(result.transfer.sessionOnlyBundle, true);
+  assert.equal(result.transfer.authenticationCopied, false);
+  assert.equal(result.transfer.machineStateCopied, false);
+  assert.equal(result.transfer.byteExactPush, true);
+  assert.equal(result.transfer.byteExactPull, true);
+  assert.equal(result.transfer.structuralPathMappingApplied, false);
+  assert.equal(result.resume.sameSessionId, true);
+  assert.equal(result.resume.markerRecovered, true);
+  assert.equal(result.resume.transcriptGrew, true);
+  assert.equal(result.resume.sourceAndDestinationPathsDiffer, true);
+  assert.equal(result.resume.sourceAndDestinationConfigRootsDiffer, true);
+  assert.equal(result.isolation.cleanDestinationConfigBeforeLogin, true);
+  assert.equal(result.isolation.separateDisposableMachineHomes, true);
+  assert.equal(result.isolation.nativeKeychainCommandAttempted, false);
+  assert.equal(result.limits.physicalSecondMachineUsed, false);
+  assert.equal(result.cleanup.complete, true);
+  assert.equal(result.cleanup.retained, false);
+  assert.equal(messages.length, 6);
+  assert.equal(pinCount, 8);
+  await expectMissing(isolationRoot);
+
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes(TEST_MARKER), false);
+  assert.equal(serialized.includes(TEST_SESSION_ID), false);
+  assert.equal(serialized.includes(isolationRoot), false);
+  assert.equal(serialized.includes(cliBundle), false);
+});
+
+test("proves resume after byte-exact destination-bucket materialization", async (t) => {
+  const cliBundle = await makeMockCli(t);
+  installParentCredentialCanaries(t);
+  const sourceResult = await executeAuthenticatedResumeSmoke(
+    { cliBundle, timeoutMs: 30_000, keep: true },
+    {
+      validateCliBundleImpl: mockValidation(cliBundle),
+      makeMarkerImpl: () => TEST_MARKER,
+    },
+  );
+  assert.equal(sourceResult.ok, true);
+  const retainedRoot = sourceResult.inspection.root;
+
+  try {
+    const result = await executeMaterializedCrossPathResume(
+      {
+        cliBundle,
+        retainedRoot,
+        timeoutMs: 30_000,
+      },
+      { validateCliBundleImpl: mockValidation(cliBundle) },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(
+      result.verdict,
+      "AUTHENTICATED_MATERIALIZED_CROSS_PATH_RESUME_PASS",
+    );
+    assert.equal(result.source.sourceBackupUnchanged, true);
+    assert.equal(result.source.sourceSessionUuidPreserved, true);
+    assert.equal(result.materialization.destinationBucketCreated, true);
+    assert.equal(result.materialization.byteExactBeforeResume, true);
+    assert.equal(result.materialization.structuralPathMappingApplied, false);
+    assert.equal(result.resume.sameSessionId, true);
+    assert.equal(result.resume.markerRecovered, true);
+    assert.equal(result.resume.cliWorkingDirectoryChanged, true);
+    assert.equal(result.limits.pathBucketMaterializationRequired, true);
+    assert.equal(result.limits.crossPathResumeProved, true);
+    assert.equal(result.cleanup.retained, true);
+
+    const verified = await executeMaterializedCrossPathResume(
+      {
+        cliBundle,
+        retainedRoot,
+        timeoutMs: 30_000,
+      },
+      { validateCliBundleImpl: mockValidation(cliBundle) },
+    );
+    assert.equal(verified.ok, true);
+    assert.equal(
+      verified.resume.verificationSource,
+      "verified_persisted_transcript",
+    );
+    const serialized = JSON.stringify({ ...verified, inspection: undefined });
+    assert.equal(serialized.includes(TEST_MARKER), false);
+    assert.equal(serialized.includes(TEST_SESSION_ID), false);
+    assert.equal(serialized.includes(retainedRoot), false);
+  } finally {
+    await rm(retainedRoot, { recursive: true, force: true });
   }
 });
 
