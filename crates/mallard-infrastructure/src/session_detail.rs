@@ -2517,6 +2517,7 @@ mod tests {
             source_path: transcript.clone(),
             source_mtime: modified_secs(&transcript_metadata),
             source_size: transcript_metadata.len(),
+            capture_bytes: transcript_metadata.len(),
         }];
         let registry = ProviderRegistry::with_test_provider();
         let before = get_project_session_detail(

@@ -3436,10 +3436,13 @@ pub enum ConversationBlocker {
     /// binary does not carry: neither direction may re-encode or decode the
     /// wire until the binaries align.
     PathMapCodecMismatch,
-    /// A push review's capture budget was full before this local
-    /// conversation's turn: it was not captured this round, so no push
-    /// action can pin it until the next review.
+    /// This push was full with newer local conversations before this one's
+    /// turn: it was not captured, so no push action can pin it. A later push
+    /// review recomputes from scratch; nothing is remembered.
     CaptureBudget,
+    /// The conversation's files exceed what one push capture may carry, so
+    /// no push can ever include it. It is unsyncable until it shrinks.
+    TooLarge,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

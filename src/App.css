@@ -5965,6 +5965,43 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   padding: 5px 20px;
 }
 
+/* The push meter takes the footer's sentence slot: what this push carries
+   against the limit, live as rows are ticked. The bar is a 4px track under
+   the sentence in the local-outstanding ink, because it measures what leaves
+   this computer; past the limit both take the danger ink and the button
+   beside them refuses with the same sentence as its title. */
+.sync-push-budget {
+  gap: 5px;
+}
+
+.sync-push-budget > small {
+  white-space: nowrap;
+}
+
+.sync-push-budget-bar {
+  display: block;
+  width: 100%;
+  max-width: 280px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-mid);
+  overflow: hidden;
+}
+
+.sync-push-budget-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--thread-status-local);
+}
+
+.sync-push-budget.over > small {
+  color: var(--danger-text);
+}
+
+.sync-push-budget.over .sync-push-budget-bar > i {
+  background: var(--danger-text);
+}
+
 /* No max-width: the rows are a table that meets the panel edge like the tab
    strip above it, and a 900px cap opened a growing channel of empty space on
    the right of any wider panel. The sentence column cannot run away with the
@@ -6545,68 +6582,6 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-project-files-page > .sync-history-section-heading {
   margin: 6px 2px -6px;
   padding: 0 6px;
-}
-
-.sync-history-older-group {
-  border: var(--box-border);
-  border-radius: var(--retro-panel-radius);
-  box-shadow: var(--shadow-card);
-  overflow: hidden;
-}
-
-.sync-history-older-group > summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 12px;
-  background: var(--bg-2);
-  color: var(--text-2);
-  font-size: var(--type-sm);
-  font-weight: var(--weight-semibold);
-  cursor: pointer;
-  user-select: none;
-}
-
-.sync-history-older-group[open] > summary {
-  border-bottom: 1px solid var(--border);
-}
-
-/* The group is the box — head, then rows — the shape the path-band tile
-   draws, so its flat list gives up the frame a bare list wears. Kept, the
-   list's 2px ink sat flush inside the group's: a 4px double rule down both
-   sides, two 14px arcs crossing at every corner, and the list's cast shadow
-   cut by the group's own clip. Rows sit flush under the head, parted by
-   hairlines, and the corner radius a hover tint could reach is the group's. */
-.sync-history-older-group > .sync-history-thread-list.flat {
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-}
-
-.sync-history-older-group > .sync-history-thread-list.flat > .sync-history-thread-card:first-child,
-.sync-history-older-group > .sync-history-thread-list.flat > .sync-history-thread-card:last-child {
-  border-radius: 0;
-}
-
-/* The inert fold is the group's last row: a hairline above, the rows' inset,
-   and its own flat list stays a box within it — inset, not a frame on the
-   frame. */
-.sync-history-older-inert {
-  padding: 8px 12px 12px;
-  border-top: 1px solid var(--border-mid);
-}
-
-.sync-history-older-inert > summary {
-  margin: 0;
-  color: var(--text-3);
-  font-size: var(--type-sm);
-  cursor: pointer;
-  user-select: none;
-}
-
-.sync-history-older-inert[open] > summary {
-  margin-bottom: 8px;
 }
 
 /* ── Catalog cards ───────────────────────────────────────────────────────── */

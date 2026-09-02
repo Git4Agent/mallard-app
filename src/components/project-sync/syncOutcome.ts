@@ -42,6 +42,9 @@ export type SyncOutcomeAction =
   /** Nothing failed to apply — the environment did. Recheck without another Pull. */
   | { kind: "recheck"; label: string; planId: string }
   | { kind: "open_pull"; label: string }
+  /** Sessions did not fit this push. Opens Push review again the ordinary
+   *  way; nothing is carried over, the next review recomputes what fits. */
+  | { kind: "push_again"; label: string }
   | { kind: "reset_metadata"; label: string };
 
 export interface SyncOutcome {
@@ -103,14 +106,22 @@ export function buildPushOutcome({
     })),
   ];
 
+  /* Sessions the review could not fit into this push. Mallard keeps no record
+     of them: the banner says how many and offers Push again, and the next
+     review recomputes what fits from whatever is outstanding then. */
+  const leftOut = threadComparison?.capture_budget?.held_count ?? 0;
+
   const stats: SyncOutcomeStat[] = [
     {
       icon: "upload",
       value: String(pushedCount),
-      label: held.length > 0 ? "pushed" : plural(pushedCount, "session"),
+      label: held.length > 0 || leftOut > 0 ? "pushed" : plural(pushedCount, "session"),
     },
     ...(held.length > 0
       ? [{ icon: "git-compare-arrows" as const, value: String(held.length), label: "held for Pull" }]
+      : []),
+    ...(leftOut > 0
+      ? [{ icon: "clock" as const, value: String(leftOut), label: "didn't fit — push again to continue" }]
       : []),
     ...(result.revision != null
       ? [{ icon: "git-branch" as const, label: "Revision", value: String(result.revision), lead: true }]
@@ -120,14 +131,20 @@ export function buildPushOutcome({
   return {
     projectId,
     storageId,
-    tone: held.length > 0 ? "warning" : "success",
+    tone: held.length > 0 || leftOut > 0 ? "warning" : "success",
     title: held.length > 0
       ? `Pushed ${pushedCount} of ${pushedCount + held.length} sessions`
-      : "Push complete",
+      : leftOut > 0
+        ? `Pushed ${pushedCount} of ${pushedCount + leftOut} sessions`
+        : "Push complete",
     stats,
     rows,
-    action: held.length > 0 ? { kind: "open_pull", label: "Open Pull review" } : undefined,
-    defaultOpen: held.length > 0,
+    action: held.length > 0
+      ? { kind: "open_pull", label: "Open Pull review" }
+      : leftOut > 0
+        ? { kind: "push_again", label: "Push again" }
+        : undefined,
+    defaultOpen: held.length > 0 || leftOut > 0,
     technical: [
       ...(result.message ? [{ label: "Message", value: result.message }] : []),
       ...(result.operation_id ? [{ label: "Operation", value: result.operation_id }] : []),

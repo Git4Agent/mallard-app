@@ -275,14 +275,15 @@ test("storage-only tasks offer the reviewed create-local action", () => {
   assert.doesNotMatch(html, /sync-history-stored-thread-location/);
 });
 
-test("out-of-window tasks remain discoverable in Older activity", () => {
+test("tasks without an activity row join the one review list, never a separate box", () => {
   const html = render({
     selectionMode: "push",
     entries: [healthyEntry, olderEntry],
     selectableResourceIds: new Set([healthyEntry.resource_id, olderEntry.resource_id]),
   });
 
-  assert.match(html, /Older activity/);
+  assert.doesNotMatch(html, /Older activity|sync-history-older/);
+  assert.match(html, /aria-label="Sessions without an activity row"/);
   assert.match(html, /Older unpublished task/);
   assert.equal((html.match(/type="checkbox"/g) ?? []).length, 2);
 });

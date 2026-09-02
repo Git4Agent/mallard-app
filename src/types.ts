@@ -1250,7 +1250,8 @@ export type ConversationBlocker =
   | "busy"
   | "redaction_ruleset_mismatch"
   | "path_map_codec_mismatch"
-  | "capture_budget";
+  | "capture_budget"
+  | "too_large";
 
 export interface ThreadSyncDecision {
   action: ConversationReviewAction;
@@ -1283,8 +1284,23 @@ export interface ThreadSyncEntry {
   /** True for rows produced by a storage comparison (sync review). */
   compared_against_storage: boolean;
   provider_thread_id?: string | null;
+  /** What a push of this row's local conversation weighs (transcript plus
+   *  sidecars); absent for storage-only rows. The review meter sums it. */
+  capture_bytes?: number | null;
   push_decision: ThreadSyncDecision;
   pull_decision: ThreadSyncDecision;
+}
+
+/** The push capture budget a review fitted its candidates against. Nothing
+ *  in it predicts future pushes; every review recomputes it. */
+export interface CaptureBudget {
+  limit_bytes: number;
+  /** Bytes the push always carries besides conversations (tools, provider state). */
+  reserved_bytes: number;
+  /** What the conversations this push carries weigh together. */
+  admitted_bytes: number;
+  held_count: number;
+  held_bytes: number;
 }
 
 export interface ThreadSyncCounts {
@@ -1318,6 +1334,8 @@ export interface ThreadSyncComparison {
   scopes: ScopeSyncRow[];
   provider_errors: Record<ProviderKey, string>;
   warnings: string[];
+  /** Present on the comparison a Push review was prepared from. */
+  capture_budget?: CaptureBudget | null;
   remote_continuity: RemoteContinuity;
 }
 

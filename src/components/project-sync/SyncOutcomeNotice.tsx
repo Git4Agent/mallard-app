@@ -19,6 +19,7 @@ const ROW_PRESENTATION: Record<
 
 function actionIcon(action: SyncOutcomeAction): IconName {
   if (action.kind === "open_pull") return "download";
+  if (action.kind === "push_again") return "upload";
   if (action.kind === "reset_metadata") return "trash";
   return "refresh";
 }

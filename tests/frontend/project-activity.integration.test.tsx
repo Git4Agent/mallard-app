@@ -3047,12 +3047,11 @@ test("a project with no repository gets the same control, minus the rail", () =>
   assert.match(html, /<strong>Load earlier<\/strong>/);
 });
 
-test("a review pages too, and the fold waits until paging is spent", () => {
-  // Two doors into one room, otherwise: while anything is still loadable the
-  // terminus is the route, so the fold stays out of the way. It cannot just be
-  // deleted — the comparison is not windowed and the terminus only walks the
-  // session timeline, so an entry with no session row at all is reachable by
-  // no amount of paging.
+test("a review shows the whole span at once: no paging, no fold, unlisted entries as rows", () => {
+  // A review loads every outstanding session in one request, so it never
+  // pages and never needs a catch-all box. What the comparison knows and the
+  // activity scan does not is offered as rows of the same list — dropping it
+  // silently would drop candidates.
   const entry: ThreadSyncEntry = {
     provider: "codex",
     provider_display_name: "Codex",
@@ -3070,26 +3069,24 @@ test("a review pages too, and the fold waits until paging is spent", () => {
   };
   const comparison = emptyComparison({ entries: [entry] });
 
-  // More to load: the terminus is the way back, and the fold holds its peace.
-  const paging = renderToStaticMarkup(
+  // Even with `older` reporting more history, a review draws no foot: it
+  // asked for the whole span, so the rail simply ends.
+  const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults} activity={activity} selectionMode="push" comparison={comparison} />,
   );
-  assert.match(paging, /sync-history-rail-step/);
-  assert.match(paging, /<strong>Load earlier<\/strong>/);
-  assert.doesNotMatch(paging, /Older activity/);
-
-  // Paging spent: whatever the comparison still holds is the true remainder,
-  // and a review has to offer it or it drops candidates silently.
-  const spent = renderToStaticMarkup(
-    <ProjectChatHistoryContent
-      {...contentDefaults} activity={{ ...activity, older: null }} selectionMode="push" comparison={comparison} />,
+  assert.doesNotMatch(html, /sync-history-rail-step/);
+  assert.doesNotMatch(html, /Load earlier/);
+  // The remainder is rows of the same list, not a box.
+  assert.doesNotMatch(html, /Older activity|sync-history-older/);
+  assert.match(html, /aria-label="Sessions without an activity row"/);
+  assert.match(html, /A thread no session row reaches/);
+  assert.doesNotMatch(html, /nothing earlier/);
+  // The standing page still pages.
+  const standing = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={activity} />,
   );
-  assert.doesNotMatch(spent, /sync-history-rail-step/);
-  assert.match(spent, /Older activity/);
-  assert.match(spent, /A thread no session row reaches/);
-  // A spent review uses the remainder fold, never a terminal footer.
-  assert.doesNotMatch(spent, /nothing earlier/);
+  assert.match(standing, /<strong>Load earlier<\/strong>/);
 });
 
 test("non-git browse also omits the terminal footer", () => {

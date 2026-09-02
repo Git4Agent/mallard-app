@@ -824,6 +824,15 @@ impl SessionWatchService {
                                         })
                                         .map(|duration| duration.as_secs())
                                         .unwrap_or(0);
+                                    // The transcript is the part that moved;
+                                    // the sidecar share keeps its discovery
+                                    // measure until the next rediscovery, so
+                                    // a served row weighs what a fresh one
+                                    // would.
+                                    view.capture_bytes = view
+                                        .capture_bytes
+                                        .saturating_sub(view.source_size)
+                                        .saturating_add(meta.len());
                                     view.source_size = meta.len();
                                 }
                                 _ => stat_raced = true,

@@ -24,8 +24,9 @@ import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import { type SyncReviewStep, historyStepLabel, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
 import { categoryFor, STORAGE_BLOCKING_STATES } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
-import { isPushReviewDecision } from "../sync-review/pullReviewStatus";
+import { isCaptureBudgetHold, isPushReviewDecision } from "../sync-review/pullReviewStatus";
 import { isIrrecoverableSyncError } from "./syncError";
+import { formatBytes } from "../../format";
 
 export interface PushReviewBlocker {
   kind: "storage" | "local";
@@ -373,6 +374,57 @@ export function pushProjectFileCommitImpact(
   return counts;
 }
 
+/** What the current selection would put into one push: the selected sessions
+ *  by their capture bytes, the requirements the push always carries, and the
+ *  selected project files by size. Null when the review carries no budget
+ *  (a review prepared without a comparison, or a Pull). */
+export function pushBudgetTotal(
+  selected: ReadonlySet<string>,
+  threadComparison?: ThreadSyncComparison | null,
+  projectContentInventory?: ProjectContentInventory | null,
+): { sessions: number; reserved: number; projectFiles: number; total: number; limit: number } | null {
+  const budget = threadComparison?.capture_budget;
+  if (!budget) return null;
+  const sessions = (threadComparison?.entries ?? [])
+    .filter((entry) => entry.local_present && selected.has(entry.resource_id))
+    .reduce((sum, entry) => sum + (entry.capture_bytes ?? 0), 0);
+  const projectFiles = (projectContentInventory?.entries ?? [])
+    .filter((entry) => entry.local_present && selected.has(entry.descriptor.resource_id))
+    .reduce((sum, entry) => sum + (entry.size ?? 0), 0);
+  const total = sessions + budget.reserved_bytes + projectFiles;
+  return { sessions, reserved: budget.reserved_bytes, projectFiles, total, limit: budget.limit_bytes };
+}
+
+function formatDay(seconds: number): string {
+  return new Date(seconds * 1_000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/** The footer's push meter: one sentence and a 4px bar in the sentence slot.
+ *  Live with the selection, which is why it lives beside the button and not
+ *  in the banner zone above the list. */
+function PushBudgetMeter({ total, overSentence }: {
+  total: NonNullable<ReturnType<typeof pushBudgetTotal>>;
+  overSentence: string | null;
+}) {
+  const sentence = overSentence ?? `This push · ${formatBytes(total.total)} of ${formatBytes(total.limit)}`;
+  const breakdown = `Sessions ${formatBytes(total.sessions)} · Requirements ${formatBytes(total.reserved)} · Project files ${formatBytes(total.projectFiles)}`;
+  return (
+    <span className={`sync-push-budget${overSentence ? " over" : ""}`} role="status" title={breakdown}>
+      <small>{sentence}</small>
+      <span
+        className="sync-push-budget-bar"
+        role="meter"
+        aria-valuemin={0}
+        aria-valuemax={total.limit}
+        aria-valuenow={Math.min(total.total, total.limit)}
+        aria-valuetext={sentence}
+      >
+        <i style={{ width: `${Math.min(100, (total.total / total.limit) * 100)}%` }} />
+      </span>
+    </span>
+  );
+}
+
 export default function PushResourceWorkspace({
   resources,
   selected,
@@ -439,7 +491,7 @@ export default function PushResourceWorkspace({
       .filter((entry) => (
         entry.local_present
         && (entry.state === "local_only" || entry.state === "local_ahead")
-        && isPushReviewDecision(entry.push_decision)
+        && (isPushReviewDecision(entry.push_decision) || isCaptureBudgetHold(entry.push_decision))
       ))
       .map((entry) => entry.resource_id)),
     [threadComparison],
@@ -561,18 +613,27 @@ export default function PushResourceWorkspace({
         : undefined,
     });
   }
-  /* Candidates the review could not afford to capture stay visible and
-     unselectable; the count says how many wait for the next round so the
-     0/N readout has a reason next to it. */
-  const capturePendingCount = (threadComparison?.entries ?? [])
-    .filter((entry) => entry.push_decision?.blocker === "capture_budget")
-    .length;
-  if (capturePendingCount > 0) {
+  /* Rows the review could not fit into this push stay listed, in their
+     place, unselectable; this banner says what the push carries and that the
+     rest waits. Nothing is remembered between pushes, so it never counts
+     rounds or pushes still to come — "push again" is the whole instruction. */
+  const captureBudget = threadComparison?.capture_budget ?? null;
+  if (captureBudget && captureBudget.held_count > 0) {
+    const admitted = (threadComparison?.entries ?? [])
+      .filter((entry) => entry.local_present && isPushReviewDecision(entry.push_decision));
+    const oldestAdmitted = admitted
+      .map((entry) => entry.local_updated_at ?? null)
+      .filter((value): value is number => value != null)
+      .reduce<number | null>((min, value) => (min == null || value < min ? value : min), null);
+    const held = captureBudget.held_count;
     banners.push({
       key: "capture-budget",
       severity: "warning",
-      title: `${capturePendingCount} conversation${capturePendingCount === 1 ? "" : "s"} wait for the next round`,
-      message: "This review's 512 MB capture budget filled before their turn. Push the selected conversations first, then open Push review again.",
+      title: "Too much to push at once",
+      message: `This push carries the newest ${admitted.length} session${admitted.length === 1 ? "" : "s"} `
+        + `(${formatBytes(captureBudget.admitted_bytes)})${oldestAdmitted != null ? `, back to ${formatDay(oldestAdmitted)}` : ""}. `
+        + `The ${held} older session${held === 1 ? "" : "s"} (${formatBytes(captureBudget.held_bytes)}) `
+        + `${held === 1 ? "doesn't" : "don't"} fit — push again after this one.`,
     });
   }
   /* No comparison means no row can be selected: every session shows its
@@ -605,7 +666,16 @@ export default function PushResourceWorkspace({
   const localBlockerSentence = localBlockingCount > 0
     ? `${localBlockingCount} selected item${localBlockingCount === 1 ? "" : "s"} can't be captured — exclude ${localBlockingCount === 1 ? "it" : "them"} to push.`
     : null;
-  const pushDisabledReason = localBlockingCount > 0
+  // The push meter: selection-driven, so it reports in the footer beside the
+  // button it can refuse. Once every admitted session fits by construction,
+  // only project files or requirements can carry the total past the limit.
+  const budgetTotal = pushBudgetTotal(effectiveSelected, threadComparison, projectContentInventory);
+  const overLimitSentence = budgetTotal && budgetTotal.total > budgetTotal.limit
+    ? `${formatBytes(budgetTotal.total - budgetTotal.limit)} over the ${formatBytes(budgetTotal.limit)} push limit — exclude sessions or files to push.`
+    : null;
+  const pushDisabledReason = overLimitSentence != null
+    ? overLimitSentence
+    : localBlockingCount > 0
     ? "Exclude the items that can't be captured"
     : blockingCount > 0
       ? "Resolve the held items above before pushing"
@@ -854,6 +924,7 @@ export default function PushResourceWorkspace({
           disabled={busy}
           onDeletionApprovedChange={setDeletionApproved}
         />
+        {budgetTotal && <PushBudgetMeter total={budgetTotal} overSentence={overLimitSentence} />}
         {localBlockerSentence && (
           /* Selection-driven: ticking a row that carries an uncaptured warning
              is what makes this appear, and it appears at the same moment the

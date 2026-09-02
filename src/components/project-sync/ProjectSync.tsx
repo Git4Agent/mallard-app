@@ -2382,6 +2382,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       void beginProjectRestore(outcome.projectId, outcome.storageId);
       return;
     }
+    if (action.kind === "push_again") {
+      // Sessions did not fit the last push. Nothing was kept about them: this
+      // is the ordinary Push review, and it recomputes what fits from
+      // whatever is outstanding now.
+      setStorageNotice(null);
+      void openPushChooser(outcome.projectId, outcome.storageId);
+      return;
+    }
     if (action.kind === "recheck") {
       // Nothing to re-apply: ask the backend again and rebuild the same banner
       // from the same result, so a fixed profile simply clears it.

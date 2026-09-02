@@ -281,8 +281,11 @@ fn blocked_reason(blocker: ConversationBlocker) -> &'static str {
              Update Mallard everywhere before syncing it."
         }
         ConversationBlocker::CaptureBudget => {
-            "This Push review's capture budget was full before this conversation's turn. \
-             Push the selected conversations first, then open Push review again."
+            "This push is full with newer conversations, so this one does not fit. \
+             Push again after this one."
+        }
+        ConversationBlocker::TooLarge => {
+            "This conversation is larger than one push carries, so it cannot be synced."
         }
     }
 }

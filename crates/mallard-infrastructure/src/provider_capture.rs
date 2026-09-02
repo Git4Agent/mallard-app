@@ -202,6 +202,10 @@ struct DiscoveredConversationMeta {
     provider_session_id: String,
     transcript_logical_path: String,
     sidecars: Vec<CapturedSidecarRef>,
+    /// What a push capture of this conversation weighs: every file of the
+    /// resource, transcript and sidecars, as stat'd at discovery. The push
+    /// review budgets against it; the push preflight re-measures.
+    capture_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -299,6 +303,22 @@ impl Discovery {
 
     /// Descriptor-only view for inventory-style callers. The Discovery keeps
     /// its physical paths for a later capture.
+    /// What a capture of one discovered resource weighs: every file it owns,
+    /// stat'd now. Conversations carry this from discovery; the other kinds
+    /// are few and small, so they are measured on demand.
+    pub fn capture_bytes_of(&self, resource_id: &str) -> u64 {
+        self.resources
+            .get(resource_id)
+            .map(|resource| {
+                resource
+                    .conversation
+                    .as_ref()
+                    .map(|conversation| conversation.capture_bytes)
+                    .unwrap_or_else(|| capture_bytes_of_files(&resource.files))
+            })
+            .unwrap_or(0)
+    }
+
     pub fn project_inventory(&self) -> ProjectInventory {
         ProjectInventory {
             resources: self
@@ -892,6 +912,10 @@ pub struct LocalSessionView {
     pub source_path: PathBuf,
     pub source_mtime: u64,
     pub source_size: u64,
+    /// What a push capture of this conversation weighs: transcript plus
+    /// sidecars, as stat'd at discovery. `source_size` is the transcript
+    /// alone and stamps freshness; this is what the push budget charges.
+    pub capture_bytes: u64,
 }
 
 /// Re-run only the session-index title enrichment over a cached discovery:
@@ -966,6 +990,7 @@ pub fn local_session_views(discovery: &Discovery) -> Vec<LocalSessionView> {
             source_path: source.physical_path.clone(),
             source_mtime,
             source_size,
+            capture_bytes: conversation.capture_bytes,
             descriptor,
         });
     }
@@ -1100,6 +1125,13 @@ fn install_provider_discovery(
                 relative_path: sidecar.file_name,
             });
         }
+        // A conversation larger than one push capture can never sync, so it
+        // is blocked here like an unreadable one: the activity page shows it
+        // as unavailable with the reason, and no review ever offers it.
+        let capture_bytes = capture_bytes_of_files(&files);
+        if blocked_reason.is_none() && capture_bytes > MAX_CAPTURE_BYTES {
+            blocked_reason = Some(oversized_capture_reason(capture_bytes));
+        }
         insert_resource(
             discovery,
             DiscoveredResource {
@@ -1121,6 +1153,7 @@ fn install_provider_discovery(
                     provider_session_id: session.session_id,
                     transcript_logical_path: transcript_logical,
                     sidecars: sidecar_refs,
+                    capture_bytes,
                 }),
             },
         )?;
@@ -1805,6 +1838,49 @@ fn insert_resource(discovery: &mut Discovery, resource: DiscoveredResource) -> R
     Ok(())
 }
 
+/// Binary units, one decimal below ten and none above, the way the app's
+/// frontend prints sizes: `640 B`, `1.5 KB`, `45 KB`, `2.3 MB`, `512 MB`.
+pub fn format_bytes(value: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if value < 1024 {
+        return format!("{} B", value);
+    }
+    let mut scaled = value as f64 / 1024.0;
+    let mut unit = UNITS[0];
+    for next in &UNITS[1..] {
+        if scaled < 1024.0 {
+            break;
+        }
+        scaled /= 1024.0;
+        unit = next;
+    }
+    if scaled < 10.0 {
+        format!("{:.1} {}", scaled, unit)
+    } else {
+        format!("{} {}", scaled.round() as u64, unit)
+    }
+}
+
+/// The blocked reason of a conversation no push can carry.
+pub fn oversized_capture_reason(capture_bytes: u64) -> String {
+    format!(
+        "Too large to sync: {}; one push carries at most {}.",
+        format_bytes(capture_bytes),
+        format_bytes(MAX_CAPTURE_BYTES)
+    )
+}
+
+/// One no-follow stat per file, summed; a file that cannot be stat'd weighs
+/// nothing here and fails the capture preflight instead.
+fn capture_bytes_of_files(files: &[SourceFile]) -> u64 {
+    files
+        .iter()
+        .filter_map(|file| fs::symlink_metadata(&file.physical_path).ok())
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+        .fold(0u64, u64::saturating_add)
+}
+
 /// Inspect files under an approved root that the caller already canonicalized.
 pub(crate) fn inspect_candidate_files(
     canonical_approved_root: &Path,
@@ -2313,6 +2389,52 @@ mod tests {
     use super::*;
     use crate::providers::ProviderRegistry;
     use std::io::Write;
+
+    #[test]
+    fn format_bytes_prints_binary_units_like_the_frontend() {
+        assert_eq!(format_bytes(640), "640 B");
+        assert_eq!(format_bytes(1_536), "1.5 KB");
+        assert_eq!(format_bytes(45 * 1024), "45 KB");
+        assert_eq!(format_bytes(2_411_724), "2.3 MB");
+        assert_eq!(format_bytes(MAX_CAPTURE_BYTES), "512 MB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
+
+    #[test]
+    fn oversized_capture_reason_names_both_sizes() {
+        let reason = oversized_capture_reason(640 * 1024 * 1024);
+        assert_eq!(
+            reason,
+            "Too large to sync: 640 MB; one push carries at most 512 MB."
+        );
+    }
+
+    #[test]
+    fn capture_bytes_sum_every_file_and_skip_what_cannot_be_measured() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("transcript.jsonl");
+        let sidecar = temp.path().join("sidecar.bin");
+        std::fs::write(&transcript, vec![b'a'; 1_000]).unwrap();
+        std::fs::write(&sidecar, vec![b'b'; 24]).unwrap();
+        let files = vec![
+            SourceFile {
+                physical_path: transcript,
+                logical_path: "state/transcript.jsonl".to_string(),
+                opaque_content: false,
+            },
+            SourceFile {
+                physical_path: sidecar,
+                logical_path: "state/sidecar.bin".to_string(),
+                opaque_content: true,
+            },
+            SourceFile {
+                physical_path: temp.path().join("missing.bin"),
+                logical_path: "state/missing.bin".to_string(),
+                opaque_content: true,
+            },
+        ];
+        assert_eq!(capture_bytes_of_files(&files), 1_024);
+    }
 
     fn write(path: &Path, bytes: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();

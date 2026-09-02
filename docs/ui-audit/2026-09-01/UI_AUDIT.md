@@ -1,13 +1,20 @@
 # Mallard UI audit — 2026-09-01
 
 Date: 2026-09-01
-Audited code: current working tree (dirty), base commit `789eea5`
+Audited code: the then-uncommitted working tree on base commit `789eea5`
 Application version: `0.1.2`
+
+> **Status note (added after the audit).** The tree audited here was subsequently committed
+> as `e444782`, which also landed fixes for R1 and R2. Both are re-measured and confirmed
+> resolved — see [Resolved since the audit](#resolved-since-the-audit). Every other finding
+> was verified live against `e444782`. Line numbers cited below are from the audited tree and
+> may have drifted.
 
 ## Executive result
 
-This audit covers the **uncommitted Codex retheme** sitting on top of `789eea5` — a
-1172-line `App.css` rewrite plus the switcher-menu and session-detail punchcard changes.
+This audit covers the **Codex retheme** — a 1172-line `App.css` rewrite plus the switcher-menu
+and session-detail punchcard changes — which was uncommitted at the time of the audit and is
+now committed as `e444782`.
 
 The frontend suite is **green on this tree: 269/269 tests plus `tsc`**. Every finding below
 is therefore something the existing gates do not catch, and that is the audit's main result:
@@ -131,6 +138,41 @@ It is a latent trap: one `className="btn-primary"` without `btn`, or a portalled
 
 **Fix (cheap).** Change the base rule to `color: var(--button-primary-text)` so the fallback is
 safe. No visual change to anything shipping today.
+
+### Resolved since the audit
+
+`e444782` fixed R1 and R2. Re-measured against that commit, in light theme on
+`--surface-row-active` (`#f0e3d5`):
+
+| token | was | now | value |
+|---|---|---|---|
+| `--thread-status-divergent` | 4.35 FAIL | **4.98 ok** | `#6d529d` |
+| `--thread-status-conflict` / `--danger-text` | 4.41 FAIL | **4.79 ok** | `#b53420` |
+
+The badge gate in `tests/frontend/css-hygiene.integration.test.tsx` now iterates
+`["--surface-row-hover", "--surface-row-active"]` rather than the hover row alone, so the
+blind spot that hid both is closed at the gate as well as at the tokens.
+
+**L07 is resolved** by the push capture-budget cutover (uncommitted at time of writing). The
+banner it described no longer exists; the replacement agrees noun and verb in both branches:
+
+```
+`The ${held} older session${held === 1 ? "" : "s"} (${formatBytes(captureBudget.held_bytes)}) `
+  + `${held === 1 ? "doesn't" : "don't"} fit — push again after this one.`
+```
+
+Verified at `PushResourceWorkspace.tsx:635`. One residue: `src/push-budget-mockup.tsx:351`
+still carries the original ungrammatical string. It is a specimen, excluded from this audit's
+production scope, but it is the copy a future iteration would be tempted to port back.
+
+**L01 stands, deliberately deferred.** Escape still discards a prepared push; the owning
+session judged it out of scope for the capture-budget change and confirmed a prepared push is
+no more expensive to rebuild than before. Recorded here so it is not mistaken for fixed.
+
+**L09 is not covered by that fix.** `--session-detail-link` is a `color-mix()`
+(`App.css:6916`), so it cannot be resolved statically the way the gate resolves plain hex
+tokens — it was measured at 3.93:1 in the browser and needs a computed-style check, not a
+token edit.
 
 ### Verified as fixed — do not re-report
 

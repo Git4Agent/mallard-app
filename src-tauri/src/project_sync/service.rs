@@ -763,8 +763,27 @@ pub struct ThreadSyncEntry {
     pub compared_against_storage: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
+    /// What a push of this row's local conversation weighs (transcript plus
+    /// sidecars); absent for storage-only rows. The review meter sums it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_bytes: Option<u64>,
     pub push_decision: ConversationDecision,
     pub pull_decision: ConversationDecision,
+}
+
+/// The push capture budget a review fitted its candidates against.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CaptureBudget {
+    /// The per-push capture ceiling.
+    pub limit_bytes: u64,
+    /// Bytes the push always carries besides conversations: the selectable
+    /// requirements (tools, provider state).
+    pub reserved_bytes: u64,
+    /// What the conversations this push carries weigh together.
+    pub admitted_bytes: u64,
+    /// Conversations that did not fit this push.
+    pub held_count: u64,
+    pub held_bytes: u64,
 }
 
 #[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -798,6 +817,12 @@ pub struct ThreadSyncComparison {
     pub provider_errors: BTreeMap<ProviderKey, String>,
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// The push capture budget this review was fitted against, when it built
+    /// a push plan: the limit, what the requirements reserve, what the
+    /// admitted rows weigh, and what waits for a later push. Nothing in it
+    /// predicts future pushes; every review recomputes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_budget: Option<CaptureBudget>,
     /// Advisory repository-level continuity between the recorded base and
     /// the observed head (DESIGN_REMOTE_HISTORY_CONTINUITY.md). Explains a
     /// wiped-and-recreated storage wherever the comparison is shown.
@@ -1714,7 +1739,11 @@ fn build_activity_from_local_read(
                 .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
                 .map(|duration| duration.as_secs())
                 .unwrap_or(0),
-            source_size: metadata.map(|metadata| metadata.len()).unwrap_or(0),
+            source_size: metadata
+                .as_ref()
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+            capture_bytes: metadata.map(|metadata| metadata.len()).unwrap_or(0),
         });
     }
     let local_sessions = project_activity::scan_local_session_views(
@@ -3684,6 +3713,8 @@ pub(crate) struct LocalThreadReview {
     pub(crate) source_path: PathBuf,
     pub(crate) source_mtime: u64,
     pub(crate) source_size: u64,
+    /// Transcript plus sidecars, what a push capture of this thread weighs.
+    pub(crate) capture_bytes: u64,
     pub(crate) captured: Option<CapturedThread>,
 }
 
@@ -4897,6 +4928,7 @@ fn provider_thread_review(
                     source_path: view.source_path.clone(),
                     source_mtime: view.source_mtime,
                     source_size: view.source_size,
+                    capture_bytes: view.capture_bytes,
                     captured: captured_thread,
                 },
             );
@@ -5798,6 +5830,7 @@ fn provider_thread_review(
             state: relation_sync_state(relation),
             local_present: local.is_some(),
             storage_present: thread.is_some(),
+            capture_bytes: local.map(|local| local.capture_bytes),
             status_detail: capabilities
                 .operation_state
                 .eq(&ConversationOperationState::Pending)
@@ -6244,6 +6277,11 @@ pub(crate) fn thread_entries(
                     .get(&conversation.transcript_logical_path)
                     .map(|file| file.bytes.len() as u64)
                     .unwrap_or(0),
+                capture_bytes: captured
+                    .files
+                    .get(&conversation.transcript_logical_path)
+                    .map(|file| file.bytes.len() as u64)
+                    .unwrap_or(0),
                 descriptor: provider_capture::ResourceCandidate {
                     metadata: BTreeMap::new(),
                     resource_id: resource_id.clone(),
@@ -6437,22 +6475,51 @@ struct ThreadComparisonBuild {
 /// Split reviewed candidates into watcher-served byte pins and the set that
 /// still needs authoritative capture. Candidates of cursor-less providers
 /// always capture.
-/// Fit a push review's candidate capture inside the capture budget. The base
+/// A review's capture plan against the per-push budget.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CaptureFit {
+    /// The base selection plus the newest candidates that fit: one
+    /// contiguous run of time, no older row before a newer one.
+    kept: BTreeSet<String>,
+    /// Candidates from the first one that did not fit on down. They wait
+    /// for a later push; nothing is remembered about them between pushes.
+    held: BTreeSet<String>,
+    /// Candidates larger than the whole budget on their own. No push can
+    /// carry them, so they are blocked as unsyncable rather than held.
+    oversized: BTreeSet<String>,
+}
+
+impl CaptureFit {
+    fn blocks(&self, resource_id: &ResourceId) -> Option<ConversationBlocker> {
+        let key = resource_id.to_string();
+        if self.held.contains(&key) {
+            Some(ConversationBlocker::CaptureBudget)
+        } else if self.oversized.contains(&key) {
+            Some(ConversationBlocker::TooLarge)
+        } else {
+            None
+        }
+    }
+}
+
+/// Fit a review's candidate capture inside the per-push budget. The base
 /// selection is always kept — it is the classification floor for providers
-/// without a tail cursor — and the remaining candidates are admitted newest
-/// first until the budget is spent. Returns the selection to capture and the
-/// candidates held over, in a stable order.
+/// without a tail cursor — and the remaining candidates are walked newest
+/// first; the walk stops at the first one that does not fit, so a push is a
+/// block of time and a smaller older row never slips in past a newer one
+/// that waits. A candidate too large for an empty budget is set aside as
+/// oversized and the walk continues past it.
 fn fit_capture_budget(
     views: &[provider_capture::LocalSessionView],
     base_selection: &BTreeSet<String>,
     selection: BTreeSet<String>,
     budget: u64,
-) -> (BTreeSet<String>, BTreeSet<String>) {
+) -> CaptureFit {
     let mut metadata_by_resource_id = HashMap::with_capacity(views.len());
     for view in views {
         metadata_by_resource_id
             .entry(view.descriptor.resource_id.as_str())
-            .or_insert((view.source_size, view.source_mtime));
+            .or_insert((view.capture_bytes, view.source_mtime));
     }
     let lookup = |resource_id: &str| -> (u64, u64) {
         metadata_by_resource_id
@@ -6463,15 +6530,18 @@ fn fit_capture_budget(
     fit_capture_budget_with(&lookup, base_selection, selection, budget)
 }
 
-/// The budget fit over a `(size, mtime)` lookup, so the policy is testable
-/// without building discovery views.
+/// The budget fit over a `(capture bytes, mtime)` lookup, so the policy is
+/// testable without building discovery views.
 fn fit_capture_budget_with(
     lookup: &dyn Fn(&str) -> (u64, u64),
     base_selection: &BTreeSet<String>,
     selection: BTreeSet<String>,
     budget: u64,
-) -> (BTreeSet<String>, BTreeSet<String>) {
-    let mut kept: BTreeSet<String> = base_selection.clone();
+) -> CaptureFit {
+    let mut fit = CaptureFit {
+        kept: base_selection.clone(),
+        ..CaptureFit::default()
+    };
     let mut spent: u64 = base_selection
         .iter()
         .map(|resource_id| lookup(resource_id).0)
@@ -6487,33 +6557,109 @@ fn fit_capture_budget_with(
     candidates.sort_by(|(a_id, _, a_mtime), (b_id, _, b_mtime)| {
         b_mtime.cmp(a_mtime).then_with(|| a_id.cmp(b_id))
     });
-    let mut over_budget = BTreeSet::new();
+    let mut full = false;
     for (resource_id, size, _) in candidates {
-        if spent.saturating_add(size) <= budget {
+        if size > budget {
+            fit.oversized.insert(resource_id);
+        } else if !full && spent.saturating_add(size) <= budget {
             spent = spent.saturating_add(size);
-            kept.insert(resource_id);
+            fit.kept.insert(resource_id);
         } else {
-            over_budget.insert(resource_id);
+            full = true;
+            fit.held.insert(resource_id);
         }
     }
-    (kept, over_budget)
+    fit
 }
 
-/// Rows the review could not capture keep their place in the list but hold
-/// a blocked decision, and any action planned for them from an Absent pin is
+/// Decide what a review captures. The fit runs over the WHOLE selection
+/// first; only rows it kept may then be served from the watcher's pin cache.
+/// A served pin saves the review-time read and nothing else — it is charged
+/// to the budget like any other row, so a quiet reopen can never admit more
+/// than one push carries.
+fn plan_candidate_capture<F>(
+    views: &[provider_capture::LocalSessionView],
+    base_selection: &BTreeSet<String>,
+    selection: BTreeSet<String>,
+    budget: u64,
+    serve_pins: F,
+) -> (
+    CaptureFit,
+    BTreeSet<String>,
+    BTreeMap<String, TargetExpectation>,
+)
+where
+    F: FnOnce(BTreeSet<String>) -> (BTreeSet<String>, BTreeMap<String, TargetExpectation>),
+{
+    let fit = fit_capture_budget(views, base_selection, selection, budget);
+    let (to_capture, served) = serve_pins(fit.kept.clone());
+    (fit, to_capture, served)
+}
+
+/// What the kept or held rows of a fit weigh together.
+fn capture_bytes_of(
+    views: &[provider_capture::LocalSessionView],
+    resource_ids: &BTreeSet<String>,
+) -> u64 {
+    views
+        .iter()
+        .filter(|view| resource_ids.contains(&view.descriptor.resource_id))
+        .map(|view| view.capture_bytes)
+        .fold(0u64, u64::saturating_add)
+}
+
+/// Bytes a push always carries besides conversations: every selectable
+/// non-conversation resource of the inventory (tools, provider state). An
+/// upper bound, and a small one.
+fn reserved_capture_bytes(
+    discovery: &provider_capture::Discovery,
+    discovered: &provider_capture::ProjectInventory,
+) -> u64 {
+    discovered
+        .resources
+        .iter()
+        .filter(|candidate| {
+            candidate.kind != CaptureResourceKind::Conversation
+                && candidate.blocked_reason.is_none()
+        })
+        .map(|candidate| discovery.capture_bytes_of(&candidate.resource_id))
+        .fold(0u64, u64::saturating_add)
+}
+
+/// Rows the review did not capture keep their place in the list but hold a
+/// blocked decision, and any action planned for them from an Absent pin is
 /// dropped — a plan must never carry an action its review did not prove.
-fn hold_over_budget_candidates(review: &mut ThreadReview, over_budget: &BTreeSet<String>) {
+fn hold_over_budget_candidates(review: &mut ThreadReview, fit: &CaptureFit) {
     for entry in review.entries.iter_mut() {
-        if over_budget.contains(&entry.resource_id.to_string()) {
-            entry.push_decision =
-                mallard_domain::blocked_conversation_decision(ConversationBlocker::CaptureBudget);
+        if let Some(blocker) = fit.blocks(&entry.resource_id) {
+            entry.push_decision = mallard_domain::blocked_conversation_decision(blocker);
         }
     }
     review.push_actions.retain(|action| {
         action
             .source_resource_id
             .as_ref()
-            .is_none_or(|resource_id| !over_budget.contains(&resource_id.to_string()))
+            .is_none_or(|resource_id| fit.blocks(resource_id).is_none())
+    });
+}
+
+/// The Pull twin: rows whose local bytes the review could not capture keep
+/// their row but lose their action.
+fn hold_over_budget_pull_candidates(review: &mut ThreadReview, fit: &CaptureFit) {
+    for row in review.pull_review.iter_mut() {
+        if let Some(blocker) = fit.blocks(&row.resource_id) {
+            let decision = mallard_domain::blocked_conversation_decision(blocker);
+            row.action = decision.action;
+            row.blocker = decision.blocker;
+            row.blocked_reason = decision.blocked_reason;
+            row.action_id = None;
+        }
+    }
+    review.pull_actions.retain(|action| {
+        action
+            .source_resource_id
+            .as_ref()
+            .is_none_or(|resource_id| fit.blocks(resource_id).is_none())
     });
 }
 
@@ -6699,13 +6845,14 @@ fn build_thread_sync_comparison(
         &base_selection,
     )?;
     let no_pins = BTreeMap::new();
-    let (captured, mut review) = if build_push_actions {
+    let (captured, mut review, capture_budget) = if build_push_actions {
         // Candidate selection is a conservative work scheduler, never a
         // second policy engine: one classification pass (served from the
-        // caches when quiet) picks every selectable push row; candidates
-        // the watcher proves unchanged reuse their frozen byte pin, the
-        // rest are captured authoritatively, and the final decisions come
-        // from the same shared decision path.
+        // caches when quiet) picks every selectable push row; the budget fit
+        // decides which of them this push carries; candidates the watcher
+        // proves unchanged reuse their frozen byte pin, the rest are
+        // captured authoritatively, and the final decisions come from the
+        // same shared decision path.
         let preliminary = run_review(&captured, &no_pins, false)?;
         let mut selection = base_selection.clone();
         for entry in preliminary
@@ -6715,26 +6862,26 @@ fn build_thread_sync_comparison(
         {
             selection.insert(entry.resource_id.to_string());
         }
-        let (selection, candidate_pins) = reuse_candidate_pins(
-            capture_request,
-            local_project_id,
-            views,
-            &base_selection,
-            selection,
-        );
-        // The capture budget is a per-capture ceiling, and a project with
-        // years of sessions can hold more candidate bytes than one capture
-        // may retain. Failing the whole review here left it open with
-        // nothing selectable and no reason; instead the review captures the
-        // newest candidates that fit and holds the rest for the next round,
-        // each with a blocker that says so. The push still enforces the same
-        // ceiling on whatever the user finally selects.
-        let (selection, over_budget) = fit_capture_budget(
-            views,
-            &base_selection,
-            selection,
-            provider_capture::MAX_CAPTURE_BYTES,
-        );
+        // The capture budget is a per-push ceiling, and a project with years
+        // of sessions can hold more candidate bytes than one push may carry.
+        // The review fits the whole selection first — newest first, stopping
+        // at the first row that does not fit — and only then lets the watcher
+        // serve pins for the rows it kept, so a cached pin is charged like
+        // any other row. Rows that did not fit stay listed, blocked, and say
+        // so; the push still enforces the same ceiling on whatever the user
+        // finally selects.
+        let reserved_bytes = reserved_capture_bytes(discovery, &discovered);
+        let budget = provider_capture::MAX_CAPTURE_BYTES.saturating_sub(reserved_bytes);
+        let (fit, selection, candidate_pins) =
+            plan_candidate_capture(views, &base_selection, selection, budget, |kept| {
+                reuse_candidate_pins(
+                    capture_request,
+                    local_project_id,
+                    views,
+                    &base_selection,
+                    kept,
+                )
+            });
         let captured = if selection == base_selection {
             captured
         } else {
@@ -6753,18 +6900,19 @@ fn build_thread_sync_comparison(
             &captured,
         );
         let mut review = run_review(&captured, &candidate_pins, true)?;
-        if !over_budget.is_empty() {
-            hold_over_budget_candidates(&mut review, &over_budget);
-            warnings.push(format!(
-                "{} conversation(s) exceed this review's {} byte capture budget and wait for the next round",
-                over_budget.len(),
-                provider_capture::MAX_CAPTURE_BYTES
-            ));
-        }
-        (captured, review)
+        hold_over_budget_candidates(&mut review, &fit);
+        let admitted: BTreeSet<String> = fit.kept.difference(&base_selection).cloned().collect();
+        let capture_budget = CaptureBudget {
+            limit_bytes: provider_capture::MAX_CAPTURE_BYTES,
+            reserved_bytes,
+            admitted_bytes: capture_bytes_of(views, &admitted),
+            held_count: fit.held.len() as u64,
+            held_bytes: capture_bytes_of(views, &fit.held),
+        };
+        (captured, review, Some(capture_budget))
     } else {
         let review = run_review(&captured, &no_pins, false)?;
-        (captured, review)
+        (captured, review, None)
     };
     warnings.extend(captured.warnings.clone());
     on_phase("capture local conversations", phase_started.elapsed());
@@ -6915,6 +7063,10 @@ fn build_thread_sync_comparison(
             // no relation was computed against the storage for this row.
             compared_against_storage: false,
             provider_thread_id: Some(provider_thread_id),
+            capture_bytes: views
+                .iter()
+                .find(|view| view.descriptor.resource_id == candidate.resource_id)
+                .map(|view| view.capture_bytes),
             push_decision: blocked.clone(),
             pull_decision: blocked,
         });
@@ -6979,6 +7131,7 @@ fn build_thread_sync_comparison(
                     forked_from: thread.forked_from.clone(),
                     compared_against_storage: true,
                     provider_thread_id: thread.source_thread_id.clone(),
+                    capture_bytes: None,
                     push_decision: view_only.clone(),
                     pull_decision: view_only.clone(),
                 });
@@ -7030,6 +7183,7 @@ fn build_thread_sync_comparison(
             scopes,
             provider_errors: review.provider_errors,
             warnings,
+            capture_budget,
             remote_continuity,
         },
         push_actions: review.push_actions,
@@ -10070,12 +10224,24 @@ pub(super) fn plan_bundle_restore_with_progress(
         }) {
             selection.insert(entry.resource_id.to_string());
         }
-        let (selection, candidate_pins) = reuse_candidate_pins(
-            &capture_request,
-            &binding.local_project_id,
+        // The same per-capture ceiling as Push, fitted the same way: the
+        // newest local candidates that fit are captured for their byte pins,
+        // the rest keep their row without an action, and a cached pin is
+        // charged before it is served.
+        let (fit, selection, candidate_pins) = plan_candidate_capture(
             &views,
             &base_selection,
             selection,
+            provider_capture::MAX_CAPTURE_BYTES,
+            |kept| {
+                reuse_candidate_pins(
+                    &capture_request,
+                    &binding.local_project_id,
+                    &views,
+                    &base_selection,
+                    kept,
+                )
+            },
         );
         let captured = if selection == base_selection {
             captured
@@ -10099,7 +10265,7 @@ pub(super) fn plan_bundle_restore_with_progress(
             phase_started.elapsed(),
         );
         let phase_started = Instant::now();
-        let review = thread_review(
+        let mut review = thread_review(
             repository,
             Some(&snapshot),
             &mut byte_source,
@@ -10112,6 +10278,7 @@ pub(super) fn plan_bundle_restore_with_progress(
             plan.expires_at,
             ReviewPurpose::PullPlan,
         )?;
+        hold_over_budget_pull_candidates(&mut review, &fit);
         plan.conversation_actions = review.pull_actions;
         plan.conversation_review = review.pull_review;
         on_phase("classify and build pull actions", phase_started.elapsed());
@@ -21722,51 +21889,124 @@ mod tests {
         );
     }
 
+    fn id_set<const N: usize>(ids: [&str; N]) -> BTreeSet<String> {
+        ids.into_iter().map(str::to_string).collect()
+    }
+
+    fn budget_view(id: &str, capture_bytes: u64, mtime: u64) -> provider_capture::LocalSessionView {
+        provider_capture::LocalSessionView {
+            descriptor: provider_capture::ResourceCandidate {
+                metadata: BTreeMap::new(),
+                resource_id: id.to_string(),
+                kind: CaptureResourceKind::Conversation,
+                provider: Some(codex_key()),
+                provider_resource_type: Some("session".to_string()),
+                display_name: id.to_string(),
+                apply_policy: CaptureApplyPolicy::SafeFile,
+                selected_by_default: true,
+                blocked_reason: None,
+                logical_paths: Vec::new(),
+            },
+            provider: codex_key(),
+            provider_thread_id: id.to_string(),
+            transcript_logical_path: format!(
+                "state/providers/codex/sessions/{id}/transcript.jsonl"
+            ),
+            source_path: PathBuf::from(format!("/tmp/{id}.jsonl")),
+            source_mtime: mtime,
+            source_size: capture_bytes,
+            capture_bytes,
+        }
+    }
+
     #[test]
-    fn fit_capture_budget_keeps_base_and_admits_newest_first() {
-        // (size, mtime) per candidate: the base row is always captured, the
-        // rest are admitted newest first until the budget is spent, and the
-        // held-over set is exactly what did not fit.
-        let looked_up = std::cell::RefCell::new(BTreeSet::new());
+    fn fit_capture_budget_is_a_time_ordered_prefix() {
+        // (capture bytes, mtime) per candidate: the base row is always
+        // captured, the rest are walked newest first, and the walk stops at
+        // the first row that does not fit — a smaller older row never slips
+        // in past it. A row too large for the whole budget is set aside as
+        // oversized and the walk continues past it.
         let lookup = |id: &str| -> (u64, u64) {
-            assert!(
-                looked_up.borrow_mut().insert(id.to_string()),
-                "metadata for '{id}' was read more than once"
-            );
             match id {
                 "base" => (100, 1),
                 "newest" => (300, 900),
+                "huge" => (2_000, 700),
                 "middle" => (300, 500),
                 "oldest" => (300, 100),
                 "tiny-old" => (50, 50),
                 _ => (0, 0),
             }
         };
-        let base: BTreeSet<String> = ["base".to_string()].into_iter().collect();
-        let selection: BTreeSet<String> = ["base", "newest", "middle", "oldest", "tiny-old"]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        let expected_lookups: BTreeSet<String> = base.union(&selection).cloned().collect();
-        let (kept, held) = fit_capture_budget_with(&lookup, &base, selection.clone(), 750);
-        // 100 (base) + 300 (newest) + 300 (middle) = 700; oldest would exceed
-        // the budget, tiny-old (50) still fits afterwards.
-        assert_eq!(
-            kept,
-            ["base", "newest", "middle", "tiny-old"]
-                .into_iter()
-                .map(str::to_string)
-                .collect()
-        );
-        assert_eq!(held, ["oldest".to_string()].into_iter().collect());
-        assert_eq!(&*looked_up.borrow(), &expected_lookups);
+        let base = id_set(["base"]);
+        let selection = id_set(["base", "newest", "huge", "middle", "oldest", "tiny-old"]);
+        let fit = fit_capture_budget_with(&lookup, &base, selection.clone(), 750);
+        // 100 (base) + 300 (newest) + 300 (middle) = 700. oldest does not
+        // fit, so it and everything older wait — tiny-old (50) included,
+        // although it would have fit: the cut is a line in time.
+        assert_eq!(fit.kept, id_set(["base", "newest", "middle"]));
+        assert_eq!(fit.held, id_set(["oldest", "tiny-old"]));
+        assert_eq!(fit.oversized, id_set(["huge"]));
         // A budget that cannot even hold the base keeps it anyway: the base
-        // is the classification floor, never a candidate.
-        looked_up.borrow_mut().clear();
-        let (kept, held) = fit_capture_budget_with(&lookup, &base, selection, 10);
-        assert_eq!(kept, base);
-        assert_eq!(held.len(), 4);
-        assert_eq!(&*looked_up.borrow(), &expected_lookups);
+        // is the classification floor, never a candidate. Every candidate is
+        // then larger than the whole budget, so none is merely held.
+        let fit = fit_capture_budget_with(&lookup, &base, selection, 10);
+        assert_eq!(fit.kept, base);
+        assert!(fit.held.is_empty());
+        assert_eq!(fit.oversized.len(), 5);
+    }
+
+    #[test]
+    fn cached_pins_are_charged_to_the_budget_before_they_are_served() {
+        // Two candidates worth 300 each against a budget of 400: only the
+        // newest fits. A watcher that would happily serve pins for both must
+        // be asked about the kept row alone — a served pin saves the read and
+        // nothing else, so a quiet reopen can never admit a second full push
+        // on top of what an earlier review already pinned.
+        let views = vec![
+            budget_view("newest", 300, 900),
+            budget_view("older", 300, 100),
+        ];
+        let base = BTreeSet::new();
+        let asked = std::cell::RefCell::new(BTreeSet::new());
+        let (fit, to_capture, served) =
+            plan_candidate_capture(&views, &base, id_set(["newest", "older"]), 400, |kept| {
+                asked.borrow_mut().extend(kept.iter().cloned());
+                let served: BTreeMap<String, TargetExpectation> = kept
+                    .iter()
+                    .map(|id| (id.clone(), TargetExpectation::Absent))
+                    .collect();
+                (BTreeSet::new(), served)
+            });
+        assert_eq!(fit.kept, id_set(["newest"]));
+        assert_eq!(fit.held, id_set(["older"]));
+        assert_eq!(&*asked.borrow(), &id_set(["newest"]));
+        assert_eq!(
+            served.keys().cloned().collect::<BTreeSet<_>>(),
+            id_set(["newest"])
+        );
+        assert!(to_capture.is_empty());
+        assert!(capture_bytes_of(&views, &fit.kept) <= 400);
+        assert_eq!(capture_bytes_of(&views, &fit.held), 300);
+    }
+
+    #[test]
+    fn fit_charges_transcript_and_sidecars_together() {
+        // The view's capture bytes are transcript plus sidecars; the fit reads
+        // them, not the transcript-only source size. After the newest row
+        // spends 200 of a 400 budget, a session whose transcript is 100 but
+        // whose sidecars bring it to 260 no longer fits, and is held.
+        let mut with_sidecar = budget_view("with-sidecar", 260, 500);
+        with_sidecar.source_size = 100;
+        let views = vec![budget_view("newest", 200, 900), with_sidecar];
+        let fit = fit_capture_budget(
+            &views,
+            &BTreeSet::new(),
+            id_set(["newest", "with-sidecar"]),
+            400,
+        );
+        assert_eq!(fit.kept, id_set(["newest"]));
+        assert_eq!(fit.held, id_set(["with-sidecar"]));
+        assert!(fit.oversized.is_empty());
     }
 
     #[test]
@@ -21800,8 +22040,21 @@ mod tests {
             strip_volatile(serde_json::to_value(&context.inventory).unwrap()),
             strip_volatile(serde_json::to_value(&standalone_inventory).unwrap()),
         );
+        // The push review fits its candidates against the capture budget; a
+        // standalone comparison only observes, so the budget is the one field
+        // that legitimately differs between the two.
+        let mut reviewed_threads = serde_json::to_value(&context.thread_comparison).unwrap();
+        let budget = reviewed_threads
+            .as_object_mut()
+            .and_then(|comparison| comparison.remove("capture_budget"))
+            .expect("a push review carries its capture budget");
         assert_eq!(
-            strip_volatile(serde_json::to_value(&context.thread_comparison).unwrap()),
+            budget["limit_bytes"],
+            serde_json::json!(provider_capture::MAX_CAPTURE_BYTES)
+        );
+        assert_eq!(budget["held_count"], serde_json::json!(0));
+        assert_eq!(
+            strip_volatile(reviewed_threads),
             strip_volatile(serde_json::to_value(Some(standalone_threads)).unwrap()),
         );
         assert!(context.thread_comparison_error.is_none());

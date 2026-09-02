@@ -15,6 +15,7 @@ import type {
 import Icon, { type IconName } from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import { formatDuration, formatFullDateTime } from "../../clock";
+import { formatBytes } from "../../format";
 import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { githubCommitUrl, openExternalUrl } from "./externalLink";
@@ -25,9 +26,9 @@ import { writeClipboardText } from "../sync-review/clipboard";
 import TopLayer from "../sync-review/TopLayer";
 import { useDebugPopoverPlacement } from "../sync-review/debugPopoverPlacement";
 import {
+  isCaptureBudgetHold,
   isPullReviewStatus,
-  isPushReviewDecision,
-  isPushReviewStatus,
+  isPushReviewRow,
 } from "../sync-review/pullReviewStatus";
 import { formatCompactNumber, formatSessionDetailTimestamp, type OpenSessionDetailRequest } from "./session-detail/sessionDetailModel";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
@@ -486,6 +487,15 @@ export function sessionSyncPresentation(
         ?? "Mallard could not safely match the local and stored session.",
     };
   }
+  /* A row this push (or pull) could not fit keeps its real status glyph — it
+     is still work that will go — and only the sentence changes. */
+  const waiting = decisionWithBlocker(["capture_budget"]);
+  if (waiting) {
+    return {
+      ...stateGlyph(entry.state),
+      label: syncHoldDetail(waiting.mode, entry) ?? "This session doesn't fit in this push.",
+    };
+  }
   const blocked = (mode: "push" | "pull"): ComparisonPresentation => ({
     status: "unavailable",
     className: "unavailable",
@@ -680,10 +690,14 @@ export function SessionMetrics({
   session,
   id,
   showTimestamp = true,
+  captureBytes = null,
 }: {
   session: ProjectSessionSummary;
   id?: string;
   showTimestamp?: boolean;
+  /** What a push of this session weighs; drawn in Push review only, where
+   *  the budget makes the number mean something. */
+  captureBytes?: number | null;
 }) {
   const durationText = formatDuration(session.started_at, session.ended_at);
   const durationLabel = durationText
@@ -705,6 +719,11 @@ export function SessionMetrics({
     {durationText && (
       <span className="sync-history-thread-metric sync-history-thread-duration" data-tooltip={durationLabel} aria-label={durationLabel} tabIndex={0}>
         <Icon name={session.is_active ? "activity" : "clock"} size={12} /><b>{durationText}</b>
+      </span>
+    )}
+    {captureBytes != null && (
+      <span className="sync-history-thread-metric" data-tooltip={`Push size · ${formatBytes(captureBytes)}`} aria-label={`Push size: ${formatBytes(captureBytes)}`} tabIndex={0}>
+        <Icon name="drive" size={12} /><b>{formatBytes(captureBytes)}</b>
       </span>
     )}
     {showTimestamp && <SessionTimestamp session={session} />}
@@ -765,6 +784,8 @@ interface SessionCardProps {
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
   onReviewPull?: () => void;
+  /** The push budget's limit, for the hold copy of rows that did not fit. */
+  captureLimitBytes?: number | null;
 }
 
 interface SessionDebugMenuProps {
@@ -1071,7 +1092,7 @@ function syncReviewStateLabel(
       case "create_local": return selected ? "Create local task" : "Not selected";
       case "report_local_only": return "Keep local";
       case "not_found": return "Not found";
-      case "blocked": return "Can't sync";
+      case "blocked": return decision.blocker === "capture_budget" ? `Not in this ${mode}` : "Can't sync";
     }
   }
   if (mode === "push") {
@@ -1093,7 +1114,26 @@ function syncReviewStateLabel(
  * user vocabulary only — sync verdicts never gate opening a session. Provider
  * naming comes from the entry, never from a hard-coded provider branch.
  */
-export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): string | null {
+/** The glyph a sync state wears when nothing blocks it. */
+function stateGlyph(state: ThreadSyncEntry["state"]): Pick<ComparisonPresentation, "status" | "className"> {
+  switch (state) {
+    case "synced": return { status: "synced", className: "synced" };
+    case "local_only":
+    case "local_ahead": return { status: "local-outstanding", className: "local" };
+    case "storage_only":
+    case "storage_ahead": return { status: "cloud-outstanding", className: "storage" };
+    case "diverged": return { status: "divergent", className: "diverged" };
+    case "unavailable": return { status: "unavailable", className: "unavailable" };
+    case "unknown":
+    default: return { status: "conflict", className: "conflict" };
+  }
+}
+
+export function syncHoldDetail(
+  mode: "push" | "pull",
+  entry: ThreadSyncEntry,
+  captureLimitBytes?: number | null,
+): string | null {
   const providerName = entry.provider_display_name ?? "the provider";
   if (entry.state === "unavailable") {
     return entry.status_detail ?? "Mallard could not safely read this session.";
@@ -1116,8 +1156,15 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
         return "This session's local mapping changed. Pull to establish the current mapping.";
       case "unknown_evidence":
         return "Can't sync — Mallard could not prove the local and stored session state safely.";
-      case "capture_budget":
-        return "Not in this round — the review's 512 MB capture budget filled before this session's turn. Push the selected sessions first, then open Push review again.";
+      case "capture_budget": {
+        // Nothing is remembered between pushes: the sentence says the push is
+        // full and to run another, never which round or how many remain.
+        const limit = captureLimitBytes != null ? `the ${formatBytes(captureLimitBytes)} limit` : "the limit";
+        const verb = mode === "push" ? "Push" : "Pull";
+        return `Doesn't fit in this ${mode} — ${limit} is full with newer sessions. ${verb} again after this one.`;
+      }
+      case "too_large":
+        return "Can't sync — this session is larger than one push carries.";
       default:
         return "Can't sync — this session can't be changed safely right now.";
     }
@@ -1159,12 +1206,16 @@ function SessionCard({
   session, occurrenceKey, workingDirectory, busy = false, busyActionId = null,
   onSessionAction, onOpenSessionDetail,
   syncEntry, reviewResourceId, storageName, syncFallback, selectionMode, selected = false, selectable = false,
-  selectionDisabled = false, onToggleResource, onReviewPull,
+  selectionDisabled = false, onToggleResource, onReviewPull, captureLimitBytes = null,
 }: SessionCardProps) {
   const fullTitle = session.title || "Untitled session";
   const visibleTitle = compactThreadTitle(fullTitle);
   const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, syncEntry, selected) : null;
-  const holdDetail = selectionMode && syncEntry ? syncHoldDetail(selectionMode, syncEntry) : null;
+  const holdDetail = selectionMode && syncEntry ? syncHoldDetail(selectionMode, syncEntry, captureLimitBytes) : null;
+  // The row this push (or pull) could not fit: in its place, unselectable,
+  // and saying so without a hover.
+  const waiting = selectionMode != null
+    && isCaptureBudgetHold(selectionMode === "push" ? syncEntry?.push_decision : syncEntry?.pull_decision);
   const syncBlockedPresentation: SessionSyncPresentation | null = session.sync_blocked_reason
     ? {
         status: "unavailable",
@@ -1245,6 +1296,9 @@ function SessionCard({
           ) : (
             <strong title={visibleTitle === fullTitle ? undefined : fullTitle}>{visibleTitle}</strong>
           )}
+          {waiting && (
+            <span className="sync-history-branch-state history-only" title={holdDetail ?? undefined}>Later</span>
+          )}
           {session.preserved && (
             <span
               className="sync-history-preserved-badge"
@@ -1324,7 +1378,11 @@ function SessionCard({
           stamp still closes the line so it forms one column down the list. */}
       <div className="sync-history-session-details">
         <div className="sync-history-session-summary">
-          <SessionMetrics session={session} showTimestamp={false} />
+          <SessionMetrics
+            session={session}
+            showTimestamp={false}
+            captureBytes={selectionMode === "push" ? syncEntry?.capture_bytes ?? null : null}
+          />
           <span className="sync-history-actions-divider" aria-hidden="true" />
           <div className="sync-history-row-clickables">
             <SessionDebugMenu
@@ -1362,6 +1420,7 @@ function SyncEntryCard({
   selectionDisabled = false,
   onToggleResource,
   onReviewPull,
+  captureLimitBytes = null,
 }: {
   entry: ThreadSyncEntry;
   storageName: string;
@@ -1371,6 +1430,7 @@ function SyncEntryCard({
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
   onReviewPull?: () => void;
+  captureLimitBytes?: number | null;
 }) {
   const fullTitle = entry.display_name.trim() && entry.display_name !== entry.thread_id
     ? entry.display_name
@@ -1381,7 +1441,9 @@ function SyncEntryCard({
   const identityLabel = `${title}, ${entry.provider_display_name} thread ${entry.thread_id}`;
   const updatedAt = entry.storage_updated_at ?? entry.local_updated_at;
   const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, entry, selected) : null;
-  const holdDetail = selectionMode ? syncHoldDetail(selectionMode, entry) : null;
+  const holdDetail = selectionMode ? syncHoldDetail(selectionMode, entry, captureLimitBytes) : null;
+  const waiting = selectionMode != null
+    && isCaptureBudgetHold(selectionMode === "push" ? entry.push_decision : entry.pull_decision);
   return (
     <article className={`sync-history-thread-card sync-history-stored-thread${selectionMode && selectable ? " sync-sync-selectable-row" : ""}${selected ? " selected" : ""}`}>
       <div className="sync-history-thread-topline">
@@ -1421,6 +1483,9 @@ function SyncEntryCard({
             <ProviderMark provider={entry.provider} displayName={entry.provider_display_name} />
           </span>
           <strong title={title === fullTitle ? undefined : fullTitle}>{title}</strong>
+          {waiting && (
+            <span className="sync-history-branch-state history-only" title={holdDetail ?? undefined}>Later</span>
+          )}
           {selectionMode === "pull" && pullOperationChip(entry) && (
             <span className="sync-history-branch-state history-only" title={holdDetail ?? reviewStateLabel ?? undefined}>
               {pullOperationChip(entry)}
@@ -1441,6 +1506,11 @@ function SyncEntryCard({
           takes all 36 characters whole. */}
       <span className="sync-history-stored-thread-meta">
         <span className="sync-history-stored-thread-id"><code>{entry.thread_id}</code></span>
+        {selectionMode === "push" && entry.capture_bytes != null && (
+          <span className="sync-history-thread-metric" data-tooltip={`Push size · ${formatBytes(entry.capture_bytes)}`} aria-label={`Push size: ${formatBytes(entry.capture_bytes)}`} tabIndex={0}>
+            <Icon name="drive" size={12} /><b>{formatBytes(entry.capture_bytes)}</b>
+          </span>
+        )}
         {updatedAt != null && (
           <time dateTime={new Date(updatedAt * 1_000).toISOString()}>{formatDate(updatedAt)}</time>
         )}
@@ -1542,7 +1612,7 @@ export function ProjectChatHistoryContent({
       const status = sessionSyncPresentation(entry, "storage").status;
       return selectionMode === "pull"
         ? isPullReviewStatus(status)
-        : isPushReviewStatus(status) && isPushReviewDecision(entry.push_decision);
+        : isPushReviewRow(status, entry.push_decision);
     });
   }, [allSessions, selectionMode, syncIndex]);
   const sessionsByResource = useMemo(
@@ -1589,22 +1659,21 @@ export function ProjectChatHistoryContent({
   const cloudSessions = sessions.filter((session) => session.source === "remote_only");
   const localSessions = sessions.filter((session) => session.source !== "remote_only");
   const compactSelectionReview = selectionMode != null;
-  const olderEntries = useMemo(() => {
+  /* Review rows the activity scan has no session row for. A review loads the
+     whole span at once, so this is only what no activity row can ever reach;
+     a review must still offer it or it would drop candidates silently. It
+     renders as plain rows at the foot of the same list — never a box. */
+  const unlistedEntries = useMemo(() => {
     if (!selectionMode) return [];
     return (comparison?.entries ?? []).filter((entry) => (
       (entry.local_present || entry.storage_present)
       && (selectionMode === "pull"
         ? isPullReviewStatus(sessionSyncPresentation(entry, "storage").status)
-        : isPushReviewStatus(sessionSyncPresentation(entry, "storage").status)
-          && isPushReviewDecision(entry.push_decision))
+        : isPushReviewRow(sessionSyncPresentation(entry, "storage").status, entry.push_decision))
       && !matchedSyncEntries.has(entry)
     ));
   }, [comparison?.entries, selectionMode, matchedSyncEntries]);
-  const olderDecisionOf = (entry: ThreadSyncEntry) => (
-    selectionMode === "pull" ? entry.pull_decision : entry.push_decision
-  );
-  const olderActionable = olderEntries.filter((entry) => olderDecisionOf(entry)?.selectable);
-  const olderInert = olderEntries.filter((entry) => !olderDecisionOf(entry)?.selectable);
+  const captureLimitBytes = comparison?.capture_budget?.limit_bytes ?? null;
   const hasBoundProvider = Object.keys(binding?.profile_ids ?? {}).length > 0;
   // Resolved once for the page: every row without a comparison entry draws this
   // instead of drawing nothing.
@@ -1659,7 +1728,7 @@ export function ProjectChatHistoryContent({
       selectionMode={selectionMode} selected={selectedResourceIds.has(reviewResourceId)}
       selectable={selectable}
       selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
-      onReviewPull={onReviewPull} />
+      onReviewPull={onReviewPull} captureLimitBytes={captureLimitBytes} />
     );
   };
   const orderedReferences = (references: { resource_id: string }[]) => references
@@ -1679,17 +1748,14 @@ export function ProjectChatHistoryContent({
       commit.session_refs.some((reference) => sessionsByResource.has(reference.resource_id))
     ));
   }, [activity?.git?.commits, selectionMode, sessionsByResource]);
+  // A review holds the whole span at once, so an empty one is truly empty.
   const selectionReviewEmpty = selectionMode != null
     && comparison != null
     && sessions.length === 0
-    && olderEntries.length === 0
-    && activity?.older == null
-    && !canShowLess;
+    && unlistedEntries.length === 0;
   const showGitTimeline = !selectionMode
     || uncommittedReferences.length > 0
-    || commits.length > 0
-    || activity?.older != null
-    || canShowLess;
+    || commits.length > 0;
   const toggleCommit = (sha: string) => {
     setCollapsedCommitShas((current) => {
       const next = new Set(current);
@@ -1982,11 +2048,12 @@ export function ProjectChatHistoryContent({
                   )}
                   </section>
                 )}
-                {/* The paging control ends the rail it pages. A review pages
-                    too, so an out-of-window thread arrives as a
-                    real row rather than as an entry in a fold. */}
-                <RailFoot older={activity.older ?? null} canShowLess={canShowLess} busy={loadingMore}
-                  railed onLoadMore={onLoadMore} onShowLess={onShowLess} />
+                {/* The paging control ends the rail it pages. A review never
+                    pages: it loaded the whole span, so the rail simply ends. */}
+                {!selectionMode && (
+                  <RailFoot older={activity.older ?? null} canShowLess={canShowLess} busy={loadingMore}
+                    railed onLoadMore={onLoadMore} onShowLess={onShowLess} />
+                )}
               </div>
             ) : null) : (
               <section>
@@ -2030,60 +2097,28 @@ export function ProjectChatHistoryContent({
                 )}
                 {/* Same control, no rail to hang it from: a project with no
                     repository draws no spine, so the node and its segment are
-                    suppressed and the row keeps the list's own left edge. */}
-                <RailFoot older={activity.older ?? null} canShowLess={canShowLess} busy={loadingMore}
-                  railed={false} onLoadMore={onLoadMore} onShowLess={onShowLess} />
+                    suppressed and the row keeps the list's own left edge. A
+                    review never pages. */}
+                {!selectionMode && (
+                  <RailFoot older={activity.older ?? null} canShowLess={canShowLess} busy={loadingMore}
+                    railed={false} onLoadMore={onLoadMore} onShowLess={onShowLess} />
+                )}
               </section>
             ))}
-            {/* The catcher, not the route. Paging reaches out-of-window
-                threads, so this stays out of the way while
-                anything is still loadable — a fold offering the same rows the
-                control above it fetches is two doors into one room.
-                It cannot simply be deleted: the comparison is not windowed and
-                the terminus only walks the session timeline, so an entry with
-                no session row in the activity scan at all is reachable by no
-                amount of paging. Once `older` is null everything loadable is
-                loaded, and whatever is still here is exactly that remainder —
-                which a review must offer or it would silently drop
-                candidates. */}
-            {!selectionReviewEmpty && selectionMode && !activity.older && olderEntries.length > 0 && (
-              <section className="sync-history-older" aria-label="Older activity">
-                <details className="sync-history-older-group">
-                  <summary>
-                    <span className="sync-history-older-title">Older activity</span>
-                    <span
-                      className="sync-history-heading-count"
-                      title={`${olderEntries.length} session${olderEntries.length === 1 ? "" : "s"} outside this 30-day window`}
-                    >
-                      <Icon name="message" size={12} />{olderEntries.length}
-                    </span>
-                  </summary>
-                  <div className="sync-history-thread-list flat">
-                    {olderActionable.map((entry) => (
-                      <SyncEntryCard key={`older:${entry.resource_id}`} entry={entry} storageName={comparisonStorageName}
-                        selectionMode={selectionMode} selected={selectedResourceIds.has(entry.resource_id)}
-                        selectable={entry.access === "bound_ready" && (selectableResourceIds?.has(entry.resource_id) ?? true)}
-                        selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
-                        onReviewPull={onReviewPull} />
-                    ))}
-                    {olderInert.length > 0 && (
-                      <details className="sync-history-older-inert">
-                        <summary>
-                          {olderInert.length === 1
-                            ? "1 session needs no changes or can't sync"
-                            : `${olderInert.length} sessions need no changes or can't sync`}
-                        </summary>
-                        <div className="sync-history-thread-list flat">
-                          {olderInert.map((entry) => (
-                            <SyncEntryCard key={`older:${entry.resource_id}`} entry={entry} storageName={comparisonStorageName}
-                              selectionMode={selectionMode} onReviewPull={onReviewPull} />
-                          ))}
-                        </div>
-                      </details>
-                    )}
-                  </div>
-                </details>
-              </section>
+            {/* Review rows no activity row reaches, as plain rows at the foot
+                of the same list. The review loaded the whole span, so nothing
+                here is "older": it is what the comparison knows and the
+                activity scan does not, offered rather than silently dropped. */}
+            {!selectionReviewEmpty && selectionMode && unlistedEntries.length > 0 && (
+              <div className="sync-history-thread-list flat" aria-label="Sessions without an activity row">
+                {unlistedEntries.map((entry) => (
+                  <SyncEntryCard key={`unlisted:${entry.resource_id}`} entry={entry} storageName={comparisonStorageName}
+                    selectionMode={selectionMode} selected={selectedResourceIds.has(entry.resource_id)}
+                    selectable={entry.access === "bound_ready" && (selectableResourceIds?.has(entry.resource_id) ?? true)}
+                    selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
+                    onReviewPull={onReviewPull} captureLimitBytes={captureLimitBytes} />
+                ))}
+              </div>
             )}
           </>
         )}
@@ -2091,6 +2126,23 @@ export function ProjectChatHistoryContent({
   );
 
   return <div className={`sync-history-page sync-history-embedded${compactSelectionReview ? " sync-history-selection-review" : ""}`}>{content}</div>;
+}
+
+/** How far back a review asks the activity to reach. A review shows every
+ *  outstanding session at once, so it asks for the whole span back to the
+ *  oldest one the comparison knows, plus a day of slack, instead of a 30-day
+ *  page; with no comparison to measure by it asks for ten years. Never less
+ *  than the standing page, so a young project reads the same either way. */
+export function reviewWindowDays(
+  comparison: ThreadSyncComparison | null | undefined,
+  nowSeconds = Date.now() / 1_000,
+): number {
+  const oldest = (comparison?.entries ?? [])
+    .map((entry) => entry.local_updated_at ?? entry.storage_updated_at ?? null)
+    .filter((value): value is number => value != null)
+    .reduce<number | null>((min, value) => (min == null || value < min ? value : min), null);
+  if (oldest == null) return 3_650;
+  return Math.max(30, Math.ceil((nowSeconds - oldest) / 86_400) + 1);
 }
 
 function mergePages(previous: ProjectActivity | null, next: ProjectActivity): ProjectActivity {
@@ -2173,7 +2225,7 @@ export default function ProjectActivityPage({
         activeStorageId,
         requestedBranch,
         beforeTime,
-        30,
+        selectionMode ? reviewWindowDays(comparisonOverride) : 30,
       );
       if (requestId !== requestRef.current) return false;
       setPages((current) => beforeTime ? [...current, next] : [next]);

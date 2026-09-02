@@ -2545,6 +2545,7 @@ mod activity_only_tests {
             source_path: transcript.clone(),
             source_mtime: modified_secs(&transcript_metadata),
             source_size: transcript_metadata.len(),
+            capture_bytes: transcript_metadata.len(),
         }];
         let rows =
             scan_local_session_views(&repository, &registry, &resolved, &views, &mut warnings)
