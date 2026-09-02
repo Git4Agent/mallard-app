@@ -40,6 +40,8 @@ interface Props {
   projectDefaults: Set<string>;
   busy: boolean;
   error: string | null;
+  /* The backend opened the review without a conversation comparison. */
+  threadComparisonError?: string | null;
   project?: LocalProjectSummary;
   binding?: ProjectBinding | null;
   storageId?: string | null;
@@ -377,6 +379,7 @@ export default function PushResourceWorkspace({
   projectDefaults,
   busy,
   error,
+  threadComparisonError = null,
   project,
   binding = null,
   storageId = null,
@@ -554,6 +557,37 @@ export default function PushResourceWorkspace({
       action: onPull
         ? (
           <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>Open Pull review</button>
+        )
+        : undefined,
+    });
+  }
+  /* Candidates the review could not afford to capture stay visible and
+     unselectable; the count says how many wait for the next round so the
+     0/N readout has a reason next to it. */
+  const capturePendingCount = (threadComparison?.entries ?? [])
+    .filter((entry) => entry.push_decision?.blocker === "capture_budget")
+    .length;
+  if (capturePendingCount > 0) {
+    banners.push({
+      key: "capture-budget",
+      severity: "warning",
+      title: `${capturePendingCount} conversation${capturePendingCount === 1 ? "" : "s"} wait for the next round`,
+      message: "This review's 512 MB capture budget filled before their turn. Push the selected conversations first, then open Push review again.",
+    });
+  }
+  /* No comparison means no row can be selected: every session shows its
+     fallback status and the counts read 0/0. That is a broken review, not an
+     empty one, so it says why at the top and offers the repair that clears
+     stale sync metadata — the usual cause after a storage reset. */
+  if (threadComparisonError) {
+    banners.push({
+      key: "comparison-failed",
+      severity: "danger",
+      title: "Conversations couldn't be compared, so nothing can be selected",
+      message: threadComparisonError,
+      action: onResetMetadata
+        ? (
+          <button type="button" className="btn btn-ghost" onClick={onResetMetadata} disabled={busy}>Reset local sync state</button>
         )
         : undefined,
     });

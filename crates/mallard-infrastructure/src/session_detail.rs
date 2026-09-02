@@ -1321,8 +1321,8 @@ fn timeline_warnings(
     warnings
 }
 
-fn ensure_response_bound<T: Serialize>(value: T, max_bytes: usize) -> SessionDetailResult<T> {
-    let encoded = serde_json::to_vec(&value).map_err(|_| {
+fn encode_response_bound<T: Serialize>(value: &T, max_bytes: usize) -> SessionDetailResult<String> {
+    let encoded = serde_json::to_string(value).map_err(|_| {
         SessionDetailError::new(
             SessionDetailErrorCode::ProviderError,
             "Mallard could not encode the normalized session response.",
@@ -1334,7 +1334,28 @@ fn ensure_response_bound<T: Serialize>(value: T, max_bytes: usize) -> SessionDet
             "The normalized session response exceeded Mallard's safety limit.",
         ));
     }
-    Ok(value)
+    Ok(encoded)
+}
+
+/// Encode the exact JSON payload that the session-detail IPC command returns.
+pub fn encode_project_session_detail_response(
+    value: &ProjectSessionDetail,
+) -> SessionDetailResult<String> {
+    encode_response_bound(value, MAX_SESSION_DETAIL_RESPONSE_BYTES)
+}
+
+/// Encode the exact JSON payload that the timeline-page IPC command returns.
+pub fn encode_project_session_timeline_page_response(
+    value: &ProjectSessionTimelinePage,
+) -> SessionDetailResult<String> {
+    encode_response_bound(value, MAX_TIMELINE_PAGE_RESPONSE_BYTES)
+}
+
+/// Encode the exact JSON payload that the event-detail IPC command returns.
+pub fn encode_session_event_detail_response(
+    value: &SessionEventDetail,
+) -> SessionDetailResult<String> {
+    encode_response_bound(value, MAX_EVENT_DETAIL_RESPONSE_BYTES)
 }
 
 fn summarize_session(
@@ -1628,7 +1649,7 @@ pub fn get_project_session_detail(
         snapshot_id,
         warnings,
     };
-    ensure_response_bound(detail, MAX_SESSION_DETAIL_RESPONSE_BYTES)
+    Ok(detail)
 }
 
 /// Read one filtered, chronological page. The opaque cursor is bound to the
@@ -1751,7 +1772,7 @@ pub fn get_project_session_timeline_page(
         next_cursor,
         warnings,
     };
-    ensure_response_bound(page, MAX_TIMELINE_PAGE_RESPONSE_BYTES)
+    Ok(page)
 }
 
 fn truncate_to_bytes(value: &mut Option<String>, limit: usize, truncated: &mut bool) {
@@ -1843,7 +1864,7 @@ pub fn get_project_session_event_detail(
         result_budget,
         &mut detail.result_truncated,
     );
-    ensure_response_bound(detail, MAX_EVENT_DETAIL_RESPONSE_BYTES)
+    Ok(detail)
 }
 
 #[cfg(test)]
@@ -1857,6 +1878,22 @@ mod tests {
         BundleRecipe, LocalProjectRegistration, LocalProviderProfileId, ProjectBinding,
         ProviderProfile, ReplicaId,
     };
+
+    #[test]
+    fn bounded_response_returns_the_measured_json() {
+        let value = vec!["quoted \"value\"", "line\nbreak"];
+        let expected = serde_json::to_string(&value).unwrap();
+        assert_eq!(
+            encode_response_bound(&value, expected.len()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            encode_response_bound(&value, expected.len() - 1)
+                .unwrap_err()
+                .code,
+            SessionDetailErrorCode::ResponseTooLarge
+        );
+    }
 
     fn counts() -> SessionEventCounts {
         SessionEventCounts {

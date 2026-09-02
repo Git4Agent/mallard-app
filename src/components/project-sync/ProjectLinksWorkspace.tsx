@@ -2322,7 +2322,11 @@ export default function ProjectLinksWorkspace({
                 ? "Everything you've added is already linked"
                 : undefined,
               onSelect: () => {
-                setLinkingProjectId(workspaceProject.local_project_id);
+                setLinkingProjectId((current) => (
+                  current === workspaceProject.local_project_id
+                    ? null
+                    : workspaceProject.local_project_id
+                ));
               },
             },
             {
@@ -3239,8 +3243,20 @@ export default function ProjectLinksWorkspace({
                         id={`storage-link-picker-${project.local_project_id}`}
                         className="project-storage-card-footer"
                       >
-                        <div className="storage-link-picker">
+                        <div className="storage-link-picker-heading">
                           <span>Choose a storage destination</span>
+                          <button
+                            type="button"
+                            className="sync-history-icon-action"
+                            disabled={busy}
+                            title="Cancel linking storage"
+                            aria-label="Cancel linking storage"
+                            onClick={() => setLinkingProjectId(null)}
+                          >
+                            <Icon name="x" size={13} />
+                          </button>
+                        </div>
+                        <div className="storage-link-picker">
                           {availableStorages.map((storage) => (
                             <button
                               key={storage.id}

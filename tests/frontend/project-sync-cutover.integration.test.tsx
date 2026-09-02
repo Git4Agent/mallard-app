@@ -11,6 +11,8 @@ import { expandHomePath } from "../../src/profilePath";
 import { PROJECT_SYNC_SCHEMA } from "../../src/types";
 import {
   MIN_PANE_HEIGHT,
+  SECTION_DIVIDER_NET,
+  SECTION_DIVIDERS_HEIGHT,
   sectionGridRows,
   shareDragged,
   storageHeightRange,
@@ -108,14 +110,14 @@ test("the desktop shell supports a persistent sidebar toggle and keyboard shortc
   assert.match(icons, /\| "sidebar-expand"/);
   assert.match(css, /\.sync-app\.sidebar-hidden \.sync-sidebar/);
   assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar/);
-  assert.match(css, /\.sync-sidebar-toggle \{[^}]*top: 14px;[^}]*left: 86px;/);
-  assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar \{[^}]*padding-left: 140px;/);
-  assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar::before \{[^}]*left: 123px;/);
+  assert.match(css, /\.sync-sidebar-toggle \{[^}]*top: 20px;[^}]*left: 92px;/);
+  assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar \{[^}]*padding-left: 146px;/);
+  assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar::before \{[^}]*left: 129px;/);
   assert.match(css, /\.sync-titlebar \{[^}]*flex: 0 0 auto;/);
   assert.match(css, /\.sync-titlebar \{[^}]*min-height: 3\.25rem;/);
   assert.match(css, /\.sync-sidebar-drag\s*\{[^}]*height: 42px;/s);
   assert.match(css, /\.sync-sidebar-brand\s*\{[^}]*height: 56px;/s);
-  assert.deepEqual(tauriConfig.app.windows[0].trafficLightPosition, { x: 20, y: 29 });
+  assert.deepEqual(tauriConfig.app.windows[0].trafficLightPosition, { x: 26, y: 35 });
 });
 
 // The sidebar's width is --sync-sidebar-width, owned by the drag handle, so
@@ -231,7 +233,7 @@ test("App imports one complete global stylesheet", () => {
 
   assert.deepEqual(imports, ["./App.css"]);
   assert.doesNotMatch(css, /@import|@layer/);
-  assert.match(css, /@font-face\s*\{[\s\S]*font-family: "Departure Mono"/);
+  assert.match(css, /@font-face\s*\{[\s\S]*font-family: "Baloo 2"/);
 });
 
 test("the shell notice reports its own tone from the shared severity ladder", () => {
@@ -517,15 +519,16 @@ test("path bar menus keep one home per scope", () => {
   assert.match(workspace, /label: `Unlink from \$\{projectLabel\(workspaceProject\)\}…`/);
   assert.match(workspace, /icon: "link-off" as const/);
   assert.match(workspace, /disabledReason: workspaceAvailableStorages\.length === 0/);
+  assert.match(workspace, /current === workspaceProject\.local_project_id\s*\? null\s*: workspaceProject\.local_project_id/);
+  assert.match(workspace, /className="storage-link-picker-heading"[\s\S]*aria-label="Cancel linking storage"[\s\S]*onClick=\{\(\) => setLinkingProjectId\(null\)\}/);
   assert.doesNotMatch(workspace, /checked: storage\.id === workspaceStorage\.id/);
   assert.doesNotMatch(workspace, /label: "Unlink storage"/);
 
-  // The workspace ⋯ holds app scope alone: the way into Settings and the full
-  // reload. The theme checked-item moved onto the Settings page's Appearance
-  // row — the menu holds commands, not state.
+  // The workspace ⋯ holds app scope alone: Settings, the theme switch, and
+  // the full reload. The checked item exposes the current theme state.
   assert.match(workspace, /const pathOverflow: PathBarMenuGroup\[\] = workspaceProject \? appActions : \[\];/);
   assert.match(sync, /label: "Settings",\s*icon: "settings" as const,\s*onSelect: openSettings,/);
-  assert.doesNotMatch(sync, /label: "Dark theme"/);
+  assert.match(sync, /label: "Dark theme",\s*icon: "moon" as const,\s*checked: theme === "dark",/);
 
   // The bar renders no radio items anywhere, and inert rows stay focusable.
   assert.doesNotMatch(bar, /menuitemradio/);
@@ -567,7 +570,7 @@ test("refocus reconciles external changes narrowly and the full reload lives in 
 test("every sidebar handle moves its own gutter and no other", () => {
   const BOX = 700;
   const STORAGE = 175;
-  const elastic = BOX - 6 - STORAGE;
+  const elastic = BOX - SECTION_DIVIDERS_HEIGHT - STORAGE;
   const projects = 210;
   const catalog = elastic - projects;
 
@@ -575,7 +578,7 @@ test("every sidebar handle moves its own gutter and no other", () => {
   // out of it unchanged — Projects, the pane it borders, absorbs the whole move.
   const shrunkBox = BOX - 60;
   const heldShare = shareHoldingCatalog(catalog, shrunkBox, STORAGE);
-  const shrunkElastic = shrunkBox - 6 - STORAGE;
+  const shrunkElastic = shrunkBox - SECTION_DIVIDERS_HEIGHT - STORAGE;
   assert.ok(Math.abs((1 - heldShare) * shrunkElastic - catalog) < 0.5, "Catalog holds its pixels");
   assert.ok(Math.abs(heldShare * shrunkElastic - (projects - 60)) < 0.5, "Projects absorbs the change");
 
@@ -583,7 +586,7 @@ test("every sidebar handle moves its own gutter and no other", () => {
   // the pane that must not move.
   const grown = STORAGE + 40;
   const share = shareHolding(projects, BOX, grown);
-  const grownElastic = BOX - 6 - grown;
+  const grownElastic = BOX - SECTION_DIVIDERS_HEIGHT - grown;
   assert.ok(Math.abs(share * grownElastic - projects) < 0.5, "Projects holds its pixels");
   assert.ok(Math.abs((1 - share) * grownElastic - (catalog - 40)) < 0.5, "Catalog absorbs the change");
 });
@@ -591,7 +594,7 @@ test("every sidebar handle moves its own gutter and no other", () => {
 test("the Storages pane floors at the same height as the panes above it", () => {
   const [min, max] = storageHeightRange(700, 210);
   assert.equal(min, MIN_PANE_HEIGHT);
-  assert.equal(max, 700 - 6 - 210 - MIN_PANE_HEIGHT);
+  assert.equal(max, 700 - SECTION_DIVIDERS_HEIGHT - 210 - MIN_PANE_HEIGHT);
 });
 
 /* The share drag is relative to the grab point on the elastic scale. Mapped
@@ -616,28 +619,28 @@ test("collapsed sections drop to their headings and leave the split intact", () 
   // two share-sized rows and a content-sized Storages row, or its pin.
   assert.equal(
     sectionGridRows(0.56, null, open),
-    `minmax(96px, ${0.56 * 100}fr) 3px minmax(96px, ${100 - 0.56 * 100}fr) 3px fit-content(40%)`,
+    `minmax(96px, ${0.56 * 100}fr) ${SECTION_DIVIDER_NET}px minmax(96px, ${100 - 0.56 * 100}fr) ${SECTION_DIVIDER_NET}px fit-content(40%)`,
   );
   assert.equal(
     sectionGridRows(0.56, 210, open),
-    `minmax(96px, ${0.56 * 100}fr) 3px minmax(96px, ${100 - 0.56 * 100}fr) 3px 210px`,
+    `minmax(96px, ${0.56 * 100}fr) ${SECTION_DIVIDER_NET}px minmax(96px, ${100 - 0.56 * 100}fr) ${SECTION_DIVIDER_NET}px 210px`,
   );
   // A collapsed row is min-content — the heading — never the 96px list floor,
   // and the share and pin ride through untouched so reopening restores the
   // exact prior split.
   assert.equal(
     sectionGridRows(0.56, 210, new Set<SectionId>(["catalog"])),
-    `minmax(96px, ${0.56 * 100}fr) 3px min-content 3px 210px`,
+    `minmax(96px, ${0.56 * 100}fr) ${SECTION_DIVIDER_NET}px min-content ${SECTION_DIVIDER_NET}px 210px`,
   );
   // With both share-sized panes closed the Storages row inherits the elastic
   // factor over its own pin: the leftover space always belongs to someone.
   assert.equal(
     sectionGridRows(0.56, 210, new Set<SectionId>(["projects", "catalog"])),
-    "min-content 3px min-content 3px minmax(96px, 1fr)",
+    `min-content ${SECTION_DIVIDER_NET}px min-content ${SECTION_DIVIDER_NET}px minmax(96px, 1fr)`,
   );
   assert.equal(
     sectionGridRows(0.56, null, new Set<SectionId>(["projects", "catalog", "storages"])),
-    "min-content 3px min-content 3px min-content",
+    `min-content ${SECTION_DIVIDER_NET}px min-content ${SECTION_DIVIDER_NET}px min-content`,
   );
 });
 

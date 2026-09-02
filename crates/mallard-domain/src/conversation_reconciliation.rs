@@ -280,6 +280,10 @@ fn blocked_reason(blocker: ConversationBlocker) -> &'static str {
             "This conversation's stored path encoding does not match this app version. \
              Update Mallard everywhere before syncing it."
         }
+        ConversationBlocker::CaptureBudget => {
+            "This Push review's capture budget was full before this conversation's turn. \
+             Push the selected conversations first, then open Push review again."
+        }
     }
 }
 

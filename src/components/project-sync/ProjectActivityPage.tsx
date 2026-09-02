@@ -1116,6 +1116,8 @@ export function syncHoldDetail(mode: "push" | "pull", entry: ThreadSyncEntry): s
         return "This session's local mapping changed. Pull to establish the current mapping.";
       case "unknown_evidence":
         return "Can't sync — Mallard could not prove the local and stored session state safely.";
+      case "capture_budget":
+        return "Not in this round — the review's 512 MB capture budget filled before this session's turn. Push the selected sessions first, then open Push review again.";
       default:
         return "Can't sync — this session can't be changed safely right now.";
     }

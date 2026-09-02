@@ -1,0 +1,1618 @@
+<!doctype html>
+<html lang="en" data-style="a" data-type="round">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mallard × codex-resets — retheme specimen</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* ══════════════════════════════════════════════════════════════════
+   Mallard retheme specimen — the SHIPPED shell, one to one:
+   floating tiles on a gutter (brand+nav tile, PROJECTS/CATALOG/
+   STORAGES section tiles, footer tile), main tile with its own
+   path bar (storage crumbs · branch chip · refresh/Pull/Push/⋯),
+   traffic lights on the gutter. Content: Git-history commit boxes,
+   Library, Session detail — all shipped layouts.
+   Styles (layouts never change):
+     A · Box + type   ONLY the new card grammar + Baloo display face;
+                      every control keeps today's quiet styling
+     B · Cardboard    full codex-resets grammar (pills, accent CTA)
+     C · +Colour      B plus pastel tiles
+   Self-contained; not part of the app bundle.
+   ══════════════════════════════════════════════════════════════════ */
+
+@font-face {
+  font-family: "Departure Mono";
+  src: url("/fonts/DepartureMono-Regular.woff2") format("woff2"),
+       url("public/fonts/DepartureMono-Regular.woff2") format("woff2");
+  font-display: swap;
+}
+
+:root {
+  --font-display: "Baloo 2", "Arial Rounded MT Bold", system-ui, sans-serif;
+  --font-body: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-pixel: "Departure Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-mono-smooth: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  /* the label/meta voice; the Type switcher swaps it */
+  --font-micro: var(--font-pixel);
+
+  --radius: 14px;
+
+  --sun:   oklch(75% .135 82);
+  --rose:  oklch(70% .12 355);
+  --sky:   oklch(71% .095 232);
+  --peach: oklch(78% .12 48);
+  --mint:  oklch(72% .11 145);
+  --accent:oklch(67% .2 38);
+  --accent-hover: oklch(62% .2 38);
+  --on-sun:   oklch(22% .04 82);
+  --on-peach: oklch(24% .05 48);
+  --on-sky:   oklch(20% .03 235);
+  --on-mint:  oklch(20% .04 145);
+  --on-accent:oklch(20% .03 38);
+}
+
+:root, :root[data-theme="dark"] {
+  --desk: oklch(10% .008 70);
+  --gutter: oklch(14% .01 70);
+  --paper:  oklch(18% .012 70);
+  --card:   oklch(24% .014 70);
+  --card-2: oklch(28% .016 70);
+  --ink:    oklch(93% .025 80);
+  --ink-2:  oklch(76% .025 75);
+  --ink-3:  oklch(66% .024 72);
+  --shadow-ink: oklch(8% .005 70);
+  --dot-ink: rgba(246, 232, 207, .08);
+  --hairline: oklch(35% .022 75);
+  --status-local: var(--sun);
+  --status-synced: var(--mint);
+  --status-cloud: var(--sky);
+  /* today's shipped tokens, for style A (everything-but-boxes original) */
+  --o-button-bg: #181512;
+  --o-button-hover: #27221d;
+  --o-button-border: #6f6459;
+  --o-primary: #ad805a;
+  --o-primary-hover: #c1966f;
+  --o-primary-text: #161210;
+  --o-status-synced: #31ae6b;
+  --o-status-local: #e2c08d;
+  --o-status-cloud: #69c6f4;
+  --o-chip: rgba(255, 238, 217, .08);
+  --o-active: rgba(255, 238, 217, .11);
+}
+
+:root[data-theme="light"] {
+  --desk: oklch(84% .025 80);
+  --gutter: oklch(90% .02 80);
+  --paper:  oklch(97% .015 85);
+  --card:   oklch(98% .012 85);
+  --card-2: oklch(93% .02 80);
+  --ink:    oklch(25% .025 70);
+  --ink-2:  oklch(42% .025 72);
+  --ink-3:  oklch(52% .024 72);
+  --shadow-ink: oklch(38% .035 70);
+  --dot-ink: rgba(82, 58, 43, .13);
+  --hairline: oklch(87% .018 80);
+  --status-local: oklch(62% .13 82);
+  --status-synced: oklch(55% .12 148);
+  --status-cloud: oklch(55% .1 232);
+  --o-button-bg: #fdf8f1;
+  --o-button-hover: #f5eadf;
+  --o-button-border: #9d8b7f;
+  --o-primary: #8a6347;
+  --o-primary-hover: #7d5940;
+  --o-primary-text: #fffaf4;
+  --o-status-synced: #006b32;
+  --o-status-local: #895503;
+  --o-status-cloud: #256c90;
+  --o-chip: rgba(82, 58, 43, .065);
+  --o-active: #f0e3d5;
+}
+
+/* grammar knobs the style switcher turns; default shade is light,
+   B/C keep the reference's louder offsets */
+:root {
+  --line: var(--ink);
+  --bw: 2px;
+  --sh-sm: 1px 1px 0 var(--shadow-ink);
+  --sh:    2px 2px 0 var(--shadow-ink);
+  --sh-lg: 3px 3px 0 var(--shadow-ink);
+  --sh-frame: none;
+  --texture: radial-gradient(var(--dot-ink) 1.5px, transparent 1.5px);
+}
+:root[data-style="b"], :root[data-style="c"] {
+  --sh-sm: 2px 2px 0 var(--shadow-ink);
+  --sh:    4px 4px 0 var(--shadow-ink);
+  --sh-lg: 6px 6px 0 var(--shadow-ink);
+  --sh-frame: 8px 8px 0 var(--shadow-ink);
+}
+:root:where(:not([data-style="b"]):not([data-style="c"])) { --texture: none; }
+/* type variants */
+:root[data-type="mono"]  { --font-micro: var(--font-mono-smooth); }
+:root[data-type="round"] { --font-micro: var(--font-display); }
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--desk);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.5;
+  padding: 24px 20px 80px;
+}
+/* the OS window: gutter-coloured frame the tiles float inside */
+.appframe {
+  max-width: 1272px;
+  margin: 0 auto;
+  background: var(--gutter);
+  border: var(--bw) solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--sh-frame);
+  padding: 12px;
+  overflow: hidden;
+}
+
+/* ── specimen chrome (not part of the app) ─────────────────────── */
+.spec-bar {
+  max-width: 1240px;
+  margin: 0 auto 18px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.spec-title {
+  font-family: var(--font-micro);
+  font-size: 12px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-right: auto;
+}
+.spec-btn {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  background: var(--card);
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  padding: 6px 14px;
+  cursor: pointer;
+  box-shadow: 3px 3px 0 var(--shadow-ink);
+}
+.spec-btn:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--shadow-ink); }
+.spec-btn[aria-pressed="true"] { background: var(--sun); color: var(--on-sun); }
+.spec-gap { width: 10px; }
+
+/* ── the shell: floating tiles on the gutter ───────────────────── */
+.shell {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+  height: clamp(640px, calc(100vh - 170px), 960px);
+}
+.side-col {
+  width: 264px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+/* tiles absorb overflow themselves; the column never scrolls */
+.side-col > .tile { flex-shrink: 0; }
+.side-col > .sect-tile { flex-shrink: 1; min-height: 56px; overflow-y: auto; }
+.sect-tile.grow { flex: 1; min-height: 110px; }
+.side-col > .foot-tile { margin-top: auto; }
+
+/* scrollbars follow the active design: 6px like the app, but the
+   thumb tone/radius comes from the style's own grammar */
+:root {
+  --scroll-radius: 999px;
+  --scroll-thumb: color-mix(in oklab, var(--ink) 35%, transparent);
+  --scroll-thumb-hover: color-mix(in oklab, var(--ink) 52%, transparent);
+}
+:root[data-style="b"], :root[data-style="c"] {
+  --scroll-radius: 999px;
+  --scroll-thumb: var(--ink);
+  --scroll-thumb-hover: var(--ink-2);
+}
+:root[data-style="e"] {
+  --scroll-radius: 999px;
+  --scroll-thumb: color-mix(in oklab, var(--ink) 24%, transparent);
+  --scroll-thumb-hover: color-mix(in oklab, var(--ink) 40%, transparent);
+}
+:root[data-style="f"] { --scroll-radius: 0; }
+::-webkit-scrollbar { width: 6px; height: 6px; background: transparent; }
+::-webkit-scrollbar-track { background: transparent; box-shadow: none; margin: 10px 0; }
+::-webkit-scrollbar-track-piece { background: transparent; }
+::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  min-width: 28px;
+  border: 0;
+  border-radius: var(--scroll-radius);
+  background: var(--scroll-thumb);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* drag regions, as shipped: the traffic strip and the bar's empty
+   space move the window; controls stay interactive above them */
+[data-tauri-drag-region] { -webkit-app-region: drag; }
+.pathbar .bar-tail, .pathbar .branch-chip, .pathbar .crumb,
+.traffic-row .collapse-glyph { -webkit-app-region: no-drag; }
+.tile {
+  background: var(--paper);
+  border: var(--bw) solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--sh);
+  overflow: hidden;
+}
+
+.traffic-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 6px 14px;
+}
+.traffic { display: flex; gap: 7px; }
+.traffic span { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--shadow-ink); }
+.traffic span:nth-child(1) { background: var(--accent); }
+.traffic span:nth-child(2) { background: var(--sun); }
+.traffic span:nth-child(3) { background: var(--mint); }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .traffic span { border: 0; }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .traffic span:nth-child(1) { background: #ff5f57; }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .traffic span:nth-child(2) { background: #febc2e; }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .traffic span:nth-child(3) { background: #28c840; }
+.collapse-glyph { margin-left: 8px; color: var(--ink-3); display: inline-flex; cursor: pointer; }
+.collapse-glyph:hover { color: var(--ink); }
+
+/* brand + primary nav tile */
+.brand-tile { padding: 14px 12px 10px; }
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 2px 8px 16px;
+  color: var(--ink);
+}
+.brand svg { width: 36px; height: 36px; }
+.brand b { font-family: var(--font-micro); font-size: 26px; font-weight: 400; letter-spacing: .02em; }
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--font-micro);
+  font-size: 14.5px;
+  letter-spacing: .03em;
+  color: var(--ink-2);
+  padding: 10px 13px;
+  border: 1.5px solid transparent;
+  border-radius: 12px;
+  cursor: pointer;
+}
+.nav-badge {
+  margin-left: auto;
+  font-family: var(--font-micro);
+  font-size: 11px;
+  color: var(--ink-2);
+  background: var(--paper);
+  border: 1.5px solid var(--hairline);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.nav-item svg { width: 16px; height: 16px; }
+.nav-item:hover { color: var(--ink); background: var(--card); }
+.nav-item.on { color: var(--ink); background: var(--o-active); border-color: var(--line); box-shadow: var(--sh); }
+[data-style="b"] .nav-item.on, [data-style="c"] .nav-item.on { background: var(--card); box-shadow: var(--sh-sm); }
+
+/* section tiles; the head pins while the list scrolls under it,
+   as shipped */
+.sect-tile { padding: 0 12px 12px; }
+.sect-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: inherit;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 4px 8px;
+}
+.sect-head .chev { display: inline-flex; color: var(--ink-3); cursor: pointer; }
+.sect-head .chev svg { width: 12px; height: 12px; }
+.sect-head .label {
+  font-family: var(--font-micro);
+  font-size: 11px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+.sect-add {
+  margin-left: auto;
+  width: 22px; height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-2);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--sh);
+  cursor: pointer;
+}
+.sect-add:hover { color: var(--ink); background: var(--card); }
+.sect-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13.5px;
+  color: var(--ink-2);
+  padding: 7px 10px;
+  border: 1.5px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  min-width: 0;
+}
+.sect-item .si-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sect-item svg { width: 15px; height: 15px; flex-shrink: 0; }
+.sect-item:hover { color: var(--ink); background: var(--card); }
+.sect-item.on { color: var(--ink); background: var(--o-active); border-color: var(--line); box-shadow: var(--sh); }
+[data-style="b"] .sect-item.on, [data-style="c"] .sect-item.on { background: var(--card); box-shadow: var(--sh-sm); }
+.sect-item .trash { color: var(--ink-3); display: inline-flex; }
+.sect-item .trash:hover { color: var(--ink); }
+.sect-item .trash svg { width: 13px; height: 13px; }
+
+.foot-tile {
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--ink-2);
+  font-family: var(--font-micro);
+  font-size: 12px;
+  letter-spacing: .04em;
+}
+.foot-tile svg { width: 18px; height: 18px; }
+
+/* ── main column: the bar and the content are separate tiles
+   floating on the gutter, as shipped ───────────────────────────── */
+.main-col {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.pathbar {
+  height: 52px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 14px;
+  background: var(--paper);
+}
+.pathbar[hidden] { display: none; }
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-micro);
+  font-size: 13px;
+  letter-spacing: .02em;
+  color: var(--ink-2);
+  min-width: 0;
+}
+.crumb { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; }
+.crumb:hover { color: var(--ink); }
+.crumb svg { width: 14px; height: 14px; }
+.crumb .dd { width: 10px; height: 10px; color: var(--ink-3); }
+.crumbs .sep { color: var(--ink-3); }
+.crumb.leaf { color: var(--ink); cursor: default; }
+.crumb.leaf .leafdot { width: 8px; height: 8px; border-radius: 50%; background: var(--o-status-synced); }
+
+.branch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-micro);
+  font-size: 12px;
+  color: var(--ink);
+  background: var(--o-chip);
+  border: var(--bw) solid var(--line);
+  border-radius: 999px;
+  box-shadow: var(--sh);
+  padding: 3px 11px;
+  cursor: pointer;
+}
+.branch-chip svg { width: 12px; height: 12px; color: var(--ink-2); }
+[data-style="b"] .branch-chip, [data-style="c"] .branch-chip { background: var(--card); }
+
+.bar-tail { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+.icon-btn {
+  width: 30px; height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-2);
+  background: transparent;
+  border: 1.5px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.icon-btn svg { width: 15px; height: 15px; }
+.icon-btn:hover { color: var(--ink); background: var(--card); }
+
+.content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 20px 26px;
+  background: var(--paper);
+}
+.view { display: none; }
+.view.on { display: block; }
+
+.micro {
+  font-family: var(--font-micro);
+  font-size: 11px;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.pane {
+  background: var(--card);
+  border: var(--bw) solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--sh);
+  overflow: hidden;
+}
+:root:where(:not([data-style="b"]):not([data-style="c"])) .pane { background: var(--paper); }
+.pane + .pane { margin-top: 16px; }
+
+.pane-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 16px;
+  border-bottom: var(--bw) solid var(--line);
+  background-image: var(--texture);
+  background-size: 16px 16px;
+}
+.pane-head h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 800;
+}
+.pane-head h2 svg { width: 16px; height: 16px; color: var(--ink-2); }
+.pane-head .count { font-family: var(--font-micro); font-size: 11px; letter-spacing: .06em; color: var(--ink-3); }
+
+/* ── git-history groups: one card per commit, fold spine outside ── */
+.groups { position: relative; display: flex; flex-direction: column; gap: 16px; padding-left: 28px; }
+.groups::before {
+  content: "";
+  position: absolute;
+  left: 8px; top: 34px; bottom: 24px;
+  border-left: 2px dashed var(--hairline);
+}
+.group { position: relative; }
+.g-fold {
+  position: absolute;
+  left: -28px; top: 13px;
+  width: 18px; height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-3);
+  background: var(--paper);
+  border: 0;
+  cursor: pointer;
+}
+.g-fold svg { width: 13px; height: 13px; }
+.g-fold:hover { color: var(--ink); }
+.group .pane { background: var(--paper); }
+[data-style="b"] .group .pane, [data-style="c"] .group .pane { background: var(--card); }
+
+.g-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 16px;
+  border-bottom: 1.5px solid var(--hairline);
+}
+.group.head-only .g-head { border-bottom: 0; }
+.g-head .g-icon { display: inline-flex; width: 15px; height: 15px; color: var(--ink-2); flex-shrink: 0; }
+.g-head .g-icon svg { width: 15px; height: 15px; }
+.g-head strong {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.g-head .g-title-pixel {
+  font-family: var(--font-micro);
+  font-size: 13px;
+  letter-spacing: .05em;
+  color: var(--ink);
+}
+.g-tail { margin-left: auto; display: inline-flex; align-items: center; gap: 9px; }
+.g-tail .extlink { display: inline-flex; color: var(--ink-3); cursor: pointer; }
+.g-tail .extlink:hover { color: var(--ink); }
+.g-tail .extlink svg { width: 12px; height: 12px; }
+.sha-chip {
+  font-family: var(--font-micro);
+  font-size: 11px;
+  letter-spacing: .04em;
+  color: var(--ink-2);
+  background: var(--o-chip);
+  border: 1.5px solid var(--hairline);
+  border-radius: 5px;
+  padding: 2px 8px;
+}
+[data-style="c"] .sha-chip { background: var(--sun); color: var(--on-sun); border: var(--bw) solid var(--line); }
+.g-stamp { font-family: var(--font-micro); font-size: 11px; letter-spacing: .04em; color: var(--ink-3); white-space: nowrap; }
+.g-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-micro);
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.g-count svg { width: 13px; height: 13px; }
+.load-earlier {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  padding: 11px 16px;
+  cursor: pointer;
+}
+.load-earlier:hover { background: var(--o-chip); }
+.load-earlier b { font-family: var(--font-display); font-size: 14px; font-weight: 700; color: var(--ink); }
+.load-earlier .micro { letter-spacing: .04em; text-transform: none; color: var(--ink-3); }
+
+/* two-row session card, as shipped */
+.thread-list { display: grid; }
+.thread-row { padding: 10px 16px 11px; cursor: pointer; }
+.thread-row:hover { background: var(--card-2); }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .thread-row:hover { background: var(--o-chip); }
+.thread-row + .thread-row { border-top: 1px solid var(--hairline); }
+.t-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.thread-title {
+  font-family: var(--font-display);
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--ink);
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.t-launch { margin-left: auto; display: inline-flex; align-items: center; gap: 14px; color: var(--ink-2); }
+.t-launch svg { width: 14px; height: 14px; }
+.t-launch span { display: inline-flex; cursor: pointer; }
+.t-launch span:hover { color: var(--ink); }
+
+.t-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 5px;
+  padding-left: 32px;
+  font-family: var(--font-micro);
+  font-size: 11px;
+  letter-spacing: .03em;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.t-meta > span { display: inline-flex; align-items: center; gap: 4px; }
+.t-meta svg { width: 12px; height: 12px; }
+.t-meta b { color: var(--ink-2); font-weight: 400; }
+.t-div { width: 1.5px; height: 12px; background: var(--hairline); }
+.t-ctl { color: var(--ink-3); cursor: pointer; }
+.t-ctl:hover { color: var(--ink); }
+.t-meta .chev { font-size: 14px; line-height: 1; }
+.t-meta .t-end { margin-left: auto; }
+
+.sstat {
+  width: 22px; height: 22px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.sstat svg { width: 18px; height: 18px; }
+.sstat.synced { color: var(--status-synced); }
+.sstat.local  { color: var(--status-local); }
+.sstat.cloud  { color: var(--status-cloud); }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .sstat.synced { color: var(--o-status-synced); }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .sstat.local  { color: var(--o-status-local); }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .sstat.cloud  { color: var(--o-status-cloud); }
+
+/* buttons: base = cardboard pills; style A = today's buttons */
+.cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--on-accent);
+  background: var(--accent);
+  border: var(--bw) solid var(--line);
+  border-radius: 999px;
+  padding: 6px 14px;
+  cursor: pointer;
+  box-shadow: var(--sh-sm);
+}
+.cta:hover { background: var(--accent-hover); }
+.cta:active { transform: translate(2px, 2px); box-shadow: none; }
+.cta.quiet { background: var(--card); color: var(--ink); }
+.cta.quiet:hover { background: var(--card-2); }
+.cta svg { width: 13px; height: 13px; }
+.cta .cnt {
+  font-family: var(--font-micro);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--o-chip);
+  color: inherit;
+}
+:root:where(:not([data-style="b"]):not([data-style="c"])) .cta {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  background: var(--o-button-bg);
+  border: var(--bw) solid var(--line);
+  border-radius: 999px;
+  box-shadow: var(--sh);
+  padding: 5px 13px;
+}
+:root:where(:not([data-style="b"]):not([data-style="c"])) .cta:hover { background: var(--o-button-hover); }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .cta:active { transform: translate(1px, 1px); box-shadow: none; }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .cta.primary { background: var(--o-primary); border-color: var(--line); color: var(--o-primary-text); }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .cta.primary:hover { background: var(--o-primary-hover); }
+:not([data-style="a"]) .cta.primary { background: var(--accent); color: var(--on-accent); }
+
+/* ── library ───────────────────────────────────────────────────── */
+.profiles { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+.profile {
+  border: var(--bw) solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--sh);
+  background: var(--paper);
+  overflow: hidden;
+}
+.profile-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 16px;
+  border-bottom: 1.5px solid var(--hairline);
+  background-image: var(--texture);
+  background-size: 16px 16px;
+}
+.profile-head h3 { font-family: var(--font-display); font-size: 17px; font-weight: 800; flex: 1; }
+.profile-head .home { font-family: var(--font-micro); font-size: 10px; letter-spacing: .04em; color: var(--ink-3); display: block; margin-top: 1px; }
+.pet {
+  width: 44px; height: 44px;
+  flex-shrink: 0;
+  background: var(--paper);
+  color: var(--ink);
+  border: var(--bw) solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--sh-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.pet svg { width: 28px; height: 28px; }
+.profile-body { padding: 12px 16px 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.profile-body .micro { margin-right: auto; color: var(--ink-3); }
+
+.scope-row { display: flex; align-items: center; gap: 12px; padding: 11px 16px; }
+.scope-row + .scope-row { border-top: 1.5px solid var(--hairline); }
+.kmark {
+  width: 28px; height: 28px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink);
+  background: var(--paper);
+  border: var(--bw) solid var(--line);
+  border-radius: 8px;
+}
+[data-style="c"] .kmark { background: var(--card-2); }
+.kmark svg { width: 15px; height: 15px; }
+.scope-name { font-family: var(--font-display); font-size: 14px; font-weight: 700; flex: 1; }
+.scope-name .micro { display: block; color: var(--ink-3); letter-spacing: .08em; }
+.badge {
+  font-family: var(--font-micro);
+  font-size: 10px;
+  letter-spacing: .06em;
+  color: var(--ink-2);
+  background: var(--o-chip);
+  border: 1.5px solid var(--hairline);
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+.badge.hot { color: var(--on-sun); background: var(--sun); border: var(--bw) solid var(--line); }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .badge { border-radius: 4px; }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .badge.hot { color: var(--o-status-local); background: transparent; border: 1px solid var(--hairline); }
+[data-style="c"] .profile-head.claude { background-color: var(--peach); color: var(--on-peach); }
+[data-style="c"] .profile-head.codex  { background-color: var(--sky); color: var(--on-sky); }
+[data-style="c"] .profile-head.claude .home, [data-style="c"] .profile-head.codex .home { color: inherit; opacity: .75; }
+
+/* ── catalog scope page: unboxed headings, one box per item ────── */
+.cat-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 20px 4px 10px;
+}
+.view > .cat-head:first-child { margin-top: 2px; }
+.cat-head svg { width: 15px; height: 15px; color: var(--ink-2); }
+.cat-head .ch-pixel { font-family: var(--font-micro); font-size: 13px; letter-spacing: .05em; color: var(--ink); }
+.cat-head strong { font-family: var(--font-display); font-size: 15px; font-weight: 700; }
+.item-box + .item-box { margin-top: 12px; }
+.item-row { display: flex; align-items: center; gap: 13px; padding: 10px 14px; }
+.preview {
+  width: 50px; height: 50px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 27px;
+  line-height: 1;
+  background: var(--card-2);
+  border: var(--bw) solid var(--line);
+  border-radius: 8px;
+}
+:root:where(:not([data-style="b"]):not([data-style="c"])) .preview { background: var(--o-chip); }
+.item-main { flex: 1; min-width: 0; }
+
+/* ── session detail ────────────────────────────────────────────── */
+.fact-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
+.fact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--font-micro);
+  font-size: 11px;
+  letter-spacing: .07em;
+  color: var(--ink-2);
+  background: var(--card);
+  border: var(--bw) solid var(--line);
+  border-radius: 999px;
+  padding: 4px 12px;
+  box-shadow: var(--sh-sm);
+}
+.fact b { color: var(--ink); font-size: 12px; letter-spacing: .02em; }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .fact { border: 1px solid var(--hairline); border-radius: 4px; box-shadow: none; background: var(--o-chip); }
+[data-style="c"] .fact.when { background: var(--sun); color: var(--on-sun); }
+[data-style="c"] .fact.when b { color: var(--on-sun); }
+.sess-provs { margin-left: auto; display: inline-flex; align-items: center; gap: 12px; color: var(--ink-2); }
+.sess-provs svg { width: 16px; height: 16px; }
+
+.show-bar { display: flex; align-items: center; gap: 8px; padding: 9px 14px; flex-wrap: wrap; }
+.filter-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--font-micro); font-size: 11px; letter-spacing: .05em;
+  color: var(--ink); background: var(--paper);
+  border: var(--bw) solid var(--line); border-radius: 8px;
+  padding: 5px 10px; cursor: pointer; box-shadow: var(--sh-sm);
+}
+.filter-chip .box { position: relative; width: 11px; height: 11px; border: 1.5px solid currentColor; border-radius: 3px; }
+.filter-chip.on .box::after { content: ""; position: absolute; inset: 2px; background: var(--accent); }
+.filter-chip.off { color: var(--ink-3); border-color: var(--hairline); box-shadow: none; }
+.filter-chip:active { transform: translate(1px, 1px); box-shadow: none; }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .filter-chip { border: 1px solid var(--hairline); border-radius: 4px; box-shadow: none; background: var(--o-button-bg); }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .filter-chip.on .box::after { background: var(--ink); }
+.show-bar .ev-count { margin-left: auto; font-family: var(--font-micro); font-size: 10px; letter-spacing: .06em; color: var(--ink-3); }
+
+.day-divider { display: flex; align-items: center; gap: 10px; margin: 18px 2px 12px; }
+.day-divider::after { content: ""; flex: 1; border-top: 2px dashed var(--hairline); }
+
+.timeline { position: relative; padding-left: 44px; }
+.timeline::before { content: ""; position: absolute; left: 13px; top: 8px; bottom: 8px; border-left: 2px dashed var(--hairline); }
+.tl-item { position: relative; margin-bottom: 14px; }
+.tl-node {
+  position: absolute; left: -44px; top: -1px;
+  width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--paper); border: var(--bw) solid var(--line); border-radius: 8px;
+  box-shadow: var(--sh-sm);
+}
+.tl-node svg { width: 15px; height: 15px; }
+.tl-node.user { color: var(--accent); }
+[data-style="c"] .tl-node.agent { background: var(--sky); color: var(--on-sky); }
+[data-style="c"] .tl-node.user { background: var(--peach); }
+.tl-item.tool .tl-node {
+  width: 10px; height: 10px; left: -35px; top: 8px;
+  border: none; border-radius: 2px; background: var(--hairline); box-shadow: none;
+}
+.prompt-card {
+  max-width: 62ch;
+  background: var(--card); border: var(--bw) solid var(--line);
+  border-radius: 12px; box-shadow: var(--sh-sm); overflow: hidden;
+}
+:root:where(:not([data-style="b"]):not([data-style="c"])) .prompt-card { background: var(--paper); }
+.prompt-card p { padding: 10px 14px 11px; font-size: 14px; font-weight: 500; color: var(--ink); }
+.pfoot {
+  display: flex; gap: 16px;
+  border-top: 1.5px solid var(--hairline);
+  background: var(--o-chip);
+  padding: 5px 14px 6px;
+  font-family: var(--font-micro); font-size: 10px; letter-spacing: .06em; color: var(--ink-3);
+}
+.tool-line { display: flex; align-items: center; gap: 12px; min-height: 26px; padding-right: 4px; }
+.tool-name { font-size: 13px; font-weight: 700; color: var(--ink); min-width: 46px; }
+.tool-argv {
+  flex: 1; min-width: 0;
+  font-family: var(--font-micro); font-size: 11px; letter-spacing: .03em;
+  color: var(--ink-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tool-line .chev { color: var(--ink-3); font-size: 15px; line-height: 1; }
+.reply-flow { max-width: 70ch; font-size: 14px; color: var(--ink-2); padding-top: 3px; }
+.reply-flow p + p { margin-top: 8px; }
+.reply-flow a { color: var(--ink); text-decoration: underline; text-decoration-color: var(--accent); text-decoration-thickness: 2px; text-underline-offset: 3px; cursor: pointer; }
+:root:where(:not([data-style="b"]):not([data-style="c"])) .reply-flow a { text-decoration-color: currentColor; text-decoration-thickness: 1px; }
+.reply-flow blockquote { margin-top: 8px; padding: 1px 0 1px 12px; border-left: 3px solid var(--line); }
+.gap-chip {
+  font-family: var(--font-micro);
+  font-size: 10px;
+  color: var(--ink-3);
+  border: 1.5px dashed var(--hairline);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.tl-item.gap { margin: 0 0 14px -31px; }
+.tl-item.gap .gap-chip { background: var(--paper); position: relative; }
+
+/* ── D · Outline — the A box grammar drawn flat: 2px ink borders,
+   zero elevation anywhere. ──────────────────────────────────────── */
+:root[data-style="d"] {
+  --sh-sm: none;
+  --sh: none;
+  --sh-lg: none;
+}
+
+/* ── E · Soft — no ink lines at all; tonal cards floating on warm
+   diffuse shadows. ──────────────────────────────────────────────── */
+:root[data-style="e"] {
+  --line: transparent;
+  --radius: 16px;
+  --sh-sm: 0 1px 4px rgba(26, 16, 8, .14);
+  --sh:    0 2px 10px rgba(26, 16, 8, .16);
+  --sh-lg: 0 5px 18px rgba(26, 16, 8, .18);
+}
+[data-style="e"] .pane, [data-style="e"] .tile, [data-style="e"] .prompt-card { background: var(--card); }
+[data-style="e"] .pathbar { background: var(--card); }
+[data-style="e"] .preview, [data-style="e"] .kmark, [data-style="e"] .tl-node { background: var(--card-2); }
+[data-style="e"] .g-fold { background: transparent; }
+
+/* ── F · Ledger — square, hairline, flat. ───────────────────────── */
+:root[data-style="f"] {
+  --line: var(--hairline);
+  --bw: 1px;
+  --radius: 3px;
+  --sh-sm: none;
+  --sh: none;
+  --sh-lg: none;
+}
+[data-style="f"] .appframe { border-radius: 6px; }
+[data-style="f"] .tl-node, [data-style="f"] .kmark, [data-style="f"] .preview,
+[data-style="f"] .nav-item, [data-style="f"] .sect-item { border-radius: 3px; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (max-width: 940px) {
+  .shell { flex-direction: column; }
+  .side-col { width: 100%; }
+  .profiles { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<!-- the app's real marks, verbatim from Icons.tsx -->
+<svg style="display:none" aria-hidden="true"><defs>
+  <symbol id="i-duck" viewBox="0 0 20 20"><path fill="currentColor" shape-rendering="crispEdges" d="M13 3h3v1h-3ZM12 4h5v2h-5ZM12 6h7v1h-7ZM12 7h3v3h-3ZM7 10h9v1h-9ZM2 11h15v1h-15ZM1 12h16v2h-16ZM2 14h15v1h-15ZM3 15h13v1h-13ZM5 16h10v1h-10Z"/></symbol>
+  <symbol id="i-claude" viewBox="0 0 24 24"><path fill="currentColor" shape-rendering="geometricPrecision" d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></symbol>
+  <symbol id="i-codex" viewBox="0 0 24 24"><path fill="currentColor" transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><path fill="currentColor" shape-rendering="crispEdges" d="M4 6h2v2H4ZM6 8h2v2H6ZM8 10h2v2H8ZM10 12h2v2h-2ZM8 14h2v2H8ZM6 16h2v2H6ZM4 18h2v2H4ZM14 18h6v2h-6Z"/></symbol>
+  <symbol id="i-commit" viewBox="0 0 24 24"><g fill="currentColor" shape-rendering="crispEdges"><path d="M1 11h6v2H1Z"/><path d="M17 11h6v2h-6Z"/><path d="M9 7h6v2H9Z"/><path d="M9 15h6v2H9Z"/><path d="M7 9h2v6H7Z"/><path d="M15 9h2v6h-2Z"/></g></symbol>
+  <symbol id="i-msg" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" d="M4 5h16v11H9l-5 4V5Z"/></symbol>
+  <symbol id="i-cog" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.2 2.2M16.2 16.2l2.2 2.2M18.4 5.6l-2.2 2.2M7.8 16.2l-2.2 2.2"/></g></symbol>
+  <symbol id="i-token" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" d="M12 3l7 9-7 9-7-9z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="8.6"/><path d="M12 7.5V12l3 2.4"/></g></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><circle cx="12" cy="7.5" r="0.6" fill="currentColor"/></g></symbol>
+  <symbol id="i-extlink" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M10 5H5v14h14v-5"/><path d="M14 4h6v6M20 4l-9 9"/></g></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5H5v14h14v-7"/><path d="M9 15l1-3.5L18.5 3l2.5 2.5L12.5 14 9 15Z"/></g></symbol>
+  <symbol id="i-chevdown" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" d="M6 9l6 6 6-6"/></symbol>
+  <symbol id="i-up-circle" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="8.6"/><path d="M12 16.2V8.4M8.6 11.4 12 8l3.4 3.4"/></g></symbol>
+  <symbol id="i-check-circle" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="8.6"/><path d="M8 12.4l2.8 2.8L16.4 9"/></g></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M7 18a5 5 0 1 1 .8-9.9A6 6 0 0 1 19 10a4 4 0 0 1-1 7.9H7Z"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="12" cy="8" r="3.6"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"/></g></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" d="M3 6h6l2 2h10v11H3V6Z"/></symbol>
+  <symbol id="i-proj" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M3 6h6l2 2h10v11H3V6Z"/><path d="M7 13h6" stroke-linecap="round"/></g></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><g fill="currentColor"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></g></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M3 4h18v5H3ZM5 9v11h14V9"/><path d="M10 13h4" stroke-linecap="round"/></g></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="7" cy="17" r="2" fill="currentColor" stroke="none"/></g></symbol>
+  <symbol id="i-bars" viewBox="0 0 24 24"><g fill="currentColor"><rect x="4" y="12" width="3.5" height="8"/><rect x="10.2" y="7" width="3.5" height="13"/><rect x="16.4" y="10" width="3.5" height="10"/></g></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/><path d="M10 11v6M14 11v6"/></g></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M18 2v5h-5"/></g></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" d="M12 4v13M6 12l6 6 6-6M5 21h14"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" d="M12 17V4M6 9l6-6 6 6M5 21h14"/></symbol>
+  <symbol id="i-dots" viewBox="0 0 24 24"><g fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></g></symbol>
+  <symbol id="i-branch" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="8" r="2.4"/><path d="M6 8.4v7.2M18 10.4c0 4-4 4.6-9.6 5.2"/></g></symbol>
+  <symbol id="i-collapse" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 4.5v15"/></g></symbol>
+  <symbol id="i-cloud-circle" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.6"/><path d="M9.2 14.7a2.2 2.2 0 1 1 .35-4.37A2.7 2.7 0 0 1 14.8 11a1.9 1.9 0 0 1-.45 3.7H9.2Z"/></g></symbol>
+  <symbol id="i-range" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M9 5H6v14h3M15 5h3v14h-3"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M6 3h8l4 4v14H6V3Z"/><path d="M14 3v4h4"/></g></symbol>
+  <symbol id="i-compare" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 20V7M7 7 4.4 9.6M7 7l2.6 2.6"/><path d="M17 4v13M17 17l-2.6-2.6M17 17l2.6-2.6"/></g></symbol>
+  <symbol id="i-lightbulb" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M9 21h6M10 17h4M12 3a6 6 0 0 1 3.5 10.9c-.6.5-1 1.2-1 2v.6h-5v-.6c0-.8-.4-1.5-1-2A6 6 0 0 1 12 3Z"/></symbol>
+  <symbol id="i-paw" viewBox="0 0 24 24"><g fill="currentColor"><ellipse cx="7" cy="7.5" rx="2" ry="2.6"/><ellipse cx="17" cy="7.5" rx="2" ry="2.6"/><ellipse cx="3.8" cy="12.5" rx="1.8" ry="2.3" transform="rotate(-20 3.8 12.5)"/><ellipse cx="20.2" cy="12.5" rx="1.8" ry="2.3" transform="rotate(20 20.2 12.5)"/><path d="M12 11c3 0 5.5 2.4 5.5 5.1 0 2-1.6 3.4-3.4 2.9-.8-.2-1.4-.3-2.1-.3s-1.3.1-2.1.3c-1.8.5-3.4-.9-3.4-2.9C6.5 13.4 9 11 12 11Z"/></g></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7V3M15 7V3"/><path d="M7 7h10v4a5 5 0 0 1-10 0V7Z"/><path d="M12 16v5"/></g></symbol>
+</defs></svg>
+
+<!-- specimen chrome -->
+<div class="spec-bar">
+  <span class="spec-title">Mallard retheme · shipped shell · pick a style</span>
+  <button class="spec-btn" data-v="activity" aria-pressed="true">Git history</button>
+  <button class="spec-btn" data-v="library" aria-pressed="false">Library</button>
+  <button class="spec-btn" data-v="session" aria-pressed="false">Session</button>
+  <span class="spec-gap"></span>
+  <button class="spec-btn" data-s="a" aria-pressed="true">A · Box + type</button>
+  <button class="spec-btn" data-s="b" aria-pressed="false">B · Cardboard</button>
+  <button class="spec-btn" data-s="c" aria-pressed="false">C · +Colour</button>
+  <button class="spec-btn" data-s="d" aria-pressed="false">D · Outline</button>
+  <button class="spec-btn" data-s="e" aria-pressed="false">E · Soft</button>
+  <button class="spec-btn" data-s="f" aria-pressed="false">F · Ledger</button>
+  <span class="spec-gap"></span>
+  <button class="spec-btn" data-t="pixel" aria-pressed="false">Pixel</button>
+  <button class="spec-btn" data-t="mono" aria-pressed="true">Mono</button>
+  <button class="spec-btn" data-t="round" aria-pressed="false">Round</button>
+  <span class="spec-gap"></span>
+  <button class="spec-btn" id="themeBtn" aria-pressed="false">☾ Dark</button>
+</div>
+
+<div class="appframe">
+<div class="shell">
+
+  <!-- left column: traffic row + stacked tiles -->
+  <div class="side-col">
+    <div class="tile brand-tile">
+      <div class="traffic-row" data-tauri-drag-region>
+        <div class="traffic"><span></span><span></span><span></span></div>
+        <span class="collapse-glyph"><svg width="16" height="16" viewBox="0 0 24 24"><use href="#i-collapse"/></svg></span>
+      </div>
+      <div class="brand"><svg viewBox="0 0 20 20"><use href="#i-duck"/></svg><b>Mallard</b></div>
+      <div class="nav-item on" data-nav="projects"><svg viewBox="0 0 24 24"><use href="#i-proj"/></svg>Projects</div>
+      <div class="nav-item" data-nav="catalog"><svg viewBox="0 0 24 24"><use href="#i-grid"/></svg>Catalog</div>
+      <div class="nav-item"><svg viewBox="0 0 24 24"><use href="#i-archive"/></svg>Storages</div>
+      <div class="nav-item"><svg viewBox="0 0 24 24"><use href="#i-sliders"/></svg>Settings</div>
+      <div class="nav-item"><svg viewBox="0 0 24 24"><use href="#i-bars"/></svg>Logs<span class="nav-badge">7</span></div>
+    </div>
+
+    <div class="tile sect-tile grow">
+      <div class="sect-head">
+        <span class="chev"><svg viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></span>
+        <span class="label">Projects</span>
+        <button class="sect-add"><svg width="12" height="12" viewBox="0 0 24 24"><use href="#i-plus"/></svg></button>
+      </div>
+      <div class="sect-item on" id="side-mallard">
+        <svg viewBox="0 0 24 24"><use href="#i-proj"/></svg>
+        <span class="si-name">mallard-app (Claude)</span>
+        <span class="trash"><svg viewBox="0 0 24 24"><use href="#i-trash"/></svg></span>
+      </div>
+      <div class="sect-item"><svg viewBox="0 0 24 24"><use href="#i-proj"/></svg><span class="si-name">mallardInternal</span></div>
+      <div class="sect-item"><svg viewBox="0 0 24 24"><use href="#i-proj"/></svg><span class="si-name">HorrorGame</span></div>
+      <div class="sect-item"><svg viewBox="0 0 24 24"><use href="#i-proj"/></svg><span class="si-name">HorrorGame (2)</span></div>
+      <div class="sect-item" id="side-testproj"><svg viewBox="0 0 24 24"><use href="#i-folder"/></svg><span class="si-name">testProjectNonGit</span></div>
+      <div class="sect-item"><svg viewBox="0 0 24 24"><use href="#i-folder"/></svg><span class="si-name">demo</span></div>
+      <div class="sect-item"><svg viewBox="0 0 24 24"><use href="#i-proj"/></svg><span class="si-name">quack-blog</span></div>
+      <div class="sect-item"><svg viewBox="0 0 24 24"><use href="#i-proj"/></svg><span class="si-name">dotfiles</span></div>
+    </div>
+
+    <div class="tile sect-tile">
+      <div class="sect-head">
+        <span class="chev"><svg viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></span>
+        <span class="label">Catalog</span>
+        <button class="sect-add"><svg width="12" height="12" viewBox="0 0 24 24"><use href="#i-plus"/></svg></button>
+      </div>
+      <div class="sect-item"><svg viewBox="0 0 24 24"><use href="#i-plug"/></svg><span class="si-name">Plugins · Default Claude</span></div>
+      <div class="sect-item"><svg viewBox="0 0 24 24"><use href="#i-plug"/></svg><span class="si-name">Plugins · myconf2_claude</span></div>
+      <div class="sect-item"><svg viewBox="0 0 24 24"><use href="#i-lightbulb"/></svg><span class="si-name">Skills · myconf2</span></div>
+      <div class="sect-item" id="side-pets"><svg viewBox="0 0 24 24"><use href="#i-paw"/></svg><span class="si-name">Pets v2 · myconf2</span></div>
+    </div>
+
+    <div class="tile sect-tile">
+      <div class="sect-head">
+        <span class="chev"><svg viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></span>
+        <span class="label">Storages</span>
+        <button class="sect-add"><svg width="12" height="12" viewBox="0 0 24 24"><use href="#i-plus"/></svg></button>
+      </div>
+      <div class="sect-item">
+        <svg viewBox="0 0 24 24"><use href="#i-archive"/></svg>
+        <span class="si-name">Local storage 1</span>
+        <span class="trash"><svg viewBox="0 0 24 24"><use href="#i-trash"/></svg></span>
+      </div>
+    </div>
+
+    <div class="tile foot-tile">
+      <svg viewBox="0 0 20 20"><use href="#i-duck"/></svg>v0.1.2
+    </div>
+  </div>
+
+  <!-- main column: bar tile + content tile -->
+  <div class="main-col">
+
+    <!-- path bars, one per view (crumbs · branch chip · actions) -->
+    <div class="tile pathbar" data-tauri-drag-region data-for="activity">
+      <div class="crumbs">
+        <span class="crumb"><svg viewBox="0 0 24 24"><use href="#i-archive"/></svg>Local storage 1<svg class="dd" viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></span>
+        <span class="sep">/</span>
+        <span class="crumb"><svg viewBox="0 0 24 24"><use href="#i-proj"/></svg>mallard-app (Claude)<svg class="dd" viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></span>
+        <span class="sep">/</span>
+        <span class="crumb leaf">Git history</span>
+      </div>
+      <span class="branch-chip"><svg viewBox="0 0 24 24"><use href="#i-branch"/></svg>main<svg viewBox="0 0 24 24" style="width:10px;height:10px"><use href="#i-chevdown"/></svg></span>
+      <span class="bar-tail">
+        <button class="icon-btn" title="Refresh"><svg viewBox="0 0 24 24"><use href="#i-refresh"/></svg></button>
+        <button class="cta quiet"><svg viewBox="0 0 24 24"><use href="#i-down"/></svg>Pull<span class="cnt">3</span></button>
+        <button class="cta quiet"><svg viewBox="0 0 24 24"><use href="#i-up"/></svg>Push<span class="cnt">5</span></button>
+        <button class="icon-btn" title="More"><svg viewBox="0 0 24 24"><use href="#i-dots"/></svg></button>
+      </span>
+    </div>
+
+    <div class="tile pathbar" data-tauri-drag-region data-for="library" hidden>
+      <div class="crumbs">
+        <span class="crumb"><svg viewBox="0 0 24 24"><use href="#i-archive"/></svg>Local storage 1<svg class="dd" viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></span>
+        <span class="sep">/</span>
+        <span class="crumb leaf"><svg viewBox="0 0 24 24"><use href="#i-paw"/></svg>Pets v2 · myconf2<svg class="dd" viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></span>
+      </div>
+      <span class="bar-tail">
+        <button class="icon-btn" title="Refresh"><svg viewBox="0 0 24 24"><use href="#i-refresh"/></svg></button>
+        <button class="cta quiet"><svg viewBox="0 0 24 24"><use href="#i-down"/></svg>Pull<span class="cnt">1</span></button>
+        <button class="cta quiet"><svg viewBox="0 0 24 24"><use href="#i-up"/></svg>Push<span class="cnt">1</span></button>
+        <button class="icon-btn" title="More"><svg viewBox="0 0 24 24"><use href="#i-dots"/></svg></button>
+      </span>
+    </div>
+
+    <div class="tile pathbar" data-tauri-drag-region data-for="session" hidden>
+      <div class="crumbs">
+        <span class="crumb"><svg viewBox="0 0 24 24"><use href="#i-archive"/></svg>Local storage 1<svg class="dd" viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></span>
+        <span class="sep">/</span>
+        <span class="crumb"><svg viewBox="0 0 24 24"><use href="#i-folder"/></svg>testProjectNonGit<svg class="dd" viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></span>
+        <span class="sep">/</span>
+        <span class="crumb leaf"><svg viewBox="0 0 24 24"><use href="#i-codex"/></svg>Create cold joke Markdown doc<span class="leafdot"></span></span>
+      </div>
+      <span class="bar-tail">
+        <button class="icon-btn" title="Refresh"><svg viewBox="0 0 24 24"><use href="#i-refresh"/></svg></button>
+        <button class="cta quiet"><svg viewBox="0 0 24 24"><use href="#i-down"/></svg>Pull</button>
+        <button class="cta quiet"><svg viewBox="0 0 24 24"><use href="#i-up"/></svg>Push</button>
+        <button class="icon-btn" title="More"><svg viewBox="0 0 24 24"><use href="#i-dots"/></svg></button>
+      </span>
+    </div>
+
+    <div class="tile content">
+
+      <!-- ═══ Git history: one card per commit, fold spine outside ═══ -->
+      <section class="view on" data-view="activity">
+        <div class="groups">
+
+          <div class="group">
+            <button class="g-fold" title="Collapse"><svg viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></button>
+            <div class="pane">
+              <div class="g-head">
+                <span class="g-icon"><svg viewBox="0 0 24 24"><use href="#i-cloud"/></svg></span>
+                <span class="g-title-pixel">Only in</span>
+                <strong>Local storage 1</strong>
+                <span class="g-tail"><span class="g-count"><svg viewBox="0 0 24 24"><use href="#i-msg"/></svg>3</span></span>
+              </div>
+              <div class="thread-list">
+                <div class="thread-row">
+                  <div class="t-top">
+                    <span class="sstat cloud" title="In storage only"><svg viewBox="0 0 24 24"><use href="#i-cloud-circle"/></svg></span>
+                    <span class="thread-title">Create Pelican Bicycle SVG</span>
+                    <span class="t-launch"><span title="Codex session"><svg viewBox="0 0 24 24"><use href="#i-codex"/></svg></span></span>
+                  </div>
+                  <div class="t-meta">
+                    <span><svg viewBox="0 0 24 24"><use href="#i-msg"/></svg><b>10</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-cog"/></svg><b>10</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-token"/></svg><b>416K</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg><b>11d 12h</b></span>
+                    <span class="t-div"></span>
+                    <span class="t-ctl"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+                    <span class="t-end">Aug 30, 2026 at 02:25</span>
+                  </div>
+                </div>
+                <div class="thread-row">
+                  <div class="t-top">
+                    <span class="sstat cloud" title="In storage only"><svg viewBox="0 0 24 24"><use href="#i-cloud-circle"/></svg></span>
+                    <span class="thread-title">Convert to PNG format</span>
+                    <span class="t-launch"><span title="Claude session"><svg viewBox="0 0 24 24"><use href="#i-claude"/></svg></span></span>
+                  </div>
+                  <div class="t-meta">
+                    <span><svg viewBox="0 0 24 24"><use href="#i-msg"/></svg><b>11</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-cog"/></svg><b>9</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-token"/></svg><b>780K</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg><b>11d</b></span>
+                    <span class="t-div"></span>
+                    <span class="t-ctl"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+                    <span class="t-end">Aug 29, 2026 at 22:31</span>
+                  </div>
+                </div>
+                <div class="thread-row">
+                  <div class="t-top">
+                    <span class="sstat cloud" title="In storage only"><svg viewBox="0 0 24 24"><use href="#i-cloud-circle"/></svg></span>
+                    <span class="thread-title">Add horror story document (Preserved 1 · Host 6869)</span>
+                    <span class="t-launch"><span title="Codex session"><svg viewBox="0 0 24 24"><use href="#i-codex"/></svg></span></span>
+                  </div>
+                  <div class="t-meta">
+                    <span><svg viewBox="0 0 24 24"><use href="#i-msg"/></svg><b>22</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-cog"/></svg><b>7</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-token"/></svg><b>365K</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg><b>2d 11h</b></span>
+                    <span class="t-div"></span>
+                    <span class="t-ctl"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+                    <span class="t-end">Aug 18, 2026 at 10:59</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="group">
+            <button class="g-fold" title="Collapse"><svg viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></button>
+            <div class="pane">
+              <div class="g-head">
+                <span class="g-icon"><svg viewBox="0 0 24 24"><use href="#i-pencil"/></svg></span>
+                <span class="g-title-pixel">Uncommitted</span>
+              </div>
+              <div class="thread-list">
+                <div class="thread-row">
+                  <div class="t-top">
+                    <span class="sstat local" title="Local, not pushed"><svg viewBox="0 0 24 24"><use href="#i-up-circle"/></svg></span>
+                    <span class="thread-title">Mallard UI design update</span>
+                    <span class="t-launch"><span title="Claude session"><svg viewBox="0 0 24 24"><use href="#i-claude"/></svg></span><span title="Open in terminal"><svg viewBox="0 0 24 24"><use href="#i-terminal"/></svg></span></span>
+                  </div>
+                  <div class="t-meta">
+                    <span><svg viewBox="0 0 24 24"><use href="#i-msg"/></svg><b>6</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-cog"/></svg><b>118</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-token"/></svg><b>17.00M</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg><b>41m</b></span>
+                    <span class="t-div"></span>
+                    <span class="t-ctl"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+                    <span class="t-ctl chev">›</span>
+                    <span class="t-end">Sep 1, 2026 at 02:23</span>
+                  </div>
+                </div>
+                <div class="thread-row">
+                  <div class="t-top">
+                    <span class="sstat local" title="Local, not pushed"><svg viewBox="0 0 24 24"><use href="#i-up-circle"/></svg></span>
+                    <span class="thread-title">Run live Codex and Claude E2E</span>
+                    <span class="t-launch"><span title="Codex session"><svg viewBox="0 0 24 24"><use href="#i-codex"/></svg></span><span title="Open in terminal"><svg viewBox="0 0 24 24"><use href="#i-terminal"/></svg></span></span>
+                  </div>
+                  <div class="t-meta">
+                    <span><svg viewBox="0 0 24 24"><use href="#i-msg"/></svg><b>4</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-cog"/></svg><b>16</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-token"/></svg><b>778K</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg><b>5m</b></span>
+                    <span class="t-div"></span>
+                    <span class="t-ctl"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+                    <span class="t-ctl chev">›</span>
+                    <span class="t-end">Sep 1, 2026 at 01:42</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="group">
+            <button class="g-fold" title="Collapse"><svg viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></button>
+            <div class="pane">
+              <div class="g-head">
+                <span class="g-icon"><svg viewBox="0 0 24 24"><use href="#i-commit"/></svg></span>
+                <strong>Optimize Claude session metadata scans</strong>
+                <span class="g-tail">
+                  <span class="extlink" title="Open on GitHub"><svg viewBox="0 0 24 24"><use href="#i-extlink"/></svg></span>
+                  <span class="sha-chip">789eea5</span>
+                  <span class="g-stamp">Sep 1, 2026 at 01:41</span>
+                </span>
+              </div>
+              <div class="thread-list">
+                <div class="thread-row">
+                  <div class="t-top">
+                    <span class="sstat local" title="Local, not pushed"><svg viewBox="0 0 24 24"><use href="#i-up-circle"/></svg></span>
+                    <span class="thread-title">Claude session metadata read performance</span>
+                    <span class="t-launch"><span title="Claude session"><svg viewBox="0 0 24 24"><use href="#i-claude"/></svg></span><span title="Open in terminal"><svg viewBox="0 0 24 24"><use href="#i-terminal"/></svg></span></span>
+                  </div>
+                  <div class="t-meta">
+                    <span><svg viewBox="0 0 24 24"><use href="#i-msg"/></svg><b>9</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-cog"/></svg><b>75</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-token"/></svg><b>13.52M</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg><b>44m</b></span>
+                    <span class="t-div"></span>
+                    <span class="t-ctl"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+                    <span class="t-ctl chev">›</span>
+                    <span class="t-end">Sep 1, 2026 at 01:35</span>
+                  </div>
+                </div>
+                <div class="thread-row">
+                  <div class="t-top">
+                    <span class="sstat local" title="Local, not pushed"><svg viewBox="0 0 24 24"><use href="#i-up-circle"/></svg></span>
+                    <span class="thread-title">Commit and push to main</span>
+                    <span class="t-launch"><span title="Codex session"><svg viewBox="0 0 24 24"><use href="#i-codex"/></svg></span><span title="Open in terminal"><svg viewBox="0 0 24 24"><use href="#i-terminal"/></svg></span></span>
+                  </div>
+                  <div class="t-meta">
+                    <span><svg viewBox="0 0 24 24"><use href="#i-msg"/></svg><b>4</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-cog"/></svg><b>33</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-token"/></svg><b>2.32M</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg><b>46m</b></span>
+                    <span class="t-div"></span>
+                    <span class="t-ctl"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+                    <span class="t-ctl chev">›</span>
+                    <span class="t-end">Sep 1, 2026 at 01:10</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="group">
+            <button class="g-fold" title="Collapse"><svg viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></button>
+            <div class="pane">
+              <div class="g-head">
+                <span class="g-icon"><svg viewBox="0 0 24 24"><use href="#i-commit"/></svg></span>
+                <strong>Optimize provider scans and activity logs</strong>
+                <span class="g-tail">
+                  <span class="extlink" title="Open on GitHub"><svg viewBox="0 0 24 24"><use href="#i-extlink"/></svg></span>
+                  <span class="sha-chip">ec82ce1</span>
+                  <span class="g-stamp">Sep 1, 2026 at 01:09</span>
+                </span>
+              </div>
+              <div class="thread-list">
+                <div class="thread-row">
+                  <div class="t-top">
+                    <span class="sstat local" title="Local, not pushed"><svg viewBox="0 0 24 24"><use href="#i-up-circle"/></svg></span>
+                    <span class="thread-title">Optimize Claude session discovery</span>
+                    <span class="t-launch"><span title="Codex session"><svg viewBox="0 0 24 24"><use href="#i-codex"/></svg></span><span title="Open in terminal"><svg viewBox="0 0 24 24"><use href="#i-terminal"/></svg></span></span>
+                  </div>
+                  <div class="t-meta">
+                    <span><svg viewBox="0 0 24 24"><use href="#i-msg"/></svg><b>7</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-cog"/></svg><b>35</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-token"/></svg><b>4.06M</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg><b>28m</b></span>
+                    <span class="t-div"></span>
+                    <span class="t-ctl"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+                    <span class="t-ctl chev">›</span>
+                    <span class="t-end">Sep 1, 2026 at 01:02</span>
+                  </div>
+                </div>
+                <div class="thread-row">
+                  <div class="t-top">
+                    <span class="sstat local" title="Local, not pushed"><svg viewBox="0 0 24 24"><use href="#i-up-circle"/></svg></span>
+                    <span class="thread-title">Fix ProjectSync log re-renders</span>
+                    <span class="t-launch"><span title="Codex session"><svg viewBox="0 0 24 24"><use href="#i-codex"/></svg></span><span title="Open in terminal"><svg viewBox="0 0 24 24"><use href="#i-terminal"/></svg></span></span>
+                  </div>
+                  <div class="t-meta">
+                    <span><svg viewBox="0 0 24 24"><use href="#i-msg"/></svg><b>4</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-cog"/></svg><b>37</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-token"/></svg><b>4.86M</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg><b>14m</b></span>
+                    <span class="t-div"></span>
+                    <span class="t-ctl"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+                    <span class="t-ctl chev">›</span>
+                    <span class="t-end">Sep 1, 2026 at 00:56</span>
+                  </div>
+                </div>
+                <div class="thread-row">
+                  <div class="t-top">
+                    <span class="sstat local" title="Local, not pushed"><svg viewBox="0 0 24 24"><use href="#i-up-circle"/></svg></span>
+                    <span class="thread-title">Optimize provider path canonicalize</span>
+                    <span class="t-launch"><span title="Codex session"><svg viewBox="0 0 24 24"><use href="#i-codex"/></svg></span><span title="Open in terminal"><svg viewBox="0 0 24 24"><use href="#i-terminal"/></svg></span></span>
+                  </div>
+                  <div class="t-meta">
+                    <span><svg viewBox="0 0 24 24"><use href="#i-msg"/></svg><b>2</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-cog"/></svg><b>22</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-token"/></svg><b>1.29M</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg><b>6m</b></span>
+                    <span class="t-div"></span>
+                    <span class="t-ctl"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+                    <span class="t-ctl chev">›</span>
+                    <span class="t-end">Sep 1, 2026 at 00:50</span>
+                  </div>
+                </div>
+                <div class="thread-row">
+                  <div class="t-top">
+                    <span class="sstat local" title="Local, not pushed"><svg viewBox="0 0 24 24"><use href="#i-up-circle"/></svg></span>
+                    <span class="thread-title">App performance audit</span>
+                    <span class="t-launch"><span title="Claude session"><svg viewBox="0 0 24 24"><use href="#i-claude"/></svg></span><span title="Open in terminal"><svg viewBox="0 0 24 24"><use href="#i-terminal"/></svg></span></span>
+                  </div>
+                  <div class="t-meta">
+                    <span><svg viewBox="0 0 24 24"><use href="#i-msg"/></svg><b>4</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-cog"/></svg><b>132</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-token"/></svg><b>17.52M</b></span>
+                    <span><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg><b>30m</b></span>
+                    <span class="t-div"></span>
+                    <span class="t-ctl"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+                    <span class="t-ctl chev">›</span>
+                    <span class="t-end">Sep 1, 2026 at 00:30</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="group head-only">
+            <button class="g-fold" title="Expand"><svg viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></button>
+            <div class="pane">
+              <div class="g-head">
+                <span class="g-icon"><svg viewBox="0 0 24 24"><use href="#i-commit"/></svg></span>
+                <strong>Add storage reset and refine sync reviews</strong>
+                <span class="g-tail">
+                  <span class="extlink" title="Open on GitHub"><svg viewBox="0 0 24 24"><use href="#i-extlink"/></svg></span>
+                  <span class="sha-chip">c002338</span>
+                  <span class="g-stamp">Sep 1, 2026 at 00:26</span>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="group head-only">
+            <button class="g-fold" title="Expand"><svg viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></button>
+            <div class="pane">
+              <div class="g-head">
+                <span class="g-icon"><svg viewBox="0 0 24 24"><use href="#i-range"/></svg></span>
+                <span class="g-title-pixel">No commits</span>
+                <span class="g-tail"><span class="g-stamp">Aug 2 — Sep 1, 2026</span></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="group head-only">
+            <button class="g-fold" title="Load earlier"><svg viewBox="0 0 24 24"><use href="#i-chevdown"/></svg></button>
+            <div class="pane">
+              <div class="load-earlier"><b>Load earlier</b><span class="micro">· Aug 2, 2026</span></div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ═══ Catalog scope page: unboxed section headings, one box
+           per item with preview tile (shipped layout) ═══ -->
+      <section class="view" data-view="library">
+
+        <div class="cat-head">
+          <svg viewBox="0 0 24 24"><use href="#i-cloud"/></svg>
+          <span class="ch-pixel">Only in</span>
+          <strong>Local storage 1</strong>
+        </div>
+
+        <div class="pane item-box">
+          <div class="item-row">
+            <span class="preview" aria-hidden="true">🐕</span>
+            <div class="item-main">
+              <div class="t-top">
+                <span class="sstat cloud" title="In storage only"><svg viewBox="0 0 24 24"><use href="#i-cloud-circle"/></svg></span>
+                <span class="thread-title">大黄</span>
+                <span class="t-launch">
+                  <span title="Codex"><svg viewBox="0 0 24 24"><use href="#i-codex"/></svg></span>
+                  <span title="Open in terminal"><svg viewBox="0 0 24 24"><use href="#i-terminal"/></svg></span>
+                  <span title="Compare"><svg viewBox="0 0 24 24"><use href="#i-compare"/></svg></span>
+                  <span title="Reveal"><svg viewBox="0 0 24 24"><use href="#i-folder"/></svg></span>
+                </span>
+              </div>
+              <div class="t-meta">
+                <span><svg viewBox="0 0 24 24"><use href="#i-file"/></svg><b>–</b></span>
+                <span><svg viewBox="0 0 24 24"><use href="#i-archive"/></svg><b>–</b></span>
+                <span class="t-div"></span>
+                <span class="t-ctl"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+                <span class="t-end">Sep 1, 2026 at 02:44</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="cat-head">
+          <svg viewBox="0 0 24 24"><use href="#i-paw"/></svg>
+          <span class="ch-pixel">Pets v2</span>
+        </div>
+
+        <div class="pane item-box">
+          <div class="item-row">
+            <span class="preview" aria-hidden="true">🐶</span>
+            <div class="item-main">
+              <div class="t-top">
+                <span class="sstat synced" title="Synced"><svg viewBox="0 0 24 24"><use href="#i-check-circle"/></svg></span>
+                <span class="thread-title">Maple</span>
+                <span class="t-launch">
+                  <span title="Codex"><svg viewBox="0 0 24 24"><use href="#i-codex"/></svg></span>
+                  <span title="Open in terminal"><svg viewBox="0 0 24 24"><use href="#i-terminal"/></svg></span>
+                  <span title="Compare"><svg viewBox="0 0 24 24"><use href="#i-compare"/></svg></span>
+                  <span title="Reveal"><svg viewBox="0 0 24 24"><use href="#i-folder"/></svg></span>
+                </span>
+              </div>
+              <div class="t-meta">
+                <span><svg viewBox="0 0 24 24"><use href="#i-file"/></svg><b>1</b></span>
+                <span><svg viewBox="0 0 24 24"><use href="#i-archive"/></svg><b>2.5 MB</b></span>
+                <span class="t-div"></span>
+                <span class="t-ctl"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+                <span class="t-end">Aug 30, 2026 at 02:53</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="pane item-box">
+          <div class="item-row">
+            <span class="preview" aria-hidden="true">🐢</span>
+            <div class="item-main">
+              <div class="t-top">
+                <span class="sstat local" title="Local, not pushed"><svg viewBox="0 0 24 24"><use href="#i-up-circle"/></svg></span>
+                <span class="thread-title">Patch</span>
+                <span class="t-launch">
+                  <span title="Codex"><svg viewBox="0 0 24 24"><use href="#i-codex"/></svg></span>
+                  <span title="Open in terminal"><svg viewBox="0 0 24 24"><use href="#i-terminal"/></svg></span>
+                  <span title="Compare"><svg viewBox="0 0 24 24"><use href="#i-compare"/></svg></span>
+                  <span title="Reveal"><svg viewBox="0 0 24 24"><use href="#i-folder"/></svg></span>
+                </span>
+              </div>
+              <div class="t-meta">
+                <span><svg viewBox="0 0 24 24"><use href="#i-file"/></svg><b>1</b></span>
+                <span><svg viewBox="0 0 24 24"><use href="#i-archive"/></svg><b>1.6 MB</b></span>
+                <span class="t-div"></span>
+                <span class="t-ctl"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+                <span class="t-end">Aug 30, 2026 at 02:53</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ Session detail: fact strip · SHOW bar · spined timeline ═══ -->
+      <section class="view" data-view="session">
+        <div class="fact-row">
+          <span class="fact when">Aug 30, 2026 · <b>00:15</b></span>
+          <span class="fact"><svg viewBox="0 0 24 24" style="width:12px;height:12px;align-self:center"><use href="#i-clock"/></svg><b>4m</b></span>
+          <span class="fact"><b>192K</b> tokens</span>
+          <span class="sess-provs" title="Codex session · terminal"><svg viewBox="0 0 24 24"><use href="#i-codex"/></svg><svg viewBox="0 0 24 24"><use href="#i-terminal"/></svg></span>
+        </div>
+
+        <div class="pane">
+          <div class="show-bar">
+            <span class="micro">Show</span>
+            <button class="filter-chip on"><span class="box"></span>Prompts 3</button>
+            <button class="filter-chip on"><span class="box"></span>Replies 3</button>
+            <button class="filter-chip off"><span class="box"></span>Steps 3</button>
+            <button class="filter-chip on"><span class="box"></span>Tool calls 4</button>
+            <span class="ev-count">10 of 13 events</span>
+          </div>
+        </div>
+
+        <div class="day-divider"><span class="micro">Aug 30, 2026</span></div>
+
+        <div class="timeline">
+          <div class="tl-item">
+            <span class="tl-node user"><svg viewBox="0 0 24 24"><use href="#i-user"/></svg></span>
+            <div class="prompt-card">
+              <p>Can you create a cold joke in a md doc?</p>
+              <div class="pfoot"><span>00:15</span><span>8s</span><span>2 calls</span></div>
+            </div>
+          </div>
+          <div class="tl-item tool">
+            <span class="tl-node"></span>
+            <div class="tool-line"><span class="tool-name">Bash</span><span class="tool-argv">pwd &amp;&amp; rg --files -g '*.md' -g '!node_modules' | head -20</span><span class="chev">›</span></div>
+          </div>
+          <div class="tl-item tool">
+            <span class="tl-node"></span>
+            <div class="tool-line"><span class="tool-name">Edit</span><span class="tool-argv">cold-joke.md</span><span class="chev">›</span></div>
+          </div>
+          <div class="tl-item">
+            <span class="tl-node agent"><svg viewBox="0 0 24 24"><use href="#i-codex"/></svg></span>
+            <div class="reply-flow">
+              <p>Created the Markdown document: <a>cold-joke.md</a></p>
+              <p>It contains:</p>
+              <blockquote>Why did the snowman look through the carrots?<br>Because he was picking his nose.</blockquote>
+            </div>
+          </div>
+          <div class="tl-item gap"><span class="gap-chip">+3m</span></div>
+          <div class="tl-item">
+            <span class="tl-node user"><svg viewBox="0 0 24 24"><use href="#i-user"/></svg></span>
+            <div class="prompt-card">
+              <p>Can you make it longer?</p>
+              <div class="pfoot"><span>00:18</span><span>9s</span><span>1 call</span></div>
+            </div>
+          </div>
+          <div class="tl-item tool">
+            <span class="tl-node"></span>
+            <div class="tool-line"><span class="tool-name">Edit</span><span class="tool-argv">cold-joke.md</span><span class="chev">›</span></div>
+          </div>
+          <div class="tl-item">
+            <span class="tl-node agent"><svg viewBox="0 0 24 24"><use href="#i-codex"/></svg></span>
+            <div class="reply-flow">
+              <p>Updated the document with a longer collection of cold-themed jokes: <a>cold-joke.md</a></p>
+            </div>
+          </div>
+          <div class="tl-item">
+            <span class="tl-node user"><svg viewBox="0 0 24 24"><use href="#i-user"/></svg></span>
+            <div class="prompt-card">
+              <p>Even longer</p>
+              <div class="pfoot"><span>00:19</span><span>23s</span><span>1 call</span></div>
+            </div>
+          </div>
+          <div class="tl-item tool">
+            <span class="tl-node"></span>
+            <div class="tool-line"><span class="tool-name">Edit</span><span class="tool-argv">cold-joke.md</span><span class="chev">›</span></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+const sideState = {
+  activity: { nav: "projects", item: "side-mallard" },
+  library:  { nav: "catalog",  item: "side-pets" },
+  session:  { nav: "projects", item: "side-testproj" },
+};
+document.querySelectorAll(".spec-btn[data-v]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".spec-btn[data-v]").forEach(b => b.setAttribute("aria-pressed", b === btn ? "true" : "false"));
+    document.querySelectorAll(".view").forEach(v => v.classList.toggle("on", v.dataset.view === btn.dataset.v));
+    document.querySelectorAll(".pathbar").forEach(p => { p.hidden = p.dataset.for !== btn.dataset.v; });
+    const s = sideState[btn.dataset.v];
+    document.querySelectorAll(".nav-item").forEach(n => n.classList.toggle("on", n.dataset.nav === s.nav));
+    document.querySelectorAll(".sect-item").forEach(i => i.classList.toggle("on", i.id === s.item));
+  });
+});
+document.querySelectorAll(".spec-btn[data-s]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".spec-btn[data-s]").forEach(b => b.setAttribute("aria-pressed", b === btn ? "true" : "false"));
+    document.documentElement.dataset.style = btn.dataset.s;
+  });
+});
+document.querySelectorAll(".spec-btn[data-t]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".spec-btn[data-t]").forEach(b => b.setAttribute("aria-pressed", b === btn ? "true" : "false"));
+    document.documentElement.dataset.type = btn.dataset.t;
+  });
+});
+document.querySelectorAll(".filter-chip").forEach(chip => {
+  chip.addEventListener("click", () => {
+    chip.classList.toggle("on");
+    chip.classList.toggle("off");
+  });
+});
+const themeBtn = document.getElementById("themeBtn");
+themeBtn.addEventListener("click", () => {
+  const light = document.documentElement.dataset.theme !== "light";
+  document.documentElement.dataset.theme = light ? "light" : "dark";
+  themeBtn.textContent = light ? "☀ Light" : "☾ Dark";
+});
+</script>
+</body>
+</html>

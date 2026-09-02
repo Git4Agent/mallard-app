@@ -58,13 +58,13 @@ export function highestSeverity(severities: readonly NoticeSeverity[]): NoticeSe
  *
  * `inline` is the fourth case and the one to justify before reaching for: no
  * role at all, for a box whose meaning is already carried by something that
- * encloses it. Two shapes need it. A screen that IS the failure — heading,
- * prose, box and Retry inside one labelled <main> — gains nothing from a
- * landmark around one of its paragraphs. And a marker that repeats per row
- * would otherwise mint one landmark per row: a file list with thirty conflicts
+ * encloses it. One shape needs it: a marker that repeats per row would
+ * otherwise mint one landmark per row — a file list with thirty conflicts
  * would hand a screen-reader user thirty regions called "Pull required", which
- * is worse than none. Neither is standing content that needs finding; both are
- * read in place. */
+ * is worse than none. It is not standing content that needs finding; it is
+ * read in place. A screen that IS the failure does not qualify: it replaces
+ * the startup loader after mount, so the failure is an event, and its notice
+ * is `blocking` so the change is spoken. */
 export type NoticeTiming =
   | { timing: "standing"; label: string }
   | { timing: "progress" | "blocking" | "inline"; label?: undefined };

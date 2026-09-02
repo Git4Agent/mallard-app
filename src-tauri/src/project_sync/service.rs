@@ -6437,6 +6437,86 @@ struct ThreadComparisonBuild {
 /// Split reviewed candidates into watcher-served byte pins and the set that
 /// still needs authoritative capture. Candidates of cursor-less providers
 /// always capture.
+/// Fit a push review's candidate capture inside the capture budget. The base
+/// selection is always kept — it is the classification floor for providers
+/// without a tail cursor — and the remaining candidates are admitted newest
+/// first until the budget is spent. Returns the selection to capture and the
+/// candidates held over, in a stable order.
+fn fit_capture_budget(
+    views: &[provider_capture::LocalSessionView],
+    base_selection: &BTreeSet<String>,
+    selection: BTreeSet<String>,
+    budget: u64,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut metadata_by_resource_id = HashMap::with_capacity(views.len());
+    for view in views {
+        metadata_by_resource_id
+            .entry(view.descriptor.resource_id.as_str())
+            .or_insert((view.source_size, view.source_mtime));
+    }
+    let lookup = |resource_id: &str| -> (u64, u64) {
+        metadata_by_resource_id
+            .get(resource_id)
+            .copied()
+            .unwrap_or((0, 0))
+    };
+    fit_capture_budget_with(&lookup, base_selection, selection, budget)
+}
+
+/// The budget fit over a `(size, mtime)` lookup, so the policy is testable
+/// without building discovery views.
+fn fit_capture_budget_with(
+    lookup: &dyn Fn(&str) -> (u64, u64),
+    base_selection: &BTreeSet<String>,
+    selection: BTreeSet<String>,
+    budget: u64,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut kept: BTreeSet<String> = base_selection.clone();
+    let mut spent: u64 = base_selection
+        .iter()
+        .map(|resource_id| lookup(resource_id).0)
+        .fold(0u64, |total, size| total.saturating_add(size));
+    let mut candidates: Vec<(String, u64, u64)> = selection
+        .into_iter()
+        .filter(|resource_id| !base_selection.contains(resource_id))
+        .map(|resource_id| {
+            let (size, mtime) = lookup(&resource_id);
+            (resource_id, size, mtime)
+        })
+        .collect();
+    candidates.sort_by(|(a_id, _, a_mtime), (b_id, _, b_mtime)| {
+        b_mtime.cmp(a_mtime).then_with(|| a_id.cmp(b_id))
+    });
+    let mut over_budget = BTreeSet::new();
+    for (resource_id, size, _) in candidates {
+        if spent.saturating_add(size) <= budget {
+            spent = spent.saturating_add(size);
+            kept.insert(resource_id);
+        } else {
+            over_budget.insert(resource_id);
+        }
+    }
+    (kept, over_budget)
+}
+
+/// Rows the review could not capture keep their place in the list but hold
+/// a blocked decision, and any action planned for them from an Absent pin is
+/// dropped — a plan must never carry an action its review did not prove.
+fn hold_over_budget_candidates(review: &mut ThreadReview, over_budget: &BTreeSet<String>) {
+    for entry in review.entries.iter_mut() {
+        if over_budget.contains(&entry.resource_id.to_string()) {
+            entry.push_decision =
+                mallard_domain::blocked_conversation_decision(ConversationBlocker::CaptureBudget);
+        }
+    }
+    review.push_actions.retain(|action| {
+        action
+            .source_resource_id
+            .as_ref()
+            .is_none_or(|resource_id| !over_budget.contains(&resource_id.to_string()))
+    });
+}
+
 fn reuse_candidate_pins(
     capture_request: &CaptureRequest,
     local_project_id: &LocalProjectId,
@@ -6642,6 +6722,19 @@ fn build_thread_sync_comparison(
             &base_selection,
             selection,
         );
+        // The capture budget is a per-capture ceiling, and a project with
+        // years of sessions can hold more candidate bytes than one capture
+        // may retain. Failing the whole review here left it open with
+        // nothing selectable and no reason; instead the review captures the
+        // newest candidates that fit and holds the rest for the next round,
+        // each with a blocker that says so. The push still enforces the same
+        // ceiling on whatever the user finally selects.
+        let (selection, over_budget) = fit_capture_budget(
+            views,
+            &base_selection,
+            selection,
+            provider_capture::MAX_CAPTURE_BYTES,
+        );
         let captured = if selection == base_selection {
             captured
         } else {
@@ -6659,7 +6752,15 @@ fn build_thread_sync_comparison(
             &base_selection,
             &captured,
         );
-        let review = run_review(&captured, &candidate_pins, true)?;
+        let mut review = run_review(&captured, &candidate_pins, true)?;
+        if !over_budget.is_empty() {
+            hold_over_budget_candidates(&mut review, &over_budget);
+            warnings.push(format!(
+                "{} conversation(s) exceed this review's {} byte capture budget and wait for the next round",
+                over_budget.len(),
+                provider_capture::MAX_CAPTURE_BYTES
+            ));
+        }
         (captured, review)
     } else {
         let review = run_review(&captured, &no_pins, false)?;
@@ -21619,6 +21720,53 @@ mod tests {
                     + detail.event_counts.intermediate_steps.value.unwrap(),
             "Codex Activity Replies included the commentary step"
         );
+    }
+
+    #[test]
+    fn fit_capture_budget_keeps_base_and_admits_newest_first() {
+        // (size, mtime) per candidate: the base row is always captured, the
+        // rest are admitted newest first until the budget is spent, and the
+        // held-over set is exactly what did not fit.
+        let looked_up = std::cell::RefCell::new(BTreeSet::new());
+        let lookup = |id: &str| -> (u64, u64) {
+            assert!(
+                looked_up.borrow_mut().insert(id.to_string()),
+                "metadata for '{id}' was read more than once"
+            );
+            match id {
+                "base" => (100, 1),
+                "newest" => (300, 900),
+                "middle" => (300, 500),
+                "oldest" => (300, 100),
+                "tiny-old" => (50, 50),
+                _ => (0, 0),
+            }
+        };
+        let base: BTreeSet<String> = ["base".to_string()].into_iter().collect();
+        let selection: BTreeSet<String> = ["base", "newest", "middle", "oldest", "tiny-old"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let expected_lookups: BTreeSet<String> = base.union(&selection).cloned().collect();
+        let (kept, held) = fit_capture_budget_with(&lookup, &base, selection.clone(), 750);
+        // 100 (base) + 300 (newest) + 300 (middle) = 700; oldest would exceed
+        // the budget, tiny-old (50) still fits afterwards.
+        assert_eq!(
+            kept,
+            ["base", "newest", "middle", "tiny-old"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+        assert_eq!(held, ["oldest".to_string()].into_iter().collect());
+        assert_eq!(&*looked_up.borrow(), &expected_lookups);
+        // A budget that cannot even hold the base keeps it anyway: the base
+        // is the classification floor, never a candidate.
+        looked_up.borrow_mut().clear();
+        let (kept, held) = fit_capture_budget_with(&lookup, &base, selection, 10);
+        assert_eq!(kept, base);
+        assert_eq!(held.len(), 4);
+        assert_eq!(&*looked_up.borrow(), &expected_lookups);
     }
 
     #[test]

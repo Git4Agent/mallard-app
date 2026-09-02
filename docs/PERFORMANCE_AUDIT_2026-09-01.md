@@ -2,8 +2,9 @@
 
 - **Audit date:** 2026-09-01
 - **Application version:** 0.1.2
-- **Source baseline:** `f2cdac4` plus the existing staged, unstaged, and
-  untracked working-tree changes
+- **Source baseline as audited:** `f2cdac4` plus the then-current working tree
+- **Status revised at:** `789eea5` (see "Status" below — PERF-025 and PERF-031
+  are resolved, and the PERF-017 `logLines` case is resolved)
 - **Scope:** provider discovery and metadata scanning, the inventory and
   timeline caches, session-detail IPC, bundle transfer scheduling, React
   render locality, frontend bundle composition, and the Cargo release profile
@@ -11,8 +12,59 @@
   Claude home, which the 2026-08-30 audit explicitly could not do, and record
   what only a production-sized corpus reveals
 
-This report describes the current working tree. Recheck the findings after
-the current changes are committed or replaced.
+This report was written against `f2cdac4`. Three commits landed immediately
+afterwards, two of them acting on these findings. The "Status" section below
+records what is resolved; the finding bodies are kept as the record of why
+each change was made, and are not rewritten.
+
+## Status at `789eea5`
+
+| ID | Status | Landed in |
+| --- | --- | --- |
+| PERF-025 | **Resolved.** Both changes shipped: the narrow-record parse and a 256 KiB tail window with a soundness condition and full-stream fallback. Design and measurements in [`DESIGN_CLAUDE_SCAN_TAIL_WINDOW.md`](DESIGN_CLAUDE_SCAN_TAIL_WINDOW.md). | `789eea5` |
+| PERF-031 | **Resolved.** `session_home_is_project_root` now takes a `BTreeMap` memo threaded through both adapters' discovery loops, so a repeated home canonicalizes once. | `ec82ce1` |
+| PERF-017 (`logLines` case) | **Resolved.** `logLines` moved to a new `ActivityLogDrawer`; the listener now writes a ref and notifies subscribers instead of setting root state, and the drawer coalesces arrivals on `requestAnimationFrame`. `ProjectSync` went from 81 `useState` declarations to 74. | `ec82ce1` |
+| PERF-026, PERF-027 | Open. | — |
+| PERF-028, PERF-029, PERF-030 | Open. | — |
+| PERF-032, PERF-033 | Open. | — |
+| PERF-009, PERF-013, PERF-020, PERF-021 | Open, as recorded under "Confirmations". | — |
+
+One residual under PERF-017: while the drawer is closed, each log event still
+calls `setUnreadLogs` at the root
+([`ProjectSync.tsx:600`](../src/components/project-sync/ProjectSync.tsx#L600)).
+That is now bounded — the counter saturates at 99 and React then bails on the
+identical value — where before it was one unbounded root write per event. Not
+worth a change on its own; fold it in if the shell is refactored again.
+
+### Independent corroboration of the PERF-025 result
+
+The audit harness and the implementation's corpus gate are separate programs
+written against the same corpus, and their narrow-parse figures agree closely:
+
+| Source | Full-file `Value` parse | Narrow-record parse |
+| --- | ---: | ---: |
+| This audit's A/B harness | 1.277 s / 1.369 s | 0.541 s / 0.537 s |
+| `claude_scan_corpus_parity_and_window_sweep` | 1.778 s | 0.564 s (256 KiB tier) |
+
+The `Value` arms differ because the gate's reference scan does more per record
+than the audit's probe; the narrow arms — the number the change is judged on —
+land within 5% of each other from independent code. `cargo test -p
+mallard-infrastructure` at `789eea5`: 372 passed, 0 failed, 3 ignored.
+
+Worth carrying forward: the window tier reads slightly **more** bytes than a
+pure full scan (1104 MB against 1090 MB at 256 KiB), because an undecided file
+reads its window and then the full stream anyway. The design doc states this
+and keeps the tier for the worst case it bounds rather than for average bytes.
+That is the right call, but it means PERF-026 — walking each home once instead
+of once per project per pass — is now the finding that reduces total I/O, and
+it is still open.
+
+PERF-025's resolution also changes the ownership doctrine, not just the cost:
+`authorized_home` (the leaf segment's first recorded home) now decides project
+ownership, replacing the `leaf_cwd`/`last_cwd` drift fallback. That is a
+correctness change carried by a performance fix, and the corpus gate reports
+zero divergences across 106 comparable files. It is worth knowing about when
+reading any older document that says ownership follows the last `cwd`.
 
 ## Relationship to the 2026-08-30 audit
 
@@ -96,19 +148,22 @@ One hypothesis was measured and **rejected**; it is recorded under
 
 | ID | Priority | Area | Finding |
 | --- | --- | --- | --- |
-| PERF-025 | P1 | Provider history | Claude discovery reads and parses complete transcripts where Codex reads a bounded head |
+| PERF-025 | P1 | Provider history | Claude discovery reads and parses complete transcripts where Codex reads a bounded head — **resolved in `789eea5`** |
 | PERF-026 | P1 | Discovery cache | The provider inventory cache is process-local and keyed per project |
 | PERF-027 | P1 | Activity | The Activity page's two parallel commands each run a complete discovery |
 | PERF-028 | P2 | Session cache | Timeline-cache eviction counts entries while its write limit counts bytes |
 | PERF-029 | P2 | Storage transfer | Bundle transfers barrier every N objects over a semaphore that already bounds them |
 | PERF-030 | P2 | Session detail | Every session-detail response is serialized twice |
-| PERF-031 | P3 | Discovery | Discovery re-canonicalizes constant paths once per session file |
+| PERF-031 | P3 | Discovery | Discovery re-canonicalizes constant paths once per session file — **resolved in `ec82ce1`** |
 | PERF-032 | P3 | Project content | The ignore matcher allocates a memo map and a format string per path component |
 | PERF-033 | P3 | Persistence | Machine-only caches are pretty-printed |
 
 ## P1 findings
 
 ### PERF-025 — Claude discovery reads complete transcripts
+
+> **Resolved in `789eea5`.** Both directions below shipped. The text is kept
+> as the record of the problem and the measurements that motivated it.
 
 `scan_claude_session_metadata`
 ([`claude/mod.rs:35`](../crates/mallard-infrastructure/src/providers/claude/mod.rs#L35))
@@ -322,6 +377,9 @@ constructs the whole over-limit document before rejecting it.
 
 ### PERF-031 — Discovery re-canonicalizes constant paths per session file
 
+> **Resolved in `ec82ce1`**, ahead of the recommendation below — the `cwd`
+> memo landed as part of the PERF-025 work rather than opportunistically.
+
 `inspect_candidate_files_with_limit` calls `fs::canonicalize(approved_root)`
 on every invocation
 ([`provider_capture.rs:1808`](../crates/mallard-infrastructure/src/provider_capture.rs#L1808)),
@@ -507,9 +565,14 @@ esbuild's 805 KB flat total matches the 627,712 + 178,503 split Vite emits.
 
 ## Recommended sequence
 
-### Milestone 1 — Bound the Claude scan
+### Milestone 1 — Bound the Claude scan — COMPLETE (`789eea5`)
 
-PERF-025 change 1 alone. It is unconditional, has no semantic effect, and is
+Shipped as both changes at once rather than change 1 alone, with a corpus
+parity gate and a window sweep behind the frozen 256 KiB constant. Measured
+1.778 s to 0.564 s, 3.2x, with the design doc noting honestly that most of
+the win is the narrow parse rather than the window.
+
+Original recommendation, for the record: PERF-025 change 1 alone. It is unconditional, has no semantic effect, and is
 verifiable with `MALLARD_SYNC_METRICS=1` plus the existing suite. Expect the
 Claude leg of discovery to roughly halve.
 

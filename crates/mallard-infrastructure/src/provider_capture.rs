@@ -20,7 +20,9 @@ use mallard_domain::{self as domain, hex_lower, sha256_hex};
 
 const MAX_DISCOVERED_FILES: usize = 20_000;
 pub(crate) const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_CAPTURE_BYTES: u64 = 512 * 1024 * 1024;
+/// The most bytes one capture may retain. A push enforces it on the reviewed
+/// selection; a push review plans its candidate capture to fit inside it.
+pub const MAX_CAPTURE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_METADATA_LINES: usize = 128;
 const MAX_TREE_DEPTH: usize = 32;

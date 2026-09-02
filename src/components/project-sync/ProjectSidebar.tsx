@@ -16,7 +16,7 @@ import { catalogKindMeta, catalogScopeLabel } from "../storage-catalog/model";
 import type { CatalogScopeView } from "../storage-catalog/types";
 import { projectLabel } from "./model";
 
-/* Both gutters down the sections box drag — they are the same 3px of frame
+/* Both gutters down the sections box drag — they are the same 8px of frame
    colour, so a fixed bottom row read as a handle and answered to nothing.
    Projects and Catalog divide the elastic space by share. Storages does not:
    it holds an unbounded list of configured destinations, so it is sized to
@@ -51,6 +51,12 @@ const DEFAULT_PROJECT_SHARE = 0.56;
 const MIN_SECTION_SHARE = 0.2;
 export const MIN_PANE_HEIGHT = 96;
 const SECTION_KEYBOARD_STEP = 12;
+/* The net height one divider row occupies in the sections grid — the CSS
+   handle is a 20px box with -6px margins, netting one 8px gutter, and the
+   grid gives it a track of exactly that. Both dividers between the three
+   panes come out of the elastic space. */
+export const SECTION_DIVIDER_NET = 8;
+export const SECTION_DIVIDERS_HEIGHT = 2 * SECTION_DIVIDER_NET;
 
 function clampSectionShare(value: number): number {
   return Math.min(1 - MIN_SECTION_SHARE, Math.max(MIN_SECTION_SHARE, value));
@@ -61,7 +67,7 @@ function clampSectionShare(value: number): number {
    ceiling stops once Catalog, the pane this handle actually borders, is down to
    its own floor, so the handle never starts eating Projects instead. */
 export function storageHeightRange(boxHeight: number, projectsHeight: number): [number, number] {
-  return [MIN_PANE_HEIGHT, Math.max(MIN_PANE_HEIGHT, boxHeight - 6 - projectsHeight - MIN_PANE_HEIGHT)];
+  return [MIN_PANE_HEIGHT, Math.max(MIN_PANE_HEIGHT, boxHeight - SECTION_DIVIDERS_HEIGHT - projectsHeight - MIN_PANE_HEIGHT)];
 }
 
 function clampStorageHeight(value: number, boxHeight: number, projectsHeight: number): number {
@@ -74,7 +80,7 @@ function clampStorageHeight(value: number, boxHeight: number, projectsHeight: nu
    Re-solving the share against the new elastic space keeps Projects on exactly
    the pixels it had, which is what makes this handle move one gutter only. */
 export function shareHolding(projectsHeight: number, boxHeight: number, storageHeight: number): number {
-  const elastic = boxHeight - 6 - storageHeight;
+  const elastic = boxHeight - SECTION_DIVIDERS_HEIGHT - storageHeight;
   return elastic > 0 ? clampSectionShare(projectsHeight / elastic) : DEFAULT_PROJECT_SHARE;
 }
 
@@ -103,7 +109,7 @@ export function shareHoldingCatalog(
   boxHeight: number,
   storageHeight: number,
 ): number {
-  const elastic = boxHeight - 6 - storageHeight;
+  const elastic = boxHeight - SECTION_DIVIDERS_HEIGHT - storageHeight;
   return elastic > 0 ? clampSectionShare(1 - catalogHeight / elastic) : DEFAULT_PROJECT_SHARE;
 }
 
@@ -197,7 +203,7 @@ export function sectionGridRows(
       : storageHeight === null
         ? "fit-content(40%)"
         : `${storageHeight}px`;
-  return `${projectsRow} 3px ${catalogRow} 3px ${storagesRow}`;
+  return `${projectsRow} ${SECTION_DIVIDER_NET}px ${catalogRow} ${SECTION_DIVIDER_NET}px ${storagesRow}`;
 }
 
 const SECTION_TITLES: Record<SectionId, string> = {

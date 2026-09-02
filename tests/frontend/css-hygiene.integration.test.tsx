@@ -96,25 +96,30 @@ test("every notice rung reads on its own fill", () => {
 });
 
 test("every status badge reads on the paper of its own theme", () => {
-  // The seven that carry a verdict. Measured against the *hovered* row, the
-  // harder of the two surfaces a badge sits on.
+  // The seven that carry a verdict. Measured against both row states a badge
+  // sits on: the hovered row and the selected or expanded row. On cream the
+  // active row is the darker of the two, and it is the one this gate once
+  // skipped — `divergent` and `conflict` passed the hovered row at 4.95 and
+  // 5.01 while measuring 4.35 and 4.41 on the active one.
   const signals = [
     "synced", "cloud", "local", "divergent", "pending", "conflict", "unavailable",
   ].map((name) => `--thread-status-${name}`);
 
   for (const theme of ["light", "dark"] as const) {
     const tokens = tokensFor(theme);
-    const surface = resolve("--surface-row-hover", tokens);
-    for (const token of signals) {
-      const colour = resolve(token, tokens);
-      const measured = contrast(colour, surface);
-      // 4.5, not the 3:1 WCAG 2.2 sets for non-text: the badge rim is a 1px
-      // hairline at the 18px the activity list draws, and the floor assumes a
-      // solid shape. Amber `pending` once measured 2.22 here.
-      assert.ok(
-        measured >= 4.5,
-        `${token} is ${colour} on ${theme}, ${measured.toFixed(2)}:1 against ${surface} — needs 4.5`,
-      );
+    for (const surfaceToken of ["--surface-row-hover", "--surface-row-active"]) {
+      const surface = resolve(surfaceToken, tokens);
+      for (const token of signals) {
+        const colour = resolve(token, tokens);
+        const measured = contrast(colour, surface);
+        // 4.5, not the 3:1 WCAG 2.2 sets for non-text: the badge rim is a 1px
+        // hairline at the 18px the activity list draws, and the floor assumes a
+        // solid shape. Amber `pending` once measured 2.22 here.
+        assert.ok(
+          measured >= 4.5,
+          `${token} is ${colour} on ${theme}, ${measured.toFixed(2)}:1 against ${surfaceToken} ${surface} — needs 4.5`,
+        );
+      }
     }
     // Tertiary text remains quiet, but it is still normal-size copy throughout
     // the app and must clear the text contrast floor on every opaque surface.
@@ -140,6 +145,100 @@ test("every status badge reads on the paper of its own theme", () => {
         measured >= 4.5,
         `--text-3 is ${measured.toFixed(2)}:1 on ${surfaceToken} in ${theme}`,
       );
+    }
+  }
+});
+
+/* The papers a sentence can land on: the page, a card, a popover, a footer and
+   a row in every state. On cream the active row is the darkest of them; in the
+   dark palette the order flips and the lightest is the hardest, so the whole
+   list is measured rather than one chosen end. Buttons are not paper — their
+   labels have recipes of their own. */
+const PAPER_SURFACES = [
+  "--bg-0",
+  "--bg-2",
+  "--bg-3",
+  "--bg-4",
+  "--surface-card",
+  "--surface-row",
+  "--surface-row-hover",
+  "--surface-row-active",
+  "--surface-popover",
+  "--surface-footer",
+];
+
+test("every signal ink reads on every paper down to the active row", () => {
+  // The four prose variants of the signal hues carry error, warning, note and
+  // success sentences, and a sentence can land on any paper. The light palette
+  // says so beside them — "≥4.5:1 on every paper surface down to
+  // --surface-row-active" — and light --danger-text measured 4.41 there while
+  // clearing its own notice fill, which the fill gate above could not see.
+  for (const theme of ["light", "dark"] as const) {
+    const tokens = tokensFor(theme);
+    for (const ink of ["--danger-text", "--warning-text", "--info-text", "--success-text"]) {
+      const colour = resolve(ink, tokens);
+      for (const surfaceToken of PAPER_SURFACES) {
+        const measured = contrast(colour, resolve(surfaceToken, tokens));
+        assert.ok(
+          measured >= 4.5,
+          `${ink} is ${colour} on ${theme}, ${measured.toFixed(2)}:1 against ${surfaceToken} — needs 4.5`,
+        );
+      }
+    }
+  }
+});
+
+/** Every custom property declared in a block whose selector is exactly this
+ *  one — page-scoped tokens the palette blocks do not carry. */
+function scopedTokens(selector: string): Map<string, string> {
+  const css = stripComments(appCss);
+  const tokens = new Map<string, string>();
+  for (const block of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (block[1].trim() !== selector) continue;
+    for (const decl of block[2].matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/g)) {
+      tokens.set(decl[1], decl[2].trim());
+    }
+  }
+  return tokens;
+}
+
+/** `color-mix(in srgb, var(--a) P%, var(--b))` as the browser paints it: the
+ *  first colour at P, the second at the rest, interpolated per sRGB channel. */
+function mixSrgb(expression: string, tokens: Map<string, string>): string {
+  const m = expression.match(
+    /^color-mix\(in srgb, var\((--[a-z0-9-]+)\) ([\d.]+)%, var\((--[a-z0-9-]+)\)\)$/,
+  );
+  assert.ok(m, `${expression} is not a two-token srgb color-mix the gate can evaluate`);
+  const share = Number(m[2]) / 100;
+  const [a, b] = [resolve(m[1], tokens), resolve(m[3], tokens)];
+  const channel = (i: number) => {
+    const mixed = parseInt(a.slice(i, i + 2), 16) * share + parseInt(b.slice(i, i + 2), 16) * (1 - share);
+    return Math.round(mixed).toString(16).padStart(2, "0");
+  };
+  return `#${channel(1)}${channel(3)}${channel(5)}`;
+}
+
+test("the session-detail inks read on an expanded tool row", () => {
+  // The page mixes body colour into three signal hues so they survive as text,
+  // and prints them on the darkest row state it paints — the expanded tool
+  // row's --surface-row-active — not only on the page. Tuned to the page, the
+  // link mix once measured 3.94 on the open row, under a 9px uppercase tool
+  // name. Evaluated by value: a palette that moves --blue or --text-0 moves
+  // the mix with it, and this catches the move.
+  const scoped = scopedTokens(".session-detail-page");
+  for (const theme of ["light", "dark"] as const) {
+    const tokens = tokensFor(theme);
+    for (const ink of ["--session-detail-amber", "--session-detail-link", "--session-detail-you"]) {
+      const expression = scoped.get(ink);
+      assert.ok(expression, `${ink} is not declared on .session-detail-page`);
+      const colour = mixSrgb(expression, tokens);
+      for (const surfaceToken of ["--surface-row", "--surface-row-active"]) {
+        const measured = contrast(colour, resolve(surfaceToken, tokens));
+        assert.ok(
+          measured >= 4.5,
+          `${ink} resolves to ${colour} on ${theme}, ${measured.toFixed(2)}:1 against ${surfaceToken} — needs 4.5`,
+        );
+      }
     }
   }
 });

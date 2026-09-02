@@ -273,6 +273,9 @@ interface PendingPush {
   savedRecipe: BundleRecipe | null;
   projectDefaults: Set<string>;
   threadComparison?: ThreadSyncComparison | null;
+  /* Why the comparison is absent when it is: without it no conversation is
+     selectable, and the review must say so rather than open empty. */
+  threadComparisonError: string | null;
   projectContentInventory: ProjectContentInventory | null;
   projectContentScanned: boolean;
   showProjectFiles: boolean;
@@ -1909,6 +1912,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         savedRecipe,
         projectDefaults,
         threadComparison: nextThreadComparison,
+        threadComparisonError: context.thread_comparison_error ?? null,
         projectContentInventory: lockedProjectContentInventory,
         projectContentScanned: lockedProjectContentInventory !== null,
         showProjectFiles: !isGitRepository || lockedProjectContentInventory !== null,
@@ -2729,6 +2733,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         onSelect: openSettings,
       },
       {
+        id: "theme",
+        label: "Dark theme",
+        icon: "moon" as const,
+        checked: theme === "dark",
+        onSelect: () => onThemeChange(theme === "dark" ? "light" : "dark"),
+      },
+      {
         id: "reload",
         label: "Reload app data",
         detail: "Every project and storage, from disk",
@@ -3403,6 +3414,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         projectDefaults={pendingPush.projectDefaults}
         busy={busy || projectContentLoading}
         error={pushError}
+        threadComparisonError={pendingPush.threadComparisonError}
         project={pendingPush.project}
         binding={pendingPush.binding}
         storageId={pendingPush.storageId}
@@ -3510,22 +3522,23 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   if (!hostIdentityStatus && hostIdentityError) {
     return (
       <main className="sync-host-recovery" aria-labelledby="sync-host-recovery-title">
-        {/* No role here. This whole screen IS the failure — heading, prose,
-            callout and Retry — and it is what the shell renders instead of the
-            app, so it is already there when the view paints. Wrapping a screen
-            in role="alert" made a screen reader read the entire page as one
-            interruption; the heading and the labelled <main> name it. */}
+        {/* No role on the screen. Wrapping the whole page in role="alert" made
+            a screen reader read heading, prose, callout and Retry as one
+            interruption; the heading and the labelled <main> name it. The
+            announcement rides the notice below instead. */}
         <section className="sync-empty-state">
           <div className="sync-empty-illustration" aria-hidden="true">
             <Icon name="alert-triangle" size={24} />
           </div>
           <h1 id="sync-host-recovery-title">Host identity unavailable</h1>
           <p>Mallard could not verify this installation, so sync remains paused.</p>
-          {/* `inline`, not `standing`: this box is one paragraph of a screen
-              that is already named by its heading and its labelled <main>, so a
-              region around it would be a landmark inside a landmark saying the
-              same thing. */}
-          <Notice severity="danger" timing="inline">{hostIdentityError}</Notice>
+          {/* `blocking`, not `inline`: this screen replaces the startup loader
+              after mount, so the failure is an event the page did not render
+              with. Without a live region a screen-reader user is never told
+              the app failed to start and has to find the changed heading by
+              hand. The alert is scoped to the one sentence saying what went
+              wrong, not to the page. */}
+          <Notice severity="danger" timing="blocking">{hostIdentityError}</Notice>
           <button type="button" className="btn btn-primary" onClick={() => void refresh()} disabled={loading}>
             {loading ? "Checking…" : "Retry"}
           </button>

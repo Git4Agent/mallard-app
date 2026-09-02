@@ -78,8 +78,10 @@ function sessionCountEmpty(count: SessionCount): boolean {
 }
 
 /**
- * Tool calls default on: the punchcard rows are the transcript's account of the
- * work. SHOW › Tool calls hides them.
+ * The conversation is what opens by default: prompts and replies. Steps and
+ * tool calls — the punchcard rows that account for the work — stay behind
+ * SHOW › Steps and SHOW › Tool calls until asked for, so a long session reads
+ * as an exchange first and a log second.
  */
 export function createDefaultSessionDetailFilters(
   counts: SessionEventCounts,
@@ -89,7 +91,7 @@ export function createDefaultSessionDetailFilters(
     responses: sessionCountSupported(counts.responses),
     intermediateSteps: false,
     checkpoints: sessionCountSupported(counts.checkpoints),
-    toolCalls: sessionCountSupported(counts.tool_calls),
+    toolCalls: false,
   };
 }
 

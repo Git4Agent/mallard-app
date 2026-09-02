@@ -56,6 +56,7 @@ export type IconName =
   | "trash"
   | "terminal"
   | "upload"
+  | "search"
   | "user"
   | "x";
 
@@ -433,6 +434,16 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           <path d="M23 14v1h-1v2h-1v2h-1v1h-1v1h-2v1h-2v1H9v-1H7v-1H5v-1H3v1H2v1H1v-7h7v1H7v1H6v2h1v1h2v1h6v-1h2v-1h2v-2h1v-3h3Z" />
           <path d="M23 2v7h-7V8h1V7h1V5h-1V4h-2V3H9v1H7v1H5v2H4v3H1V9h1V7h1V5h1V4h1V3h2V2h2V1h6v1h2v1h2v1h2V3h1V2h1Z" />
         </g>
+      )}
+      {/* A magnifier: a one-cell ring and a two-cell handle, hollow like the
+          other marks. */}
+      {name === "search" && (
+        <path
+          className="icon-pixel-fill"
+          fill="currentColor"
+          stroke="none"
+          d="M8 2h2v1h-2ZM5 3h3v1h-3ZM10 3h3v1h-3ZM4 4h2v1h-2ZM12 4h2v1h-2ZM3 5h2v1h-2ZM13 5h2v1h-2ZM3 6h1v1h-1ZM14 6h1v1h-1ZM3 7h1v1h-1ZM14 7h1v1h-1ZM2 8h1v1h-1ZM15 8h1v1h-1ZM2 9h1v1h-1ZM15 9h1v1h-1ZM3 10h1v1h-1ZM14 10h1v1h-1ZM3 11h1v1h-1ZM14 11h1v1h-1ZM3 12h2v1h-2ZM13 12h2v1h-2ZM4 13h2v1h-2ZM12 13h2v1h-2ZM5 14h3v1h-3ZM10 14h3v1h-3ZM8 15h2v1h-2ZM15 15h2v1h-2ZM16 16h2v1h-2ZM17 17h2v1h-2ZM18 18h2v1h-2ZM19 19h2v1h-2ZM20 20h2v1h-2Z"
+        />
       )}
       {name === "settings" && (
         <path

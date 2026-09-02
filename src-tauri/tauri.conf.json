@@ -15,8 +15,8 @@
         "title": "Mallard",
         "titleBarStyle": "Overlay",
         "trafficLightPosition": {
-          "x": 20,
-          "y": 29
+          "x": 26,
+          "y": 35
         },
         "hiddenTitle": true,
         "width": 1100,

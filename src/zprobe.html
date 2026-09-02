@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cascade probe</title>
+<link rel="stylesheet" href="./App.css">
+</head>
+<body>
+<div class="app sync-app" id="root">
+  <header class="sync-pathbar sync-titlebar">
+    <ol class="sync-path">
+      <li class="sync-path-item">
+        <button class="sync-path-crumb root" type="button">Storage</button>
+        <div class="sync-path-menu switcher" role="menu" aria-label="Storage" id="probe-menu">
+          <div class="sync-path-menu-current" aria-current="true">
+            <span class="sync-path-menu-copy"><span>Local storage 1</span><small>~/x</small></span>
+          </div>
+          <input type="search" class="sync-path-menu-search" id="probe-search" placeholder="Switch storage…">
+          <div class="sync-path-menu-group" aria-label="Switch to">
+            <button type="button" role="menuitem" class="sync-path-menu-item target" id="probe-target">
+              <span class="sync-path-menu-copy"><span>Team bucket</span></span>
+            </button>
+          </div>
+          <div class="sync-path-menu-foot">
+            <span class="sync-path-menu-cap">Agent profile · default</span>
+            <div class="sync-path-menu-verbs">
+              <button type="button" role="menuitem" class="sync-path-menu-verb" id="probe-verb" aria-label="Rename project…"></button>
+            </div>
+            <button type="button" role="menuitem" class="sync-path-menu-tail" id="probe-tail"><span>Add storage…</span></button>
+          </div>
+        </div>
+        <div class="sync-path-menu" role="menu" aria-label="More actions" id="probe-overflow">
+          <div class="sync-path-menu-group">
+            <div class="sync-path-menu-label" id="probe-label">Mallard</div>
+            <button type="button" role="menuitem" class="sync-path-menu-item"><span class="sync-path-menu-copy"><span>Settings</span></span></button>
+          </div>
+        </div>
+      </li>
+    </ol>
+  </header>
+
+  <div class="sync-project-files-search" id="files-search-wrap">
+    <input type="search" id="probe-files-search" placeholder="Filter">
+  </div>
+
+  <div class="settings-page">
+    <input type="checkbox" class="sync-settings-switch" id="probe-switch">
+  </div>
+
+  <div class="log-drawer sync-log-drawer open">
+    <label class="log-search-control"><input type="search" id="probe-log-search"></label>
+    <label class="log-filter-control"><select id="probe-log-select"><option>a</option></select></label>
+  </div>
+
+  <ol class="session-detail-event-list">
+    <li class="event-response">
+      <div class="session-detail-event-body">
+        <div class="session-detail-card session-detail-card-reply" id="probe-reply">
+          <div class="session-detail-card-head" id="probe-head"><time>10:00</time></div>
+          <div class="session-detail-event-copy"><p>hi</p></div>
+        </div>
+      </div>
+    </li>
+    <li class="event-intermediate">
+      <div class="session-detail-event-body">
+        <div class="session-detail-event-copy session-detail-intermediate-prose" id="probe-step"><p>step</p></div>
+      </div>
+    </li>
+    <li class="event-tool-call">
+      <div class="session-detail-event-body">
+        <details class="session-detail-tool-call"><summary id="probe-toolsummary"><span class="session-detail-tool-name cat-read">READ</span><span class="session-detail-tool-summary">a.txt</span></summary></details>
+      </div>
+    </li>
+  </ol>
+
+  <div class="sync-history-thread-list flat" id="flatlist">
+    <article class="sync-history-thread-card" id="flatcard1"></article>
+    <article class="sync-history-thread-card" id="flatcard2"></article>
+  </div>
+
+  <div class="loading-scaffold-list" id="scaffold"><div class="loading-scaffold-row"></div><div class="loading-scaffold-row" id="scaffoldrow2"></div></div>
+
+  <button class="btn btn-primary" id="probe-btn-primary">Push</button>
+  <button class="btn btn-ghost" id="probe-btn-ghost">Cancel</button>
+  <button class="sync-path-sync" id="probe-pathsync">Push</button>
+</div>
+<script>
+window.__probe = (sel, props) => {
+  const el = document.querySelector(sel);
+  if (!el) return {sel, missing: true};
+  const cs = getComputedStyle(el);
+  const out = {sel};
+  for (const p of props) out[p] = cs.getPropertyValue(p);
+  return out;
+};
+</script>
+</body>
+</html>

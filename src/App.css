@@ -209,19 +209,26 @@ summary:focus-visible {
   font-size: var(--type-xs);
 }
 
-/* The bones mirror .sync-history-thread-card exactly — the flat,
-   hairline-separated list family both Activity sessions and the Library's
-   catalog rows land as. Same list gap, card grid gap, and padding. */
+/* The bones mirror the boxed session list exactly — the ink-edged card the
+   Activity commits and the Library's catalog rows land in, rows parted by the
+   same hairline. Same card grid gap and row padding. */
 .loading-scaffold-list {
   display: grid;
-  gap: 6px;
+  gap: 0;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
+  background: var(--surface-row);
+  box-shadow: var(--shadow-card);
 }
 
 .loading-scaffold-row {
   display: grid;
   gap: 6px;
-  padding: 9px 10px;
-  border-top: 1px solid var(--border);
+  padding: 10px 12px;
+}
+
+.loading-scaffold-row + .loading-scaffold-row {
+  border-top: 1px solid var(--border-mid);
 }
 
 .loading-scaffold-topline {
@@ -264,9 +271,10 @@ summary:focus-visible {
   flex-wrap: wrap;
   gap: 3px;
   padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
   background: var(--surface-card);
+  box-shadow: var(--shadow-card);
 }
 
 .loading-scaffold-band i {
@@ -287,9 +295,10 @@ summary:focus-visible {
   flex-direction: column;
   gap: 8px;
   padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
   background: var(--surface-card);
+  box-shadow: var(--shadow-card);
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -302,8 +311,8 @@ summary:focus-visible {
   justify-content: center;
   gap: 6px;
   min-height: 34px;
-  padding: 0 13px;
-  border: 1px solid var(--button-border);
+  padding: 0 14px;
+  border: var(--box-border);
   color: var(--text-1);
   cursor: pointer;
   white-space: nowrap;
@@ -325,22 +334,24 @@ summary:focus-visible {
 .btn-primary {
   background: var(--button-primary-bg);
   color: var(--text-0);
-  border-color: var(--button-primary-border);
   font-weight: var(--weight-semibold);
 }
 
 .btn-primary:hover:not(:disabled) {
   background: var(--button-primary-hover);
-  border-color: var(--border-strong);
 }
 
+/* Ghosts opt back out of the box grammar: no edge, no cast shadow, the
+   chrome-label weight rather than the button's bold. */
 .btn-ghost {
   background: transparent;
   color: var(--text-1);
   border-color: transparent;
+  box-shadow: none;
   min-height: 32px;
   padding: 0 9px;
   border-radius: var(--button-radius);
+  font-weight: var(--weight-medium);
 }
 .btn-ghost:hover:not(:disabled) {
   color: var(--text-0);
@@ -574,8 +585,9 @@ summary:focus-visible {
   display: flex;
   align-items: center;
   gap: 6px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: var(--box-border);
+  border-radius: var(--r-pill);
+  box-shadow: var(--shadow-card);
   background: var(--bg-0);
   cursor: pointer;
   list-style: none;
@@ -584,7 +596,7 @@ summary:focus-visible {
 
 .log-type-filter > summary::-webkit-details-marker { display: none; }
 .log-type-filter > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.log-type-filter[open] > summary { border-color: var(--border-strong); }
+.log-type-filter[open] > summary { background: var(--button-bg-hover); }
 .log-type-filter > summary svg { margin-left: auto; }
 .log-type-filter[open] > summary svg { transform: rotate(180deg); }
 
@@ -602,8 +614,8 @@ summary:focus-visible {
   left: 0;
   width: 190px;
   padding: 6px;
-  border: 1px solid var(--border-mid);
-  border-radius: 9px;
+  border: var(--box-border);
+  border-radius: 10px;
   background: var(--surface-popover);
   box-shadow: var(--shadow-popover);
 }
@@ -621,7 +633,7 @@ summary:focus-visible {
   min-height: 26px;
   padding: 0 5px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r);
   color: var(--text-2);
   background: transparent;
   font: var(--type-2xs) var(--font);
@@ -641,7 +653,7 @@ summary:focus-visible {
   display: flex;
   align-items: center;
   gap: 8px;
-  border-radius: 5px;
+  border-radius: var(--r);
   color: var(--text-1);
   cursor: pointer;
   user-select: none;
@@ -656,48 +668,65 @@ summary:focus-visible {
 }
 
 .log-filter-control {
+  position: relative;
   height: 28px;
-  padding-left: 8px;
+  padding-left: 10px;
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: var(--box-border);
+  border-radius: var(--r-pill);
+  box-shadow: var(--shadow-card);
   color: var(--text-3);
   background: var(--bg-0);
   font-family: var(--font);
   font-size: var(--type-2xs);
 }
 
+/* No native stepper inside the pill: the select is flat and the wrapper
+   draws the app's own chevron, the same way the setup selects do. */
 .log-filter-control select {
-  height: 26px;
+  height: 24px;
   max-width: 128px;
-  padding: 0 24px 0 0;
+  padding: 0 26px 0 0;
   border: 0;
   color: var(--text-1);
   background: transparent;
   font: inherit;
   font-size: var(--type-xs);
   cursor: pointer;
+  appearance: none;
+}
+
+.log-filter-control::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 9px;
+  width: 12px;
+  height: 12px;
+  margin-top: -6px;
+  background: currentColor;
+  color: var(--text-3);
+  pointer-events: none;
+  -webkit-mask: var(--retro-chevron-down) center / 12px 12px no-repeat;
+  mask: var(--retro-chevron-down) center / 12px 12px no-repeat;
 }
 
 .log-filter-control:focus-within {
-  border-color: var(--border-strong);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .log-search-control input {
   width: 132px;
   height: 28px;
-  padding: 0 9px;
-  border: 1px solid var(--control-border);
-  border-radius: 6px;
-  color: var(--text-1);
-  background: var(--bg-0);
+  padding: 0 12px;
   font: var(--type-xs) var(--font);
 }
 
 .log-search-control input::placeholder { color: var(--text-3); }
-.log-search-control input:focus { border-color: var(--border-strong); }
+.log-search-control input:focus { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 .log-panel-body {
   flex: 1;
@@ -784,15 +813,15 @@ summary:focus-visible {
 .sync-sidebar-toggle {
   position: absolute;
   z-index: 12;
-  top: 14px;
-  left: 86px;
+  top: 20px;
+  left: 92px;
   width: 28px;
   height: 24px;
   padding: 0;
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 7px;
+  border-radius: 8px;
   background: transparent;
   cursor: pointer;
 }
@@ -813,7 +842,7 @@ summary:focus-visible {
 }
 
 .sync-app.sidebar-hidden .sync-titlebar {
-  padding-left: 140px;
+  padding-left: 146px;
 }
 
 .sync-app.sidebar-hidden .sync-titlebar::before {
@@ -821,7 +850,7 @@ summary:focus-visible {
   position: absolute;
   top: 13px;
   bottom: 13px;
-  left: 123px;
+  left: 129px;
   width: 1px;
   background: var(--border);
   pointer-events: none;
@@ -885,7 +914,7 @@ summary:focus-visible {
 }
 
 .sync-primary-nav button:hover:not(:disabled) { color: var(--text-0); }
-.sync-primary-nav button.active { color: var(--text-0); font-weight: var(--weight-semibold); }
+.sync-primary-nav button.active { color: var(--text-0); font-weight: var(--weight-bold); }
 .sync-primary-nav button > span { margin-left: auto; color: var(--text-3); font-size: var(--type-xs); }
 .sync-primary-nav button:disabled,
 .sidebar-profile-main:disabled,
@@ -901,7 +930,7 @@ summary:focus-visible {
   align-items: center;
   gap: 8px;
   border: 1px dashed var(--border-mid);
-  border-radius: 9px;
+  border-radius: var(--retro-panel-radius);
   color: var(--text-2);
   background: transparent;
   font: inherit;
@@ -1143,7 +1172,7 @@ summary:focus-visible {
   display: flex;
   align-items: center;
   gap: 10px;
-  border-radius: 10px;
+  border-radius: calc(var(--retro-panel-radius) - 2px);
   color: var(--text-0);
   user-select: none;
 }
@@ -1159,7 +1188,7 @@ summary:focus-visible {
   align-items: center;
   gap: 10px;
   border: 0;
-  border-radius: 10px;
+  border-radius: calc(var(--retro-panel-radius) - 2px);
   color: inherit;
   font: inherit;
   text-align: left;
@@ -1444,7 +1473,7 @@ summary:focus-visible {
   max-height: calc(100vh - 72px);
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border-mid);
+  border: var(--box-border);
   color: inherit;
   overflow: hidden;
 }
@@ -1504,12 +1533,12 @@ summary:focus-visible {
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px;
-  border: 1px solid var(--border-mid);
-  border-radius: 9px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
   background: var(--surface-muted);
+  box-shadow: var(--shadow-card);
 }
 .sync-provider-card.enabled {
-  border-color: var(--border-strong, var(--border-mid));
   background: var(--surface-raised, var(--surface-muted));
 }
 .sync-provider-card > small { color: var(--text-3); font-size: var(--type-2xs); }
@@ -1575,9 +1604,10 @@ summary:focus-visible {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--border-mid);
-  border-radius: 10px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
   background: var(--surface-card);
+  box-shadow: var(--shadow-card);
   animation: storage-link-reveal 180ms ease-out both;
 }
 
@@ -1631,8 +1661,9 @@ summary:focus-visible {
 .sync-bundle-match-options,
 .sync-bundle-choice-list {
   overflow: hidden;
-  border: 1px solid var(--border-mid);
-  border-radius: 9px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
+  box-shadow: var(--shadow-card);
   background: var(--surface-row);
 }
 .sync-bundle-match-option,
@@ -1675,7 +1706,7 @@ summary:focus-visible {
 .sync-bundle-recommended {
   margin-left: 6px;
   padding: 1px 4px;
-  border-radius: 2px;
+  border-radius: var(--r-pill);
   color: var(--text-1);
   background: var(--chip-bg);
   text-transform: uppercase;
@@ -2033,11 +2064,13 @@ summary:focus-visible {
 
 .sync-storage-card { border: 1px solid var(--border); overflow: hidden; }
 .sync-storage-card > header { min-height: 50px; padding: 8px 10px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); }
-.sync-storage-icon { width: 30px; height: 30px; display: grid; place-items: center; color: var(--accent); background: var(--accent-soft); border-radius: 8px; }
+.sync-storage-icon { width: 30px; height: 30px; display: grid; place-items: center; color: var(--accent); background: var(--accent-soft); border-radius: 10px; }
 .sync-storage-card header > input { width: 220px; font-weight: var(--weight-semibold); }
 .sync-storage-card > header .danger { margin-left: auto; color: var(--danger-text); }
-.sync-segmented { display: flex; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-muted); }
-.sync-segmented button { height: 25px; padding: 0 8px; border: 0; color: var(--text-2); background: transparent; font: inherit; font-size: var(--type-2xs); cursor: pointer; }
+/* A closed choice in the pill grammar: one ink-edged pill under the cast
+   shadow, the chosen segment filled like an active row. */
+.sync-segmented { display: flex; padding: 2px; border: var(--box-border); border-radius: var(--r-pill); background: var(--button-bg); box-shadow: var(--shadow-card); }
+.sync-segmented button { height: 26px; padding: 0 10px; border: 0; color: var(--text-2); background: transparent; font: inherit; font-family: var(--font-display); font-size: var(--type-2xs); font-weight: var(--weight-medium); cursor: pointer; }
 .sync-storage-card > .sync-folder-field { margin: 12px 14px; }
 .sync-storage-card > header .sync-segmented { margin-left: auto; }
 .sync-storage-editor-title { margin: 0; color: var(--text-0); }
@@ -2077,12 +2110,10 @@ summary:focus-visible {
 .btn.sync-r2-agent-cta {
   color: var(--accent);
   background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
 }
 .btn.sync-r2-agent-cta:hover:not(:disabled) {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 16%, var(--accent-soft));
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 /* After the copy, the button's slot narrates the rest: listening for the CLI's
    committed storage, then the adoption note; a failed copy answers in the
@@ -2140,11 +2171,28 @@ summary:focus-visible {
 }
 /* The split cluster: the visible half runs the session's preferred agent,
    the arrow discloses the other launchers and the copy route in the path
-   bar's own menu. */
-.sync-r2-split { position: relative; display: inline-flex; flex: none; }
-.sync-r2-split > .btn + .btn { border-left: 0; }
-.sync-r2-split > .btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-.sync-r2-split-arrow { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 2px 6px; }
+   bar's own menu. It is one pill — the ink edge and the cast shadow belong
+   to the cluster, the halves inside are borderless and part at a 2px ink
+   seam — so the pair reads as a single control with a disclosure end rather
+   than two buttons wearing their own boxes. */
+.sync-r2-split {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  border: var(--box-border);
+  border-radius: var(--r-pill);
+  background: var(--button-bg);
+  box-shadow: var(--shadow-card);
+}
+.sync-r2-split > .btn {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.sync-r2-split > .btn:first-child { border-radius: var(--r-pill) 0 0 var(--r-pill); }
+.sync-r2-split > .btn + .btn { border-left: 2px solid var(--accent); }
+.sync-r2-split > .btn:active:not(:disabled) { transform: none; }
+.sync-r2-split > .sync-r2-split-arrow { border-radius: 0 var(--r-pill) var(--r-pill) 0; padding: 2px 8px; }
 .sync-r2-split > .sync-path-menu { top: calc(100% + 5px); }
 .sync-r2-menu-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .sync-r2-menu-text small { color: var(--text-3); font-size: var(--type-3xs); }
@@ -2170,7 +2218,8 @@ summary:focus-visible {
   padding: 0 10px;
   border: 0;
   border-left: 1px solid var(--button-border);
-  border-radius: 0 6px 6px 0;
+  /* Inside the 4px input, one pixel in from its edge. */
+  border-radius: 0 3px 3px 0;
   color: var(--text-2);
   background: transparent;
   font: inherit;
@@ -2283,12 +2332,16 @@ summary:focus-visible {
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* On the project page the link card is a bare layout wrapper: the storage
+   card inside it carries the frame, so every part of the box grammar — the
+   cast shadow included — comes off, or an invisible card casts an L. */
 .sync-project-workspace-page .profile-link-card {
   display: block;
   padding: 0;
   border: 0;
   border-radius: 0;
   background: transparent;
+  box-shadow: none;
 }
 
 .sync-project-workspace-page .profile-link-connections {
@@ -2303,9 +2356,10 @@ summary:focus-visible {
 .project-storage-card {
   overflow: hidden;
   margin: 0 0 10px var(--sync-history-card-offset);
-  border: 1px solid var(--border-mid);
-  border-radius: 4px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
   background: var(--surface-row);
+  box-shadow: var(--shadow-card);
 }
 
 /* Non-Git session cards have no timeline rail, so their storage result starts
@@ -2579,7 +2633,7 @@ summary:focus-visible {
   gap: 6px;
   padding: 0 7px;
   border: 1px solid transparent;
-  border-radius: 5px;
+  border-radius: 8px;
   color: var(--text-1);
   background: transparent;
   font: inherit;
@@ -2634,7 +2688,7 @@ button.sync-path-crumb:disabled {
   align-items: center;
   gap: 6px;
   border: 0;
-  border-radius: 4px;
+  border-radius: 8px;
   color: inherit;
   background: transparent;
   font: inherit;
@@ -2649,7 +2703,7 @@ button.sync-path-crumb:disabled {
   align-items: center;
   gap: 6px;
   border: 0;
-  border-radius: 4px;
+  border-radius: 8px;
   color: inherit;
   background: transparent;
   font: inherit;
@@ -2758,17 +2812,22 @@ span.sync-path-crumb {
   display: inline-grid;
   place-items: center;
   padding: 0;
-  border: 1px solid var(--button-border);
-  border-radius: 4px;
+  border: var(--box-border);
+  border-radius: var(--r-pill);
   color: var(--text-2);
   background: var(--button-bg);
+  box-shadow: var(--shadow-card);
   cursor: pointer;
 }
 
 .sync-path-more:hover:not(:disabled) {
-  border-color: var(--border-strong);
   color: var(--text-0);
   background: var(--button-bg-hover);
+}
+
+.sync-path-more:active:not(:disabled) {
+  box-shadow: none;
+  transform: translate(1px, 1px);
 }
 
 .sync-path-more:disabled {
@@ -2795,19 +2854,25 @@ span.sync-path-crumb {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 0 11px;
-  border: 1px solid var(--button-border);
-  border-radius: 4px;
+  padding: 0 12px;
+  border: var(--box-border);
+  border-radius: var(--button-radius);
   color: var(--text-0);
   background: var(--button-bg);
+  box-shadow: var(--shadow-card);
   font: inherit;
+  font-weight: var(--weight-bold);
   cursor: pointer;
 }
 
 .sync-path-sync:hover:not(:disabled) {
-  border-color: var(--border-strong);
   color: var(--accent);
   background: var(--button-bg-hover);
+}
+
+.sync-path-sync:active:not(:disabled) {
+  box-shadow: none;
+  transform: translate(1px, 1px);
 }
 
 .sync-path-sync:disabled {
@@ -2826,6 +2891,7 @@ span.sync-path-crumb {
   margin-right: -3px;
   margin-left: -1px;
   padding: 0 5px;
+  border-radius: var(--r-pill);
   background: var(--chip-strong-bg);
   color: var(--text-0);
   font-variant-numeric: tabular-nums;
@@ -2911,7 +2977,6 @@ span.sync-path-crumb {
 }
 
 .sync-path-icon-action:hover:not(:disabled) {
-  border-color: var(--border);
   background: var(--bg-hover);
   color: var(--text-0);
 }
@@ -2933,7 +2998,6 @@ span.sync-path-crumb {
 }
 
 .sync-path-sync.active {
-  border-color: var(--button-primary-border);
   background: var(--button-primary-bg);
   color: var(--button-primary-text);
 }
@@ -2999,11 +3063,18 @@ span.sync-path-crumb {
   top: calc(100% + 6px);
   left: 0;
   z-index: 30;
-  min-width: 250px;
-  max-width: 340px;
-  padding: 5px;
-  border: 1px solid var(--border-strong);
-  border-radius: 5px;
+  min-width: 260px;
+  max-width: 380px;
+  /* The window root clips (overflow: hidden) and nothing between it and this
+     panel scrolls, so a list taller than the room below the bar would run off
+     the bottom of the window — and the footer verbs with it. The ceiling is
+     the room under the 3.25rem bar and the 6px drop, less a 12px margin; the
+     panel scrolls within it, and a switcher scrolls only its target list. */
+  max-height: calc(100vh - 3.25rem - 18px);
+  overflow-y: auto;
+  padding: 8px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
   background: var(--surface-popover);
   box-shadow: var(--shadow-popover);
 }
@@ -3018,8 +3089,13 @@ span.sync-path-crumb {
 }
 
 .sync-path-menu-label {
-  padding: 6px 8px 4px;
-  color: var(--text-3);
+  padding: 8px 9px 4px;
+  color: var(--text-2);
+  font-family: var(--font-display);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 .sync-path-menu-separator {
@@ -3030,12 +3106,14 @@ span.sync-path-crumb {
 
 .sync-path-menu-item {
   width: 100%;
+  min-height: 34px;
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 7px 8px;
-  border: 0;
-  border-radius: 3px;
+  padding: 5px 9px;
+  /* Transparent at the lifted current row's width, so the two line up. */
+  border: 2px solid transparent;
+  border-radius: 10px;
   color: var(--text-1);
   background: transparent;
   font: inherit;
@@ -3057,7 +3135,11 @@ span.sync-path-crumb {
 
 .sync-path-menu-item > svg {
   flex: 0 0 auto;
-  color: var(--text-3);
+  color: var(--text-2);
+}
+.sync-path-menu-item .sync-path-menu-copy > span {
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
 }
 
 /* A menuitemcheckbox uses one trailing tick so hover cannot obscure state. */
@@ -3076,24 +3158,145 @@ span.sync-path-crumb {
   background: var(--danger-soft);
 }
 
+/* The switcher: a crumb menu with a header. The current object is a lifted
+   row — ink edge, cast shadow, tick — the switch targets are one line high
+   in the display face, and the verbs are the row-end icon cluster in a
+   footer strip beside the ways to get more. */
+.sync-path-menu.switcher:not([hidden]) {
+  width: 380px;
+  /* A column so the target list can take the ceiling's slack and scroll on
+     its own, with the current row, the filter and the footer verbs pinned
+     outside the scrollport — a long list must not push the verbs off-screen. */
+  display: flex;
+  flex-direction: column;
+}
+.sync-path-menu-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
 /* The object the menu acts on: context at the top, not a command. No hover,
    no cursor — the verbs beneath it inherit its scope by proximity. */
 .sync-path-menu-current {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 9px;
-  padding: 8px;
+  margin-bottom: 4px;
+  padding: 6px 9px;
+  border: var(--box-border);
+  border-radius: 10px;
+  background: var(--surface-row-active);
+  box-shadow: var(--shadow-card);
 }
-
 .sync-path-menu-current > svg {
   flex: 0 0 auto;
-  margin-top: 2px;
-  color: var(--text-3);
+  color: var(--text-1);
 }
-
 .sync-path-menu-current .sync-path-menu-copy > span {
   color: var(--text-0);
+  font-family: var(--font-display);
   font-weight: var(--weight-semibold);
+}
+.sync-path-menu-current .sync-path-menu-check {
+  color: var(--text-1);
+}
+.sync-path-menu-search {
+  width: 100%;
+  flex: 0 0 32px;
+  height: 32px;
+  /* No top margin: the flex column does not collapse it into the current
+     row's 4px, which is the gap intended. */
+  margin: 0 0 6px;
+  padding: 0 12px;
+  border: var(--box-border);
+  border-radius: var(--r-pill);
+  background: var(--bg-1);
+  box-shadow: var(--shadow-card);
+  color: var(--text-0);
+  font: inherit;
+  font-size: var(--type-sm);
+}
+.sync-path-menu-search::placeholder {
+  color: var(--text-3);
+}
+.sync-path-menu-search:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.sync-path-menu-empty {
+  margin: 0;
+  padding: 10px 9px;
+  color: var(--text-3);
+  font-size: var(--type-xs);
+}
+.sync-path-menu-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px -8px -8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-mid);
+  border-radius: 0 0 calc(var(--retro-panel-radius) - 2px) calc(var(--retro-panel-radius) - 2px);
+  background: var(--surface-footer);
+}
+/* The one verb with a qualifier (the agent profile) states it once, above
+   the pills, instead of on a second line the pill has no room for. */
+.sync-path-menu-cap {
+  flex-basis: 100%;
+  margin: -2px 0 2px;
+  color: var(--text-3);
+  font-size: var(--type-2xs);
+}
+.sync-path-menu-verbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sync-path-menu-verb,
+.sync-path-menu-tail {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  min-width: 32px;
+  padding: 0;
+  border: var(--box-border);
+  border-radius: var(--r-pill);
+  background: var(--button-bg);
+  color: var(--text-1);
+  box-shadow: var(--shadow-card);
+  font: inherit;
+  cursor: pointer;
+}
+.sync-path-menu-tail {
+  margin-left: auto;
+  padding: 0 12px;
+  font-family: var(--font-display);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-bold);
+}
+.sync-path-menu-tail + .sync-path-menu-tail {
+  margin-left: 0;
+}
+.sync-path-menu-verb:hover:not([aria-disabled="true"]),
+.sync-path-menu-tail:hover:not([aria-disabled="true"]) {
+  color: var(--text-0);
+  background: var(--button-bg-hover);
+}
+.sync-path-menu-verb:active:not([aria-disabled="true"]),
+.sync-path-menu-tail:active:not([aria-disabled="true"]) {
+  box-shadow: none;
+  transform: translate(1px, 1px);
+}
+.sync-path-menu-verb.danger {
+  color: var(--danger-text);
+}
+.sync-path-menu-verb[aria-disabled="true"],
+.sync-path-menu-tail[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* Why the whole menu is inert, said once at the top — instead of a tooltip
@@ -3104,7 +3307,7 @@ span.sync-path-crumb {
   gap: 9px;
   margin-bottom: 5px;
   padding: 8px;
-  border-radius: 3px;
+  border-radius: var(--r);
   background: var(--warning-soft);
   color: var(--text-1);
 }
@@ -3208,9 +3411,14 @@ span.sync-path-crumb {
   flex: 1;
   display: grid;
   /* Every row floors at MIN_PANE_HEIGHT. The tray scrolls any shortfall to
-     keep the bottom pane above the product mark. */
+     keep the bottom pane above the product mark. Scrolling makes this box a
+     clip: the 2px cast shadows on the pane tiles inside would be cut at the
+     right and bottom edges, so the tray leans 2px into the gutter on both
+     axes and gives that room back as padding — the tiles stay aligned with
+     the head tile while their shadows land inside the clip. */
   overflow-y: auto;
-  padding-top: 8px;
+  margin: 0 -2px -2px 0;
+  padding: 8px 2px 2px 0;
 }
 
 .sidebar-split-pane {
@@ -3418,7 +3626,7 @@ span.sync-path-crumb {
   margin-left: auto;
   padding: 1px 5px;
   border: 1px solid var(--border-mid);
-  border-radius: 3px;
+  border-radius: var(--r-pill);
   background: var(--surface-card);
   color: var(--text-2);
   font-family: var(--font-mono);
@@ -3518,8 +3726,9 @@ span.sync-path-crumb {
   grid-template-columns: minmax(205px, 0.3fr) minmax(0, 1fr);
   gap: 26px;
   padding: 22px 24px 18px;
-  border: 1px solid var(--border-mid);
-  border-radius: 10px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
+  box-shadow: var(--shadow-card);
   background: var(--surface-card);
 }
 
@@ -3540,24 +3749,22 @@ span.sync-path-crumb {
   container-type: inline-size;
   overflow: hidden;
   margin-bottom: 7px;
-  border: 1px solid var(--border-mid);
-  border-radius: 9px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
+  box-shadow: var(--shadow-card);
   background: var(--surface-row);
   transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
 }
 
 .storage-link-block:hover {
-  border-color: var(--border-strong);
   background: var(--surface-row-hover);
 }
 
 .storage-link-block.expanded {
-  border-color: var(--border-strong);
   background: var(--surface-row-active);
 }
 
 .storage-link-block.sync-review-open {
-  border-color: var(--border-strong);
   background: var(--surface-row-active);
 }
 
@@ -3576,8 +3783,9 @@ span.sync-path-crumb {
   justify-content: center;
   flex-shrink: 0;
   padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 7px;
+  border: var(--box-border);
+  border-radius: var(--r-pill);
+  box-shadow: var(--shadow-card);
   background: transparent;
   color: var(--text-2);
   font: inherit;
@@ -3587,7 +3795,6 @@ span.sync-path-crumb {
 
 .storage-link-more:hover:not(:disabled),
 .storage-link-overflow.open .storage-link-more {
-  border-color: var(--border-strong);
   background: var(--button-bg-hover);
   color: var(--text-0);
 }
@@ -3749,6 +3956,7 @@ span.sync-path-crumb {
 
 .sync-storage-details-panel > .sync-storage-card {
   border: 0;
+  box-shadow: none;
   border-radius: 0;
   background: transparent;
 }
@@ -3856,7 +4064,7 @@ span.sync-path-crumb {
   align-items: baseline;
   gap: 5px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: var(--r-pill);
   background: var(--surface-muted);
 }
 
@@ -3989,6 +4197,20 @@ span.sync-path-crumb {
 }
 
 /* The picker is storage-card footer content. The card owns its frame. */
+.storage-link-picker-heading {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+  color: var(--text-2);
+  font-size: var(--type-xs);
+}
+
+.storage-link-picker-heading .sync-history-icon-action {
+  margin-left: auto;
+}
+
 .storage-link-picker {
   display: flex;
   flex-wrap: wrap;
@@ -3996,21 +4218,16 @@ span.sync-path-crumb {
   animation: storage-link-reveal 160ms ease-out both;
 }
 
-.storage-link-picker > span {
-  width: 100%;
-  color: var(--text-2);
-  font-size: var(--type-xs);
-}
-
 .storage-link-picker button {
   min-height: 36px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 0 10px;
-  border: 1px solid var(--button-border);
-  border-radius: 8px;
+  padding: 0 12px;
+  border: var(--box-border);
+  border-radius: var(--button-radius);
   background: var(--button-bg);
+  box-shadow: var(--shadow-card);
   color: var(--text-0);
   font: inherit;
   font-size: var(--type-sm);
@@ -4019,7 +4236,6 @@ span.sync-path-crumb {
 
 .storage-link-picker button:hover {
   background: var(--button-bg-hover);
-  border-color: var(--border-strong);
 }
 
 .storage-link-picker button svg:last-child {
@@ -4039,7 +4255,7 @@ span.sync-path-crumb {
   justify-content: center;
   gap: 12px;
   border: 1px dashed var(--border-mid);
-  border-radius: 10px;
+  border-radius: var(--retro-panel-radius);
   color: var(--text-2);
 }
 
@@ -4063,8 +4279,9 @@ span.sync-path-crumb {
 .sync-settings-group > .settings-section-title > svg { color: var(--text-1); }
 
 .sync-settings-card {
-  border: 1px solid var(--border-mid);
-  border-radius: 6px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
+  box-shadow: var(--shadow-card);
   background: var(--surface-card);
 }
 
@@ -4116,7 +4333,7 @@ span.sync-path-crumb {
   margin: 0;
   flex: 0 0 auto;
   border: 1px solid var(--control-border);
-  border-radius: 4px;
+  border-radius: var(--r-pill);
   background: var(--switch-off);
   cursor: pointer;
   transition: background 90ms steps(2, end), border-color 90ms steps(2, end);
@@ -4129,6 +4346,7 @@ span.sync-path-crumb {
   left: 3px;
   width: 12px;
   height: 12px;
+  border-radius: 50%;
   border-radius: 2px;
   background: var(--switch-thumb);
   transition: transform 90ms steps(2, end);
@@ -4144,13 +4362,14 @@ span.sync-path-crumb {
   background: var(--accent-contrast);
 }
 
-/* Closed-vocabulary choices use the button tokens and pixel type. */
+/* Closed-vocabulary choices use the button tokens and the display face. */
 .sync-settings-segment {
   display: inline-flex;
   overflow: hidden;
-  border: 1px solid var(--button-border);
+  border: var(--box-border);
   border-radius: var(--button-radius);
   background: var(--button-bg);
+  box-shadow: var(--shadow-card);
 }
 
 .sync-settings-segment > button {
@@ -4162,7 +4381,7 @@ span.sync-path-crumb {
   cursor: pointer;
 }
 
-.sync-settings-segment > button + button { border-left: 1px solid var(--button-border); }
+.sync-settings-segment > button + button { border-left: 2px solid var(--accent); }
 
 .sync-settings-segment > button:hover:not(.active) { background: var(--button-bg-hover); }
 
@@ -4177,7 +4396,7 @@ span.sync-path-crumb {
   align-items: center;
   padding: 4px 8px;
   border: 1px solid var(--border-mid);
-  border-radius: 3px;
+  border-radius: var(--r-pill);
   background: var(--chip-bg);
   color: var(--accent);
   text-transform: uppercase;
@@ -4254,6 +4473,7 @@ span.sync-path-crumb {
   max-width: none;
   margin: 0;
   border: 0;
+  box-shadow: none;
   border-radius: 0;
   background: transparent;
 }
@@ -4388,7 +4608,7 @@ span.sync-path-crumb {
   display: grid;
   place-items: center;
   flex: 0 0 auto;
-  border-radius: 3px;
+  border-radius: var(--r-pill);
   color: var(--text-2);
   background: transparent;
 }
@@ -4423,7 +4643,7 @@ span.sync-path-crumb {
   align-items: flex-start;
   gap: 9px;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: 10px;
   background: var(--warning-soft);
   cursor: pointer;
 }
@@ -4574,7 +4794,7 @@ span.sync-path-crumb {
 .sync-project-tabs > button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: 4px;
+  border-radius: 8px;
 }
 
 .sync-project-tab-panel {
@@ -4644,8 +4864,8 @@ span.sync-path-crumb {
   max-width: min(200px, 21cqi);
   display: inline-flex;
   align-items: center;
-  padding: 0 6px 0 7px;
-  border: 1px solid var(--border);
+  padding: 0 8px 0 9px;
+  border: var(--box-border);
   background: var(--chip-bg);
   font: inherit;
   cursor: pointer;
@@ -4659,7 +4879,6 @@ span.sync-path-crumb {
 
 button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-history-branch-select.open .sync-history-branch-trigger {
-  border-color: var(--border-mid);
   background: var(--chip-strong-bg);
   color: var(--text-0);
 }
@@ -4975,12 +5194,16 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   white-space: nowrap;
 }
 
+/* Titles are the one carve-out from the "user data reads in the clean face"
+   rule: a commit subject or session title is this page's headline, and the
+   headline voice is the display face. The body of any prose stays sans. */
 .sync-history-commit-heading strong {
   min-width: 0;
   overflow: hidden;
   color: var(--text-0);
+  font-family: var(--font-display);
   font-size: var(--type-md);
-  font-weight: var(--weight-semibold);
+  font-weight: var(--weight-bold);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -5014,7 +5237,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  border-radius: 5px;
+  border-radius: 8px;
   color: var(--text-3);
   cursor: help;
   line-height: 0;
@@ -5070,8 +5293,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   pointer-events: none;
   /* Shown instantly and deliberately unanimated. Fading opacity promotes the
      tooltip to its own compositing layer, and text re-rasterised against a
-     layer origin can land a pixel off the page grid; with the pixel face
-     rendered unsmoothed that flips whole pixels, which reads as the row
+     layer origin can land a pixel off the page grid, which reads as the row
      twitching even though nothing moves — measured as zero geometry change
      across 72 elements. Appearing at once avoids the promotion entirely. */
   visibility: hidden;
@@ -5131,8 +5353,9 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   place-items: center;
   border: 1px solid var(--border-mid);
   border-radius: 3px;
-  font-family: var(--font-pixel);
+  font-family: var(--font-display);
   font-size: var(--type-3xs);
+  font-weight: var(--weight-bold);
   line-height: 1;
 }
 
@@ -5169,7 +5392,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 
 .sync-history-thread-metric {
   position: relative;
-  border-radius: 4px;
+  border-radius: var(--r);
   outline: none;
   /* A readout is one fact and stays one line: squeezed, `2d 11h` broke at its
      space and the second line landed on the divider beside it. The squeeze
@@ -5219,8 +5442,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   pointer-events: none;
   /* Shown instantly and deliberately unanimated. Fading opacity promotes the
      tooltip to its own compositing layer, and text re-rasterised against a
-     layer origin can land a pixel off the page grid; with the pixel face
-     rendered unsmoothed that flips whole pixels, which reads as the row
+     layer origin can land a pixel off the page grid, which reads as the row
      twitching even though nothing moves — measured as zero geometry change
      across 72 elements. Appearing at once avoids the promotion entirely. */
   visibility: hidden;
@@ -5374,7 +5596,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   gap: 8px;
   padding: 7px 6px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-pill);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -5457,10 +5679,10 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   gap: 8px;
   margin: 0 0 0 var(--sync-history-card-offset, 0px);
   /* Transparent, not absent: the node and the segment are positioned against
-     the padding box, and every card on the rail puts its own fold inside a 1px
-     border. Without one here the node sits a pixel off the column, which reads
-     as a break in a vertical line. */
-  border: 1px solid transparent;
+     the padding box, and every card on the rail puts its own fold inside a
+     2px ink border. Without the same width here the node sits off the column,
+     which reads as a break in a vertical line. */
+  border: 2px solid transparent;
 }
 
 .sync-history-rail-foot-node {
@@ -5472,7 +5694,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   height: 24px;
   display: grid;
   place-items: center;
-  border-radius: 3px;
+  border-radius: 999px;
   color: var(--text-2);
 }
 
@@ -5491,21 +5713,23 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   justify-content: center;
   gap: 8px;
   padding: 4px 12px;
-  border: 1px solid var(--button-border);
+  border: var(--box-border);
   border-radius: var(--button-radius);
   background: var(--button-bg);
+  box-shadow: var(--shadow-card);
   color: var(--text-1);
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .sync-history-rail-step:hover:not(:disabled) {
-  border-color: var(--border-strong);
   background: var(--button-bg-hover);
 }
 
 .sync-history-rail-step:active:not(:disabled) {
   background: var(--button-bg-active);
+  box-shadow: none;
+  transform: translate(1px, 1px);
 }
 
 .sync-history-rail-step:focus-visible {
@@ -6179,15 +6403,16 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   min-width: 0;
   height: 32px;
   flex: 1;
-  padding: 0 10px;
-  border: 1px solid var(--control-border);
-  border-radius: 7px;
+  padding: 0 14px;
+  border: var(--box-border);
+  border-radius: var(--r-pill);
+  box-shadow: var(--shadow-card);
   color: var(--text-0);
   background: var(--bg-1);
   outline: none;
 }
 
-.sync-project-files-search input:focus { border-color: var(--text-2); }
+.sync-project-files-search input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .sync-project-files-search > span { color: var(--text-3); font-size: var(--type-2xs); white-space: nowrap; }
 
 .sync-project-file-warning {
@@ -6245,9 +6470,10 @@ button.sync-history-branch-trigger:hover:not(:disabled),
    storage-only partition leads as the cloud-tinted tile. */
 .sync-project-file-tile {
   overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
   background: var(--surface-row);
+  box-shadow: var(--shadow-card);
 }
 
 .sync-project-file-tile-head {
@@ -6261,15 +6487,15 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 }
 
 .sync-project-file-tile-head > svg { flex: 0 0 auto; color: var(--text-2); }
-/* The label wears the section headings' pixel face and size — the tile head
+/* The label wears the section headings' display face and size — the tile head
    is this page's "Only in <storage>" row, and the two must read as one
    voice across the Sessions and Files faces. */
 .sync-project-file-tile-head > strong {
   color: var(--text-0);
   font-size: var(--type-md);
 }
-/* The pixel face is for chrome. A directory path or storage name came out of
-   the user's data, so it reads in the normal face even inside the label —
+/* The display face is for chrome. A directory path or storage name came out
+   of the user's data, so it reads in the normal face even inside the label —
    the same carve-out the section heading gives its storage name. */
 .sync-project-file-tile-head > strong > span {
   font-family: var(--font-sans);
@@ -6278,13 +6504,23 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-project-file-tile-head > small { color: var(--text-3); font-size: var(--type-2xs); }
 
 .sync-project-file-tile.cloud {
-  border-color: color-mix(in srgb, var(--thread-status-cloud) 35%, var(--border));
+  border-color: color-mix(in srgb, var(--thread-status-cloud) 35%, var(--accent));
 }
 .sync-project-file-tile.cloud > .sync-project-file-tile-head {
   background: color-mix(in srgb, var(--thread-status-cloud) 7%, var(--surface-subtle));
 }
 
-.sync-project-file-tile > .sync-history-thread-list { gap: 0; }
+/* Inside a path-band tile the list is the tile's own rows: the flat list's
+   box (border, radius, shadow) comes off here, the same reset the
+   uncommitted and storage-only groups apply, or it draws a second frame
+   flush inside the tile and the tile's clip cuts its shadow. */
+.sync-project-file-tile > .sync-history-thread-list.flat {
+  gap: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
 .sync-project-file-tile .sync-history-thread-card {
   border: 0;
   border-radius: 0;
@@ -6312,7 +6548,9 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 }
 
 .sync-history-older-group {
-  border: 1px solid var(--border);
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
+  box-shadow: var(--shadow-card);
   overflow: hidden;
 }
 
@@ -6333,12 +6571,34 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   border-bottom: 1px solid var(--border);
 }
 
-.sync-history-older-group > .sync-history-thread-list {
-  padding: 10px 12px;
+/* The group is the box — head, then rows — the shape the path-band tile
+   draws, so its flat list gives up the frame a bare list wears. Kept, the
+   list's 2px ink sat flush inside the group's: a 4px double rule down both
+   sides, two 14px arcs crossing at every corner, and the list's cast shadow
+   cut by the group's own clip. Rows sit flush under the head, parted by
+   hairlines, and the corner radius a hover tint could reach is the group's. */
+.sync-history-older-group > .sync-history-thread-list.flat {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.sync-history-older-group > .sync-history-thread-list.flat > .sync-history-thread-card:first-child,
+.sync-history-older-group > .sync-history-thread-list.flat > .sync-history-thread-card:last-child {
+  border-radius: 0;
+}
+
+/* The inert fold is the group's last row: a hairline above, the rows' inset,
+   and its own flat list stays a box within it — inset, not a frame on the
+   frame. */
+.sync-history-older-inert {
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--border-mid);
 }
 
 .sync-history-older-inert > summary {
-  margin: 2px 0;
+  margin: 0;
   color: var(--text-3);
   font-size: var(--type-sm);
   cursor: pointer;
@@ -6384,8 +6644,8 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: var(--box-border);
+  border-radius: 10px;
   background: var(--bg-2);
   color: var(--text-3);
 }
@@ -6415,20 +6675,19 @@ button.catalog-row-action {
   align-items: center;
   gap: 4px;
   padding: 2px 4px 2px 6px;
-  border: 1px solid var(--border-mid);
-  border-radius: 5px;
+  border: var(--box-border);
+  border-radius: var(--r-pill);
+  box-shadow: var(--shadow-card);
   background: var(--button-bg);
   cursor: pointer;
 }
 
 button.catalog-row-action:hover {
-  border-color: var(--border-strong);
   background: var(--button-bg-hover);
   color: var(--text-1);
 }
 
 button.catalog-row-action[aria-expanded="true"] {
-  border-color: var(--border-strong);
   background: var(--button-bg-active);
   color: var(--text-0);
 }
@@ -6648,10 +6907,14 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
      2.45:1 and --blue 3.84:1, against the 4.5:1 a sentence needs. Mixing the
      body colour in clears the bar without leaving the family, and on the dark
      palette — where both already passed — it only adds headroom. The rails and
-     borders keep the pure hue, where 3:1 is the bar. */
-  --session-detail-amber: color-mix(in srgb, var(--yellow) 60%, var(--text-0));
-  --session-detail-link: color-mix(in srgb, var(--blue) 85%, var(--text-0));
-  --session-detail-you: color-mix(in srgb, var(--red) 85%, var(--text-0));
+     borders keep the pure hue, where 3:1 is the bar. The shares are set
+     against the darkest paper the page prints these inks on — an expanded
+     tool row's --surface-row-active (#f0e3d5), where the 9px uppercase tool
+     name sits — not against the page: shares tuned to the page (60/85/85)
+     measured 4.18, 3.94 and 4.01 there. These hold 4.9, 4.8 and 4.6. */
+  --session-detail-amber: color-mix(in srgb, var(--yellow) 52%, var(--text-0));
+  --session-detail-link: color-mix(in srgb, var(--blue) 72%, var(--text-0));
+  --session-detail-you: color-mix(in srgb, var(--red) 75%, var(--text-0));
 }
 
 /* SVG marks never shrink. A fractional width breaks their whole-cell grid. */
@@ -6751,9 +7014,10 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   flex-wrap: wrap;
   gap: 6px;
   padding: 7px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
   background: var(--surface-footer);
+  box-shadow: var(--shadow-card);
 }
 
 .session-detail-toolbar-label {
@@ -6778,6 +7042,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   gap: 6px;
   padding: 0 8px;
   border: 1px solid var(--border);
+  border-radius: var(--r-pill);
   background: var(--bg-4);
   color: var(--text-2);
   cursor: pointer;
@@ -6803,7 +7068,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 }
 
 .session-detail-filter-toggle.is-on {
-  border-color: var(--border-strong);
+  border-color: var(--accent);
   background: var(--bg-active);
   color: var(--text-0);
 }
@@ -6854,8 +7119,14 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 }
 
 .session-detail-day-divider > span {
-  color: var(--text-2);
+  padding: 2px 10px;
+  border: var(--box-border);
+  border-radius: 4px;
+  background: var(--bg-0);
+  color: var(--text-1);
   font-size: var(--type-3xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 1px;
   text-transform: uppercase;
 }
 
@@ -6868,10 +7139,10 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 
 /* ---- the rail ---------------------------------------------------------- */
 
-/* One hairline down each day, drawn behind the tiles. Left 11px sits it under
-   the 24px node column's own border (a 1px line has no true center on an even
-   column). Scoped to the list, so day dividers break it naturally and empty or
-   error states never draw a rail with nothing on it. */
+/* One 2px stroke down each day, drawn behind the tiles — the same weight the
+   Activity rail carries. Left 11px centres it under the 24px node column.
+   Scoped to the list, so day dividers break it naturally and empty or error
+   states never draw a rail with nothing on it. */
 .session-detail-event-list {
   position: relative;
   min-width: 0;
@@ -6886,8 +7157,9 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   top: 6px;
   bottom: 6px;
   left: 11px;
-  width: 1px;
-  background: var(--border);
+  width: 2px;
+  border-radius: 1px;
+  background: var(--border-mid);
 }
 
 .session-detail-event-list > li {
@@ -6920,6 +7192,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   z-index: 1;
   padding: 1px 5px;
   border: 1px solid var(--border-mid);
+  border-radius: var(--r-pill);
   background: var(--bg-0);
   color: var(--text-2);
   font-size: var(--type-2xs);
@@ -6945,8 +7218,9 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   outline-offset: 3px;
 }
 
-/* A 24px tile: a whole cell for the 12px glyph inside, and wide enough to
-   cover the rail behind it. */
+/* A 24px punchcard tile in the box grammar's own ink: a whole cell for the
+   12px glyph inside, and wide enough to cover the rail behind it. The tile is
+   the only thing that names the speaker — the cards carry no mark. */
 .session-detail-event-node {
   position: relative;
   z-index: 1;
@@ -6954,8 +7228,9 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   height: 24px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--border-mid);
-  background: var(--bg-1);
+  border: var(--box-border);
+  border-radius: 5px;
+  background: var(--bg-0);
   color: var(--text-1);
 }
 
@@ -6971,20 +7246,23 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   font-size: var(--type-2xs);
 }
 
-/* One punch per call. Failures punch in the failure colour, so a bad call is
-   findable from the rail alone before any row is read. */
+/* One punch per call: a hollow 9px square on the rail. Failures fill in the
+   failure colour, so a bad call is findable from the rail alone before any
+   row is read. */
 .session-detail-event-tick {
   position: relative;
   z-index: 1;
-  width: 7px;
-  height: 7px;
-  /* Centered on the 32px row's first line. */
-  margin: 13px auto 0;
-  background: var(--border-mid);
+  width: 9px;
+  height: 9px;
+  /* Centered on the 30px row's first line. */
+  margin: 11px auto 0;
+  border: 2px solid var(--border-mid);
+  border-radius: 1px;
+  background: var(--bg-0);
 }
 
-.event-tool-call.tool-failed .session-detail-event-tick { background: var(--danger-text); }
-.event-tool-call.tool-incomplete .session-detail-event-tick { background: var(--session-detail-amber); }
+.event-tool-call.tool-failed .session-detail-event-tick { border-color: var(--danger-text); background: var(--danger-text); }
+.event-tool-call.tool-incomplete .session-detail-event-tick { border-color: var(--session-detail-amber); background: var(--session-detail-amber); }
 
 .session-detail-event-body {
   min-width: 0;
@@ -7002,7 +7280,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   min-height: 18px;
   padding: 1px 5px;
   border: 1px solid var(--border);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-pill);
   color: var(--text-2);
   font-size: var(--type-3xs);
 }
@@ -7019,39 +7297,51 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   overflow-wrap: anywhere;
 }
 
-/* User prompts use cards; agent responses use open prose. */
-.session-detail-prompt-card {
-  max-width: 68ch;
-  border: 1px solid var(--border-mid);
+/* Both speakers write in the same card: an ink box on the punchcard's 8px
+   corner, whose only chrome is the stamp band. Who is talking is the rail
+   tile's job, so the card carries no name or mark. Every box on the rail
+   runs to the content's right edge, flush with the SHOW bar above. */
+.session-detail-card {
+  overflow: hidden;
+  border: var(--box-border);
+  border-radius: 8px;
+  background: var(--surface-row);
+  box-shadow: var(--shadow-card);
 }
 
-.session-detail-prompt-card > .session-detail-event-copy {
+.session-detail-card > .session-detail-event-copy {
   max-width: none;
-  padding: 10px 12px 9px;
+  padding: 10px 12px 11px;
 }
 
-/* clock · duration · calls. Absolute clock, because the divider owns the date;
-   the duration appears once a later event of the turn has loaded — measured,
-   never promised. */
-.session-detail-card-meta {
+/* The stamp: clock · duration · calls on a prompt, the clock alone on a reply.
+   Absolute clock, because the divider owns the date; the duration appears once
+   a later event of the turn has loaded — measured, never promised. */
+.session-detail-card-head {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 4px 10px;
-  padding: 5px 12px 6px;
-  border-top: 1px solid var(--border);
+  padding: 5px 12px 4px;
+  border-bottom: 1px solid var(--border-mid);
+  background: var(--surface-subtle);
   color: var(--text-2);
+  font-family: var(--font-mono);
   font-size: var(--type-xs);
+  font-weight: var(--weight-semibold);
   font-variant-numeric: tabular-nums;
 }
 
-.session-detail-response-prose {
-  padding: 2px 0 0;
-}
-
+/* A step — the agent narrating its work between calls — is a note, not an
+   answer: the same ink box as everything else on the rail, but no stamp band,
+   a subtler fill, one size under the reply prose, and its purple kept as a
+   thick left edge so the kind is still readable at a glance. */
 .session-detail-intermediate-prose {
-  padding: 2px 0 2px 12px;
-  border-left: 2px solid color-mix(in srgb, var(--purple) 45%, var(--border));
+  padding: 8px 12px 9px;
+  border: var(--box-border);
+  border-left: 5px solid color-mix(in srgb, var(--purple) 60%, var(--accent));
+  border-radius: 8px;
+  background: var(--surface-subtle);
   color: var(--text-1);
   font-size: var(--type-md);
 }
@@ -7182,7 +7472,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   height: auto;
   margin: 8px 0;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: 8px;
 }
 
 .session-detail-image-placeholder {
@@ -7192,7 +7482,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   max-width: 100%;
   padding: 2px 8px;
   border: 1px dashed var(--border-strong);
-  border-radius: 4px;
+  border-radius: 8px;
   color: var(--text-2);
   font-size: var(--type-sm);
   vertical-align: middle;
@@ -7232,7 +7522,6 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 /* sha · subject · branch · clock — the fields the provider records. No diff
    stats: they are not in the data, and evidence is never faked. */
 .session-detail-checkpoint-card {
-  max-width: 68ch;
   /* A grid item keeps its content's width unless told otherwise, and the
      subject sets `white-space: nowrap`. Without this the card grows past its
      column in a narrow window and the subject's ellipsis never fires. */
@@ -7242,7 +7531,9 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   align-items: center;
   gap: 10px;
   padding: 6px 12px;
-  border: 1px solid var(--border-mid);
+  border: var(--box-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-card);
 }
 
 /* Only a sha a remote can resolve wears the glyph: it marks the chip as an
@@ -7253,7 +7544,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border-radius: 3px;
+  border-radius: var(--r);
   color: var(--text-3);
   text-decoration: none;
 }
@@ -7308,7 +7599,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   min-height: 18px;
   padding: 1px 6px;
   border: 1px solid var(--border-mid);
-  border-radius: 3px;
+  border-radius: var(--r-pill);
   color: var(--text-1);
   font-size: var(--type-3xs);
 }
@@ -7325,19 +7616,20 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   min-width: 0;
 }
 
-/* A flat row, flush with the prose around it: action, command, chevron at the
-   far edge where every disclosure on the page points. The negative margin
-   keeps the hover tile from indenting the text. */
+/* A punchcard row: an ink box on the same 8px corner as the cards, holding
+   action stamp, command, and the chevron at the far edge where every
+   disclosure on the page points. */
 .session-detail-tool-call > summary {
   list-style: none;
   cursor: pointer;
-  min-height: 32px;
+  min-height: 30px;
   display: flex;
   align-items: center;
   gap: 10px;
-  margin: 0 -8px;
-  padding: 4px 8px;
-  border-radius: 3px;
+  padding: 3px 10px 3px 9px;
+  border: var(--box-border);
+  border-radius: 8px;
+  background: var(--surface-row);
   color: var(--text-1);
 }
 
@@ -7366,11 +7658,14 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
    passthrough names (`send_message`, `exec_command`: 12ch ≈ 83px at this
    size); a rare longer one ellipsizes rather than shoving that edge around. */
 .session-detail-tool-name {
-  flex: 0 0 104px;
+  flex: 0 0 88px;
   overflow: hidden;
   color: var(--text-0);
-  font-size: var(--type-sm);
+  font-family: var(--font-mono);
+  font-size: var(--type-3xs);
   font-weight: var(--weight-semibold);
+  letter-spacing: 1px;
+  text-transform: uppercase;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -7379,13 +7674,14 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 .session-detail-tool-name.cat-read { color: var(--session-detail-link); }
 .session-detail-tool-name.cat-other { color: color-mix(in srgb, var(--purple) 85%, var(--text-0)); }
 
-/* The command, not the wrapper that invoked it. */
+/* The command, not the wrapper that invoked it — an identifier, so mono. */
 .session-detail-tool-summary {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--text-2);
-  font-size: var(--type-sm);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -7399,7 +7695,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   flex: 0 0 auto;
   padding: 1px 5px;
   border: 1px solid var(--danger-text);
-  border-radius: 3px;
+  border-radius: var(--r-pill);
   color: var(--danger-text);
   font-size: var(--type-3xs);
   white-space: nowrap;
@@ -7434,7 +7730,8 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   display: grid;
   gap: 9px;
   padding: 8px 9px 9px;
-  border: 1px solid var(--border);
+  border: var(--box-border);
+  border-radius: 8px;
   background: var(--surface-subtle);
 }
 
@@ -7483,7 +7780,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
      edge every other button in the app draws — --border is a divider colour
      and left these reading as barely-there. */
   border: 1px solid var(--button-border);
-  border-radius: 0;
+  border-radius: 6px;
   background: var(--button-bg);
   color: var(--text-2);
   cursor: pointer;
@@ -7511,7 +7808,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   overflow: auto;
   padding: 7px 9px;
   border: 1px solid var(--border);
-  border-radius: 0;
+  border-radius: 6px;
   background: var(--bg-4);
   color: var(--text-1);
   font-size: var(--type-xs);
@@ -7537,6 +7834,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   display: inline-flex;
   padding: 2px 6px;
   border: 1px solid var(--border);
+  border-radius: 6px;
   background: var(--bg-4);
   color: var(--text-1);
   font-family: var(--font-mono);
@@ -7628,9 +7926,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
     gap: 0 10px;
   }
 
-  .session-detail-event-copy,
-  .session-detail-prompt-card,
-  .session-detail-checkpoint-card {
+  .session-detail-event-copy {
     max-width: none;
   }
 }
@@ -7644,26 +7940,26 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   }
 }
 
-/* Departure Mono ships one weight. Size and colour, not weight, provide
-   hierarchy for the pixel face. */
+/* Baloo 2 is bundled as a single variable file spanning the 400-800 axis, so
+   every weight step below draws from one 33KB asset with no network fetch. */
 @font-face {
-  font-family: "Departure Mono";
-  src: url("/fonts/DepartureMono-Regular.woff2") format("woff2");
+  font-family: "Baloo 2";
+  src: url("/fonts/Baloo2-Variable.woff2") format("woff2");
   font-style: normal;
-  font-weight: 400;
+  font-weight: 400 800;
   font-display: block;
 }
 
 /*
  * Typography contract. Three faces, one rule each:
  *
- *   --font-pixel  static chrome labels drawn from a closed vocabulary
- *   --font-sans   human-readable text that came out of the user's data, and prose
- *   --font-mono   machine identifiers: shas, ids, paths, stamps, counts
+ *   --font-display  the app's own voice: chrome labels, headings, and titles
+ *   --font-sans     prose and body text that came out of the user's data
+ *   --font-mono     machine identifiers: shas, ids, paths, stamps, counts
  *
  * A mixed node keeps the face of its variable part and wraps the static half;
- * where the string is assembled in TS or arrives through attr(), the whole node
- * takes the clean face rather than the pixel one.
+ * where the string is assembled in TS or arrives through attr(), the body of
+ * prose keeps the clean face while its title line takes the display one.
  *
  * The scale below is authoritative for every selector this theme styles.
  *
@@ -7675,16 +7971,13 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
     "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: "SFMono-Regular", "SF Mono", "Cascadia Mono", "Roboto Mono",
     "Liberation Mono", Menlo, Consolas, monospace;
-  --font-pixel: "Departure Mono", var(--font-mono);
+  --font-display: "Baloo 2", "Arial Rounded MT Bold", var(--font-sans);
   /* Default UI face for rules that still consume the shared token. */
   --font: var(--font-sans);
 
   /* Root-relative so the OS/webview text-size preference actually lands
      (WCAG 1.4.4): at the default 16px root every step resolves to the whole
-     pixel it was designed at (9/10/11/12/13/14/17/22/26) — whole pixels
-     matter because the pixel face is bitmap-derived, and any fractional
-     advance walks its blocks off the device grid. A user-raised root trades
-     that grid fit for legibility, which is the right trade. */
+     pixel it was designed at (9/10/11/12/13/14/17/22/26). */
   --type-3xs: 0.5625rem;
   --type-2xs: 0.625rem;
   --type-xs: 0.6875rem;
@@ -7695,12 +7988,13 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --type-2xl: 1.375rem;
   --type-3xl: 1.625rem;
 
-  /* Four weight steps. The pixel face uses its declared 400-700 axis and body
-     disables synthetic weights. */
+  /* Five weight steps. The display face carries a 400-800 variable axis;
+     `heavy` exists for it alone — headings set in the app's own voice. */
   --weight-regular: 400;
   --weight-medium: 500;
   --weight-semibold: 600;
   --weight-bold: 700;
+  --weight-heavy: 800;
 
   --leading-flat: 1;
   --leading-snug: 1.35;
@@ -7711,6 +8005,11 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
      --border and --border-mid stay for dividers, where quietness is the
      point. Resolves per-theme through --border-strong. */
   --control-border: var(--border-strong);
+
+  /* Boxes — tiles, cards, buttons, popovers — draw their edge in the theme's
+     own ink: the chunky 2px line is the box grammar itself, not a divider.
+     Dividers inside a box keep the quiet --border family. */
+  --box-border: 2px solid var(--accent);
 
   /* Theme-invariant tokens. This file is the palette's single source of truth. */
   --button-disabled-opacity: 0.38;
@@ -7740,53 +8039,57 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 }
 
 /* Both palettes ride one warm axis. Light is cream paper over sepia browns;
-   dark is the same paper at night: every neutral keeps its lightness and takes
-   the sepia cast, text and accent go lamplight cream (the family the switch
-   thumb always wore), and the shadow ink is warm brown-black, never blue.
-   Signal hues match the light set. Bars held: text ≥4.5:1, non-text ≥3:1
-   (WCAG 2.2), primary text ≥15.8:1 on the darkest surface (Material). */
+   dark is the same paper at night: every neutral keeps the sepia cast, text
+   and accent go lamplight cream, and the shadow ink is plain black, never
+   blue. Signal hues match the light set. The dark set follows the Material
+   dark-theme rules: no true black anywhere (the gutter is the darkest thing
+   and it is warm), elevation is expressed as lighter surfaces — card, row,
+   hover, active each a step up — rather than by shadow alone, text sits at
+   high/medium emphasis rather than raw white, and the signal hues are
+   desaturated a notch so they do not vibrate on the dark ground. Bars held:
+   text ≥4.5:1, non-text ≥3:1 (WCAG 2.2), primary text ≥15.8:1 on the darkest
+   surface (Material), and every signal ink ≥4.5:1 on the active row. */
 :root,
 :root[data-theme="dark"] {
   --color-scheme: dark;
-  --bg-0: #12100d;
-  --bg-1: #0d0b09;
-  --bg-2: #1a1714;
-  --bg-3: #282420;
-  --bg-4: #14120f;
+  --bg-0: #15120f;
+  --bg-1: #191512;
+  --bg-2: #1e1a16;
+  --bg-3: #2c2722;
+  --bg-4: #171310;
   --bg-hover: rgba(255, 238, 217, 0.065);
   --bg-active: rgba(255, 238, 217, 0.11);
-  --border: #2e2925;
-  --border-mid: #443d36;
-  --border-strong: #7a7065;
-  --button-bg: #181512;
-  --button-bg-hover: #27221d;
-  --button-bg-active: #362f28;
-  --button-border: #6f6459;
+  --border: #34302a;
+  --border-mid: #4a433b;
+  /* 4.5:1 on the paper, so a control's edge clears the 3:1 floor with room. */
+  --border-strong: #867b6f;
+  --button-bg: #1d1915;
+  --button-bg-hover: #2b2521;
+  --button-bg-active: #39322c;
+  --button-border: #7a6f63;
   /* A caramel fill off the palette's own sepia axis — the light theme's brown
-     lifted to sit on dark paper, so the two themes stay mirror images at the
-     same 5.2:1 of background separation from a plain button. That is what
-     keeps "Push" from being mistaken for the "Cancel" beside it; the quiet
-     border-only treatment measured 1.38:1, at the threshold of visibility, and
-     the pixel face is single-weight with font-synthesis: none, so weight could
-     not carry the difference either. Hover moves AWAY from the paper in both
-     themes — the fill sits close enough to its label's contrast floor that
-     moving toward the paper would take the label under 4.5:1. Not
-     var(--primary): that ink still marks the checked checkbox and the text
-     selection, which stay at full contrast. */
-  --button-primary-bg: #ad805a;
-  --button-primary-hover: #c1966f;
-  --button-primary-border: #ad805a;
+     lifted to sit on dark paper, so the two themes stay mirror images at
+     6.2:1 of background separation from a plain button. That is what keeps
+     "Push" from being mistaken for the "Cancel" beside it; a quiet
+     border-only treatment measured 1.38:1, at the threshold of visibility.
+     Hover moves AWAY from the paper in both themes — the fill sits close
+     enough to its label's contrast floor that moving toward the paper would
+     take the label under 4.5:1. Not var(--primary): that ink still marks the
+     checked checkbox and the text selection, which stay at full contrast. */
+  --button-primary-bg: #bf9169;
+  --button-primary-hover: #cfa27a;
+  --button-primary-border: #bf9169;
   /* Keep button ink separate because --primary-text is also used as a
      background. */
-  --button-primary-text: #161210;
-  --button-radius: 4px;
-  --app-shell: #0b0908;
-  --surface-card: #171412;
-  --surface-row: #14120f;
-  --surface-row-hover: #201c18;
-  --surface-row-active: #27231e;
-  --surface-popover: #1b1815;
-  --surface-footer: #0f0d0b;
+  --button-primary-text: #1b1612;
+  --button-radius: 999px;
+  --app-shell: #0c0a08;
+  --surface-card: #1d1915;
+  --surface-row: #1a1613;
+  --surface-row-hover: #251f1b;
+  --surface-row-active: #2d2622;
+  --surface-popover: #26211c;
+  --surface-footer: #19150f;
   --surface-subtle: rgba(255, 238, 217, 0.035);
   --surface-subtle-hover: rgba(255, 238, 217, 0.06);
   --surface-overlay: rgba(23, 20, 18, 0.97);
@@ -7795,29 +8098,33 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --chip-bg: rgba(255, 238, 217, 0.08);
   --chip-strong-bg: rgba(255, 238, 217, 0.13);
   --loader-track: rgba(255, 238, 217, 0.2);
-  --danger-soft: rgba(251, 115, 97, 0.11);
-  --warning-soft: rgba(244, 185, 79, 0.11);
-  --info-soft: rgba(105, 198, 244, 0.11);
-  --success-soft: rgba(99, 205, 130, 0.11);
-  --accent-soft: rgba(239, 231, 212, 0.1);
-  --accent-contrast: #100e0b;
-  --switch-off: #575048;
+  --danger-soft: rgba(244, 145, 127, 0.12);
+  --warning-soft: rgba(242, 195, 105, 0.12);
+  --info-soft: rgba(140, 207, 243, 0.12);
+  --success-soft: rgba(126, 212, 154, 0.12);
+  --accent-soft: rgba(240, 232, 213, 0.1);
+  --accent-contrast: #15120f;
+  --switch-off: #5c534a;
   --switch-thumb: #f6f2df;
   --editor-active-line: rgba(255, 238, 217, 0.055);
-  --text-0: #f6f1e6;
-  --text-1: #d8d2c5;
-  --text-2: #a59d8f;
+  /* High, medium, and low emphasis of the same cream — never raw white. */
+  --text-0: #f3ede1;
+  --text-1: #d3cbbc;
+  --text-2: #a79e90;
   --text-3: var(--text-2);
-  --accent: #efe7d4;
-  --accent-glow: rgba(239, 231, 212, 0.15);
-  --primary: #efe7d4;
-  --primary-text: #161210;
-  --green: #63cd82;
-  --red: #fb7361;
-  --yellow: #f4b94f;
+  --accent: #f0e8d5;
+  --accent-glow: rgba(240, 232, 213, 0.15);
+  --primary: #f0e8d5;
+  --primary-text: #1b1612;
+  /* Desaturated a notch from the light set's hues (Material's 200-tone
+     rule): a saturated signal on dark paper vibrates, and these still clear
+     4.5:1 as prose on every surface down to the active row. */
+  --green: #7ed49a;
+  --red: #f4917f;
+  --yellow: #f2c369;
   --amber: var(--yellow);
-  --blue: #69c6f4;
-  --purple: #bfa0f2;
+  --blue: #8ccff3;
+  --purple: #cbb4f3;
   /* Prose variants of the signal hues: error sentences and status copy must
      clear 4.5:1 where a 3:1 glyph can ride the brighter raw signal. This dark
      palette's hues clear the prose bar on their own, so the variants alias
@@ -7826,44 +8133,37 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --success-text: var(--green);
   --warning-text: var(--yellow);
   --info-text: var(--blue);
-  /* The two status badges with no token of their own. `synced` keeps the exact
-     green it has always worn: it clears 5.96:1 on a hovered dark row, so the
-     dark theme needs no change at all. It is also cooler and more saturated
-     than --green, which is what keeps it 16.9 ΔE from the neutral ink for a
-     protanope — --green measured 5.8 there, close enough to be one colour.
-     `local` is VS Code's shipped gitDecoration.modified dark value, as-is. */
-  --thread-status-synced: #31ae6b;
-  --thread-status-local: #e2c08d;
+  /* The two status badges with no token of their own. `synced` is a cooler,
+     more saturated green than --green so the two stay apart for a protanope,
+     lifted to 7.0:1 on a hovered row; `local` is VS Code's shipped
+     gitDecoration.modified dark value, lifted a step for the same reason. */
+  --thread-status-synced: #4dbf7e;
+  --thread-status-local: #e6c896;
   --focus-ring: var(--accent);
-  --r-lg: 9px;
   --r: 6px;
   --r-sm: 4px;
-  --r-pill: 4px;
-  --shadow-card: 2px 2px 0 rgba(26, 16, 8, 0.32);
-  --shadow-overlay: 4px 4px 0 rgba(26, 16, 8, 0.4);
-  --shadow-popover: 4px 4px 0 rgba(26, 16, 8, 0.46);
-  /* Shell frame: every region is a rounded tile floating on a uniform gutter,
-     so horizontal and vertical separators meet in rounded corners instead of
-     square T-joints. */
-  --retro-gutter: 3px;
-  --retro-panel-radius: 10px;
-  --retro-panel-radius-inner: 9px;
+  --r-pill: 999px;
+  /* Plain black at half strength: on a warm ground a tinted shadow reads as
+     a smear, and the cast edge is what separates tiles from the gutter. */
+  --shadow-card: 2px 2px 0 rgba(0, 0, 0, 0.5);
+  --shadow-overlay: 3px 3px 0 rgba(0, 0, 0, 0.5);
+  --shadow-popover: 3px 3px 0 rgba(0, 0, 0, 0.5);
+  /* Shell frame: every region is a rounded tile floating on a gutter, so
+     horizontal and vertical separators meet in rounded corners instead of
+     square T-joints. The gutter is what lets each tile's 2px ink edge and
+     hard offset shadow read as separate pieces instead of one plate; columns
+     take a wider seam than stacked tiles, which sit closer. */
+  --retro-gutter: 8px;
+  --retro-gutter-x: 8px;
+  --retro-panel-radius: 14px;
+  --retro-panel-radius-inner: 13px;
   /* The chevron-down glyph from Icons.tsx, as a mask so it paints in
      currentColor. Lets a control that cannot hold an <svg> child — a native
      select — still draw the same arrow every other control in the app uses. */
   --retro-chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M20 8v2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-4v-1H9v-1H8v-1H7v-1H6v-1H5v-1H4V8h2v1h1v1h1v1h1v1h1v1h4v-1h1v-1h1v-1h1V9h1V8h2Z'/%3E%3C/svg%3E");
-  --retro-rule: #968a7c;
-  --retro-bevel-highlight: #3a332c;
-  --retro-bevel-shadow: #0a0807;
-  --retro-divider-shell: #1b1815;
-  --retro-divider-fill: #3a302b;
-  --retro-frame-edge: #968a7c;
-  --retro-frame-highlight: #282420;
-  --retro-frame-gutter: #040303;
-  --retro-scroll-thumb: #5d564c;
-  --retro-scroll-thumb-highlight: #6f675c;
-  --retro-scroll-thumb-hover: #6d655a;
-  --retro-scroll-thumb-shadow: rgba(0, 0, 0, 0.3);
+  /* The darkest surface, and still warm: Material's rule against true
+     black keeps the tiles' shadows readable on it. */
+  --retro-frame-gutter: #0c0a08;
   --retro-grid: rgba(255, 238, 217, 0.02);
 }
 
@@ -7930,16 +8230,19 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --green: #4b9661;
   --red: #d8523e;
   /* This palette's red reads 3.9:1 against the paper — enough for a glyph,
-     short of the 4.5:1 an error sentence needs. One step darker measures
-     4.9:1 and is indistinguishable at a glance. The dark palette's red
-     already clears the bar, so only this block overrides the default. */
-  /* The danger ink also clears 4.5:1 on `--danger-soft`; every rung meets the
-     contrast target on its own fill. */
-  --danger-text: #be3824;
+     short of the 4.5:1 an error sentence needs. The ink below is two steps
+     darker and indistinguishable at a glance: one step (#be3824) cleared the
+     page, the hovered row and its own notice fill, and measured 4.4:1 on the
+     active row — the darkest paper an error sentence or a conflict badge is
+     printed on. This one holds 4.8:1 there. The dark palette's red already
+     clears the bar, so only this block overrides the default. */
+  --danger-text: #b53420;
   --yellow: #d99609;
   --amber: var(--yellow);
   --blue: #2f88b4;
-  --purple: #765ba7;
+  /* The divergent badge prints this bare on the row it marks, so it is held
+     to the same floor: 5.0:1 on the active row, where #765ba7 sat at 4.35. */
+  --purple: #6d529d;
   /* Same treatment for the other three signal hues: the raw inks measure
      3.4:1 (green), 2.4:1 (amber), and 3.7:1 (blue) against this paper — fine
      for glyphs, failing for prose. Each variant holds ≥4.5:1 on every paper
@@ -7956,21 +8259,13 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --thread-status-synced: #006b32;
   --thread-status-local: #895503;
   --focus-ring: var(--accent);
-  --shadow-card: 2px 2px 0 rgba(82, 58, 43, 0.07);
-  --shadow-overlay: 4px 4px 0 rgba(82, 58, 43, 0.11);
-  --shadow-popover: 4px 4px 0 rgba(82, 58, 43, 0.14);
-  --retro-rule: #8f7f74;
-  --retro-bevel-highlight: #fffdf9;
-  --retro-bevel-shadow: #6f6057;
-  --retro-divider-shell: #eee2d6;
-  --retro-divider-fill: #dcc5b2;
-  --retro-frame-edge: #8f7f74;
-  --retro-frame-highlight: #fffdf9;
+  /* The offset shadow is drawn in a solid warm grey-brown, not a translucent
+     wash: a hard cast edge is part of the box grammar, and on cream paper a
+     7% tint read as a smudge rather than a piece of cut shadow. */
+  --shadow-card: 2px 2px 0 #6f6057;
+  --shadow-overlay: 3px 3px 0 #6f6057;
+  --shadow-popover: 3px 3px 0 #6f6057;
   --retro-frame-gutter: #dfd1c4;
-  --retro-scroll-thumb: #d3d4d7;
-  --retro-scroll-thumb-highlight: #dcdddf;
-  --retro-scroll-thumb-hover: #c3c5c8;
-  --retro-scroll-thumb-shadow: rgba(61, 50, 44, 0.18);
   --retro-grid: rgba(82, 58, 43, 0.012);
 }
 
@@ -7997,13 +8292,9 @@ body {
 
 /* Every selector that speaks in the app's own voice, and nothing that carries a
    value out of the user's data. One rule, so the face cannot drift away from
-   the properties that go with it. Nothing else in this file may declare
-   --font-pixel — there is a test that counts.
-
-   Rasterisation stays at the body's antialiased setting. Disabling smoothing
-   thresholds every edge, so any
-   partial pixel coverage rounds up to full ink and every stem gains weight —
-   which read as a permanently bold UI at 9-17px. */
+   the properties that go with it. The display face carries hierarchy in
+   weight: chrome labels sit at medium, and the heading group below lifts to
+   heavy. */
 .btn,
 .sidebar-settings-sections .sidebar-section-title,
 .sync-draft-badge,
@@ -8019,12 +8310,8 @@ body {
 .sync-field-name,
 .sync-storage-repository-details > dt,
 .sync-storage-repo-chip > span {
-  font-family: var(--font-pixel);
-  /* One weight exists, and synthesis is off, so asking for anything heavier
-     here would be a declaration that quietly does nothing. Pixel hierarchy is
-     size and colour. */
-  font-weight: var(--weight-regular);
-  font-synthesis: none;
+  font-family: var(--font-display);
+  font-weight: var(--weight-medium);
 }
 .sync-sidebar-brand strong,
 .sync-primary-nav button,
@@ -8052,9 +8339,8 @@ body {
 .session-detail-filter-name,
 .session-detail-checkpoint-branch,
 .session-detail-payload-label {
-  font-family: var(--font-pixel);
-  font-weight: var(--weight-regular);
-  font-synthesis: none;
+  font-family: var(--font-display);
+  font-weight: var(--weight-medium);
   letter-spacing: 0;
 }
 
@@ -8068,6 +8354,22 @@ body {
 .sync-settings-flag {
   font-size: var(--type-3xs);
   letter-spacing: 1px;
+}
+
+/* The headings among the display-face selectors above: the wordmark and every
+   page/section/dialog title lifts to the heavy end of the axis, which is where
+   the display face does its actual display work. */
+.sync-sidebar-brand strong,
+.sync-sync-review-header h1,
+.sync-sync-review-header h2,
+.sync-history-section-heading h2,
+.sync-modal-header h1,
+.settings-section-title,
+.sync-storage-editor-title,
+.sync-storage-repositories-heading h2,
+.sync-setup-section > .sync-card-heading strong,
+.log-panel-title {
+  font-weight: var(--weight-heavy);
 }
 
 /* Chrome names for the storage panels, one step under the page heading. */
@@ -8089,7 +8391,7 @@ body {
   font-size: var(--type-md);
 }
 
-/* The review header and its tabs use one pixel face. */
+/* The review header and its tabs use one display face. */
 .sync-sync-review-header h1,
 .sync-sync-review-header h2 {
   font-size: var(--type-lg);
@@ -8175,9 +8477,14 @@ summary {
   background: var(--primary);
 }
 
+/* The thumb is a pill of the theme's own ink, faded into the paper with
+   color-mix — no fixed grey, so it lands correctly on every tile fill in both
+   themes. The bare ::-webkit-scrollbar element must paint transparent itself:
+   unstyled it draws a default white strip down every scrolling tile. */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-track {
@@ -8189,36 +8496,12 @@ summary {
   min-height: 28px;
   min-width: 28px;
   border: 0;
-  border-radius: 3px;
-  background: var(--retro-scroll-thumb);
-}
-
-::-webkit-scrollbar-thumb:vertical {
-  box-shadow:
-    inset -1px 0 0 var(--retro-scroll-thumb-highlight),
-    0 1px 2px var(--retro-scroll-thumb-shadow);
-}
-
-::-webkit-scrollbar-thumb:horizontal {
-  box-shadow:
-    inset 0 -1px 0 var(--retro-scroll-thumb-highlight),
-    0 1px 2px var(--retro-scroll-thumb-shadow);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--accent) 35%, transparent);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--retro-scroll-thumb-hover);
-}
-
-::-webkit-scrollbar-thumb:vertical:hover {
-  box-shadow:
-    inset -1px 0 0 var(--retro-scroll-thumb-highlight),
-    0 1px 3px var(--retro-scroll-thumb-shadow);
-}
-
-::-webkit-scrollbar-thumb:horizontal:hover {
-  box-shadow:
-    inset 0 -1px 0 var(--retro-scroll-thumb-highlight),
-    0 1px 3px var(--retro-scroll-thumb-shadow);
+  background: color-mix(in oklab, var(--accent) 52%, transparent);
 }
 
 ::-webkit-scrollbar-corner {
@@ -8246,12 +8529,13 @@ summary {
 
 .sync-primary-nav::-webkit-scrollbar-track:vertical,
 .sidebar-split-pane > .sidebar-links-list::-webkit-scrollbar-track:vertical,
+.sidebar-split-pane > .sidebar-profile-list::-webkit-scrollbar-track:vertical,
 .sync-log-drawer .log-panel-body::-webkit-scrollbar-track:vertical {
   margin-bottom: var(--retro-panel-radius-inner);
 }
 
 .sync-app {
-  padding: var(--retro-gutter);
+  padding: var(--retro-gutter) var(--retro-gutter-x);
   border: 0;
   border-radius: 0;
   background: var(--retro-frame-gutter);
@@ -8279,11 +8563,11 @@ summary {
 }
 
 .btn {
-  border-color: var(--button-border);
   border-radius: var(--button-radius);
   background: var(--button-bg);
-  box-shadow: none;
+  box-shadow: var(--shadow-card);
   font-size: var(--type-sm);
+  font-weight: var(--weight-bold);
   line-height: var(--leading-flat);
   transition:
     color 90ms steps(2, end),
@@ -8293,18 +8577,22 @@ summary {
 }
 
 .btn:hover:not(:disabled) {
-  border-color: var(--border-strong);
   background: var(--button-bg-hover);
 }
 
+/* Pressing sinks the button into its own shadow. */
 .btn:active:not(:disabled) {
   box-shadow: none;
   transform: translate(1px, 1px);
 }
 
+.btn.btn-ghost {
+  box-shadow: none;
+  font-weight: var(--weight-medium);
+}
+
 .btn.btn-primary,
 .sync-app .btn-primary {
-  border-color: var(--button-primary-border);
   background: var(--button-primary-bg);
   color: var(--button-primary-text);
 }
@@ -8412,8 +8700,9 @@ summary {
 .sync-workspace > .sync-backend-banner,
 .sync-workspace > .sync-main,
 .sync-log-drawer.open {
-  border: 1px solid var(--retro-frame-edge);
+  border: var(--box-border);
   border-radius: var(--retro-panel-radius);
+  box-shadow: var(--shadow-card);
 }
 
 /* Sits in the stack on the same gutter the titlebar keeps below itself. */
@@ -8429,10 +8718,10 @@ summary {
   background: var(--bg-1);
 }
 
-/* The strip exists only to clear the macOS traffic lights. Those end at 41px
-   (trafficLightPosition y: 29 plus the 12px buttons), and the strip starts 4px
-   in — the frame gutter plus the head tile's own border — so 42px leaves the
-   wordmark a 5px margin and nothing above it is wasted. */
+/* The strip exists only to clear the macOS traffic lights. Those end at 47px
+   (trafficLightPosition y: 35 plus the 12px buttons), and the strip starts
+   10px in — the frame gutter plus the head tile's own border — so 42px leaves
+   the wordmark a 5px margin and nothing above it is wasted. */
 .sync-sidebar-drag {
   height: 42px;
   flex-basis: 42px;
@@ -8469,9 +8758,8 @@ summary {
   filter: brightness(0) invert(1);
 }
 
-/* The sidebar carries the app's voice, and the pixel face reads thin at its
-   lighter weights — wordmark, nav, and section titles all sit at the top of
-   the axis so the rail holds together as one block. */
+/* The sidebar carries the app's voice; the wordmark sits at the heavy end
+   of the display axis so the rail holds together as one block. */
 .sync-sidebar-brand strong {
   color: var(--text-0);
   font-size: var(--type-3xl);
@@ -8501,11 +8789,13 @@ summary {
   flex: 0 0 auto;
   gap: 10px;
   padding: 0 11px;
-  border: 1px solid transparent;
-  border-radius: 5px;
+  /* Two transparent pixels so activation swaps colour into the ink edge the
+     row already owns — no layout jump when the box appears. */
+  border: 2px solid transparent;
+  border-radius: 12px;
   color: var(--text-0);
   /* One step under the type-lg it launched at: the nav names destinations, it
-     is not itself a destination heading. 13px stays on the pixel grid. */
+     is not itself a destination heading. */
   font-size: var(--type-md);
 }
 
@@ -8519,10 +8809,11 @@ summary {
   background: var(--bg-hover);
 }
 
+/* The active destination is a lifted box: ink edge, hard cast shadow. */
 .sync-primary-nav button.active {
-  border-color: var(--border-mid);
+  border-color: var(--accent);
   background: var(--surface-row-active);
-  box-shadow: none;
+  box-shadow: var(--shadow-card);
 }
 
 /* The badge holds a count, not a label, so it reads in the identifier face —
@@ -8532,7 +8823,7 @@ summary {
   min-width: 28px;
   padding: 2px 5px;
   border: 1px solid var(--border-mid);
-  border-radius: 3px;
+  border-radius: var(--r-pill);
   background: var(--surface-card);
   color: var(--accent);
   font-family: var(--font-mono);
@@ -8573,10 +8864,16 @@ summary {
 .sidebar-add-action {
   width: 28px;
   height: 28px;
-  border-color: var(--button-border);
-  border-radius: 4px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
   background: var(--button-bg);
+  box-shadow: var(--shadow-card);
+}
+
+.sidebar-section-action:active:not(:disabled),
+.sidebar-add-action:active:not(:disabled) {
   box-shadow: none;
+  transform: translate(1px, 1px);
 }
 
 .sidebar-profile-list,
@@ -8588,8 +8885,10 @@ summary {
 .sidebar-profile-item {
   min-height: 39px;
   padding: 2px 4px 2px 10px;
-  border: 1px solid transparent;
-  border-radius: 4px;
+  /* Transparent at the box grammar's own width, so the active ink edge swaps
+     in without a layout jump. */
+  border: 2px solid transparent;
+  border-radius: 10px;
 }
 
 .sidebar-profile-item:hover {
@@ -8598,9 +8897,9 @@ summary {
 }
 
 .sidebar-profile-item.active {
-  border-color: var(--border-mid);
+  border-color: var(--accent);
   background: var(--surface-row-active);
-  box-shadow: none;
+  box-shadow: var(--shadow-card);
 }
 
 .sidebar-profile-main {
@@ -8625,7 +8924,7 @@ summary {
 
 .sidebar-profile-actions button {
   border: 0;
-  border-radius: 2px;
+  border-radius: var(--r);
 }
 
 .sidebar-profile-actions .sidebar-profile-remove {
@@ -8643,10 +8942,12 @@ summary {
 }
 
 /* Both resize handles straddle a real gutter, so they only tint it on
-   hover; the rounded tile corners keep the junction shape. */
+   hover; the rounded tile corners keep the junction shape. The handle's
+   20px box with -6px margins nets to exactly one 8px gutter, so a seam
+   between drag-sized panes measures the same as every flex gap around it. */
 .sidebar-section-divider {
-  height: 9px;
-  margin: -3px 0;
+  height: 20px;
+  margin: -6px 0;
   align-self: center;
   background: transparent;
 }
@@ -8656,24 +8957,27 @@ summary {
 }
 
 /* The head is a flex child of the rail rather than a row of the split, so this
-   one has to cancel the two gutters flexbox puts either side of it: a 9px box
-   with -6px margins collapses to a -3px margin box, which the surrounding 3px
-   gaps restore to a single 3px seam with the handle centred on it. It must sit
-   after the shared rule above to win the margin. */
+   one has to cancel the two gutters flexbox puts either side of it: the 20px
+   box with -14px margins collapses to an -8px margin box, which the
+   surrounding 8px gaps restore to a single 8px seam with the handle centred
+   on it. It must sit after the shared rule above to win the margin. */
 .sidebar-head-divider {
-  margin: -6px 0;
+  margin: -14px 0;
   flex: 0 0 auto;
   align-self: stretch;
 }
 
+/* The tint is a slim pill centred in the seam, not a fill of the whole
+   gutter: at this gutter width a full fill reads as a painted bar, and the
+   pill is the shape every platform gives a grab handle. */
 .sidebar-section-divider::after {
   z-index: 3;
-  top: 3px;
+  top: 8px;
   right: var(--retro-panel-radius);
   left: var(--retro-panel-radius);
   width: auto;
-  height: var(--retro-gutter);
-  border-radius: 1px;
+  height: 4px;
+  border-radius: 999px;
   background: transparent;
   box-shadow: none;
 }
@@ -8686,11 +8990,12 @@ summary {
   box-shadow: none;
 }
 
+/* The 12px handle with -2px margins nets to the 8px column seam. */
 .sync-sidebar-resizer {
-  width: 7px;
+  width: 12px;
   margin-right: -2px;
   margin-left: -2px;
-  flex: 0 0 7px;
+  flex: 0 0 12px;
   background: transparent;
 }
 
@@ -8699,9 +9004,9 @@ summary {
 }
 
 .sync-sidebar-resizer::after {
-  inset: var(--retro-panel-radius) auto var(--retro-panel-radius) 2px;
-  width: var(--retro-gutter);
-  border-radius: 1px;
+  inset: var(--retro-panel-radius) auto var(--retro-panel-radius) 4px;
+  width: 4px;
+  border-radius: 999px;
   background: transparent;
 }
 
@@ -8754,8 +9059,10 @@ summary {
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: 0;
-  border-radius: 3px;
+  border: var(--box-border);
+  border-radius: var(--r-pill);
+  background: var(--button-bg);
+  box-shadow: var(--shadow-card);
   color: var(--accent);
 }
 
@@ -8772,8 +9079,7 @@ summary {
 .sync-titlebar-actions .storage-link-more {
   width: 34px;
   height: 32px;
-  border: 0;
-  border-radius: 3px;
+  border-radius: var(--r-pill);
   color: var(--accent);
 }
 
@@ -8839,7 +9145,6 @@ summary {
 }
 
 .sync-path-crumb.section {
-  /* One weight exists for the pixel face; hierarchy is size and colour. */
   font-size: var(--type-md);
   letter-spacing: 0;
 }
@@ -8906,13 +9211,6 @@ summary {
   font-size: var(--type-xs);
 }
 
-.sync-project-combined-page .storage-link-more {
-  border: 1px solid var(--button-border);
-  border-radius: 4px;
-  background: var(--button-bg);
-  box-shadow: none;
-}
-
 /* A byte readout is a measurement, not a label — it holds its width while the
    pixel word beside it keeps speaking in the app's voice. */
 .sync-path-sync .sync-btn-readout,
@@ -8930,15 +9228,15 @@ summary {
 .storage-link-actions-menu,
 .storage-link-menu,
 .sync-history-branch-menu {
-  border-color: var(--border-strong);
-  border-radius: 5px;
+  border: var(--box-border);
+  border-radius: 10px;
   background: var(--surface-popover);
   box-shadow: var(--shadow-popover);
 }
 
 .storage-link-actions-menu-item,
 .sync-history-branch-option {
-  border-radius: 3px;
+  border-radius: var(--r);
 }
 
 /* Git and conversation history */
@@ -8963,6 +9261,13 @@ summary {
   gap: 5px;
   border-radius: var(--r-pill);
   color: var(--text-0);
+  box-shadow: var(--shadow-card);
+}
+
+/* The data-moving verbs read at the button weight; the display-face list
+   above set every chrome label to medium, so the bold is restated here. */
+.sync-path-sync {
+  font-weight: var(--weight-bold);
 }
 
 /* A branch name is an identifier: it gets typed, copied, and compared. */
@@ -8974,7 +9279,7 @@ summary {
 
 .sync-history-branch-state {
   border: 1px solid var(--border-mid);
-  border-radius: 3px;
+  border-radius: var(--r-pill);
   background: var(--surface-card);
   color: var(--accent);
 }
@@ -8990,7 +9295,7 @@ summary {
   width: 30px;
   height: 30px;
   border: 1px solid transparent;
-  border-radius: 3px;
+  border-radius: 8px;
   color: var(--accent);
 }
 
@@ -8998,11 +9303,19 @@ summary {
   border-color: var(--border);
 }
 
-/* The path bar's refresh, on the same face as the list's icon actions — square
-   corners, the accent mark, a border only on hover. */
+/* The path bar's refresh and overflow wear the same box the verbs beside
+   them do: a round ink-edged button under a cast shadow. */
 .sync-path-icon-action {
-  border-radius: 3px;
+  border: var(--box-border);
+  border-radius: var(--r-pill);
+  background: var(--button-bg);
+  box-shadow: var(--shadow-card);
   color: var(--accent);
+}
+
+.sync-path-icon-action:active:not(:disabled) {
+  box-shadow: none;
+  transform: translate(1px, 1px);
 }
 
 /* Counts and the attention tally are measurements: mono, tabular, holding
@@ -9014,8 +9327,7 @@ summary {
   font-weight: var(--weight-semibold);
 }
 
-/* `--r-pill` is 4px here: the skin squares everything off, and a stadium badge
-   among 4px controls would be the only rounded thing on the row. */
+/* Stadium badges, on the same pill radius as the buttons that carry them. */
 .sync-path-attention,
 .sync-path-count,
 .session-detail-chip {
@@ -9036,16 +9348,14 @@ summary {
   margin: 18px 0 6px;
 }
 
-/* A pixel face needs a whole-pixel size and whole-pixel tracking; 12.5px and
-   0.02em (a quarter pixel) both land glyph origins between pixels and smudge
-   the blocks no matter what the smoothing setting is. */
+/* One step under the page heading, on the type scale's own step. */
 .sync-history-section-heading h2 {
   font-size: var(--type-md);
 }
 
-/* The pixel face is for chrome. A name that came out of the user's data reads
-   in the normal face even when a pixel-font label wraps it. Ordered after the
-   heading so the carve-out wins on source order as well as specificity. */
+/* The display face is for chrome. A name that came out of the user's data
+   reads in the normal face even when a chrome label wraps it. Ordered after
+   the heading so the carve-out wins on source order as well as specificity. */
 .sync-history-section-heading h2 .sync-history-storage-name {
   font-family: var(--font-sans);
   font-weight: var(--weight-semibold);
@@ -9103,9 +9413,10 @@ summary {
   position: relative;
   overflow: visible;
   margin: 0 0 10px var(--sync-history-card-offset);
-  border: 1px solid var(--border-mid);
-  border-radius: 4px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
   background: var(--surface-row);
+  box-shadow: var(--shadow-card);
 }
 
 /* The rail stops 12px short of every fold and resumes 12px past it, so the 24px
@@ -9113,18 +9424,21 @@ summary {
    across hover and disabled states. `bottom` is exactly -anchor because the pseudo is laid out against the
    padding box: this card's border, the 10px card gap and the next card's border
    already span the 12px the gap needs, so the anchor is all that is left. */
+/* The rail is drawn at the box grammar's own 2px stroke — a 1px thread reads
+   as lint next to the ink-edged cards it connects. */
 .sync-history-uncommitted::after {
   content: "";
   position: absolute;
   z-index: 1;
   top: calc(var(--sync-history-row-anchor-y) + 12px);
   bottom: calc(-1 * var(--sync-history-row-anchor-y));
-  left: calc(var(--sync-history-rail-x) - var(--sync-history-card-offset));
-  width: 1px;
+  left: calc(var(--sync-history-rail-x) - var(--sync-history-card-offset) - 1px);
+  width: 2px;
+  border-radius: 1px;
   background: repeating-linear-gradient(
     to bottom,
-    color-mix(in srgb, var(--border-mid) 78%, transparent) 0 4px,
-    transparent 4px 8px
+    color-mix(in srgb, var(--border-mid) 88%, transparent) 0 5px,
+    transparent 5px 10px
   );
   pointer-events: none;
 }
@@ -9162,6 +9476,7 @@ summary {
   border: 0;
   border-radius: 0;
   background: transparent;
+  box-shadow: none;
 }
 
 .sync-history-uncommitted .sync-history-thread-card {
@@ -9196,9 +9511,10 @@ summary {
   min-width: 0;
   margin: 0 0 10px var(--sync-history-card-offset);
   padding: 0;
-  border: 1px solid var(--border-mid);
-  border-radius: 4px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
   background: var(--surface-row);
+  box-shadow: var(--shadow-card);
 }
 
 /* No :has() lift for an open debug popover. Toggling a z-index as the panel
@@ -9216,8 +9532,9 @@ summary {
   z-index: 0;
   top: calc(var(--sync-history-row-anchor-y) + 12px);
   bottom: calc(-1 * var(--sync-history-row-anchor-y));
-  left: calc(var(--sync-history-rail-x) - var(--sync-history-card-offset));
-  width: 1px;
+  left: calc(var(--sync-history-rail-x) - var(--sync-history-card-offset) - 1px);
+  width: 2px;
+  border-radius: 1px;
   background: var(--border-mid);
   pointer-events: none;
 }
@@ -9258,7 +9575,7 @@ summary {
   place-items: center;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 3px;
+  border-radius: 999px;
   background: transparent;
   box-shadow: none;
   color: var(--text-2);
@@ -9341,7 +9658,7 @@ summary {
   display: inline-grid;
   place-items: center;
   flex: 0 0 var(--sync-history-row-icon-size, 18px);
-  border-radius: 2px;
+  border-radius: 8px;
   line-height: 0;
 }
 
@@ -9390,12 +9707,14 @@ summary {
   white-space: nowrap;
 }
 
+/* Session titles take the display face for the same headline reason the
+   commit subject does; the metadata line under them stays in its own faces. */
 .sync-history-thread-title > strong {
   min-width: 0;
   overflow: hidden;
   flex: 1;
   color: var(--text-0);
-  font-family: var(--font-sans);
+  font-family: var(--font-display);
   font-size: var(--type-sm);
   font-weight: var(--weight-semibold);
   line-height: var(--leading-snug);
@@ -9557,8 +9876,38 @@ summary {
   display: none;
 }
 
+/* A flat list — non-git sessions, a review's rows — has no commit to box it,
+   so the list is the box: one frame, rows parted by hairlines, the shape its
+   own loading scaffold already draws. Rows inside give up their card chrome
+   and keep an inner radius at the two corners a hover tint can reach. */
 .sync-history-thread-list.flat {
-  gap: 5px;
+  gap: 0;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
+  background: var(--surface-row);
+  box-shadow: var(--shadow-card);
+}
+
+.sync-history-thread-list.flat > .sync-history-thread-card {
+  border: 0;
+  border-radius: 0;
+}
+
+.sync-history-thread-list.flat > .sync-history-thread-card + .sync-history-thread-card {
+  border-top: 1px solid var(--border-mid);
+}
+
+.sync-history-thread-list.flat > .sync-history-thread-card:first-child {
+  border-radius: calc(var(--retro-panel-radius) - 2px) calc(var(--retro-panel-radius) - 2px) 0 0;
+}
+
+.sync-history-thread-list.flat > .sync-history-thread-card:last-child {
+  border-radius: 0 0 calc(var(--retro-panel-radius) - 2px) calc(var(--retro-panel-radius) - 2px);
+}
+
+/* The empty sentence already sits in the list's own frame. */
+.sync-history-thread-list.flat > .sync-history-state {
+  border: 0;
 }
 
 .sync-history-thread-card {
@@ -9567,6 +9916,16 @@ summary {
   border-radius: 4px;
   background: var(--surface-row);
   box-shadow: none;
+}
+
+/* A catalog item is a standalone box on its page — the full grammar — where
+   a flat review row stays a quiet list entry. Inside a Files path-band tile
+   the same card is a row of the tile's own box, so the tile context is
+   carved out here rather than overridden after the fact. */
+.sync-history-thread-card.catalog-card:not(.sync-project-file-tile .sync-history-thread-card) {
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
+  box-shadow: var(--shadow-card);
 }
 
 .sync-history-thread-topline {
@@ -9649,10 +10008,11 @@ summary {
 
 /* These cards cannot clip (the rail node and its connector live outside them),
    so the last row would paint its square background over the card's rounded
-   bottom border. Give it the matching inner radius instead. */
+   bottom border. Give it the matching inner radius instead — the outer panel
+   radius less the 2px ink edge. */
 .sync-history-commit > .sync-history-thread-list > .sync-history-thread-card:last-child,
 .sync-history-uncommitted .sync-history-thread-card:last-child {
-  border-radius: 0 0 3px 3px;
+  border-radius: 0 0 calc(var(--retro-panel-radius) - 2px) calc(var(--retro-panel-radius) - 2px);
 }
 
 .sync-history-commit > .sync-history-thread-list .sync-thread-sync-indicator {
@@ -9684,9 +10044,10 @@ summary {
      the rail; the left inset matches the timeline cards, so this group's fold
      lands in the same rail column as every other fold on the page. */
   margin: 12px 0 10px var(--sync-history-card-offset);
-  border: 1px solid var(--border-mid);
-  border-radius: 4px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
   background: var(--surface-row);
+  box-shadow: var(--shadow-card);
 }
 
 /* The fold left the heading for the rail, so the bar is just the label. */
@@ -9730,6 +10091,7 @@ summary {
   border: 0;
   border-radius: 0;
   background: transparent;
+  box-shadow: none;
 }
 
 .sync-history-storage-only .sync-history-thread-card {
@@ -10012,16 +10374,10 @@ summary {
 
 .sync-history-debug-popover,
 .sync-thread-sync-indicator::after {
-  border-color: var(--border-strong);
-  border-radius: 4px;
+  border-color: var(--accent);
+  border-radius: 8px;
   background: var(--surface-popover);
   box-shadow: var(--shadow-popover);
-}
-
-.sync-history-older-group,
-.sync-history-older-inert {
-  border-color: var(--border-mid);
-  border-radius: 4px;
 }
 
 /* Setup, storage, review, and resource surfaces */
@@ -10031,10 +10387,10 @@ summary {
 .sync-storage-details-panel,
 .sync-storage-repositories,
 .sync-storage-index-list {
-  border-color: var(--border-mid);
-  border-radius: 5px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
   background: var(--surface-card);
-  box-shadow: 1px 1px 0 color-mix(in srgb, var(--border-strong) 13%, transparent);
+  box-shadow: var(--shadow-card);
 }
 
 .sync-storage-card > header,
@@ -10076,7 +10432,6 @@ summary {
   box-shadow: none;
 }
 
-.sync-segmented,
 .sync-project-tabs {
   border-color: var(--border-mid);
 }
@@ -10088,17 +10443,16 @@ summary {
 }
 
 .sync-segmented button {
-  border-radius: 3px;
+  border-radius: var(--r-pill);
 }
 
 .sync-segmented button.active {
-  background: var(--surface-card);
-  box-shadow: 1px 1px 0 color-mix(in srgb, var(--border-strong) 18%, transparent);
-  color: var(--accent);
+  background: var(--surface-row-active);
+  color: var(--text-0);
 }
 
-/* Project setup uses hairline-ruled bands on one capped column, pixel labels,
-   readable values, app-styled selects, and square radios. */
+/* Project setup uses hairline-ruled bands on one capped column, display-face
+   labels, readable values, app-styled selects, and square radios. */
 
 .sync-setup-section > .sync-card-heading strong {
   color: var(--text-0);
@@ -10317,9 +10671,12 @@ summary {
   padding-top: 0;
 }
 
+/* The handle spans the main tile's 2px bottom edge, the gutter, and the
+   drawer's 2px top edge, then reaches 4px into the drawer for grip. Its tint
+   is the same slim pill the sidebar handles draw, centred in the gutter. */
 .sync-log-drawer .log-resizer {
-  top: calc(-1px - var(--retro-gutter) - 1px);
-  height: 9px;
+  top: calc(-2px - var(--retro-gutter) - 2px);
+  height: calc(var(--retro-gutter) + 8px);
 }
 
 .sync-log-drawer .log-resizer::before {
@@ -10327,11 +10684,11 @@ summary {
 }
 
 .sync-log-drawer .log-resizer::after {
-  top: 0;
+  top: calc(2px + (var(--retro-gutter) - 4px) / 2);
   right: var(--retro-panel-radius);
   left: var(--retro-panel-radius);
-  height: var(--retro-gutter);
-  border-radius: 1px;
+  height: 4px;
+  border-radius: 999px;
   background: transparent;
 }
 
@@ -10429,6 +10786,25 @@ summary {
   font-size: var(--type-2xs);
 }
 
+/* The drawer's toolbar controls wear the pill grammar. The generic field skin
+   above this point would square the search off and paint a box around the
+   level select, so both are restated here at the same specificity, later. */
+.sync-app .log-drawer .log-search-control input {
+  border: var(--box-border);
+  border-radius: var(--r-pill);
+  background: var(--bg-0);
+  color: var(--text-1);
+  box-shadow: var(--shadow-card);
+}
+
+.sync-app .log-drawer .log-filter-control select {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-1);
+  box-shadow: none;
+}
+
 .sync-modal::backdrop {
   background:
     repeating-linear-gradient(
@@ -10441,8 +10817,7 @@ summary {
 }
 
 .sync-modal {
-  border-color: var(--border-strong);
-  border-radius: 7px;
+  border-radius: var(--retro-panel-radius);
   background: var(--surface-popover);
   box-shadow: var(--shadow-overlay);
 }
@@ -10452,7 +10827,7 @@ summary {
   background: var(--surface-subtle);
 }
 
-/* Keep tracking on the pixel grid and weight within the face's 400-700 axis. */
+/* The dialog title is a page heading: top of the size scale. */
 .sync-modal-header h1 {
   font-size: var(--type-2xl);
 }
@@ -10617,7 +10992,8 @@ summary {
 }
 
 .session-detail-chip,
-.session-detail-card-meta,
+.session-detail-card-head,
+.session-detail-day-divider > span,
 .session-detail-event-gap > span,
 .session-detail-toolbar-readout,
 .session-detail-filter-count,
@@ -10661,17 +11037,9 @@ summary {
   color: var(--text-1);
 }
 
-.session-detail-prompt-card,
+.session-detail-card,
 .session-detail-checkpoint-card {
-  border-radius: var(--r-sm);
   background: var(--surface-card);
-  box-shadow: var(--shadow-card);
-}
-
-.session-detail-response-prose {
-  border: 0;
-  background: transparent;
-  box-shadow: none;
 }
 
 .session-detail-tool-call {

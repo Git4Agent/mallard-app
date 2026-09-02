@@ -3436,6 +3436,10 @@ pub enum ConversationBlocker {
     /// binary does not carry: neither direction may re-encode or decode the
     /// wire until the binaries align.
     PathMapCodecMismatch,
+    /// A push review's capture budget was full before this local
+    /// conversation's turn: it was not captured this round, so no push
+    /// action can pin it until the next review.
+    CaptureBudget,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

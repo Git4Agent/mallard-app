@@ -492,17 +492,23 @@ pub async fn get_project_thread_sync_comparison(
 pub async fn get_project_session_detail(
     local_project_id: LocalProjectId,
     resource_id: String,
-) -> Result<ProjectSessionDetail, SessionDetailError> {
+) -> Result<tauri::ipc::Response, SessionDetailError> {
     let repository = repository().map_err(|_| {
         session_detail_error(
             SessionDetailErrorCode::ProviderError,
             "Mallard could not open its local state repository.",
         )
     })?;
-    run_session_detail_blocking(move || {
-        get_project_session_detail_with_repository(&repository, &local_project_id, &resource_id)
+    let encoded = run_session_detail_blocking(move || {
+        let detail = get_project_session_detail_with_repository(
+            &repository,
+            &local_project_id,
+            &resource_id,
+        )?;
+        mallard_infrastructure::session_detail::encode_project_session_detail_response(&detail)
     })
-    .await
+    .await?;
+    Ok(tauri::ipc::Response::new(encoded))
 }
 
 #[tauri::command]
@@ -516,15 +522,15 @@ pub async fn get_project_session_timeline_page(
     included_event_kinds: Vec<SessionTimelineEventKind>,
     included_tool_categories: Vec<SessionToolCategory>,
     turn_id: Option<String>,
-) -> Result<ProjectSessionTimelinePage, SessionDetailError> {
+) -> Result<tauri::ipc::Response, SessionDetailError> {
     let repository = repository().map_err(|_| {
         session_detail_error(
             SessionDetailErrorCode::ProviderError,
             "Mallard could not open its local state repository.",
         )
     })?;
-    run_session_detail_blocking(move || {
-        get_project_session_timeline_page_with_repository(
+    let encoded = run_session_detail_blocking(move || {
+        let page = get_project_session_timeline_page_with_repository(
             &repository,
             &local_project_id,
             &resource_id,
@@ -536,9 +542,11 @@ pub async fn get_project_session_timeline_page(
                 included_tool_categories: included_tool_categories.into_iter().collect(),
                 turn_id,
             },
-        )
+        )?;
+        mallard_infrastructure::session_detail::encode_project_session_timeline_page_response(&page)
     })
-    .await
+    .await?;
+    Ok(tauri::ipc::Response::new(encoded))
 }
 
 #[tauri::command]
@@ -547,23 +555,25 @@ pub async fn get_project_session_event_detail(
     resource_id: String,
     snapshot_id: String,
     event_id: String,
-) -> Result<SessionEventDetail, SessionDetailError> {
+) -> Result<tauri::ipc::Response, SessionDetailError> {
     let repository = repository().map_err(|_| {
         session_detail_error(
             SessionDetailErrorCode::ProviderError,
             "Mallard could not open its local state repository.",
         )
     })?;
-    run_session_detail_blocking(move || {
-        get_project_session_event_detail_with_repository(
+    let encoded = run_session_detail_blocking(move || {
+        let detail = get_project_session_event_detail_with_repository(
             &repository,
             &local_project_id,
             &resource_id,
             &snapshot_id,
             &event_id,
-        )
+        )?;
+        mallard_infrastructure::session_detail::encode_session_event_detail_response(&detail)
     })
-    .await
+    .await?;
+    Ok(tauri::ipc::Response::new(encoded))
 }
 
 #[tauri::command]
@@ -1469,6 +1479,25 @@ pub async fn prepare_push_review(
                     context.conversation_action_ids.len()
                 ),
             );
+            // A review that opens without its comparison is a review with
+            // nothing selectable; the reason must reach the log, not only
+            // the context the frontend may or may not render.
+            if let Some(error) = &context.thread_comparison_error {
+                log.emit(
+                    &app,
+                    "warning",
+                    "push.comparison_failed",
+                    &format!("⚠  Conversation comparison failed: {}", error),
+                );
+            }
+            if let Some(error) = &context.project_files_error {
+                log.emit(
+                    &app,
+                    "warning",
+                    "push.project_files_failed",
+                    &format!("⚠  Project files inventory failed: {}", error),
+                );
+            }
         }
         Err(error) => log.emit(
             &app,

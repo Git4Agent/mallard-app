@@ -408,45 +408,46 @@ test("thread status badges use the outlined Default 24px pixel family", () => {
     ThreadStatusIconName,
     { light: string; dark: string; glyph: string; filled?: true }
   > = {
-    // Dark keeps the green it has always worn; only cream forces a change,
-    // where the same hue goes to full saturation instead of lightness.
+    // Cream forces the green to full saturation instead of lightness; dark
+    // keeps the hue and lifts it a step so it clears the active row.
     synced: {
       light: "#006b32",
-      dark: "#31ae6b",
+      dark: "#4dbf7e",
       glyph: "M16 9h2v2h-1v1h-1v2h-1v1h-1v1h-1v1h-2v-1h-1v-1h-1v-1h-1v-2h2v1h1v1h2v-1h1v-2h1v-1h1Z",
     },
     "cloud-outstanding": {
       light: "#256c90",
-      dark: "#69c6f4",
+      dark: "#8ccff3",
       glyph: "M9 7h5v1h-5ZM9 8v2h-1v-2ZM14 8h1v2h-1ZM8 10v1h-2v-1ZM15 10h2v1h-2ZM6 11v3h-1v-3ZM17 11h1v5h-12v-2h1v1h10Z",
     },
-    // VS Code's shipped gitDecoration.modified, both themes, unaltered: amber
-    // is what a file list means by "local work not sent anywhere yet".
+    // VS Code's shipped gitDecoration.modified (light unaltered, dark lifted a
+    // step for the active row): amber is what a file list means by "local work
+    // not sent anywhere yet".
     "local-outstanding": {
       light: "#895503",
-      dark: "#e2c08d",
+      dark: "#e6c896",
       glyph: "M11 8h3v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v7h-2v-6h-1v1h-2v-2h1v-1h1v-1h1Z",
     },
     divergent: {
-      light: "#765ba7",
-      dark: "#bfa0f2",
+      light: "#6d529d",
+      dark: "#cbb4f3",
       glyph: "M6 7h3v1h-3ZM7 8h3v1h-3ZM8 9h3v1h-3ZM9 10h3v1h-3ZM15 7h3v1h-3ZM14 8h3v1h-3ZM13 9h3v1h-3ZM12 10h3v1h-3ZM10 11h4v1h-4ZM10 12h4v6h-4Z",
       filled: true,
     },
     pending: {
       light: "#6f6159",
-      dark: "#a59d8f",
+      dark: "#a79e90",
       glyph: "M11 7h2v5h4v2h-6Z",
     },
     conflict: {
-      light: "#be3824",
-      dark: "#fb7361",
+      light: "#b53420",
+      dark: "#f4917f",
       glyph: "M11 6h3v9h-3ZM11 16h3v3h-3Z",
       filled: true,
     },
     unavailable: {
       light: "#6f6159",
-      dark: "#a59d8f",
+      dark: "#a79e90",
       glyph: "M7 11h10v3h-10Z",
     },
     // The three neutrals say "no verdict yet", so they take --text-3 rather
@@ -1726,6 +1727,7 @@ test("selection review removes repeated history and storage labels", () => {
   const css = readFileSync("src/App.css", "utf8");
   const compactReviewRule = css.match(/\.sync-sync-review-scroll > \.sync-history-selection-review\s*\{[^}]+\}/s)?.[0] ?? "";
   const compactHeadingRule = css.match(/\.sync-history-selection-review \.sync-history-section-heading\s*\{[^}]+\}/s)?.[0] ?? "";
+  const flatSessionRule = css.match(/\.sync-history-thread-list\.flat > \.sync-history-thread-card\s*\{[^}]+\}/s)?.[0] ?? "";
   // 8px, not 0. The compact review was zeroed while a section heading with its
   // own top margin led the body; that heading is suppressed, so a
   // timeline leads with a card and a flat list with a row — neither carries a
@@ -1733,6 +1735,7 @@ test("selection review removes repeated history and storage labels", () => {
   assert.match(compactReviewRule, /padding-top:\s*8px/);
   assert.match(compactReviewRule, /padding-right:\s*8px/);
   assert.match(compactHeadingRule, /margin-top:\s*8px/);
+  assert.doesNotMatch(flatSessionRule, /background:/, "flat-list chrome must not override selected-row tint");
 });
 
 test("Push review renders checkboxes only for selectable bound-ready rows", () => {
@@ -2633,7 +2636,7 @@ test("collapsed sections keep their signals and quiet their handles", () => {
     // Closed rows are min-content; the open Catalog keeps its elastic factor
     // between them. (The factor's digits are floating-point noise; the row
     // shape is what this pins.)
-    assert.match(html, /grid-template-rows:min-content 3px minmax\(96px, [0-9.]+fr\) 3px min-content/);
+    assert.match(html, /grid-template-rows:min-content 8px minmax\(96px, [0-9.]+fr\) 8px min-content/);
     // The closed Storages tile sheds its 96px floor with its list.
     assert.doesNotMatch(html, /aria-label="Storages"[^>]*style="min-height:96px"/);
   } finally {

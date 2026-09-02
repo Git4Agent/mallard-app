@@ -116,6 +116,23 @@ function hasItems(groups: PathBarMenuGroup[] | undefined): groups is PathBarMenu
   return !!groups?.some((group) => group.items.length > 0);
 }
 
+/**
+ * A crumb menu with a header is a switcher, and its groups play roles by
+ * position: the first unlabelled group is the object's verbs, every labelled
+ * group is a list of things to switch to, and the unlabelled groups after
+ * them are the ways to get more. The switcher draws those roles in the
+ * shape the rest of the app already uses — the current object as a lifted
+ * row, the verbs as the row-end icon cluster in a footer strip, the ways to
+ * get more as text pills beside them — so the list itself is only the things
+ * you can switch to. A headerless menu (the ⋯) stays a plain list.
+ */
+const SWITCHER_SEARCH_FLOOR = 6;
+
+function verbTitle(item: PathBarMenuItem): string {
+  if (item.title) return item.title;
+  return item.detail ? `${item.label} · ${item.detail}` : item.label;
+}
+
 function PathBarMenu({
   id,
   groups,
@@ -141,24 +158,141 @@ function PathBarMenu({
   // Type-ahead per the menu pattern: printable characters accumulate for
   // 500ms and focus the next label with that prefix.
   const typeahead = useRef({ buffer: "", at: 0 });
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
+
+  const switcher = !!header;
+  const populated = groups.filter((group) => group.items.length > 0);
+  const verbs = switcher && populated[0] && !populated[0].label ? populated[0].items : [];
+  const lists = switcher ? populated.filter((group) => !!group.label) : [];
+  const tails = switcher
+    ? populated.slice(verbs.length > 0 ? 1 : 0).filter((group) => !group.label).flatMap((group) => group.items)
+    : [];
+  const targetCount = lists.reduce((count, group) => count + group.items.length, 0);
+  const searchable = switcher && targetCount >= SWITCHER_SEARCH_FLOOR;
+  const needle = query.trim().toLowerCase();
+  const matches = (item: PathBarMenuItem) => (
+    !needle || `${item.label} ${item.detail ?? ""}`.toLowerCase().includes(needle)
+  );
+  const caption = verbs
+    .filter((item) => item.detail)
+    .map((item) => `${item.label.replace(/…$/, "")} · ${item.detail}`)
+    .join(" · ");
+
+  const renderItem = (item: PathBarMenuItem, target: boolean) => {
+    const checkable = item.checked !== undefined;
+    const inert = !!item.disabled;
+    // A disabled row's second line is its reason; an able row's is its
+    // data. Reasons are sentences-in-miniature, so they read as prose. A
+    // switch target keeps its path in the tooltip and stays one line high.
+    const reason = inert && item.disabledReason ? item.disabledReason : undefined;
+    const detail = reason ?? (target && item.detailIsPath ? undefined : item.detail);
+    const detailIsPath = reason ? false : item.detailIsPath;
+    return (
+      <button
+        key={item.id}
+        type="button"
+        role={checkable ? "menuitemcheckbox" : "menuitem"}
+        aria-checked={checkable ? item.checked : undefined}
+        className={`sync-path-menu-item${target ? " target" : ""}${item.danger ? " danger" : ""}`}
+        aria-disabled={inert || undefined}
+        tabIndex={-1}
+        title={item.title ?? (target && item.detailIsPath ? item.detail : undefined)}
+        onClick={() => {
+          if (inert) return;
+          onClose(true);
+          item.onSelect();
+        }}
+      >
+        {item.icon && <Icon name={item.icon} size={14} />}
+        <span className="sync-path-menu-copy">
+          <span>{item.label}</span>
+          {detail && (
+            <small className={detailIsPath ? undefined : "phrase"}>{detail}</small>
+          )}
+        </span>
+        {checkable && item.checked && (
+          <Icon name="check" size={13} className="sync-path-menu-check" />
+        )}
+      </button>
+    );
+  };
+
+  const renderPill = (item: PathBarMenuItem, tail: boolean) => {
+    const inert = !!item.disabled;
+    return (
+      <button
+        key={item.id}
+        type="button"
+        role="menuitem"
+        className={`${tail ? "sync-path-menu-tail" : "sync-path-menu-verb"}${item.danger ? " danger" : ""}`}
+        aria-disabled={inert || undefined}
+        aria-label={tail ? undefined : item.label}
+        tabIndex={-1}
+        title={inert && item.disabledReason ? item.disabledReason : verbTitle(item)}
+        onClick={() => {
+          if (inert) return;
+          onClose(true);
+          item.onSelect();
+        }}
+      >
+        {item.icon && <Icon name={item.icon} size={14} />}
+        {tail && <span>{item.label}</span>}
+      </button>
+    );
+  };
 
   return (
     <div
       ref={registerRef}
       id={id}
-      className={`sync-path-menu${align === "end" ? " end" : ""}`}
+      className={`sync-path-menu${switcher ? " switcher" : ""}${align === "end" ? " end" : ""}`}
       role="menu"
       aria-label={label}
       hidden={!open}
+      onBlur={(event) => {
+        // Focus that lands outside the menu closes it — a Tab that walked
+        // out, a click elsewhere. A blur to nowhere is the menu hiding
+        // itself, not a departure, and must not be answered.
+        const next = event.relatedTarget;
+        if (next instanceof Node && !event.currentTarget.contains(next)) onClose(false);
+      }}
       onKeyDown={(event) => {
-        // Tab is not menu navigation: the menu steps aside and the bar's own
-        // tab order continues wherever the browser takes it.
         if (event.key === "Tab") {
+          // Inside a searchable switcher Tab walks between the filter and
+          // the list. Otherwise Tab is not menu navigation: the menu steps
+          // aside and the bar's own tab order continues wherever the browser
+          // takes it.
+          const search = event.currentTarget.querySelector<HTMLInputElement>(".sync-path-menu-search");
+          const tabOptions = search ? menuOptions(event.currentTarget) : [];
+          if (search && !event.shiftKey && event.target === search && tabOptions.length > 0) {
+            event.preventDefault();
+            tabOptions[0]?.focus();
+            return;
+          }
+          if (search && event.shiftKey && event.target !== search) {
+            event.preventDefault();
+            search.focus();
+            return;
+          }
           onClose(false);
           return;
         }
         const options = menuOptions(event.currentTarget);
         if (options.length === 0) return;
+        const typing = event.target instanceof HTMLInputElement;
+        // The search field keeps its own Home/End and its characters; the
+        // arrows step from it into the list, and Enter takes the first match.
+        if (typing) {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            options.find((option) => option.classList.contains("target"))?.click();
+            return;
+          }
+          if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+        }
         const index = options.indexOf(document.activeElement as HTMLButtonElement);
         // Arrows, Home and End are the shared menu contract.
         if (moveMenuFocus(event.currentTarget, event.key)) {
@@ -176,7 +310,9 @@ function PathBarMenu({
         // from the focused row, so typing "te" stays on "Team bucket".
         const from = buffer.length === 1 ? index + 1 : Math.max(index, 0);
         const labels = options.map((option) => (
-          option.querySelector(".sync-path-menu-copy > span")?.textContent?.toLowerCase() ?? ""
+          option.querySelector(".sync-path-menu-copy > span")?.textContent?.toLowerCase()
+            ?? option.getAttribute("aria-label")?.toLowerCase()
+            ?? ""
         ));
         for (let step = 0; step < options.length; step += 1) {
           const candidate = (from + step) % options.length;
@@ -199,61 +335,62 @@ function PathBarMenu({
         </div>
       )}
       {header && (
-        <>
-          <div className="sync-path-menu-current">
-            {header.icon && <Icon name={header.icon} size={14} />}
-            <span className="sync-path-menu-copy">
-              <span>{header.label}</span>
-              {header.detail && (
-                <small className={header.detailIsPath ? undefined : "phrase"}>{header.detail}</small>
-              )}
-            </span>
-          </div>
-          <div className="sync-path-menu-separator" role="separator" />
-        </>
-      )}
-      {groups.filter((group) => group.items.length > 0).map((group, groupIndex) => (
-        <div key={group.label ?? `group-${groupIndex}`} className="sync-path-menu-group">
-          {groupIndex > 0 && <div className="sync-path-menu-separator" role="separator" />}
-          {group.label && <div className="sync-path-menu-label">{group.label}</div>}
-          {group.items.map((item) => {
-            const checkable = item.checked !== undefined;
-            const inert = !!item.disabled;
-            // A disabled row's second line is its reason; an able row's is its
-            // data. Reasons are sentences-in-miniature, so they read as prose.
-            const detail = (inert && item.disabledReason) ? item.disabledReason : item.detail;
-            const detailIsPath = (inert && item.disabledReason) ? false : item.detailIsPath;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                role={checkable ? "menuitemcheckbox" : "menuitem"}
-                aria-checked={checkable ? item.checked : undefined}
-                className={`sync-path-menu-item${item.danger ? " danger" : ""}`}
-                aria-disabled={inert || undefined}
-                tabIndex={-1}
-                title={item.title}
-                onClick={() => {
-                  if (inert) return;
-                  onClose(true);
-                  item.onSelect();
-                }}
-              >
-                {item.icon && <Icon name={item.icon} size={14} />}
-                <span className="sync-path-menu-copy">
-                  <span>{item.label}</span>
-                  {detail && (
-                    <small className={detailIsPath ? undefined : "phrase"}>{detail}</small>
-                  )}
-                </span>
-                {checkable && item.checked && (
-                  <Icon name="check" size={13} className="sync-path-menu-check" />
-                )}
-              </button>
-            );
-          })}
+        <div className="sync-path-menu-current" aria-current="true">
+          {header.icon && <Icon name={header.icon} size={14} />}
+          <span className="sync-path-menu-copy">
+            <span>{header.label}</span>
+            {header.detail && (
+              <small className={header.detailIsPath ? undefined : "phrase"}>{header.detail}</small>
+            )}
+          </span>
+          <Icon name="check" size={13} className="sync-path-menu-check" />
         </div>
-      ))}
+      )}
+      {searchable && (
+        <input
+          type="search"
+          className="sync-path-menu-search"
+          placeholder={`Switch ${label.toLowerCase()}…`}
+          aria-label={`Filter ${label.toLowerCase()} list`}
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      )}
+      {switcher ? (
+        <>
+          {/* One scrollport for every target list, so a long one scrolls
+              under the current row and the filter while the footer verbs stay
+              in reach; the panel's ceiling is the room left below the bar. */}
+          <div className="sync-path-menu-scroll">
+            {lists.map((group) => {
+              const shown = group.items.filter(matches);
+              return (
+                <div key={group.label} className="sync-path-menu-group" aria-label={group.label}>
+                  {shown.map((item) => renderItem(item, true))}
+                  {shown.length === 0 && <p className="sync-path-menu-empty">No match.</p>}
+                </div>
+              );
+            })}
+          </div>
+          {(verbs.length > 0 || tails.length > 0) && (
+            <div className="sync-path-menu-foot">
+              {caption && <span className="sync-path-menu-cap">{caption}</span>}
+              {verbs.length > 0 && (
+                <div className="sync-path-menu-verbs">{verbs.map((item) => renderPill(item, false))}</div>
+              )}
+              {tails.map((item) => renderPill(item, true))}
+            </div>
+          )}
+        </>
+      ) : (
+        populated.map((group, groupIndex) => (
+          <div key={group.label ?? `group-${groupIndex}`} className="sync-path-menu-group">
+            {groupIndex > 0 && <div className="sync-path-menu-separator" role="separator" />}
+            {group.label && <div className="sync-path-menu-label">{group.label}</div>}
+            {group.items.map((item) => renderItem(item, false))}
+          </div>
+        ))
+      )}
     </div>
   );
 }
@@ -311,7 +448,15 @@ export default function SyncPathBar({
   const focusMenuOption = (key: string, position: "first" | "last") => {
     window.requestAnimationFrame(() => {
       const root = menuRefs.current.get(key);
-      const options = root ? menuOptions(root) : [];
+      if (!root) return;
+      // A searchable switcher opens on its filter: with that many targets,
+      // narrowing them is the first thing a keyboard user wants to do.
+      const search = position === "first" ? root.querySelector<HTMLInputElement>(".sync-path-menu-search") : null;
+      if (search) {
+        search.focus();
+        return;
+      }
+      const options = menuOptions(root);
       if (options.length === 0) return;
       if (position === "first") options[0]?.focus();
       else options[options.length - 1]?.focus();

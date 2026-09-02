@@ -587,10 +587,10 @@ html, body { height: auto; min-height: 100%; overflow: visible; }
 .app.mockup-root { height: auto; min-height: 100vh; overflow: visible; }
 .mockup-shell { width: 100%; max-width: 1180px; margin: 0 auto; padding: 28px 24px 90px; }
 .mockup-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 8px; }
-.mockup-head h1 { margin: 0 0 6px; color: var(--text-0); font-family: var(--font-pixel); font-size: var(--type-xl); font-weight: 400; }
+.mockup-head h1 { margin: 0 0 6px; color: var(--text-0); font-family: var(--font-display); font-size: var(--type-xl); font-weight: 400; }
 .mockup-head p { max-width: 84ch; margin: 0; color: var(--text-2); font-size: var(--type-md); line-height: 1.55; }
 .mockup-panel { margin-top: 34px; padding-top: 20px; border-top: 1px solid var(--border); }
-.mockup-panel > h3 { margin: 0 0 4px; color: var(--text-0); font-family: var(--font-pixel); font-size: var(--type-lg); font-weight: 400; }
+.mockup-panel > h3 { margin: 0 0 4px; color: var(--text-0); font-family: var(--font-display); font-size: var(--type-lg); font-weight: 400; }
 .mockup-panel > p { max-width: 88ch; margin: 0 0 14px; color: var(--text-2); font-size: var(--type-sm); line-height: 1.55; }
 .mockup-stage { border: 1px solid var(--border); border-radius: 6px; background: var(--surface-card); }
 .mockup-stage.tight { padding: 0; overflow: hidden; }

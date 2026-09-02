@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>shell probe</title>
+<link rel="stylesheet" href="./App.css">
+<style>html,body{margin:0}</style>
+</head>
+<body>
+<div class="app sync-app" id="root" style="--sync-sidebar-width:318px;height:560px">
+  <aside class="sync-sidebar" id="project-sidebar" style="width:318px;min-width:318px;flex:0 0 318px"></aside>
+  <div class="sync-sidebar-resizer"></div>
+  <div class="sync-workspace" style="flex:1 1 auto;min-width:0;display:flex;flex-direction:column">
+    <header class="sync-pathbar sync-titlebar" id="bar">
+      <ol class="sync-path" aria-label="Workspace path">
+        <li class="sync-path-item" id="li-storage">
+          <button type="button" class="sync-path-crumb root"><span>Local storage 1</span><svg width="11" height="11" class="sync-path-chevron"></svg></button>
+          <div class="sync-path-menu switcher" role="menu" aria-label="Storage" id="menu-storage">
+            <div class="sync-path-menu-current"><span class="sync-path-menu-copy"><span>Local storage 1</span><small>~/Documents/mallard</small></span></div>
+            <div class="sync-path-menu-group"><button type="button" role="menuitem" class="sync-path-menu-item target"><span class="sync-path-menu-copy"><span>Team bucket</span></span></button></div>
+            <div class="sync-path-menu-foot"><button type="button" role="menuitem" class="sync-path-menu-tail"><span>Add storage…</span></button></div>
+          </div>
+        </li>
+        <li class="sync-path-item" id="li-project">
+          <span class="sync-path-separator" aria-hidden="true">/</span>
+          <span class="sync-path-crumb split"><button type="button" class="sync-path-crumb-link"><span>HorrorGame</span></button><button type="button" class="sync-path-crumb-toggle"><svg width="11" height="11" class="sync-path-chevron"></svg></button></span>
+          <div class="sync-path-menu switcher" role="menu" aria-label="Project" id="menu-project">
+            <div class="sync-path-menu-current"><span class="sync-path-menu-copy"><span>HorrorGame</span><small>~/dev/HorrorGame</small></span></div>
+            <div class="sync-path-menu-group"><button type="button" role="menuitem" class="sync-path-menu-item target"><span class="sync-path-menu-copy"><span>Other project</span></span></button></div>
+            <div class="sync-path-menu-foot">
+              <span class="sync-path-menu-cap">Agent profile · Claude Code</span>
+              <div class="sync-path-menu-verbs">
+                <button type="button" role="menuitem" class="sync-path-menu-verb" aria-label="Reveal in Finder"></button>
+                <button type="button" role="menuitem" class="sync-path-menu-verb" aria-label="Agent profile…"></button>
+                <button type="button" role="menuitem" class="sync-path-menu-verb" aria-label="Rename project…"></button>
+                <button type="button" role="menuitem" class="sync-path-menu-verb danger" aria-label="Reset local sync state…"></button>
+              </div>
+              <button type="button" role="menuitem" class="sync-path-menu-tail"><span>Add project…</span></button>
+            </div>
+          </div>
+        </li>
+        <li class="sync-path-item leaf-item" id="li-section">
+          <span class="sync-path-separator" aria-hidden="true">/</span>
+          <button type="button" class="sync-path-crumb section leaf"><span>Sessions</span><svg width="11" height="11" class="sync-path-chevron"></svg></button>
+          <div class="sync-path-menu switcher" role="menu" aria-label="Switch view" id="menu-section">
+            <div class="sync-path-menu-current"><span class="sync-path-menu-copy"><span>Sessions</span><small class="phrase">Agent sessions</small></span></div>
+            <div class="sync-path-menu-group"><button type="button" role="menuitem" class="sync-path-menu-item target"><span class="sync-path-menu-copy"><span>Files</span><small class="phrase">Files outside Git</small></span></button></div>
+          </div>
+        </li>
+      </ol>
+      <div class="sync-path-actions">
+        <button type="button" class="sync-path-sync">Pull</button>
+        <button type="button" class="sync-path-sync">Push</button>
+        <span class="sync-path-divider" aria-hidden="true"></span>
+        <div class="sync-path-overflow"><button type="button" class="sync-path-more"></button></div>
+      </div>
+    </header>
+    <div class="sync-main"></div>
+  </div>
+</div>
+</body>
+</html>

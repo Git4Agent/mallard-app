@@ -182,12 +182,13 @@ function renderTimeline(
   );
 }
 
-test("filters carry event kinds only, and tool calls are on by default", () => {
+test("filters carry event kinds only, and the conversation is what opens by default", () => {
   const filters = createDefaultSessionDetailFilters(detail.event_counts);
-  // The punchcard rows are the transcript's account of the work; the per-turn
-  // disclosure that used to reveal them lazily is gone.
-  assert.deepEqual(includedSessionEventKinds(filters), ["prompt", "response", "checkpoint", "tool_call"]);
-  assert.equal(filters.toolCalls, true);
+  // Prompts and replies open; the punchcard rows — steps and tool calls —
+  // wait behind their SHOW toggles until asked for.
+  assert.deepEqual(includedSessionEventKinds(filters), ["prompt", "response", "checkpoint"]);
+  assert.equal(filters.toolCalls, false);
+  assert.equal(filters.intermediateSteps, false);
   assert.equal("toolCategories" in filters, false);
 
   // The query still names every category, because sorting by category is gone
@@ -335,9 +336,11 @@ test("the timeline is a rail: tiles for turns, punches for calls, no speaker hea
   assert.doesNotMatch(html, /session-detail-event-gutter|session-detail-event-rail/);
 
   // You ask in a card: markdown body plus a clock · duration · calls meta line.
-  assert.match(html, /class="session-detail-prompt-card"/);
-  assert.match(html, /class="session-detail-card-meta"><time[^>]*>\d{2}:\d{2}<\/time><span>6m<\/span><span>2 calls<\/span>/);
-  assert.match(html, /class="session-detail-event-copy session-detail-response-prose"/);
+  assert.match(html, /class="session-detail-card session-detail-card-prompt"/);
+  // The stamp leads the card: clock · duration · calls, then the copy.
+  assert.match(html, /class="session-detail-card-head"><time[^>]*>\d{2}:\d{2}<\/time><span>6m<\/span><span>2 calls<\/span><\/div><div class="session-detail-event-copy"/);
+  // The reply is a card too, stamped with its clock alone.
+  assert.match(html, /class="session-detail-card session-detail-card-reply"><div class="session-detail-card-head"><time[^>]*>\d{2}:\d{2}<\/time><\/div><div class="session-detail-event-copy"/);
 
   // The eyebrow that restated the heading, and the count that contradicted the
   // filter panel, are both gone.

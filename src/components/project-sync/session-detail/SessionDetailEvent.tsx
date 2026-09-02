@@ -277,9 +277,10 @@ function speakableCount(count: SessionCount | undefined): SessionCount | null {
 }
 
 /**
- * You ask in a card, the agent answers in prose — shape is the speaker. The
- * meta line reads clock · duration · calls: absolute clock because the divider
- * already owns the date, duration measured from the turn's loaded extent.
+ * Both speakers answer in a card; the rail node is what says who is talking,
+ * so the card carries no name or mark of its own. Its head is a stamp band
+ * reading clock · duration · calls: absolute clock because the divider already
+ * owns the date, duration measured from the turn's loaded extent.
  */
 function PromptCard({
   event,
@@ -299,7 +300,16 @@ function PromptCard({
   const callCount = speakableCount(event.turn_tool_summary?.tool_calls);
   const clock = event.timestamp != null ? formatSessionDetailClock(event.timestamp) : null;
   return (
-    <div className="session-detail-prompt-card">
+    <div className="session-detail-card session-detail-card-prompt">
+      {(clock || turnDuration || callCount) && (
+        <div className="session-detail-card-head">
+          {clock && <time dateTime={sessionDetailDateTime(event.timestamp)}>{clock}</time>}
+          {turnDuration && <span>{turnDuration}</span>}
+          {callCount && (
+            <span>{formatSessionCount(callCount)} {callCount.value === 1 ? "call" : "calls"}</span>
+          )}
+        </div>
+      )}
       <div className="session-detail-event-copy">
         {event.text ? (
           <SessionDetailMarkdown
@@ -313,15 +323,45 @@ function PromptCard({
           <p className="session-detail-event-empty">No visible text is available for this event.</p>
         )}
       </div>
-      {(clock || turnDuration || callCount) && (
-        <div className="session-detail-card-meta">
-          {clock && <time dateTime={sessionDetailDateTime(event.timestamp)}>{clock}</time>}
-          {turnDuration && <span>{turnDuration}</span>}
-          {callCount && (
-            <span>{formatSessionCount(callCount)} {callCount.value === 1 ? "call" : "calls"}</span>
-          )}
+    </div>
+  );
+}
+
+/** The agent's reply, in the same card as the prompt: a clock stamp, then prose. */
+function ReplyCard({
+  event,
+  onOpenProjectPath,
+  projectImages,
+  onLoadProjectImage,
+  projectRoot,
+}: {
+  event: SessionTimelineEvent;
+  onOpenProjectPath: (relativePath: string) => void;
+  projectImages?: Readonly<Record<string, ProjectMarkdownImageState>>;
+  onLoadProjectImage?: (relativePath: string) => void;
+  projectRoot: string;
+}) {
+  const clock = event.timestamp != null ? formatSessionDetailClock(event.timestamp) : null;
+  return (
+    <div className="session-detail-card session-detail-card-reply">
+      {clock && (
+        <div className="session-detail-card-head">
+          <time dateTime={sessionDetailDateTime(event.timestamp)}>{clock}</time>
         </div>
       )}
+      <div className="session-detail-event-copy">
+        {event.text ? (
+          <SessionDetailMarkdown
+            text={event.text}
+            onOpenProjectPath={onOpenProjectPath}
+            projectImages={projectImages}
+            onLoadProjectImage={onLoadProjectImage}
+            projectRoot={projectRoot}
+          />
+        ) : (
+          <p className="session-detail-event-empty">No visible text is available for this event.</p>
+        )}
+      </div>
     </div>
   );
 }
@@ -435,10 +475,16 @@ export default function SessionDetailEvent({
             onLoadProjectImage={onLoadProjectImage}
             projectRoot={projectRoot}
           />
+        ) : event.kind === "response" ? (
+          <ReplyCard
+            event={event}
+            onOpenProjectPath={onOpenProjectPath}
+            projectImages={projectImages}
+            onLoadProjectImage={onLoadProjectImage}
+            projectRoot={projectRoot}
+          />
         ) : (
-          <div className={`session-detail-event-copy ${event.kind === "response"
-            ? "session-detail-response-prose"
-            : "session-detail-intermediate-prose"}`}>
+          <div className="session-detail-event-copy session-detail-intermediate-prose">
             {event.text ? (
               <SessionDetailMarkdown
                 text={event.text}
