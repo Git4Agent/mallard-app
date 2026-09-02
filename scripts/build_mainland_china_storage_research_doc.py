@@ -4,7 +4,7 @@ from pathlib import Path
 
 from docx import Document
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
@@ -327,7 +327,7 @@ def apply_numbering(paragraph, num_id: int):
     p_pr.insert(0, num_pr)
 
 
-def add_list(doc, items, *, ordered=False):
+def add_list(doc, items, *, ordered=False, page_break_before_indexes=()):
     if ordered:
         num_id = create_numbering_id(
             doc,
@@ -341,7 +341,8 @@ def add_list(doc, items, *, ordered=False):
             level_text_value="\u2022",
             font="Arial",
         )
-    for item in items:
+    break_indexes = set(page_break_before_indexes)
+    for index, item in enumerate(items):
         if isinstance(item, tuple):
             label, text = item
         else:
@@ -351,6 +352,7 @@ def add_list(doc, items, *, ordered=False):
         paragraph.paragraph_format.space_after = Pt(8)
         paragraph.paragraph_format.line_spacing = 1.167
         paragraph.paragraph_format.keep_together = True
+        paragraph.paragraph_format.page_break_before = index in break_indexes
         apply_numbering(paragraph, num_id)
         if label:
             lead = paragraph.add_run(f"{label}: ")
@@ -439,18 +441,7 @@ def configure_page(doc):
     section.header_distance = Inches(0.492)
     section.footer_distance = Inches(0.492)
 
-    for header in (section.header, section.even_page_header):
-        paragraph = header.paragraphs[0]
-        paragraph.paragraph_format.space_before = Pt(0)
-        paragraph.paragraph_format.space_after = Pt(0)
-        paragraph.paragraph_format.tab_stops.add_tab_stop(Inches(6.5))
-        left = paragraph.add_run("MALLARD | TECHNICAL RESEARCH")
-        set_run_font(left, size=8.5, color=MUTED, bold=True)
-        paragraph.add_run("\t")
-        right = paragraph.add_run("MAINLAND CHINA OBJECT STORAGE")
-        set_run_font(right, size=8.5, color=MUTED, bold=True)
-
-    for footer in (section.footer, section.even_page_footer):
+    for footer in (section.footer,):
         paragraph = footer.paragraphs[0]
         paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         paragraph.paragraph_format.space_before = Pt(0)
@@ -461,6 +452,21 @@ def configure_page(doc):
         middle = paragraph.add_run(" of ")
         set_run_font(middle, size=9, color=MUTED)
         add_field(paragraph, " NUMPAGES ")
+
+
+def add_masthead(doc):
+    paragraph = doc.add_paragraph()
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(24)
+    paragraph.paragraph_format.tab_stops.add_tab_stop(
+        Inches(6.5),
+        WD_TAB_ALIGNMENT.RIGHT,
+    )
+    left = paragraph.add_run("MALLARD | TECHNICAL RESEARCH")
+    set_run_font(left, size=8.5, color=MUTED, bold=True)
+    paragraph.add_run("\t")
+    right = paragraph.add_run("MAINLAND CHINA OBJECT STORAGE")
+    set_run_font(right, size=8.5, color=MUTED, bold=True)
 
 
 def add_metadata_row(doc, label: str, value: str):
@@ -556,6 +562,7 @@ def build_document():
     props.last_modified_by = ""
     props.keywords = "Mallard, China, object storage, S3, OSS, COS, OBS, BOS, TOS"
 
+    add_masthead(doc)
     title = doc.add_paragraph(style="Title")
     title.add_run("Mainland China Object Storage Compatibility Assessment")
     subtitle = doc.add_paragraph(style="Subtitle")
@@ -647,7 +654,8 @@ def build_document():
         ],
     )
 
-    doc.add_heading("2.3 Compatibility gate", level=2)
+    compatibility_heading = doc.add_heading("2.3 Compatibility gate", level=2)
+    compatibility_heading.paragraph_format.page_break_before = True
     add_body(
         doc,
         "Basic upload and download support is not sufficient. A provider must pass all of these checks:",
@@ -769,8 +777,8 @@ def build_document():
     set_table_geometry(table, [1640, 1540, 1540, 2320, 2320])
     style_table(table, body_size=8.3, status_column=4)
 
-    doc.add_page_break()
     continued = doc.add_paragraph()
+    continued.paragraph_format.page_break_before = True
     continued.paragraph_format.space_before = Pt(0)
     continued.paragraph_format.space_after = Pt(8)
     continued.paragraph_format.keep_with_next = True
@@ -918,6 +926,7 @@ def build_document():
             "If top-three mainland provider coverage is a product requirement, evaluate append-only immutable head records and deterministic reconciliation as a separate protocol project.",
         ],
         ordered=True,
+        page_break_before_indexes=(5,),
     )
 
     doc.add_heading("6. Conformance test checklist", level=1)
@@ -967,7 +976,8 @@ def build_document():
         ],
     )
 
-    doc.add_heading("7. Decision and next actions", level=1)
+    decision_heading = doc.add_heading("7. Decision and next actions", level=1)
+    decision_heading.paragraph_format.page_break_before = True
     table = doc.add_table(rows=1, cols=3)
     for index, value in enumerate(("Decision", "Recommended action", "Acceptance condition")):
         table.rows[0].cells[index].text = value
