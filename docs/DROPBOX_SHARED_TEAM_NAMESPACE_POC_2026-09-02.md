@@ -13,9 +13,9 @@ The offline evidence supports a focused live test of the Dropbox file `rev` as
 Mallard's opaque `etag` token. The live two-account test is still pending. Do
 not expose Dropbox as a Mallard storage type from the offline result.
 
-This POC accepts pre-issued credentials. It does not prove that broader
-authorization for collaborators or managed teams is feasible. OAuth lifecycle,
-administrator consent, and authorization availability are separate gates.
+This POC accepts pre-issued credentials. The production design uses that same
+boundary: the configuring user supplies a user-linked token and already has
+edit access. OAuth and managed-team authorization are outside Mallard.
 
 The probe is isolated under
 [`poc/dropbox-shared-team-namespace`](../poc/dropbox-shared-team-namespace/README.md).
@@ -48,6 +48,9 @@ The harness uses direct Dropbox API v2 requests. It applies one stable
 namespace ID to each file request with `Dropbox-API-Path-Root` in
 `namespace_id` mode. It supports a team-linked token with two different
 `Dropbox-API-Select-User` or `Dropbox-API-Select-Admin` contexts.
+
+The team-linked contexts are additional POC coverage. The production design
+accepts only a user-linked token and sends no selector header.
 
 It fails unless `/users/get_current_account` returns two distinct account IDs.
 It rejects either account's personal home namespace. A selected common team
@@ -128,7 +131,8 @@ The minimum user-linked scopes are:
 
 A team-linked token also needs `team_data.member` to act for selected members.
 A managed team can block the app or require administrator approval. This POC
-does not test that authorization path.
+does not test that authorization path, and the production design does not use
+it.
 
 Do not share the credential file. Run the probe locally. A live `POC_PASS` is
 valid only for the selected actors and namespace, and only when
@@ -151,19 +155,14 @@ Production integration still requires these separate layers:
 
 1. A tagged machine-local storage destination model. Do not add more
    provider-specific fields to the current flat `StorageConfig`.
-2. A machine-local authorization profile with stable account, team, namespace,
-   acting-member, scope, and credential-reference data.
-3. OAuth code flow with PKCE and refresh tokens. Store refresh tokens in the
-   OS credential store. Never return them to the webview.
-4. A credential-aware object-store factory used by ProjectSync, Activity, and
-   the storage Library.
-5. A direct-HTTP Rust adapter with bounded streaming, retry, redaction, nested
+2. A restricted machine-local user access token that is redacted from every
+   response. The user replaces it manually after expiry.
+3. A direct-HTTP Rust adapter with bounded streaming, retry, redaction, nested
    `.mallard/` key mapping, case-alias rejection, ambiguity recovery, and a
    provider-neutral conformance suite.
-6. Focused authorize, list-namespace, test, upsert, and disconnect commands.
-   The generic config-save path must not create or replace Dropbox
-   authorization or destinations.
-7. Exact per-provider frontend branches. Existing code treats several
+4. Focused test and upsert commands. The generic config-save path must not
+   create or replace Dropbox credentials or destinations.
+5. Exact per-provider frontend branches. Existing code treats several
    non-local branches as R2. A new enum value must not use those branches.
 
 Portable bundle schema 1, storage marker schema 1, immutable object keys,
@@ -174,7 +173,7 @@ if the production conformance work confirms these mappings.
 
 The current harness does not prove:
 
-- OAuth PKCE, refresh, reconnect, revocation, or OS credential storage;
+- machine-local token redaction, replacement, or expiry behavior;
 - administrator consent or broad managed-team authorization;
 - namespace discovery or team migration behavior;
 - nested `.mallard/` object-key mapping;

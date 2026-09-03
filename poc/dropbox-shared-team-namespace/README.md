@@ -73,10 +73,9 @@ token must act as two different members with `Dropbox-API-Select-User`, or as
 two different administrators where the endpoint permits
 `Dropbox-API-Select-Admin`.
 
-This harness accepts pre-issued access tokens. It does not test whether a
-collaborator or managed-team authorization flow is broadly feasible. A
-distributed desktop application must use the OAuth 2 code flow with PKCE and
-refresh tokens.
+This harness accepts pre-issued access tokens. The production design accepts
+only a user-linked token from a user who already has edit access. The
+team-linked mode remains POC-only. Mallard does not issue or refresh tokens.
 
 ## Select the namespace
 
@@ -199,7 +198,7 @@ the empty probe root manually.
 This is a capability probe. It is not a Dropbox storage adapter. It does not
 test:
 
-- OAuth PKCE, token refresh, reconnect, revocation, or OS credential storage;
+- machine-local token redaction, replacement, or expiry behavior;
 - administrator consent policy or authorization availability across managed
   teams;
 - namespace discovery UI or team-space migration behavior;
@@ -215,7 +214,7 @@ The 255-byte test applies to one direct child file-name component. It does not
 prove nested Mallard key mapping.
 
 Do not add Dropbox to `StorageConfig` or the storage UI from this result alone.
-First run the live probe. Then test the authorization lifecycle, nested object
+First run the live probe. Then test manual token replacement, nested object
 mapping, live throttling, and the production adapter.
 
 ## Official references

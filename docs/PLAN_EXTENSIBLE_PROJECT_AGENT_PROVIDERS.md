@@ -1,7 +1,8 @@
 # Plan: Extensible Project Agent Providers and Mixed-Provider Repositories
 
-**Status:** proposed clean-cut redesign  
+**Status:** design history; resource-contract section superseded
 **Date:** 2026-08-07  
+**Amended:** 2026-09-03
 **Scope:** architecture and implementation plan only
 
 ## 1. Outcome
@@ -263,6 +264,13 @@ profile adapter. Selecting or editing one provider never removes another
 entry.
 
 ### 5.4 Generic resource classes
+
+> **Superseded extension contract:** The closed `ResourceKind` shape below
+> records the earlier provider cutover. It is not the final portable wire
+> contract. Sections 4.4 and 5.4 of
+> `DESIGN_EXTENSIBLE_STORAGE_AND_AGENT_PROVIDERS.md` replace `ResourceKind`,
+> `ApplyPolicy`, `Provenance`, and the dependent `TombstoneTarget` with stable
+> versioned keys and compiled registries.
 
 Remove provider names from `ResourceKind`:
 
