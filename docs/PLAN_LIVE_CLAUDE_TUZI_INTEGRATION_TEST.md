@@ -138,7 +138,8 @@ The runner:
    working, and process-temporary directories;
 8. starts one direct `claude` process with a closed environment and no shell;
 9. permits one model turn, zero retries, zero tools, no fallback model, a
-   1024-output-token limit, a 120-second timeout, and a USD 0.05 client cap;
+   1024-output-token limit, a 180-second API timeout, and a USD 0.05 client
+   cap;
 10. replaces the large default system prompt with one fixed minimal system
     instruction and sends no Mallard source, conversation, or personal data;
 11. requires the exact marker response, one turn, the generated session ID,
@@ -292,7 +293,7 @@ The closed child environment additionally sets:
 CLAUDE_CODE_MAX_RETRIES=0
 CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1
 CLAUDE_CODE_MAX_OUTPUT_TOKENS=1024
-API_TIMEOUT_MS=120000
+API_TIMEOUT_MS=180000
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 ```
 

@@ -1,27 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import PushResourceWorkspace, { pushBudgetTotal } from "../../src/components/project-sync/PushResourceWorkspace";
+import PushResourceWorkspace, {
+  pushBudgetTotal,
+  pushReviewDisabledReason,
+  sanitizePushSelection,
+} from "../../src/components/project-sync/PushResourceWorkspace";
+import { recipeWithSelection } from "../../src/components/project-sync/model";
 import {
   ProjectChatHistoryContent,
   reviewWindowDays,
-  syncHoldDetail,
 } from "../../src/components/project-sync/ProjectActivityPage";
 import type {
+  InventoryResource,
   LocalProjectSummary,
   ProjectActivity,
   ProjectBinding,
   ProjectContentInventory,
-  ProjectResourceDescriptor,
   ProjectSessionSummary,
   ThreadSyncComparison,
   ThreadSyncEntry,
 } from "../../src/types";
 
-/* The Push review when the backlog is bigger than one push
-   (docs/PLAN_PUSH_CAPTURE_BUDGET.md): rows that do not fit stay in the one
-   list, unselectable, wearing "Later"; the footer meter sums what this push
-   carries; nothing counts rounds. */
+/* Push comparison lists every eligible session. The live selection meter,
+   not session age or list order, enforces the aggregate Apply limit. */
 
 const MB = 1024 * 1024;
 const LIMIT = 512 * MB;
@@ -85,12 +87,6 @@ const waits = entry(WAITS_ID, {
   display_name: "Catalog profile launch buttons",
   capture_bytes: 118 * MB,
   local_updated_at: NOW - 5 * 86_400,
-  push_decision: {
-    action: "blocked",
-    blocker: "capture_budget",
-    selectable: false,
-    blocked_reason: "This push is full with newer conversations, so this one does not fit.",
-  },
 });
 
 function comparison(overrides: Partial<ThreadSyncComparison> = {}): ThreadSyncComparison {
@@ -107,9 +103,6 @@ function comparison(overrides: Partial<ThreadSyncComparison> = {}): ThreadSyncCo
     capture_budget: {
       limit_bytes: LIMIT,
       reserved_bytes: 3 * MB,
-      admitted_bytes: 96 * MB,
-      held_count: 1,
-      held_bytes: 118 * MB,
     },
     remote_continuity: { state: "in_sync", revision: 1 },
     ...overrides,
@@ -131,7 +124,6 @@ function session(threadId: string, title: string, endedAt: number): ProjectSessi
     started_at: endedAt - 1_000,
     ended_at: endedAt,
     working_directory: null,
-    branch: "main",
     recorded_sha: "a".repeat(40),
     is_active: false,
     user_round_count: 2,
@@ -193,46 +185,18 @@ function renderReviewList(selectable: Set<string>) {
   );
 }
 
-test("a session that doesn't fit stays in the list, unselectable, wearing Later", () => {
-  const html = renderReviewList(new Set([fits.resource_id]));
+test("all eligible sessions stay selectable regardless of age or list position", () => {
+  const html = renderReviewList(new Set([fits.resource_id, waits.resource_id]));
 
-  // Both rows are on screen, in the one list: no fold, no paging control.
+  // Both rows are on screen and selectable in one list.
   assert.match(html, /Refine sync review UX/);
   assert.match(html, /Catalog profile launch buttons/);
   assert.doesNotMatch(html, /Older activity|sync-history-older|Load earlier/);
-  // Only the row that fits has a checkbox; the other wears the chip instead.
-  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 1);
-  assert.equal((html.match(/>Later<\/span>/g) ?? []).length, 1);
-  // The held row keeps its real status glyph — it is still local work that
-  // will go — and its sentence says the push is full and to push again.
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 2);
+  assert.doesNotMatch(html, />Later<\/span>/);
   assert.equal((html.match(/sync-thread-sync-indicator local"/g) ?? []).length, 2);
-  assert.match(
-    html,
-    /Not in this push\. Doesn(&#x27;|')t fit in this push — the 512 MB limit is full with newer sessions\. Push again after this one\./,
-  );
-  assert.doesNotMatch(html, /round/i);
-  // Review rows carry their push size after the duration.
   assert.match(html, /data-icon="drive"[^>]*>(?:<[^>]*>)*<\/svg><b>96 MB<\/b>/);
   assert.match(html, /<b>118 MB<\/b>/);
-});
-
-test("hold copy names the limit when the review knows it, and a too-large session is unsyncable", () => {
-  assert.equal(
-    syncHoldDetail("push", waits, LIMIT),
-    "Doesn't fit in this push — the 512 MB limit is full with newer sessions. Push again after this one.",
-  );
-  assert.equal(
-    syncHoldDetail("push", waits),
-    "Doesn't fit in this push — the limit is full with newer sessions. Push again after this one.",
-  );
-  assert.equal(
-    syncHoldDetail("pull", { ...waits, pull_decision: waits.push_decision }, LIMIT),
-    "Doesn't fit in this pull — the 512 MB limit is full with newer sessions. Pull again after this one.",
-  );
-  const tooLarge = entry(WAITS_ID, {
-    push_decision: { action: "blocked", blocker: "too_large", selectable: false },
-  });
-  assert.equal(syncHoldDetail("push", tooLarge), "Can't sync — this session is larger than one push carries.");
 });
 
 test("a review asks for the whole span back to the oldest outstanding session", () => {
@@ -246,33 +210,39 @@ test("a review asks for the whole span back to the oldest outstanding session", 
   assert.equal(reviewWindowDays(comparison({ entries: [fits] }), NOW), 30);
 });
 
-function conversationResource(threadEntry: ThreadSyncEntry): ProjectResourceDescriptor {
+function conversationResource(threadEntry: ThreadSyncEntry): InventoryResource {
   return {
     resource_id: threadEntry.resource_id,
-    kind: "conversation",
+    kind: { key: "conversation", version: 1 },
     provider: "codex",
     provider_resource_type: "session",
     display_name: threadEntry.display_name,
-    provenance: { kind: "conversation" },
-    apply_policy: "safe_file",
+    provenance: { kind: "conversation", version: 1, fields: {} },
+    apply_policy: { key: "safe_file", version: 1 },
     codec_version: 1,
-    metadata: {},
+    attributes: {},
     category: "conversations",
+    kind_label: "Conversation",
+    apply_policy_label: "Safe file",
+    selectable: true,
     default_selected: true,
   };
 }
 
-const projectFile: ProjectResourceDescriptor = {
+const projectFile: InventoryResource = {
   resource_id: "project:file:assets/recording.mov",
-  kind: "project_content_file",
+  kind: { key: "project_content_file", version: 1 },
   provider: null,
   provider_resource_type: null,
   display_name: "recording.mov",
-  provenance: { kind: "project_content" },
-  apply_policy: "explicit_review",
+  provenance: { kind: "project_content", version: 1, fields: {} },
+  apply_policy: { key: "explicit_review", version: 1 },
   codec_version: 1,
-  metadata: {},
+  attributes: {},
   category: "project_files",
+  kind_label: "Project file",
+  apply_policy_label: "Explicit review",
+  selectable: true,
   logical_paths: ["project/assets/recording.mov"],
   default_selected: true,
 };
@@ -330,36 +300,131 @@ function renderWorkspace(selected: Set<string>, inventory: ProjectContentInvento
   );
 }
 
-test("the review banner says what this push carries and that the rest waits — no rounds", () => {
-  const html = renderWorkspace(new Set([fits.resource_id]));
-  assert.match(html, /Too much to push at once/);
-  assert.match(
-    html,
-    /This push carries the newest 1 session \(96 MB\), back to [A-Z][a-z]{2} \d{1,2}\. The 1 older session \(118 MB\) doesn(&#x27;|')t fit — push again after this one\./,
-  );
-  assert.doesNotMatch(html, /round|wait for the next/i);
-  // The held row is listed in the fallback inventory too, unselectable.
+test("the review does not apply a newest-first admission policy", () => {
+  const html = renderWorkspace(new Set([waits.resource_id]));
+  assert.doesNotMatch(html, /Too much to push at once|push again after this one|>Later</i);
   assert.match(html, /Catalog profile launch buttons/);
+  assert.match(html, /This push · 121 MB of 512 MB/);
 });
 
-test("the footer meter sums sessions, requirements, and project files against the limit", () => {
+test("the meter is drawn in both pinned zones and sums sessions, requirements, and project files", () => {
   const within = renderWorkspace(new Set([fits.resource_id]));
-  assert.match(within, /class="sync-push-budget"[^>]*role="status"/);
-  assert.match(within, /This push · 99 MB of 512 MB/);
+  // The header glance and the footer gauge are the review's two zones that do
+  // not scroll away, and they carry the same figure.
+  assert.equal(within.match(/class="sync-push-budget-figure"/g)?.length, 2);
+  assert.match(within, /class="sync-push-budget-glance" title="Sessions 96 MB · Requirements 3\.0 MB · Project files 0 B"/);
+  assert.match(within, /class="sync-push-budget-gauge"[^>]*role="status"/);
+  // Only the footer's announces. Two live regions would read every tick twice.
+  assert.equal(within.match(/class="sync-push-budget[^"]*"[^>]*role="status"/g)?.length, 1);
   assert.match(within, /role="meter"[^>]*aria-valuemax="536870912"[^>]*aria-valuenow="103809024"/);
-  assert.match(within, /title="Sessions 96 MB · Requirements 3\.0 MB · Project files 0 B"/);
+  assert.match(within, /aria-valuetext="This push · 99 MB of 512 MB"/);
+  assert.match(within, /<b>99 MB<\/b> \/ 512 MB/);
+  // While it fits, the track's right end IS the limit — no tick, no refusal.
+  assert.doesNotMatch(within, /class="sync-push-budget-track over"/);
+  assert.doesNotMatch(within, /sync-push-budget-sentence/);
   const pushWithin = within.slice(within.lastIndexOf("<button", within.indexOf("sync-pull-apply-button")));
   assert.doesNotMatch(pushWithin.slice(0, pushWithin.indexOf(">")), /disabled=""/);
 
-  // A 500 MB project file carries the total past the limit: the sentence
-  // turns, the bar turns, and Push refuses with the sentence as its title.
+  // A 500 MB project file carries the total past the limit: both figures turn
+  // to the overshoot, the track grows a tick the fill runs past, the refusal
+  // takes its own row, and Push refuses with the same sentence as its title.
   const over = renderWorkspace(new Set([fits.resource_id, projectFile.resource_id]), projectFiles);
-  assert.match(over, /class="sync-push-budget over"/);
-  assert.match(over, /87 MB over the 512 MB push limit — exclude sessions or files to push\./);
+  assert.match(over, /class="sync-push-budget-gauge over"/);
+  assert.match(over, /class="sync-push-budget-track over"/);
+  // The tick sits where the limit fell on a track scaled to the total, so the
+  // fill visibly runs past it: 512 of 599 MB is 85.4% along.
+  assert.match(over, /class="sync-push-budget-track over"[^>]*>.*?<b style="left:85\.4/);
+  assert.equal(over.match(/class="sync-push-budget-figure over"/g)?.length, 2);
+  assert.match(over, /<b>\+87 MB<\/b>/);
+  assert.equal(
+    over.match(/87 MB over the 512 MB push limit — exclude sessions or files to push\./g)?.length,
+    // Once as the refusal row, once as the Push button's title, and once in
+    // each figure's aria-valuetext.
+    4,
+  );
+  assert.match(over, /class="sync-push-budget-sentence">87 MB over the 512 MB push limit/);
   const pushOver = over.slice(over.lastIndexOf("<button", over.indexOf("sync-pull-apply-button")));
   const pushOverTag = pushOver.slice(0, pushOver.indexOf(">"));
   assert.match(pushOverTag, /disabled=""/);
   assert.match(pushOverTag, /title="87 MB over the 512 MB push limit — exclude sessions or files to push\."/);
+});
+
+test("one rule refuses the push, and it is the one both push buttons read", () => {
+  // Regression: the path bar's Push publishes the open review, and its own
+  // disable rule knew nothing about the capture budget or the project-file
+  // deletion approval — so a review the footer refused could still be pushed
+  // from the bar above it.
+  const overBudget = new Set([fits.resource_id, projectFile.resource_id]);
+  assert.equal(
+    pushReviewDisabledReason({
+      selected: overBudget,
+      threadComparison: comparison(),
+      projectContentInventory: projectFiles,
+      deletionApproved: true,
+    }),
+    "87 MB over the 512 MB push limit — exclude sessions or files to push.",
+  );
+  // Unticked deletions refuse too, and that state lives with the selection.
+  assert.equal(
+    pushReviewDisabledReason({
+      selected: new Set([fits.resource_id]),
+      threadComparison: comparison(),
+      projectContentInventory: projectFiles,
+      projectContentRemovals: new Set([projectFile.resource_id]),
+      deletionApproved: false,
+    }),
+    "Approve the selected project file deletions",
+  );
+  assert.equal(
+    pushReviewDisabledReason({
+      selected: new Set([fits.resource_id]),
+      threadComparison: comparison(),
+      projectContentInventory: projectFiles,
+      projectContentRemovals: new Set([projectFile.resource_id]),
+      deletionApproved: true,
+    }),
+    null,
+  );
+  // An empty review, and one still scanning, refuse as they always did.
+  assert.equal(
+    pushReviewDisabledReason({ selected: new Set(), deletionApproved: true }),
+    "Nothing is selected",
+  );
+  assert.equal(
+    pushReviewDisabledReason({
+      selected: new Set([fits.resource_id]),
+      threadComparison: comparison(),
+      deletionApproved: true,
+      projectContentLoading: true,
+    }),
+    "Project files are still being scanned",
+  );
+  // And a review that fits, with nothing held, may push.
+  assert.equal(
+    pushReviewDisabledReason({
+      selected: new Set([fits.resource_id]),
+      threadComparison: comparison(),
+      deletionApproved: true,
+    }),
+    null,
+  );
+});
+
+test("the panel's footer button refuses on exactly the shared rule", () => {
+  // The footer stopped carrying a rule of its own; this pins that it still
+  // refuses where the shared one does, with that reason as its title.
+  const over = renderWorkspace(new Set([fits.resource_id, projectFile.resource_id]), projectFiles);
+  const reason = pushReviewDisabledReason({
+    selected: new Set([fits.resource_id, projectFile.resource_id]),
+    threadComparison: comparison(),
+    projectContentInventory: projectFiles,
+    deletionApproved: true,
+  });
+  assert.equal(reason, "87 MB over the 512 MB push limit — exclude sessions or files to push.");
+  const push = over.slice(over.lastIndexOf("<button", over.indexOf("sync-pull-apply-button")));
+  const tag = push.slice(0, push.indexOf(">"));
+  assert.match(tag, /disabled=""/);
+  assert.match(tag, new RegExp(`title="${reason!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`));
 });
 
 test("pushBudgetTotal is null without a budget and otherwise sums what the selection would push", () => {
@@ -376,4 +441,34 @@ test("pushBudgetTotal is null without a budget and otherwise sums what the selec
     total: (96 + 118 + 3 + 500) * MB,
     limit: LIMIT,
   });
+});
+
+test("five stored 96 MiB sessions do not expand a selected 40 MiB capture", () => {
+  const selectedEntry = entry("selected", { capture_bytes: 40 * MB });
+  const syncedEntries = Array.from({ length: 5 }, (_, index) => entry(`synced-${index}`, {
+    state: "synced",
+    storage_present: true,
+    push_decision: { action: "no_changes", selectable: false },
+  }));
+  const resources = [...syncedEntries, selectedEntry].map(conversationResource);
+  const reviewed = comparison({
+    entries: [...syncedEntries, selectedEntry],
+    capture_budget: { limit_bytes: LIMIT, reserved_bytes: 0 },
+  });
+  const savedRecipe = recipeWithSelection(
+    { schema_version: 1, revision: 1, entries: {} },
+    resources,
+    new Set(syncedEntries.map((row) => row.resource_id)),
+  );
+  const selected = sanitizePushSelection(new Set([selectedEntry.resource_id]), resources, reviewed);
+  const captureRecipe = recipeWithSelection(savedRecipe, resources, selected);
+
+  assert.deepEqual(Object.keys(captureRecipe.entries), [selectedEntry.resource_id]);
+  assert.equal(pushBudgetTotal(selected, reviewed)?.total, 40 * MB);
+  assert.equal(
+    pushBudgetTotal(new Set(Object.keys(captureRecipe.entries)), reviewed)?.total,
+    40 * MB,
+    "the meter and backend recipe use the same capture set",
+  );
+  assert.equal(pushReviewDisabledReason({ selected, threadComparison: reviewed, deletionApproved: true }), null);
 });

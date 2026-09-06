@@ -56,26 +56,19 @@ Dropbox implements the existing revision model:
 This limitation is intentional. If automatic token renewal becomes a product
 requirement, it needs a separate design and explicit authorization boundary.
 
-## 2. Clean schema-1 cutover
+## 2. Schema-1 contract
 
-This change is a clean cutover. All affected schemas stay at `1`.
+Dropbox uses the current provider-neutral schema-1 storage configuration,
+storage draft, and setup journal. It adds provider key `dropbox` at config
+version `1`; it does not change a top-level or portable schema.
 
-- Replace the machine-local storage shape in schema 1.
-- Replace the machine-local storage-setup draft shape in schema 1.
-- Replace machine-local documents that embed either shape.
-- Replace the R2-only setup journal with a provider-neutral schema-1 journal.
 - Keep portable bundle schema 1 unchanged.
 - Keep storage-marker schema 1 and its layout unchanged.
-- Add no migration, compatibility reader, alias, default, fallback, dual
-  writer, old command, or legacy execution path.
-- Reject the old flat storage shape.
-- Reject the old persisted `"s3"` destination tag.
-- Persist Cloudflare R2 with the `"r2"` destination tag.
-
-There are no customers and no retained test data. The user will delete their
-disposable `~/.mallard` state and disposable cloud data before retesting.
-Implementation and automated tests must not perform that manual deletion.
-Tests must use an injected temporary home or fixture repository.
+- Add no migration, compatibility reader, alias, fallback, dual writer, or
+  provider-specific public command.
+- Keep pre-cutover flat storage records and the old persisted `"s3"` tag
+  invalid.
+- Use injected temporary homes and stores in automated tests.
 
 ## 3. Goals
 
@@ -89,7 +82,7 @@ Tests must use an injected temporary home or fixture repository.
 - Use the current `.mallard/` object-key layout.
 - Bind storage continuity to a namespace ID, not a display path or token.
 - Keep every remote operation bounded.
-- Keep Local and R2 working after each implementation layer.
+- Keep Local and R2 behavior unchanged.
 
 ## 4. Non-goals
 
@@ -164,38 +157,27 @@ tests that token before it replaces the stored token.
 
 ## 6. Machine-local storage model
 
-Replace the flat `StorageConfig` with a tagged destination:
+Register Dropbox through the current provider envelope:
 
 ```rust
 #[serde(deny_unknown_fields)]
 struct StorageConfig {
     id: StorageId,
-    name: DisplayName,
-    destination: StorageDestination,
+    name: String,
+    provider: StorageProviderKey, // "dropbox"
+    provider_config: StorageProviderConfig,
 }
 
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum StorageDestination {
-    Local {
-        directory: LocalStorageDirectory,
-    },
-    R2 {
-        bucket: BucketName,
-        access_key_id: AccessKeyId,
-        secret_access_key: SecretAccessKey,
-        account_id: R2AccountId,
-        endpoint: R2Endpoint,
-        region: R2Region,
-    },
-    Dropbox {
-        namespace_id: DropboxNamespaceId,
-        access_token: DropboxAccessToken,
-    },
+#[serde(deny_unknown_fields)]
+struct StorageProviderConfig {
+    version: u32,                  // 1
+    settings: BoundedConfigObject, // namespace_id
+    secrets: SecretMap,            // access_token
 }
 ```
 
-The R2 wrappers above are new validated types for the cutover. Preserve the
-current R2 validation behavior.
+The Dropbox adapter owns typed decoding and validation of `namespace_id` and
+`access_token`. Common storage types do not add a Dropbox variant.
 
 ### 6.1 Dropbox field rules
 
@@ -234,30 +216,31 @@ get the same continuity identity.
 Reject two configured Dropbox storages with the same namespace ID. The first
 release supports one Mallard storage per namespace.
 
-For an existing Dropbox storage, the tested upsert can replace the name or
+For an existing Dropbox storage, a tested draft commit can replace the name or
 token but not the namespace ID. A different namespace requires a new
-`StorageId`. This prevents one local storage identity from silently moving to a
-different remote tree.
+`StorageId`. This prevents one local storage identity from silently moving to
+a different remote tree.
 
 ### 6.3 Secret persistence and redaction
 
-The access token follows the existing R2 secret boundary:
+The access token follows the common storage-secret boundary:
 
 - persist it only in schema-1 machine-local configuration or a restricted
   storage-setup draft under `~/.mallard`;
 - use the existing canonical, no-follow, mode-`0700` root and mode-`0600`
   atomic JSON persistence on Unix;
 - use the equivalent restricted file permissions on supported Windows builds;
-- clear the token before any configuration or draft DTO reaches the webview;
-- treat a blank token on an existing destination as **keep the stored token**;
-- accept a nonblank replacement only through the focused tested upsert;
+- expose only presence for committed storage, draft listings, update
+  responses, and edit drafts;
+- use an explicit `unchanged` operation to keep a stored token;
+- accept a replacement only through the focused draft update and tested
+  commit;
 - never include it in portable manifests, receipts, plans, activity records,
   logs, errors, or project files; and
 - never echo a malformed token in a validation error.
 
-The setup form can hold a new token only while the user edits it. Clear the
-frontend value as soon as the draft update completes. Stored values never
-return to frontend state.
+An exact fetch of a new draft can return that draft's own token for review.
+An edit draft never returns a token copied from committed configuration.
 
 There is no native-vault entry and no separate Dropbox authorization document.
 The existing bounded local reset removes the token with the rest of
@@ -265,28 +248,18 @@ The existing bounded local reset removes the token with the rest of
 
 ## 7. Draft and configuration rules
 
-Replace `StorageSetupDraft` with a provider-tagged schema-1 draft. The Dropbox
-variant contains the same namespace and token fields as the destination plus
-the existing draft ID, storage ID, revision, name, and timestamps.
+The existing schema-1 `StorageSetupDraft` holds the Dropbox provider envelope.
+The generic storage descriptor declares one `namespace_id` setting and one
+`access_token` secret. Existing focused create, update, test, commit, and
+discard commands handle the draft.
 
-Add `deny_unknown_fields` to each replaced document and tagged variant.
+Project setup can select only a committed `StorageId`. It cannot open or embed
+an uncommitted storage configuration. Project setup must not copy a Dropbox
+token into a second document.
 
-Project setup can select only a committed `StorageId`. Remove
-`DraftStorageSelection::Pending`, `SetupTransaction.storage`, and the frontend
-path that opens an uncommitted `StorageConfig`. Project setup must not copy a
-Dropbox token into a second document.
-
-Replace the R2-specific generic-save guard with a remote-storage guard. The
-generic configuration command can rename or remove a storage. It cannot:
-
-- create an R2 or Dropbox destination;
-- change a destination kind;
-- change R2 connection or credential fields; or
-- change a Dropbox namespace or access token.
-
-Only the provider-specific tested upsert can make those changes.
-For Dropbox, namespace replacement is not an update operation. Create a new
-storage instead.
+For Dropbox, an edit can change the name or access token only. A namespace
+change requires a new storage ID. The commit transaction must reject an edit
+whose continuity coordinates differ from its stored source.
 
 ## 8. Namespace validation and mapping
 
@@ -356,18 +329,10 @@ Reject:
 Do not add an authorization repository, token manager, or credential-aware
 factory.
 
-Extend the existing concrete dispatch enum:
-
-```rust
-enum ConfiguredObjectStore {
-    Local(LocalObjectStore),
-    R2(S3ObjectStore),
-    Dropbox(DropboxObjectStore),
-}
-```
-
-Extend `ConfiguredObjectStore::from_config` with the Dropbox destination. The
-method constructs the store directly from the tested machine-local config.
+Add one `DropboxAdapter` to `StorageProviderRegistry`. Its `open` method
+constructs an `Arc<DropboxObjectStore>` from the validated machine-local
+provider configuration. `ConfiguredObjectStore` remains the existing opaque
+provider-neutral wrapper.
 
 This keeps the current construction pattern for:
 
@@ -376,8 +341,8 @@ This keeps the current construction pattern for:
 - managed clear; and
 - the storage Library.
 
-Add exhaustive delegation for the complete `ObjectStore` contract. Do not add
-a trait-object forwarding layer.
+`DropboxObjectStore` implements the complete `ObjectStore` contract and runs
+through the same wrapper as Local and R2.
 
 ## 10. Dropbox transport
 
@@ -487,9 +452,8 @@ the JSON with string interpolation.
 
 ## 11. Revision-bearing list and conditional delete
 
-The current key-only list and unconditional delete cannot protect a
-collaborator's replacement file. Change the provider-neutral contract for
-Local, R2, and Dropbox:
+Dropbox implements the current revision-bearing list and conditional-delete
+contract. Managed clear can use deletion only when the store declares support:
 
 ```rust
 struct StoreListEntry {
@@ -505,31 +469,42 @@ struct StoreListPage {
 enum DeleteOutcome {
     Deleted,
     Missing,
-    Conflict { current_etag: Option<String> },
+    Conflict { current_etag: String },
 }
 
 trait ObjectStore {
+    fn supports_conditional_delete(&self) -> bool {
+        false
+    }
+
     fn delete(
         &self,
         key: &ObjectKey,
         expected_etag: &str,
-    ) -> Result<DeleteOutcome, String>;
+    ) -> Result<DeleteOutcome, String> {
+        Err("conditional object deletion is not supported by this storage".to_string())
+    }
 }
 ```
 
-There is no delete-any variant.
+There is no public delete-any variant.
 
 - Local verifies its SHA-256 revision and deletes under its store lock.
-- R2 uses `DeleteObject` with `If-Match`.
+- R2 declares no conditional-delete support. Its descriptor sets
+  `supports_managed_clear` to `false`, so the UI omits managed clear and the
+  common backend rejects direct clear calls before remote I/O.
 - Dropbox uses the file `rev` as `parent_rev`.
 - Missing is idempotent success.
 - A changed revision returns `Conflict`.
 - Managed clear stops on the first conflict.
 
-The R2 implementation and a live Cloudflare R2 test must prove conditional
-delete before this cutover merges. If R2 cannot provide this guarantee, revise
-the provider-neutral clear design before implementation. Do not add an
-unconditional fallback.
+Cloudflare R2 does not evaluate `If-Match` for `DeleteObject`. The R2 setup
+probe therefore tests only the operations required for normal sync: bounded
+list, verified read, conditional create, conditional replacement, and stale
+conditional-write rejection. Its private cleanup can unconditionally delete
+only the unique generated setup-probe key and must verify that the key is
+absent. This cleanup is not exposed through `ObjectStore` and is not a managed
+clear fallback.
 
 ### 11.1 Dropbox delete rules
 
@@ -614,24 +589,17 @@ if two legal Mallard keys can differ only by Dropbox case rules.
 
 ## 13. Setup probe and recovery
 
-Replace the R2-only setup journal with a provider-neutral schema-1 journal. Do
-not read the old journal shape.
+Use the existing provider-neutral schema-1 storage setup journal. The Dropbox
+adapter returns the namespace ID as its bounded, non-secret journal facts.
+The common entry contains only the setup ID, provider key, config version,
+stage, sanitized error code, timestamps, and facts. It contains no token,
+provider response, draft, or local path.
 
-The Dropbox journal entry contains:
-
-- setup ID;
-- exact storage-draft ID and revision;
-- namespace ID;
-- destination fingerprint;
-- deterministic probe object suffixes;
-- current probe revisions, sizes, and Mallard hashes;
-- bounded stage and timestamps; and
-- one fixed sanitized error code.
-
-It contains no access token or provider response. The exact draft is the one
-credential source during pre-commit recovery. A draft cannot be deleted while
-a journal entry references it. If the draft is missing or has a different
-revision, automatic cleanup stops with `manual_cleanup_required`.
+The common setup service writes the running entry before calling the adapter.
+It removes the entry after a successful probe and cleanup. On restart, it
+passes matching candidate or stored credentials to the adapter's
+`reconcile_probe` implementation. Failed cleanup remains a bounded
+`cleanup_required` entry.
 
 Use this reserved prefix:
 
@@ -644,11 +612,11 @@ the normal repository or Library key spaces.
 
 ### 13.1 Probe sequence
 
-1. Validate the draft and expected configuration revision.
+1. Validate the pinned draft and complete Dropbox provider configuration.
 2. Call `/users/get_current_account` with no selector.
 3. Verify the namespace is not the personal home namespace.
 4. List the configured namespace root.
-5. Persist the pre-mutation journal entry.
+5. Start remote mutations only after the common layer persists the journal.
 6. Create required folders one component at a time.
 7. Prove the deterministic probe key is absent.
 8. Client A performs strict absent creation.
@@ -663,8 +631,8 @@ the normal repository or Library key spaces.
 15. Delete the exact replacement by its revision.
 16. Repeat the delete and require idempotent `Missing`.
 17. Verify that no owned probe file remains.
-18. Create or validate the unchanged schema-1 storage marker.
-19. Persist a bounded successful probe receipt.
+18. Return success only after no owned probe file remains; the common layer
+    then removes the journal entry.
 
 The two setup clients have independent HTTP state but use the same configured
 user token. The live collaborator gate uses two independent user tokens.
@@ -679,36 +647,23 @@ Persist each witnessed revision before the next mutation. If a crash can have
 written a file without recording its revision, require manual cleanup. Do not
 guess a revision.
 
-`test_dropbox_storage` can leave the valid storage marker and empty folders.
-The UI must state this before the test. Mallard never rolls back a valid marker
-by deleting it.
+The probe can leave empty Dropbox folders. The UI must state this before the
+test. Mallard never deletes the selected namespace or a folder during cleanup.
 
 ## 14. Commands and DTOs
 
-Add only two Dropbox-specific commands:
+Add no Dropbox-specific command. Register the Dropbox descriptor and adapter
+behind the existing provider-neutral command surface:
 
-```text
-test_dropbox_storage
-upsert_dropbox_storage
-```
+- `create_storage_setup_draft`;
+- `update_storage_setup_draft`;
+- `test_storage_setup_draft`;
+- `commit_storage_setup_draft`; and
+- `discard_storage_setup_draft`.
 
-Use the existing provider-neutral storage-draft commands to create, update,
-list, and discard the setup draft.
-
-`test_dropbox_storage` requires:
-
-- storage-draft ID and revision; and
-- expected global configuration revision.
-
-`upsert_dropbox_storage` requires the same pins plus:
-
-- successful probe ID;
-- destination fingerprint;
-- probe digest; and
-- probe expiry.
-
-It rechecks all pins before marker validation and inside the final config
-transaction. A failed pin changes no configuration.
+Test and commit take the draft ID and expected draft revision. Commit rechecks
+the draft source and configuration transaction before it writes. A failed pin
+changes no configuration.
 
 Command rules:
 
@@ -729,9 +684,10 @@ disconnect, forget, or token-refresh commands.
 Use the existing `LocalStateRepository::acquire_host_operation()` OS lock. Do
 not add a Dropbox-specific lock.
 
-Hold the host-operation guard for a setup test, upsert, token replacement,
-Push, Pull, restore, Library remote operation, managed clear, and storage
-removal. A competing Mallard process fails fast with the existing busy result.
+Hold the host-operation guard for a setup test, draft commit, token
+replacement, Push, Pull, restore, Library remote operation, managed clear,
+and storage removal. A competing Mallard process fails fast with the existing
+busy result.
 
 Do not hold the Project Sync persistence or Library catalog-state lock during
 Dropbox network I/O. Reacquire state locks after the remote phase, reload all
@@ -792,13 +748,16 @@ Use one operation deadline and one retry budget across all attempts.
 
 ## 17. UI
 
-Add one **Dropbox** storage editor with:
+Add one Dropbox storage descriptor with:
 
 - storage name;
 - namespace ID;
 - access token;
 - **Test**; and
-- **Save**.
+- **Finish setup**.
+
+The existing descriptor-driven storage editor renders these fields and
+actions. Do not add Dropbox-specific frontend branching.
 
 The editor states:
 
@@ -806,10 +765,11 @@ The editor states:
 - the token and namespace ID must be obtained outside Mallard;
 - Mallard does not authorize Dropbox or renew the token;
 - an expired token must be replaced manually;
-- the test can create a schema-1 marker and empty `.mallard/` folders; and
+- the test can create empty `.mallard/` probe folders; and
 - Mallard never deletes the selected namespace or its folders.
 
-After draft submission, blank the token field. A saved storage displays only:
+Committed tokens and edit-draft values stay out of frontend state. A saved
+storage displays only:
 
 ```text
 Dropbox · <Mallard storage name>
@@ -818,54 +778,40 @@ Dropbox · <Mallard storage name>
 Never show a token suffix, account identity, namespace ID, or raw provider
 error.
 
-Update storage cards, setup summaries, project selectors, sidebar status, the
-Library selector, empty states, and error copy with exhaustive Local, R2, and
-Dropbox branches.
+Storage cards, setup summaries, project selectors, sidebar status, the Library
+selector, empty states, and error copy use the existing provider descriptors
+and generic unavailable state.
 
 ## 18. Implementation layers
 
-### Layer 1: schema-1 cutover
+### Layer 1: Dropbox adapter
 
-- Add the tagged Local, R2, and Dropbox destinations.
-- Rename the persisted `s3` tag to `r2`.
-- Remove `supports_conditional_writes`.
-- Replace setup drafts and embedded snapshots.
-- Remove pending inline project storage.
-- Add strict rejection tests for every old shape.
-- Keep Dropbox creation hidden.
-- Make all Local and R2 tests pass.
+- Add the version-1 settings and secret decoder.
+- Add the descriptor, continuity coordinates, safe summary, journal facts,
+  and registry entry.
+- Enforce namespace immutability for edits.
+- Keep the production descriptor disabled until transport and setup tests
+  pass.
 
-### Layer 2: provider-neutral delete correction
-
-- Add revision-bearing list entries.
-- Add required expected revisions to delete.
-- Implement Local conditional delete.
-- Implement and prove R2 conditional delete.
-- Correct ambiguous R2 compare-and-swap handling.
-- Keep Dropbox creation hidden.
-
-### Layer 3: Dropbox transport
+### Layer 2: Dropbox transport
 
 - Add `DropboxObjectStore`.
-- Extend `ConfiguredObjectStore::from_config`.
 - Add scripted-server transport tests.
-- Run the provider-neutral conformance suite.
-- Keep Dropbox creation hidden.
+- Pass the shared `ObjectStore` conformance suite, including conditional
+  deletion.
+- Keep the production descriptor disabled.
 
-### Layer 4: tested setup
+### Layer 3: setup and recovery
 
-- Add the Dropbox draft branch.
-- Add the provider-neutral probe journal.
-- Add test and upsert commands.
-- Add token redaction and remote-change guards.
-- Add marker and recovery tests.
+- Implement adapter `probe` and `reconcile_probe` through the existing
+  provider-neutral journal.
+- Add token redaction, remote-change, and cleanup tests.
 - Enable Dropbox only in developer builds.
 
-### Layer 5: product integration
+### Layer 4: product integration
 
-- Add the Dropbox editor and summaries.
-- Route Project Sync, activity, managed clear, and Library through the new
-  configured-store branch.
+- Verify the generic editor, summaries, Project Sync, activity, managed clear,
+  and Library paths through the registered adapter.
 - Pass frontend and complete-app tests.
 - Pass the two-collaborator live gate.
 - Set list and clear limits from measured Dropbox behavior.
@@ -878,12 +824,13 @@ or disabled invariant.
 
 ### 19.1 Domain and persistence
 
-- Round-trip each new schema-1 destination and draft.
-- Reject the old flat storage shape and old `s3` tag.
-- Reject unknown tags and fields.
-- Reject old inline project-storage and R2-journal shapes.
+- Round-trip the Dropbox version-1 provider envelope through the existing
+  schema-1 storage and draft documents.
+- Reject unknown Dropbox settings, secrets, and config versions.
 - Reject invalid namespace IDs and tokens.
-- Prove every configuration and draft response redacts the token.
+- Prove committed configuration, listings, update responses, and edit drafts
+  redact the token.
+- Prove an exact fetch can reveal only a new draft's own token.
 - Scan JSON fixtures, IPC snapshots, errors, and logs with a token canary.
 - Prove Dropbox identity changes only with namespace ID.
 - Prove project setup can reference only a committed storage.
@@ -910,24 +857,27 @@ Use a scripted local server to verify:
   body, oversized body, and invalid JSON behavior; and
 - no provider data in errors or logs.
 
-Run one reusable `ObjectStore` conformance suite against Local, R2, and
-Dropbox.
+Run the mandatory `ObjectStore` conformance cases against Local, R2, and
+Dropbox. Run conditional-delete conformance only for adapters that declare
+support.
 
 ### 19.3 Setup and commands
 
 - Reject a team token that cannot call User Authentication without a selector.
 - Reject a personal home namespace.
 - Reject a namespace without edit access.
-- Prove strict create, CAS, list, conditional delete, and cleanup.
+- Prove strict create, CAS, list, and cleanup.
+- Prove conditional delete for each provider that advertises managed clear.
 - Prove marker creation and validation keep schema `1`.
-- Prove stale draft, config, probe, digest, and expiry pins fail.
-- Prove generic save cannot change a token or namespace.
+- Prove stale draft revisions and edit-source digests fail before commit.
+- Prove generic rename cannot change a token or namespace.
 - Prove an existing Dropbox storage cannot change namespace ID; a new
   namespace requires a new `StorageId`.
 - Prove token replacement keeps the old token after a failed test.
 - Prove recovery deletes only fully witnessed probe files.
-- Prove a missing or changed draft requires manual cleanup.
-- Verify both commands are registered and typed.
+- Prove unreconciled residue retains a sanitized cleanup-required journal.
+- Verify the generic commands are registered and typed and no public command
+  names Dropbox.
 
 ### 19.4 Concurrency
 
@@ -938,10 +888,10 @@ Dropbox.
 
 ### 19.5 Frontend
 
-- Cover exact Local, R2, and Dropbox branches.
+- Prove the Dropbox descriptor renders through the generic storage editor.
 - Prove Dropbox has no OAuth, Connect, Reconnect, team, actor, or namespace
   discovery UI.
-- Prove stored tokens never return to frontend state.
+- Prove committed tokens never return to frontend state.
 - Cover test, save, failed test, expired token, token replacement, stale
   response, and revision conflict.
 - Verify Library receives only its neutral storage option.
@@ -1003,58 +953,34 @@ Dropbox support is complete only when all statements are true:
   portable data.
 - Token expiry produces a manual replacement flow without data mutation.
 - Mallard does not claim unattended Dropbox access beyond token expiry.
-- Every replaced schema-1 shape has no legacy reader or execution path.
+- No Dropbox-specific compatibility reader or execution path exists.
 - Bundle and storage-marker schemas remain `1` and unchanged.
 - Local and R2 remain green.
-- The R2 conditional-delete gate and Dropbox live collaborator gate pass.
+- R2 does not advertise managed clear and sends no conditional delete.
+- The Dropbox live collaborator gate passes.
 
 ## 21. Expected code areas
 
 Implementation is expected to touch:
 
 ```text
-crates/mallard-domain/src/lib.rs
-crates/mallard-domain/src/tests.rs
-crates/mallard-application/src/dropbox_storage_setup.rs
-crates/mallard-application/src/lib.rs
 crates/mallard-application/src/storage_setup.rs
 crates/mallard-infrastructure/Cargo.toml
-crates/mallard-infrastructure/src/storage_probe_journal.rs
-crates/mallard-infrastructure/src/r2_setup_journal.rs (remove)
-crates/mallard-infrastructure/src/persistence.rs
-crates/mallard-infrastructure/src/project_activity.rs
+crates/mallard-infrastructure/src/storage_providers/dropbox.rs
+crates/mallard-infrastructure/src/storage_providers/mod.rs
+crates/mallard-infrastructure/src/storage_providers/registry.rs
+crates/mallard-infrastructure/src/storage_providers/traits.rs
 crates/mallard-infrastructure/src/storage_core/mod.rs
-crates/mallard-infrastructure/src/storage_core/object_store.rs
 crates/mallard-infrastructure/src/storage_core/dropbox_store.rs
-crates/mallard-cli/src/backend.rs
-crates/mallard-cli/tests/cli.rs
-src-tauri/src/project_sync/commands.rs
-src-tauri/src/project_sync/service.rs
-src-tauri/src/storage_catalog/persistence.rs
-src-tauri/src/storage_catalog/resource_engine.rs
-src-tauri/src/storage_catalog/resource_planning.rs
-src-tauri/src/storage_catalog/service.rs
-src-tauri/src/lib.rs
-src/types.ts
-src/components/project-sync/api.ts
-src/components/project-sync/ProjectSync.tsx
-src/components/project-sync/StorageSettings.tsx
-src/components/project-sync/StorageIndexPage.tsx
-src/components/project-sync/BundleConnectionDialog.tsx
-src/components/project-sync/ProjectPicker.tsx
-src/components/project-sync/ProjectLinksWorkspace.tsx
-src/components/project-sync/ProjectSetupWorkspace.tsx
-src/components/project-sync/ProjectSidebar.tsx
-src/components/storage-catalog/StorageCatalogPage.tsx
 src/storageError.ts
 tests/frontend/
 src-tauri/src/sync_tests/
 ```
 
-Before implementation, search exhaustively for `StorageConfig`, `StorageKind`,
-`DraftStorageSelection`, `StorageSetupDraft`, `SetupTransaction`,
-`R2SetupJournal`, `ConfiguredObjectStore::from_config`, secret-redaction
-helpers, and all `ObjectStore::delete` implementations and test doubles.
+The generic Tauri commands, DTOs, API wrappers, setup components, Project
+Setup, and Library flows must not need a Dropbox branch. If adding Dropbox
+requires one, fix the registry boundary instead of adding a compatibility
+path.
 
 ## 22. POC status
 

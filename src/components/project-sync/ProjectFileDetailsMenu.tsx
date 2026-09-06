@@ -141,12 +141,15 @@ export default function ProjectFileDetailsMenu({
             <span>Click a value to copy it.</span>
           </header>
           <div className="sync-history-debug-values">
+            {/* No aria-label: it would replace the row's content as the
+                accessible name, and the value is the one thing worth hearing.
+                Named from content instead, so the path or digest is announced
+                and stays navigable with a reading cursor. */}
             {values.map((value) => (
               <button
                 key={value.key}
                 type="button"
                 className="sync-history-debug-copy"
-                aria-label={`Copy ${value.label.toLowerCase()}`}
                 title={`Copy ${value.label.toLowerCase()}`}
                 onClick={() => void copyValue(value.key, value.value)}
               >

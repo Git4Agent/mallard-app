@@ -347,7 +347,15 @@ Both phases, in one cutover. Deltas from the plan above:
   ("Too much to push at once … back to <date> … push again after this one");
   the footer meter is `pushBudgetTotal` + `PushBudgetMeter`
   (`.sync-push-budget`, `.sync-push-budget-bar`, `.over`), and Push refuses
-  with the over-limit sentence as its title; the outcome banner adds a
+  with the over-limit sentence as its title
+  (**superseded 2026-09-04**: the meter is now drawn in both of the review's
+  pinned zones — `PushBudgetGlance` in the header and `PushBudgetGauge` against
+  the button — over `PushBudgetTrack`/`PushBudgetFigure` and
+  `.sync-push-budget-glance` / `-track` / `-figure` / `-gauge` / `-fill` /
+  `-sentence`; the track is scaled to max(total, limit) with the limit as a
+  tick past it, the refusal takes its own footer row, and only the footer
+  instance is a live region. `PushBudgetMeter`, `.sync-push-budget` and
+  `.sync-push-budget-bar` are deleted. Specimen: `push-limit-mockup.html`); the outcome banner adds a
   "didn't fit — push again to continue" stat and a `push_again` action that
   calls `openPushChooser`.
 - **Tests.** Rust: the three fit tests plus `format_bytes`,

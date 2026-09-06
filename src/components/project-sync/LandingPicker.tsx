@@ -27,12 +27,37 @@ export interface LandingCard {
   onOpen: () => void;
 }
 
+/**
+ * With nothing listed, the page is the filled landing ghosted: one dashed
+ * card per way Add can start — a kind, a provider, or the one verb — each
+ * opening Add with that choice already made. A door names its choice and
+ * wears the marks of the agents it covers; it carries no location, because
+ * nothing has one yet.
+ */
+export interface LandingDoor {
+  key: string;
+  icon: IconName;
+  label: string;
+  /** "Add Skills", "Add Local folder storage" — the choice as a verb. */
+  ariaLabel: string;
+  marks?: ReactNode;
+  onOpen: () => void;
+}
+
+/** One line under the ghost cards saying what the list is for, in icons and
+ *  a few words — the only copy the empty page adds. */
+export interface LandingCaption {
+  icons: IconName[];
+  text: string;
+}
+
 export default function LandingPicker({
   title,
   count,
   actionLabel,
-  emptyTitle,
   cards,
+  doors,
+  caption,
   busy = false,
   onAction,
 }: {
@@ -40,58 +65,77 @@ export default function LandingPicker({
   /** "N on this machine" — a fact about the list, in the identifier face. */
   count: string;
   actionLabel: string;
-  emptyTitle: string;
   cards: LandingCard[];
+  doors: LandingDoor[];
+  caption: LandingCaption;
   busy?: boolean;
   onAction: () => void;
 }) {
-  const action = (
-    <button type="button" className="btn btn-primary" onClick={onAction} disabled={busy}>
-      <Icon name="plus" size={13} />
-      {actionLabel}
-    </button>
-  );
-  if (cards.length === 0) {
-    return (
-      <section className="landing-picker landing-picker-empty" aria-labelledby="landing-picker-title">
-        <span className="landing-picker-mark" aria-hidden="true">
-          <img src="/mallard-logo-duck.svg" alt="" />
-        </span>
-        <h1 id="landing-picker-title" className="settings-section-title">{emptyTitle}</h1>
-        {action}
-      </section>
-    );
-  }
   return (
     <section className="landing-picker" aria-labelledby="landing-picker-title">
       <div className="landing-picker-head">
         <h1 id="landing-picker-title" className="settings-section-title">{title}</h1>
         <span className="landing-picker-count">{count}</span>
-        {action}
+        <button type="button" className="btn btn-primary" onClick={onAction} disabled={busy}>
+          <Icon name="plus" size={13} />
+          {actionLabel}
+        </button>
       </div>
-      <ul className="landing-picker-grid">
-        {cards.map((card) => (
-          <li key={card.key}>
-            <button
-              type="button"
-              className="landing-picker-card"
-              aria-label={card.ariaLabel ?? card.title}
-              disabled={busy}
-              onClick={card.onOpen}
-            >
-              <span className="landing-picker-card-title">
-                <Icon name={card.icon} size={17} />
-                <strong>{card.title}</strong>
-                {card.marks && <span className="landing-picker-card-marks">{card.marks}</span>}
-              </span>
-              <span className="landing-picker-card-location">{card.location}</span>
-              {card.detail && (
-                <span className={`landing-picker-card-detail${card.detailMuted ? " muted" : ""}`}>{card.detail}</span>
-              )}
-            </button>
-          </li>
-        ))}
-      </ul>
+      {cards.length === 0 ? (
+        <>
+          <ul className="landing-picker-grid landing-picker-doors">
+            {doors.map((door) => (
+              <li key={door.key}>
+                <button
+                  type="button"
+                  className="landing-picker-door"
+                  aria-label={door.ariaLabel}
+                  disabled={busy}
+                  onClick={door.onOpen}
+                >
+                  <span className="landing-picker-door-title">
+                    <Icon name={door.icon} size={17} />
+                    <strong>{door.label}</strong>
+                    <Icon name="plus" size={13} />
+                  </span>
+                  <span className="landing-picker-door-bar" aria-hidden="true" />
+                  {door.marks
+                    ? <span className="landing-picker-door-marks">{door.marks}</span>
+                    : <span className="landing-picker-door-bar short" aria-hidden="true" />}
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="landing-picker-caption">
+            {caption.icons.map((icon) => <Icon key={icon} name={icon} size={14} />)}
+            <span>{caption.text}</span>
+          </p>
+        </>
+      ) : (
+        <ul className="landing-picker-grid">
+          {cards.map((card) => (
+            <li key={card.key}>
+              <button
+                type="button"
+                className="landing-picker-card"
+                aria-label={card.ariaLabel ?? card.title}
+                disabled={busy}
+                onClick={card.onOpen}
+              >
+                <span className="landing-picker-card-title">
+                  <Icon name={card.icon} size={17} />
+                  <strong>{card.title}</strong>
+                  {card.marks && <span className="landing-picker-card-marks">{card.marks}</span>}
+                </span>
+                <span className="landing-picker-card-location">{card.location}</span>
+                {card.detail && (
+                  <span className={`landing-picker-card-detail${card.detailMuted ? " muted" : ""}`}>{card.detail}</span>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

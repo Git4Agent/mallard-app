@@ -164,7 +164,7 @@ impl<'a> CodexStructureAccumulator<'a> {
                             return Err(error(
                                 CodexStructureErrorKind::ActiveIdentityMismatch,
                                 format!(
-                                    "authoritative session_meta thread ID '{}' does not match assigned thread '{}'",
+                                    "authoritative session_meta thread ID '{}' does not match expected rollout thread '{}'",
                                     record.id, expected
                                 ),
                             ));

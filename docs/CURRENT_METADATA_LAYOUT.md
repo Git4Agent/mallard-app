@@ -86,9 +86,9 @@ on demand.
 |-- sync_config.json
 |-- machine_projects.json
 |-- conversation_bindings.json
-|-- conversation_sync_journal.json
 |-- materializations.json
 |-- activity_cache.json
+|-- observation_cache.json
 |-- catalog_resource_profiles.json
 |-- catalog_scopes.json
 |-- catalog_scope_links.json
@@ -103,21 +103,15 @@ on demand.
 |   `-- <draft-id>.json
 |-- setup_transactions/
 |   `-- <draft-id>.json
-|-- restore_plans/
-|   `-- <plan-id>.json
-|-- conversation_push_plans/
-|   `-- <plan-id>.json
 |
-|-- conversation_operations/
-|   `-- <operation-id>/
-|       `-- <target-index>.payload
+|-- staging/
+|   `-- pull-conversations/                    # Apply-only temporary files
 |-- backups/
 |   |-- <plan-id>/...
 |   |-- catalog_resources/
 |   |   `-- <plan-id>/...
-|   |-- conversations/
-|   |   `-- <operation-id>/<target-index>.bak
-|   `-- pathrepair-<id>/...
+|   `-- conversations/
+|       `-- <operation-id>/<target-index>.bak
 |
 |-- locks/
 |   |-- catalog-state.lock
@@ -141,10 +135,11 @@ on demand.
 | `host_identity.json` | Installation identity | Schema/revision, private 128-bit `host_id`, optional local display name, timestamps | No |
 | `sync_config.json` | User configuration and project/storage catalog | Storage definitions, S3 credentials, local projects, storage links, recipes, project-content preferences, per-storage reviewed bases, per-link conversation checkpoints (accepted portable tail + witness, observed tail, physical mapping cursor, prefix witness) | No |
 | `machine_projects.json` | Machine path and provider-profile catalog | Exact and canonical checkout paths, exact and canonical provider-home paths, host/replica IDs, project/profile bindings, binding revisions and state | No |
-| `conversation_bindings.json` | Local-to-portable conversation identity map | Mallard thread ID, provider thread ID, project/replica/profile scope, materialization state, immutable root tail layout (codec, partition kind, fixed start), `forked_from` provenance hint, keep-both `preserved` provenance (`preserved_from` origin + per-origin ordinal) | No |
-| `conversation_sync_journal.json` | Crash-recoverable conversation transactions | In-flight Push publications (CandidateUploaded, HeadAdvanced, LocalCommitted, terminal phases) and Pull materializations (TargetStaged, ProviderCommitted, LocalCommitted, terminal phases), each embedding the exact whole-document `SyncConfig` and `ConversationBindings` before/after states that recovery installs verbatim | No |
+| `conversation_bindings.json` | Local-to-portable conversation identity map | Required nullable `path_origins_ref` (SHA-256 and byte length), Mallard thread ID, provider thread ID, project/replica/profile scope, materialization state, immutable root tail layout (codec, partition kind, fixed start), `forked_from` provenance hint, keep-both `preserved` provenance (`preserved_from` origin + per-origin ordinal) | No |
+| `path_origins/<sha256>.json` | Immutable local inverse path edits | Schema 1, codec, physical owner, source IDs, strict record hashes, derived-record flags, JSON pointers, UTF-8 byte ranges, and wire atoms; no transcript copy; 128 MiB bound | No |
 | `materializations.json` | Durable Pull history | Plan and bundle coordinates, status, action receipts, absolute targets, backup paths, conversation receipts, errors | No |
 | `activity_cache.json` | Local session-history acceleration for every bound provider | File size/mtime keys, provider key, parsed ownership, cwd, Git/session metrics, and identities; cached title, summary, and chat text are deliberately omitted | No |
+| `observation_cache.json` | Local comparison acceleration | Bounded, schema-1 tail observations keyed by project, storage, provider home, and checkpoint generation; reset removes the in-memory and on-disk entries | No |
 | `catalog_resource_profiles.json` | Machine-local Codex/Claude Library profiles | Provider key, display name, configured `CODEX_HOME`/`CLAUDE_CONFIG_DIR` path, revisions | No |
 | `catalog_scopes.json` | User-added Catalog menu rows | One row per (profile × resource kind); membership is the kind inventory, never stored | No |
 | `catalog_scope_links.json` | Scope-storage links | One link per (scope × storage): the derived kind-repository ID, the accepted head continuity pin, and per-resource accepted content bases | No |
@@ -218,9 +213,8 @@ nullable: always serialized, `null` when unmapped, and the key is required on
 read so pre-cutover rows fail closed). The cloud stores no mapping and no
 local identity with linkage semantics. Per binding scope
 (host/replica/project/profile), at most one row may claim a given cloud
-thread id. Every fresh identity is minted at apply, never at planning, and
-journaled with its whole-document after-states before any visible mutation;
-recovery installs those documents verbatim and never mints.
+thread id. Every fresh identity is minted at Apply, never at planning. Whole-document
+after-states carry the chosen identity. Failed Apply is not replayed.
 
 One provider thread ID may have only one owner for a given host/profile.
 `conversation_bindings.json` also records:
@@ -262,25 +256,27 @@ that namespace, so a manifest cannot inject a local-space id at all. It
 includes `source_thread_id` as a content fact only — the provider session id
 embedded in the stored transcript bytes — never an identity.
 
-### 3.4 Review plans and transaction journals
+### 3.4 Reviews and transaction state
 
-Plans are immutable approval surfaces. Reusing an existing plan ID is an
-error.
+Project Sync Push and Pull reviews are not persisted. Push Compare returns a
+comparison value. Pull Compare returns an in-memory schema-1 `RestorePlan`
+review value to keep the current IPC shape. Apply rechecks the review anchor,
+captures the selected resources, and builds fresh executable actions and pins
+in memory.
 
-| Directory | Document | What it pins |
-| --- | --- | --- |
-| `restore_plans/` | `RestorePlan` | Host/replica, storage/bundle, revision, commit, manifest hash, binding revision, expiry, absolute targets, expected target state, selected file/conversation actions |
-| `conversation_push_plans/` | `ConversationPushPlan` | Host/replica/project/profile revisions, current or absent head coordinates, conversation relations/actions, target expectations, lineage/semantic pins, expiry |
+Project Sync does not create `restore_plans/`, `conversation_push_plans/`,
+`conversation_sync_journal.json`, or `conversation_operations/`. A failed or
+interrupted Apply is not retried, replayed, resumed, rolled back, or rolled
+forward. The user must Compare and Apply again.
 
 Library (Catalog) Push/Pull/Fork reviews are not documents: they live in a
 bounded in-memory plan store, expire after 24 hours, and are discarded on
 apply, replacement, or app restart. Apply re-verifies every pin against live
 state, so a lost review can only fail closed ("review again").
 
-Restore and conversation Push plans normally expire after 24 hours. Completed
-project results live in `materializations.json`; Library outcomes and recovery
-state live in the claim, preservation, and operation documents. Plans are not
-themselves portable history.
+Completed project Pull results live in `materializations.json`. Library
+outcomes and recovery state live in the claim, preservation, and operation
+documents. None of these documents is portable history.
 
 Setup has two local layers:
 
@@ -316,28 +312,24 @@ The Library needs neither layer: adding a Catalog row records one scope in
 `catalog_scopes.json`, and linking the scope to a storage lands one link in
 `catalog_scope_links.json` in a single locked mutation.
 
-### 3.5 Conversation operation payloads and backups
+### 3.5 Conversation Apply staging and backups
 
-An in-flight provider materialization may use three physical locations:
-
-1. `conversation_sync_journal.json` stores the transaction state and absolute
-   target/staging/backup paths.
-2. `conversation_operations/<operation-id>/<index>.payload` stores durable
-   private intent bytes so a `Prepared` operation can resume before a
-   provider-side stage exists.
-3. `.<target-name>.mallard-<operation-fragment>-<index>.stage` is created next
-   to the provider target so the final rename stays on the same filesystem.
+A provider materialization keeps its action and payload state in memory for
+one Apply attempt. `.<target-name>.mallard-<operation-fragment>-<index>.stage`
+is created next to each provider target so the final rename stays on the same
+filesystem. Codex graph reconstruction can also use
+`staging/pull-conversations/<action-id>.jsonl` during the same Apply. Apply
+removes these stage files on success and failure.
 
 If an existing provider target is replaced, its backup is stored at
-`backups/conversations/<operation-id>/<index>.bak`. Successful cleanup removes
-the intent directory and stage files and retires the journal operation.
-Backups needed by durable receipts remain local.
+`backups/conversations/<operation-id>/<index>.bak`. Backups needed by durable
+receipts remain local. There is no durable intent payload or conversation
+recovery journal.
 
 Normal restore backups are grouped under `backups/<plan-id>/`. Library
 skill/pet replacement backups use
 `backups/catalog_resources/<plan-id>/`; their operation metadata stays in
-`catalog_resource_operations.json`. Codex path-repair operations use a
-generated `pathrepair-*` directory.
+`catalog_resource_operations.json`.
 
 ### 3.6 Divergence and keep-both metadata
 
@@ -435,13 +427,11 @@ reactivate them.
 | `project_drafts/<id>.json` | 4 MiB |
 | `storage_drafts/<id>.json` | 128 KiB |
 | `setup_transactions/<id>.json` | 8 MiB |
-| `restore_plans/<id>.json` | 64 MiB |
-| `conversation_push_plans/<id>.json` | 64 MiB |
 | `conversation_bindings.json` | 64 MiB |
-| `conversation_sync_journal.json` | 64 MiB |
 | `materializations.json` | 64 MiB |
 | `host_rotation.json` | 192 MiB |
 | `activity_cache.json` | 32 MiB / 50,000 entries |
+| `observation_cache.json` | 16 MiB / 4,096 entries |
 | `catalog_resource_profiles.json` | 1 MiB |
 | `catalog_scopes.json` | 1 MiB |
 | `catalog_scope_links.json` | 16 MiB |
@@ -732,6 +722,35 @@ optional source_thread_id
 optional created_by_origin, last_updated_by_origin
 created_at, updated_at
 ```
+
+The schema-1 path codec uses terminated spelling tags, such as
+`/__mallard_root__/b;` for the binding root and `/__mallard_root__/bt;` for
+its tilde spelling. Tags also distinguish canonical aliases and raw or
+percent-encoded file URIs. URI references replace the full URI prefix.
+Literal `/__mallard_root__` and `/__mallard_escape__` text uses
+`/__mallard_escape__/r` and `/__mallard_escape__/e`. No source text spelling
+is reserved. Each pass scans its input once and does not scan emitted text.
+Unknown tags and malformed wire escapes fail validation.
+
+Pull records exact inverse edits in local origin files. Push reuses them for
+retained history, including records with zero edits. It scans new records.
+This preserves literal destination paths and original path spellings through
+later pushes. Codex portable transcripts keep source records; Pull rebuilds
+redundant native display records after path decoding. Derived local records
+are hash-checked and omitted on the next Push.
+
+`path_origins_ref` belongs to the physical history binding, independently of
+storage. A null reference means no path capture yet. Referenced files must
+pass their size, digest, owner, codec, and strict record checks. The file is
+staged before Apply writes provider data; its reference enters the binding
+before the accepted checkpoint advances. Project metadata reset removes all
+session bindings for that project, including these path-origin references.
+It keeps the immutable origin files and provider sessions. Host rotation
+stages files with the new owner for retained bindings. A failed Apply is
+not rolled back. Missing or stale origins fail the affected thread.
+
+See [codec rules and verification](../formal/pathmap-origins-v1/README.md).
+This is a clean replacement under schema 1 with no migration or old reader.
 
 The canonical typed transcript path is:
 

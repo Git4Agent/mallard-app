@@ -734,6 +734,14 @@ impl<'de> serde::Deserialize<'de> for ClaudeScanRecord {
 /// reason codes so capture can safely offer StoredOnly instead of blocking a
 /// Push of everything else.
 pub fn analyze_claude_transcript(bytes: &[u8]) -> SessionAnalysis {
+    analyze_claude_records(bytes, crate::conversation_codec::parsed_records(bytes))
+}
+
+pub(crate) fn analyze_claude_records(
+    bytes: &[u8],
+    input: impl Iterator<Item = Result<Value, serde_json::Error>>,
+) -> SessionAnalysis {
+    crate::sync_metrics::record_transcript_analysis(bytes.len() as u64);
     if bytes.iter().all(u8::is_ascii_whitespace) {
         return unknown(None, None, 0, CodecUnknownReason::Empty);
     }
@@ -745,12 +753,8 @@ pub fn analyze_claude_transcript(bytes: &[u8]) -> SessionAnalysis {
     // separate a stitch (parent absent from the whole projection — Desktop
     // deleted the row) from a sever (parent exists but never earlier).
     let mut all_uuids = BTreeSet::<String>::new();
-    for raw in bytes.split(|byte| *byte == b'\n') {
-        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-        if raw.is_empty() {
-            continue;
-        }
-        let value: Value = match serde_json::from_slice(raw) {
+    for record in input {
+        let value = match record {
             Ok(value) => value,
             Err(_) => {
                 let (session_id, cwd) = identity.observed_identity();
@@ -955,13 +959,32 @@ pub(crate) fn semantic_record_fingerprint(mut value: Value) -> String {
             object.remove(key);
         }
     }
-    sha256_hex(canonical_json(&value).as_bytes())
+    sha256_hex(&canonical_json(value))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn claude_semantic_fingerprint_preserves_fixture_hash() {
+        let value = json!({
+            "sessionId": "fixture-session", "cwd": "/tmp/fixture-project",
+            "uuid": "message-id", "parentUuid": "message-parent",
+            "timestamp": "2026-09-04T10:00:00Z", "version": "fixture-version",
+            "requestId": "fixture-request", "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Quote: \"; slash: \\; line:\n雪"}],
+                "data": {"z": [null, true, false, -0.0, 1.5], "a": {"z": 2, "a": 1}}
+            }
+        });
+        assert_eq!(
+            semantic_record_fingerprint(value),
+            "888a1d8f4d60c790c9a83a23e1b452432f1ba00b4c6348b0635c6285dc0fdc13"
+        );
+    }
 
     #[test]
     fn scan_record_identity_parts_match_the_value_extraction() {
@@ -1944,7 +1967,11 @@ mod tests {
                 "sessionId": session,
                 "cwd": source_root,
                 "message": {"role": "user", "content": [
-                    {"type": "text", "text": "edit /homeA/projact_alpha/readme please"}
+                    {"type": "text", "text": concat!(
+                        "edit /homeA/projact_alpha/readme please; ",
+                        "literal /__mallard_root__/readme; ",
+                        "escape /__mallard_escape__/r"
+                    )}
                 ]}
             }),
             json!({
@@ -1996,7 +2023,9 @@ mod tests {
             .map(|line| encoder.encode_jsonl_line_gated(line).unwrap() + "\n")
             .collect::<String>();
         assert!(!wire_text.contains(source_root));
-        assert!(wire_text.contains("\"cwd\":\"/__mallard_root__/frontend\""));
+        assert!(wire_text.contains("\"cwd\":\"/__mallard_root__/b;/frontend\""));
+        assert!(wire_text.contains("literal /__mallard_escape__/r/readme"));
+        assert!(wire_text.contains("escape /__mallard_escape__/e/r"));
         // The wire form analyzes Complete with the chain identities intact.
         let wire_analysis = analyze_claude_transcript(wire_text.as_bytes());
         assert_eq!(chain_ids(&wire_analysis), chain_ids(&before));
@@ -2014,7 +2043,11 @@ mod tests {
             !decoded_text.contains(source_root),
             "source-root spellings must not survive the hop"
         );
-        assert!(decoded_text.contains("edit /homeB/projact_beta/readme please"));
+        assert!(decoded_text.contains(concat!(
+            "edit /homeB/projact_beta/readme please; ",
+            "literal /__mallard_root__/readme; ",
+            "escape /__mallard_escape__/r"
+        )));
         assert!(decoded_text.contains("\"file_path\":\"/homeB/projact_beta/readme\""));
         assert!(decoded_text.contains("\"filePath\":\"/homeB/projact_beta/readme\""));
         assert!(decoded_text.contains("\"filename\":\"/homeB/projact_beta/notes.md\""));

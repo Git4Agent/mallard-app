@@ -223,7 +223,7 @@ const SESSION_TIPS: Record<MockSession["indicator"], string> = {
 const SESSIONS: MockSession[] = [
   { id: "s1", title: "Draft the ghost story ending", indicator: "local", chips: { messages: "24", tools: "9", tokens: "182k" }, when: "Aug 30, 2026 · 09:02", length: "38m" },
   { id: "s2", title: "Punch up the cold-joke timing", indicator: "local", chips: { messages: "11", tokens: "64k" }, when: "Aug 29, 2026 · 22:18", length: "17m" },
-  { id: "s3", title: "Outline chapter beats", indicator: "synced", chips: { messages: "31", tools: "4", tokens: "240k" }, when: "Aug 27, 2026 · 17:40", length: "1h 05m" },
+  { id: "session-3", title: "Outline chapter beats", indicator: "synced", chips: { messages: "31", tools: "4", tokens: "240k" }, when: "Aug 27, 2026 · 17:40", length: "1h 05m" },
 ];
 
 const PULL_SESSIONS: MockSession[] = [

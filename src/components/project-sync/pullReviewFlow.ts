@@ -1,15 +1,15 @@
 import type {
   BundleReadiness,
   ProjectBinding,
-  RestorePlan,
+  PullReview,
   RestoreResult,
 } from "../../types";
 import { errorMessage } from "../../storageError";
 import { buildPullReviewItems, restoreActionIds } from "./pullReviewModel";
 
 export interface PullReviewApi {
-  planRestore: (storageId: string, bundleId: string, binding: ProjectBinding) => Promise<RestorePlan>;
-  getRestoreReadiness: (restorePlanId: string) => Promise<BundleReadiness>;
+  planRestore: (storageId: string, bundleId: string, binding: ProjectBinding) => Promise<PullReview>;
+  getRestoreReadiness: (review: PullReview) => Promise<BundleReadiness>;
 }
 
 export interface PullReviewRequest {
@@ -24,7 +24,7 @@ export interface PullReviewSupport {
 }
 
 export interface StartedPullReview {
-  restorePlan: RestorePlan;
+  restorePlan: PullReview;
   support: Promise<PullReviewSupport>;
 }
 
@@ -37,10 +37,10 @@ export interface PullReviewSelection {
 
 export interface PullReviewApplyApi {
   applyRestore: (
-    planId: string,
+    review: PullReview,
     actionIds: string[],
   ) => Promise<RestoreResult>;
-  getRestoreReadiness: (restorePlanId: string) => Promise<BundleReadiness>;
+  getRestoreReadiness: (review: PullReview) => Promise<BundleReadiness>;
 }
 
 export interface PullReviewApplyResult {
@@ -52,22 +52,22 @@ export interface PullReviewApplyResult {
 }
 
 /** A review opens only when it contains storage-side or divergent work. */
-export function hasPendingRestoreMutations(plan: RestorePlan): boolean {
+export function hasPendingRestoreMutations(plan: PullReview): boolean {
   return buildPullReviewItems(plan).some((item) => restoreActionIds(item).length > 0);
 }
 
 /**
- * The restore plan is an immutable approval surface. Refuse a selection whose
+ * The in-memory Pull review is the approval surface. Refuse a selection whose
  * ids no longer belong to it; otherwise a single Apply click could approve a
  * state the user never reviewed.
  */
 export function assertPullPlansAligned(
-  restorePlan: RestorePlan,
+  restorePlan: PullReview,
   selection: PullReviewSelection,
 ): void {
   const restoreIds = new Set([
     ...restorePlan.actions.map((action) => action.action_id),
-    ...(restorePlan.conversation_actions ?? []).map((action) => action.action_id),
+    ...restorePlan.conversation_review.flatMap((row) => row.action_id ? [row.action_id] : []),
   ]);
   if (selection.restoreActionIds.some((actionId) => !restoreIds.has(actionId))) {
     throw new Error("The selected restore actions no longer belong to this Pull review.");
@@ -85,7 +85,7 @@ export function assertPullPlansAligned(
  */
 export async function applyPullReview(
   api: PullReviewApplyApi,
-  restorePlan: RestorePlan,
+  restorePlan: PullReview,
   selection: PullReviewSelection,
   onPhase: (phase: PullApplyPhase) => void,
 ): Promise<PullReviewApplyResult> {
@@ -98,7 +98,7 @@ export async function applyPullReview(
   onPhase("restoring");
   try {
     restoreResult = await api.applyRestore(
-      restorePlan.plan_id,
+      restorePlan,
       selection.restoreActionIds,
     );
   } catch (reason) {
@@ -108,7 +108,7 @@ export async function applyPullReview(
 
   onPhase("verifying");
   try {
-    readiness = await api.getRestoreReadiness(restorePlan.plan_id);
+    readiness = await api.getRestoreReadiness(restorePlan);
   } catch (reason) {
     const verificationError = `Readiness verification failed: ${errorMessage(reason)}`;
     executionError = executionError ? `${executionError} ${verificationError}` : verificationError;
@@ -117,7 +117,6 @@ export async function applyPullReview(
   const success =
     executionError === null &&
     (restoreResult?.success ?? true) &&
-    (restoreResult ? restoreResult.status === "complete" : true) &&
     readiness?.state === "ready";
   onPhase("complete");
   return {
@@ -146,24 +145,24 @@ export async function beginPullReview(
 
 /**
  * Load only the mutation review. This is deliberately separate from optional
- * supporting checks so a readiness error cannot hide a valid plan or its
- * Apply button. Planning fetches the bundle itself — no separate prefetch,
- * the payload must only be downloaded once.
+ * supporting checks so a readiness error cannot hide a valid review or its
+ * Apply button. Compare fetches the manifest itself; selected payloads remain
+ * Apply-time work.
  */
 export async function preparePullReview(
   api: PullReviewApi,
   request: PullReviewRequest,
-): Promise<RestorePlan> {
+): Promise<PullReview> {
   return api.planRestore(request.storageId, request.bundleId, request.binding);
 }
 
 /** Load non-blocking context shown alongside an already-visible review. */
 export async function loadPullReviewSupport(
   api: PullReviewApi,
-  restorePlan: RestorePlan,
+  restorePlan: PullReview,
 ): Promise<PullReviewSupport> {
   try {
-    return { readiness: await api.getRestoreReadiness(restorePlan.plan_id), errors: [] };
+    return { readiness: await api.getRestoreReadiness(restorePlan), errors: [] };
   } catch (reason) {
     return { readiness: null, errors: [`Readiness checks: ${errorMessage(reason)}`] };
   }

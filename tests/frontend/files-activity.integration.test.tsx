@@ -18,19 +18,18 @@ import { PROJECT_FILE_CARD_RENDER_LIMIT } from "../../src/components/project-syn
    the catalog grammar, the storage-only partition on top, and directory
    bands instead of a tree. */
 
+/* A scanned entry carries the bare portable descriptor, as the backend's
+   `ProjectContentEntry` does; the Files page reads the entry, not a label. */
 function descriptor(resourceId: string, path: string): ProjectResourceDescriptor {
   return {
     resource_id: resourceId,
-    kind: "project_content_file",
+    kind: { key: "project_content_file", version: 1 },
     provider: null,
     display_name: path.split("/").slice(-1)[0],
-    provenance: { kind: "project_local", relative_path: path },
-    apply_policy: "explicit_review",
+    provenance: { kind: "project_local", version: 1, fields: { relative_path: path } },
+    apply_policy: { key: "explicit_review", version: 1 },
     codec_version: 1,
-    metadata: {},
-    category: "project_files",
-    logical_paths: [`project/${path}`],
-    default_selected: false,
+    attributes: {},
   };
 }
 
@@ -131,7 +130,7 @@ test("the activity list searches the full inventory but renders at most 500 file
     entry_type: "directory" as const,
     descriptor: {
       ...descriptor(`directory-${index}`, `folder-${index}`),
-      kind: "project_content_directory" as const,
+      kind: { key: "project_content_directory", version: 1 },
     },
   }));
 
@@ -230,7 +229,7 @@ test("the activity list is read-only and directories band instead of nesting", (
     {
       ...entry("dir-notes", "notes", "synced"),
       entry_type: "directory",
-      descriptor: { ...descriptor("dir-notes", "notes"), kind: "project_content_directory" },
+      descriptor: { ...descriptor("dir-notes", "notes"), kind: { key: "project_content_directory", version: 1 } },
     },
     entry("file-notes-a", "notes/outline.md", "synced"),
     entry("file-notes-b", "notes/render.sh", "local_only", { warning_code: "executable", warning_digest: "b".repeat(64) }),

@@ -1,9 +1,10 @@
 use super::harness::{chain, codex_scope, codex_scope_key, ThreadSpec, VariantWorld};
+use mallard_domain::portable::contracts;
 use mallard_domain::{
     BundleId, BundleManifest, BundleScope, CloudThreadId, ConversationFileRef,
     ConversationFileRole, ConversationLineageStatus, ConversationMaterializationState,
     ConversationPlanActionType, LocalConversationBinding, LogicalPath, PreservedProvenance,
-    ProviderKey, ReplicaId, ThreadId, Tombstone, TombstoneTarget,
+    ProviderKey, ReplicaId, ThreadId, Tombstone,
 };
 use mallard_infrastructure::storage_core::ObjectStore;
 use std::fs;
@@ -222,34 +223,37 @@ fn current_schema_manifest_rejects_each_conversation_reference_corruption() {
     }));
     mutations.push(Box::new(|scope| {
         let resource = scope.conversations[&thread_id()].resource_id.clone();
+        // Bounded attributes cannot even hold an oversized value; the
+        // structural rule left to break is the contract version itself.
         scope
             .resources
             .get_mut(&resource)
             .unwrap()
-            .metadata
-            .insert("oversized".to_string(), "x".repeat(4_097));
+            .apply_policy
+            .version = 0;
     }));
     mutations.push(Box::new(|scope| {
         let tombstone = Tombstone {
-            target: TombstoneTarget::ConversationThread {
-                thread_id: thread_id(),
-            },
+            target: contracts::tombstone_conversation_thread(&thread_id()).unwrap(),
             last_sha256: Some("a".repeat(64)),
             deleted_at: 20,
         };
         scope
             .tombstones
-            .insert(tombstone.canonical_key(), tombstone);
+            .insert(tombstone.structural_key(), tombstone);
     }));
     for (index, mutate) in mutations.into_iter().enumerate() {
         // The scope digest is resealed over the corrupted content, so every
         // rejection below comes from the reference rule itself and not from
         // a trivially stale content digest.
         let invalid = mutate_codex_scope(&baseline, |scope| mutate(scope));
-        assert!(
-            invalid.validate().is_err(),
-            "mutation {index} unexpectedly validated"
-        );
+        // Structural validation catches shape corruption; registry
+        // validation catches what only resolved contracts can judge.
+        let rejected = invalid.validate().is_err()
+            || invalid
+                .resolve_all(mallard_infrastructure::portable_resources::PortableResourceRegistry::production())
+                .is_err();
+        assert!(rejected, "mutation {index} unexpectedly validated");
     }
 
     let mut serialized = serde_json::to_value(&baseline).unwrap();
@@ -275,13 +279,14 @@ fn mutate_codex_scope(
 #[test]
 fn local_bindings_reject_duplicate_provider_thread_ownership_profile_wide() {
     let world = VariantWorld::new();
-    let scope = super::recovery::install_scope(
+    let scope = super::scope::install_scope(
         &world.repo_fresh,
         &world.bundle_id,
         "duplicate-provider-owner",
         "replica-duplicate-owner",
     );
     let binding = |thread: &str| LocalConversationBinding {
+        path_origins_ref: None,
         host_id: scope.host_id.clone(),
         replica_id: scope.replica_id.clone(),
         local_project_id: scope.project_id.clone(),

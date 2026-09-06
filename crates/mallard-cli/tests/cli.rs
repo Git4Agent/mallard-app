@@ -1,6 +1,7 @@
 use mallard_domain::{
-    generated_named_id, StorageConfig, StorageId, StorageKind, StorageSetupDraft,
-    StorageSetupDraftId, STORAGE_SETUP_DRAFT_SCHEMA,
+    generated_named_id, BoundedConfigObject, SecretMap, StorageConfig, StorageId,
+    StorageProviderConfig, StorageProviderKey, StorageSetupDraft, StorageSetupDraftId,
+    StorageSetupDraftSource, STORAGE_SETUP_DRAFT_SCHEMA,
 };
 use mallard_infrastructure::persistence::LocalStateRepository;
 use std::fs;
@@ -29,18 +30,16 @@ fn create_r2_draft(home: &std::path::Path, name: &str) -> StorageSetupDraft {
             schema: STORAGE_SETUP_DRAFT_SCHEMA,
             draft_id: StorageSetupDraftId::parse(generated_named_id("storagedraft").unwrap())
                 .unwrap(),
+            source: StorageSetupDraftSource::New,
             storage: StorageConfig {
                 id: StorageId::parse(generated_named_id("storage").unwrap()).unwrap(),
                 name: name.to_string(),
-                kind: StorageKind::S3,
-                bucket: String::new(),
-                access_key_id: String::new(),
-                secret_access_key: String::new(),
-                account_id: String::new(),
-                s3_endpoint: String::new(),
-                region: "auto".to_string(),
-                local_dir: String::new(),
-                supports_conditional_writes: None,
+                provider: StorageProviderKey::parse("r2").unwrap(),
+                provider_config: StorageProviderConfig::new(
+                    1,
+                    BoundedConfigObject::empty(),
+                    SecretMap::empty(),
+                ),
             },
             revision: 0,
             created_at: 1,

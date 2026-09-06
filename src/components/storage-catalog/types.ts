@@ -1,12 +1,99 @@
-/** Scope-rowed Library contracts. These mirror the Rust command DTOs and
- * remain independent from project-sync DTOs. */
+/** Scope-rowed Library contracts. These mirror the Rust command DTOs
+ * (`storage_catalog/service.rs`, `registry.rs`, `domain.rs`) and remain
+ * independent from project-sync DTOs. Providers, kinds, formats, and targets
+ * are open keys served beside backend labels: the frontend never holds a
+ * fixed provider, kind, or format table. */
 
-export type CatalogProviderKey = "codex" | "claude";
-export type CatalogResourceKind =
-  | "agent_skill"
-  | "plugin_install_intent"
-  | "codex_pet_v1"
-  | "codex_pet_v2";
+/** The four independent Library axes that address one portable resource
+ * shape. Structurally any well-formed coordinate parses; only the backend's
+ * registry decides whether this build can operate on it. */
+export interface CatalogCoordinate {
+  provider: string;
+  resource_kind: string;
+  format: string;
+  format_version: number;
+}
+
+/** Backend-supplied labels for one coordinate, served flattened beside the
+ * raw keys on every DTO that names a coordinate. */
+export interface CatalogCoordinateLabels {
+  provider_label: string;
+  kind_label: string;
+  format_label: string;
+}
+
+/** How the common workflow discovers and captures resources of a
+ * capability: every child directory of each target root, or the provider's
+ * own inventory with nothing read from a directory. A protocol shape, never
+ * a provider, kind, or format identity. */
+export type CatalogCaptureSupport = "directory_tree" | "provider_inventory";
+
+export type CatalogApplySupport = "unsupported" | "manual" | "automatic";
+
+/** Icon and label hints the frontend renders without holding its own
+ * provider, kind, or format tables. `icon` is a hint (`skill`, `pet`) that
+ * `catalogPresentation` in model.ts resolves to a glyph. */
+export interface CatalogPresentation {
+  icon: string;
+  kind_label: string;
+  format_label: string;
+}
+
+/** One registered capability as `list_catalog_capabilities` serves it, in
+ * the backend's display order: provider rank first, then registration. */
+export interface CatalogCapabilityDescriptor extends CatalogCoordinate {
+  provider_label: string;
+  label: string;
+  singular_label: string;
+  presentation: CatalogPresentation;
+  capture: CatalogCaptureSupport;
+  apply: CatalogApplySupport;
+  targets: string[];
+}
+
+/** `CatalogProfileDto`: one Library profile plus its provider's label. */
+export interface CatalogProfile {
+  profile_id: string;
+  provider: string;
+  provider_label: string;
+  display_name: string;
+  configured_home: string;
+  revision: number;
+  created_at: number;
+  updated_at: number;
+}
+
+/** One Catalog menu row: every resource of one coordinate under one provider
+ * profile. */
+export interface CatalogScope extends CatalogCoordinate {
+  scope_id: string;
+  profile_id: string;
+  revision: number;
+  created_at: number;
+  updated_at: number;
+}
+
+/** `CatalogScopeDto`: a menu row plus the profile its label derives from and
+ * the registered capability's labels. A row whose coordinate this build does
+ * not register is listed as unavailable: it keeps its raw coordinate, names
+ * itself by it, and cannot be operated on. */
+export interface CatalogScopeDto extends CatalogCoordinateLabels {
+  scope: CatalogScope;
+  profile: CatalogProfile;
+  /** The registered capability's label, or the raw coordinate. */
+  label: string;
+  available: boolean;
+  unavailable_reason?: string;
+}
+
+/** The frontend's one join over two backend lists: a scope row and the
+ * capability descriptor its coordinate registers, `null` when this build
+ * registers none. The descriptor is where the presentation lives; the row
+ * DTO carries labels and availability only. Built by `catalogScopeViews`. */
+export interface CatalogScopeView extends CatalogScopeDto {
+  capability: CatalogCapabilityDescriptor | null;
+}
+
 export type CatalogLinkState =
   | "new"
   | "in_sync"
@@ -27,46 +114,17 @@ export type CatalogResourceRelation =
   | "unavailable_locally"
   | "blocked";
 
-export interface CatalogCapability {
-  provider: CatalogProviderKey;
-  kinds: CatalogResourceKind[];
-}
-
-export interface LocalCatalogProfile {
-  profile_id: string;
-  provider_key: CatalogProviderKey;
-  display_name: string;
-  configured_home: string;
-  revision: number;
-  created_at: number;
-  updated_at: number;
-}
-
-/** One Catalog menu row: every resource of one kind under one provider
- * profile. Its label always derives from the kind plus the profile name. */
-export interface CatalogScope {
-  scope_id: string;
-  provider: CatalogProviderKey;
-  profile_id: string;
-  resource_kind: CatalogResourceKind;
-  revision: number;
-  created_at: number;
-  updated_at: number;
-}
-
-export interface CatalogScopeView {
-  scope: CatalogScope;
-  profile: LocalCatalogProfile;
-}
-
-/** One row on a scope page: a resource of this kind compared against the one
- * storage the page is scoped to. Local-only, stored-only and both-sides
- * resources share this shape, because the page draws them the same way —
- * which one a row is reads off `local_present` and `remote_present`. */
+/** One row on a scope page: a resource of this coordinate compared against
+ * the one storage the page is scoped to. Local-only, stored-only and
+ * both-sides resources share this shape, because the page draws them the
+ * same way — which one a row is reads off `local_present` and
+ * `remote_present`. */
 export interface CatalogScopeRow {
   row_id: string;
   display_name: string;
   resource_id?: string | null;
+  /** The codec's secondary label for this resource (a root class, a format
+   * version), when the coordinate does not say it all. */
   scope_label?: string | null;
   /** Null only when no storage is chosen: nothing to compare against. */
   state?: CatalogLinkState | null;
@@ -83,12 +141,14 @@ export interface CatalogScopeRow {
   /** The digest the comparison used: the local capture's when one exists,
    * otherwise the stored version's. */
   content_sha256?: string | null;
-  /** A small PNG of the pet's idle frame, as a data URI. Pet rows only;
-   * null when nothing local can be drawn — stored-only rows fetch theirs
-   * lazily through `getPetPreview`. */
+  /** A small PNG preview as a data URI, derived from this Mac's capture by
+   * the format's codec. Null when the format has no preview or nothing local
+   * can be drawn — stored-only rows fetch theirs lazily through
+   * `getPreview`. */
   preview_png?: string | null;
-  /** The pet descriptor's own sentence about itself. Pet rows only. */
-  pet_description?: string | null;
+  /** The codec's one-line description of the resource, when the format has
+   * one. */
+  description?: string | null;
   warnings: CatalogResourceWarning[];
   blocker?: string | null;
 }
@@ -100,13 +160,14 @@ export interface CatalogScopePageLink {
   revision: number;
 }
 
-export interface CatalogScopeResources {
+/** `CatalogScopeResourcesDto`: the complete content of one scope page. */
+export interface CatalogScopeResources extends CatalogCoordinateLabels {
   scope: CatalogScope;
-  profile: LocalCatalogProfile;
+  profile: CatalogProfile;
   storage_id?: string | null;
   storage_name?: string | null;
   link?: CatalogScopePageLink | null;
-  /** The stored kind repository's current revision, when one exists. */
+  /** The stored repository's current revision, when one exists. */
   storage_revision?: number | null;
   rows: CatalogScopeRow[];
   warnings: string[];
@@ -126,11 +187,19 @@ export interface CatalogResourceWarning {
   digest: string;
 }
 
-export interface CatalogPushRow {
+/** One mutable repository head as the plan observed it. */
+export interface LibraryHeadCoordinate {
+  repository_id: string;
+  revision: number;
+  commit_id: string;
+  manifest_sha256: string;
+  manifest_size: number;
+  storage_identity_sha256: string;
+}
+
+export interface CatalogPushRow extends CatalogCoordinate, CatalogCoordinateLabels {
   resource_id: string;
-  kind: CatalogResourceKind;
   display_name: string;
-  provider: CatalogProviderKey;
   scope_label?: string | null;
   relation: CatalogResourceRelation;
   selectable: boolean;
@@ -157,6 +226,9 @@ export interface CatalogScopePushPlan {
   link_revision: number;
   storage_id: string;
   repository_id: string;
+  storage_identity_sha256: string;
+  /** Absent when the repository had no head yet. */
+  observed_head?: LibraryHeadCoordinate;
   rows: CatalogScopePushRow[];
   warning_digests: string[];
   created_at: number;
@@ -180,24 +252,25 @@ export interface CatalogPreservationPin {
   reusable_witness: boolean;
 }
 
+/** The fixed protocol outcomes an executable Pull action can take. They
+ * describe the common workflow, never a provider, kind, or format. */
 export type CatalogPullActionKind =
-  | { kind: "install_skill" }
-  | { kind: "update_skill" }
-  | { kind: "preserve_skill_as_copy_and_overwrite"; copy: CatalogPreservationPin }
-  | { kind: "overwrite_skill_with_storage" }
-  | { kind: "install_plugin"; plan: unknown }
-  | { kind: "update_plugin"; plan: unknown }
-  | { kind: "overwrite_plugin_with_storage"; plan: unknown }
-  | { kind: "install_pet" }
-  | { kind: "update_pet" }
-  | { kind: "preserve_pet_as_copy_and_overwrite"; copy: CatalogPreservationPin }
-  | { kind: "overwrite_pet_with_storage" };
+  | { kind: "install" }
+  | { kind: "update" }
+  | { kind: "preserve_as_copy_and_overwrite"; copy: CatalogPreservationPin }
+  | { kind: "overwrite_with_storage" };
+
+/** What the plan expects to find at the local target before it applies. */
+export type CatalogTargetExpectation =
+  | { state: "absent" }
+  | { state: "sha256"; sha256: string };
 
 export interface CatalogPullAction {
   action_id: string;
   resource_id: string;
   kind: CatalogPullActionKind;
   requires_destructive_approval: boolean;
+  expected_target_state: CatalogTargetExpectation;
   incoming_content_sha256: string;
 }
 
@@ -208,11 +281,9 @@ export type CatalogPullDisposition =
   | { kind: "manual"; message: string }
   | { kind: "blocked"; reason: string };
 
-export interface CatalogPullItem {
+export interface CatalogPullItem extends CatalogCoordinate, CatalogCoordinateLabels {
   resource_id: string;
-  kind: CatalogResourceKind;
   display_name: string;
-  provider: CatalogProviderKey;
   scope_label?: string | null;
   relation: CatalogResourceRelation;
   disposition: CatalogPullDisposition;
@@ -241,6 +312,8 @@ export interface CatalogScopePullPlan {
   link_revision: number;
   storage_id: string;
   repository_id: string;
+  storage_identity_sha256: string;
+  head: LibraryHeadCoordinate;
   items: CatalogScopePullItem[];
   created_at: number;
   expires_at: number;
@@ -277,26 +350,34 @@ export interface CatalogScopePullOutcome {
 export interface CatalogResourceForkPlan {
   plan_id: string;
   scope_id: string;
+  source_coordinate: CatalogCoordinate;
   source_resource_id: string;
   source_display_name: string;
+  source_content_sha256: string;
   copy_name: string;
   copy_resource_id: string;
   copy_target_path: string;
+  transformed_content_sha256: string;
   created_at: number;
   expires_at: number;
 }
 
-/** One Catalog kind repository as the storage page lists it: the derived
- * identity plus its head facts, or — when something answers under the id but
- * cannot be read — the refusal. Absent repositories are simply not listed. */
-export interface CatalogStorageRepository {
+/** `CatalogStorageRepositoryDto`: one Library repository as the storage page
+ * lists it — the coordinate it derives from with its labels, the head facts
+ * when the repository reads, and the refusal when it does not. Absent
+ * repositories are simply not listed. */
+export interface CatalogStorageRepository extends CatalogCoordinate, CatalogCoordinateLabels {
   repository_id: string;
-  provider: CatalogProviderKey;
-  resource_kind: CatalogResourceKind;
   revision: number | null;
   updated_at: number | null;
   /** Display names of everything the set holds, sorted for the fold. */
   resource_names: string[];
   /** Why the repository can't be read; the row states it instead of chips. */
   error: string | null;
+}
+
+/** A repository row joined to the capability its coordinate registers, the
+ * same join `CatalogScopeView` is. Built by `catalogStorageRepositoryViews`. */
+export interface CatalogStorageRepositoryView extends CatalogStorageRepository {
+  capability: CatalogCapabilityDescriptor | null;
 }

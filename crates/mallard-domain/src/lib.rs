@@ -5,6 +5,9 @@
 //! deserialization, so persistence and transport code cannot accidentally
 //! turn untrusted JSON into an unchecked path or identifier.
 
+mod pull_review;
+pub use pull_review::PullReview;
+
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -17,8 +20,6 @@ pub const LOCAL_SCHEMA: u32 = 1;
 pub const MACHINE_PROJECT_SCHEMA: u32 = 1;
 pub const HOST_IDENTITY_SCHEMA: u32 = 1;
 pub const CONVERSATION_BINDINGS_SCHEMA: u32 = 1;
-pub(crate) const CONVERSATION_SYNC_JOURNAL_SCHEMA: u32 = 1;
-pub const PUSH_PLAN_SCHEMA: u32 = 1;
 pub const BUNDLE_SCHEMA: u32 = 1;
 pub(crate) const RECIPE_SCHEMA: u32 = 1;
 pub const RESTORE_PLAN_SCHEMA: u32 = 1;
@@ -37,10 +38,14 @@ pub(crate) const MAX_BINDINGS: usize = 4_096;
 pub(crate) const MAX_PROVIDER_PROFILES: usize = 1_024;
 pub(crate) const MAX_RESOURCES: usize = 20_000;
 pub(crate) const MAX_FILES: usize = 100_000;
+/// The most files one conversation may carry end to end: transcript,
+/// sidecars, and index fragment. One bound for the thread record, the
+/// reviewed pins, and the apply operation, so Push never accepts a session
+/// that Pull refuses to install.
+pub const MAX_CONVERSATION_FILES: usize = 4_096;
 pub(crate) const MAX_ACTIONS: usize = 100_000;
 pub const MAX_CONVERSATION_BINDINGS: usize = 100_000;
 pub const MAX_ORIGIN_ALIASES: usize = 20_000;
-pub(crate) const MAX_CONVERSATION_JOURNAL_OPERATIONS: usize = 10_000;
 pub(crate) const MAX_LOGICAL_PATH_BYTES: usize = 1_024;
 pub const MAX_CONVERSATION_FILE_BYTES: u64 = 100 * 1024 * 1024;
 pub(crate) const MAX_PROJECT_CONTENT_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -194,9 +199,7 @@ named_id!(SetupDraftId, "setup draft id");
 named_id!(StorageSetupDraftId, "storage setup draft id");
 
 impl CloudThreadId {
-    /// Mint a fresh cloud thread identity. Called only at push apply — plans
-    /// carry intent, never minted identities, and recovery installs journaled
-    /// documents verbatim without re-minting.
+    /// Mint a fresh cloud thread identity during Push Apply.
     pub fn generate() -> Result<Self, String> {
         Self::parse(generated_named_id("cloudthread")?)
     }
@@ -576,6 +579,16 @@ fn validate_display_text(label: &str, value: &str, allow_empty: bool) -> Result<
     }
 }
 
+/// Titles are presentation data. Allow every character and bound the UTF-8
+/// byte length. A missing optional title uses `None` instead of an empty string.
+pub fn validate_title(label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 1_024 {
+        Err(format!("invalid {}", label))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_provider_thread_id(label: &str, value: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
         Err(format!("invalid {}", label))
@@ -600,115 +613,6 @@ pub fn validate_absolute_clean_path(label: &str, value: &str) -> Result<(), Stri
         ));
     }
     Ok(())
-}
-
-/// Validated agent-provider identity. Providers are registered keys, not a
-/// closed enum: structural validation accepts any well-formed key so unknown
-/// remote provider scopes stay readable and preservable, while commands that
-/// mutate local provider state must additionally resolve the key through the
-/// compile-time adapter registry.
-///
-/// Keys use a bounded lowercase ASCII namespace: the first character is a
-/// letter, later characters are `[a-z0-9._-]`, the final character is a
-/// letter or digit, and `..` never appears. This keeps every key safe as one
-/// logical-namespace component before the normal logical-path validation
-/// runs.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(try_from = "String", into = "String")]
-pub struct ProviderKey(String);
-
-fn validate_bounded_key(label: &str, value: &str) -> Result<(), String> {
-    let bytes = value.as_bytes();
-    let valid = (1..=64).contains(&bytes.len())
-        && bytes.first().is_some_and(u8::is_ascii_lowercase)
-        && bytes
-            .last()
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && bytes.iter().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(byte)
-        })
-        && !value.contains("..");
-    if valid {
-        Ok(())
-    } else {
-        Err(format!(
-            "{} must be 1-64 lowercase ASCII key characters: '{}'",
-            label,
-            value.escape_debug()
-        ))
-    }
-}
-
-impl ProviderKey {
-    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
-        let value = value.into();
-        validate_bounded_key("provider key", &value)?;
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for ProviderKey {
-    type Error = String;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::parse(value)
-    }
-}
-
-impl From<ProviderKey> for String {
-    fn from(value: ProviderKey) -> String {
-        value.0
-    }
-}
-
-impl fmt::Display for ProviderKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-/// Presentation-oriented provider resource subtype such as `session`,
-/// `memory`, `todo`, or `file-history`. Core behavior keys off
-/// [`ResourceKind`], ownership, and adapter capabilities — never off this
-/// string.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(try_from = "String", into = "String")]
-pub struct ResourceTypeKey(String);
-
-impl ResourceTypeKey {
-    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
-        let value = value.into();
-        validate_bounded_key("provider resource type", &value)?;
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for ResourceTypeKey {
-    type Error = String;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::parse(value)
-    }
-}
-
-impl From<ResourceTypeKey> for String {
-    fn from(value: ResourceTypeKey) -> String {
-        value.0
-    }
-}
-
-impl fmt::Display for ResourceTypeKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
 }
 
 /// One independently revisioned portion of a portable repository: the shared
@@ -774,141 +678,67 @@ pub enum BundleKind {
     Project,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum StorageKind {
-    S3,
-    Local,
-}
-
+/// One configured storage. The provider key selects a compiled storage
+/// adapter and the versioned envelope holds that adapter's settings and
+/// machine-local secrets. Structural validation never needs the adapter.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StorageConfig {
     pub id: StorageId,
     pub name: String,
-    pub kind: StorageKind,
-    #[serde(default)]
-    pub bucket: String,
-    #[serde(default)]
-    pub access_key_id: String,
-    #[serde(default)]
-    pub secret_access_key: String,
-    #[serde(default)]
-    pub account_id: String,
-    #[serde(default)]
-    pub s3_endpoint: String,
-    #[serde(default)]
-    pub region: String,
-    #[serde(default)]
-    pub local_dir: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_conditional_writes: Option<bool>,
+    pub provider: StorageProviderKey,
+    pub provider_config: StorageProviderConfig,
 }
 
 impl StorageConfig {
     pub fn validate(&self) -> Result<(), String> {
         validate_display_text("storage name", &self.name, true)?;
-        match self.kind {
-            StorageKind::Local => {
-                if self.local_dir.is_empty() {
-                    return Err(format!("storage '{}' needs a local directory", self.id));
-                }
-                validate_absolute_clean_path("local storage directory", &self.local_dir)?;
-            }
-            StorageKind::S3 => {
-                if self.bucket.trim().is_empty() {
-                    return Err(format!("storage '{}' needs a bucket", self.id));
-                }
-            }
-        }
-        Ok(())
+        self.provider_config.validate()
+    }
+
+    /// A machine-local concurrency token for the complete storage record.
+    /// It includes secrets and must never cross IPC or enter a portable
+    /// manifest.
+    pub fn integrity_digest(&self) -> Result<String, String> {
+        self.validate()?;
+        let encoded = serde_json::to_vec(self)
+            .map_err(|_| "encode storage configuration for integrity check".to_string())?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"mallard-storage-config-v1\0");
+        update_length_prefixed(&mut hasher, &encoded);
+        Ok(hex_lower(&hasher.finalize()))
     }
 }
 
-/// Generic resource classes. Provider identity lives in
-/// [`ResourceDescriptor::provider`], never in the kind, so registering a new
-/// provider adds no variant here.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum ResourceKind {
-    Conversation,
-    ProviderState,
-    ProjectContentFile,
-    ProjectContentDirectory,
-    Requirement,
-}
-
-impl ResourceKind {
-    /// The sync scope this kind of resource belongs to: provider-owned kinds
-    /// live in their provider's scope, everything else in the project scope.
-    fn requires_provider(self) -> bool {
-        matches!(self, Self::Conversation | Self::ProviderState)
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ApplyPolicy {
-    SafeFile,
-    Merge,
-    ExplicitReview,
-    ManualOnly,
-    Never,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Provenance {
-    ProjectLocal { relative_path: String },
-    Unknown,
-}
-
-impl Provenance {
-    fn validate(&self) -> Result<(), String> {
-        match self {
-            Self::ProjectLocal { relative_path } => {
-                if relative_path.is_empty()
-                    || Path::new(relative_path).is_absolute()
-                    || Path::new(relative_path).components().any(|component| {
-                        matches!(component, Component::CurDir | Component::ParentDir)
-                    })
-                {
-                    return Err("invalid project-local provenance path".to_string());
-                }
-            }
-            Self::Unknown => {}
-        }
-        Ok(())
-    }
-}
-
+/// One portable resource. Its kind, apply policy, and provenance are open
+/// versioned contracts; `attributes` is the bounded, kind-typed replacement
+/// for a free string map. Structural validation never needs a registry;
+/// kind-specific rules run in [`BundleScope::resolve`].
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ResourceDescriptor {
     pub resource_id: ResourceId,
-    pub kind: ResourceKind,
+    pub kind: ResourceKindCoordinate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderKey>,
     /// Presentation-only provider subtype (`session`, `memory`, `todo`, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_resource_type: Option<ResourceTypeKey>,
     pub display_name: String,
-    pub provenance: Provenance,
-    pub apply_policy: ApplyPolicy,
+    pub provenance: ProvenanceEnvelope,
+    pub apply_policy: ApplyPolicyCoordinate,
+    /// The provider content codec version, independent of every contract
+    /// version above.
     pub codec_version: u32,
     #[serde(default)]
-    pub metadata: BTreeMap<String, String>,
+    pub attributes: BoundedPortableObject,
 }
 
 impl ResourceDescriptor {
     pub fn validate(&self) -> Result<(), String> {
-        validate_display_text("resource display name", &self.display_name, false)?;
+        validate_title("resource display name", &self.display_name)?;
+        self.kind.validate()?;
+        self.apply_policy.validate()?;
         self.provenance.validate()?;
-        if self.kind.requires_provider() != self.provider.is_some() {
-            return Err(format!(
-                "resource '{}' provider does not match its kind",
-                self.resource_id
-            ));
-        }
         if self.provider.is_none() && self.provider_resource_type.is_some() {
             return Err(format!(
                 "resource '{}' has a provider subtype without a provider",
@@ -921,20 +751,19 @@ impl ResourceDescriptor {
                 self.resource_id
             ));
         }
-        if self.metadata.len() > 256
-            || self.metadata.iter().any(|(key, value)| {
-                key.is_empty()
-                    || key.len() > 256
-                    || value.len() > 4_096
-                    || key.chars().any(char::is_control)
-                    || value.chars().any(char::is_control)
-            })
-        {
-            return Err(format!(
-                "resource '{}' has invalid metadata",
-                self.resource_id
-            ));
-        }
+        Ok(())
+    }
+
+    /// One string attribute, for callers that recorded a digest or a label.
+    pub fn attribute_str(&self, key: &str) -> Option<&str> {
+        self.attributes.get_str(key)
+    }
+
+    /// Replace one attribute, re-validating the bounded object.
+    pub fn set_attribute(&mut self, key: &str, value: serde_json::Value) -> Result<(), String> {
+        let mut json = self.attributes.to_json();
+        json[key] = value;
+        self.attributes = BoundedPortableObject::from_json(&json)?;
         Ok(())
     }
 }
@@ -942,7 +771,7 @@ impl ResourceDescriptor {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RecipeEntry {
     pub resource_id: ResourceId,
-    pub apply_policy: ApplyPolicy,
+    pub apply_policy: ApplyPolicyCoordinate,
     #[serde(default)]
     pub required: bool,
 }
@@ -983,9 +812,7 @@ impl BundleRecipe {
                     id, entry.resource_id
                 ));
             }
-            if entry.apply_policy == ApplyPolicy::Never {
-                return Err(format!("recipe cannot select Never resource '{}'", id));
-            }
+            entry.apply_policy.validate()?;
         }
         Ok(())
     }
@@ -1372,6 +1199,8 @@ fn project_content_identity(
 
 fn validate_project_content_descriptor_identity(
     descriptor: &ResourceDescriptor,
+    provenance: &ProvenancePrimitive,
+    apply_policy: ApplyPolicyPrimitive,
     logical_path: &LogicalPath,
     entry_type: &str,
 ) -> Result<(), String> {
@@ -1382,8 +1211,8 @@ fn validate_project_content_descriptor_identity(
             descriptor.resource_id, entry_type, logical_path
         ));
     }
-    match &descriptor.provenance {
-        Provenance::ProjectLocal {
+    match provenance {
+        ProvenancePrimitive::ProjectLocal {
             relative_path: provenance,
         } if provenance == &relative_path => {}
         _ => {
@@ -1393,7 +1222,7 @@ fn validate_project_content_descriptor_identity(
             ));
         }
     }
-    if descriptor.apply_policy != ApplyPolicy::ExplicitReview
+    if apply_policy != ApplyPolicyPrimitive::ExplicitReview
         || descriptor.codec_version != 1
         || descriptor.provider.is_some()
     {
@@ -1609,6 +1438,10 @@ pub struct ProviderProfile {
     pub path: String,
     /// Canonical path captured when the profile was created.
     pub canonical_path: String,
+    /// The provider's own versioned profile settings. Current providers use
+    /// version 1 with no settings; a later provider adds typed settings
+    /// inside its own envelope without changing this record.
+    pub provider_config: AgentProviderConfig,
     pub revision: u64,
     pub created_at: u64,
     pub updated_at: u64,
@@ -1619,6 +1452,7 @@ impl ProviderProfile {
         validate_display_text("provider profile name", &self.display_name, false)?;
         validate_absolute_clean_path("provider profile path", &self.path)?;
         validate_absolute_clean_path("canonical provider profile path", &self.canonical_path)?;
+        self.provider_config.validate()?;
         if self.created_at > self.updated_at {
             return Err(format!(
                 "provider profile '{}' has invalid timestamps",
@@ -1941,6 +1775,10 @@ pub struct LocalConversationBinding {
     pub local_project_id: LocalProjectId,
     pub provider_profile_id: LocalProviderProfileId,
     pub thread_id: ThreadId,
+    /// Required nullable field. None is valid before the first path capture.
+    /// The immutable file belongs to local history, independently of storage.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub path_origins_ref: Option<PathOriginsRef>,
     /// The cloud thread this local thread is paired with; `None` for a
     /// local-only thread (never published, or deliberately detached by
     /// keep-both). Present on the wire even when `None` so rows with a missing
@@ -1972,6 +1810,9 @@ pub struct LocalConversationBinding {
 
 impl LocalConversationBinding {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(origins) = &self.path_origins_ref {
+            origins.validate()?;
+        }
         if let Some(preserved) = &self.preserved {
             preserved.validate()?;
         }
@@ -1995,6 +1836,23 @@ impl LocalConversationBinding {
         }
         if self.created_at > self.updated_at {
             return Err("conversation binding has invalid timestamps".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PathOriginsRef {
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+
+impl PathOriginsRef {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_sha256("path origins", &self.sha256)?;
+        if self.size_bytes == 0 || self.size_bytes > 128 * 1024 * 1024 {
+            return Err("path origins exceed their bounded size".to_string());
         }
         Ok(())
     }
@@ -2099,11 +1957,15 @@ impl ConversationBindings {
         Ok(())
     }
 
+    /// `tail_layout_codec` is the adapter-declared codec one provider's
+    /// materialized bindings must carry, resolved by the caller through the
+    /// agent registry; `None` means the provider declares no layout.
     pub fn validate(
         &self,
         identity: &HostIdentity,
         machine: &MachineProjectState,
         config: &SyncConfig,
+        tail_layout_codec: &dyn Fn(&ProviderKey) -> Option<&'static str>,
     ) -> Result<(), String> {
         self.validate_structure()?;
         if self.host_id != identity.host_id {
@@ -2140,14 +2002,9 @@ impl ConversationBindings {
             // portable partition under that provider's local codec; a missing
             // or foreign layout is corruption, never a default.
             if binding.provider_thread_id.is_some() {
-                let expected_layout_codec =
-                    profiles
-                        .get(&binding.provider_profile_id)
-                        .and_then(|profile| match profile.provider.as_str() {
-                            "codex" => Some(PORTABLE_TAIL_CODEC_V1),
-                            "claude" => Some(CLAUDE_PORTABLE_TAIL_CODEC_V1),
-                            _ => None,
-                        });
+                let expected_layout_codec = profiles
+                    .get(&binding.provider_profile_id)
+                    .and_then(|profile| tail_layout_codec(&profile.provider));
                 if let Some(expected_codec) = expected_layout_codec {
                     if binding
                         .root_tail_layout
@@ -2171,73 +2028,10 @@ pub fn fallback_origin_host_label(token: &OriginHostToken) -> String {
     format!("Host {}", token.as_str()[..4].to_ascii_uppercase())
 }
 
-/// Durable phase of a publishing Push operation.  `RecoveryBlockedCorruption`
-/// gates the touched resources for explicit repair; it neither retries nor
-/// releases.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PushJournalPhase {
-    CandidateUploaded,
-    HeadAdvanced,
-    LocalCommitted,
-    Complete,
-    CompleteWithWarnings,
-    AbortedCasLost,
-    RecoveryBlockedCorruption,
-}
-
-impl PushJournalPhase {
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Complete | Self::CompleteWithWarnings | Self::AbortedCasLost
-        )
-    }
-
-    pub fn is_blocked(self) -> bool {
-        self == Self::RecoveryBlockedCorruption
-    }
-}
-
-/// Durable phase of a materializing Pull operation (including keep-both).
-/// Metadata-only Pull actions are journal-free atomic `SyncConfig`
-/// replacements and never appear here.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PullJournalPhase {
-    TargetStaged,
-    ProviderCommitted,
-    LocalCommitted,
-    Complete,
-    CompleteWithWarnings,
-    AbortedPrecommit,
-    AbortedProviderCollision,
-    RecoveryBlockedCorruption,
-}
-
-impl PullJournalPhase {
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Complete
-                | Self::CompleteWithWarnings
-                | Self::AbortedPrecommit
-                | Self::AbortedProviderCollision
-        )
-    }
-
-    pub fn is_blocked(self) -> bool {
-        self == Self::RecoveryBlockedCorruption
-    }
-}
-
-/// A publishing Push: one immutable candidate, one head CAS, and the exact
-/// local after-state to install.  The whole-document before/after states make
-/// recovery a deterministic installation, never a recomputation.
+/// One session in a publishing Push. Local state belongs to the batch.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ConversationPublicationOperation {
-    pub phase: PushJournalPhase,
+pub struct ConversationPublicationApply {
     pub candidate_commit_id: String,
     pub candidate_manifest_sha256: String,
     pub artifact_sha256: String,
@@ -2247,15 +2041,9 @@ pub struct ConversationPublicationOperation {
     pub tail_before: Option<PortableConversationTail>,
     pub tail_after: PortableConversationTail,
     pub planned_relation: TailClassification,
-    pub sync_config_before: SyncConfig,
-    pub sync_config_after: SyncConfig,
-    /// Publishing also commits the binding after-state: a first `CreateCloud`
-    /// creates the binding row with its immutable layout.
-    pub bindings_before: ConversationBindings,
-    pub bindings_after: ConversationBindings,
 }
 
-impl ConversationPublicationOperation {
+impl ConversationPublicationApply {
     fn validate(&self) -> Result<(), String> {
         validate_named_id("conversation candidate commit", &self.candidate_commit_id)?;
         validate_sha256(
@@ -2281,21 +2069,14 @@ impl ConversationPublicationOperation {
                 );
             }
         }
-        self.sync_config_before.validate()?;
-        self.sync_config_after.validate()?;
-        self.bindings_before.validate_structure()?;
-        self.bindings_after.validate_structure()
+        Ok(())
     }
 }
 
-/// The identities of a divergent keep-both binding move, minted at apply and
-/// journaled before any visible mutation.  The full document mutations live
-/// in the operation's before/after states; these fields let recovery assert
-/// it is resuming the same move, and receipts read minted keep-both facts
-/// from here — never from a plan.
+/// Identities for a divergent keep-both move, minted during Apply.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct KeepBothJournal {
+pub struct KeepBothApply {
     pub preserved_thread_id: ThreadId,
     pub remote_provider_thread_id: String,
     pub preserved: PreservedProvenance,
@@ -2303,12 +2084,10 @@ pub struct KeepBothJournal {
 }
 
 /// A materializing Pull: verified cloud objects reconstructed into staged
-/// targets, installed no-clobber, and committed as exact journaled
-/// after-states for bindings and `SyncConfig`.
+/// targets, installed no-clobber, and committed with exact local after-states.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ConversationMaterializationOperation {
-    pub phase: PullJournalPhase,
+pub struct ConversationMaterializationApply {
     pub planned_relation: TailClassification,
     /// The verified cloud tail this operation accepts.
     pub accepted_tail_after: PortableConversationTail,
@@ -2317,14 +2096,14 @@ pub struct ConversationMaterializationOperation {
     pub pinned_lineage_digest: String,
     pub pinned_semantic_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_both: Option<KeepBothJournal>,
-    pub sync_config_before: SyncConfig,
+    pub keep_both: Option<KeepBothApply>,
+    /// The before-state stays in the locked Pull batch.
+    pub expected_config_revision: u64,
     pub sync_config_after: SyncConfig,
-    pub bindings_before: ConversationBindings,
     pub bindings_after: ConversationBindings,
 }
 
-impl ConversationMaterializationOperation {
+impl ConversationMaterializationApply {
     fn validate(&self) -> Result<(), String> {
         if !matches!(
             self.planned_relation,
@@ -2356,15 +2135,12 @@ impl ConversationMaterializationOperation {
                 &keep_both.remote_provider_thread_id,
             )?;
             keep_both.preserved.validate()?;
-            validate_display_text(
+            validate_title(
                 "conversation keep-both preserved title",
                 &keep_both.preserved_display_title,
-                false,
             )?;
         }
-        self.sync_config_before.validate()?;
         self.sync_config_after.validate()?;
-        self.bindings_before.validate_structure()?;
         self.bindings_after.validate_structure()
     }
 }
@@ -2374,14 +2150,14 @@ impl ConversationMaterializationOperation {
 // The operation payloads dwarf a marker enum by design; boxing them would
 // change every construction site for no serialized-contract gain.
 #[allow(clippy::large_enum_variant)]
-pub enum ConversationSyncOperationKind {
-    CloudPublication(ConversationPublicationOperation),
-    ProviderMaterialization(ConversationMaterializationOperation),
+pub enum ConversationApplyKind {
+    CloudPublication(ConversationPublicationApply),
+    ProviderMaterialization(ConversationMaterializationApply),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ConversationJournalTarget {
+pub struct ConversationApplyTarget {
     pub target_path: String,
     pub role: ConversationFileRole,
     pub expected: TargetExpectation,
@@ -2396,48 +2172,38 @@ pub struct ConversationJournalTarget {
     /// `ProviderIndexFragment` targets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub index_rows: Vec<String>,
-    #[serde(default)]
-    pub commit_started: bool,
-    #[serde(default)]
-    pub committed: bool,
 }
 
-impl ConversationJournalTarget {
+impl ConversationApplyTarget {
     fn validate(&self) -> Result<(), String> {
-        validate_absolute_clean_path("conversation journal target", &self.target_path)?;
+        validate_absolute_clean_path("conversation apply target", &self.target_path)?;
         self.expected.validate()?;
         if let Some(path) = &self.staged_path {
-            validate_absolute_clean_path("conversation journal staging path", path)?;
+            validate_absolute_clean_path("conversation apply staging path", path)?;
         }
         if let Some(path) = &self.backup_path {
-            validate_absolute_clean_path("conversation journal backup path", path)?;
+            validate_absolute_clean_path("conversation apply backup path", path)?;
         }
         if let Some(digest) = &self.staged_sha256 {
-            validate_sha256("conversation journal staged target", digest)?;
+            validate_sha256("conversation apply staged target", digest)?;
         }
         if self.staged_path.is_some() != self.staged_sha256.is_some() {
-            return Err("conversation journal staging path and digest must be paired".to_string());
-        }
-        if self.committed && !self.commit_started {
-            return Err(
-                "conversation journal target cannot be committed before commit starts".to_string(),
-            );
+            return Err("conversation apply staging path and digest must be paired".to_string());
         }
         if (self.role == ConversationFileRole::ProviderIndexFragment) == self.index_rows.is_empty()
         {
             return Err(
-                "conversation journal index rows must pair with the index-fragment role"
-                    .to_string(),
+                "conversation apply index rows must pair with the index-fragment role".to_string(),
             );
         }
         if self.index_rows.len() > 8 {
-            return Err("conversation journal target has too many index rows".to_string());
+            return Err("conversation apply target has too many index rows".to_string());
         }
         let mut row_ids = BTreeSet::new();
         for row_id in &self.index_rows {
-            validate_provider_thread_id("conversation journal index row", row_id)?;
+            validate_provider_thread_id("conversation apply index row", row_id)?;
             if !row_ids.insert(row_id) {
-                return Err("conversation journal target repeats an index row".to_string());
+                return Err("conversation apply target repeats an index row".to_string());
             }
         }
         self.role.validate()?;
@@ -2445,9 +2211,7 @@ impl ConversationJournalTarget {
     }
 }
 
-/// The reviewed cloud coordinates a sync operation was planned against.
-/// Present on every operation: metadata-only actions are journal-free, so
-/// every journaled operation touches storage.
+/// Cloud coordinates fixed for one Apply attempt.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationCloudAnchor {
@@ -2460,14 +2224,14 @@ pub struct ConversationCloudAnchor {
 
 impl ConversationCloudAnchor {
     fn validate(&self) -> Result<(), String> {
-        validate_named_id("conversation journal commit", &self.commit_id)?;
-        validate_sha256("conversation journal manifest", &self.manifest_sha256)
+        validate_named_id("conversation apply commit", &self.commit_id)?;
+        validate_sha256("conversation apply manifest", &self.manifest_sha256)
     }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ConversationSyncOperation {
+pub struct ConversationApplyOperation {
     pub operation_id: ConversationOperationId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<PlanId>,
@@ -2480,11 +2244,9 @@ pub struct ConversationSyncOperation {
     pub provider_profile_id: LocalProviderProfileId,
     pub provider: ProviderKey,
     pub thread_id: ThreadId,
-    /// The cloud identity this operation publishes or materializes. Required
-    /// and complete: operations are constructed at apply, after minting, so
-    /// the journal is the durable record of every identity pairing.
+    /// The cloud identity this attempt publishes or materializes.
     pub cloud_thread_id: CloudThreadId,
-    pub operation: ConversationSyncOperationKind,
+    pub operation: ConversationApplyKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
     pub materialization_state: ConversationMaterializationState,
@@ -2495,73 +2257,47 @@ pub struct ConversationSyncOperation {
     pub expected_profile_revision: u64,
     pub expected_project_binding_revision: u64,
     #[serde(default)]
-    pub targets: Vec<ConversationJournalTarget>,
+    pub targets: Vec<ConversationApplyTarget>,
     pub created_at: u64,
     pub updated_at: u64,
 }
 
-impl ConversationSyncOperation {
+impl ConversationApplyOperation {
     pub fn direction(&self) -> ConversationPlanDirection {
         match &self.operation {
-            ConversationSyncOperationKind::CloudPublication(_) => ConversationPlanDirection::Push,
-            ConversationSyncOperationKind::ProviderMaterialization(_) => {
-                ConversationPlanDirection::Pull
-            }
-        }
-    }
-
-    pub fn is_terminal(&self) -> bool {
-        match &self.operation {
-            ConversationSyncOperationKind::CloudPublication(operation) => {
-                operation.phase.is_terminal()
-            }
-            ConversationSyncOperationKind::ProviderMaterialization(operation) => {
-                operation.phase.is_terminal()
-            }
-        }
-    }
-
-    pub fn is_blocked(&self) -> bool {
-        match &self.operation {
-            ConversationSyncOperationKind::CloudPublication(operation) => {
-                operation.phase.is_blocked()
-            }
-            ConversationSyncOperationKind::ProviderMaterialization(operation) => {
-                operation.phase.is_blocked()
-            }
+            ConversationApplyKind::CloudPublication(_) => ConversationPlanDirection::Push,
+            ConversationApplyKind::ProviderMaterialization(_) => ConversationPlanDirection::Pull,
         }
     }
 
     pub fn validate(&self) -> Result<(), String> {
         self.cloud.validate()?;
         if self.plan_action_id.is_some() && self.plan_id.is_none() {
-            return Err("conversation journal action provenance requires a plan id".to_string());
+            return Err("conversation apply action requires an apply id".to_string());
         }
-        if self.created_at > self.updated_at || self.targets.len() > 64 {
-            return Err("invalid conversation journal timestamps or target count".to_string());
+        if self.created_at > self.updated_at || self.targets.len() > MAX_CONVERSATION_FILES {
+            return Err("invalid conversation apply timestamps or target count".to_string());
         }
         if self.provider_thread_id.as_ref().is_some_and(|thread_id| {
             thread_id.is_empty() || thread_id.len() > 128 || thread_id.chars().any(char::is_control)
         }) {
-            return Err("conversation journal has an invalid provider thread id".to_string());
+            return Err("conversation apply has an invalid provider thread id".to_string());
         }
         let requires_provider = matches!(
             self.materialization_state,
             ConversationMaterializationState::Pending | ConversationMaterializationState::Resumable
         );
         if requires_provider != self.provider_thread_id.is_some() {
-            return Err("conversation journal has invalid provider materialization".to_string());
+            return Err("conversation apply has invalid provider materialization".to_string());
         }
         match &self.operation {
-            ConversationSyncOperationKind::CloudPublication(operation) => {
+            ConversationApplyKind::CloudPublication(operation) => {
                 if !self.targets.is_empty() {
-                    return Err(
-                        "conversation publication journal reserves no provider targets".to_string(),
-                    );
+                    return Err("conversation publication reserves no provider targets".to_string());
                 }
                 operation.validate()?;
             }
-            ConversationSyncOperationKind::ProviderMaterialization(operation) => {
+            ConversationApplyKind::ProviderMaterialization(operation) => {
                 operation.validate()?;
                 if let Some(keep_both) = &operation.keep_both {
                     if keep_both.preserved_thread_id == self.thread_id {
@@ -2581,82 +2317,7 @@ impl ConversationSyncOperation {
         for target in &self.targets {
             target.validate()?;
             if !targets.insert(target.target_path.to_lowercase()) {
-                return Err("conversation journal repeats a target".to_string());
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConversationSyncJournal {
-    pub schema: u32,
-    pub revision: u64,
-    #[serde(default)]
-    pub operations: Vec<ConversationSyncOperation>,
-}
-
-impl ConversationSyncJournal {
-    pub fn empty() -> Self {
-        Self {
-            schema: CONVERSATION_SYNC_JOURNAL_SCHEMA,
-            revision: 0,
-            operations: Vec::new(),
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        if self.schema != CONVERSATION_SYNC_JOURNAL_SCHEMA
-            || self.operations.len() > MAX_CONVERSATION_JOURNAL_OPERATIONS
-        {
-            return Err("invalid conversation sync journal".to_string());
-        }
-        let mut ids = BTreeSet::new();
-        let mut local_keys = BTreeSet::new();
-        let mut cloud_keys = BTreeSet::new();
-        let mut plan_actions = BTreeSet::new();
-        for operation in &self.operations {
-            operation.validate()?;
-            if !ids.insert(operation.operation_id.clone()) {
-                return Err(format!(
-                    "duplicate conversation journal operation '{}'",
-                    operation.operation_id
-                ));
-            }
-            // Pending-operation uniqueness, per identity space. The cloud key
-            // is deliberately not provider-qualified: cloud ids are
-            // bundle-global. Together with the plan-action key this closes
-            // the interrupted-retry hole apply-time minting opens — a retried
-            // action mints fresh local identities, but shares its cloud id
-            // and plan action with the journaled first attempt.
-            if !local_keys.insert((
-                operation.local_project_id.clone(),
-                operation.provider.clone(),
-                operation.thread_id.clone(),
-            )) {
-                return Err(format!(
-                    "conversation journal holds two operations for thread '{}'",
-                    operation.thread_id
-                ));
-            }
-            if !cloud_keys.insert((
-                operation.local_project_id.clone(),
-                operation.cloud_thread_id.clone(),
-            )) {
-                return Err(format!(
-                    "conversation journal holds two operations for cloud thread '{}'",
-                    operation.cloud_thread_id
-                ));
-            }
-            if let (Some(plan_id), Some(action_id)) =
-                (&operation.plan_id, &operation.plan_action_id)
-            {
-                if !plan_actions.insert((plan_id.clone(), action_id.clone())) {
-                    return Err(
-                        "conversation journal holds two operations for one plan action".to_string(),
-                    );
-                }
+                return Err("conversation apply repeats a target".to_string());
             }
         }
         Ok(())
@@ -2679,17 +2340,10 @@ pub enum DraftProfileSelection {
     },
 }
 
-/// Which storage a setup draft intends to link.  Pending storage carries the
-/// full (possibly still incomplete) configuration, including credentials, so
-/// drafts require the same private file permissions as the config itself.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-// A pending storage necessarily carries the whole connection form; boxing
-// the draft-only payload buys nothing.
-#[allow(clippy::large_enum_variant)]
-pub enum DraftStorageSelection {
-    Existing { storage_id: StorageId },
-    Pending { storage: StorageConfig },
+#[serde(deny_unknown_fields)]
+pub struct DraftStorageSelection {
+    pub storage_id: StorageId,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -2764,22 +2418,6 @@ impl ProjectSetupDraft {
                 validate_display_text("draft profile name", display_name, true)?;
             }
         }
-        if let Some(DraftStorageSelection::Pending { storage }) = &self.storage {
-            // A draft may hold a half-edited storage; bound the text instead
-            // of demanding completeness.  Finalize runs the strict validation.
-            validate_display_text("draft storage name", &storage.name, true)?;
-            for value in [
-                &storage.bucket,
-                &storage.account_id,
-                &storage.s3_endpoint,
-                &storage.region,
-                &storage.local_dir,
-            ] {
-                if value.len() > 4_096 || value.chars().any(char::is_control) {
-                    return Err("invalid draft storage field".to_string());
-                }
-            }
-        }
         if let DraftRepositoryChoice::Existing {
             display_name,
             repository_fingerprint,
@@ -2803,17 +2441,25 @@ impl ProjectSetupDraft {
     }
 }
 
-/// A resumable, machine-local storage setup draft.  It persists the full
-/// (possibly half-edited) `StorageConfig`, including the secret access key,
-/// so drafts require the same private file permissions as the config itself.
-/// Adapters must redact the secret before a draft crosses any IPC boundary.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StorageSetupDraftSource {
+    New,
+    Edit {
+        storage_id: StorageId,
+        base_digest: String,
+    },
+}
+
+/// A resumable, machine-local storage setup draft. It persists the full
+/// (possibly half-edited) `StorageConfig`, including its secrets, so drafts
+/// require the same private file permissions as the config itself.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct StorageSetupDraft {
     pub schema: u32,
     pub draft_id: StorageSetupDraftId,
-    /// The draft's `storage.id` is inert restore metadata: committing a draft
-    /// goes through the verified upsert, which mints or resolves storage
-    /// identities itself and never trusts this one.
+    pub source: StorageSetupDraftSource,
     pub storage: StorageConfig,
     pub revision: u64,
     pub created_at: u64,
@@ -2829,29 +2475,53 @@ impl StorageSetupDraft {
             ));
         }
         // A draft holds a half-edited form; bound the text instead of
-        // demanding completeness.  The verified upsert runs the strict
-        // validation.  Unlike the project draft's pending storage, the two
-        // credential fields are bounded here too.  Error strings never carry
-        // field values — every draft may hold a secret.
+        // demanding completeness. The adapter's structural validation and
+        // the commit transaction run the strict checks. Error strings never
+        // carry field values — every draft may hold a secret.
         validate_display_text("draft storage name", &self.storage.name, true)?;
-        for value in [
-            &self.storage.bucket,
-            &self.storage.access_key_id,
-            &self.storage.secret_access_key,
-            &self.storage.account_id,
-            &self.storage.s3_endpoint,
-            &self.storage.region,
-            &self.storage.local_dir,
-        ] {
-            if value.len() > 4_096 || value.chars().any(char::is_control) {
-                return Err("invalid storage draft field".to_string());
+        self.storage.provider_config.validate()?;
+        if let StorageSetupDraftSource::Edit {
+            storage_id,
+            base_digest,
+        } = &self.source
+        {
+            if storage_id != &self.storage.id {
+                return Err("storage draft edit target does not match its storage".to_string());
             }
+            validate_sha256("storage draft base digest", base_digest)?;
         }
         if self.created_at > self.updated_at {
             return Err(format!(
                 "storage draft '{}' has invalid timestamps",
                 self.draft_id
             ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_source_target(&self, config: &SyncConfig) -> Result<(), String> {
+        let current = config
+            .storages
+            .iter()
+            .find(|storage| storage.id == self.storage.id);
+        match (&self.source, current) {
+            (StorageSetupDraftSource::New, None) => Ok(()),
+            (StorageSetupDraftSource::Edit { .. }, Some(_)) => Ok(()),
+            _ => Err("storage draft target changed".to_string()),
+        }
+    }
+
+    pub fn validate_source(&self, config: &SyncConfig) -> Result<(), String> {
+        self.validate_source_target(config)?;
+        if let StorageSetupDraftSource::Edit { base_digest, .. } = &self.source {
+            let current = config
+                .storages
+                .iter()
+                .find(|storage| storage.id == self.storage.id)
+                .ok_or_else(|| "storage draft target changed".to_string())?;
+            if current.integrity_digest()? != *base_digest {
+                return Err("storage draft target changed".to_string());
+            }
         }
         Ok(())
     }
@@ -2870,8 +2540,6 @@ pub struct SetupTransaction {
     pub replica_id: ReplicaId,
     #[serde(default)]
     pub profiles: Vec<ProviderProfile>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage: Option<StorageConfig>,
     pub project: LocalProjectRegistration,
     #[serde(default)]
     pub links: Vec<ProjectStorageLink>,
@@ -2888,9 +2556,6 @@ impl SetupTransaction {
         }
         for profile in &self.profiles {
             profile.validate_structure()?;
-        }
-        if let Some(storage) = &self.storage {
-            storage.validate()?;
         }
         self.project.validate()?;
         for link in &self.links {
@@ -3080,6 +2745,34 @@ impl ConversationWirePathMap {
 /// machine's local thread id, and stays the thread's one portable identity
 /// across all storages. The cloud stores no local identity with linkage
 /// semantics.
+/// How a provider declares the path map its wire transcripts need.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathMapDeclaration {
+    /// The transcript carries its own marker; no out-of-band stamp.
+    InBand,
+    /// An out-of-band stamp is required.
+    OutOfBand,
+}
+
+/// The wire grammar a provider's portable tail follows: one of the closed
+/// validation primitives the domain implements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TailWireKind {
+    CodexRollout,
+    ClaudeJsonl,
+    Generic,
+}
+
+/// One provider's adapter-declared conversation wire rules. Resolved by the
+/// caller through the agent registry and passed into domain validation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConversationWireRules {
+    pub requires_redaction_stamp: bool,
+    pub requires_portable_tail: bool,
+    pub path_map: PathMapDeclaration,
+    pub tail_wire: TailWireKind,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationThread {
@@ -3147,7 +2840,7 @@ impl ConversationThread {
     fn validate(&self) -> Result<(), String> {
         self.lineage_status.validate()?;
         if let Some(title) = &self.display_title {
-            validate_display_text("conversation title", title, false)?;
+            validate_title("conversation title", title)?;
         }
         self.presentation.validate()?;
         validate_display_text("conversation lineage codec", &self.lineage_codec, false)?;
@@ -3158,7 +2851,7 @@ impl ConversationThread {
                 self.thread_id, self.resource_id
             ));
         }
-        if self.files.is_empty() || self.files.len() > MAX_FILES {
+        if self.files.is_empty() || self.files.len() > MAX_CONVERSATION_FILES {
             return Err(format!(
                 "conversation thread '{}' has an invalid file inventory",
                 self.thread_id
@@ -3234,66 +2927,24 @@ impl ConversationThread {
         }
         validate_sha256("conversation lineage", &self.lineage_digest)?;
         validate_sha256("conversation semantic", &self.semantic_digest)?;
-        // Wire-form transcripts require a redaction ruleset stamp. A row
-        // without one is unreadable and fails closed.
-        match &self.wire_redaction {
-            Some(stamp) => stamp.validate()?,
-            None => {
-                if matches!(self.provider.as_str(), "codex" | "claude") {
-                    return Err(format!(
-                        "conversation thread '{}' lacks its wire redaction stamp",
-                        self.thread_id
-                    ));
-                }
-            }
+        // Structural checks only: stamps and tails that are present must be
+        // well formed. Whether a provider requires them is that provider's
+        // adapter-declared wire rule, enforced by `validate_wire`.
+        if let Some(stamp) = &self.wire_redaction {
+            stamp.validate()?;
         }
-        // The path-map declaration is out-of-band exactly where no in-band
-        // record exists: required for claude, forbidden everywhere else.
-        match &self.wire_path_map {
-            Some(stamp) => {
-                if self.provider.as_str() != "claude" {
-                    return Err(format!(
-                        "conversation thread '{}' declares an out-of-band path map for a \
-                         provider that declares in-band",
-                        self.thread_id
-                    ));
-                }
-                stamp.validate()?;
-            }
-            None => {
-                if self.provider.as_str() == "claude" {
-                    return Err(format!(
-                        "conversation thread '{}' lacks its wire path-map stamp",
-                        self.thread_id
-                    ));
-                }
-            }
+        if let Some(stamp) = &self.wire_path_map {
+            stamp.validate()?;
         }
-        match &self.portable_tail {
-            Some(tail) => {
-                if self.provider.as_str() == "codex" {
-                    tail.validate_codex_wire()?;
-                } else if self.provider.as_str() == "claude" {
-                    tail.validate_claude_wire()?;
-                } else {
-                    tail.validate()?;
-                }
-                // The accepted tail always ends at the complete canonical
-                // root end.
-                if tail.accepted_end_record_count != self.message_count {
-                    return Err(format!(
-                        "conversation thread '{}' has a portable tail that does not end at its message count",
-                        self.thread_id
-                    ));
-                }
-            }
-            None => {
-                if matches!(self.provider.as_str(), "codex" | "claude") {
-                    return Err(format!(
-                        "conversation thread '{}' requires a portable tail for {}",
-                        self.thread_id, self.provider
-                    ));
-                }
+        if let Some(tail) = &self.portable_tail {
+            tail.validate()?;
+            // The accepted tail always ends at the complete canonical
+            // root end.
+            if tail.accepted_end_record_count != self.message_count {
+                return Err(format!(
+                    "conversation thread '{}' has a portable tail that does not end at its message count",
+                    self.thread_id
+                ));
             }
         }
         if self.forked_from.as_ref() == Some(&self.thread_id) {
@@ -3302,6 +2953,55 @@ impl ConversationThread {
                 self.thread_id
             ));
         }
+        self.validate_fork_and_source_metadata()
+    }
+
+    /// Enforce one provider's adapter-declared wire rules on this thread:
+    /// which stamps it must carry, how its path map is declared, and which
+    /// wire grammar its portable tail follows. Callers resolve the rules
+    /// through the registry; the domain never chooses them by provider name.
+    pub fn validate_wire(&self, rules: &ConversationWireRules) -> Result<(), String> {
+        if rules.requires_redaction_stamp && self.wire_redaction.is_none() {
+            return Err(format!(
+                "conversation thread '{}' lacks its wire redaction stamp",
+                self.thread_id
+            ));
+        }
+        match (rules.path_map, &self.wire_path_map) {
+            (PathMapDeclaration::InBand, Some(_)) => {
+                return Err(format!(
+                    "conversation thread '{}' declares an out-of-band path map for a \
+                     provider that declares in-band",
+                    self.thread_id
+                ));
+            }
+            (PathMapDeclaration::OutOfBand, None) => {
+                return Err(format!(
+                    "conversation thread '{}' lacks its wire path-map stamp",
+                    self.thread_id
+                ));
+            }
+            _ => {}
+        }
+        match &self.portable_tail {
+            Some(tail) => match rules.tail_wire {
+                TailWireKind::CodexRollout => tail.validate_codex_wire()?,
+                TailWireKind::ClaudeJsonl => tail.validate_claude_wire()?,
+                TailWireKind::Generic => tail.validate()?,
+            },
+            None => {
+                if rules.requires_portable_tail {
+                    return Err(format!(
+                        "conversation thread '{}' requires a portable tail for {}",
+                        self.thread_id, self.provider
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_fork_and_source_metadata(&self) -> Result<(), String> {
         if let Some(preserved) = &self.preserved {
             preserved.validate_for_cloud_row(&self.thread_id)?;
         }
@@ -3436,13 +3136,10 @@ pub enum ConversationBlocker {
     /// binary does not carry: neither direction may re-encode or decode the
     /// wire until the binaries align.
     PathMapCodecMismatch,
-    /// This push was full with newer local conversations before this one's
-    /// turn: it was not captured, so no push action can pin it. A later push
-    /// review recomputes from scratch; nothing is remembered.
-    CaptureBudget,
-    /// The conversation's files exceed what one push capture may carry, so
-    /// no push can ever include it. It is unsyncable until it shrinks.
-    TooLarge,
+    /// The local session could not be read or parsed for review. The row
+    /// stays visible with the read error; every other thread reviews
+    /// normally, and this one reviews again once its source reads cleanly.
+    ObservationFailed,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -3583,7 +3280,7 @@ pub struct ConversationTargetPins {
 impl ConversationTargetPins {
     fn validate(&self) -> Result<(), String> {
         self.local.validate()?;
-        if self.provider_state.len() > 64 {
+        if self.provider_state.len() > MAX_CONVERSATION_FILES {
             return Err("conversation plan has too many provider targets".to_string());
         }
         let mut paths = BTreeSet::new();
@@ -3621,7 +3318,7 @@ impl ConversationActionPins {
 /// relations and pins evidence, but assigns no new identity of any kind — no
 /// cloud thread id, no local thread id, no provider session id, no keep-both
 /// preserved identity or marker title. Every fresh identity is minted at
-/// apply, immediately before journaling; any conflict there fails the action.
+/// Apply; any conflict there fails the action.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationPlanAction {
@@ -3690,10 +3387,10 @@ impl ConversationPlanAction {
     }
 }
 
-/// Small immutable Pull-review row. `action_id` is present exactly when the
-/// row projects an executable action stored in `conversation_actions`. The
-/// id pair mirrors the action's: `thread_id` is `None` for cloud-only rows,
-/// `cloud_thread_id` is `None` for local-only rows; at least one is present.
+/// Small Pull comparison row. `action_id` is a selection token when the row
+/// can become an executable action during Apply. The id pair mirrors the
+/// compared task: `thread_id` is `None` for storage-only rows and
+/// `cloud_thread_id` is `None` for local-only rows.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationReviewRow {
@@ -3734,106 +3431,7 @@ impl ConversationReviewRow {
         // Rejects Some("") too, which is what keeps "untitled" a single
         // state on the wire: absent, never an empty string.
         if let Some(title) = &self.display_title {
-            validate_display_text("conversation review title", title, false)?;
-        }
-        Ok(())
-    }
-}
-/// A reviewed multi-provider Push plan. Provider and profile pins live on
-/// every action, never at the top level, so one plan can carry actions for
-/// several providers with independent profile revisions.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConversationPushPlan {
-    pub schema_version: u32,
-    pub plan_id: PlanId,
-    pub storage_id: StorageId,
-    pub bundle_id: BundleId,
-    pub host_id: HostId,
-    pub replica_id: ReplicaId,
-    pub local_project_id: LocalProjectId,
-    pub expected_host_identity_revision: u64,
-    pub expected_project_binding_revision: u64,
-    pub expected_bindings_document_revision: u64,
-    pub revision: u64,
-    pub commit_id: String,
-    pub manifest_sha256: String,
-    pub created_at: u64,
-    pub expires_at: u64,
-    #[serde(default)]
-    pub actions: Vec<ConversationPlanAction>,
-}
-
-impl ConversationPushPlan {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != PUSH_PLAN_SCHEMA {
-            return Err(format!(
-                "unsupported conversation push-plan schema {}",
-                self.schema_version
-            ));
-        }
-        validate_bundle_head_pin(self.revision, &self.commit_id, &self.manifest_sha256)?;
-        if self.created_at > self.expires_at || self.actions.len() > MAX_ACTIONS {
-            return Err("invalid conversation push-plan lifetime or action count".to_string());
-        }
-        let mut action_ids = BTreeSet::new();
-        let mut claimed_cloud_ids = BTreeSet::new();
-        let mut provider_scope_pins: BTreeMap<ProviderKey, (u64, String)> = BTreeMap::new();
-        for action in &self.actions {
-            action.validate()?;
-            if !matches!(
-                action.action,
-                ConversationPlanActionType::Publish | ConversationPlanActionType::CreateCloud
-            ) || action.pins.context.host_id != self.host_id
-                || action.pins.context.replica_id != self.replica_id
-                || action.pins.context.local_project_id != self.local_project_id
-                || action.pins.revision.bundle_revision != self.revision
-                || action.pins.revision.commit_id != self.commit_id
-                || action.pins.revision.manifest_sha256 != self.manifest_sha256
-                || action.pins.context.host_identity_revision
-                    != self.expected_host_identity_revision
-                || action.pins.context.bindings_document_revision
-                    != self.expected_bindings_document_revision
-                || action.pins.context.project_binding_revision
-                    != self.expected_project_binding_revision
-                || action.pins.expires_at != self.expires_at
-            {
-                return Err("conversation push-plan action pins disagree with the plan".to_string());
-            }
-            // Push actions always operate on a registered local thread; the
-            // action-level matrix leaves `None` to CreateLocal only, so this
-            // is a defensive restatement for the push document.
-            if action.thread_id.is_none() {
-                return Err("conversation push-plan action lacks its local thread id".to_string());
-            }
-            if let Some(cloud_thread_id) = &action.cloud_thread_id {
-                if !claimed_cloud_ids.insert((action.provider.clone(), cloud_thread_id.clone())) {
-                    return Err("conversation push-plan claims one cloud thread twice".to_string());
-                }
-            }
-            let scope_pin = (
-                action.pins.revision.scope_revision,
-                action.pins.revision.scope_sha256.clone(),
-            );
-            if let Some(previous) = provider_scope_pins.insert(action.provider.clone(), scope_pin) {
-                if previous
-                    != (
-                        action.pins.revision.scope_revision,
-                        action.pins.revision.scope_sha256.clone(),
-                    )
-                {
-                    return Err(format!(
-                        "conversation push-plan pins two scope states for provider '{}'",
-                        action.provider
-                    ));
-                }
-            }
-            if !action_ids.insert(action.action_id.clone()) {
-                return Err(format!(
-                    "duplicate conversation push action '{}'",
-                    action.action_id
-                ));
-            }
+            validate_title("conversation review title", title)?;
         }
         Ok(())
     }
@@ -4130,64 +3728,61 @@ impl BundleFileEntry {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TombstoneTarget {
-    Resource {
-        resource_id: ResourceId,
-    },
-    File {
-        resource_id: ResourceId,
-        logical_path: LogicalPath,
-    },
-    ProjectContentFile {
-        resource_id: ResourceId,
-        logical_path: LogicalPath,
-    },
-    ProjectContentDirectory {
-        resource_id: ResourceId,
-        logical_path: LogicalPath,
-    },
-    ConversationThread {
-        thread_id: CloudThreadId,
-    },
-}
-
+/// One deletion record. Its target is an open versioned envelope; the map
+/// key a scope holds it under is derived at load time from the envelope and
+/// never persisted.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Tombstone {
-    pub target: TombstoneTarget,
+    pub target: TombstoneTargetEnvelope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_sha256: Option<String>,
     pub deleted_at: u64,
 }
 
 impl Tombstone {
-    pub fn canonical_key(&self) -> String {
-        match &self.target {
-            TombstoneTarget::Resource { resource_id } => format!("resource:{}", resource_id),
-            TombstoneTarget::File {
-                resource_id,
-                logical_path,
-            } => format!("file:{}:{}", resource_id, logical_path),
-            TombstoneTarget::ProjectContentFile {
-                resource_id,
-                logical_path,
-            } => format!("project-content-file:{}:{}", resource_id, logical_path),
-            TombstoneTarget::ProjectContentDirectory {
-                resource_id,
-                logical_path,
-            } => format!("project-content-dir:{}:{}", resource_id, logical_path),
-            TombstoneTarget::ConversationThread { thread_id } => {
-                format!("conversation-thread:{}", thread_id)
-            }
-        }
+    /// The load-time map key: target kind, version, and canonical identity.
+    pub fn structural_key(&self) -> String {
+        self.target.structural_key()
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.target.validate()?;
         if let Some(digest) = &self.last_sha256 {
             validate_sha256("tombstone digest", digest)?;
         }
         Ok(())
+    }
+}
+
+/// Tombstones travel as a list ordered by structural key; the in-memory map
+/// is rebuilt from that list on load so no derived key is ever persisted.
+mod tombstone_wire {
+    use super::Tombstone;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S: Serializer>(
+        map: &BTreeMap<String, Tombstone>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        map.values().collect::<Vec<_>>().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<String, Tombstone>, D::Error> {
+        let list = Vec::<Tombstone>::deserialize(deserializer)?;
+        let mut map = BTreeMap::new();
+        for tombstone in list {
+            let key = tombstone.structural_key();
+            if map.insert(key.clone(), tombstone).is_some() {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate tombstone '{}'",
+                    key
+                )));
+            }
+        }
+        Ok(map)
     }
 }
 
@@ -4250,7 +3845,8 @@ pub struct BundleScope {
     pub files: BTreeMap<LogicalPath, BundleFileEntry>,
     #[serde(default)]
     pub directories: BTreeMap<LogicalPath, BundleDirectoryEntry>,
-    #[serde(default)]
+    /// Keyed by [`Tombstone::structural_key`], derived on load.
+    #[serde(default, with = "tombstone_wire")]
     pub tombstones: BTreeMap<String, Tombstone>,
 }
 
@@ -4268,7 +3864,7 @@ struct BundleScopeDigestView<'a> {
     resources: &'a BTreeMap<ResourceId, ResourceDescriptor>,
     files: &'a BTreeMap<LogicalPath, BundleFileEntry>,
     directories: &'a BTreeMap<LogicalPath, BundleDirectoryEntry>,
-    tombstones: &'a BTreeMap<String, Tombstone>,
+    tombstones: Vec<&'a Tombstone>,
 }
 
 impl BundleScope {
@@ -4310,7 +3906,7 @@ impl BundleScope {
             resources: &self.resources,
             files: &self.files,
             directories: &self.directories,
-            tombstones: &self.tombstones,
+            tombstones: self.tombstones.values().collect(),
         };
         let bytes = serde_json::to_vec(&view)
             .map_err(|error| format!("encode scope '{}' digest view: {}", scope, error))?;
@@ -4349,59 +3945,44 @@ impl BundleScope {
                 scope
             ));
         }
+        for (id, descriptor) in &self.resources {
+            // A recipe cannot upgrade or replace the policy the registered
+            // resource contract selected.
+            if let Some(entry) = self.recipe.entries.get(id) {
+                if entry.apply_policy != descriptor.apply_policy {
+                    return Err(format!(
+                        "recipe policy for '{}' differs from its resource policy",
+                        id
+                    ));
+                }
+            }
+        }
+        for (key, tombstone) in &self.tombstones {
+            tombstone.validate()?;
+            if key != &tombstone.structural_key() {
+                return Err(format!("non-canonical tombstone key '{}'", key));
+            }
+        }
         match scope {
-            SyncScopeKey::Project => self.validate_project_scope(),
-            SyncScopeKey::Provider(provider) => self.validate_provider_scope(provider),
+            SyncScopeKey::Project => self.validate_project_structure(),
+            SyncScopeKey::Provider(provider) => self.validate_provider_structure(provider),
         }
     }
 
-    fn validate_project_scope(&self) -> Result<(), String> {
+    /// Scope-shape rules that need no contract registry: which namespaces a
+    /// scope may hold, that every entry names a live resource, and that the
+    /// conversation graph is well formed.
+    fn validate_project_structure(&self) -> Result<(), String> {
         if !self.conversations.is_empty() {
             return Err("project scope cannot contain conversations".to_string());
         }
-        for descriptor in self.resources.values() {
-            if !matches!(
-                descriptor.kind,
-                ResourceKind::ProjectContentFile
-                    | ResourceKind::ProjectContentDirectory
-                    | ResourceKind::Requirement
-            ) {
-                return Err(format!(
-                    "project scope cannot hold {:?} resource '{}'",
-                    descriptor.kind, descriptor.resource_id
-                ));
-            }
-        }
-        let mut file_owners = BTreeMap::<ResourceId, usize>::new();
-        let mut directory_owners = BTreeMap::<ResourceId, usize>::new();
-        let mut project_content_bytes = 0_u64;
         for (path, entry) in &self.directories {
             entry.validate()?;
-            let descriptor = self.resources.get(&entry.resource_id).ok_or_else(|| {
-                format!(
+            if !self.resources.contains_key(&entry.resource_id) {
+                return Err(format!(
                     "directory '{}' references missing resource '{}'",
                     path, entry.resource_id
-                )
-            })?;
-            if descriptor.kind != ResourceKind::ProjectContentDirectory {
-                return Err(format!(
-                    "directory '{}' is owned by non-directory resource '{}'",
-                    path, entry.resource_id
                 ));
-            }
-            validate_project_content_descriptor_identity(descriptor, path, "dir")?;
-            *directory_owners
-                .entry(entry.resource_id.clone())
-                .or_default() += 1;
-            let components = path.as_str().split('/').collect::<Vec<_>>();
-            for end in 2..components.len() {
-                let ancestor = LogicalPath::parse(components[..end].join("/"))?;
-                if !self.directories.contains_key(&ancestor) {
-                    return Err(format!(
-                        "project-content directory '{}' lacks directory entry '{}'",
-                        path, ancestor
-                    ));
-                }
             }
         }
         for (path, entry) in &self.files {
@@ -4412,171 +3993,17 @@ impl BundleScope {
                     path
                 ));
             }
-            let descriptor = self.resources.get(&entry.resource_id).ok_or_else(|| {
-                format!(
+            if !self.resources.contains_key(&entry.resource_id) {
+                return Err(format!(
                     "file '{}' references missing resource '{}'",
                     path, entry.resource_id
-                )
-            })?;
-            *file_owners.entry(entry.resource_id.clone()).or_default() += 1;
-            if descriptor.kind == ResourceKind::ProjectContentFile {
-                validate_project_content_descriptor_identity(descriptor, path, "file")?;
-                if entry.size > MAX_PROJECT_CONTENT_FILE_BYTES {
-                    return Err(format!(
-                        "project-content file '{}' exceeds {} bytes",
-                        path, MAX_PROJECT_CONTENT_FILE_BYTES
-                    ));
-                }
-                project_content_bytes = project_content_bytes
-                    .checked_add(entry.size)
-                    .ok_or_else(|| "project-content byte total overflow".to_string())?;
-                if project_content_bytes > MAX_PROJECT_CONTENT_TOTAL_BYTES {
-                    return Err(format!(
-                        "project content exceeds {} bytes",
-                        MAX_PROJECT_CONTENT_TOTAL_BYTES
-                    ));
-                }
-                let components = path.as_str().split('/').collect::<Vec<_>>();
-                for end in 2..components.len() {
-                    let ancestor = LogicalPath::parse(components[..end].join("/"))?;
-                    if !self.directories.contains_key(&ancestor) {
-                        return Err(format!(
-                            "project-content file '{}' lacks directory entry '{}'",
-                            path, ancestor
-                        ));
-                    }
-                }
-            }
-        }
-        for (resource_id, descriptor) in &self.resources {
-            let file_count = file_owners.get(resource_id).copied().unwrap_or_default();
-            let directory_count = directory_owners
-                .get(resource_id)
-                .copied()
-                .unwrap_or_default();
-            match descriptor.kind {
-                ResourceKind::ProjectContentFile if file_count != 1 || directory_count != 0 => {
-                    return Err(format!(
-                        "project-content file resource '{}' must own exactly one file",
-                        resource_id
-                    ));
-                }
-                ResourceKind::ProjectContentDirectory
-                    if directory_count != 1 || file_count != 0 =>
-                {
-                    return Err(format!(
-                        "project-content directory resource '{}' must own exactly one directory",
-                        resource_id
-                    ));
-                }
-                _ => {}
-            }
-        }
-        for (key, tombstone) in &self.tombstones {
-            tombstone.validate()?;
-            if key != &tombstone.canonical_key() {
-                return Err(format!("non-canonical tombstone key '{}'", key));
-            }
-            match &tombstone.target {
-                TombstoneTarget::Resource { resource_id } => {
-                    if self.resources.contains_key(resource_id) {
-                        return Err(format!(
-                            "live resource '{}' also has a tombstone",
-                            resource_id
-                        ));
-                    }
-                }
-                TombstoneTarget::File {
-                    resource_id,
-                    logical_path,
-                } => {
-                    if self.files.contains_key(logical_path) {
-                        return Err(format!("live file '{}' also has a tombstone", logical_path));
-                    }
-                    if logical_path.as_str().starts_with("state/") {
-                        return Err(format!(
-                            "project scope cannot tombstone provider file '{}'",
-                            logical_path
-                        ));
-                    }
-                    if self.resources.contains_key(resource_id)
-                        && !self.recipe.entries.contains_key(resource_id)
-                    {
-                        return Err(format!("invalid file tombstone resource '{}'", resource_id));
-                    }
-                }
-                TombstoneTarget::ProjectContentFile {
-                    resource_id,
-                    logical_path,
-                } => {
-                    if self.files.contains_key(logical_path) {
-                        return Err(format!(
-                            "live project-content file '{}' also has a tombstone",
-                            logical_path
-                        ));
-                    }
-                    let (_, expected_id) = project_content_identity("file", logical_path)?;
-                    if resource_id != &expected_id {
-                        return Err(format!(
-                            "project-content file tombstone resource '{}' does not match '{}'",
-                            resource_id, logical_path
-                        ));
-                    }
-                    if self.resources.contains_key(resource_id) {
-                        return Err(format!(
-                            "live resource '{}' also has a project-content tombstone",
-                            resource_id
-                        ));
-                    }
-                    if tombstone.last_sha256.is_none() {
-                        return Err(format!(
-                            "project-content file tombstone '{}' lacks its last digest",
-                            logical_path
-                        ));
-                    }
-                }
-                TombstoneTarget::ProjectContentDirectory {
-                    resource_id,
-                    logical_path,
-                } => {
-                    if self.directories.contains_key(logical_path) {
-                        return Err(format!(
-                            "live project-content directory '{}' also has a tombstone",
-                            logical_path
-                        ));
-                    }
-                    let (_, expected_id) = project_content_identity("dir", logical_path)?;
-                    if resource_id != &expected_id {
-                        return Err(format!(
-                            "project-content directory tombstone resource '{}' does not match '{}'",
-                            resource_id, logical_path
-                        ));
-                    }
-                    if self.resources.contains_key(resource_id) {
-                        return Err(format!(
-                            "live resource '{}' also has a project-content tombstone",
-                            resource_id
-                        ));
-                    }
-                    if tombstone.last_sha256.is_some() {
-                        return Err(format!(
-                            "project-content directory tombstone '{}' cannot have a digest",
-                            logical_path
-                        ));
-                    }
-                }
-                TombstoneTarget::ConversationThread { thread_id } => {
-                    return Err(format!(
-                        "project scope cannot tombstone conversation thread '{}'",
-                        thread_id
-                    ));
-                }
+                ));
             }
         }
         Ok(())
     }
 
-    fn validate_provider_scope(&self, provider: &ProviderKey) -> Result<(), String> {
+    fn validate_provider_structure(&self, provider: &ProviderKey) -> Result<(), String> {
         if !self.directories.is_empty() {
             return Err(format!(
                 "provider scope '{}' cannot contain directory entries",
@@ -4590,15 +4017,6 @@ impl BundleScope {
                 return Err(format!(
                     "provider scope '{}' cannot hold resource '{}' of another provider",
                     provider, descriptor.resource_id
-                ));
-            }
-            if !matches!(
-                descriptor.kind,
-                ResourceKind::Conversation | ResourceKind::ProviderState
-            ) {
-                return Err(format!(
-                    "provider scope '{}' cannot hold {:?} resource '{}'",
-                    provider, descriptor.kind, descriptor.resource_id
                 ));
             }
         }
@@ -4630,9 +4048,7 @@ impl BundleScope {
                     thread_id, thread.resource_id
                 )
             })?;
-            if descriptor.kind != ResourceKind::Conversation
-                || descriptor.provider.as_ref() != Some(provider)
-            {
+            if descriptor.provider.as_ref() != Some(provider) {
                 return Err(format!(
                     "conversation thread '{}' disagrees with its resource provider",
                     thread_id
@@ -4684,16 +4100,6 @@ impl BundleScope {
                 }
             }
         }
-        for (resource_id, descriptor) in &self.resources {
-            if descriptor.kind == ResourceKind::Conversation
-                && !thread_resources.contains(resource_id)
-            {
-                return Err(format!(
-                    "conversation resource '{}' belongs to no live thread",
-                    resource_id
-                ));
-            }
-        }
         for (path, entry) in &self.files {
             entry.validate()?;
             let in_conversations = path.as_str().starts_with(&conversation_prefix);
@@ -4704,35 +4110,10 @@ impl BundleScope {
                     provider, path
                 ));
             }
-            let descriptor = self.resources.get(&entry.resource_id).ok_or_else(|| {
-                format!(
+            if !self.resources.contains_key(&entry.resource_id) {
+                return Err(format!(
                     "file '{}' references missing resource '{}'",
                     path, entry.resource_id
-                )
-            })?;
-            if in_state && descriptor.kind != ResourceKind::ProviderState {
-                return Err(format!(
-                    "provider-state file '{}' must be owned by a provider-state resource",
-                    path
-                ));
-            }
-            if in_conversations && descriptor.kind != ResourceKind::Conversation {
-                return Err(format!(
-                    "conversation-namespace file '{}' must be owned by a conversation resource",
-                    path
-                ));
-            }
-        }
-        for (resource_id, descriptor) in &self.resources {
-            if descriptor.kind == ResourceKind::ProviderState
-                && !self
-                    .files
-                    .values()
-                    .any(|entry| &entry.resource_id == resource_id)
-            {
-                return Err(format!(
-                    "provider-state resource '{}' owns no files",
-                    resource_id
                 ));
             }
         }
@@ -4754,13 +4135,197 @@ impl BundleScope {
                 cursor = parent;
             }
         }
-        for (key, tombstone) in &self.tombstones {
-            tombstone.validate()?;
-            if key != &tombstone.canonical_key() {
-                return Err(format!("non-canonical tombstone key '{}'", key));
+        Ok(())
+    }
+
+    /// Registry validation: resolve every contract coordinate in this scope
+    /// through `resolver` and enforce the rules the resolved primitives
+    /// imply. An unregistered coordinate fails the whole scope, which keeps
+    /// the scope preserved and inert without touching any other scope.
+    pub fn resolve(
+        &self,
+        scope: &SyncScopeKey,
+        resolver: &dyn PortableContractResolver,
+    ) -> Result<ResolvedScope, String> {
+        let mut resolved = ResolvedScope::default();
+        for (id, descriptor) in &self.resources {
+            let kind = resolver
+                .resolve_resource_kind(&descriptor.kind, &descriptor.attributes)
+                .map_err(|error| format!("resource '{}' attributes: {}", id, error))?
+                .ok_or_else(|| {
+                    format!(
+                        "resource '{}' uses resource kind '{}', which this build does not register",
+                        id, descriptor.kind
+                    )
+                })?;
+            let policy = resolver
+                .apply_policy(&descriptor.apply_policy)
+                .ok_or_else(|| {
+                    format!(
+                        "resource '{}' uses apply policy '{}', which this build does not register",
+                        id, descriptor.apply_policy
+                    )
+                })?;
+            let provenance = resolver
+                .provenance(&descriptor.provenance)
+                .map_err(|error| format!("resource '{}' provenance: {}", id, error))?
+                .ok_or_else(|| {
+                    format!(
+                        "resource '{}' uses provenance kind '{}@{}', which this build does not register",
+                        id, descriptor.provenance.kind, descriptor.provenance.version
+                    )
+                })?;
+            if kind.requires_provider() != descriptor.provider.is_some() {
+                return Err(format!(
+                    "resource '{}' provider does not match its kind",
+                    id
+                ));
             }
-            match &tombstone.target {
-                TombstoneTarget::Resource { resource_id } => {
+            if policy == ApplyPolicyPrimitive::Never && self.recipe.entries.contains_key(id) {
+                return Err(format!("recipe cannot select Never resource '{}'", id));
+            }
+            resolved.kinds.insert(id.clone(), kind);
+            resolved.policies.insert(id.clone(), policy);
+            resolved.provenance.insert(id.clone(), provenance);
+        }
+        for (key, tombstone) in &self.tombstones {
+            let target = resolver
+                .tombstone_target(&tombstone.target)
+                .map_err(|error| format!("tombstone '{}': {}", key, error))?
+                .ok_or_else(|| {
+                    format!(
+                        "tombstone '{}' uses target kind '{}@{}', which this build does not register",
+                        key, tombstone.target.kind, tombstone.target.version
+                    )
+                })?;
+            resolved.tombstones.insert(key.clone(), target);
+        }
+        match scope {
+            SyncScopeKey::Project => self.resolve_project_scope(&resolved)?,
+            SyncScopeKey::Provider(provider) => {
+                resolved.wire_rules = resolver.conversation_wire_rules(provider);
+                self.resolve_provider_scope(provider, &resolved)?
+            }
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_project_scope(&self, resolved: &ResolvedScope) -> Result<(), String> {
+        for (id, kind) in &resolved.kinds {
+            if !matches!(
+                kind,
+                ResourceKindPrimitive::ProjectContentFile
+                    | ResourceKindPrimitive::ProjectContentDirectory
+                    | ResourceKindPrimitive::Requirement
+            ) {
+                return Err(format!(
+                    "project scope cannot hold {:?} resource '{}'",
+                    kind, id
+                ));
+            }
+        }
+        let mut file_owners = BTreeMap::<ResourceId, usize>::new();
+        let mut directory_owners = BTreeMap::<ResourceId, usize>::new();
+        let mut project_content_bytes = 0_u64;
+        for (path, entry) in &self.directories {
+            let descriptor = &self.resources[&entry.resource_id];
+            if resolved.kind(&entry.resource_id)
+                != Some(ResourceKindPrimitive::ProjectContentDirectory)
+            {
+                return Err(format!(
+                    "directory '{}' is owned by non-directory resource '{}'",
+                    path, entry.resource_id
+                ));
+            }
+            validate_project_content_descriptor_identity(
+                descriptor,
+                resolved.provenance_of(&entry.resource_id)?,
+                resolved.policy_of(&entry.resource_id)?,
+                path,
+                "dir",
+            )?;
+            *directory_owners
+                .entry(entry.resource_id.clone())
+                .or_default() += 1;
+            let components = path.as_str().split('/').collect::<Vec<_>>();
+            for end in 2..components.len() {
+                let ancestor = LogicalPath::parse(components[..end].join("/"))?;
+                if !self.directories.contains_key(&ancestor) {
+                    return Err(format!(
+                        "project-content directory '{}' lacks directory entry '{}'",
+                        path, ancestor
+                    ));
+                }
+            }
+        }
+        for (path, entry) in &self.files {
+            let descriptor = &self.resources[&entry.resource_id];
+            *file_owners.entry(entry.resource_id.clone()).or_default() += 1;
+            if resolved.kind(&entry.resource_id) == Some(ResourceKindPrimitive::ProjectContentFile)
+            {
+                validate_project_content_descriptor_identity(
+                    descriptor,
+                    resolved.provenance_of(&entry.resource_id)?,
+                    resolved.policy_of(&entry.resource_id)?,
+                    path,
+                    "file",
+                )?;
+                if entry.size > MAX_PROJECT_CONTENT_FILE_BYTES {
+                    return Err(format!(
+                        "project-content file '{}' exceeds {} bytes",
+                        path, MAX_PROJECT_CONTENT_FILE_BYTES
+                    ));
+                }
+                project_content_bytes = project_content_bytes
+                    .checked_add(entry.size)
+                    .ok_or_else(|| "project-content byte total overflow".to_string())?;
+                if project_content_bytes > MAX_PROJECT_CONTENT_TOTAL_BYTES {
+                    return Err(format!(
+                        "project content exceeds {} bytes",
+                        MAX_PROJECT_CONTENT_TOTAL_BYTES
+                    ));
+                }
+                let components = path.as_str().split('/').collect::<Vec<_>>();
+                for end in 2..components.len() {
+                    let ancestor = LogicalPath::parse(components[..end].join("/"))?;
+                    if !self.directories.contains_key(&ancestor) {
+                        return Err(format!(
+                            "project-content file '{}' lacks directory entry '{}'",
+                            path, ancestor
+                        ));
+                    }
+                }
+            }
+        }
+        for (resource_id, kind) in &resolved.kinds {
+            let file_count = file_owners.get(resource_id).copied().unwrap_or_default();
+            let directory_count = directory_owners
+                .get(resource_id)
+                .copied()
+                .unwrap_or_default();
+            match kind {
+                ResourceKindPrimitive::ProjectContentFile
+                    if file_count != 1 || directory_count != 0 =>
+                {
+                    return Err(format!(
+                        "project-content file resource '{}' must own exactly one file",
+                        resource_id
+                    ));
+                }
+                ResourceKindPrimitive::ProjectContentDirectory
+                    if directory_count != 1 || file_count != 0 =>
+                {
+                    return Err(format!(
+                        "project-content directory resource '{}' must own exactly one directory",
+                        resource_id
+                    ));
+                }
+                _ => {}
+            }
+        }
+        for (key, tombstone) in &self.tombstones {
+            match &resolved.tombstones[key] {
+                TombstoneTargetPrimitive::Resource { resource_id } => {
                     if self.resources.contains_key(resource_id) {
                         return Err(format!(
                             "live resource '{}' also has a tombstone",
@@ -4768,7 +4333,178 @@ impl BundleScope {
                         ));
                     }
                 }
-                TombstoneTarget::File {
+                TombstoneTargetPrimitive::File {
+                    resource_id,
+                    logical_path,
+                } => {
+                    if self.files.contains_key(logical_path) {
+                        return Err(format!("live file '{}' also has a tombstone", logical_path));
+                    }
+                    if logical_path.as_str().starts_with("state/") {
+                        return Err(format!(
+                            "project scope cannot tombstone provider file '{}'",
+                            logical_path
+                        ));
+                    }
+                    if self.resources.contains_key(resource_id)
+                        && !self.recipe.entries.contains_key(resource_id)
+                    {
+                        return Err(format!("invalid file tombstone resource '{}'", resource_id));
+                    }
+                }
+                TombstoneTargetPrimitive::ProjectContentFile {
+                    resource_id,
+                    logical_path,
+                } => {
+                    if self.files.contains_key(logical_path) {
+                        return Err(format!(
+                            "live project-content file '{}' also has a tombstone",
+                            logical_path
+                        ));
+                    }
+                    let (_, expected_id) = project_content_identity("file", logical_path)?;
+                    if resource_id != &expected_id {
+                        return Err(format!(
+                            "project-content file tombstone resource '{}' does not match '{}'",
+                            resource_id, logical_path
+                        ));
+                    }
+                    if self.resources.contains_key(resource_id) {
+                        return Err(format!(
+                            "live resource '{}' also has a project-content tombstone",
+                            resource_id
+                        ));
+                    }
+                    if tombstone.last_sha256.is_none() {
+                        return Err(format!(
+                            "project-content file tombstone '{}' lacks its last digest",
+                            logical_path
+                        ));
+                    }
+                }
+                TombstoneTargetPrimitive::ProjectContentDirectory {
+                    resource_id,
+                    logical_path,
+                } => {
+                    if self.directories.contains_key(logical_path) {
+                        return Err(format!(
+                            "live project-content directory '{}' also has a tombstone",
+                            logical_path
+                        ));
+                    }
+                    let (_, expected_id) = project_content_identity("dir", logical_path)?;
+                    if resource_id != &expected_id {
+                        return Err(format!(
+                            "project-content directory tombstone resource '{}' does not match '{}'",
+                            resource_id, logical_path
+                        ));
+                    }
+                    if self.resources.contains_key(resource_id) {
+                        return Err(format!(
+                            "live resource '{}' also has a project-content tombstone",
+                            resource_id
+                        ));
+                    }
+                    if tombstone.last_sha256.is_some() {
+                        return Err(format!(
+                            "project-content directory tombstone '{}' cannot have a digest",
+                            logical_path
+                        ));
+                    }
+                }
+                TombstoneTargetPrimitive::ConversationThread { thread_id } => {
+                    return Err(format!(
+                        "project scope cannot tombstone conversation thread '{}'",
+                        thread_id
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_provider_scope(
+        &self,
+        provider: &ProviderKey,
+        resolved: &ResolvedScope,
+    ) -> Result<(), String> {
+        let conversation_prefix = format!("state/conversations/{}/", provider);
+        let state_prefix = provider_state_path_prefix(provider);
+        for (id, kind) in &resolved.kinds {
+            if !matches!(
+                kind,
+                ResourceKindPrimitive::Conversation | ResourceKindPrimitive::ProviderState
+            ) {
+                return Err(format!(
+                    "provider scope '{}' cannot hold {:?} resource '{}'",
+                    provider, kind, id
+                ));
+            }
+        }
+        let mut thread_resources = BTreeSet::new();
+        for (thread_id, thread) in &self.conversations {
+            thread_resources.insert(thread.resource_id.clone());
+            if let Some(rules) = &resolved.wire_rules {
+                thread.validate_wire(rules)?;
+            }
+            if resolved.kind(&thread.resource_id) != Some(ResourceKindPrimitive::Conversation) {
+                return Err(format!(
+                    "conversation thread '{}' disagrees with its resource kind",
+                    thread_id
+                ));
+            }
+        }
+        for (resource_id, kind) in &resolved.kinds {
+            if *kind == ResourceKindPrimitive::Conversation
+                && !thread_resources.contains(resource_id)
+            {
+                return Err(format!(
+                    "conversation resource '{}' belongs to no live thread",
+                    resource_id
+                ));
+            }
+        }
+        for (path, entry) in &self.files {
+            let in_conversations = path.as_str().starts_with(&conversation_prefix);
+            let in_state = path.as_str().starts_with(&state_prefix);
+            let kind = resolved.kind(&entry.resource_id);
+            if in_state && kind != Some(ResourceKindPrimitive::ProviderState) {
+                return Err(format!(
+                    "provider-state file '{}' must be owned by a provider-state resource",
+                    path
+                ));
+            }
+            if in_conversations && kind != Some(ResourceKindPrimitive::Conversation) {
+                return Err(format!(
+                    "conversation-namespace file '{}' must be owned by a conversation resource",
+                    path
+                ));
+            }
+        }
+        for (resource_id, kind) in &resolved.kinds {
+            if *kind == ResourceKindPrimitive::ProviderState
+                && !self
+                    .files
+                    .values()
+                    .any(|entry| &entry.resource_id == resource_id)
+            {
+                return Err(format!(
+                    "provider-state resource '{}' owns no files",
+                    resource_id
+                ));
+            }
+        }
+        for (key, tombstone) in &self.tombstones {
+            match &resolved.tombstones[key] {
+                TombstoneTargetPrimitive::Resource { resource_id } => {
+                    if self.resources.contains_key(resource_id) {
+                        return Err(format!(
+                            "live resource '{}' also has a tombstone",
+                            resource_id
+                        ));
+                    }
+                }
+                TombstoneTargetPrimitive::File {
                     resource_id,
                     logical_path,
                 } => {
@@ -4789,7 +4525,7 @@ impl BundleScope {
                         return Err(format!("invalid file tombstone resource '{}'", resource_id));
                     }
                 }
-                TombstoneTarget::ConversationThread { thread_id } => {
+                TombstoneTargetPrimitive::ConversationThread { thread_id } => {
                     if self.conversations.contains_key(thread_id) {
                         return Err(format!(
                             "live conversation thread '{}' also has a tombstone",
@@ -4803,8 +4539,8 @@ impl BundleScope {
                         ));
                     }
                 }
-                TombstoneTarget::ProjectContentFile { logical_path, .. }
-                | TombstoneTarget::ProjectContentDirectory { logical_path, .. } => {
+                TombstoneTargetPrimitive::ProjectContentFile { logical_path, .. }
+                | TombstoneTargetPrimitive::ProjectContentDirectory { logical_path, .. } => {
                     return Err(format!(
                         "provider scope '{}' cannot tombstone project content '{}'",
                         provider, logical_path
@@ -4813,6 +4549,65 @@ impl BundleScope {
             }
         }
         Ok(())
+    }
+}
+
+/// The primitives one scope's contracts resolved to under one build's
+/// registrations. Engines dispatch on these; they never read a key.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResolvedScope {
+    pub kinds: BTreeMap<ResourceId, ResourceKindPrimitive>,
+    pub policies: BTreeMap<ResourceId, ApplyPolicyPrimitive>,
+    pub provenance: BTreeMap<ResourceId, ProvenancePrimitive>,
+    pub tombstones: BTreeMap<String, TombstoneTargetPrimitive>,
+    /// The scope provider's wire rules, when this build registers it.
+    pub wire_rules: Option<ConversationWireRules>,
+}
+
+impl ResolvedScope {
+    pub fn kind(&self, resource_id: &ResourceId) -> Option<ResourceKindPrimitive> {
+        self.kinds.get(resource_id).copied()
+    }
+
+    pub fn policy(&self, resource_id: &ResourceId) -> Option<ApplyPolicyPrimitive> {
+        self.policies.get(resource_id).copied()
+    }
+
+    pub fn tombstone(&self, key: &str) -> Option<&TombstoneTargetPrimitive> {
+        self.tombstones.get(key)
+    }
+
+    fn provenance_of(&self, resource_id: &ResourceId) -> Result<&ProvenancePrimitive, String> {
+        self.provenance
+            .get(resource_id)
+            .ok_or_else(|| format!("resource '{}' was not resolved", resource_id))
+    }
+
+    fn policy_of(&self, resource_id: &ResourceId) -> Result<ApplyPolicyPrimitive, String> {
+        self.policy(resource_id)
+            .ok_or_else(|| format!("resource '{}' was not resolved", resource_id))
+    }
+}
+
+/// Every scope of one manifest resolved under one build's registrations.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResolvedManifest {
+    pub scopes: BTreeMap<SyncScopeKey, ResolvedScope>,
+}
+
+impl ResolvedManifest {
+    pub fn scope(&self, key: &SyncScopeKey) -> Option<&ResolvedScope> {
+        self.scopes.get(key)
+    }
+
+    pub fn kind(
+        &self,
+        scope: &SyncScopeKey,
+        resource_id: &ResourceId,
+    ) -> Option<ResourceKindPrimitive> {
+        self.scopes
+            .get(scope)
+            .and_then(|scope| scope.kind(resource_id))
     }
 }
 
@@ -4948,6 +4743,32 @@ impl BundleManifest {
                 && scope.directories.is_empty()
                 && scope.tombstones.is_empty()
         })
+    }
+
+    /// Registry validation for every scope. A scope whose contracts this
+    /// build does not register fails alone; the rest resolve normally.
+    pub fn resolve_scopes(
+        &self,
+        resolver: &dyn PortableContractResolver,
+    ) -> BTreeMap<SyncScopeKey, Result<ResolvedScope, String>> {
+        self.scopes
+            .iter()
+            .map(|(key, scope)| (key.clone(), scope.resolve(key, resolver)))
+            .collect()
+    }
+
+    /// Resolve every scope or fail on the first that cannot execute.
+    pub fn resolve_all(
+        &self,
+        resolver: &dyn PortableContractResolver,
+    ) -> Result<ResolvedManifest, String> {
+        let mut resolved = ResolvedManifest::default();
+        for (key, scope) in &self.scopes {
+            resolved
+                .scopes
+                .insert(key.clone(), scope.resolve(key, resolver)?);
+        }
+        Ok(resolved)
     }
 
     pub fn scope(&self, key: &SyncScopeKey) -> Option<&BundleScope> {
@@ -5343,6 +5164,48 @@ impl ProjectFileSyncEligibility {
 }
 
 impl RestorePlan {
+    /// Validate the non-executable comparison returned before Pull Apply.
+    /// Conversation rows carry selection IDs but no action pins.
+    pub fn validate_review(&self) -> Result<(), String> {
+        if self.schema_version != RESTORE_PLAN_SCHEMA {
+            return Err(format!(
+                "unsupported restore review schema {}",
+                self.schema_version
+            ));
+        }
+        validate_named_id("commit id", &self.commit_id)?;
+        validate_sha256("restore review manifest", &self.manifest_sha256)?;
+        if self.created_at > self.expires_at
+            || self.actions.len() > MAX_ACTIONS
+            || self.conversation_review.len() > MAX_ACTIONS
+            || !self.conversation_actions.is_empty()
+        {
+            return Err("invalid restore review lifetime or action count".to_string());
+        }
+        if let Some(eligibility) = &self.project_content_eligibility {
+            eligibility.validate()?;
+        }
+        let mut selection_ids = HashSet::new();
+        for action in &self.actions {
+            action.validate()?;
+            if !selection_ids.insert(action.action_id.clone()) {
+                return Err(format!(
+                    "duplicate restore selection '{}'",
+                    action.action_id
+                ));
+            }
+        }
+        for row in &self.conversation_review {
+            row.validate()?;
+            if let Some(action_id) = &row.action_id {
+                if !selection_ids.insert(action_id.clone()) {
+                    return Err(format!("duplicate restore selection '{}'", action_id));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.schema_version != RESTORE_PLAN_SCHEMA {
             return Err(format!(
@@ -5472,7 +5335,7 @@ pub struct ConversationApplyReceipt {
     pub published_origin_host_token: Option<OriginHostToken>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published_origin_replica_token: Option<OriginReplicaToken>,
-    pub journal_operation_id: ConversationOperationId,
+    pub operation_id: ConversationOperationId,
     /// The accepted portable tail after this operation, when it moved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_tail: Option<PortableConversationTail>,
@@ -5480,8 +5343,7 @@ pub struct ConversationApplyReceipt {
     /// divergent keep-both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preserved_thread_id: Option<ThreadId>,
-    /// The preserved copy's marker title, read from the journaled keep-both
-    /// record (identities are minted at apply; plans carry none).
+    /// The preserved copy's marker title. Apply mints the identities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preserved_display_title: Option<String>,
     /// Recorded for every consumed provider source; old sources are never
@@ -5685,9 +5547,28 @@ impl Materializations {
     }
 }
 
+pub mod bounded;
 mod conversation_reconciliation;
 mod conversation_tail;
 mod conversation_tail_relation;
+pub mod keys;
+pub mod portable;
+pub mod provider_config;
+pub mod secrets;
+
+pub use bounded::{BoundedConfigObject, BoundedPortableObject, BoundedValue};
+pub use keys::{
+    validate_bounded_key, ActionKey, ApplyPolicyKey, CatalogFormatKey, CatalogResourceKindKey,
+    CatalogTargetKey, FieldKey, ProvenanceKindKey, ProviderKey, ResourceKindKey, ResourceTypeKey,
+    SecretKey, StorageProviderKey, TombstoneTargetKindKey,
+};
+pub use portable::{
+    ApplyPolicyCoordinate, ApplyPolicyPrimitive, PortableContractResolver, ProvenanceEnvelope,
+    ProvenancePrimitive, ResourceKindCoordinate, ResourceKindPrimitive, TombstoneTargetEnvelope,
+    TombstoneTargetPrimitive,
+};
+pub use provider_config::{AgentProviderConfig, CatalogProviderConfig, StorageProviderConfig};
+pub use secrets::{SecretMap, SecretOperation, SecretValue};
 
 pub use conversation_reconciliation::{
     blocked_conversation_decision, default_conversation_decision, BindingResolution,

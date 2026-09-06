@@ -9,12 +9,13 @@ use crate::app_settings::{
 };
 use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
-    most_specific_project_relative_path, timeline_tool_detail_budgets, SessionCount,
-    SessionCountQuality, SessionDetailWarning, SessionEventCounts, SessionEventDetail,
-    SessionFileSummary, SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent,
-    SessionTimelineEventKind, SessionTimelineIndex, SessionTimelineIndexEntry,
-    SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus,
-    SessionToolCategory, SessionToolIndexEntry, SessionTurnToolSummary,
+    attach_turn_tool_summaries, most_specific_project_relative_path, timeline_tool_detail_budgets,
+    SessionCount, SessionCountQuality, SessionDetailWarning, SessionEventCounts,
+    SessionEventDetail, SessionFileSummary, SessionSourceSpan, SessionTimelineContext,
+    SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
+    SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
+    SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
+    SessionTurnToolSummary,
 };
 use mallard_domain::NoticeSeverity;
 use serde::de::{Deserializer, IgnoredAny, Visitor};
@@ -498,10 +499,6 @@ impl RolloutParser {
         } else {
             self.event_agent_message_count
         };
-        let mut recorded_branches = std::collections::BTreeSet::new();
-        if let Some(branch) = &self.branch {
-            recorded_branches.insert(branch.clone());
-        }
         Ok(SessionFileSummary {
             session_id: thread_id,
             title: summary.clone(),
@@ -513,7 +510,6 @@ impl RolloutParser {
                 .or(self.metadata_timestamp),
             branch: self.branch,
             recorded_sha: self.recorded_sha,
-            recorded_branches,
             user_rounds: user_round_count,
             agent_messages: agent_message_count,
             tool_calls: self.tool_call_count,
@@ -572,6 +568,25 @@ pub(crate) fn summarize_rollout_file(path: &Path) -> Result<SessionFileSummary, 
 
 pub(crate) fn summarize_rollout_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String> {
     summarize_rollout_reader(&mut std::io::Cursor::new(bytes), "captured transcript")
+}
+
+/// Share each parsed record with lineage analysis and presentation. Drain after
+/// a lineage failure because presentation can still use later valid records.
+pub(crate) fn analyze_and_summarize(
+    bytes: &[u8],
+) -> (
+    crate::conversation_codec::CodexTranscriptAnalysis,
+    Result<SessionFileSummary, String>,
+) {
+    let mut parser = RolloutParser::new();
+    let mut records =
+        crate::conversation_codec::parsed_records(bytes).inspect(|record| match record {
+            Ok(value) => parser.consume(value),
+            Err(_) => parser.metrics_complete = false,
+        });
+    let analysis = crate::conversation_codec::analyze_codex_records(bytes, &mut records);
+    records.for_each(drop);
+    (analysis, parser.finish())
 }
 
 #[derive(Deserialize)]
@@ -979,18 +994,23 @@ impl TimelineBuilder {
     }
 
     fn finalize(mut self) -> SessionTimelineIndex {
-        for position in 0..self.events.len() {
-            if self.events[position].assistant_phase != AssistantPhase::Unknown {
+        let mut max_tool_order_by_turn = BTreeMap::<Option<String>, (u64, u16)>::new();
+        for pending in &self.events {
+            if pending.entry.kind == SessionTimelineEventKind::ToolCall {
+                max_tool_order_by_turn
+                    .entry(pending.entry.turn_id.clone())
+                    .and_modify(|order| *order = (*order).max(pending.order))
+                    .or_insert(pending.order);
+            }
+        }
+        for pending in &mut self.events {
+            if pending.assistant_phase != AssistantPhase::Unknown {
                 continue;
             }
-            let turn_id = self.events[position].entry.turn_id.clone();
-            let order = self.events[position].order;
-            let followed_by_tool = self.events.iter().any(|candidate| {
-                candidate.entry.kind == SessionTimelineEventKind::ToolCall
-                    && candidate.entry.turn_id == turn_id
-                    && candidate.order > order
-            });
-            let entry = &mut self.events[position].entry;
+            let followed_by_tool = max_tool_order_by_turn
+                .get(&pending.entry.turn_id)
+                .is_some_and(|order| *order > pending.order);
+            let entry = &mut pending.entry;
             entry.quality = SessionCountQuality::Inferred;
             if followed_by_tool {
                 entry.kind = SessionTimelineEventKind::IntermediateStep;
@@ -1035,46 +1055,16 @@ impl TimelineBuilder {
         } else {
             SessionCountQuality::Exact
         };
-        let mut tools_by_turn = BTreeMap::<String, u64>::new();
-        for pending in &self.events {
-            if pending.entry.kind != SessionTimelineEventKind::ToolCall {
-                continue;
-            }
-            if let Some(turn_id) = &pending.entry.turn_id {
-                *tools_by_turn.entry(turn_id.clone()).or_default() += 1;
-            }
-        }
-        for (turn_id, value) in tools_by_turn {
-            let leading_position = self
-                .events
-                .iter()
-                .position(|pending| {
-                    pending.entry.turn_id.as_deref() == Some(turn_id.as_str())
-                        && pending.entry.kind != SessionTimelineEventKind::ToolCall
-                })
-                .or_else(|| {
-                    self.events.iter().position(|pending| {
-                        pending.entry.turn_id.as_deref() == Some(turn_id.as_str())
-                    })
-                });
-            if let Some(position) = leading_position {
-                let leading = &mut self.events[position];
-                leading.entry.turn_tool_summary = Some(SessionTurnToolSummary {
-                    turn_id: turn_id.clone(),
-                    tool_calls: count_with_quality(
-                        value,
-                        tool_quality,
-                        tool_count_explanation(tool_quality),
-                    ),
-                });
-            }
-        }
-
-        let entries = self
+        let mut entries = self
             .events
             .into_iter()
             .map(|pending| pending.entry)
             .collect::<Vec<_>>();
+        attach_turn_tool_summaries(
+            &mut entries,
+            tool_quality,
+            tool_count_explanation(tool_quality),
+        );
         let counts = counts_for_entries(
             &entries,
             self.degraded_all,
@@ -3099,6 +3089,111 @@ mod tests {
         let response_preview = page.events[1].text.as_ref().unwrap();
         assert!(response_preview.ends_with('…'));
         assert!(response_preview.len() <= timeline_message_preview_bytes());
+    }
+
+    #[test]
+    fn phase_inference_uses_only_later_tools_in_the_same_turn() {
+        use AssistantPhase::{Known, Unknown};
+        use SessionTimelineEventKind::{IntermediateStep, Response, ToolCall};
+
+        let pending = |event_id: String, turn_id: Option<&str>, order, kind, assistant_phase| {
+            PendingTimelineEvent {
+                entry: SessionTimelineIndexEntry {
+                    event_id: event_id.clone(),
+                    ordinal: 0,
+                    timestamp: None,
+                    kind,
+                    quality: SessionCountQuality::Exact,
+                    turn_id: turn_id.map(ToOwned::to_owned),
+                    turn_tool_summary: None,
+                    parent_event_id: None,
+                    source: SessionSourceSpan {
+                        offset: 0,
+                        length: 1,
+                    },
+                    tool: (kind == ToolCall).then(|| SessionToolIndexEntry {
+                        provider_call_id: event_id,
+                        native_name: "shell".to_string(),
+                        category: SessionToolCategory::Shell,
+                        status: SessionToolCallStatus::Completed,
+                        affected_paths: Vec::new(),
+                        result_source: None,
+                    }),
+                },
+                order,
+                text_key: None,
+                assistant_phase,
+            }
+        };
+        let mut builder = TimelineBuilder::default();
+        for (position, (turn_id, order)) in [
+            (Some("a"), (30, 0)),
+            (Some("a"), (10, 0)),
+            (Some("c"), (20, 2)),
+            (Some("d"), (20, 0)),
+            (None, (30, 0)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            builder.events.push(pending(
+                format!("tool-{position}"),
+                turn_id,
+                order,
+                ToolCall,
+                Known,
+            ));
+        }
+        let cases = [
+            (Some("a"), (20, 1), Unknown, Response, IntermediateStep),
+            (Some("a"), (30, 0), Unknown, Response, Response),
+            (Some("a"), (30, 1), Unknown, Response, Response),
+            (Some("b"), (20, 1), Unknown, Response, Response),
+            (Some("c"), (20, 1), Unknown, Response, IntermediateStep),
+            (Some("d"), (20, 1), Unknown, Response, Response),
+            (None, (20, 1), Unknown, Response, IntermediateStep),
+            (None, (40, 0), Unknown, Response, Response),
+            (Some("a"), (15, 0), Known, Response, Response),
+            (
+                Some("b"),
+                (15, 0),
+                Known,
+                IntermediateStep,
+                IntermediateStep,
+            ),
+        ];
+        for (position, (turn_id, order, phase, kind, _)) in cases.into_iter().enumerate() {
+            builder.events.push(pending(
+                format!("message-{position}"),
+                turn_id,
+                order,
+                kind,
+                phase,
+            ));
+        }
+
+        let index = builder.finalize();
+
+        for (position, (_, _, phase, _, expected_kind)) in cases.into_iter().enumerate() {
+            let event_id = format!("message-{position}");
+            let entry = index
+                .events
+                .iter()
+                .find(|entry| entry.event_id == event_id)
+                .unwrap();
+            assert_eq!(entry.kind, expected_kind, "{event_id}");
+            assert_eq!(
+                entry.quality,
+                if phase == Unknown {
+                    SessionCountQuality::Inferred
+                } else {
+                    SessionCountQuality::Exact
+                },
+                "{event_id}"
+            );
+        }
+        assert_eq!(index.warnings.len(), 1);
+        assert_eq!(index.warnings[0].code, "legacy_message_phase_inferred");
     }
 
     #[test]

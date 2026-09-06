@@ -111,8 +111,8 @@ pub async fn reset_local_state(app: tauri::AppHandle) -> Result<LocalStateWipeRe
 mod tests {
     use super::reset_local_state_with_repositories;
     use crate::storage_catalog::domain::{
-        CatalogLinkId, CatalogPlanId, CatalogResourceKindTag, CatalogResourcePlanDocument,
-        CatalogResourceRepositoryId, CatalogScopeId, CatalogScopePushPlan, ProviderKey,
+        CatalogCoordinate, CatalogLinkId, CatalogPlanId, CatalogResourcePlanDocument,
+        CatalogResourceRepositoryId, CatalogScopeId, CatalogScopePushPlan,
     };
     use crate::storage_catalog::persistence::CatalogStateRepository;
     use crate::storage_catalog::plan_store;
@@ -130,13 +130,12 @@ mod tests {
             link_id: CatalogLinkId::generate().unwrap(),
             link_revision: 1,
             storage_id: mallard_domain::StorageId::parse("storage-a").unwrap(),
-            repository_id: CatalogResourceRepositoryId::for_kind(
-                ProviderKey::Codex,
-                CatalogResourceKindTag::AgentSkill,
+            repository_id: CatalogResourceRepositoryId::for_coordinate(
+                &CatalogCoordinate::new("codex", "agent_skill", "agentskills.io.skill", 1).unwrap(),
             ),
             storage_identity_sha256: "a".repeat(64),
             profile_pins: Vec::new(),
-            skill_root_pins: Vec::new(),
+            target_pins: Vec::new(),
             observed_head: None,
             rows: Vec::new(),
             warning_digests: Vec::new(),

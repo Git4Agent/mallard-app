@@ -8,13 +8,14 @@ export type IconName =
   | "activity"
   | "alert-triangle"
   | "ban"
+  | "cat"
   | "catalog"
   | "check"
   | "chevron-down"
   | "chevron-left"
   | "chevron-right"
   | "chevron-up"
-  | "claude"
+  | "claude-mark"
   | "clock"
   | "cloud"
   | "code"
@@ -65,6 +66,16 @@ interface IconProps extends SVGProps<SVGSVGElement> {
   size?: number;
 }
 
+/* Backend descriptors carry a presentation hint ("cloud", "drive") rather
+   than a mark; this is the frontend's own vocabulary for such hints. A hint
+   outside it takes the caller's fallback, so a provider this build has never
+   heard of still draws a real glyph instead of nothing. */
+const HINTED_ICONS: readonly IconName[] = ["cloud", "drive", "folder", "computer", "link", "lock"];
+
+export function iconNameFromHint(hint: string | null | undefined, fallback: IconName): IconName {
+  return hint && (HINTED_ICONS as readonly string[]).includes(hint) ? hint as IconName : fallback;
+}
+
 /**
  * Every mark below is drawn as whole cells on a 24-unit grid, and the SVG asks
  * for crispEdges — so a cell is never antialiased, it is *rounded*. A stem
@@ -108,6 +119,22 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
         <g className="icon-pixel-fill" fill="currentColor" stroke="none">
           <path d="M9 1h6v1h2v1h2v1h1v1h1v2h1v2h1v6h-1v2h-1v2h-1v1h-1v1h-2v1h-2v1H9v-1H7v-1H5v-1H4v-1H3v-2H2v-2H1V9h1V7h1V5h1V4h1V3h2V2h2V1Zm0 2v1H7v1H6l13 13v-1h1v-2h1V9h-1V7h-1V6h-1V5h-1V4h-2V3H9ZM5 6v1H4v2H3v6h1v2h1v1h1v1h1v1h2v1h6v-1h2v-1h1L5 6Z" />
         </g>
+      )}
+      {name === "cat" && (
+        /* Pets, second format. The Catalog lists Pets v1 and Pets v2 as two
+           rows, and a row is told apart by its glyph before its label, so the
+           second format wears a face beside the first format's print. Drawn
+           on the same twelve-cell grid as the paw, as a one-cell outline like
+           the bulb and the puzzle piece: two ears, a head, two eyes. The ears
+           are what make it a cat and not an owl at 16px — they rise clear of
+           the head's top edge rather than sitting on it. 34 cells of ink,
+           inside the set's 15-48 band. */
+        <path
+          className="icon-pixel-fill icon-mallard-pixel"
+          fill="currentColor"
+          stroke="none"
+          d="M2 4h2v6H2ZM20 4h2v6h-2ZM4 6h2v2H4ZM18 6h2v2h-2ZM6 8h12v2H6ZM0 10h2v8H0ZM22 10h2v8h-2ZM6 12h2v2H6ZM16 12h2v2h-2ZM2 18h2v2H2ZM20 18h2v2h-2ZM4 20h16v2H4Z"
+        />
       )}
       {name === "catalog" && (
         <path
@@ -175,7 +202,7 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           the sheet's crispEdges — the same call the ChatGPT knot makes, because
           unantialiased diagonals shatter. Needs the canonical geometry and a
           THIRD_PARTY_NOTICES.md entry before it can claim to be the real mark. */}
-      {name === "claude" && (
+      {name === "claude-mark" && (
         <path
           className="icon-claude-mark"
           fill="currentColor"

@@ -13,10 +13,11 @@ import type {
   ProviderProfileSummary,
   SetupDraftInspection,
   SetupSectionStatus,
-  StorageConfig,
+  StorageSummary,
 } from "../../types";
-import Icon from "../Icons";
+import Icon, { iconNameFromHint } from "../Icons";
 import Notice from "../notice/Notice";
+import ProviderMark from "../sync-review/ProviderMark";
 import { expandHomePath, isAbsoluteProfilePath } from "../../profilePath";
 import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
@@ -35,11 +36,10 @@ interface Props {
   providers: ProviderDescriptor[];
   profiles: ProviderProfileSummary[];
   projects: LocalProjectSummary[];
-  storages: StorageConfig[];
+  storages: StorageSummary[];
   busy: boolean;
   onClose: () => void;
   onDiscard: (draftId: string) => void;
-  onAddStorage: () => void;
   onFinalized: (
     detail: ProjectDetail,
     workflowEpoch: number,
@@ -222,7 +222,6 @@ export default function ProjectSetupWorkspace({
   busy,
   onClose,
   onDiscard,
-  onAddStorage,
   onFinalized,
 }: Props) {
   const [draft, setDraft] = useState<ProjectSetupDraft | null>(null);
@@ -295,7 +294,6 @@ export default function ProjectSetupWorkspace({
     // The draft page owns one draft for its lifetime.
   }, [draftId]);
 
-  // Debounced autosave whenever an edit lands.
   useEffect(() => {
     if (!draft || !dirtyRef.current || savingRef.current || !workflowIsActive()) return;
     const timer = window.setTimeout(() => {
@@ -341,31 +339,15 @@ export default function ProjectSetupWorkspace({
     setDraft((current) => (current ? mutate(current) : current));
   };
 
-  const selectedStorage: StorageConfig | null = useMemo(() => {
+  const selectedStorage = useMemo((): StorageSummary | null => {
     if (!draft?.storage) return null;
-    if (draft.storage.kind === "existing") {
-      const id = draft.storage.storage_id;
-      return storages.find((storage) => storage.id === id) ?? null;
-    }
-    return draft.storage.storage;
+    return storages.find((candidate) => candidate.storage_id === draft.storage?.storage_id) ?? null;
   }, [draft?.storage, storages]);
-  const storageIsPending = draft?.storage?.kind === "pending";
-
-  // Remote repositories for the selected storage. A pending storage is not
-  // in the saved config yet, but its repos still matter — re-adding a
-  // populated folder must offer the repos already inside it — so those are
-  // listed read-only from the draft configuration itself.
-  const listableStorageId = draft?.storage?.kind === "existing" ? draft.storage.storage_id : null;
-  const pendingStorage = draft?.storage?.kind === "pending" ? draft.storage.storage : null;
-  const pendingStorageListable = !!pendingStorage
-    && (pendingStorage.kind === "local"
-      ? pendingStorage.local_dir.trim().length > 0
-      : pendingStorage.bucket.trim().length > 0);
-  const chosenStorageId = listableStorageId ?? (pendingStorage ? pendingStorage.id : null);
+  const chosenStorageId = draft?.storage?.storage_id ?? null;
   useEffect(() => {
     let cancelled = false;
     if (!workflowIsActive()) return () => { cancelled = true; };
-    if (!listableStorageId && !pendingStorageListable) {
+    if (!chosenStorageId) {
       setRemoteBundles([]);
       setBundlesError(null);
       setBundlesLoading(false);
@@ -373,10 +355,7 @@ export default function ProjectSetupWorkspace({
     }
     setBundlesLoading(true);
     setBundlesError(null);
-    const listing = listableStorageId
-      ? projectSyncApi.listRemoteBundleSnapshots(listableStorageId)
-      : projectSyncApi.listPendingStorageBundleSnapshots(pendingStorage as StorageConfig);
-    void listing
+    void projectSyncApi.listRemoteBundleSnapshots(chosenStorageId)
       .then((bundles) => {
         if (cancelled || !workflowIsActive()) return;
         setRemoteBundles(bundles);
@@ -390,14 +369,7 @@ export default function ProjectSetupWorkspace({
         if (!cancelled && workflowIsActive()) setBundlesLoading(false);
       });
     return () => { cancelled = true; };
-  }, [
-    listableStorageId,
-    pendingStorageListable,
-    pendingStorage?.id,
-    pendingStorage?.kind,
-    pendingStorage?.local_dir,
-    pendingStorage?.bucket,
-  ]);
+  }, [chosenStorageId]);
 
   const repositoryFingerprint = inspection?.draft.repository_fingerprint
     ?? draft?.repository_fingerprint
@@ -606,6 +578,14 @@ export default function ProjectSetupWorkspace({
     }
   }
 
+  // Repository choices are storage-specific, so changing the storage drops the
+  // repository decision rather than carrying a stale one across.
+  const chooseStorage = (storageId: string | null) => edit((current) => ({
+    ...current,
+    repository: { kind: "new" },
+    storage: storageId ? { storage_id: storageId } : null,
+  }));
+
   const profileRow = (descriptor: ProviderDescriptor) => {
     const provider = descriptor.key;
     const label = descriptor.display_name;
@@ -754,7 +734,6 @@ export default function ProjectSetupWorkspace({
           </Notice>
         )}
 
-        {/* Project */}
         <section className="sync-setup-section">
           <div className="sync-card-heading">
             <div><strong>Project</strong></div>
@@ -774,7 +753,11 @@ export default function ProjectSetupWorkspace({
               <span>Folder</span>
               <div className="sync-profile-select-row">
                 <input value={compactProjectPath(draft.project_root)} readOnly title={draft.project_root} aria-describedby={projectErrorId} />
-                <button type="button" className="btn" onClick={() => void changeProjectFolder()} disabled={working}>Change…</button>
+                {/* The same glyph Browse wears two bands down: both buttons
+                    open the same folder picker. */}
+                <button type="button" className="btn" onClick={() => void changeProjectFolder()} disabled={working}>
+                  <Icon name="folder" size={13} /> Change…
+                </button>
               </div>
             </label>
           </div>
@@ -786,7 +769,6 @@ export default function ProjectSetupWorkspace({
           )}
         </section>
 
-        {/* Agent profile */}
         <section className="sync-setup-section">
           <div className="sync-card-heading">
             <div><strong>Agent</strong></div>
@@ -797,7 +779,7 @@ export default function ProjectSetupWorkspace({
               const enabled = setupEnabled.has(descriptor.key);
               return (
                 <div key={descriptor.key} className={`sync-provider-card${enabled ? " enabled" : ""}`}>
-                  <label className="sync-provider-toggle">
+                  <label className="sync-provider-toggle setup-marked-toggle">
                     <input
                       type="checkbox"
                       checked={enabled}
@@ -805,6 +787,7 @@ export default function ProjectSetupWorkspace({
                       aria-label={`Use ${descriptor.display_name} in this project`}
                       onChange={() => toggleSetupProvider(descriptor.key)}
                     />
+                    <ProviderMark provider={descriptor.key} displayName={descriptor.display_name} size={12} />
                     <strong>{descriptor.display_name}</strong>
                     <span>{descriptor.profile_label}</span>
                   </label>
@@ -824,63 +807,85 @@ export default function ProjectSetupWorkspace({
           )}
         </section>
 
-        {/* Storage */}
         <section className="sync-setup-section">
           <div className="sync-card-heading">
             <div><strong>Storage</strong></div>
-            {sectionBadge(storageSection)}
+            {/* `attention` on this section means one thing — no storage is
+                linked — and the row below already says so as its own answer.
+                A chosen "None yet" is not something to review, and the badge
+                carried no message anyway: the page prints a section's message
+                only when it is blocked, so the triangle marked the safe
+                answer as a fault and would not say why. Only blocked storage
+                gets a badge now. */}
+            {storageSection?.state === "blocked" ? sectionBadge(storageSection) : null}
           </div>
-          <div className="sync-profile-select-row">
-            <span className="sync-select-shell">
-              <select
-                value={draft.storage?.kind === "existing" ? draft.storage.storage_id : draft.storage?.kind === "pending" ? "__pending" : ""}
-                disabled={working}
-                aria-label="Storage"
-                aria-describedby={storageErrorId}
-                onChange={(event) => {
-                  const next = event.target.value;
-                  edit((current) => ({
-                    ...current,
-                    // Repository choices are storage-specific.
-                    repository: { kind: "new" },
-                    storage: !next || next === "__pending"
-                      ? (next === "__pending" ? current.storage : null)
-                      : { kind: "existing", storage_id: next },
-                  }));
-                }}
-              >
-                <option value="">Local only</option>
-                {storageIsPending && selectedStorage && (
-                  <option value="__pending">{selectedStorage.name} (new)</option>
-                )}
-                {storages.map((storage) => (
-                  <option key={storage.id} value={storage.id}>
-                    {storage.name || "(unnamed)"} · {storage.kind === "local" ? "local folder" : "S3"}
-                  </option>
-                ))}
-              </select>
-            </span>
+          {/* Each storage wears the glyph its own landing card wears — the
+              fact a select had no way to hold. "None yet" leads: it is the
+              answer a project has until a storage is chosen, and it names the
+              empty slot the way the rest of the app does ("No storage
+              linked") rather than a mode competing with the names beside it.
+              The glyph still says where the sessions live, so the label is
+              free to say only what the slot holds. */}
+          <div
+            className="setup-pill-row"
+            role="radiogroup"
+            aria-label="Storage"
+            aria-describedby={storageErrorId}
+          >
             <button
               type="button"
-              className="btn"
-              onClick={onAddStorage}
-              disabled={working || saveState === "saving" || saveState === "error"}
+              role="radio"
+              aria-checked={!chosenStorageId}
+              className={`setup-pill${chosenStorageId ? "" : " active"}`}
+              disabled={working}
+              /* The siblings carry their provider here; this one carries what
+                 the empty slot means, in the sentence Activity already uses
+                 for the same state. "Computer", not "Mac": this build ships
+                 for every desktop target. */
+              title="No storage linked yet — sessions stay on this computer"
+              onClick={() => chooseStorage(null)}
             >
-              <Icon name="plus" size={13} /> Add storage
+              <Icon name="computer" size={12} />
+              <span className="setup-pill-label">None yet</span>
+              <span className="setup-pill-check" aria-hidden="true">
+                {!chosenStorageId && <Icon name="check" size={12} />}
+              </span>
             </button>
+            {storages.map((storage) => {
+              const active = chosenStorageId === storage.storage_id;
+              const name = storage.name || "(unnamed)";
+              return (
+                <button
+                  key={storage.storage_id}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  /* The name alone is the visible label; the provider it runs
+                     on stays in the accessible name and the tooltip, where the
+                     select used to spell it out on every row. */
+                  aria-label={`${name} · ${storage.provider_label}`}
+                  title={`${name} · ${storage.provider_label}`}
+                  className={`setup-pill${active ? " active" : ""}`}
+                  disabled={working || !storage.available}
+                  onClick={() => chooseStorage(storage.storage_id)}
+                >
+                  <Icon name={iconNameFromHint(storage.icon, "drive")} size={12} />
+                  <span className="setup-pill-label">{name}{storage.available ? "" : " (unavailable)"}</span>
+                  <span className="setup-pill-check" aria-hidden="true">
+                    {active && <Icon name="check" size={12} />}
+                  </span>
+                </button>
+              );
+            })}
           </div>
           {storageSection?.message && storageSection.state === "blocked" && (
             <div id={storageErrorId} className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {storageSection.message}</div>
-          )}
-          {storageIsPending && selectedStorage && (
-            <small className="sync-setup-hint">{selectedStorage.local_dir}</small>
           )}
           {bundlesLoading && (
             <small className="sync-setup-inline-status"><span className="status-loader" /> Checking repositories…</small>
           )}
         </section>
 
-        {/* Repository */}
         {showRepositoryChoice && (
           <section className="sync-setup-section">
             <div className="sync-card-heading">
@@ -912,6 +917,9 @@ export default function ProjectSetupWorkspace({
                   disabled={working}
                 >
                   <span className="sync-bundle-radio"><span /></span>
+                  {/* Its own line, the mark Sync already uses for a history
+                      kept independently. */}
+                  <span className="setup-choice-mark" aria-hidden="true"><Icon name="git-fork" size={24} /></span>
                   <span className="sync-bundle-match-copy">
                     <strong>New repository</strong>
                     <span>
@@ -951,6 +959,11 @@ export default function ProjectSetupWorkspace({
                       disabled={working}
                     >
                       <span className="sync-bundle-radio"><span /></span>
+                      {/* Whether the stored repository is a git one, said the
+                          way every other list of repositories says it. */}
+                      <span className="setup-choice-mark" aria-hidden="true">
+                        <Icon name={bundle.repository_fingerprint ? "git-folder" : "folder"} size={24} />
+                      </span>
                       <span className="sync-bundle-match-copy">
                         <strong>{bundle.display_name}{recommended && <small className="sync-bundle-recommended">Git match</small>}</strong>
                         <span>{bundle.bundle_id}</span>
@@ -984,13 +997,6 @@ export default function ProjectSetupWorkspace({
         )}
 
         {error && (
-          /* This box is the whole workspace's, not any one field's — it wore
-             the field-error class only for its colour. What fills it is an
-             autosave or a Finish that failed, so it is an event and it stops
-             the flow: what the user asked for did not happen. The first
-             inspection can write here too, at mount, and a load that failed is
-             worth announcing as well, so the assertive rung reads correctly
-             for every writer. */
           <Notice severity="danger" timing="blocking" className="sync-setup-system-error">
             {error}
           </Notice>

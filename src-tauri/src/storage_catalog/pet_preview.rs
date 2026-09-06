@@ -4,12 +4,16 @@
 //! this Mac's provider home, or a storage payload fetched for a stored-only
 //! row. Previews are decoration — callers degrade to the kind glyph on any
 //! failure — but the derivation itself fails closed: bounded input, digest
-//! verification before decode, and the format's pinned dimensions.
+//! verification before decode, and the version's pinned dimensions.
+//!
+//! This is part of the `openai.codex-pet` codec; nothing outside that codec
+//! reaches it.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use super::domain::{sha256_hex, CodexPetFormat, MAX_PET_ATLAS_BYTES};
+use super::codex_pet::{CodexPetFormat, MAX_PET_ATLAS_BYTES};
+use super::domain::sha256_hex;
 
 /// 2x the 44x48 tile the card draws, at the atlas cell's own 192:208.
 const PREVIEW_WIDTH: u32 = 96;
@@ -18,12 +22,6 @@ const PREVIEW_HEIGHT: u32 = 104;
 /// A derived preview is a small PNG. A cache entry bigger than this is not
 /// something this module wrote, and is not served.
 const MAX_PREVIEW_BYTES: u64 = 262_144;
-
-/// Machine-local, digest-keyed, and disposable: wiping `~/.mallard` wipes it,
-/// and every entry can be re-derived from its source.
-pub fn preview_cache_dir(user_home: &Path) -> PathBuf {
-    user_home.join(".mallard").join("pet_preview_cache")
-}
 
 fn data_uri(png: &[u8]) -> String {
     format!(
@@ -34,7 +32,7 @@ fn data_uri(png: &[u8]) -> String {
 
 /// Crop cell (0,0) of a full atlas and scale it to the preview size. Refuses
 /// oversized input, undecodable bytes, and dimensions that are not exactly
-/// the format's — a wrong-shaped sheet has no well-defined first cell.
+/// the version's — a wrong-shaped sheet has no well-defined first cell.
 pub(crate) fn derive_preview_png(
     format: CodexPetFormat,
     atlas_bytes: &[u8],
@@ -47,7 +45,7 @@ pub(crate) fn derive_preview_png(
     let (width, height) = format.atlas_dimensions();
     if image.width() != width || image.height() != height {
         return Err(format!(
-            "pet atlas is {}x{}, not the {}x{} its format pins",
+            "pet atlas is {}x{}, not the {}x{} its version pins",
             image.width(),
             image.height(),
             width,
@@ -140,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn derives_the_first_cell_at_preview_size_for_both_formats() {
+    fn derives_the_first_cell_at_preview_size_for_both_versions() {
         for format in [CodexPetFormat::V1, CodexPetFormat::V2] {
             let atlas = png_atlas(format, [200, 40, 40, 255]);
             let png = derive_preview_png(format, &atlas).unwrap();
@@ -160,11 +158,11 @@ mod tests {
     }
 
     #[test]
-    fn refuses_dimensions_the_format_does_not_pin() {
+    fn refuses_dimensions_the_version_does_not_pin() {
         // A v2-shaped sheet is not a v1 pet, even though it decodes fine.
         let atlas = png_atlas(CodexPetFormat::V2, [0, 0, 0, 255]);
         let error = derive_preview_png(CodexPetFormat::V1, &atlas).unwrap_err();
-        assert!(error.contains("its format pins"), "{}", error);
+        assert!(error.contains("its version pins"), "{}", error);
     }
 
     #[test]
@@ -175,7 +173,7 @@ mod tests {
             .contains("size limit"));
         // The header-only test fixture is exactly the corrupt-in-practice
         // case: valid dimensions in the header, no image data behind them.
-        let header_only = super::super::codex_pet::fixtures::webp_atlas(CodexPetFormat::V1);
+        let header_only = super::super::codex_pet::fixtures::webp_atlas(1);
         assert!(derive_preview_png(CodexPetFormat::V1, &header_only)
             .unwrap_err()
             .contains("decode pet atlas"));

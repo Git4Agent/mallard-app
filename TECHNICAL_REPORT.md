@@ -1,6 +1,6 @@
 # Mallard Current Technical Report
 
-**Implementation date:** 2026-08-06
+**Implementation date:** 2026-09-03
 **Application version:** 0.1.2
 **Scope:** the active implementation only. This report does not describe
 superseded formats, migrations, or compatibility behavior.
@@ -17,7 +17,6 @@ superseded formats, migrations, or compatibility behavior.
 | Host identity and conversation state | Schema 1 |
 | Bundle recipe | Schema 1 |
 | Per-link project-content preferences | Schema 1 |
-| Restore plans | Schema 1 |
 | Setup drafts and transactions | Schema 1 |
 | Activity entries and policy | Schema 1 |
 
@@ -96,14 +95,11 @@ Machine state is stored directly under `~/.mallard`:
 |-- host_identity.json
 |-- host_rotation.json
 |-- conversation_bindings.json
-|-- conversation_sync_journal.json
 |-- materializations.json
 |-- chat_history_cache.json
 |-- project_drafts/<draft-id>.json
 |-- setup_transactions/<draft-id>.json
-|-- conversation_push_plans/<plan-id>.json
-|-- restore_plans/<plan-id>.json
-|-- backups/<plan-id>/...
+|-- backups/<apply-id>/...
 `-- logs/
 ```
 
@@ -120,11 +116,9 @@ bindings. Exact and canonical project/profile paths stay here. Resolved
 `CODEX_HOME` and `CLAUDE_CONFIG_DIR` values are runtime fields and are not
 serialized into portable bundles.
 
-Restore plans are immutable approval documents. They contain resolved
-absolute targets, source digests, expected target digests or modes, a binding
-revision, a remote bundle revision/commit/hash pin, and a 24-hour expiry.
-Materialization records contain the resulting receipts. Backups are stored
-per restore plan.
+Push and Pull reviews remain in frontend memory. Apply builds current target
+pins and engine plans in memory and does not persist them. Materialization
+records contain result receipts. Backups are stored per Apply.
 
 Persistence uses bounded reads, schema validation, no-symlink path checks,
 revision checks, a process mutex, synced temporary files, and atomic
@@ -330,7 +324,8 @@ Push executes in this order:
 6. Compare the current remote head with the local `RecipeBase`. A missing,
    unknown, stale, or binding-mismatched base blocks publication.
 7. Upload selected file objects, then the immutable manifest and commit.
-8. Compare-and-swap `_head.json` from the reviewed ETag to the new revision.
+8. Compare-and-swap `_head.json` once from the Apply-time ETag to the new
+   revision.
 9. Best-effort refresh `_tag.json`.
 10. Guardedly update machine-local metadata.
 
@@ -365,6 +360,25 @@ boundary: if the remote head succeeds and the later guarded local mutation
 detects a local revision race, the remote revision remains valid while the
 command reports that local state must be refreshed.
 
+### Per-conversation failure isolation
+
+Conversation actions are built one thread at a time, and a thread commits
+into the publish request only after its last fallible step. A failure whose
+inputs belong to one thread (its captured bytes, reviewed pins, path
+mapping, redaction, sidecars, or stamps) fails that thread only: the request
+carries the thread's previous stored row untouched, its checkpoint does not
+move, and every other selected thread publishes in the same revision. The
+result lists each such thread under the review's resource id with
+`state: "failed"` and its message, or `state: "held"` when the apply-time
+review found that a Pull has to resolve it first. `success` is false when any
+thread failed, and the message reports the count. Nothing about a failed
+thread is stored: the next Compare classifies it from its unmoved pins and
+offers it again.
+
+Failures whose inputs are shared (storage transport, the head
+compare-and-swap, config and binding loads, provider availability, and batch
+invariants) still stop the whole Push before publication.
+
 ## 9. Explicit removal and tombstones
 
 Local absence is not deletion intent. If Machine A deletes
@@ -382,18 +396,19 @@ must each be removed, and the backend rejects a parent-directory removal while
 stored descendants remain selected. A rename is represented as removal of the
 old exact resource plus addition of the new exact resource.
 
-## 10. Pull planning, apply, and metadata updates
+## 10. Pull comparison, Apply, and metadata updates
 
-Pull is split into immutable review and mutation phases.
+Pull has a comparison review followed by one mutation command.
 
-### 10.1 Inspect, lazy staging, and plan
+### 10.1 Compare and lazy staging
 
 Inspect validates the bounded storage marker and head, then stages the
 manifest against the head's exact `manifest_size` and `manifest_sha256` before
 parsing and validating schema, bundle identity, logical paths, resource
 ownership, case-folded path collisions, directory ancestry, and tombstones.
-The restore planner maps portable logical paths to the current binding and
-emits typed actions without eagerly downloading a whole bundle.
+Compare maps portable logical paths to the current binding without eagerly
+downloading a whole bundle. It does not capture complete local transcripts or
+persist an executable plan.
 
 Payload bytes are staged only when a consumer needs them. The manifest
 entry's exact size and SHA-256 are passed to the storage adapter, which
@@ -414,16 +429,16 @@ UI. Selecting a nested file also selects its planned ancestor directories.
 Unchecked actions mean **Keep local / skip this Pull** and do not block
 approved conversations.
 
-The plan pins the storage, bundle, replica, revision, commit, manifest hash,
-binding revision, targets, expected target digests/modes, and expiry.
+The in-memory review pins the storage, bundle, replica, revision, commit,
+manifest hash, binding revision, and expiry. Apply rebuilds target digests,
+modes, conversation identities, and executable actions from current state.
 
-### 10.2 Apply preflight
+### 10.2 Apply
 
-Before mutation, Apply rejects unknown/duplicate action IDs, expired or
-already-recorded plans, changed bindings, changed remote heads, changed
-staged payload bytes, path escapes, link traversal, changed target
-hashes/modes, and newly Git-managed project roots when a project-content
-action was approved.
+Before each mutation, Apply rejects unknown or duplicate selection IDs, an
+expired review, changed bindings, changed remote heads, changed payload bytes,
+path escapes, link traversal, changed target hashes or modes, and newly
+Git-managed project roots when a project-content action was approved.
 
 Apply uses this filesystem order:
 
@@ -447,7 +462,7 @@ If Machine B changed a file covered by a deletion tombstone, its digest no
 longer matches and deletion fails without removing B's bytes. If B has an
 untracked `docs/local.md`, approved tracked child files may be deleted, but
 `docs` remains because recursive deletion is forbidden. A failed directory
-removal is recorded and a retry requires a refreshed plan.
+removal is recorded and a later attempt requires a new comparison.
 
 ### 10.3 Successful Pull: local and remote metadata
 
@@ -459,7 +474,15 @@ and advances the `RecipeBase` with the inspected head's exact manifest size
 and hash. Project-content exclusion preferences are not rewritten by Pull.
 
 Apply is followed by readiness verification. A readiness failure does not
-hide an already valid restore plan from the user.
+hide the current Pull result from the user.
+
+Conversation actions settle one thread at a time. A thread that fails to
+prepare or apply, a thread whose local capture failed, and an approved row
+the apply-time review no longer offers as the reviewed action each get a
+failure receipt of their own while every other approved action applies; the
+result lists them under `failed_actions`. Shared-state failures (storage
+transport, the batched transcript prefetch, config and binding loads,
+provider availability) still stop the whole Apply.
 
 ## 11. Integrity, concurrency, and path safety
 
@@ -492,7 +515,7 @@ existing ancestor without following symlinks. Writes never use a remote
 absolute path.
 
 Head CAS provides single-winner publication. A pusher must hold the exact
-reviewed `RecipeBase`, and a restore plan must still match the current head.
+reviewed `RecipeBase`, and a Pull review must still match the current head.
 The immutable commit chain retains published history, while stale writers fail
 and must inspect/review again.
 

@@ -27,10 +27,10 @@ Mallard will make these changes as one coordinated feature:
    a fork is therefore valid.
 3. Reject mismatched active identity, unrelated copied metadata, conflicting
    parent claims, self-parenting, and ancestry cycles.
-4. Use one shared full-rollout structure parser for path inspection and
-   repair, transcript analysis, and structural rewrite. Bounded discovery and
-   history probes follow the same first-authoritative-record rule without
-   scanning every transcript in full.
+4. Use one shared full-rollout structure parser for transcript analysis and
+   portable Push/Pull structural rewrite. Bounded discovery and history probes
+   follow the same first-authoritative-record rule without scanning every
+   transcript in full.
 5. Keep provider fork ancestry separate from Mallard's portable logical-thread
    ancestry.
 6. Resolve `Diverged` to a non-destructive `Fork` by default in both Push and
@@ -72,10 +72,9 @@ The `provider-p111` rollout can contain metadata records for
 `provider-p111`, `provider-p11`, `provider-p1`, and `provider-p`, including
 duplicates of those records.
 
-The previous path audit in `commands.rs` scanned every `session_meta` and
-required every recorded ID to equal the assigned active ID. That rule
-incorrectly rejected copied ancestor metadata. The old path remapper repeated
-the same assumption, so a valid nested fork could not pass path repair either.
+Earlier ownership code scanned every `session_meta` and required every recorded
+ID to equal the expected active ID. That rule incorrectly rejected copied
+ancestor metadata.
 
 `scan_jsonl_metadata` already has the correct starting behavior: it returns
 the first authoritative Codex `session_meta`. The stricter full-file checks
@@ -216,7 +215,7 @@ respectively.
 - `payload.id` is preferred as the active ID. Older supported formats may fall
   back to `thread_id`, `threadId`, `session_id`, or `sessionId` through an
   explicitly versioned adapter.
-- The authoritative active ID must equal the assigned thread ID, rollout
+- The authoritative active ID must equal the expected rollout thread ID, rollout
   filename ID when one is available, and capture resource identity.
 - A later metadata record is historical; it cannot replace the active ID or
   active CWD.
@@ -362,7 +361,7 @@ p111 -> p11, plus unrelated metadata x
 p111 -> p11 and p111 -> p1
 p111 -> p111
 p111 -> p11 -> p1 -> p111
-authoritative id p111 while the assigned id is p11
+authoritative id p111 while the expected rollout id is p11
 ```
 
 ### Callers
@@ -371,8 +370,6 @@ The shared result replaces independent identity parsing in:
 
 - `provider_capture::scan_jsonl_metadata`;
 - Codex discovery and capture ownership checks;
-- `inspect_codex_structural_cwds`;
-- `remap_codex_structural_cwds`;
 - `conversation_codec::analyze_codex_transcript`;
 - `conversation_codec::rewrite_codex_transcript`.
 
@@ -380,46 +377,32 @@ Discovery may use a streaming first-record fast path to identify a candidate,
 but selected capture and ownership approval must run the complete bounded
 structural validation.
 
-## Path ownership and repair
+## Authoritative project ownership
 
-Ownership and resumability are separate decisions.
+Ownership and resumability are separate decisions. Each rollout has one
+authoritative project home: the `cwd` in its active, authoritative
+`session_meta` record.
 
-### Ownership result
+A project owns a rollout only when:
 
-A conversation is owned by the assigned project when:
-
-- the assignment maps the authoritative active ID to the project;
 - the rollout resolves inside the bound Codex home;
-- exactly one rollout represents the assigned active ID;
-- the authoritative ID matches the assignment; and
+- exactly one rollout represents the expected active ID;
+- the authoritative ID matches the expected rollout thread ID;
+- the authoritative home is canonically equal to the bound project root; and
 - all observed historical metadata belongs to valid accepted ancestry.
+
+Codex Desktop project lists, thread-project assignments, writable roots, and
+workspace hints are not ownership evidence. A Desktop assignment cannot
+transfer a rollout to another project. Later `turn_context.cwd` values also do
+not change its home.
+
+Mallard never rewrites a local rollout to change its project ownership. If a
+project moves, existing rollouts retain their recorded authoritative home.
+Portable Push/Pull path mapping remains a transfer-boundary transform and does
+not mutate the source rollout.
 
 Message-lineage support is not required to establish ownership. An owned but
 unsupported transcript can still be captured as stored-only.
-
-### CWD inspection
-
-After ancestry validation, inspect the CWD of every accepted `session_meta` and
-every structural `turn_context`. A stale ancestor CWD is a repairable path
-issue, not an identity mismatch.
-
-### CWD repair
-
-Repair:
-
-- rewrites only declared structural CWD fields;
-- rewrites CWDs in current and accepted historical records;
-- does not rewrite IDs, `forked_from_id`, `parent_thread_id`, messages, tool
-  records, timestamps, or content;
-- reparses the complete output with the shared structural parser;
-- proves the active ID and provider ancestry are unchanged;
-- proves canonical conversation lineage and semantic digests are unchanged
-  when the codec can compute them; and
-- retains the existing bounded read, regular-file, no-symlink, backup,
-  recheck, and atomic-write protections.
-
-An unrelated metadata ID remains a blocker and is never made acceptable by
-rewriting its CWD.
 
 ### Failure scope
 
@@ -910,7 +893,7 @@ Use distinct user-facing classes:
 | --- | --- | --- |
 | Ownership mismatch | Assigned ID differs from authoritative first metadata ID | Block that conversation |
 | Invalid provider ancestry | Cycle, self-parent, conflicting parent, unrelated copied metadata | Block that conversation |
-| Repairable project path | Accepted current or ancestor structural CWD points to the old project | Offer path repair |
+| Foreign authoritative home | Active `session_meta.cwd` differs from the bound project root | Exclude from this project; do not rewrite |
 | Unsupported message codec | Ownership valid, canonical item sequence not provable | Store-only; do not claim resumable |
 | Ambiguous binding | More than one compatible logical ancestor | Block mutating action |
 | Stale reviewed plan | Head, bytes, binding, target, codec, or revision changed | Abort and refresh |
@@ -927,7 +910,7 @@ Do not report copied, valid ancestor metadata as an ownership mismatch.
   same JSONL file.
 - Never log transcript content, credentials, complete local paths, or portable
   provider-home details.
-- Keep local bindings, repair backups, journal state, plan pins, target paths,
+- Keep local bindings, journal state, plan pins, target paths,
   and provider index details out of portable manifests.
 - Verify immutable upload objects by SHA-256.
 - Preserve head compare-and-swap behavior.
@@ -981,7 +964,8 @@ persisted typed plan that the active command path can execute.
 ### Phase 1 — Shared structural parser and ownership fix
 
 - Add the bounded Codex rollout parser.
-- Route discovery, ownership audit, CWD inspection, and repair through it.
+- Route discovery, capture ownership, and transcript analysis through it.
+- Use the authoritative active `session_meta.cwd` as the one project home.
 - Accept nested valid fork ancestry.
 - Scope true failures to the affected conversation.
 - Add realistic JSONL fixtures based on current Codex metadata shapes.
@@ -1048,13 +1032,13 @@ Add Rust tests for:
 7. two non-null parents claimed by one ID;
 8. self-parenting;
 9. an ancestry cycle;
-10. active ID versus assigned ID mismatch;
+10. active ID versus expected rollout ID mismatch;
 11. malformed first metadata;
 12. invalid or over-limit IDs;
 13. depth and distinct-ID limits;
-14. stale CWDs in current and ancestor records;
-15. repair of every accepted structural CWD; and
-16. proof that repair leaves IDs and parent edges unchanged.
+14. exact canonical equality between authoritative home and project root;
+15. a Desktop project assignment cannot transfer rollout ownership; and
+16. later turn CWDs cannot transfer rollout ownership.
 
 ### Codec
 
@@ -1185,10 +1169,10 @@ provider home as a writable test target.
 This design is complete only when all of the following are true:
 
 1. A valid three-level Codex fork chain no longer pauses Push or Pull.
-2. The authoritative active ID still must match the assigned thread.
+2. The authoritative active ID still must match the expected rollout thread.
 3. Unrelated or cyclic metadata remains blocked.
-4. CWD repair handles current and ancestor structural records without changing
-   identity or content.
+4. Codex Desktop assignment changes do not transfer ownership or rewrite a
+   rollout.
 5. Nested fork rollouts can be classified by codec v2 when their canonical
    items are supported.
 6. A conflict on `t111` can create a new logical child whose immediate parent
@@ -1211,18 +1195,17 @@ This design is complete only when all of the following are true:
 
 Current Mallard implementation:
 
-- `src-tauri/src/project_sync/commands.rs`
-  - `thread_entries`
-  - `inspect_codex_structural_cwds`
-  - `remap_codex_structural_cwds`
-- `src-tauri/src/project_sync/provider_capture.rs`
-  - `scan_jsonl_metadata`
-- `src-tauri/src/project_sync/conversation_codec.rs`
+- `crates/mallard-infrastructure/src/codex_rollout.rs`
+  - `analyze_codex_rollout_structure`
+- `crates/mallard-infrastructure/src/providers/codex/`
+  - authoritative metadata parsing and exact-home discovery
+- `crates/mallard-infrastructure/src/conversation_codec.rs`
   - `analyze_codex_transcript`
   - `rewrite_codex_transcript`
-- `src-tauri/src/project_sync/conversation_sync.rs`
+- `crates/mallard-infrastructure/src/codex_standalone_builder.rs`
+  - `build_standalone_codex_root`
+- `crates/mallard-domain/src/conversation_reconciliation.rs`
   - `default_conversation_decision`
-  - `rekey_thread_binding`
 - `src-tauri/src/project_sync/conversation_materialization.rs`
   - `apply_conversation_cloud_publication`
   - `apply_conversation_materialization`

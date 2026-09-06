@@ -26,7 +26,6 @@ import { writeClipboardText } from "../sync-review/clipboard";
 import TopLayer from "../sync-review/TopLayer";
 import { useDebugPopoverPlacement } from "../sync-review/debugPopoverPlacement";
 import {
-  isCaptureBudgetHold,
   isPullReviewStatus,
   isPushReviewRow,
 } from "../sync-review/pullReviewStatus";
@@ -200,14 +199,13 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
   if (!selected) return null;
 
   // The whole pill — icon, name, and chevron — is one path-bar target.
-  const label = `Branch: ${selected.name}${selected.is_current ? ", current branch" : ""}${!selected.available ? ", history only" : ""}`;
+  const label = `Branch: ${selected.name}${selected.is_current ? ", current branch" : ""}`;
   const face = (
     <>
       <Icon name="git-branch" size={12} />
       {/* Just the branch name: the pill always shows the selected branch, so
           "Current" belongs in the open menu, not here. */}
       <span className="sync-history-branch-name" title={selected.name}>{selected.name}</span>
-      {!selected.available && <span className="sync-history-branch-state history-only">History only</span>}
     </>
   );
 
@@ -270,7 +268,7 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
               aria-checked={branch.name === selectedBranch}
               className="sync-history-branch-option"
               data-branch={branch.name}
-              title={!branch.available ? "This branch is no longer available locally; recorded session history can still be shown." : branch.name}
+              title={branch.name}
               onClick={() => {
                 closeMenu(true);
                 if (branch.name !== selectedBranch) onChange(branch.name);
@@ -283,7 +281,6 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
                 <strong>{branch.name}</strong>
               </span>
               {branch.is_current && <span className="sync-history-branch-state current">Current</span>}
-              {!branch.available && <span className="sync-history-branch-state history-only">History only</span>}
             </button>
           ))}
         </div>
@@ -485,15 +482,6 @@ export function sessionSyncPresentation(
       label: syncHoldDetail(conflict.mode, entry)
         ?? entry.status_detail
         ?? "Mallard could not safely match the local and stored session.",
-    };
-  }
-  /* A row this push (or pull) could not fit keeps its real status glyph — it
-     is still work that will go — and only the sentence changes. */
-  const waiting = decisionWithBlocker(["capture_budget"]);
-  if (waiting) {
-    return {
-      ...stateGlyph(entry.state),
-      label: syncHoldDetail(waiting.mode, entry) ?? "This session doesn't fit in this push.",
     };
   }
   const blocked = (mode: "push" | "pull"): ComparisonPresentation => ({
@@ -784,8 +772,6 @@ interface SessionCardProps {
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
   onReviewPull?: () => void;
-  /** The push budget's limit, for the hold copy of rows that did not fit. */
-  captureLimitBytes?: number | null;
 }
 
 interface SessionDebugMenuProps {
@@ -961,12 +947,15 @@ function SessionDebugMenu({
             <span>Click a value to copy it.</span>
           </header>
           <div className="sync-history-debug-values">
+            {/* No aria-label: it would replace the row's content as the
+                accessible name, and the value is the one thing worth hearing.
+                Named from content instead, so the path or digest is announced
+                and stays navigable with a reading cursor. */}
             {rows.map((row) => (
               <button
                 key={row.key}
                 type="button"
                 className="sync-history-debug-copy"
-                aria-label={`Copy ${row.label.toLowerCase()}`}
                 title={`Copy ${row.label.toLowerCase()}`}
                 onClick={() => void copyValue(row.key, row.value)}
               >
@@ -1092,7 +1081,7 @@ function syncReviewStateLabel(
       case "create_local": return selected ? "Create local task" : "Not selected";
       case "report_local_only": return "Keep local";
       case "not_found": return "Not found";
-      case "blocked": return decision.blocker === "capture_budget" ? `Not in this ${mode}` : "Can't sync";
+      case "blocked": return "Can't sync";
     }
   }
   if (mode === "push") {
@@ -1114,25 +1103,9 @@ function syncReviewStateLabel(
  * user vocabulary only — sync verdicts never gate opening a session. Provider
  * naming comes from the entry, never from a hard-coded provider branch.
  */
-/** The glyph a sync state wears when nothing blocks it. */
-function stateGlyph(state: ThreadSyncEntry["state"]): Pick<ComparisonPresentation, "status" | "className"> {
-  switch (state) {
-    case "synced": return { status: "synced", className: "synced" };
-    case "local_only":
-    case "local_ahead": return { status: "local-outstanding", className: "local" };
-    case "storage_only":
-    case "storage_ahead": return { status: "cloud-outstanding", className: "storage" };
-    case "diverged": return { status: "divergent", className: "diverged" };
-    case "unavailable": return { status: "unavailable", className: "unavailable" };
-    case "unknown":
-    default: return { status: "conflict", className: "conflict" };
-  }
-}
-
 export function syncHoldDetail(
   mode: "push" | "pull",
   entry: ThreadSyncEntry,
-  captureLimitBytes?: number | null,
 ): string | null {
   const providerName = entry.provider_display_name ?? "the provider";
   if (entry.state === "unavailable") {
@@ -1151,20 +1124,11 @@ export function syncHoldDetail(
       case "missing_binding":
         return "Can't sync — this session isn't linked to a stored copy yet.";
       case "busy":
-        return `Another ${providerName} sync operation is still finishing. Wait for recovery, then refresh.`;
+        return `Another ${providerName} sync operation is still finishing. Wait, then refresh.`;
       case "detached_requires_pull":
         return "This session's local mapping changed. Pull to establish the current mapping.";
       case "unknown_evidence":
         return "Can't sync — Mallard could not prove the local and stored session state safely.";
-      case "capture_budget": {
-        // Nothing is remembered between pushes: the sentence says the push is
-        // full and to run another, never which round or how many remain.
-        const limit = captureLimitBytes != null ? `the ${formatBytes(captureLimitBytes)} limit` : "the limit";
-        const verb = mode === "push" ? "Push" : "Pull";
-        return `Doesn't fit in this ${mode} — ${limit} is full with newer sessions. ${verb} again after this one.`;
-      }
-      case "too_large":
-        return "Can't sync — this session is larger than one push carries.";
       default:
         return "Can't sync — this session can't be changed safely right now.";
     }
@@ -1206,16 +1170,12 @@ function SessionCard({
   session, occurrenceKey, workingDirectory, busy = false, busyActionId = null,
   onSessionAction, onOpenSessionDetail,
   syncEntry, reviewResourceId, storageName, syncFallback, selectionMode, selected = false, selectable = false,
-  selectionDisabled = false, onToggleResource, onReviewPull, captureLimitBytes = null,
+  selectionDisabled = false, onToggleResource, onReviewPull,
 }: SessionCardProps) {
   const fullTitle = session.title || "Untitled session";
   const visibleTitle = compactThreadTitle(fullTitle);
   const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, syncEntry, selected) : null;
-  const holdDetail = selectionMode && syncEntry ? syncHoldDetail(selectionMode, syncEntry, captureLimitBytes) : null;
-  // The row this push (or pull) could not fit: in its place, unselectable,
-  // and saying so without a hover.
-  const waiting = selectionMode != null
-    && isCaptureBudgetHold(selectionMode === "push" ? syncEntry?.push_decision : syncEntry?.pull_decision);
+  const holdDetail = selectionMode && syncEntry ? syncHoldDetail(selectionMode, syncEntry) : null;
   const syncBlockedPresentation: SessionSyncPresentation | null = session.sync_blocked_reason
     ? {
         status: "unavailable",
@@ -1223,7 +1183,7 @@ function SessionCard({
         label: `Unavailable for sync. ${session.sync_blocked_reason}`,
       }
     : null;
-  // The status badge owns row state; the Uncommitted heading owns its pencil.
+  // The status badge owns row state; the branch-unmapped heading owns its pencil.
   const accessNote = sessionAccessNote(session);
   const canOpenDetails = !selectionMode
     && session.source !== "remote_only"
@@ -1295,9 +1255,6 @@ function SessionCard({
             </button>
           ) : (
             <strong title={visibleTitle === fullTitle ? undefined : fullTitle}>{visibleTitle}</strong>
-          )}
-          {waiting && (
-            <span className="sync-history-branch-state history-only" title={holdDetail ?? undefined}>Later</span>
           )}
           {session.preserved && (
             <span
@@ -1420,7 +1377,6 @@ function SyncEntryCard({
   selectionDisabled = false,
   onToggleResource,
   onReviewPull,
-  captureLimitBytes = null,
 }: {
   entry: ThreadSyncEntry;
   storageName: string;
@@ -1430,7 +1386,6 @@ function SyncEntryCard({
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
   onReviewPull?: () => void;
-  captureLimitBytes?: number | null;
 }) {
   const fullTitle = entry.display_name.trim() && entry.display_name !== entry.thread_id
     ? entry.display_name
@@ -1441,9 +1396,7 @@ function SyncEntryCard({
   const identityLabel = `${title}, ${entry.provider_display_name} thread ${entry.thread_id}`;
   const updatedAt = entry.storage_updated_at ?? entry.local_updated_at;
   const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, entry, selected) : null;
-  const holdDetail = selectionMode ? syncHoldDetail(selectionMode, entry, captureLimitBytes) : null;
-  const waiting = selectionMode != null
-    && isCaptureBudgetHold(selectionMode === "push" ? entry.push_decision : entry.pull_decision);
+  const holdDetail = selectionMode ? syncHoldDetail(selectionMode, entry) : null;
   return (
     <article className={`sync-history-thread-card sync-history-stored-thread${selectionMode && selectable ? " sync-sync-selectable-row" : ""}${selected ? " selected" : ""}`}>
       <div className="sync-history-thread-topline">
@@ -1483,9 +1436,6 @@ function SyncEntryCard({
             <ProviderMark provider={entry.provider} displayName={entry.provider_display_name} />
           </span>
           <strong title={title === fullTitle ? undefined : fullTitle}>{title}</strong>
-          {waiting && (
-            <span className="sync-history-branch-state history-only" title={holdDetail ?? undefined}>Later</span>
-          )}
           {selectionMode === "pull" && pullOperationChip(entry) && (
             <span className="sync-history-branch-state history-only" title={holdDetail ?? reviewStateLabel ?? undefined}>
               {pullOperationChip(entry)}
@@ -1593,7 +1543,7 @@ export function ProjectChatHistoryContent({
   continuityActionBusy = false,
 }: ContentProps) {
   const [collapsedCommitShas, setCollapsedCommitShas] = useState<Set<string>>(new Set());
-  const [uncommittedCollapsed, setUncommittedCollapsed] = useState(false);
+  const [branchUnmappedCollapsed, setBranchUnmappedCollapsed] = useState(false);
   const [storageOnlyCollapsed, setStorageOnlyCollapsed] = useState(false);
   const label = projectLabel(project);
   const allSessions = useMemo(
@@ -1627,10 +1577,6 @@ export function ProjectChatHistoryContent({
     }
     return matched;
   }, [sessions, syncIndex]);
-  const matchedSyncEntries = useMemo(
-    () => new Set(syncBySessionResource.values()),
-    [syncBySessionResource],
-  );
   const providerNames = useMemo(
     () => new Map((activity?.providers ?? []).map((state) => [state.provider, state.display_name])),
     [activity?.providers],
@@ -1645,15 +1591,34 @@ export function ProjectChatHistoryContent({
   // Resolved the same way the rows' status badges resolve it, so the group
   // heading and the tooltips under it can never name two different storages.
   const storageOnlyName = (comparison ? comparisonStorageName : activeStorageName) ?? "storage";
-  // Unmapped rows split by where the session lives. A storage-only session is
-  // not uncommitted local work, so it never renders under a heading that
-  // promises a commit is coming; one that does map to a commit still renders
-  // on the rail, because the rail records which sessions produced the commit
-  // and that stays true wherever the transcript is.
+  // Unmapped rows split by where the session lives. A storage-only session
+  // stays in its storage group; a local session states only that this branch
+  // has no matching commit.
   const unmappedReferences = (activity?.unmapped ?? [])
     .filter((reference) => sessionsByResource.has(reference.resource_id));
   const storageOnlyReferences = unmappedReferences.filter((reference) => sessionsByResource.get(reference.resource_id)?.source === "remote_only");
-  const uncommittedReferences = unmappedReferences.filter((reference) => sessionsByResource.get(reference.resource_id)?.source !== "remote_only");
+  const branchUnmappedReferences = unmappedReferences.filter((reference) => sessionsByResource.get(reference.resource_id)?.source !== "remote_only");
+  /* A comparison row is represented only when the Activity projection will
+     render its session. Presence in `activity.sessions` is not enough: a
+     missing commit/unmapped reference would otherwise hide a planned Push or
+     Pull row from both the Git rail and the fallback list. */
+  const renderedSessionIds = useMemo(() => {
+    if (!activity?.git) return new Set(sessions.map((session) => session.resource_id));
+    return new Set([
+      ...activity.git.commits.flatMap((commit) => (
+        commit.session_refs.map((reference) => reference.resource_id)
+      )),
+      ...(activity.unmapped ?? []).map((reference) => reference.resource_id),
+    ].filter((resourceId) => sessionsByResource.has(resourceId)));
+  }, [activity, sessions, sessionsByResource]);
+  const renderedSyncEntryIds = useMemo(() => {
+    const entryIds = new Set<string>();
+    for (const resourceId of renderedSessionIds) {
+      const entry = syncBySessionResource.get(resourceId);
+      if (entry) entryIds.add(entry.resource_id);
+    }
+    return entryIds;
+  }, [renderedSessionIds, syncBySessionResource]);
   /* The non-git flat list's own split of the same fact, session-typed rather
      than reference-typed because that list renders sessions directly. */
   const cloudSessions = sessions.filter((session) => session.source === "remote_only");
@@ -1670,10 +1635,9 @@ export function ProjectChatHistoryContent({
       && (selectionMode === "pull"
         ? isPullReviewStatus(sessionSyncPresentation(entry, "storage").status)
         : isPushReviewRow(sessionSyncPresentation(entry, "storage").status, entry.push_decision))
-      && !matchedSyncEntries.has(entry)
+      && !renderedSyncEntryIds.has(entry.resource_id)
     ));
-  }, [comparison?.entries, selectionMode, matchedSyncEntries]);
-  const captureLimitBytes = comparison?.capture_budget?.limit_bytes ?? null;
+  }, [comparison?.entries, selectionMode, renderedSyncEntryIds]);
   const hasBoundProvider = Object.keys(binding?.profile_ids ?? {}).length > 0;
   // Resolved once for the page: every row without a comparison entry draws this
   // instead of drawing nothing.
@@ -1686,22 +1650,14 @@ export function ProjectChatHistoryContent({
   }), [comparison, comparisonLoading, comparisonError, activeStorageName, hasBoundProvider]);
   const sectionTitle = activity?.git ? "Git history" : activity ? "Sessions" : "Activity";
   const windowRange = activity ? formatDayRange(activity.window_start, activity.window_end) : "";
-  /* An empty rail has three causes and they are not interchangeable. Only one
-     of them is about the window, and for the other two no amount of paging
-     would ever produce a commit — so the page has to say which it is.
-     `available` is false for a branch recorded in session metadata but with no
-     local ref; it is true for the current branch even before its first commit,
-     which is what separates the remaining two. */
+  /* An empty rail either belongs to an unborn branch or to a loaded range
+     without commits. Branch choices come only from the local repository. */
   const emptyRail = useMemo(() => {
-    const branch = activity?.git?.branches.find((entry) => entry.name === activity.git?.selected_branch);
-    if (branch && !branch.available) {
-      return { icon: "git-branch" as IconName, title: "Branch not checked out here", meta: null };
-    }
     if ((activity?.older?.commits ?? 0) === 0) {
       return { icon: "git-commit" as IconName, title: "No commits yet", meta: null };
     }
     return { icon: "range" as IconName, title: "No commits", meta: windowRange };
-  }, [activity?.git?.branches, activity?.git?.selected_branch, activity?.older?.commits, windowRange]);
+  }, [activity?.older?.commits, windowRange]);
   const refreshStatus = comparisonLoading
     ? `Comparing threads with ${activeStorageName ?? "storage"}`
     : loading
@@ -1728,7 +1684,7 @@ export function ProjectChatHistoryContent({
       selectionMode={selectionMode} selected={selectedResourceIds.has(reviewResourceId)}
       selectable={selectable}
       selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
-      onReviewPull={onReviewPull} captureLimitBytes={captureLimitBytes} />
+      onReviewPull={onReviewPull} />
     );
   };
   const orderedReferences = (references: { resource_id: string }[]) => references
@@ -1754,7 +1710,7 @@ export function ProjectChatHistoryContent({
     && sessions.length === 0
     && unlistedEntries.length === 0;
   const showGitTimeline = !selectionMode
-    || uncommittedReferences.length > 0
+    || branchUnmappedReferences.length > 0
     || commits.length > 0;
   const toggleCommit = (sha: string) => {
     setCollapsedCommitShas((current) => {
@@ -1948,20 +1904,20 @@ export function ProjectChatHistoryContent({
               </section>
             )}
             {!selectionReviewEmpty && (activity.git ? (showGitTimeline ? (
-              <div className={`sync-history-timeline${uncommittedReferences.length > 0 ? " has-uncommitted" : ""}`}>
-                {uncommittedReferences.length > 0 && (
-                  <section className={`sync-history-uncommitted${uncommittedCollapsed ? " collapsed" : ""}`} aria-labelledby="uncommitted-heading">
+              <div className={`sync-history-timeline${branchUnmappedReferences.length > 0 ? " has-branch-unmapped" : ""}`}>
+                {branchUnmappedReferences.length > 0 && (
+                  <section className={`sync-history-branch-unmapped${branchUnmappedCollapsed ? " collapsed" : ""}`} aria-labelledby="branch-unmapped-heading">
                     <SectionFold
-                      collapsed={uncommittedCollapsed}
-                      controls="uncommitted-list"
-                      label={`${uncommittedCollapsed ? "Expand" : "Collapse"} ${uncommittedReferences.length} session${uncommittedReferences.length === 1 ? "" : "s"} not linked to a commit`}
-                      onToggle={() => setUncommittedCollapsed(!uncommittedCollapsed)}
+                      collapsed={branchUnmappedCollapsed}
+                      controls="branch-unmapped-list"
+                      label={`${branchUnmappedCollapsed ? "Expand" : "Collapse"} ${branchUnmappedReferences.length} uncommitted session${branchUnmappedReferences.length === 1 ? "" : "s"}`}
+                      onToggle={() => setBranchUnmappedCollapsed(!branchUnmappedCollapsed)}
                     />
                     <div className="sync-history-section-heading">
-                      <h2 id="uncommitted-heading"><Icon name="edit" size={13} />Uncommitted</h2>
+                      <h2 id="branch-unmapped-heading"><Icon name="edit" size={13} />Uncommitted</h2>
                     </div>
-                    {!uncommittedCollapsed && (
-                      <div id="uncommitted-list" className="sync-history-thread-list flat">{uncommittedReferences.map((reference) => { const session = sessionsByResource.get(reference.resource_id); return session ? renderSession(session, `uncommitted:${session.resource_id}`) : null; })}</div>
+                    {!branchUnmappedCollapsed && (
+                      <div id="branch-unmapped-list" className="sync-history-thread-list flat">{branchUnmappedReferences.map((reference) => { const session = sessionsByResource.get(reference.resource_id); return session ? renderSession(session, `branch-unmapped:${session.resource_id}`) : null; })}</div>
                     )}
                   </section>
                 )}
@@ -2064,7 +2020,14 @@ export function ProjectChatHistoryContent({
                     exists; alone, the leaf crumb already names it. */}
                 {sessions.length === 0 ? (
                   <div className="sync-history-thread-list flat">
-                    <div className="sync-history-state">{`No sessions in ${windowRange}.`}</div>
+                    {/* Same rule as the empty rail: the window is named only
+                        when paging past it could still turn something up. A
+                        project whose homes hold no session at all gets no
+                        "Load earlier" control, so blaming its window would
+                        promise a step the page cannot offer. */}
+                    <div className="sync-history-state">
+                      {(activity.older?.sessions ?? 0) > 0 ? `No sessions in ${windowRange}.` : "No sessions yet."}
+                    </div>
                   </div>
                 ) : (
                   <>
@@ -2116,7 +2079,7 @@ export function ProjectChatHistoryContent({
                     selectionMode={selectionMode} selected={selectedResourceIds.has(entry.resource_id)}
                     selectable={entry.access === "bound_ready" && (selectableResourceIds?.has(entry.resource_id) ?? true)}
                     selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
-                    onReviewPull={onReviewPull} captureLimitBytes={captureLimitBytes} />
+                    onReviewPull={onReviewPull} />
                 ))}
               </div>
             )}
@@ -2342,6 +2305,8 @@ export default function ProjectActivityPage({
   }, [activity, onDropSelection, pages, selectedResourceIds, visibleReviewIds]);
 
   const changeBranch = useCallback((nextBranch: string) => {
+    // The review parent owns selection. A branch changes only this page's Git
+    // projection, so it must not clear selection or rebuild comparison.
     setBranch(nextBranch);
     setPages([]);
     void latest.current.load(null, nextBranch);

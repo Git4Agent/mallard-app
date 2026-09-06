@@ -14,8 +14,8 @@ import type {
   BundleRecipe,
   BundleReadiness,
   BundleSnapshotSummary,
-  CodexConversationPathAudit,
   HostIdentityStatus,
+  InventoryResource,
   LocalProjectRegistration,
   LocalProjectSummary,
   LogLine,
@@ -29,13 +29,16 @@ import type {
   ProviderProfile,
   ProviderProfileSummary,
   ResourceInventory as ResourceInventoryModel,
-  RestorePlan,
+  PullReview,
   RestoreResult,
   SetupDraftSummary,
   SiblingBundleStatus,
-  StorageConfig,
+  CommitStorageDraftResult,
+  StorageProviderDescriptor,
+  StorageProviderKey,
   StorageSetupDraft,
   StorageSetupDraftsChangedEvent,
+  StorageSummary,
   SyncConfig,
   ThreadSyncComparison,
 } from "../../types";
@@ -52,18 +55,17 @@ import ProjectBindingEditor, {
   type ProjectBindingDraft,
   type ProjectBindingSubmission,
 } from "./ProjectBindingEditor";
-import ProjectLinksWorkspace, {
-  storageSubtitle,
-  storageSubtitleIsPath,
-  type StorageNotice,
-} from "./ProjectLinksWorkspace";
+import ProjectLinksWorkspace, { type StorageNotice } from "./ProjectLinksWorkspace";
+import { StorageDraftSaveQueue } from "./storageDraftSaveQueue";
+import ResizeGrip from "./ResizeGrip";
 import StorageIndexPage from "./StorageIndexPage";
-import type { PathBarMenuGroup } from "../sync-review/SyncPathBar";
+import { storageSubtitle, storageSubtitleIsPath } from "./StorageSettings";
+import StorageProviderPicker from "./StorageProviderPicker";
+import { PathBarBelow, PathBarMenu, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import PushResourceWorkspace, {
   includeRequiredProjectContentDirectories,
-  preserveSyncedPushRecipeEntries,
   pullRequiredCopy,
-  pushReviewBlockingCount,
+  pushReviewDisabledReason,
   recommendedPushSelection,
   sanitizePushSelection,
 } from "./PushResourceWorkspace";
@@ -79,19 +81,24 @@ import StorageCatalogPage, {
 import CatalogIndexPage from "../storage-catalog/CatalogIndexPage";
 import AddCatalogScopeWorkspace from "../storage-catalog/AddCatalogScopeWorkspace";
 import { storageCatalogApi } from "../storage-catalog/api";
-import type { CatalogScopeView } from "../storage-catalog/types";
+import type { CatalogCapabilityDescriptor, CatalogScopeDto, CatalogScopeView } from "../storage-catalog/types";
 import {
   catalogScopeLabel,
   catalogScopeRemovalMessage,
   catalogScopeRemovalRequiresCleanup,
+  catalogScopeViews,
 } from "../storage-catalog/model";
 import RestorePlanView, { type PullReviewPrimary } from "./RestorePlanView";
 import StartupLoadingScreen, { type StartupStage } from "./StartupLoadingScreen";
 import { type SyncReviewStep } from "./reviewSteps";
-import { buildPullReviewItems } from "./pullReviewModel";
-import { buildPullOutcome, buildPushOutcome, type SyncOutcome } from "./syncOutcome";
+import { buildPullReviewItems, pullActionResourceIds } from "./pullReviewModel";
+import {
+  buildPullOutcome,
+  buildPushOutcome,
+  type SyncOutcome,
+  type SyncOutcomeAction,
+} from "./syncOutcome";
 import { projectSyncApi } from "./api";
-import { r2S3ApiUrl } from "./StorageSettings";
 import {
   applyPullReview,
   beginPullReview,
@@ -102,6 +109,8 @@ import {
 } from "./pullReviewFlow";
 import {
   inventoryResources,
+  maintenanceActionFor,
+  projectContentReviewRow,
   projectLabel,
   recipeSelection,
   recipeWithSelection,
@@ -122,57 +131,6 @@ const EMPTY_CONFIG: SyncConfig = {
   projects: [],
   links: [],
 };
-
-function sameStorageConfig(left: SyncConfig["storages"][number], right: SyncConfig["storages"][number]): boolean {
-  return left.id === right.id
-    && left.name === right.name
-    && left.kind === right.kind
-    && left.bucket === right.bucket
-    && left.access_key_id === right.access_key_id
-    && left.secret_access_key === right.secret_access_key
-    && left.account_id === right.account_id
-    && left.s3_endpoint === right.s3_endpoint
-    && left.region === right.region
-    && left.local_dir === right.local_dir
-    && left.supports_conditional_writes === right.supports_conditional_writes;
-}
-
-function sameR2Connection(left: SyncConfig["storages"][number], right: SyncConfig["storages"][number]): boolean {
-  return left.kind === "s3"
-    && right.kind === "s3"
-    && left.bucket === right.bucket
-    && left.access_key_id === right.access_key_id
-    && left.secret_access_key === right.secret_access_key
-    && left.account_id === right.account_id
-    && left.s3_endpoint === right.s3_endpoint
-    && left.region === right.region;
-}
-
-export function applyStorageDraft(
-  storages: SyncConfig["storages"],
-  draft: SyncConfig["storages"][number],
-  expectedBaseline: SyncConfig["storages"][number] | null,
-): SyncConfig["storages"] {
-  const existing = storages.find((candidate) => candidate.id === draft.id) ?? null;
-  if (expectedBaseline) {
-    if (
-      expectedBaseline.id !== draft.id
-      || !existing
-      || !sameStorageConfig(existing, expectedBaseline)
-    ) {
-      throw new Error(
-        "This storage changed outside the editor. Reload its current configuration before saving.",
-      );
-    }
-  } else if (existing) {
-    throw new Error(
-      "A storage with this identifier was added outside the editor. Reload before saving.",
-    );
-  }
-  return existing
-    ? storages.map((candidate) => candidate.id === draft.id ? draft : candidate)
-    : [...storages, draft];
-}
 
 export function shouldReloadConfigRevision(
   currentRevision: number,
@@ -268,7 +226,7 @@ interface PendingPush {
   projectName: string;
   project: LocalProjectSummary;
   binding: ProjectBinding | null;
-  storage: StorageConfig;
+  storage: StorageSummary;
   inventory: ResourceInventoryModel;
   savedRecipe: BundleRecipe | null;
   projectDefaults: Set<string>;
@@ -279,22 +237,14 @@ interface PendingPush {
   projectContentInventory: ProjectContentInventory | null;
   projectContentScanned: boolean;
   showProjectFiles: boolean;
-  conversationPushPlanId: string | null;
-  conversationActionIds: Record<string, string>;
 }
 
-function pushResources(pending: PendingPush): ReturnType<typeof inventoryResources> {
+function pushResources(pending: PendingPush): InventoryResource[] {
   const resources = inventoryResources(pending.inventory);
   const byId = new Map(resources.map((resource) => [resource.resource_id, resource]));
   for (const entry of pending.projectContentInventory?.entries ?? []) {
-    byId.set(entry.descriptor.resource_id, {
-      ...entry.descriptor,
-      category: "project_files",
-      logical_paths: [entry.logical_path],
-      default_selected: entry.selected_in_recipe || entry.selected_after_scan,
-      blocked_reason: entry.blocked_reason,
-      description: entry.relative_path,
-    });
+    const resourceId = entry.descriptor.resource_id;
+    byId.set(resourceId, projectContentReviewRow(entry, byId.get(resourceId)));
   }
   return [...byId.values()];
 }
@@ -327,9 +277,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [bindings, setBindings] = useState<ProjectBinding[]>([]);
   const [profiles, setProfiles] = useState<ProviderProfileSummary[]>([]);
   const [agentProviders, setAgentProviders] = useState<ProviderDescriptor[]>([]);
-  const [conversationPathAudits, setConversationPathAudits] = useState<Record<string, CodexConversationPathAudit>>({});
-  const [conversationPathAuditErrors, setConversationPathAuditErrors] = useState<Record<string, string>>({});
-  const [conversationPathAuditLoading, setConversationPathAuditLoading] = useState(true);
+  const [storageProviders, setStorageProviders] = useState<StorageProviderDescriptor[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [activeProjectSubview, setActiveProjectSubview] = useState<ActiveProjectSubview>({ kind: "overview" });
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
@@ -340,21 +288,32 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   // The page the storage trail is rooted at: every storage page starts its
   // path with a Storages crumb, and this is where that crumb goes.
   const [storageIndexOpen, setStorageIndexOpen] = useState(false);
+  const [storageProviderPickerOpen, setStorageProviderPickerOpen] = useState(false);
+  // Add storage starts with a provider choice; the picker is its own screen,
+  // rooted at the Storages crumb like every storage page.
   // The Catalog menu starts empty and grows one row per (provider profile ×
   // resource kind) the user adds. Each registered resource owns its own
   // storage links; there is no storage-wide Catalog selection.
   const [catalogScopes, setCatalogScopes] = useState<CatalogScopeView[]>([]);
+  /* The registry behind the rows, kept for the doors an empty Catalog draws. */
+  const [catalogCapabilities, setCatalogCapabilities] = useState<CatalogCapabilityDescriptor[]>([]);
+  /* The Kind a door chose on the way into Add; null when the verb was bare. */
+  const [catalogAddChoiceKey, setCatalogAddChoiceKey] = useState<string | null>(null);
   const [catalogScopeId, setCatalogScopeId] = useState<string | null>(null);
   const [addingCatalogScope, setAddingCatalogScope] = useState(false);
   const [catalogIndexOpen, setCatalogIndexOpen] = useState(false);
   const [storageIssues, setStorageIssues] = useState<Record<string, string>>({});
   const [storageEditorRequest, setStorageEditorRequest] = useState<
     | { mode: "open"; storageId: string; settingsExpanded: boolean; requestId: number }
-    | { mode: "create"; storageKind: "local" | "s3"; requestId: number }
     | { mode: "resume-draft"; draft: StorageSetupDraft; requestId: number }
     | { mode: "close"; requestId: number }
     | null
   >(null);
+  const storageDraftSaveQueue = useRef(new StorageDraftSaveQueue()).current;
+  const storageNavigationGuardRef = useRef<(() => Promise<boolean>) | null>(null);
+  const setStorageNavigationGuard = useCallback((guard: (() => Promise<boolean>) | null) => {
+    storageNavigationGuardRef.current = guard;
+  }, []);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -382,6 +341,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [pushSelected, setPushSelected] = useState<Set<string>>(new Set());
   const [pushProjectContentRemovals, setPushProjectContentRemovals] = useState<Set<string>>(new Set());
   const [pushWarningAcknowledgements, setPushWarningAcknowledgements] = useState<Set<string>>(new Set());
+  /* Beside the selection, not inside the review panel: the path bar's Push
+     publishes the same review, so its refusal has to see this too. */
+  const [pushDeletionApproved, setPushDeletionApproved] = useState(false);
   const [projectContentLoading, setProjectContentLoading] = useState(false);
   const [pushError, setPushError] = useState<string | null>(null);
   const [pushReviewStep, setPushReviewStep] = useState<SyncReviewStep>("history");
@@ -414,7 +376,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [setupDraftId, setSetupDraftId] = useState<string | null>(null);
   const [editingBinding, setEditingBinding] = useState<ProjectBindingDraft | null>(null);
 
-  const [restorePlan, setRestorePlan] = useState<RestorePlan | null>(null);
+  const [restorePlan, setRestorePlan] = useState<PullReview | null>(null);
   const [fetchProgress, setFetchProgress] = useState<BundleFetchProgress | null>(null);
   const [restoreBinding, setRestoreBinding] = useState<ProjectBinding | null>(null);
   const [restoreProjectName, setRestoreProjectName] = useState("project");
@@ -508,7 +470,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   }, []);
 
   useEffect(() => {
-    const storageIds = new Set(config.storages.map((storage) => storage.id));
+    const storageIds = new Set(config.storages.map((storage) => storage.storage_id));
     setStorageIssues((current) => {
       const next = Object.fromEntries(
         Object.entries(current).filter(([storageId]) => storageIds.has(storageId)),
@@ -770,9 +732,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setCatalogStorageMenuRequest(null);
   }, [activeCatalogScope?.scope.scope_id, catalogStorageMenuRequest]);
   const catalogStorages: CatalogStorageOption[] = config.storages.map((storage) => ({
-    id: storage.id,
+    id: storage.storage_id,
     name: storage.name,
-    kind: storage.kind,
+    provider_label: storage.provider_label,
+    icon: storage.icon,
     detail: storageSubtitle(storage),
     detailIsPath: storageSubtitleIsPath(storage),
   }));
@@ -796,13 +759,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       || !!activeCatalogScope
       || catalogIndexOpen
       || storageIndexOpen
+      || storageProviderPickerOpen
       || settingsOpen
       || activeStorageSettingsId != null);
   const pendingConnectionProject = pendingBundleConnection
     ? registrations.find((candidate) => candidate.local_project_id === pendingBundleConnection.projectId) ?? null
     : null;
   const pendingConnectionStorage = pendingBundleConnection
-    ? config.storages.find((candidate) => candidate.id === pendingBundleConnection.storageId) ?? null
+    ? config.storages.find((candidate) => candidate.storage_id === pendingBundleConnection.storageId) ?? null
     : null;
   const projectLinks: ProjectStorageLink[] = detail?.project.local_project_id === activeProjectId
     ? detail.links
@@ -878,9 +842,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setRepositoryKinds({});
     setBindings([]);
     setProfiles([]);
-    setConversationPathAudits({});
-    setConversationPathAuditErrors({});
-    setConversationPathAuditLoading(false);
     configRef.current = EMPTY_CONFIG;
     configSnapshotValidRef.current = false;
     setConfig(EMPTY_CONFIG);
@@ -889,43 +850,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setNotice(null);
     setBusy(false);
   }, []);
-  const loadConversationPathAudits = async (
-    nextBindings: ProjectBinding[],
-    shellRequestId?: number,
-    workflowEpoch?: number,
-  ) => {
-    if (
-      (shellRequestId !== undefined && shellRequest.current !== shellRequestId)
-      || (workflowEpoch !== undefined && hostWorkflowEpoch.current !== workflowEpoch)
-    ) return;
-    setConversationPathAuditLoading(true);
-    const activeBindings = nextBindings.filter((candidate) => candidate.state === "active");
-    const results = await Promise.all(activeBindings.map(async (candidate) => {
-      try {
-        const audit = await projectSyncApi.auditCodexConversationPaths(candidate.local_project_id);
-        return { projectId: candidate.local_project_id, audit, error: null };
-      } catch (reason) {
-        return {
-          projectId: candidate.local_project_id,
-          audit: null,
-          error: errorMessage(reason),
-        };
-      }
-    }));
-    if (
-      (shellRequestId !== undefined && shellRequest.current !== shellRequestId)
-      || (workflowEpoch !== undefined && hostWorkflowEpoch.current !== workflowEpoch)
-    ) return;
-    const nextAudits: Record<string, CodexConversationPathAudit> = {};
-    const nextErrors: Record<string, string> = {};
-    for (const result of results) {
-      if (result.audit) nextAudits[result.projectId] = result.audit;
-      if (result.error) nextErrors[result.projectId] = result.error;
-    }
-    setConversationPathAudits(nextAudits);
-    setConversationPathAuditErrors(nextErrors);
-    setConversationPathAuditLoading(false);
-  };
   const loadShell = async (): Promise<{
     nextProjects: LocalProjectRegistration[];
     nextConfig: SyncConfig;
@@ -942,13 +866,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       hostIdentityReady: false,
     });
     setLoading(true);
-    setConversationPathAuditLoading(true);
     setStartupStage("installation");
     const failures: string[] = [];
     let nextProjects: LocalProjectRegistration[] = [];
     let nextConfig: SyncConfig = EMPTY_CONFIG;
     let nextBindings: ProjectBinding[] = [];
     let nextProfiles: ProviderProfileSummary[] = [];
+    let nextAgentProviders: ProviderDescriptor[] = [];
     let verifiedHostIdentity: HostIdentityStatus | null = null;
     try {
       const nextHostIdentity = await projectSyncApi.getHostIdentityStatus();
@@ -1024,6 +948,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     ] as const);
     const providerReads = Promise.allSettled([
       projectSyncApi.listAgentProviders(),
+      projectSyncApi.listStorageProviders(),
       projectSyncApi.listProviderProfiles(),
       projectSyncApi.listBindings(),
     ] as const);
@@ -1043,13 +968,20 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       setRepositoryKinds({});
     }
     setStartupStage("providers");
-    const [agentProvidersResult, profilesResult, bindingsResult] = await providerReads;
+    const [agentProvidersResult, storageProvidersResult, profilesResult, bindingsResult] = await providerReads;
     if (shellRequest.current !== requestId) return unavailableResult();
     if (agentProvidersResult.status === "fulfilled") {
-      setAgentProviders(agentProvidersResult.value);
+      nextAgentProviders = agentProvidersResult.value;
+      setAgentProviders(nextAgentProviders);
     } else {
       failures.push(`Agent providers: ${errorMessage(agentProvidersResult.reason)}`);
       setAgentProviders([]);
+    }
+    if (storageProvidersResult.status === "fulfilled") {
+      setStorageProviders(storageProvidersResult.value);
+    } else {
+      failures.push(`Storage providers: ${errorMessage(storageProvidersResult.reason)}`);
+      setStorageProviders([]);
     }
     if (profilesResult.status === "fulfilled") {
       nextProfiles = profilesResult.value;
@@ -1097,7 +1029,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     };
     setHostIdentityShellReady(true);
     setLoading(false);
-    void loadConversationPathAudits(nextBindings, requestId);
     return { nextProjects, nextConfig, nextBindings, nextProfiles, hostIdentityReady: true };
   };
 
@@ -1106,13 +1037,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
      sentence that names the fix; Push and Pull showed the raw string for the
      same root cause. One resolution point, so both surfaces agree. */
   const storageFailureMessage = (storageId: string, reason: unknown): string => storageAccessErrorMessage(
-    configRef.current.storages.find((candidate) => candidate.id === storageId) ?? null,
+    configRef.current.storages.find((candidate) => candidate.storage_id === storageId) ?? null,
     reason,
   );
 
-  /* A running Push or Pull writes the bundle and the local journal together;
-     killing the process midway is what the review footers warn cannot be
-     undone, and the red close button did exactly that without asking.
+  /* A running Push or Pull can write remote and local state. Killing the
+     process midway can leave a partial result that Mallard does not retry.
 
      The listener is registered only while something is in flight. That keeps
      the ordinary close on its default path — `onCloseRequested` destroys the
@@ -1181,7 +1111,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           ? remembered
           : links[0]?.storage_id ?? null;
       // Project selection does not probe remote readiness. Pull populates
-      // `readiness` from the reviewed plan when it needs it.
+      // `readiness` from the current review when it needs it.
       if (storageId && nextDetail.binding?.state === "active") {
         setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
       }
@@ -1417,8 +1347,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       "project-sync-storage-setup-drafts-changed",
       () => {
         // The native event is intentionally value-free. Reload through the
-        // command that redacts `secret_access_key` and exposes only
-        // `secret_present` to the webview.
+        // command that reports secret presence only; no value ever reaches
+        // the webview.
         void refreshStorageSetupDrafts();
       },
     );
@@ -1427,7 +1357,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     };
   }, []);
 
-  const closeWorkspaceSettings = () => {
+  const saveStorageDraftBeforeNavigation = async () => (
+    storageNavigationGuardRef.current ? storageNavigationGuardRef.current() : true
+  );
+
+  const closeWorkspaceSettings = async (): Promise<boolean> => {
+    if (!(await saveStorageDraftBeforeNavigation())) return false;
     closeProjectSubview();
     setPendingPush(null);
     setPushError(null);
@@ -1438,22 +1373,26 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setAddingCatalogScope(false);
     setCatalogIndexOpen(false);
     setStorageIndexOpen(false);
+    setStorageProviderPickerOpen(false);
     setSettingsOpen(false);
     setStorageEditorRequest((current) => ({
       mode: "close",
       requestId: (current?.requestId ?? 0) + 1,
     }));
+    return true;
   };
 
   /** One route into a storage page, shared by the sidebar, the Storages
       index, and the banners that deep-link a specific storage's settings. */
-  const openStorageWorkspace = (storageId: string, settingsExpanded: boolean) => {
+  const openStorageWorkspace = async (storageId: string, settingsExpanded: boolean) => {
+    if (!(await saveStorageDraftBeforeNavigation())) return;
     closeProjectSubview();
     setSetupDraftId(null);
     setAddingCatalogScope(false);
     setCatalogIndexOpen(false);
     setCatalogScopeId(null);
     setStorageIndexOpen(false);
+    setStorageProviderPickerOpen(false);
     setSettingsOpen(false);
     setPendingPush(null);
     setPushError(null);
@@ -1466,16 +1405,17 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }));
   };
 
-  const openStorageIndex = () => {
+  const openStorageIndex = async () => {
     setError(null);
-    closeWorkspaceSettings();
+    if (!(await closeWorkspaceSettings())) return;
     setSetupDraftId(null);
     setStorageIndexOpen(true);
+    setStorageProviderPickerOpen(false);
   };
 
-  const openProjectsIndex = () => {
+  const openProjectsIndex = async () => {
     setError(null);
-    closeWorkspaceSettings();
+    if (!(await closeWorkspaceSettings())) return;
     setSetupDraftId(null);
     projectRequest.current += 1;
     setLoading(false);
@@ -1486,16 +1426,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setSiblingNotice(null);
   };
 
-  const openCatalogIndex = () => {
+  const openCatalogIndex = async () => {
     setError(null);
-    closeWorkspaceSettings();
+    if (!(await closeWorkspaceSettings())) return;
     setSetupDraftId(null);
     setCatalogIndexOpen(true);
   };
 
-  const openSettings = () => {
+  const openSettings = async () => {
     setError(null);
-    closeWorkspaceSettings();
+    if (!(await closeWorkspaceSettings())) return;
     setSetupDraftId(null);
     setSettingsOpen(true);
   };
@@ -1508,12 +1448,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       || typeof picked !== "string"
       || !picked
     ) return;
+    if (!(await closeWorkspaceSettings())) return;
     setBusy(true);
     setError(null);
     try {
       const created = await projectSyncApi.createSetupDraft(picked);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      closeWorkspaceSettings();
       setSetupDraftId(created.draft.draft_id);
       if (created.resumed) {
         notify(`Resumed setup draft for ${created.draft.display_name}.`);
@@ -1533,40 +1473,48 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       || hostWorkflowEpoch.current !== requestedWorkflowEpoch
     ) return;
     try {
-      const listed = await storageCatalogApi.listScopes();
+      // The rows and the capabilities they register, joined by coordinate:
+      // the descriptor is where a row's glyph and artwork come from.
+      const [listed, capabilities] = await Promise.all([
+        storageCatalogApi.listScopes(),
+        storageCatalogApi.listCapabilities(),
+      ]);
       if (
         (shellRequestId !== undefined && shellRequest.current !== shellRequestId)
         || hostWorkflowEpoch.current !== requestedWorkflowEpoch
       ) return;
-      setCatalogScopes(listed);
+      setCatalogScopes(catalogScopeViews(listed, capabilities));
+      setCatalogCapabilities(capabilities);
     } catch {
       // The menu is a convenience surface; the rest of the shell stays usable.
     }
   };
 
-  /** Opens the Add-row workspace: Kind, then provider home, and nothing else. */
-  const beginAddCatalogScope = () => {
+  /** Opens the Add-row workspace: Kind, then provider home, and nothing else.
+      A door arrives with Kind already chosen. */
+  const beginAddCatalogScope = async (choiceKey?: string) => {
     setError(null);
-    closeWorkspaceSettings();
+    if (!(await closeWorkspaceSettings())) return;
     setSetupDraftId(null);
     setCatalogIndexOpen(false);
+    setCatalogAddChoiceKey(choiceKey ?? null);
     setAddingCatalogScope(true);
   };
 
-  const openCatalogScope = (scopeId: string) => {
+  const openCatalogScope = async (scopeId: string) => {
     setError(null);
-    closeWorkspaceSettings();
+    if (!(await closeWorkspaceSettings())) return;
     setSetupDraftId(null);
     setCatalogIndexOpen(false);
     setCatalogScopeId(scopeId);
   };
 
-  const completeAddCatalogScope = async (scope: CatalogScopeView, workflowEpoch: number) => {
+  const completeAddCatalogScope = async (scope: CatalogScopeDto, workflowEpoch: number) => {
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
     setAddingCatalogScope(false);
     setCatalogIndexOpen(false);
     setCatalogScopeId(scope.scope.scope_id);
-    notify(`${catalogScopeLabel(scope.scope, scope.profile)} added to the Catalog.`);
+    notify(`${catalogScopeLabel(scope)} added to the Catalog.`);
     await refreshCatalogScopes(undefined, workflowEpoch);
   };
 
@@ -1577,7 +1525,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       await refreshCatalogScopes(undefined, workflowEpoch);
       return;
     }
-    const label = catalogScopeLabel(scope.scope, scope.profile);
+    const label = catalogScopeLabel(scope);
     const approved = await confirm(
       `Remove the “${label}” row from the Catalog?\n\nOnly the menu row is removed. No provider or storage content is touched.`,
       { title: "Remove Catalog row" },
@@ -1609,9 +1557,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  const openSetupDraft = (draftId: string) => {
+  const openSetupDraft = async (draftId: string) => {
     setError(null);
-    closeWorkspaceSettings();
+    if (!(await closeWorkspaceSettings())) return;
     setSetupDraftId((current) => current === draftId ? null : draftId);
   };
 
@@ -1644,33 +1592,22 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  /** Discard a storage setup draft from the rail. If that draft's form is
-      open (the workspace reports its storage id as the active editor), the
-      editor closes too — its state describes a draft that no longer exists. */
+  /** Discard a storage setup draft from the rail. The workspace watches the
+      draft list: a form open on that draft drops it the moment the list no
+      longer carries it. */
   const discardStorageSetupDraft = async (draftId: string) => {
     const workflowEpoch = hostWorkflowEpoch.current;
     const draft = storageSetupDrafts.find((candidate) => candidate.draft_id === draftId);
-    const discardImpact = draft?.storage.kind === "s3"
-      ? "This removes only Mallard’s local setup draft. It does not delete any Cloudflare bucket or access key that may have been created during preparation."
-      : draft?.storage.kind === "local"
-        ? "This removes only Mallard’s local setup draft. The selected folder and its contents are not changed."
-        : "This removes only Mallard’s local setup draft; external storage resources are not changed.";
     const approved = await confirm(
-      `Discard the storage draft for “${draft?.storage.name || "(unnamed)"}”?\n\n${discardImpact}`,
+      `Discard the storage draft for “${draft?.name || "(unnamed)"}”?\n\nThis removes only Mallard’s local setup draft; external storage resources are not changed.`,
       { title: "Discard storage draft" },
     );
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
     setBusy(true);
     setError(null);
     try {
-      await projectSyncApi.discardStorageSetupDraft(draftId);
+      await storageDraftSaveQueue.enqueue(() => projectSyncApi.discardStorageSetupDraft(draftId));
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      if (draft && activeStorageSettingsId === draft.storage.id) {
-        setStorageEditorRequest((current) => ({
-          mode: "close",
-          requestId: (current?.requestId ?? 0) + 1,
-        }));
-      }
       await refreshStorageSetupDrafts(undefined, workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       notify("Storage draft discarded.");
@@ -1752,81 +1689,29 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  const repairConversationPaths = async (projectId: string) => {
-    const workflowEpoch = hostWorkflowEpoch.current;
-    const audit = conversationPathAudits[projectId];
-    if (!audit?.can_repair) return;
-    const registration = registrations.find((candidate) => candidate.local_project_id === projectId);
-    const projectName = registration ? projectLabel(registration) : "this project";
-    const approved = await confirm(
-      `Repair ${audit.issues.length} Codex conversation path${audit.issues.length === 1 ? "" : "s"} for “${projectName}”?\n\nOnly conversations explicitly assigned to this project by Codex Desktop will be changed. Mallard will back up every affected rollout first, then update structural cwd fields without changing messages or history.\n\nClose the affected Codex tasks before continuing so they are not written at the same time.`,
-      { title: "Repair conversation paths" },
-    );
-    if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
-
-    setBusy(true);
-    setError(null);
-    try {
-      const result = await projectSyncApi.repairCodexConversationPaths(projectId);
-      if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      setConversationPathAudits((current) => ({
-        ...current,
-        [projectId]: result.audit,
-      }));
-      setConversationPathAuditErrors((current) => {
-        const next = { ...current };
-        delete next[projectId];
-        return next;
-      });
-      setActiveProjectId(projectId);
-      await loadProjectData(
-        projectId,
-        config,
-        activeStorageByProject[projectId],
-        workflowEpoch,
-      );
-      if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      notify(
-        `Repaired ${result.repaired_thread_ids.length} conversation path${result.repaired_thread_ids.length === 1 ? "" : "s"} — originals backed up.`,
-      );
-    } catch (reason) {
-      if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      setError(errorMessage(reason));
-      try {
-        const refreshed = await projectSyncApi.auditCodexConversationPaths(projectId);
-        if (hostWorkflowEpoch.current !== workflowEpoch) return;
-        setConversationPathAudits((current) => ({ ...current, [projectId]: refreshed }));
-      } catch {
-        // Keep the prior gate visible when the follow-up audit also fails.
-      }
-    } finally {
-      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
-    }
-  };
-
   const openPushChooser = async (
     projectId: string,
     storageId: string,
     workflowEpoch = hostWorkflowEpoch.current,
   ) => {
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
-    if (restorePlan) closePullReview();
-    setPushReviewStep("history");
-    setPushProjectContentRemovals(new Set());
-    setPushWarningAcknowledgements(new Set());
-    setProjectContentLoading(false);
-    setStorageNotice(null);
     setBusy(true);
     setError(null);
     setPushError(null);
     try {
+      if (restorePlan) closePullReview();
+      setPushReviewStep("history");
+      setPushProjectContentRemovals(new Set());
+      setPushWarningAcknowledgements(new Set());
+      setProjectContentLoading(false);
+      setStorageNotice(null);
       // One backend call runs a single discovery pass and a single remote
       // snapshot for every review section.
       const context = await projectSyncApi.preparePushReview(projectId, storageId);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       const nextDetail = context.project;
       const nextInventory = context.inventory;
-      const storage = config.storages.find((candidate) => candidate.id === storageId);
+      const storage = config.storages.find((candidate) => candidate.storage_id === storageId);
       if (!storage) throw new Error("The selected storage no longer exists.");
       const link = nextDetail.links.find((candidate) => candidate.storage_id === storageId);
       if (!link) throw new Error("This project is no longer linked to the selected storage.");
@@ -1916,8 +1801,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         projectContentInventory: lockedProjectContentInventory,
         projectContentScanned: lockedProjectContentInventory !== null,
         showProjectFiles: !isGitRepository || lockedProjectContentInventory !== null,
-        conversationPushPlanId: context.conversation_push_plan_id ?? null,
-        conversationActionIds: context.conversation_action_ids ?? {},
       });
       setPushSelected(new Set(projectDefaults));
       setActiveProjectId(projectId);
@@ -2062,8 +1945,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     projectContentReviewToken: string | null = null,
     projectContentRemovalIds: string[] = [],
     acknowledgedWarningDigests: string[] = [],
-    conversationPushPlanId: string | null = null,
-    approvedConversationActionIds: string[] = [],
   ) => {
     const workflowEpoch = hostWorkflowEpoch.current;
     if (getPreference("openLogsOnSync")) openActivity();
@@ -2078,8 +1959,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         projectContentReviewToken,
         projectContentRemovalIds,
         acknowledgedWarningDigests,
-        conversationPushPlanId,
-        approvedConversationActionIds,
       );
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       // The push is finished, so the review closes and the result lands on the
@@ -2176,18 +2055,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       pendingPush.threadComparison,
       pendingPush.projectContentInventory,
     );
-    const preservationRecipe: BundleRecipe = {
-      ...pendingPush.inventory.recipe,
-      entries: {
-        ...pendingPush.inventory.recipe.entries,
-        ...(pendingPush.savedRecipe?.entries ?? {}),
-      },
-    };
-    const recipe = preserveSyncedPushRecipeEntries(
-      recipeWithSelection(baseRecipe, resources, safeSelection),
-      preservationRecipe,
-      pendingPush.threadComparison,
-    );
+    // Capture only the visible selection. The backend retains stored conversations.
+    const recipe = recipeWithSelection(baseRecipe, resources, safeSelection);
     for (const resourceId of pushProjectContentRemovals) delete recipe.entries[resourceId];
     await publishProject(
       pendingPush.projectId,
@@ -2198,10 +2067,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         : null,
       [...pushProjectContentRemovals],
       [...pushWarningAcknowledgements],
-      pendingPush.conversationPushPlanId,
-      [...safeSelection]
-        .map((resourceId) => pendingPush.conversationActionIds[resourceId])
-        .filter((actionId): actionId is string => Boolean(actionId)),
     );
   };
 
@@ -2238,8 +2103,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       await refreshRepositoryKinds(workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       notify("Machine binding updated — cloud identity unchanged.");
-      await loadConversationPathAudits(nextBindings, undefined, workflowEpoch);
-      if (hostWorkflowEpoch.current !== workflowEpoch) return;
       await loadProjectData(projectId, config, activeStorageId, workflowEpoch);
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
@@ -2315,11 +2178,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         !hasPendingRestoreMutations(review.restorePlan)
         && review.restorePlan.remote_continuity?.state !== "replaced"
       ) {
-        const finalization = await projectSyncApi.applyRestore(review.restorePlan.plan_id, []);
+        const finalization = await projectSyncApi.applyRestore(review.restorePlan, []);
         if (restoreRequest.current !== requestId) return null;
         if (
           !finalization.success
-          || finalization.status !== "complete"
           || finalization.reviewed_base_advanced === false
         ) {
           throw new Error("Nothing to pull, but the reviewed baseline could not be advanced.");
@@ -2365,14 +2227,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  /**
-   * The one follow-up a finished sync can still owe. Restart and retry talk to
-   * the backend directly because the review is closed by the time this banner
-   * exists. Anything unresolved reopens Pull and replans from scratch.
-   */
-  const runOutcomeAction = async (outcome: SyncOutcome) => {
-    const action = outcome.action;
-    if (!action) return;
+  /** Finished-sync actions run after the review closes. Provider maintenance
+   *  offers keep their backend order and execute independently. */
+  const runOutcomeAction = async (outcome: SyncOutcome, action: SyncOutcomeAction) => {
+    if (!outcome.actions.includes(action)) return;
     if (action.kind === "reset_metadata") {
       await resetProjectSyncMetadata(outcome.projectId);
       return;
@@ -2382,14 +2240,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       void beginProjectRestore(outcome.projectId, outcome.storageId);
       return;
     }
-    if (action.kind === "push_again") {
-      // Sessions did not fit the last push. Nothing was kept about them: this
-      // is the ordinary Push review, and it recomputes what fits from
-      // whatever is outstanding now.
-      setStorageNotice(null);
-      void openPushChooser(outcome.projectId, outcome.storageId);
-      return;
-    }
     if (action.kind === "recheck") {
       // Nothing to re-apply: ask the backend again and rebuild the same banner
       // from the same result, so a fixed profile simply clears it.
@@ -2397,10 +2247,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (!inputs) return;
       setBusy(true);
       try {
-        const readiness = await projectSyncApi.getRestoreReadiness(action.planId);
+        const readiness = await projectSyncApi.getRestoreReadiness(inputs.plan);
         setReadiness(readiness);
         const next = buildPullOutcome({ ...inputs, readiness });
-        if (next.tone === "success" && !next.action) {
+        if (next.tone === "success" && next.actions.length === 0) {
           setStorageNotice(null);
           notify("Setup resolved — project ready.");
         } else {
@@ -2424,41 +2274,48 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       }
       return;
     }
-    // The backend refuses to restart unless the caller vouches that active
-    // chats are complete — so actually ask, instead of vouching unasked.
-    const chatsComplete = await confirm(
-      `${action.label} now?\n\nAny chats it is still running are interrupted mid-turn. Continue only once active chats are complete.`,
-      { title: action.label },
+    if (!action.offer.available) return;
+    const descriptor = maintenanceActionFor(
+      agentProviders,
+      action.offer.provider,
+      action.offer.action_id,
     );
-    if (!chatsComplete) return;
+    if (!descriptor) {
+      notify(`“${action.label}” is no longer declared by this provider.`, "attention");
+      return;
+    }
+    const confirmed = descriptor.requires_confirmation
+      ? await confirm(
+        `${action.label}?\n\n${action.title}\n\n${descriptor.description}`,
+        { title: action.label },
+      )
+      : false;
+    if (descriptor.requires_confirmation && !confirmed) return;
     setBusy(true);
     try {
-      const result = await projectSyncApi.restartCodexAppAfterPull(
-        action.operationId,
-        action.appKind,
-        chatsComplete,
-      );
+      const result = await projectSyncApi.executeProviderMaintenanceAction({
+        provider: action.offer.provider,
+        action_id: action.offer.action_id,
+        arguments: action.offer.arguments,
+        confirmed,
+      });
       setHistoryRefreshEpoch((epoch) => epoch + 1);
-      if (result.success) {
-        setStorageNotice(null);
-        notify(result.message);
-      } else {
-        setStorageNotice({
-          projectId: outcome.projectId,
-          storageId: outcome.storageId,
-          kind: "action_failed",
-          action: "pull",
-          message: result.message,
+      if (result.ready) {
+        const remainingActions = outcome.actions.filter((candidate) => candidate !== action);
+        setStorageNotice((current) => {
+          if (current?.kind !== "outcome" || current.outcome !== outcome) return current;
+          if (remainingActions.length === 0) return null;
+          return {
+            ...current,
+            outcome: { ...outcome, actions: remainingActions },
+          };
         });
+        notify(result.summary);
+      } else {
+        notify(result.summary, "attention");
       }
     } catch (reason) {
-      setStorageNotice({
-        projectId: outcome.projectId,
-        storageId: outcome.storageId,
-        kind: "action_failed",
-        action: "pull",
-        message: errorMessage(reason),
-      });
+      notify(errorMessage(reason), "attention");
     } finally {
       setBusy(false);
     }
@@ -2466,11 +2323,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
   const beginProjectRestore = async (projectId: string, storageId: string) => {
     const workflowEpoch = hostWorkflowEpoch.current;
-    setPendingPush(null);
-    setPushError(null);
-    setStorageNotice(null);
+    setBusy(true);
     setError(null);
     try {
+      setPendingPush(null);
+      setPushError(null);
+      setStorageNotice(null);
       const nextDetail = await projectSyncApi.getProject(projectId);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       if (!nextDetail) throw new Error("The selected local project no longer exists.");
@@ -2539,6 +2397,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           message: errorMessage(reason),
         });
       }
+    } finally {
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
@@ -2684,7 +2544,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       return;
     }
     const approved = await confirm(
-      `Reset local sync state for “${projectLabel(summary)}”?\n\nMallard will forget this project's reviewed sync bases, conversation mappings, recovery records, Pull results, and saved Push/Pull plans. Project files, provider sessions, project setup, recipes, storage configuration, and cloud data will not be deleted.`,
+      `Reset local sync state for “${projectLabel(summary)}”?\n\nMallard will remove all local session bindings for this project, including restored-session path mappings. It will also forget reviewed sync bases and Pull results. Project files, provider sessions, project setup, recipes, storage configuration, and cloud data will not be deleted.`,
       { title: "Reset local sync state" },
     );
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
@@ -2711,18 +2571,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       const removed = result.scope_bases_removed
         + result.conversation_checkpoints_removed
         + result.conversation_bindings_removed
-        + result.materializations_removed
-        + result.journal_operations_removed
-        + result.restore_plans_removed
-        + result.push_plans_removed;
-      if (result.unreadable_plan_files_retained > 0) {
-        notify(
-          `Local sync state reset (${removed} records removed). ${result.unreadable_plan_files_retained} unreadable saved plan file${result.unreadable_plan_files_retained === 1 ? " was" : "s were"} retained for inspection.`,
-          "attention",
-        );
-      } else {
-        notify(`Local sync state reset — ${removed} derived record${removed === 1 ? "" : "s"} removed; files and cloud data kept.`);
-      }
+        + result.materializations_removed;
+      notify(`Local sync state reset — ${removed} derived record${removed === 1 ? "" : "s"} removed; files and cloud data kept.`);
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
@@ -2767,15 +2617,17 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   // overflow's Mallard group, and theme lives on the Settings page there.
   const windowActions = (
     <div className="sync-titlebar-actions">
-      <button
-        type="button"
-        className="sync-theme-button"
-        onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}
-        title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-        aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-      >
-        <Icon name={theme === "dark" ? "moon" : "sun"} size={18} />
-      </button>
+      {workspaceTitle === "Projects" ? null : (
+        <button
+          type="button"
+          className="sync-theme-button"
+          onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}
+          title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+          aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+        >
+          <Icon name={theme === "dark" ? "moon" : "sun"} size={18} />
+        </button>
+      )}
       <div ref={appMenuRef} className={`storage-link-overflow${appMenuOpen ? " open" : ""}`}>
         <button
           type="button"
@@ -2789,38 +2641,25 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         >
           <Icon name="more" size={16} />
         </button>
-        <div
+        <PathBarMenu
           id="sync-app-actions-menu"
-          className="storage-link-actions-menu"
-          role="menu"
-          aria-label="App actions"
-          hidden={!appMenuOpen}
-        >
-          <button
-            type="button"
-            role="menuitem"
-            className="storage-link-actions-menu-item"
-            disabled={loading || busy}
-            title="Reload all Mallard data from disk and storage; project files are not modified"
-            onClick={() => {
-              setAppMenuOpen(false);
-              void refresh();
-            }}
-          >
-            <Icon name="refresh" size={14} className={loading ? "icon-spin" : undefined} />
-            <span>Reload app data</span>
-          </button>
-        </div>
+          groups={appActions}
+          label="App actions"
+          align="end"
+          open={appMenuOpen}
+          registerRef={() => undefined}
+          onClose={() => setAppMenuOpen(false)}
+        />
       </div>
     </div>
   );
 
   // One way into a project, shared by the sidebar and the path bar's repo crumb.
-  const openProject = (projectId: string) => {
+  const openProject = async (projectId: string) => {
+    if (!(await closeWorkspaceSettings())) return;
     setSetupDraftId(null);
-    closeWorkspaceSettings();
     if (restorePlan) closePullReview();
-    void selectProject(projectId);
+    await selectProject(projectId);
   };
 
   const configureProjectBinding = (projectId: string) => {
@@ -2849,7 +2688,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   ) => {
     const workflowEpoch = hostWorkflowEpoch.current;
     const project = projects.find((candidate) => candidate.local_project_id === projectId);
-    const storage = config.storages.find((candidate) => candidate.id === storageId);
+    const storage = config.storages.find((candidate) => candidate.storage_id === storageId);
     if (!project || !storage) return;
 
     const projectName = projectLabel(project);
@@ -2918,20 +2757,24 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     const requestId = restoreRequest.current;
     const workflowEpoch = hostWorkflowEpoch.current;
     const currentRestorePlan = restorePlan;
-    // The review-ready notice describes the pre-Apply state. Clear it before
-    // execution so a completed Pull can never still claim that nothing was
-    // applied.
-    setNotice(null);
-    setFailedPullResourceIds((current) => {
-      const next = new Set(current);
-      for (const resourceId of selection.resourceIds) next.delete(resourceId);
-      return next;
-    });
-    if (selection.restoreActionIds.length > 0) setRestoreResult(null);
     if (getPreference("openLogsOnSync")) openActivity();
     setBusy(true);
     setRestoreError(null);
     try {
+      if (
+        hostWorkflowEpoch.current !== workflowEpoch
+        || restoreRequest.current !== requestId
+      ) return;
+      // The review-ready notice describes the pre-Apply state. Clear it before
+      // execution so a completed Pull can never still claim that nothing was
+      // applied.
+      setNotice(null);
+      setFailedPullResourceIds((current) => {
+        const next = new Set(current);
+        for (const resourceId of selection.resourceIds) next.delete(resourceId);
+        return next;
+      });
+      if (selection.restoreActionIds.length > 0) setRestoreResult(null);
       const result = await applyPullReview(
         projectSyncApi,
         currentRestorePlan,
@@ -2950,17 +2793,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (result.readiness) setReadiness(result.readiness);
       if (result.error) setRestoreError(result.error);
 
-      const resourceByAction = new Map<string, string>();
-      for (const action of currentRestorePlan.actions) {
-        resourceByAction.set(action.action_id, action.resource_id);
-      }
-      for (const action of currentRestorePlan.conversation_actions ?? []) {
-        resourceByAction.set(
-          action.action_id,
-          action.source_resource_id
-            ?? `${action.provider}:conversation:${action.thread_id ?? action.cloud_thread_id}`,
-        );
-      }
+      const resourceByAction = pullActionResourceIds(currentRestorePlan);
       const appliedActionIds = new Set(result.restoreResult?.applied_action_ids ?? []);
       const failedActionIds = new Set(
         (result.restoreResult?.failed_actions ?? []).map((failure) => failure.action_id),
@@ -2997,7 +2830,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
       // The Pull is finished — successfully or not — so the review closes and
       // the result lands on the storage card. Anything left over reopens the
-      // review, which replans from scratch, so there is nothing to keep alive
+      // review, which compares from scratch, so there is nothing to keep alive
       // here.
       if (result.restoreResult) {
         pullOutcomeInputs.current = {
@@ -3022,7 +2855,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         return;
       }
 
-      // Refresh the plan after a partial pass so remaining setup is
+      // Refresh the review after a partial pass so remaining setup is
       // presented against one current revision.
       const approvedThisPass = new Set(selection.restoreActionIds);
       const hasSkippedActions = currentRestorePlan.actions
@@ -3062,25 +2895,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  const saveStorageConfig = async (
-    update: (current: SyncConfig) => SyncConfig,
-    successNotice = "Project storage settings saved.",
-    workflowEpoch = hostWorkflowEpoch.current,
-  ): Promise<boolean> => {
-    if (hostWorkflowEpoch.current !== workflowEpoch) return false;
+  /** Verify a draft against its provider without committing anything. The
+      failure lands in the shell error zone like every other refusal; success
+      is the caller's verdict to render. */
+  const testStorageDraft = async (draftId: string, expectedRevision: number): Promise<boolean> => {
+    const workflowEpoch = hostWorkflowEpoch.current;
     setBusy(true);
     setError(null);
     try {
-      // Focused project operations can advance the global config revision.
-      // Rebase this storage-only edit on the latest document instead of a
-      // potentially stale React snapshot.
-      const current = await projectSyncApi.getConfig();
-      if (hostWorkflowEpoch.current !== workflowEpoch) return false;
-      const saved = await projectSyncApi.saveConfig(update(current));
-      if (hostWorkflowEpoch.current !== workflowEpoch) return false;
-      adoptConfigSnapshot(saved);
-      notify(successNotice);
-      return true;
+      const result = await projectSyncApi.testStorageSetupDraft(draftId, expectedRevision);
+      return hostWorkflowEpoch.current === workflowEpoch && result.verified;
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
       return false;
@@ -3089,154 +2913,54 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  const saveInlineStorage = async (
-    storage: SyncConfig["storages"][number],
-    expectedBaseline: SyncConfig["storages"][number] | null,
-    setupDraftId?: string | null,
-    setupDraftRevision?: number | null,
-    setupDraftStorageId?: string | null,
-  ) => {
-    const needsVerifiedR2Save = storage.kind === "s3"
-      && (!expectedBaseline || !sameR2Connection(storage, expectedBaseline));
-    if (needsVerifiedR2Save) {
-      const apiUrl = r2S3ApiUrl(storage.account_id, storage.bucket, storage.s3_endpoint);
-      if (!apiUrl) {
-        setError("Enter a valid Cloudflare R2 S3 API URL before connecting.");
-        return false;
-      }
-      const workflowEpoch = hostWorkflowEpoch.current;
-      setBusy(true);
-      setError(null);
-      try {
-        const current = await projectSyncApi.getConfig();
-        if (hostWorkflowEpoch.current !== workflowEpoch) return false;
-        const currentStorage = current.storages.find((candidate) => candidate.id === storage.id) ?? null;
-        if (expectedBaseline) {
-          if (!currentStorage || !sameStorageConfig(currentStorage, expectedBaseline)) {
-            throw new Error("Storage settings changed outside this editor. Reload them before saving.");
-          }
-        } else if (currentStorage) {
-          throw new Error("A storage with this identity already exists. Start a new storage draft.");
-        }
-
-        const hasAnyDraftPin = setupDraftId != null
-          || setupDraftRevision != null
-          || setupDraftStorageId != null;
-        const usesPinnedDraft = !expectedBaseline
-          && !!setupDraftId
-          && setupDraftRevision != null
-          && !!setupDraftStorageId;
-        if (
-          hasAnyDraftPin
-          && !usesPinnedDraft
-        ) {
-          throw new Error("The reviewed R2 draft could not be pinned. Review the form and try Finish setup again.");
-        }
-        if (!expectedBaseline && !usesPinnedDraft && storage.secret_access_key.length === 0) {
-          throw new Error("Enter a Secret Access Key or save a complete R2 draft before finishing setup.");
-        }
-        const result = await projectSyncApi.upsertR2Storage({
-          storage_id: expectedBaseline ? storage.id : null,
-          // A blank secret may be resolved only from the exact revision and
-          // inert identity that the form persisted immediately before this
-          // user action. An explicitly typed secret does not reference the
-          // backend-held draft at all.
-          draft_id: usesPinnedDraft ? setupDraftId : null,
-          draft_revision: usesPinnedDraft ? setupDraftRevision : null,
-          draft_storage_id: usesPinnedDraft ? setupDraftStorageId : null,
-          name: storage.name,
-          api_url: apiUrl,
-          access_key_id: storage.access_key_id,
-          secret_access_key: usesPinnedDraft ? "" : storage.secret_access_key,
-          expected_config_revision: current.revision,
-        });
-        if (hostWorkflowEpoch.current !== workflowEpoch) return false;
-        const saved = await projectSyncApi.getConfig();
-        if (
-          saved.schema !== PROJECT_SYNC_SCHEMA
-          || saved.revision < result.config_revision
-          || !saved.storages.some((candidate) => candidate.id === result.storage_id)
-        ) {
-          throw new Error("R2 was verified, but its committed configuration could not be refreshed.");
-        }
-        if (hostWorkflowEpoch.current !== workflowEpoch) return false;
-        adoptConfigSnapshot(saved);
-        notify(`${expectedBaseline ? "Updated" : "Connected"} ${storage.name || "Cloudflare R2"}.`);
-        await refreshStorageSetupDrafts(undefined, workflowEpoch);
-        return true;
-      } catch (reason) {
-        if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
-        return false;
-      } finally {
-        if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
-      }
-    }
-    const saved = await saveStorageConfig((current) => {
-      return {
-        ...current,
-        storages: applyStorageDraft(current.storages, storage, expectedBaseline),
-      };
-    });
-    if (saved && setupDraftId) {
-      // The local-kind path has no backend draft consumer, so the frontend
-      // retires the draft after a successful create.
-      try {
-        await projectSyncApi.discardStorageSetupDraft(setupDraftId);
-      } catch {
-        // A leftover draft row is harmless; the user can discard it.
-      }
-      await refreshStorageSetupDrafts();
-    }
-    return saved;
-  };
-
-  /** Commit-free probe of the New-storage form against R2. Failures surface
-      exactly where save failures do; success is the caller's verdict to
-      render. */
-  const testInlineStorage = async (
-    storage: SyncConfig["storages"][number],
-    setupDraftId?: string | null,
-    setupDraftRevision?: number | null,
-    setupDraftStorageId?: string | null,
-  ) => {
-    const apiUrl = r2S3ApiUrl(storage.account_id, storage.bucket, storage.s3_endpoint);
-    if (!apiUrl) {
-      setError("Enter a valid Cloudflare R2 S3 API URL before testing.");
-      return false;
-    }
+  const commitStorageDraft = async (
+    draftId: string,
+    expectedDraftRevision: number,
+  ): Promise<CommitStorageDraftResult | null> => {
     const workflowEpoch = hostWorkflowEpoch.current;
     setBusy(true);
     setError(null);
     try {
-      const current = await projectSyncApi.getConfig();
-      if (hostWorkflowEpoch.current !== workflowEpoch) return false;
-      const hasAnyDraftPin = setupDraftId != null
-        || setupDraftRevision != null
-        || setupDraftStorageId != null;
-      const usesPinnedDraft = !!setupDraftId
-        && setupDraftRevision != null
-        && !!setupDraftStorageId;
+      const result = await projectSyncApi.commitStorageSetupDraft(
+        draftId,
+        expectedDraftRevision,
+      );
+      if (hostWorkflowEpoch.current !== workflowEpoch) return null;
+      const saved = await projectSyncApi.getConfig();
+      if (hostWorkflowEpoch.current !== workflowEpoch) return null;
       if (
-        hasAnyDraftPin
-        && !usesPinnedDraft
+        saved.schema !== PROJECT_SYNC_SCHEMA
+        || saved.revision < result.config_revision
+        || !saved.storages.some((candidate) => candidate.storage_id === result.storage_id)
       ) {
-        throw new Error("The reviewed R2 draft could not be pinned. Review the form and try Test connection again.");
+        throw new Error("The storage was verified and saved, but its configuration could not be refreshed.");
       }
-      if (!usesPinnedDraft && storage.secret_access_key.length === 0) {
-        throw new Error("Enter a Secret Access Key or save a complete R2 draft before testing the connection.");
-      }
-      const result = await projectSyncApi.testR2Storage({
-        storage_id: null,
-        draft_id: usesPinnedDraft ? setupDraftId : null,
-        draft_revision: usesPinnedDraft ? setupDraftRevision : null,
-        draft_storage_id: usesPinnedDraft ? setupDraftStorageId : null,
-        name: storage.name,
-        api_url: apiUrl,
-        access_key_id: storage.access_key_id,
-        secret_access_key: usesPinnedDraft ? "" : storage.secret_access_key,
-        expected_config_revision: current.revision,
-      });
-      return hostWorkflowEpoch.current === workflowEpoch && result.verified;
+      adoptConfigSnapshot(saved);
+      const storageName = saved.storages
+        .find((candidate) => candidate.storage_id === result.storage_id)?.name || "Storage";
+      notify(`${result.replaced ? "Updated" : "Connected"} ${storageName}.`);
+      await refreshStorageSetupDrafts(undefined, workflowEpoch);
+      return hostWorkflowEpoch.current === workflowEpoch ? result : null;
+    } catch (reason) {
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
+      return null;
+    } finally {
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
+    }
+  };
+
+  /** Rename a settled storage in place. Only connection settings go through
+      a draft; the name is one focused, revision-checked write. */
+  const renameStorage = async (storageId: string, name: string): Promise<boolean> => {
+    const workflowEpoch = hostWorkflowEpoch.current;
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await projectSyncApi.renameStorage(storageId, name, configRef.current.revision);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return false;
+      adoptConfigSnapshot(saved);
+      notify(`Storage renamed to “${name}”.`);
+      return true;
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
       return false;
@@ -3247,15 +2971,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
   const clearStorageData = async (storageId: string) => {
     const workflowEpoch = hostWorkflowEpoch.current;
-    const storage = configRef.current.storages.find((candidate) => candidate.id === storageId);
+    const storage = configRef.current.storages.find((candidate) => candidate.storage_id === storageId);
     if (!storage) {
       setError("The selected storage no longer exists.");
       return;
     }
+    const expectedConfigRevision = configRef.current.revision;
     const storageName = storage.name || "Storage";
     const approved = await confirm(
-      `Permanently clear all Mallard data from “${storageName}”?\n\nThis deletes every synced project repository and Library resource in this storage. It does not delete unrelated bucket/folder contents, local project files, provider sessions, or the storage connection. This cannot be undone.`,
-      { title: "Clear storage data" },
+      `Permanently clear all Mallard data from “${storageName}”?\n\nThis deletes every synced project repository and Library resource in this storage. It does not delete unrelated bucket/folder contents, local project files, provider sessions, or the storage connection. This cannot be undone.\n\nStop sync on all machines before you continue. By choosing “Sync stopped — clear”, you confirm that sync has stopped on all machines.`,
+      { title: "Clear storage data", okLabel: "Sync stopped — clear", cancelLabel: "Cancel" },
     );
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
 
@@ -3264,7 +2989,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     try {
       const result = await projectSyncApi.clearStorageData(
         storageId,
-        configRef.current.revision,
+        expectedConfigRevision,
       );
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       closePullReview();
@@ -3277,12 +3002,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       // listing the repositories this call just deleted. Reload it.
       setStorageRefreshEpoch((current) => current + 1);
       const deleted = result.repository_objects_deleted + result.library_objects_deleted;
-      const retained = result.unreadable_plan_files_retained;
       notify(
-        retained > 0
-          ? `${storageName} cleared — ${deleted} object${deleted === 1 ? "" : "s"} deleted. ${retained} unreadable saved plan file${retained === 1 ? " was" : "s were"} retained for inspection.`
-          : `${storageName} cleared — ${deleted} Mallard object${deleted === 1 ? "" : "s"} deleted; storage settings and unrelated data kept.`,
-        retained > 0 ? "attention" : "ok",
+        `${storageName} cleared — ${deleted} Mallard object${deleted === 1 ? "" : "s"} deleted; storage settings and unrelated data kept.`,
+        "ok",
       );
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
@@ -3293,7 +3015,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
   const removeStorage = async (storageId: string) => {
     const workflowEpoch = hostWorkflowEpoch.current;
-    const storage = config.storages.find((candidate) => candidate.id === storageId);
+    const storage = config.storages.find((candidate) => candidate.storage_id === storageId);
     if (!storage) return;
     const storageName = storage.name || "Storage";
     const linkedProjects = config.links.filter((link) => link.storage_id === storageId).length;
@@ -3306,16 +3028,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       { title: "Remove storage" },
     );
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
-    const removed = await saveStorageConfig((current) => {
-      if (current.links.some((link) => link.storage_id === storageId)) {
-        throw new Error(`${storageName} is linked to a project. Unlink it before removing the storage.`);
-      }
-      return {
-        ...current,
-        storages: current.storages.filter((candidate) => candidate.id !== storageId),
-      };
-    }, `${storageName} removed. Stored files were not deleted.`, workflowEpoch);
-    if (removed && hostWorkflowEpoch.current === workflowEpoch) {
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await projectSyncApi.removeStorage(storageId, configRef.current.revision);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
+      adoptConfigSnapshot(saved);
+      notify(`${storageName} removed — stored files were not deleted.`);
       setStorageEditorRequest((current) => ({
         mode: "close",
         requestId: (current?.requestId ?? 0) + 1,
@@ -3323,33 +3042,92 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       // Removing the storage whose page you are on leaves nothing to stand
       // on; the trail's root is the natural place to land.
       if (activeStorageSettingsId === storageId) setStorageIndexOpen(true);
+    } catch (reason) {
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
+    } finally {
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
 
-  const openNewStorageConfiguration = () => {
+  /** Add storage starts with a provider choice. The picker is its own
+      screen, rooted at the Storages crumb like every storage page; the
+      card's type switch can still change the choice afterwards. */
+  const openNewStorageConfiguration = async () => {
+    setError(null);
+    if (!(await closeWorkspaceSettings())) return;
+    setSetupDraftId(null);
+    setStorageProviderPickerOpen(true);
+  };
+
+  /** A door names its provider, so its draft is created straight away; the
+      bare verb goes through the picker. */
+  const beginAddStorage = (provider?: StorageProviderKey) => {
+    if (provider) void createStorageDraft(provider);
+    else openNewStorageConfiguration();
+  };
+
+  /** Open a storage draft in the New-storage form (or, for an edit draft,
+      on its storage's page). Every draft comes through this one door. */
+  const openStorageDraftForm = (draft: StorageSetupDraft) => {
     closeProjectSubview();
     setSetupDraftId(null);
     setAddingCatalogScope(false);
     setCatalogIndexOpen(false);
     setCatalogScopeId(null);
     setStorageIndexOpen(false);
+    setStorageProviderPickerOpen(false);
     setSettingsOpen(false);
     setPendingPush(null);
     setPushError(null);
     if (restorePlan) closePullReview();
     setStorageEditorRequest((current) => ({
-      mode: "create",
-      storageKind: "local",
+      mode: "resume-draft",
+      draft,
       requestId: (current?.requestId ?? 0) + 1,
     }));
   };
 
-  /** Reopen a persisted storage setup draft in the New-storage form. The
-      draft is fetched here so the workspace's request handler stays
-      synchronous, like every other editor request. */
+  /** The chosen provider mints the draft; the backend binds it to that
+      provider for good, and the form opens on it. */
+  const createStorageDraft = async (provider: StorageProviderKey, name?: string) => {
+    const workflowEpoch = hostWorkflowEpoch.current;
+    if (!(await saveStorageDraftBeforeNavigation())) return;
+    setBusy(true);
+    setError(null);
+    let draft: StorageSetupDraft | null = null;
+    try {
+      draft = await storageDraftSaveQueue.enqueue(
+        () => projectSyncApi.createStorageSetupDraft(provider),
+      );
+      // A name typed before a type switch carries over to the new draft.
+      if (name?.trim()) {
+        const created = draft;
+        draft = await storageDraftSaveQueue.enqueue(() => projectSyncApi.updateStorageSetupDraft({
+          draft_id: created.draft_id,
+          revision: created.revision,
+          name,
+          settings: created.settings,
+          secrets: {},
+        }));
+      }
+    } catch (reason) {
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
+    } finally {
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
+    }
+    if (!draft || hostWorkflowEpoch.current !== workflowEpoch) return;
+    await refreshStorageSetupDrafts(undefined, workflowEpoch);
+    if (hostWorkflowEpoch.current !== workflowEpoch) return;
+    openStorageDraftForm(draft);
+  };
+
+  /** Reopen a persisted storage setup draft. The draft is fetched here so
+      the workspace's request handler stays synchronous, like every other
+      editor request. */
   const openStorageSetupDraft = async (draftId: string) => {
     const workflowEpoch = hostWorkflowEpoch.current;
     setError(null);
+    if (!(await saveStorageDraftBeforeNavigation())) return;
     let draft: StorageSetupDraft | null = null;
     try {
       draft = await projectSyncApi.getStorageSetupDraft(draftId);
@@ -3363,22 +3141,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       await refreshStorageSetupDrafts(undefined, workflowEpoch);
       return;
     }
-    closeProjectSubview();
-    setSetupDraftId(null);
-    setAddingCatalogScope(false);
-    setCatalogIndexOpen(false);
-    setCatalogScopeId(null);
-    setStorageIndexOpen(false);
-    setSettingsOpen(false);
-    setPendingPush(null);
-    setPushError(null);
-    if (restorePlan) closePullReview();
-    const loaded = draft;
-    setStorageEditorRequest((current) => ({
-      mode: "resume-draft",
-      draft: loaded,
-      requestId: (current?.requestId ?? 0) + 1,
-    }));
+    openStorageDraftForm(draft);
   };
 
   const safePushSelection = pendingPush
@@ -3389,15 +3152,22 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       pendingPush.projectContentInventory,
     )
     : pushSelected;
-  const pendingPushBlockingCount = pendingPush
-    ? pushReviewBlockingCount(
-      safePushSelection,
-      pendingPush.threadComparison,
-      pendingPush.projectContentInventory,
-      pushWarningAcknowledgements,
-      pushProjectContentRemovals,
-    )
-    : 0;
+  /* One rule for both buttons that publish this review — the panel's own
+     footer Push and the path bar's, which continues the open review rather
+     than opening one. They were two rules once, and the bar's knew nothing
+     about the capture budget or the deletion acknowledgement, so a review the
+     footer refused could still be pushed from above it. */
+  const pendingPushDisabledReason = pendingPush
+    ? pushReviewDisabledReason({
+      selected: safePushSelection,
+      threadComparison: pendingPush.threadComparison,
+      projectContentInventory: pendingPush.projectContentInventory,
+      acknowledgedWarningDigests: pushWarningAcknowledgements,
+      projectContentRemovals: pushProjectContentRemovals,
+      deletionApproved: pushDeletionApproved,
+      projectContentLoading,
+    })
+    : null;
   const inlineStorageReview = pendingPush ? {
     kind: "push" as const,
     projectId: pendingPush.projectId,
@@ -3405,9 +3175,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     onContinue: () => {
       void publishPendingPush();
     },
-    continueDisabled: (safePushSelection.size === 0 && pushProjectContentRemovals.size === 0)
-      || pendingPushBlockingCount > 0
-      || projectContentLoading,
+    continueDisabled: pendingPushDisabledReason !== null,
+    /* Pull already said why its button was withheld; Push said nothing, so a
+       refusal in the bar had no explanation anywhere near it. */
+    continueTitle: pendingPushDisabledReason,
     onClose: () => {
       if (busy) return;
       setPendingPush(null);
@@ -3434,6 +3205,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         projectContentLoading={projectContentLoading}
         projectContentRemovals={pushProjectContentRemovals}
         acknowledgedWarningDigests={pushWarningAcknowledgements}
+        deletionApproved={pushDeletionApproved}
+        onDeletionApprovedChange={setPushDeletionApproved}
         fetchProgress={fetchProgress}
         showProjectFiles={pendingPush.showProjectFiles}
         activeStep={pushReviewStep}
@@ -3493,7 +3266,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     content: (
       <RestorePlanView
         project={projects.find((candidate) => candidate.local_project_id === restoreBinding.local_project_id) ?? undefined}
-        storageName={config.storages.find((storage) => storage.id === restorePlan.storage_id)?.name ?? null}
+        storageName={config.storages.find((storage) => storage.storage_id === restorePlan.storage_id)?.name ?? null}
         projectName={restoreProjectName}
         plan={restorePlan}
         binding={restoreBinding}
@@ -3570,16 +3343,23 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       action: <button type="button" className="btn" onClick={() => void refresh()}>Retry</button>,
     });
   }
-  if (error) {
+  /* A modal makes the shell inert. Keep its action failure inside the dialog
+     and suppress the inaccessible copy behind it. */
+  const dialogOwnsError = Boolean(
+    editingBinding
+    || (pendingBundleConnection && pendingConnectionProject && pendingConnectionStorage),
+  );
+  const shellError = dialogOwnsError ? null : error;
+  if (shellError) {
     shellNotices.push({
       key: "shell-error",
       severity: "danger",
-      message: error,
-      /* This sits outside every early return so failures remain visible on
-         every screen, including failures from destructive actions. */
+      message: shellError,
+      /* Shell-owned failures stay visible on every non-modal screen,
+         including failures from destructive actions. */
       action: (
         <>
-          {catalogRemovalErrorTarget?.message === error && (
+          {catalogRemovalErrorTarget?.message === shellError && (
             <button
               type="button"
               className="btn"
@@ -3626,17 +3406,31 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       ),
     });
   }
-  /* Every rung of this zone is an event. `error` is a handler reporting that
-     what the user just did did not happen. `backendError` looks like standing
+  /* Every rung of this zone is an event. `shellError` reports that what the
+     user just did did not happen. `backendError` looks like standing
      content because the startup load writes it, but the same `refresh()` runs
      behind "Reload app data" and the path-bar overflow, so a backend that
      falls over on an explicit refresh would go unannounced if this zone were
      a region — and the shell paints the startup screen until the load
      settles, so even the startup case arrives as a change. A notice is
      advisory. The loudest present event re-times the whole box. */
-  const shellNoticeTiming: NoticeTiming = error || backendError
+  const shellNoticeTiming: NoticeTiming = shellError || backendError
     ? { timing: "blocking" }
     : { timing: "progress" };
+  /* Keeps `sync-backend-banner` for the shell's own geometry only: the zone is
+     a sibling of the top bar and the page, and that class is what gives it
+     their width, their frame and the gutter below it. It sits UNDER the top
+     bar on every screen — the bar is the window's title bar, and the trail is
+     read before the message — so a screen that draws its own path bar has to
+     place it: it reaches those screens through `PathBarBelow`. */
+  const shellNoticeZone = (
+    <NoticeZone
+      items={shellNotices}
+      subject="messages from Mallard"
+      className="sync-backend-banner"
+      {...shellNoticeTiming}
+    />
+  );
 
   return (
     <div
@@ -3666,18 +3460,20 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         storageDrafts={storageSetupDrafts}
         onOpenStorageDraft={(draftId) => void openStorageSetupDraft(draftId)}
         onDiscardStorageDraft={(draftId) => void discardStorageSetupDraft(draftId)}
+        storageProviders={storageProviders}
         storageUsage={Object.fromEntries(config.storages.map((storage) => [
-          storage.id,
-          config.links.filter((link) => link.storage_id === storage.id).length,
+          storage.storage_id,
+          config.links.filter((link) => link.storage_id === storage.storage_id).length,
         ]))}
         storageIssues={storageIssues}
         activeProjectId={activeProjectId}
         activeStorageId={activeStorageSettingsId}
         catalogScopes={catalogScopes}
+        catalogCapabilities={catalogCapabilities}
         activeCatalogScopeId={activeCatalogScope?.scope.scope_id ?? null}
         addingCatalogScope={addingCatalogScope}
         catalogIndexOpen={catalogIndexOpen}
-        storageIndexOpen={storageIndexOpen}
+        storageIndexOpen={storageIndexOpen || storageProviderPickerOpen}
         settingsOpen={settingsOpen}
         loading={loading}
         busy={busy || !!inlineStorageReview}
@@ -3698,7 +3494,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         onAddProject={() => void beginAddProject()}
         onOpenStorage={openStorageWorkspace}
         onRemoveStorage={(storageId) => void removeStorage(storageId)}
-        onAddStorage={openNewStorageConfiguration}
+        onAddStorage={beginAddStorage}
         onOpenCatalogIndex={openCatalogIndex}
         onOpenCatalogScope={openCatalogScope}
         onAddCatalogScope={beginAddCatalogScope}
@@ -3722,13 +3518,19 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         onPointerCancel={finishSidebarResize}
         onKeyDown={resizeSidebarWithKeyboard}
         onDoubleClick={() => setSidebarWidth(DEFAULT_PROJECT_SIDEBAR_WIDTH)}
-      />
+        // A pointer drags the seam without focusing it, so no focus ring is
+        // left behind; the keyboard still reaches it through its tab stop.
+        onMouseDown={(event) => event.preventDefault()}
+      >
+        <ResizeGrip />
+      </div>
 
       <div className={`sync-workspace${activityOpen ? " logs-open" : ""}${resizingLog ? " resizing-log" : ""}`}>
         {/* The project workspace merges the window chrome into its path bar, so
             there is one row at the top instead of a named strip above an empty
             one. Every other screen still gets a titlebar of its own. */}
         {showsPathBar ? null : (
+        <>
         <header className="sync-titlebar" data-tauri-drag-region>
           <div className="sync-titlebar-context" data-tauri-drag-region title={workspaceTitle ?? undefined}>
             {workspaceTitle && (
@@ -3741,23 +3543,20 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           </div>
           {windowActions}
         </header>
+        {shellNoticeZone}
+        </>
         )}
 
-        {/* Keeps `sync-backend-banner` for the shell's own geometry only: the
-            zone is a sibling of the path bar and the page, and that class is
-            what gives it their width, their frame and the 10px below it. */}
-        <NoticeZone
-          items={shellNotices}
-          subject="messages from Mallard"
-          className="sync-backend-banner"
-          {...shellNoticeTiming}
-        />
-
+        {/* Screens that draw their own path bar place the zone themselves,
+            right under the bar, through the context the bar reads. */}
+        <PathBarBelow.Provider value={showsPathBar ? shellNoticeZone : null}>
         {addingCatalogScope ? (
           <AddCatalogScopeWorkspace
+            key={catalogAddChoiceKey ?? "any"}
             workflowEpoch={hostWorkflowEpoch.current}
             isWorkflowCurrent={(epoch) => hostWorkflowEpoch.current === epoch}
             busy={busy}
+            initialChoiceKey={catalogAddChoiceKey}
             onClose={openCatalogIndex}
             onCreated={(scope, epoch) => void completeAddCatalogScope(scope, epoch)}
           />
@@ -3787,6 +3586,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         ) : catalogIndexOpen ? (
           <CatalogIndexPage
             scopes={catalogScopes}
+            capabilities={catalogCapabilities}
             busy={busy}
             appActions={appActions}
             onOpenScope={openCatalogScope}
@@ -3797,17 +3597,26 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             appActions={appActions}
             onLogsChanged={() => setLogRefreshEpoch((epoch) => epoch + 1)}
           />
+        ) : storageProviderPickerOpen ? (
+          <StorageProviderPicker
+            providers={storageProviders}
+            busy={busy}
+            appActions={appActions}
+            onChoose={(provider) => void createStorageDraft(provider)}
+            onCancel={openStorageIndex}
+          />
         ) : storageIndexOpen ? (
           <StorageIndexPage
             storages={config.storages}
             links={config.links}
             storageIssues={storageIssues}
             drafts={storageSetupDrafts}
+            storageProviders={storageProviders}
             busy={busy}
             appActions={appActions}
             onOpenStorage={(storageId) => openStorageWorkspace(storageId, false)}
             onOpenStorageDraft={(draftId) => void openStorageSetupDraft(draftId)}
-            onAddStorage={openNewStorageConfiguration}
+            onAddStorage={beginAddStorage}
           />
         ) : (
         <ProjectLinksWorkspace
@@ -3818,15 +3627,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             bindings={bindings}
             profiles={profiles}
             providers={agentProviders}
+            storageProviders={storageProviders}
             storages={config.storages}
             storageSetupDrafts={storageSetupDrafts}
             links={config.links}
             loading={loading}
             busy={busy}
-            error={error}
-            conversationPathAudits={conversationPathAudits}
-            conversationPathAuditErrors={conversationPathAuditErrors}
-            conversationPathAuditLoading={conversationPathAuditLoading}
             fetchProgress={fetchProgress}
             onSelectStorage={(projectId, storageId) => selectStorage(projectId, storageId)}
             onOpenSessionDetail={openSessionDetail}
@@ -3840,7 +3646,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
               setPendingBundleConnection({ projectId, storageId, matches, reason: "sibling" });
             }}
             onConfigureBinding={configureProjectBinding}
-            onRepairConversationPaths={(projectId) => repairConversationPaths(projectId)}
             onRenameProject={(projectId, alias) => renameProject(projectId, alias)}
             onResetProjectMetadata={(projectId) => resetProjectSyncMetadata(projectId)}
             onRefresh={() => void refresh()}
@@ -3848,22 +3653,26 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             onSelectProject={openProject}
             appActions={appActions}
             onAddStorage={openNewStorageConfiguration}
+            onCreateStorageDraft={createStorageDraft}
             onOpenStorage={openStorageWorkspace}
             onOpenStorageIndex={openStorageIndex}
             onClearStorage={(storageId) => void clearStorageData(storageId)}
             onRemoveStorage={(storageId) => void removeStorage(storageId)}
-            onSaveStorage={saveInlineStorage}
-            onTestStorage={testInlineStorage}
+            onRenameStorage={renameStorage}
+            onCommitStorageDraft={commitStorageDraft}
+            onTestStorageDraft={testStorageDraft}
             onStorageDraftsChanged={() => void refreshStorageSetupDrafts()}
+            storageDraftSaveQueue={storageDraftSaveQueue}
             storageEditorRequest={storageEditorRequest}
             onStorageEditorRequestHandled={() => setStorageEditorRequest(null)}
+            onStorageNavigationGuardChange={setStorageNavigationGuard}
             onStorageEditorChange={setActiveStorageSettingsId}
             onStorageIssueChange={updateStorageIssue}
             historyRefreshEpoch={historyRefreshEpoch}
             storageRefreshEpoch={storageRefreshEpoch}
             inlineStorageReview={inlineStorageReview}
             storageNotice={storageNotice}
-            onStorageNoticeAction={(outcome) => void runOutcomeAction(outcome)}
+            onStorageNoticeAction={(outcome, action) => void runOutcomeAction(outcome, action)}
             onDismissStorageNotice={() => setStorageNotice(null)}
             newProjectSetup={setupDraftId ? (
               <ProjectSetupWorkspace
@@ -3880,7 +3689,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
                 busy={busy}
                 onClose={() => void closeSetupDraft()}
                 onDiscard={(draftId) => void discardSetupDraft(draftId)}
-                onAddStorage={openNewStorageConfiguration}
                 onFinalized={(detail, workflowEpoch) => (
                   void completeSetup(detail, workflowEpoch)
                 )}
@@ -3888,6 +3696,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             ) : null}
           />
         )}
+        </PathBarBelow.Provider>
 
         <ActivityLogDrawer
           open={activityOpen}

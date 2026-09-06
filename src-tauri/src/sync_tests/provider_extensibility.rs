@@ -1,6 +1,6 @@
 //! Registration-driven extensibility proofs (plan §16.6): the test-only
 //! third provider enters common discovery, capture, and codec analysis
-//! through `ProviderRegistry::with_test_provider()` alone, and a structurally
+//! through `AgentProviderRegistry::with_test_provider()` alone, and a structurally
 //! valid scope of a provider this binary has never registered survives a
 //! common publish byte-identical.
 
@@ -8,27 +8,32 @@ use crate::sync_tests::thread_variants::harness::{
     codex_scope_key, harness_captured_with, publish_request, publish_with_head, ThreadSpec,
     TranscriptBuilder, VariantWorld,
 };
-use mallard_domain::{provider_state_path_prefix, ApplyPolicy, BundleRecipe};
+use mallard_domain::portable::contracts;
+use mallard_domain::{provider_state_path_prefix, BundleRecipe};
 use mallard_domain::{
-    LogicalPath, Provenance, ProviderKey, RecipeEntry, ResourceDescriptor, ResourceId,
-    ResourceKind, ResourceTypeKey, SyncScopeKey,
+    LogicalPath, ProviderKey, RecipeEntry, ResourceDescriptor, ResourceId, ResourceTypeKey,
+    SyncScopeKey,
 };
 use mallard_infrastructure::bundle_engine::{self, CapturedBundleFile, PublishExpectation};
-use mallard_infrastructure::provider_capture::{self, CaptureRequest, CaptureResourceKind};
-use mallard_infrastructure::providers::{test_provider, ProviderRegistry};
+use mallard_infrastructure::provider_capture::{self, CaptureRequest};
+use mallard_infrastructure::providers::{test_provider, AgentProviderRegistry};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 #[test]
 fn third_provider_registers_through_descriptors_alone() {
-    let production = ProviderRegistry::production()
+    let production = AgentProviderRegistry::production()
         .descriptors()
         .into_iter()
         .map(|descriptor| descriptor.key.as_str().to_string())
         .collect::<Vec<_>>();
-    assert_eq!(production, vec!["claude".to_string(), "codex".to_string()]);
+    assert_eq!(
+        production,
+        vec!["codex".to_string(), "claude".to_string()],
+        "descriptors list in declared display rank, not key order"
+    );
 
-    let with_test = ProviderRegistry::with_test_provider()
+    let with_test = AgentProviderRegistry::with_test_provider()
         .descriptors()
         .into_iter()
         .map(|descriptor| descriptor.key.as_str().to_string())
@@ -36,8 +41,8 @@ fn third_provider_registers_through_descriptors_alone() {
     assert_eq!(
         with_test,
         vec![
-            "claude".to_string(),
             "codex".to_string(),
+            "claude".to_string(),
             "testprov".to_string(),
         ],
         "registering the third provider is one registry entry, no common-flow change"
@@ -85,7 +90,7 @@ fn third_provider_sessions_flow_through_common_discovery_and_capture() {
         + "\n";
     fs::write(sessions.join(format!("{session_id}.jsonl")), &transcript).unwrap();
 
-    let registry = ProviderRegistry::with_test_provider();
+    let registry = AgentProviderRegistry::with_test_provider();
     let request = CaptureRequest {
         project_root: project_root.clone(),
         provider_homes: BTreeMap::from([(test_provider::provider_key(), provider_home)]),
@@ -97,7 +102,7 @@ fn third_provider_sessions_flow_through_common_discovery_and_capture() {
     let candidates = inventory
         .resources
         .iter()
-        .filter(|candidate| candidate.kind == CaptureResourceKind::Conversation)
+        .filter(|candidate| candidate.kind == contracts::conversation())
         .collect::<Vec<_>>();
     assert_eq!(candidates.len(), 1, "warnings: {:?}", inventory.warnings);
     let candidate = candidates[0];
@@ -162,7 +167,7 @@ fn unregistered_provider_scope_is_carried_unchanged_through_a_publish() {
         future_resource.clone(),
         RecipeEntry {
             resource_id: future_resource.clone(),
-            apply_policy: ApplyPolicy::SafeFile,
+            apply_policy: contracts::safe_file(),
             required: false,
         },
     );
@@ -176,14 +181,14 @@ fn unregistered_provider_scope_is_carried_unchanged_through_a_publish() {
                 future_resource.clone(),
                 ResourceDescriptor {
                     resource_id: future_resource.clone(),
-                    kind: ResourceKind::ProviderState,
+                    kind: contracts::provider_state(),
                     provider: Some(future.clone()),
                     provider_resource_type: Some(ResourceTypeKey::parse("state").unwrap()),
                     display_name: "Future provider notes".to_string(),
-                    provenance: Provenance::Unknown,
-                    apply_policy: ApplyPolicy::SafeFile,
+                    provenance: contracts::provenance_unknown(),
+                    apply_policy: contracts::safe_file(),
                     codec_version: 1,
-                    metadata: BTreeMap::new(),
+                    attributes: mallard_domain::BoundedPortableObject::empty(),
                 },
             )]),
             retained_files: BTreeMap::new(),

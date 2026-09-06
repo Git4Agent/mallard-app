@@ -6,16 +6,17 @@ import type {
   ProjectContentEntry,
   ProjectContentInventory,
   ProjectResourceDescriptor,
-  RestorePlan,
+  PullReview,
 } from "../../src/types";
 import ProjectFilesReviewPage from "../../src/components/project-sync/ProjectFilesReviewPage";
 import PushResourceWorkspace, {
   includeRequiredProjectContentDirectories,
   pushProjectFileCommitImpact,
-  pushReviewBlockingCount,
+  pushReviewBlockers,
   requiredProjectContentDirectoryIds,
 } from "../../src/components/project-sync/PushResourceWorkspace";
 import RestorePlanView, { pullProjectFileCommitImpact } from "../../src/components/project-sync/RestorePlanView";
+import { projectContentReviewRow } from "../../src/components/project-sync/model";
 import SyncReviewTabs from "../../src/components/sync-review/SyncReviewTabs";
 import { projectReviewTabs, syncReviewSteps } from "../../src/components/project-sync/reviewSteps";
 import { applyPullReview } from "../../src/components/project-sync/pullReviewFlow";
@@ -25,23 +26,22 @@ import {
   recommendedPullSelection,
 } from "../../src/components/project-sync/pullReviewModel";
 
+/* A scanned entry carries the bare portable descriptor, as the backend's
+   `ProjectContentEntry` does; the review row is built from the entry. */
 function descriptor(
   resourceId: string,
-  kind: "project_content_file" | "project_content_directory",
+  type: "file" | "directory",
   path: string,
 ): ProjectResourceDescriptor {
   return {
     resource_id: resourceId,
-    kind,
+    kind: { key: type === "file" ? "project_content_file" : "project_content_directory", version: 1 },
     provider: null,
     display_name: path.split("/").slice(-1)[0],
-    provenance: { kind: "project_local", relative_path: path },
-    apply_policy: "explicit_review",
+    provenance: { kind: "project_local", version: 1, fields: { relative_path: path } },
+    apply_policy: { key: "explicit_review", version: 1 },
     codec_version: 1,
-    metadata: {},
-    category: "project_files",
-    logical_paths: [`project/${path}`],
-    default_selected: false,
+    attributes: {},
   };
 }
 
@@ -52,11 +52,7 @@ function entry(
   selectedAfterScan = true,
 ): ProjectContentEntry {
   return {
-    descriptor: descriptor(
-      resourceId,
-      type === "file" ? "project_content_file" : "project_content_directory",
-      path,
-    ),
+    descriptor: descriptor(resourceId, type, path),
     entry_type: type,
     relative_path: path,
     logical_path: `project/${path}`,
@@ -146,7 +142,7 @@ test("an explicit Push scan presents new entries selected and locks both directo
 
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
-      resources={inventory.entries.map((candidate) => candidate.descriptor)}
+      resources={inventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={selected}
       projectDefaults={selected}
       busy={false}
@@ -186,7 +182,7 @@ test("Project file controls stay on the dedicated page", () => {
   const selected = new Set(inventory.entries.map((candidate) => candidate.descriptor.resource_id));
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
-      resources={inventory.entries.map((candidate) => candidate.descriptor)}
+      resources={inventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={selected}
       projectDefaults={selected}
       busy={false}
@@ -208,7 +204,7 @@ test("the footer carries the step navigator beside Push, forward then back", () 
   const selected = new Set(inventory.entries.map((candidate) => candidate.descriptor.resource_id));
   const render = (activeStep: "history" | "project_files") => renderToStaticMarkup(
     <PushResourceWorkspace
-      resources={inventory.entries.map((candidate) => candidate.descriptor)}
+      resources={inventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={selected}
       projectDefaults={selected}
       busy={false}
@@ -311,7 +307,7 @@ test("Push review shows only local-outstanding project files", () => {
   const selected = new Set(mixedInventory.entries.map((candidate) => candidate.descriptor.resource_id));
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
-      resources={mixedInventory.entries.map((candidate) => candidate.descriptor)}
+      resources={mixedInventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={selected}
       projectDefaults={selected}
       busy={false}
@@ -361,13 +357,13 @@ test("Push gates storage deletions and Pull omits conflict deletions", () => {
     { add: 0, replace: 0, deleteFile: 1, deleteDirectory: 1 },
   );
   assert.equal(
-    pushReviewBlockingCount(new Set(), undefined, removalInventory, new Set(), removals),
+    pushReviewBlockers(new Set(), undefined, removalInventory, new Set(), removals).length,
     0,
   );
 
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
-      resources={removalInventory.entries.map((candidate) => candidate.descriptor)}
+      resources={removalInventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={new Set()}
       projectDefaults={new Set()}
       busy={false}
@@ -389,7 +385,7 @@ test("Push gates storage deletions and Pull omits conflict deletions", () => {
   assert.match(html, /Approve removal of 1 file and 1 folder from storage\./);
   assert.match(html, /title="Approve the selected project file deletions"/);
 
-  const deletionPlan: RestorePlan = {
+  const deletionPlan: PullReview = {
     ...pullPlan,
     actions: [
       ...pullPlan.actions,
@@ -518,7 +514,7 @@ const binding: ProjectBinding = {
   updated_at: 1,
 };
 
-const pullPlan: RestorePlan = {
+const pullPlan: PullReview = {
   schema_version: 1,
   plan_id: "plan-project-files",
   storage_id: "storage-a",
@@ -533,7 +529,6 @@ const pullPlan: RestorePlan = {
   created_at: 1,
   expires_at: 2,
   project_content_eligibility: { state: "eligible", reason: "Not inside a Git work tree." },
-  conversation_actions: [],
   conversation_review: [],
   actions: [
     {
@@ -563,7 +558,7 @@ const pullPlan: RestorePlan = {
 
 test("Pull review omits project content that already matches storage", () => {
   const digest = "c".repeat(64);
-  const noOpPlan: RestorePlan = {
+  const noOpPlan: PullReview = {
     ...pullPlan,
     plan_id: "plan-project-file-noop",
     actions: [
@@ -724,7 +719,7 @@ test("Pull project content starts as keep-local and selecting a nested file requ
 });
 
 test("generic pull rows wear the same operation chips", () => {
-  const genericPlan: RestorePlan = {
+  const genericPlan: PullReview = {
     ...pullPlan,
     plan_id: "plan-generic",
     project_content_eligibility: undefined,
@@ -771,7 +766,7 @@ test("generic pull rows wear the same operation chips", () => {
 });
 
 test("a diverged pull row carries and names its preserved copy", () => {
-  const preservedPlan: RestorePlan = {
+  const preservedPlan: PullReview = {
     ...pullPlan,
     plan_id: "plan-preserve",
     actions: [
@@ -840,13 +835,13 @@ test("confirming keep-local still submits an empty approved set so Pull can adva
         calls.push(`restore:${actionIds.length}`);
         return {
           success: true,
-          status: "complete",
           message: "Kept project files local",
           plan_id: pullPlan.plan_id,
           applied_action_ids: [],
           failed_actions: [],
           divergences: [],
           preserved_threads: [],
+          after_pull_actions: [],
         };
       },
       getRestoreReadiness: async () => {

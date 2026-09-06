@@ -4,7 +4,7 @@
 //!
 //! The scope is the sync object: each replica links its scope to the shared
 //! storage once, every push and pull is one review over rows, and all
-//! resources of one (provider, kind) pair converge into one kind repository.
+//! resources of one coordinate converge into one repository.
 
 use mallard_domain::{StorageConfig, StorageId};
 use mallard_infrastructure::persistence::LocalStateRepository;
@@ -16,11 +16,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tauri_app_lib::{
-    CatalogActionOutcome, CatalogLinkState, CatalogPullActionKind, CatalogPullApproval,
-    CatalogPullDisposition, CatalogPushApproval, CatalogResourceId, CatalogResourceKindTag,
+    CatalogActionOutcome, CatalogCoordinate, CatalogLinkState, CatalogPullActionKind,
+    CatalogPullApproval, CatalogPullDisposition, CatalogPushApproval, CatalogResourceId,
     CatalogResourceRelation, CatalogResourceRepositoryId, CatalogScopeId, CatalogScopePullPlan,
-    CatalogScopePushPlan, CmdOutput, CodexPetFormat, PluginProcessRunner, ProjectSyncService,
-    ProviderKey, StorageCatalogService, CATALOG_SCHEMA,
+    CatalogScopePushPlan, CmdOutput, PluginProcessRunner, ProjectSyncService, ProviderKey,
+    StorageCatalogService, CATALOG_SCHEMA,
 };
 use walkdir::WalkDir;
 
@@ -32,6 +32,20 @@ const DUCK: &str = "mallard-duck-v1";
 const OWL: &str = "mallard-owl-v2";
 const DUCK_COPY: &str = "mallard-duck-b-local-copy";
 const OWL_COPY: &str = "mallard-owl-a-local-copy";
+
+fn codex() -> ProviderKey {
+    ProviderKey::parse("codex").expect("valid provider key")
+}
+
+fn skills_coordinate() -> CatalogCoordinate {
+    CatalogCoordinate::new("codex", "agent_skill", "agentskills.io.skill", 1)
+        .expect("valid skills coordinate")
+}
+
+fn pets_coordinate(version: u32) -> CatalogCoordinate {
+    CatalogCoordinate::new("codex", "desktop_pet", "openai.codex-pet", version)
+        .expect("valid pets coordinate")
+}
 
 pub struct CatalogFlowInputs<'a> {
     pub machine_home_a: &'a Path,
@@ -46,9 +60,9 @@ pub struct CatalogFlowInputs<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogFlowReport {
-    /// One repository per (provider, kind): skills, pets v1, pets v2.
+    /// One repository per coordinate: skills, pets v1, pets v2.
     pub repository_count: usize,
-    /// Final head revisions of the kind repositories, sorted ascending.
+    /// Final head revisions of the coordinate repositories, sorted ascending.
     pub kind_repository_revisions: Vec<u64>,
     pub native_provider_process_calls: usize,
     pub injected_inventory_calls: usize,
@@ -108,12 +122,9 @@ fn recommended_pull_approval(plan: &CatalogScopePullPlan) -> CatalogPullApproval
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PullMutation {
-    InstallSkill,
-    UpdateSkill,
-    PreserveSkill,
-    InstallPet,
-    UpdatePet,
-    PreservePet,
+    Install,
+    Update,
+    Preserve,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,12 +158,12 @@ struct EmptyCodexRunner {
 impl PluginProcessRunner for EmptyCodexRunner {
     fn run(
         &self,
-        provider: ProviderKey,
+        provider: &ProviderKey,
         home: &Path,
         argv: &[String],
     ) -> Result<CmdOutput, String> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        if provider != ProviderKey::Codex {
+        if provider != &codex() {
             return Err(format!(
                 "unexpected provider process: {}",
                 provider.as_str()
@@ -222,22 +233,25 @@ fn create_replica(
     )
     .expect("open isolated Library service");
     let profile = service
-        .save_profile(
-            ProviderKey::Codex,
-            canonical_codex_home.to_string_lossy().to_string(),
-        )
+        .save_profile(codex(), canonical_codex_home.to_string_lossy().to_string())
         .expect("save isolated Codex profile");
-    let create_scope = |kind| {
+    let create_scope = |coordinate: CatalogCoordinate| {
         service
-            .create_scope(ProviderKey::Codex, profile.profile_id.clone(), kind)
+            .create_scope(
+                coordinate.provider,
+                profile.profile_id.clone(),
+                coordinate.resource_kind,
+                coordinate.format,
+                coordinate.format_version,
+            )
             .expect("create Library scope")
             .scope
             .scope_id
     };
     let scopes = ScopeSet {
-        skills: create_scope(CatalogResourceKindTag::AgentSkill),
-        pets_v1: create_scope(CatalogResourceKindTag::CodexPetV1),
-        pets_v2: create_scope(CatalogResourceKindTag::CodexPetV2),
+        skills: create_scope(skills_coordinate()),
+        pets_v1: create_scope(pets_coordinate(1)),
+        pets_v2: create_scope(pets_coordinate(2)),
     };
     Replica {
         service,
@@ -301,10 +315,11 @@ fn write_skill(replica: &Replica, name: &str, version: &str) -> TreeSnapshot {
     snapshot_tree(&root)
 }
 
-fn webp_atlas(format: CodexPetFormat, marker: u8) -> Vec<u8> {
-    let (width, height) = match format {
-        CodexPetFormat::V1 => (1536, 1872),
-        CodexPetFormat::V2 => (1536, 2288),
+fn webp_atlas(version: u32, marker: u8) -> Vec<u8> {
+    let (width, height) = if version == 2 {
+        (1536, 2288)
+    } else {
+        (1536, 1872)
     };
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"RIFF");
@@ -322,7 +337,7 @@ fn webp_atlas(format: CodexPetFormat, marker: u8) -> Vec<u8> {
 }
 
 fn pet_manifest(
-    format: CodexPetFormat,
+    version: u32,
     pet_id: &str,
     display_name: &str,
     description: &str,
@@ -346,7 +361,7 @@ fn pet_manifest(
         id: pet_id,
         display_name,
         description,
-        sprite_version_number: (format == CodexPetFormat::V2).then_some(2),
+        sprite_version_number: (version == 2).then_some(2),
         spritesheet_path: atlas_basename,
     };
     let mut bytes = serde_json::to_vec_pretty(&manifest).expect("serialize fake pet manifest");
@@ -357,7 +372,7 @@ fn pet_manifest(
 #[allow(clippy::too_many_arguments)]
 fn write_pet(
     replica: &Replica,
-    format: CodexPetFormat,
+    version: u32,
     pet_id: &str,
     display_name: &str,
     description: &str,
@@ -368,12 +383,12 @@ fn write_pet(
     fs::create_dir_all(&root).expect("create pet directory");
     write_file(
         &root.join("pet.json"),
-        &pet_manifest(format, pet_id, display_name, description, atlas_basename),
+        &pet_manifest(version, pet_id, display_name, description, atlas_basename),
         0o644,
     );
     write_file(
         &root.join(atlas_basename),
-        &webp_atlas(format, marker),
+        &webp_atlas(version, marker),
         0o644,
     );
     snapshot_tree(&root)
@@ -511,7 +526,7 @@ fn renamed_skill_snapshot(source: &TreeSnapshot, copy_name: &str) -> TreeSnapsho
 
 fn renamed_pet_snapshot(
     source: &TreeSnapshot,
-    format: CodexPetFormat,
+    version: u32,
     copy_name: &str,
     description: &str,
     atlas_basename: &str,
@@ -520,7 +535,7 @@ fn renamed_pet_snapshot(
     renamed
         .get_mut("pet.json")
         .expect("pet fixture has manifest")
-        .bytes = pet_manifest(format, copy_name, copy_name, description, atlas_basename);
+        .bytes = pet_manifest(version, copy_name, copy_name, description, atlas_basename);
     renamed
 }
 
@@ -640,11 +655,7 @@ fn push_resource(
         selected_resource_ids: vec![resource_id.clone()],
         acknowledged_warning_digests: Vec::new(),
     };
-    if row
-        .resource
-        .as_ref()
-        .is_some_and(|resource| matches!(resource, tauri_app_lib::CatalogResource::AgentSkill(_)))
-    {
+    if row.row.coordinate == skills_coordinate() {
         let executable = row
             .row
             .warnings
@@ -688,20 +699,11 @@ fn assert_pull_kind(kind: &CatalogPullActionKind, expected: PullMutation) {
     assert!(
         matches!(
             (kind, expected),
-            (
-                CatalogPullActionKind::InstallSkill,
-                PullMutation::InstallSkill
-            ) | (
-                CatalogPullActionKind::UpdateSkill,
-                PullMutation::UpdateSkill
-            ) | (
-                CatalogPullActionKind::PreserveSkillAsCopyAndOverwrite { .. },
-                PullMutation::PreserveSkill
-            ) | (CatalogPullActionKind::InstallPet, PullMutation::InstallPet)
-                | (CatalogPullActionKind::UpdatePet, PullMutation::UpdatePet)
+            (CatalogPullActionKind::Install, PullMutation::Install)
+                | (CatalogPullActionKind::Update, PullMutation::Update)
                 | (
-                    CatalogPullActionKind::PreservePetAsCopyAndOverwrite { .. },
-                    PullMutation::PreservePet
+                    CatalogPullActionKind::PreserveAsCopyAndOverwrite { .. },
+                    PullMutation::Preserve
                 )
         ),
         "unexpected Pull action: {kind:?}"
@@ -1037,7 +1039,7 @@ fn run_skill_flow(
         storage_id,
         ALPHA,
         CatalogResourceRelation::StorageOnly,
-        PullMutation::InstallSkill,
+        PullMutation::Install,
         None,
         CatalogActionOutcome::Installed,
     );
@@ -1058,7 +1060,7 @@ fn run_skill_flow(
         storage_id,
         BETA,
         CatalogResourceRelation::StorageOnly,
-        PullMutation::InstallSkill,
+        PullMutation::Install,
         None,
         CatalogActionOutcome::Installed,
     );
@@ -1095,7 +1097,7 @@ fn run_skill_flow(
         storage_id,
         ALPHA,
         CatalogResourceRelation::StorageChanged,
-        PullMutation::UpdateSkill,
+        PullMutation::Update,
         None,
         CatalogActionOutcome::Updated,
     );
@@ -1117,7 +1119,7 @@ fn run_skill_flow(
         storage_id,
         BETA,
         CatalogResourceRelation::StorageChanged,
-        PullMutation::UpdateSkill,
+        PullMutation::Update,
         None,
         CatalogActionOutcome::Updated,
     );
@@ -1156,7 +1158,7 @@ fn run_skill_flow(
         storage_id,
         ALPHA,
         CatalogResourceRelation::ChangedBoth,
-        PullMutation::PreserveSkill,
+        PullMutation::Preserve,
         Some(ALPHA_COPY),
         CatalogActionOutcome::PreservedAndUpdated,
     );
@@ -1181,7 +1183,7 @@ fn run_skill_flow(
         storage_id,
         ALPHA_COPY,
         CatalogResourceRelation::StorageOnly,
-        PullMutation::InstallSkill,
+        PullMutation::Install,
         None,
         CatalogActionOutcome::Installed,
     );
@@ -1211,7 +1213,7 @@ fn run_skill_flow(
         storage_id,
         BETA,
         CatalogResourceRelation::ChangedBoth,
-        PullMutation::PreserveSkill,
+        PullMutation::Preserve,
         Some(BETA_COPY),
         CatalogActionOutcome::PreservedAndUpdated,
     );
@@ -1235,7 +1237,7 @@ fn run_skill_flow(
         storage_id,
         BETA_COPY,
         CatalogResourceRelation::StorageOnly,
-        PullMutation::InstallSkill,
+        PullMutation::Install,
         None,
         CatalogActionOutcome::Installed,
     );
@@ -1259,7 +1261,7 @@ fn run_skill_flow(
         storage_id,
         ALPHA,
         CatalogResourceRelation::StorageChanged,
-        PullMutation::UpdateSkill,
+        PullMutation::Update,
         None,
         CatalogActionOutcome::Updated,
     );
@@ -1281,17 +1283,14 @@ fn run_skill_flow(
         storage_id,
         BETA,
         CatalogResourceRelation::StorageChanged,
-        PullMutation::UpdateSkill,
+        PullMutation::Update,
         None,
         CatalogActionOutcome::Updated,
     );
     assert_tree(&skill_path(b, BETA), &beta_v4);
 
     KindFlow {
-        repository_id: CatalogResourceRepositoryId::for_kind(
-            ProviderKey::Codex,
-            CatalogResourceKindTag::AgentSkill,
-        ),
+        repository_id: CatalogResourceRepositoryId::for_coordinate(&skills_coordinate()),
         revision,
         resource_ids: BTreeSet::from([alpha_id, beta_id, alpha_copy_id, beta_copy_id]),
     }
@@ -1301,24 +1300,8 @@ fn run_skill_flow(
 fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, KindFlow) {
     let mut v1_revision = 0_u64;
     let mut v2_revision = 0_u64;
-    let duck_v1 = write_pet(
-        a,
-        CodexPetFormat::V1,
-        DUCK,
-        "Mallard Duck",
-        "duck-v1-from-a",
-        "duck.webp",
-        1,
-    );
-    let owl_v1 = write_pet(
-        b,
-        CodexPetFormat::V2,
-        OWL,
-        "Mallard Owl",
-        "owl-v1-from-b",
-        "owl.webp",
-        11,
-    );
+    let duck_v1 = write_pet(a, 1, DUCK, "Mallard Duck", "duck-v1-from-a", "duck.webp", 1);
+    let owl_v1 = write_pet(b, 2, OWL, "Mallard Owl", "owl-v1-from-b", "owl.webp", 11);
 
     link_scope(a, &a.scopes.pets_v1, storage_id, "open");
     v1_revision += 1;
@@ -1337,7 +1320,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
         storage_id,
         "Mallard Duck",
         CatalogResourceRelation::StorageOnly,
-        PullMutation::InstallPet,
+        PullMutation::Install,
         None,
         CatalogActionOutcome::Installed,
     );
@@ -1360,7 +1343,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
         storage_id,
         "Mallard Owl",
         CatalogResourceRelation::StorageOnly,
-        PullMutation::InstallPet,
+        PullMutation::Install,
         None,
         CatalogActionOutcome::Installed,
     );
@@ -1370,7 +1353,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
     // The receiving replica may publish the next ordinary revision.
     let duck_v2 = write_pet(
         b,
-        CodexPetFormat::V1,
+        1,
         DUCK,
         "Mallard Duck",
         "duck-v2-from-receiver-b",
@@ -1392,7 +1375,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
         storage_id,
         "Mallard Duck",
         CatalogResourceRelation::StorageChanged,
-        PullMutation::UpdatePet,
+        PullMutation::Update,
         None,
         CatalogActionOutcome::Updated,
     );
@@ -1400,7 +1383,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
 
     let owl_v2 = write_pet(
         a,
-        CodexPetFormat::V2,
+        2,
         OWL,
         "Mallard Owl",
         "owl-v2-from-receiver-a",
@@ -1422,7 +1405,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
         storage_id,
         "Mallard Owl",
         CatalogResourceRelation::StorageChanged,
-        PullMutation::UpdatePet,
+        PullMutation::Update,
         None,
         CatalogActionOutcome::Updated,
     );
@@ -1431,7 +1414,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
     // Duck divergence: A wins the remote head and B preserves its local pet.
     let duck_a_winner = write_pet(
         a,
-        CodexPetFormat::V1,
+        1,
         DUCK,
         "Mallard Duck",
         "duck-v3-a-storage-winner",
@@ -1440,7 +1423,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
     );
     let duck_b_loser = write_pet(
         b,
-        CodexPetFormat::V1,
+        1,
         DUCK,
         "Mallard Duck",
         "duck-v3-b-preserved-local",
@@ -1468,14 +1451,14 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
         storage_id,
         "Mallard Duck",
         CatalogResourceRelation::ChangedBoth,
-        PullMutation::PreservePet,
+        PullMutation::Preserve,
         Some(DUCK_COPY),
         CatalogActionOutcome::PreservedAndUpdated,
     );
     assert_tree(&pet_path(b, DUCK), &duck_a_winner);
     let duck_copy_snapshot = renamed_pet_snapshot(
         &duck_b_loser,
-        CodexPetFormat::V1,
+        1,
         DUCK_COPY,
         "duck-v3-b-preserved-local",
         "duck.webp",
@@ -1498,7 +1481,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
         storage_id,
         DUCK_COPY,
         CatalogResourceRelation::StorageOnly,
-        PullMutation::InstallPet,
+        PullMutation::Install,
         None,
         CatalogActionOutcome::Installed,
     );
@@ -1507,7 +1490,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
     // Owl divergence reverses the winner/loser roles and preserves v2.
     let owl_a_loser = write_pet(
         a,
-        CodexPetFormat::V2,
+        2,
         OWL,
         "Mallard Owl",
         "owl-v3-a-preserved-local",
@@ -1516,7 +1499,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
     );
     let owl_b_winner = write_pet(
         b,
-        CodexPetFormat::V2,
+        2,
         OWL,
         "Mallard Owl",
         "owl-v3-b-storage-winner",
@@ -1544,14 +1527,14 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
         storage_id,
         "Mallard Owl",
         CatalogResourceRelation::ChangedBoth,
-        PullMutation::PreservePet,
+        PullMutation::Preserve,
         Some(OWL_COPY),
         CatalogActionOutcome::PreservedAndUpdated,
     );
     assert_tree(&pet_path(a, OWL), &owl_b_winner);
     let owl_copy_snapshot = renamed_pet_snapshot(
         &owl_a_loser,
-        CodexPetFormat::V2,
+        2,
         OWL_COPY,
         "owl-v3-a-preserved-local",
         "owl.webp",
@@ -1574,7 +1557,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
         storage_id,
         OWL_COPY,
         CatalogResourceRelation::StorageOnly,
-        PullMutation::InstallPet,
+        PullMutation::Install,
         None,
         CatalogActionOutcome::Installed,
     );
@@ -1582,7 +1565,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
 
     let duck_v4 = write_pet(
         b,
-        CodexPetFormat::V1,
+        1,
         DUCK,
         "Mallard Duck",
         "duck-v4-from-former-loser-b",
@@ -1604,7 +1587,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
         storage_id,
         "Mallard Duck",
         CatalogResourceRelation::StorageChanged,
-        PullMutation::UpdatePet,
+        PullMutation::Update,
         None,
         CatalogActionOutcome::Updated,
     );
@@ -1612,7 +1595,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
 
     let owl_v4 = write_pet(
         a,
-        CodexPetFormat::V2,
+        2,
         OWL,
         "Mallard Owl",
         "owl-v4-from-former-loser-a",
@@ -1634,7 +1617,7 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
         storage_id,
         "Mallard Owl",
         CatalogResourceRelation::StorageChanged,
-        PullMutation::UpdatePet,
+        PullMutation::Update,
         None,
         CatalogActionOutcome::Updated,
     );
@@ -1642,18 +1625,12 @@ fn run_pet_flow(a: &Replica, b: &Replica, storage_id: &StorageId) -> (KindFlow, 
 
     (
         KindFlow {
-            repository_id: CatalogResourceRepositoryId::for_kind(
-                ProviderKey::Codex,
-                CatalogResourceKindTag::CodexPetV1,
-            ),
+            repository_id: CatalogResourceRepositoryId::for_coordinate(&pets_coordinate(1)),
             revision: v1_revision,
             resource_ids: BTreeSet::from([duck_id, duck_copy_id]),
         },
         KindFlow {
-            repository_id: CatalogResourceRepositoryId::for_kind(
-                ProviderKey::Codex,
-                CatalogResourceKindTag::CodexPetV2,
-            ),
+            repository_id: CatalogResourceRepositoryId::for_coordinate(&pets_coordinate(2)),
             revision: v2_revision,
             resource_ids: BTreeSet::from([owl_id, owl_copy_id]),
         },
@@ -1882,7 +1859,13 @@ fn run_catalog_flow_inner(
         .storage
         .validate()
         .expect("valid shared test storage");
-    let storage_root = Path::new(&inputs.storage.local_dir);
+    let storage_root = mallard_application::storage_setup::storage_local_root(
+        mallard_infrastructure::storage_providers::StorageProviderRegistry::production(),
+        inputs.storage,
+    )
+    .expect("resolve the shared test storage")
+    .expect("the shared test storage is a local folder");
+    let storage_root = storage_root.as_path();
     assert!(storage_root.is_absolute());
     fs::create_dir_all(storage_root).expect("create shared local-folder storage");
 

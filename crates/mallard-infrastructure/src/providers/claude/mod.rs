@@ -9,11 +9,11 @@ pub mod history;
 pub mod materialization;
 
 use super::traits::{
-    MaterializationTargetRequest, PlannedProviderTarget, ProviderCliLauncher, ProviderDescriptor,
-    SessionActionContext, SessionActionDescriptor, SessionActionOutcome, SessionActionRequest,
-    SessionAdapter, SessionAnalysis, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
-    SessionFileMetadata, SessionFileSummary, SessionTimelineContext, SessionTimelineIndex,
-    SessionTimelinePageSlice, SessionTimelineQuery,
+    shell_quote, MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand,
+    ProviderCliLauncher, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
+    SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
+    SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
+    SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::app_settings::conversation_file_limit_bytes;
 use crate::provider_capture::validated_session_metadata;
@@ -231,10 +231,26 @@ impl Default for ClaudeAdapter {
 }
 
 impl SessionAdapter for ClaudeAdapter {
+    fn project_open_commands(&self, home: &Path, project_root: &str) -> Vec<ProjectOpenCommand> {
+        let environment = format!("CLAUDE_CONFIG_DIR={}", shell_quote(&home.to_string_lossy()));
+        let project = shell_quote(project_root);
+        vec![
+            ProjectOpenCommand {
+                label: "Claude — new".to_string(),
+                command: format!("cd {} && {} claude", project, environment),
+            },
+            ProjectOpenCommand {
+                label: "Claude — resume".to_string(),
+                command: format!("cd {} && {} claude --resume", project, environment),
+            },
+        ]
+    }
+
     fn descriptor(&self) -> ProviderDescriptor {
         ProviderDescriptor {
             key: provider_key(),
             display_name: "Claude".to_string(),
+            display_rank: 20,
             profile_label: ".claude profile".to_string(),
             default_profile_directory: Some(".claude".to_string()),
             setup_default: true,
@@ -242,7 +258,25 @@ impl SessionAdapter for ClaudeAdapter {
                 program: "claude".to_string(),
                 display_name: "Claude Code".to_string(),
             }),
+            maintenance_actions: Vec::new(),
         }
+    }
+
+    fn watch_roots(&self) -> &'static [&'static str] {
+        &["projects", "file-history", "todos"]
+    }
+
+    fn tail_layout_codec(&self) -> Option<&'static str> {
+        Some(mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_V1)
+    }
+
+    fn conversation_wire_rules(&self) -> Option<mallard_domain::ConversationWireRules> {
+        Some(mallard_domain::ConversationWireRules {
+            requires_redaction_stamp: true,
+            requires_portable_tail: true,
+            path_map: mallard_domain::PathMapDeclaration::OutOfBand,
+            tail_wire: mallard_domain::TailWireKind::ClaudeJsonl,
+        })
     }
 
     fn codec_key(&self) -> &str {
@@ -271,6 +305,17 @@ impl SessionAdapter for ClaudeAdapter {
 
     fn analyze(&self, bytes: &[u8]) -> SessionAnalysis {
         codec::analyze_claude_transcript(bytes)
+    }
+
+    fn analyze_and_summarize(
+        &self,
+        bytes: &[u8],
+    ) -> (SessionAnalysis, Result<SessionFileSummary, String>) {
+        history::analyze_and_summarize(bytes)
+    }
+
+    fn verify_sidecar(&self, sidecar_kind: &str, bytes: &[u8]) -> Result<(), String> {
+        materialization::verify_sidecar(sidecar_kind, bytes)
     }
 
     fn materialization_targets(

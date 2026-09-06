@@ -1,9 +1,13 @@
 use mallard_application::storage_setup::{
-    begin_r2_storage_draft_operation, list_storages, prepare_r2_storage_draft_in_operation,
-    verify_storage, PrepareR2StorageDraftRequest,
+    begin_storage_draft_operation, list_storages, prepare_storage_draft_in_operation,
+    verify_storage, PreparedProviderConfig,
 };
-use mallard_domain::{StorageId, StorageKind, StorageSetupDraftId};
+use mallard_domain::{BoundedConfigObject, SecretMap, StorageId, StorageSetupDraftId};
 use mallard_infrastructure::persistence::LocalStateRepository;
+use mallard_infrastructure::storage_providers::r2::{
+    provider_key as r2_provider_key, secret_access_key, R2SettingsV1,
+};
+use mallard_infrastructure::storage_providers::StorageProviderRegistry;
 use serde::Serialize;
 use tokio::runtime::{Handle, Runtime};
 
@@ -14,7 +18,8 @@ use crate::r2_browser_setup::{authorize_bucket, derive_destination, WranglerClie
 pub(crate) struct StorageSummary {
     pub storage_id: String,
     pub name: String,
-    pub kind: &'static str,
+    pub provider: String,
+    pub provider_label: String,
 }
 
 pub(crate) struct SetupInput {
@@ -60,24 +65,29 @@ impl ProductionBackend {
     fn runtime_handle(&self) -> Handle {
         self.runtime.handle().clone()
     }
+
+    fn registry(&self) -> &'static StorageProviderRegistry {
+        StorageProviderRegistry::production()
+    }
 }
 
 impl StorageBackend for ProductionBackend {
     fn list(&self) -> Result<Vec<StorageSummary>, CliError> {
-        Ok(list_storages(&self.repository)
+        Ok(list_storages(&self.repository, self.registry())
             .map_err(CliError::from_setup)?
             .into_iter()
             .map(|storage| StorageSummary {
                 storage_id: storage.storage_id.to_string(),
                 name: storage.name,
-                kind: match storage.kind {
-                    StorageKind::S3 => "r2",
-                    StorageKind::Local => "local",
-                },
+                provider: storage.provider.to_string(),
+                provider_label: storage.provider_label,
             })
             .collect())
     }
 
+    /// The R2 provisioning assistant: pin the exact draft, drive Cloudflare's
+    /// Wrangler login and bucket provisioning, mint an exact-bucket
+    /// credential, and prepare the ordinary draft for the user's review.
     fn setup(&self, input: SetupInput) -> Result<(), CliError> {
         let draft_id = StorageSetupDraftId::parse(input.draft_id).map_err(|_| {
             CliError::invalid_code(
@@ -85,27 +95,47 @@ impl StorageBackend for ProductionBackend {
                 "The Mallard storage setup draft ID is invalid.",
             )
         })?;
-        let operation = begin_r2_storage_draft_operation(
+        let operation = begin_storage_draft_operation(
             &self.repository,
             &draft_id,
             input.expected_revision,
             &input.name,
         )
         .map_err(CliError::from_setup)?;
+        if operation.provider() != &r2_provider_key() {
+            return Err(CliError::invalid_code(
+                "storage_setup_draft_not_r2",
+                "The requested storage setup draft is not an R2 draft.",
+            ));
+        }
         let wrangler = WranglerClient::new()?;
         let account_id = wrangler.authenticated_account_id()?;
         let destination = derive_destination(&account_id, &input.name);
 
         wrangler.ensure_bucket(&destination.account_id, &destination.bucket)?;
         let credentials = authorize_bucket(&destination.account_id, &destination.bucket)?;
-        prepare_r2_storage_draft_in_operation(
+        let settings = BoundedConfigObject::encode(&R2SettingsV1 {
+            api_url: destination.api_url,
+            bucket: destination.bucket,
+            account_id: destination.account_id,
+            access_key_id: credentials.access_key_id(),
+        })
+        .map_err(|_| CliError::persistence("Mallard could not encode the R2 settings."))?;
+        let mut secrets = SecretMap::empty();
+        secrets
+            .insert(
+                secret_access_key(),
+                credentials
+                    .secret_access_key()
+                    .into_secret_value()
+                    .map_err(CliError::from_setup)?,
+            )
+            .map_err(|_| CliError::persistence("Mallard could not store the R2 secret."))?;
+        prepare_storage_draft_in_operation(
             &operation,
             &self.repository,
-            PrepareR2StorageDraftRequest {
-                api_url: destination.api_url,
-                access_key_id: credentials.access_key_id(),
-                secret_access_key: credentials.secret_access_key(),
-            },
+            self.registry(),
+            PreparedProviderConfig { settings, secrets },
         )
         .map_err(CliError::from_setup)?;
         Ok(())
@@ -114,8 +144,13 @@ impl StorageBackend for ProductionBackend {
     fn verify(&self, storage_id: &str) -> Result<VerifyOutcome, CliError> {
         let storage_id = StorageId::parse(storage_id)
             .map_err(|_| CliError::invalid("The Mallard storage ID is invalid."))?;
-        let result = verify_storage(&self.repository, self.runtime_handle(), &storage_id)
-            .map_err(CliError::from_setup)?;
+        let result = verify_storage(
+            &self.repository,
+            self.registry(),
+            &self.runtime_handle(),
+            &storage_id,
+        )
+        .map_err(CliError::from_setup)?;
         Ok(VerifyOutcome {
             storage_id: result.storage_id.to_string(),
             config_revision: result.config_revision,

@@ -168,10 +168,33 @@ pub enum ImmutablePutOutcome {
     AlreadyPresent,
 }
 
+/// One listed object with the opaque revision the store reported for it.
+/// A later conditional delete binds to exactly this revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreListEntry {
+    pub key: ObjectKey,
+    pub etag: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreListPage {
-    pub keys: Vec<ObjectKey>,
+    pub entries: Vec<StoreListEntry>,
     pub next_cursor: Option<String>,
+}
+
+impl StoreListPage {
+    pub fn keys(&self) -> impl Iterator<Item = &ObjectKey> {
+        self.entries.iter().map(|entry| &entry.key)
+    }
+}
+
+/// The outcome of one conditional delete. There is no unconditional
+/// variant: every deletion names the revision it listed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    Deleted,
+    Missing,
+    Conflict { current_etag: String },
 }
 
 /// The narrow transport contract required by both storage protocols.
@@ -232,9 +255,31 @@ pub trait ObjectStore: Send + Sync {
         expectation: &CasExpectation,
         bytes: &[u8],
     ) -> Result<CasOutcome, String>;
-    /// Delete one exact validated Mallard object. Implementations must make a
-    /// missing key an idempotent success; callers never supply raw paths.
-    fn delete(&self, key: &ObjectKey) -> Result<(), String>;
+
+    /// Whether this store can atomically delete only the object revision that
+    /// the caller names. Stores return false unless this behavior is proved.
+    fn supports_conditional_delete(&self) -> bool {
+        false
+    }
+
+    /// Delete one exact validated Mallard object only if its current
+    /// revision equals `expected_etag`, the revision a listing reported.
+    /// A missing key reports `Missing`; a different revision reports
+    /// `Conflict` and deletes nothing. Callers never supply raw paths.
+    fn delete(&self, _key: &ObjectKey, _expected_etag: &str) -> Result<DeleteOutcome, String> {
+        Err("conditional object deletion is not supported by this storage".to_string())
+    }
+
+    /// Explicit storage-wide clear. Normal object deletion remains revision checked.
+    fn clear_managed_data(&self) -> Result<super::ManagedStorageClearResult, String> {
+        if !self.supports_conditional_delete() {
+            return Err("storage clear is unavailable for this provider".to_string());
+        }
+        super::clear_managed_data_with(self, |entry| self.delete(&entry.key, &entry.etag))
+    }
+
+    /// Bounded, deterministic listing. Every entry carries the object's
+    /// current opaque revision so a caller can delete exactly what it saw.
     fn list(
         &self,
         prefix: &ObjectPrefix,

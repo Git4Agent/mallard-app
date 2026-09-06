@@ -1,8 +1,9 @@
 //! Codex session discovery under one `CODEX_HOME`.
 
+use super::filter_codex_session_index_by_ids;
 use crate::provider_capture::{
-    canonical_existing_dir, filter_codex_session_index_by_ids, inspect_candidate_files_with_limit,
-    provider_walk_entry, session_home_is_project_root,
+    canonical_existing_dir, inspect_candidate_files_with_limit, provider_walk_entry,
+    session_home_is_project_root,
 };
 use crate::providers::codex::history::parse_session_index_titles;
 use crate::providers::traits::{DiscoveredSession, SessionDiscovery, SessionDiscoveryContext};
@@ -72,9 +73,7 @@ pub(super) fn discover(
                 continue;
             }
             if meta.is_internal_subagent {
-                // TODO(sync-subagent-task): Parent/child rollout graphs need
-                // atomic selection and complete parent-ID rewriting before
-                // they can be portable. See docs/TODO.md.
+                // Parent-child rollout selection and ID rewrites are not atomic.
                 discovery
                     .excluded_subagent_session_ids
                     .insert(meta.session_id);

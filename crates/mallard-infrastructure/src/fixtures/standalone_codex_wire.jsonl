@@ -1,0 +1,6 @@
+{"ordinal":0,"payload":{"__mallard_path_map__":{"codec":"mallard.pathmap.v1"},"cwd":"/__mallard_root__/b;","history_base":null,"history_mode":"paginated","id":"fixture-leaf"},"type":"session_meta"}
+{"ordinal":1,"payload":{"content":"Read /__mallard_root__/b;/readme.","id":"m1","type":"message"},"type":"response_item"}
+{"ordinal":2,"payload":{"content":"DB_PASSWORD=<password>","id":"m2","type":"message"},"type":"response_item"}
+{"ordinal":3,"payload":{"content":"Literal /__mallard_escape__/r/example.","id":"m3","type":"message"},"type":"response_item"}
+{"ordinal":4,"payload":{"text":"Check the source.","type":"agent_reasoning"},"timestamp":"2026-09-04T10:00:00Z","type":"event_msg"}
+{"ordinal":5,"payload":{"message":"Updated /__mallard_root__/b;/readme.","type":"agent_message"},"timestamp":"2026-09-04T10:00:01Z","type":"event_msg"}

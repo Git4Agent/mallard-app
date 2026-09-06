@@ -79,6 +79,19 @@ pub(super) fn materialization_targets(
     Ok(targets)
 }
 
+/// Verify one staged sidecar payload by kind. A `todos` list is one JSON
+/// document; a `file-history` entry is a raw snapshot of an edited project
+/// file and may hold any bytes (the core bounds its size).
+pub(super) fn verify_sidecar(sidecar_kind: &str, bytes: &[u8]) -> Result<(), String> {
+    match sidecar_kind {
+        "todos" => serde_json::from_slice::<serde::de::IgnoredAny>(bytes)
+            .map(|_| ())
+            .map_err(|_| "Claude todos sidecar is not valid JSON".to_string()),
+        "file-history" => Ok(()),
+        other => Err(format!("unsupported Claude sidecar kind '{}'", other)),
+    }
+}
+
 /// Map one provider-state logical suffix (`memory/<rel>`) to its machine
 /// path in the project root's canonical bucket under the Claude home.
 pub(super) fn state_target(
@@ -101,4 +114,23 @@ pub(super) fn state_target(
         target.push(component);
     }
     Ok(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidecar_payloads_are_verified_by_kind() {
+        assert!(verify_sidecar("todos", br#"[{"content":"x","status":"pending"}]"#).is_ok());
+        assert!(verify_sidecar("todos", b"APP=demo\n")
+            .unwrap_err()
+            .contains("not valid JSON"));
+        // file-history entries are raw snapshots of edited files.
+        assert!(verify_sidecar("file-history", b"APP=demo\nDB_PASSWORD=<password>\n").is_ok());
+        assert!(verify_sidecar("file-history", &[0xff, 0xfe, 0x00]).is_ok());
+        assert!(verify_sidecar("tool-results", b"{}")
+            .unwrap_err()
+            .contains("unsupported Claude sidecar kind"));
+    }
 }

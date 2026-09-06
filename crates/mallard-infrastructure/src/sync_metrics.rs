@@ -9,6 +9,7 @@
 //! observe each other's work. The process-global counters back the
 //! `MALLARD_SYNC_METRICS=1` benchmark log in every build.
 
+use std::cell::Cell;
 use std::path::Path;
 #[cfg(any(test, feature = "test-support"))]
 use std::path::PathBuf;
@@ -16,6 +17,41 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::{Arc, RwLock};
+
+/// Per-worker semantic analysis work. Unlike path counters this also covers
+/// immutable cloud bytes, and stays isolated from other preparation workers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AnalysisWork {
+    pub passes: u64,
+    pub bytes: u64,
+}
+
+thread_local! {
+    static ANALYSIS_WORK: Cell<AnalysisWork> = const { Cell::new(AnalysisWork { passes: 0, bytes: 0 }) };
+}
+
+pub fn analysis_work() -> AnalysisWork {
+    ANALYSIS_WORK.with(Cell::get)
+}
+
+pub fn record_transcript_analysis(bytes: u64) {
+    ANALYSIS_WORK.with(|work| {
+        let current = work.get();
+        work.set(AnalysisWork {
+            passes: current.passes + 1,
+            bytes: current.bytes + bytes,
+        });
+    });
+}
+
+impl AnalysisWork {
+    pub fn delta_since(self, earlier: Self) -> Self {
+        Self {
+            passes: self.passes - earlier.passes,
+            bytes: self.bytes - earlier.bytes,
+        }
+    }
+}
 
 #[derive(Default)]
 struct Counters {

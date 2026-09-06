@@ -3,11 +3,12 @@ use super::harness::{
     VariantWorld,
 };
 use crate::sync_tests::stub_s3::StubS3;
-use mallard_domain::{CloudThreadId, StorageConfig, StorageKind};
+use mallard_domain::CloudThreadId;
 use mallard_infrastructure::bundle_engine::{BundleEngine, PublishExpectation};
 use mallard_infrastructure::storage_core::{
-    CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix,
-    ObjectStore, S3ObjectStore, StageOutcome, StoreListPage, StoredMetadata,
+    CasExpectation, CasOutcome, DeleteOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey,
+    ObjectPrefix, ObjectStore, S3Connection, S3ObjectStore, StageOutcome, StoreListPage,
+    StoredMetadata,
 };
 use std::fs;
 use std::path::Path;
@@ -151,20 +152,17 @@ async fn stub_s3_current_schema_noop_and_fast_forward_match_local_protocol() {
         10,
     );
     let storage_id = mallard_domain::StorageId::parse("s3-variant-store").unwrap();
-    let config = StorageConfig {
-        id: storage_id.clone(),
-        name: "Thread stub S3".to_string(),
-        kind: StorageKind::S3,
-        bucket: "variant-bucket".to_string(),
-        access_key_id: "test-access-key".to_string(),
-        secret_access_key: "test-secret".to_string(),
-        account_id: String::new(),
-        s3_endpoint: server.endpoint.clone(),
-        region: "auto".to_string(),
-        local_dir: String::new(),
-        supports_conditional_writes: None,
-    };
-    let store = S3ObjectStore::from_config(&config, tokio::runtime::Handle::current()).unwrap();
+    let store = S3ObjectStore::from_connection(
+        &S3Connection {
+            endpoint: &server.endpoint,
+            region: "auto",
+            bucket: "variant-bucket",
+            access_key_id: "test-access-key",
+            secret_access_key: "test-secret",
+        },
+        tokio::runtime::Handle::current(),
+    )
+    .unwrap();
     let initial_request = publish_request(
         world.bundle_id.clone(),
         std::slice::from_ref(&thread),
@@ -271,20 +269,17 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
         10,
     );
     let storage_id = mallard_domain::StorageId::parse("s3-cas-store").unwrap();
-    let config = StorageConfig {
-        id: storage_id.clone(),
-        name: "Thread CAS stub S3".to_string(),
-        kind: StorageKind::S3,
-        bucket: "variant-bucket".to_string(),
-        access_key_id: "test-access-key".to_string(),
-        secret_access_key: "test-secret".to_string(),
-        account_id: String::new(),
-        s3_endpoint: server.endpoint.clone(),
-        region: "auto".to_string(),
-        local_dir: String::new(),
-        supports_conditional_writes: None,
-    };
-    let store = S3ObjectStore::from_config(&config, tokio::runtime::Handle::current()).unwrap();
+    let store = S3ObjectStore::from_connection(
+        &S3Connection {
+            endpoint: &server.endpoint,
+            region: "auto",
+            bucket: "variant-bucket",
+            access_key_id: "test-access-key",
+            secret_access_key: "test-secret",
+        },
+        tokio::runtime::Handle::current(),
+    )
+    .unwrap();
     let initial_request = publish_request(
         world.bundle_id.clone(),
         &[t1.clone(), t2.clone()],
@@ -498,8 +493,8 @@ impl ObjectStore for FailingStore {
         self.inner.compare_and_swap(key, expectation, bytes)
     }
 
-    fn delete(&self, key: &ObjectKey) -> Result<(), String> {
-        self.inner.delete(key)
+    fn delete(&self, key: &ObjectKey, expected_etag: &str) -> Result<DeleteOutcome, String> {
+        self.inner.delete(key, expected_etag)
     }
 
     fn list(

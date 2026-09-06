@@ -1205,8 +1205,10 @@ mod tests {
                 .last()
                 .unwrap()
                 .is_ascii_alphanumeric());
-            let parsed =
-                mallard_application::storage_setup::parse_r2_api_url(&destination.api_url).unwrap();
+            let parsed = mallard_infrastructure::storage_providers::r2::parse_r2_api_url(
+                &destination.api_url,
+            )
+            .unwrap();
             assert_eq!(parsed.bucket(), destination.bucket);
         }
     }

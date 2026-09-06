@@ -898,46 +898,58 @@ summary:focus-visible {
   letter-spacing: 0.06em;
 }
 
-.sync-primary-nav {
+/* One strip, five destinations, one glyph each. The roots are named here and
+   nowhere else in the rail, so the strip is the whole of the head's
+   navigation and costs one row instead of five. */
+.sidebar-root-tabs {
   display: flex;
-  flex-direction: column;
 }
 
-.sync-primary-nav button {
-  width: 100%;
+.sidebar-root-tab {
+  position: relative;
+  min-width: 0;
+  flex: 1;
   display: flex;
   align-items: center;
+  justify-content: center;
   background: transparent;
   font: inherit;
-  text-align: left;
   cursor: pointer;
 }
 
-.sync-primary-nav button:hover:not(:disabled) { color: var(--text-0); }
-.sync-primary-nav button.active { color: var(--text-0); font-weight: var(--weight-bold); }
-.sync-primary-nav button > span { margin-left: auto; color: var(--text-3); font-size: var(--type-xs); }
-.sync-primary-nav button:disabled,
-.sidebar-profile-main:disabled,
-.sync-sidebar-empty:disabled {
+.sidebar-root-tab:hover:not(:disabled) { color: var(--text-0); }
+.sidebar-root-tab.active { color: var(--text-0); }
+.sidebar-root-tab:disabled,
+.sidebar-profile-main:disabled {
   opacity: var(--button-disabled-opacity);
   cursor: not-allowed;
 }
 
-.sync-sidebar-empty {
-  width: 100%;
-  padding: 10px;
-  display: flex;
+/* An empty pane: one dashed tile per way Add can start — the glyph and a
+   plus, no words — so the count of tiles is the count of choices. A tile
+   opens Add with that choice already made. The tiles stack, one choice per
+   row, the way the rows they stand in for will: a rail is a list read down,
+   and four glyphs sharing one line read as a toolbar instead. */
+.sidebar-doors {
+  display: grid;
+  gap: 6px;
+  margin: 2px 4px 8px;
+}
+.sidebar-door {
+  height: 40px;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  gap: 6px;
+  padding: 0;
   border: 1px dashed var(--border-mid);
-  border-radius: var(--retro-panel-radius);
-  color: var(--text-2);
+  border-radius: 12px;
   background: transparent;
-  font: inherit;
-  font-size: var(--type-sm);
+  color: var(--text-2);
   cursor: pointer;
 }
-.sync-sidebar-empty:hover:not(:disabled) { color: var(--text-0); background: var(--bg-hover); }
+.sidebar-door:hover:not(:disabled) { color: var(--text-0); background: var(--bg-hover); }
+.sidebar-door:disabled { opacity: var(--button-disabled-opacity); cursor: not-allowed; }
 
 .sync-workspace {
   position: relative;
@@ -1407,10 +1419,15 @@ summary:focus-visible {
 /* A panel in the workspace stack, not a floating strip: it is a sibling of the
    path bar and page, so it carries their full width and frame geometry. */
 /* The shell's banner slot: where the zone sits and how tall it stands. Its box
-   uses `.notice`; the loudest message supplies the tone. */
+   uses `.notice`; the loudest message supplies the tone.
+
+   It stands UNDER the bar, so it stacks under the bar as well: the bar's menus
+   live inside the bar's own stacking context (z-index 6), and a banner above
+   that would paint over any menu dropped onto it. Above the page still, so its
+   shadow falls on the page the way the bar's does. */
 .sync-backend-banner {
   position: relative;
-  z-index: 8;
+  z-index: 5;
   margin: 0 0 10px;
   min-height: 42px;
   font-size: var(--type-xs);
@@ -2073,6 +2090,9 @@ summary:focus-visible {
 .sync-segmented button { height: 26px; padding: 0 10px; border: 0; color: var(--text-2); background: transparent; font: inherit; font-family: var(--font-display); font-size: var(--type-2xs); font-weight: var(--weight-medium); cursor: pointer; }
 .sync-storage-card > .sync-folder-field { margin: 12px 14px; }
 .sync-storage-card > header .sync-segmented { margin-left: auto; }
+/* The provider a draft is bound to, stated at the header's end where the
+   type switch used to be — a label, not a control. */
+.sync-storage-card > header > .sync-storage-editor-provider { margin-left: auto; color: var(--text-3); font-size: var(--type-2xs); font-weight: var(--weight-semibold); white-space: nowrap; }
 .sync-storage-editor-title { margin: 0; color: var(--text-0); }
 .sync-storage-fields { padding: 13px 14px 15px; grid-template-columns: 1fr 1fr; }
 /* Field names are chrome micro-labels; the value below them carries the voice. */
@@ -2082,7 +2102,7 @@ summary:focus-visible {
   letter-spacing: 1px;
   text-transform: uppercase;
 }
-.sync-r2-guide {
+.storage-setup-guide {
   padding: 9px 14px;
   display: flex;
   align-items: center;
@@ -2092,13 +2112,13 @@ summary:focus-visible {
   color: var(--text-2);
   font-size: var(--type-xs);
 }
-.sync-r2-guide > svg { flex: none; }
-.sync-r2-guide-copy { min-width: 0; flex: 1 1 300px; }
-.sync-r2-guide > .btn-link { min-height: 24px; padding: 2px 0; flex: none; white-space: nowrap; }
+.storage-setup-guide > svg { flex: none; }
+.storage-setup-guide-copy { min-width: 0; flex: 1 1 300px; }
+.storage-setup-guide > .btn-link { min-height: 24px; padding: 2px 0; flex: none; white-space: nowrap; }
 /* The agent action at the guide row's tail: a compact button in the accent's
    soft tint — the storage icon's pair — so the route is the loudest thing in
    the row while the commit bar keeps the page's one primary. */
-.sync-r2-guide-btn {
+.storage-setup-guide-button {
   min-height: 26px;
   padding: 2px 9px;
   display: inline-flex;
@@ -2107,18 +2127,18 @@ summary:focus-visible {
   flex: none;
 }
 /* Keep the contextual tint above the shared button recipe. */
-.btn.sync-r2-agent-cta {
+.btn.storage-setup-agent-cta {
   color: var(--accent);
   background: var(--accent-soft);
 }
-.btn.sync-r2-agent-cta:hover:not(:disabled) {
+.btn.storage-setup-agent-cta:hover:not(:disabled) {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 16%, var(--accent-soft));
 }
 /* After the copy, the button's slot narrates the rest: listening for the CLI's
    committed storage, then the adoption note; a failed copy answers in the
    danger voice. */
-.sync-r2-guide-wait {
+.storage-setup-guide-wait {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -2126,20 +2146,20 @@ summary:focus-visible {
   color: var(--text-2);
   font-size: var(--type-xs);
 }
-.sync-r2-guide-connected {
+.storage-setup-guide-connected {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   color: var(--success-text);
   font-size: var(--type-xs);
 }
-.sync-r2-guide-error {
+.storage-setup-guide-error {
   color: var(--danger-text);
   font-size: var(--type-xs);
 }
 /* The setup draft's two named routes: one quiet row per lane, the agent row
    in a whisper of the accent tint. Zone labels reuse the field-name voice. */
-.sync-r2-zone-label {
+.storage-setup-route-label {
   color: var(--text-3);
   font-size: var(--type-3xs);
   font-weight: var(--weight-semibold);
@@ -2147,7 +2167,7 @@ summary:focus-visible {
   text-transform: uppercase;
   white-space: nowrap;
 }
-.sync-r2-route-row {
+.storage-setup-route-row {
   padding: 8px 14px;
   display: flex;
   align-items: center;
@@ -2157,10 +2177,10 @@ summary:focus-visible {
   color: var(--text-2);
   font-size: var(--type-xs);
 }
-.sync-r2-route-row > svg { flex: none; }
-.sync-r2-route-row.agent { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
-.sync-r2-route-row .sync-r2-guide-copy { flex: 1 1 260px; }
-.sync-r2-route-row > .btn-link {
+.storage-setup-route-row > svg { flex: none; }
+.storage-setup-route-row.agent { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
+.storage-setup-route-row .storage-setup-guide-copy { flex: 1 1 260px; }
+.storage-setup-route-row > .btn-link {
   min-height: 24px;
   padding: 2px 0;
   flex: none;
@@ -2175,7 +2195,7 @@ summary:focus-visible {
    to the cluster, the halves inside are borderless and part at a 2px ink
    seam — so the pair reads as a single control with a disclosure end rather
    than two buttons wearing their own boxes. */
-.sync-r2-split {
+.storage-setup-agent-split {
   position: relative;
   display: inline-flex;
   flex: none;
@@ -2184,29 +2204,29 @@ summary:focus-visible {
   background: var(--button-bg);
   box-shadow: var(--shadow-card);
 }
-.sync-r2-split > .btn {
+.storage-setup-agent-split > .btn {
   border: 0;
   border-radius: 0;
   box-shadow: none;
 }
-.sync-r2-split > .btn:first-child { border-radius: var(--r-pill) 0 0 var(--r-pill); }
-.sync-r2-split > .btn + .btn { border-left: 2px solid var(--accent); }
-.sync-r2-split > .btn:active:not(:disabled) { transform: none; }
-.sync-r2-split > .sync-r2-split-arrow { border-radius: 0 var(--r-pill) var(--r-pill) 0; padding: 2px 8px; }
-.sync-r2-split > .sync-path-menu { top: calc(100% + 5px); }
-.sync-r2-menu-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.sync-r2-menu-text small { color: var(--text-3); font-size: var(--type-3xs); }
+.storage-setup-agent-split > .btn:first-child { border-radius: var(--r-pill) 0 0 var(--r-pill); }
+.storage-setup-agent-split > .btn + .btn { border-left: 2px solid var(--accent); }
+.storage-setup-agent-split > .btn:active:not(:disabled) { transform: none; }
+.storage-setup-agent-split > .storage-setup-agent-split-arrow { border-radius: 0 var(--r-pill) var(--r-pill) 0; padding: 2px 8px; }
+.storage-setup-agent-split > .sync-path-menu { top: calc(100% + 5px); }
+.storage-setup-agent-menu-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.storage-setup-agent-menu-text small { color: var(--text-3); font-size: var(--type-3xs); }
 /* Keep the copy acknowledgment above the shared button recipe. */
-.btn.sync-r2-copied-flash {
+.btn.storage-setup-copied-flash {
   color: var(--success-text);
   border-color: color-mix(in srgb, var(--success-text) 40%, transparent);
 }
-.sync-r2-fields {
+.storage-provider-fields {
   gap: 12px 14px;
 }
-.sync-r2-url-field { grid-column: 1 / -1; }
-.sync-r2-fields label { gap: 5px; }
-.sync-r2-fields .form-label-row { overflow: visible; }
+.storage-provider-url-field { grid-column: 1 / -1; }
+.storage-provider-fields label { gap: 5px; }
+.storage-provider-fields .form-label-row { overflow: visible; }
 .sync-secret-input { position: relative; display: block; }
 .sync-secret-input > input { width: 100%; padding-right: 58px; }
 .sync-secret-reveal {
@@ -2260,32 +2280,44 @@ summary:focus-visible {
   touch-action: none;
 }
 
-.sync-sidebar-resizer::after {
-  content: "";
-  position: absolute;
-  transition: background 120ms ease;
-}
-
-.sync-sidebar-resizer:hover::after,
-.sync-sidebar-resizer:active::after,
-.sync-sidebar-resizer:focus-visible::after {
-  background: var(--border-strong);
-}
-
+/* A drag seam paints nothing at rest — no fill, no pill, no outline box.
+   Under the pointer it shows one short pill centred on it, along the seam,
+   the way a split-view handle is drawn; the pill goes to ink while held or
+   keyboard-focused. The ink pill is the focus indicator; a pointer never
+   leaves focus behind (its mousedown is cancelled), so that state is the
+   keyboard's alone. */
 .sync-sidebar-resizer:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
+  outline: none;
 }
 
-.sync-sidebar .sync-sidebar-empty {
-  width: calc(100% - 8px);
-  margin: 2px 4px 8px;
+.sync-resize-grip {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 60px;
+  display: none;
+  border-radius: var(--r-pill);
+  background: var(--text-2);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.sync-sidebar-resizer:hover > .sync-resize-grip,
+.sync-sidebar-resizer:active > .sync-resize-grip,
+.sync-sidebar-resizer:focus-visible > .sync-resize-grip {
+  display: block;
+}
+
+.sync-sidebar-resizer:active > .sync-resize-grip,
+.sync-sidebar-resizer:focus-visible > .sync-resize-grip {
+  background: var(--text-0);
 }
 
 .sync-sidebar-profile-warning {
   margin-left: auto;
   flex-shrink: 0;
-  color: var(--yellow);
+  color: var(--warning-text);
 }
 
 .sidebar-profile-main svg.sync-sidebar-storage-warning {
@@ -2366,9 +2398,8 @@ summary:focus-visible {
    at the content edge instead of after the rail gutter. */
 .project-storage-card-non-git { margin-left: 0; }
 
-/* The bar matches the Uncommitted heading; only the layout differs, because
-   this one can carry a repair notice mid-bar and an actions cluster at the
-   end, and space-between would strand the notice in the middle. */
+/* The bar matches the branch-unmapped heading. The layout keeps its actions at
+   the end without a second grid. */
 .project-storage-card > .sync-history-section-heading {
   min-height: 38px;
   justify-content: flex-start;
@@ -2459,37 +2490,6 @@ summary:focus-visible {
 
 .project-storage-empty > .btn {
   margin-left: auto;
-}
-
-.project-storage-card > .conversation-path-repair-notice {
-  min-height: 40px;
-  margin: 0;
-  padding: 4px 8px 4px 12px;
-  border-right: 0;
-  border-left: 0;
-  border-radius: 0;
-  background: color-mix(in srgb, var(--yellow) 3%, var(--surface-subtle));
-}
-.project-storage-card > .conversation-path-repair-notice .conversation-path-repair-button {
-  min-height: 28px;
-  padding-right: 8px;
-  padding-left: 8px;
-}
-
-.project-storage-card .sync-history-section-heading > .conversation-path-repair-notice.repairable {
-  min-height: 28px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-.project-storage-card .sync-history-section-heading > .conversation-path-repair-notice .conversation-path-repair-button {
-  min-height: 28px;
-  padding-right: 7px;
-  padding-left: 7px;
-  font-size: var(--type-xs);
 }
 
 /* The list holds one block: the active storage's banners and open review. It is
@@ -3314,7 +3314,7 @@ span.sync-path-crumb {
 
 .sync-path-menu-banner > svg {
   flex: 0 0 auto;
-  color: var(--yellow);
+  color: var(--warning-text);
 }
 
 .sync-path-menu-copy {
@@ -3395,54 +3395,29 @@ span.sync-path-crumb {
 
 /* ── Storage / profile editors + selected link ── */
 
-/* ── Sidebar profile/storage sections ── */
+/* ── The rail: one list, whichever root the workspace is standing in ── */
 
-.sidebar-links-list {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: 0 8px 6px;
-}
-
-/* ── Profile-first sync settings ────────────────── */
-
-.sidebar-settings-sections {
+/* It takes everything the head and the product mark leave, so the window's
+   height reaches the list and nothing else — no floors to bottom out on and
+   no tray to scroll. */
+.sync-sidebar-rail {
   min-height: 0;
   flex: 1;
-  display: grid;
-  /* Every row floors at MIN_PANE_HEIGHT. The tray scrolls any shortfall to
-     keep the bottom pane above the product mark. Scrolling makes this box a
-     clip: the 2px cast shadows on the pane tiles inside would be cut at the
-     right and bottom edges, so the tray leans 2px into the gutter on both
-     axes and gives that room back as padding — the tiles stay aligned with
-     the head tile while their shadows land inside the clip. */
-  overflow-y: auto;
-  margin: 0 -2px -2px 0;
-  padding: 8px 2px 2px 0;
-}
-
-.sidebar-split-pane {
-  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
-.sidebar-split-pane > .sidebar-profile-list,
-.sidebar-split-pane > .sidebar-links-list {
+.sidebar-rail-list {
   min-height: 0;
-  /* Keep both panes in the same scrollbar layout mode while the split moves. */
-  overflow-y: scroll;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 0 10px 8px;
+  overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-}
-
-/* The hidden attribute is the UA's display:none at attribute-selector
-   strength, and .sidebar-links-list declares display:flex — which wins, so a
-   collapsed Storages pane kept drawing its rows. This is what actually closes
-   a pane's list. */
-.sidebar-split-pane > [hidden] {
-  display: none;
 }
 
 .sidebar-heading-actions {
@@ -3456,14 +3431,6 @@ span.sync-path-crumb {
   color: var(--text-1);
 }
 
-.sidebar-settings-sections .sidebar-links-list {
-  gap: 3px;
-  padding: 0 10px 8px;
-}
-
-.sidebar-profile-list {
-  padding: 0 8px 8px;
-}
 
 .sidebar-profile-item {
   width: 100%;
@@ -3546,84 +3513,18 @@ span.sync-path-crumb {
   cursor: not-allowed;
 }
 
-.sidebar-section-divider {
-  position: relative;
-  z-index: 2;
-  cursor: row-resize;
-  touch-action: none;
-}
-
-.sidebar-section-divider:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
-}
-
-.sidebar-section-divider::after {
-  content: "";
-  position: absolute;
-  transition: background 120ms ease, box-shadow 120ms ease;
-}
-
-.sidebar-settings-sections.resizing,
-.sidebar-settings-sections.resizing * {
-  cursor: row-resize !important;
-  user-select: none;
-}
-
-/* ── Collapsible sections ── */
-
-/* The label half of the heading is the disclosure button; it fills the row up
-   to the add action, so the whole header toggles the way VS Code's do. The
-   negative margins grow the hit area back over the heading's padding. */
-.sidebar-section-toggle {
+/* The heading's label half: the root's name and its count, side by side. */
+.sidebar-section-label {
   min-width: 0;
-  flex: 1;
   display: inline-flex;
   align-items: center;
-  gap: 9px;
-  margin: -4px 8px -4px -9px;
-  padding: 4px 9px;
-  border: 0;
-  border-radius: var(--r-sm);
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-  text-align: left;
+  gap: 8px;
 }
 
-.sidebar-section-toggle > svg {
-  flex: 0 0 auto;
-  color: var(--text-3);
-}
-
-.sidebar-section-toggle:hover {
-  background: var(--bg-hover);
-}
-
-.sidebar-section-toggle:hover .sidebar-section-title {
-  color: var(--text-0);
-}
-
-.sidebar-section-toggle:hover > svg {
-  color: var(--text-1);
-}
-
-.sidebar-section-toggle:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
-}
-
-/* A closed tile is border plus heading; keep the label off the bottom edge. */
-.sidebar-settings-sections .sidebar-split-pane.collapsed > .sidebar-section-heading {
-  padding-bottom: 8px;
-}
-
-/* Collapsed-only signals, pushed to the far end of the toggle. The count is a
-   number, so it reads in the identifier face like the nav badge does. */
+/* The count is a number, so it reads in the identifier face like the nav
+   badge does. */
 .sidebar-section-count {
   min-width: 24px;
-  margin-left: auto;
   padding: 1px 5px;
   border: 1px solid var(--border-mid);
   border-radius: var(--r-pill);
@@ -3637,29 +3538,6 @@ span.sync-path-crumb {
   text-align: center;
 }
 
-.sidebar-section-alert {
-  margin-left: auto;
-  color: var(--warning-text);
-}
-
-.sidebar-section-alert + .sidebar-section-count {
-  margin-left: 6px;
-}
-
-/* A handle that borders a collapsed pane answers to nothing: keep the seam,
-   drop the affordance. The extra class outranks the shared hover tint, and
-   the resizing rule below keeps a live drag on another handle from tinting
-   an inert seam along with it. */
-.sidebar-section-divider.inert {
-  cursor: default;
-}
-
-.sidebar-section-divider.inert:hover::after,
-.sidebar-section-divider.inert:active::after,
-.sidebar-settings-sections.resizing .sidebar-section-divider.inert::after {
-  background: transparent;
-  box-shadow: none;
-}
 
 .profile-links-section {
   gap: 0;
@@ -3818,7 +3696,92 @@ span.sync-path-crumb {
   gap: 8px;
 }
 
-/* Nothing listed: the mark, the fact, the one action. */
+/* Nothing listed: the filled landing, ghosted. One dashed card per way Add
+   can start, in the card's own grid and anatomy — glyph, name, and a bar of
+   nothing where the location would go — so the first real card lands in a
+   shape the eye already knows. The whole card is the door into Add. */
+.landing-picker-door {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 13px 16px 12px;
+  border: 2px dashed var(--border-mid);
+  border-radius: var(--retro-panel-radius);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 90ms steps(2, end);
+}
+
+.landing-picker-door:hover:not(:disabled) {
+  color: var(--text-0);
+  background: var(--bg-hover);
+}
+
+.landing-picker-door:disabled {
+  opacity: var(--button-disabled-opacity);
+  cursor: not-allowed;
+}
+
+.landing-picker-door-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.landing-picker-door-title > svg {
+  flex: 0 0 auto;
+}
+
+.landing-picker-door-title > strong {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  font-family: var(--font-display);
+  font-size: var(--type-lg);
+  font-weight: var(--weight-bold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.landing-picker-door-bar {
+  display: block;
+  width: 62%;
+  height: 8px;
+  border-radius: var(--r-sm);
+  background: var(--chip-bg);
+}
+
+.landing-picker-door-bar.short {
+  width: 38%;
+}
+
+.landing-picker-door-marks {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* What the list is for, in the identifier face: icons and a few words. */
+.landing-picker-caption {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 18px 0 0;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+.landing-picker-caption > svg {
+  flex: 0 0 auto;
+}
+
+/* A build with no providers to choose from: the mark, the fact, the way back. */
 .landing-picker-empty {
   display: flex;
   flex-direction: column;
@@ -4041,25 +4004,6 @@ span.sync-path-crumb {
   cursor: not-allowed;
 }
 
-/* Placement only. The frame, the fill and the row inside them are `.notice`'s,
-   and the tone follows the severity: an audit Mallard could not run reads as an
-   error, paths it can see read as a warning. The `.blocked` neutral surface
-   went with the class-driven tone — a blocker is not quieter than a repairable
-   one, it is the half the reader cannot act on. */
-.conversation-path-repair-notice {
-  min-height: 42px;
-  margin-bottom: 9px;
-}
-.conversation-path-repair-button {
-  min-height: 28px;
-  flex: 0 0 auto;
-  font-size: var(--type-sm);
-}
-
-.conversation-path-repair-button-icon {
-  color: var(--yellow);
-}
-
 /* The cards share the workspace with a fixed sidebar, so viewport breakpoints
    do not describe the space this row actually has. Reflow from the link's own
    width before the storage/profile columns collide with the action labels. */
@@ -4068,18 +4012,6 @@ span.sync-path-crumb {
     right: auto;
     left: 0;
   }
-}
-
-@container (max-width: 480px) {
-  .conversation-path-repair-notice {
-    align-items: flex-start;
-    flex-wrap: wrap;
-  }
-
-  .conversation-path-repair-button {
-    margin-left: 0;
-  }
-
 }
 
 /* A stack of sibling cards — settings editor, totals band, repository list —
@@ -4121,7 +4053,30 @@ span.sync-path-crumb {
 .sync-storage-setup-footer > div {
   margin-left: auto;
   display: flex;
+  /* The verdict chip is shorter than the buttons beside it; without this it
+     stretches to their height and stops reading as a chip. */
+  align-items: center;
   gap: 7px;
+}
+
+/* The Test verdict, in the verb group: the app's success fill and rim at
+   button weight, so the one fact that unlocks Finish setup carries from
+   across the row. Its own class, not the guide's quiet line — the agent
+   setup's "Copied." and ready lines stay captions. */
+.storage-setup-verified {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 5px;
+  padding: 4px 10px 4px 8px;
+  border: 1px solid var(--green);
+  border-radius: var(--r-pill);
+  background: var(--success-soft);
+  color: var(--success-text);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-flat);
+  white-space: nowrap;
 }
 
 .sync-storage-details-panel {
@@ -4778,6 +4733,158 @@ span.sync-path-crumb {
   font-size: var(--type-2xs);
   overflow-wrap: anywhere;
 }
+/* The same line under a two-column row: naming the home of a *saved* profile
+   puts the verdict where column 2 holds Browse rather than a path field, so
+   that one case, and only that one, spans the row. */
+.sync-setup-path-hint.spans-row { grid-column: 1 / -1; }
+
+/* ——— the setup pages' choice vocabulary ———————————————————————————
+   Add Catalog resource and project setup ask the same kinds of question, and
+   the rest of the app already draws the answers — kind glyphs, storage hints,
+   provider marks — while the setup pages spelled them in plain text, or hid
+   them inside a native select that cannot hold a mark at all. These are the
+   parts both pages answer with; nothing here belongs to one of them. */
+
+/* The glyph of the thing a choice names: a resource kind, a repository.
+   Bare, no box — the mark is already a shape on its own ground, and a frame
+   around it only competes with the row's. A fixed slot keeps every name on
+   one column, and 24 is a size these marks are crisp at (Icons.tsx: whole
+   stems only at 12 or 24). */
+.setup-choice-mark {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  color: var(--text-2);
+}
+.sync-bundle-match-option.active .setup-choice-mark,
+.setup-choice-card.active .setup-choice-mark { color: var(--text-0); }
+
+/* Two providers, or three storages, is a row and not a menu — and the mark is
+   the whole reason to draw them rather than list them. Chosen is the accent
+   the option rows already wear, so one page never says it two ways. */
+.setup-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.setup-pill {
+  max-width: 100%;
+  min-height: 32px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 2px solid var(--border-mid);
+  border-radius: var(--r-pill);
+  color: var(--text-1);
+  background: var(--surface-row);
+  font: inherit;
+  font-size: var(--type-sm);
+  cursor: pointer;
+}
+.setup-pill:hover:not(:disabled) { background: var(--surface-row-hover); }
+.setup-pill:disabled { opacity: var(--button-disabled-opacity); cursor: not-allowed; }
+.setup-pill.active {
+  border-color: var(--accent);
+  color: var(--text-0);
+  background: var(--accent-soft);
+}
+.setup-pill > svg,
+.setup-pill > .sync-provider-mark { flex: 0 0 auto; }
+.setup-pill-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A fixed slot, so choosing one never reflows the row. */
+.setup-pill-check {
+  width: 14px;
+  height: 14px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+/* The agent's own mark on the card that enables it, between the checkbox and
+   the name. The toggle line is baseline-aligned prose, so the mark takes the
+   centre it needs without disturbing it. */
+.setup-marked-toggle > .sync-provider-mark {
+  align-self: center;
+  flex: 0 0 auto;
+  color: var(--text-2);
+}
+
+/* The landing door, made selectable: same grid, same radius, same 2px frame,
+   same display-face name over the marks of the agents it covers. A door opens
+   Add on one kind; this is that kind still on screen, now chosen. */
+.setup-choice-grid {
+  max-width: var(--sync-setup-column);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(212px, 1fr));
+  gap: 10px;
+}
+.setup-choice-card {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 11px;
+  border: 2px solid var(--border-mid);
+  border-radius: var(--retro-panel-radius);
+  background: var(--surface-row);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 90ms steps(2, end);
+}
+.setup-choice-card:hover:not(:disabled) { background: var(--surface-row-hover); }
+.setup-choice-card:disabled { opacity: var(--button-disabled-opacity); cursor: not-allowed; }
+.setup-choice-card.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: var(--shadow-card);
+}
+.setup-choice-card-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.setup-choice-card-head > strong {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--text-0);
+  font-family: var(--font-display);
+  font-size: var(--type-lg);
+  font-weight: var(--weight-bold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.setup-choice-card-check {
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+/* Where the door draws a bar of nothing, a card that names a real choice
+   draws what it covers: the marks, then the sentence. */
+.setup-choice-card-foot {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: var(--type-2xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.setup-choice-card-foot > .sync-provider-mark,
+.setup-choice-card-foot > svg { flex: 0 0 auto; color: var(--text-2); }
 .sync-setup-state {
   width: 20px;
   height: 20px;
@@ -5291,7 +5398,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 
 .sync-history-profile-state > svg {
   flex-shrink: 0;
-  color: var(--yellow);
+  color: var(--warning-text);
 }
 
 .sync-history-profile-state > div {
@@ -6053,7 +6160,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   height: 5px;
   margin-left: -3px;
   border-radius: 50%;
-  background: var(--yellow);
+  background: var(--warning-text);
 }
 
 .sync-inline-pull-review .sync-sync-review-content,
@@ -6141,41 +6248,146 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   padding: 5px 20px;
 }
 
-/* The push meter takes the footer's sentence slot: what this push carries
-   against the limit, live as rows are ticked. The bar is a 4px track under
-   the sentence in the local-outstanding ink, because it measures what leaves
-   this computer; past the limit both take the danger ink and the button
-   beside them refuses with the same sentence as its title. */
-.sync-push-budget {
-  gap: 5px;
+/* The push meter is drawn twice, in the review's two pinned zones: a glance in
+   the header and the gauge pill against the Push button. The list between them
+   scrolls, so a meter that lived only in the footer's sentence slot — a 4px
+   hairline the width of a paragraph, a panel away from the button it disables —
+   was legible from one end of the review only. Both instances measure the same
+   thing, live as rows are ticked: what this push carries against the limit, in
+   the local-outstanding ink because it measures what leaves this computer, in
+   the danger ink once it no longer fits. */
+.sync-push-budget-glance {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding-right: 12px;
+  border-right: 1px solid var(--border);
 }
 
-.sync-push-budget > small {
-  white-space: nowrap;
-}
-
-.sync-push-budget-bar {
-  display: block;
-  width: 100%;
-  max-width: 280px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--border-mid);
+/* Scaled to max(total, limit): while the push fits, the track's right end IS
+   the limit; past it the limit is the tick and the fill runs beyond it. */
+.sync-push-budget-track {
+  position: relative;
+  display: flex;
+  width: 96px;
+  height: 6px;
+  border-radius: 999px;
+  /* The empty part of a progress track, which is what this is. --border-mid
+     is a divider ink: it left the local-outstanding fill at 2.27:1 against its
+     own groove on the light theme, under the 3:1 a graphic that carries
+     meaning has to clear (1.4.11). --loader-track holds the fill at 4.30 on
+     cream and 6.01 on dark, and the over hatch at 4.16 and 4.23, while still
+     reading as a groove — it is an ink over the surface, not a paper of its
+     own. */
+  background: var(--loader-track);
   overflow: hidden;
 }
 
-.sync-push-budget-bar > i {
+/* One fill in the local-outstanding ink, because the bar measures what leaves
+   this computer. A tone per source — sessions, requirements, project files —
+   was drawn first and does not survive measurement: --text-3 sits 1.05:1 from
+   --thread-status-local on cream, so two of the three segments were the same
+   colour. The breakdown stays in the title, where it already was. */
+.sync-push-budget-track > i {
   display: block;
   height: 100%;
   background: var(--thread-status-local);
 }
 
-.sync-push-budget.over > small {
+/* Hatched rather than only recoloured: a striped bar tells the over state from
+   the solid one without colour carrying it alone (1.4.1). The pale stripe is
+   65% — the limit tick is cut in the panel's paper and measured 2.13:1 against
+   a 45% stripe, under the 3:1 a mark that carries meaning has to hold. At 65%
+   it reads 3.07 on cream and 3.99 on dark, and the two stripes still part
+   company by eye. */
+.sync-push-budget-track.over > i {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--danger-text) 0 3px,
+    color-mix(in srgb, var(--danger-text) 65%, var(--bg-2)) 3px 6px
+  );
+}
+
+/* Where the limit fell, once the fill has run past it. Cut in the panel's own
+   paper rather than drawn in ink: a --text-0 line held 2.90:1 against the
+   danger fill on cream and 1.96 on dark, while the paper clears 5.67 and 7.66
+   against the same fill and 3.07/3.99 against the hatch's pale stripe. */
+.sync-push-budget-track > b {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--surface-card);
+}
+
+.sync-push-budget-figure {
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sync-push-budget-figure > b {
+  color: var(--text-0);
+  font-weight: var(--weight-semibold);
+}
+
+.sync-push-budget-figure.over,
+.sync-push-budget-figure.over > b {
   color: var(--danger-text);
 }
 
-.sync-push-budget.over .sync-push-budget-bar > i {
-  background: var(--danger-text);
+/* The pill is the readout and the gauge at once, at the button's own height
+   and hard against it: the quantity and the act that spends it read as one
+   object rather than as a sentence at the far end of the same strip. */
+.sync-push-budget-gauge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 14px;
+  border: var(--box-border);
+  border-radius: 999px;
+  background: var(--surface-card);
+  overflow: hidden;
+}
+
+/* Not drawn past the limit — the component stops rendering it, because the
+   pill is full and a danger wash under a danger figure measured 3.42:1 on
+   cream against 5.03 on the plate alone. */
+.sync-push-budget-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: color-mix(in srgb, var(--thread-status-local) 34%, transparent);
+}
+
+/* Over the fill, which is painted across the whole pill. */
+.sync-push-budget-gauge > .sync-push-budget-figure {
+  position: relative;
+}
+
+/* --danger-soft is a tint, not a colour: on its own it would let the footer
+   read through at 12%, so it is laid over the pill's own surface. */
+.sync-push-budget-gauge.over {
+  border-color: var(--danger-text);
+  background: linear-gradient(var(--danger-soft), var(--danger-soft)), var(--surface-card);
+}
+
+/* The refusal takes a row of its own above the cluster, so it sits with the
+   gauge and the button rather than squeezing them. The footer wraps for it and
+   for nothing else: while the push fits, the row is not rendered at all. */
+.sync-push-resource-footer {
+  flex-wrap: wrap;
+}
+
+.sync-push-budget-sentence {
+  flex: 1 0 100%;
+  order: -1;
+  margin: 0;
+  color: var(--danger-text);
+  font-size: var(--type-2xs);
+  text-align: right;
 }
 
 /* No max-width: the rows are a table that meets the panel edge like the tab
@@ -6270,7 +6482,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 }
 .sync-outcome-head > svg:first-child { flex: 0 0 auto; }
 .sync-outcome-notice.success > .sync-outcome-head > svg:first-child { color: var(--green); }
-.sync-outcome-notice.warning > .sync-outcome-head > svg:first-child { color: var(--yellow); }
+.sync-outcome-notice.warning > .sync-outcome-head > svg:first-child { color: var(--warning-text); }
 
 .sync-outcome-summary {
   min-width: 0;
@@ -6292,8 +6504,11 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   font-variant-numeric: tabular-nums;
 }
 
-.sync-outcome-actions { flex: 0 0 auto; display: inline-flex; gap: 4px; }
+.sync-outcome-actions { flex: 0 0 auto; display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
 .sync-outcome-actions .btn { white-space: nowrap; }
+.sync-outcome-guidance { padding: 0 10px 8px 38px; color: var(--text-1); font-size: var(--type-xs); }
+.sync-outcome-guidance p { margin: 0; }
+.sync-outcome-guidance p + p { margin-top: 4px; }
 
 /* The fold is the history table's own toggle, and the dismiss sits with it.
    The shared toggle's hover chrome (border + fill) reads as a raised box
@@ -6725,7 +6940,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 
 /* Inside a path-band tile the list is the tile's own rows: the flat list's
    box (border, radius, shadow) comes off here, the same reset the
-   uncommitted and storage-only groups apply, or it draws a second frame
+   branch-unmapped and storage-only groups apply, or it draws a second frame
    flush inside the tile and the tile's clip cuts its shadow. */
 .sync-project-file-tile > .sync-history-thread-list.flat {
   gap: 0;
@@ -8367,7 +8582,12 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --success-soft: rgba(75, 150, 97, 0.09);
   --accent-soft: rgba(82, 58, 43, 0.075);
   --accent-contrast: #fffaf4;
-  --switch-off: #ad9e92;
+  /* The track is the ground the thumb is read against, and thumb position IS
+     the off/on state, so the track carries the 3:1 non-text floor rather than
+     the quiet role its name suggests: #ad9e92 held the thumb at 2.50:1. This
+     holds it at 3.85 and still reads as plainly unfilled beside the checked
+     track's --accent, 3.94:1 away. Dark needs no such move at 6.69:1. */
+  --switch-off: #8d7c70;
   --switch-thumb: #fffaf4;
   --editor-active-line: rgba(82, 58, 43, 0.045);
   --text-0: #1e1817;
@@ -8378,7 +8598,10 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --accent-glow: rgba(82, 58, 43, 0.12);
   --primary: #2a211d;
   --primary-text: #fffaf4;
-  --green: #4b9661;
+  /* A step down from #4b9661, which cleared the page at 3.5:1 but measured
+     2.85 on the active row — under the 3:1 a success glyph needs, and the
+     outcome notice and pull rows both print one there. */
+  --green: #48905d;
   --red: #d8523e;
   /* This palette's red reads 3.9:1 against the paper — enough for a glyph,
      short of the 4.5:1 an error sentence needs. The ink below is two steps
@@ -8395,9 +8618,14 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
      to the same floor: 5.0:1 on the active row, where #765ba7 sat at 4.35. */
   --purple: #6d529d;
   /* Same treatment for the other three signal hues: the raw inks measure
-     3.4:1 (green), 2.4:1 (amber), and 3.7:1 (blue) against this paper — fine
-     for glyphs, failing for prose. Each variant holds ≥4.5:1 on every paper
-     surface down to --surface-row-active (#f0e3d5). */
+     3.6:1 (green), 2.4:1 (amber), and 3.8:1 (blue) against this paper — short
+     of the 4.5:1 a sentence needs, so each keeps a prose variant that holds
+     ≥4.5:1 on every paper surface down to --surface-row-active (#f0e3d5).
+     The 3:1 non-text floor is a separate bar, and it is not true that a raw
+     ink always clears it: amber clears it on no surface this app paints, so
+     nothing prints a bare var(--yellow) glyph — the warning mark uses
+     --warning-text like the sentence beside it. Green and blue do clear it,
+     and the graphic gate in css-hygiene is what keeps all three honest. */
   --success-text: #397149;
   --warning-text: #885e06;
   --info-text: #256c90;
@@ -8447,7 +8675,7 @@ body {
    weight: chrome labels sit at medium, and the heading group below lifts to
    heavy. */
 .btn,
-.sidebar-settings-sections .sidebar-section-title,
+.sync-sidebar-rail .sidebar-section-title,
 .sync-draft-badge,
 .sync-eyebrow,
 .sync-settings-flag,
@@ -8465,7 +8693,6 @@ body {
   font-weight: var(--weight-medium);
 }
 .sync-sidebar-brand strong,
-.sync-primary-nav button,
 .settings-section-title,
 .sync-settings-segment > button,
 .sync-path-sync,
@@ -8483,7 +8710,7 @@ body {
 .sync-setup-section > .sync-card-heading strong,
 .sync-storage-editor-title,
 .sync-storage-repositories-heading h2,
-.sync-r2-guide > .btn-link,
+.storage-setup-guide > .btn-link,
 .sync-secret-reveal,
 .session-detail-day-divider > span,
 .session-detail-toolbar-label,
@@ -8678,9 +8905,7 @@ summary {
   margin-inline: var(--retro-panel-radius-inner);
 }
 
-.sync-primary-nav::-webkit-scrollbar-track:vertical,
-.sidebar-split-pane > .sidebar-links-list::-webkit-scrollbar-track:vertical,
-.sidebar-split-pane > .sidebar-profile-list::-webkit-scrollbar-track:vertical,
+.sidebar-rail-list::-webkit-scrollbar-track:vertical,
 .sync-log-drawer .log-panel-body::-webkit-scrollbar-track:vertical {
   margin-bottom: var(--retro-panel-radius-inner);
 }
@@ -8843,9 +9068,7 @@ summary {
 }
 
 .sync-sidebar-head,
-.sidebar-project-pane,
-.sidebar-storage-pane,
-.sidebar-catalog-pane,
+.sync-sidebar-rail,
 .sync-sidebar-product-mark,
 .sync-titlebar,
 .sync-workspace > .sync-backend-banner,
@@ -8861,10 +9084,14 @@ summary {
   margin-bottom: var(--retro-gutter);
 }
 
+/* 42 drag strip + 56 wordmark + 46 tab strip + 4 border. Fixed, because the
+   head has no handle and no stored height: the same three rows at every
+   window size, so nothing up here moves as the window is dragged. */
 .sync-sidebar-head {
+  height: 148px;
   display: flex;
   overflow: hidden;
-  flex: 0 0 auto;
+  flex: 0 0 148px;
   flex-direction: column;
   background: var(--bg-1);
 }
@@ -8916,61 +9143,57 @@ summary {
   font-size: var(--type-3xl);
 }
 
-/* Shortening the head clips the nav, so it scrolls — no destination the handle
-   pushes out of view becomes unreachable. */
-.sync-primary-nav {
-  position: relative;
-  min-height: 0;
-  overflow-y: auto;
-  gap: 2px;
-  padding: 6px 8px 8px;
-  border-bottom: 0;
+/* The strip sits under the wordmark and fills the head's last row. The 8px
+   side padding puts a tab's ink edge on the same column the rail's rows keep
+   below it. */
+.sidebar-root-tabs {
+  gap: 4px;
+  padding: 0 8px 6px;
 }
 
-/* The gutter separates the head tile from the section tiles. */
-.sync-primary-nav::after {
-  display: none;
-}
-
-/* Fixed, not shrinkable: in a column flex the rows would otherwise squash as
-   the head is shortened, so the nav would never scroll and the handle's floor —
-   measured off one row — would drift as it moved. */
-.sync-primary-nav button {
-  height: 38px;
-  flex: 0 0 auto;
-  gap: 10px;
-  padding: 0 11px;
-  /* Two transparent pixels so activation swaps colour into the ink edge the
-     row already owns — no layout jump when the box appears. */
+/* Two transparent pixels so activation swaps colour into the ink edge the tab
+   already owns — no layout jump when the box appears. */
+.sidebar-root-tab {
+  height: 40px;
   border: 2px solid transparent;
-  border-radius: 12px;
-  color: var(--text-0);
-  /* One step under the type-lg it launched at: the nav names destinations, it
-     is not itself a destination heading. */
-  font-size: var(--type-md);
+  border-radius: 11px;
+  color: var(--text-2);
 }
 
-.sync-primary-nav button > svg {
-  width: 18px;
-  height: 18px;
+.sidebar-root-tab > svg {
+  width: 19px;
+  height: 19px;
 }
 
-.sync-primary-nav button:hover:not(:disabled) {
+.sidebar-root-tab:hover:not(:disabled) {
   border-color: var(--border);
   background: var(--bg-hover);
+  color: var(--text-0);
 }
 
 /* The active destination is a lifted box: ink edge, hard cast shadow. */
-.sync-primary-nav button.active {
+.sidebar-root-tab.active {
   border-color: var(--accent);
   background: var(--surface-row-active);
   box-shadow: var(--shadow-card);
+  color: var(--text-0);
+}
+
+/* Nothing sits beside a glyph to push the badge along, so it rides the tab's
+   top corner instead of the end of a row — and drops the row badge's 28px
+   floor, which on a 52px tab reached across its neighbour. */
+.sidebar-root-tab > .sync-activity-badge {
+  position: absolute;
+  top: -6px;
+  right: -5px;
+  min-width: 18px;
+  padding: 1px 4px;
 }
 
 /* The badge holds a count, not a label, so it reads in the identifier face —
    and tabular figures keep it from resizing as the number climbs. */
 .sidebar-nav-badge,
-.sync-primary-nav button > .sync-activity-badge {
+.sidebar-root-tab > .sync-activity-badge {
   min-width: 28px;
   padding: 2px 5px;
   border: 1px solid var(--border-mid);
@@ -8984,25 +9207,16 @@ summary {
   line-height: var(--leading-flat);
 }
 
-.sync-sidebar-sections {
-  padding-top: 0;
-  background: transparent;
-}
-
-/* All three panes are drag-sized rows of one split, separated by handles that
-   straddle their gutters. */
-.sidebar-project-pane,
-.sidebar-storage-pane,
-.sidebar-catalog-pane {
+.sync-sidebar-rail {
   background: var(--bg-1);
 }
 
-.sidebar-settings-sections .sidebar-section-heading {
+.sync-sidebar-rail .sidebar-section-heading {
   min-height: 45px;
   padding: 8px 12px 4px 20px;
 }
 
-.sidebar-settings-sections .sidebar-section-title {
+.sync-sidebar-rail .sidebar-section-title {
   color: var(--accent);
   font-size: var(--type-md);
   /* Whole pixels, so the uppercase label keeps its air without drifting the
@@ -9027,8 +9241,7 @@ summary {
   transform: translate(1px, 1px);
 }
 
-.sidebar-profile-list,
-.sidebar-settings-sections .sidebar-links-list {
+.sidebar-rail-list {
   padding-right: 9px;
   padding-left: 9px;
 }
@@ -9092,72 +9305,12 @@ summary {
   background: var(--bg-hover);
 }
 
-/* Both resize handles straddle a real gutter, so they only tint it on
-   hover; the rounded tile corners keep the junction shape. The handle's
-   20px box with -6px margins nets to exactly one 8px gutter, so a seam
-   between drag-sized panes measures the same as every flex gap around it. */
-.sidebar-section-divider {
-  height: 20px;
-  margin: -6px 0;
-  align-self: center;
-  background: transparent;
-}
-
-.sidebar-section-divider::before {
-  display: none;
-}
-
-/* The head is a flex child of the rail rather than a row of the split, so this
-   one has to cancel the two gutters flexbox puts either side of it: the 20px
-   box with -14px margins collapses to an -8px margin box, which the
-   surrounding 8px gaps restore to a single 8px seam with the handle centred
-   on it. It must sit after the shared rule above to win the margin. */
-.sidebar-head-divider {
-  margin: -14px 0;
-  flex: 0 0 auto;
-  align-self: stretch;
-}
-
-/* The tint is a slim pill centred in the seam, not a fill of the whole
-   gutter: at this gutter width a full fill reads as a painted bar, and the
-   pill is the shape every platform gives a grab handle. */
-.sidebar-section-divider::after {
-  z-index: 3;
-  top: 8px;
-  right: var(--retro-panel-radius);
-  left: var(--retro-panel-radius);
-  width: auto;
-  height: 4px;
-  border-radius: 999px;
-  background: transparent;
-  box-shadow: none;
-}
-
-.sidebar-section-divider:hover::after,
-.sidebar-section-divider:active::after,
-.sidebar-section-divider:focus-visible::after,
-.sidebar-settings-sections.resizing .sidebar-section-divider::after {
-  background: var(--border-strong);
-  box-shadow: none;
-}
-
 /* The 12px handle with -2px margins nets to the 8px column seam. */
 .sync-sidebar-resizer {
   width: 12px;
   margin-right: -2px;
   margin-left: -2px;
   flex: 0 0 12px;
-  background: transparent;
-}
-
-.sync-sidebar-resizer::before {
-  display: none;
-}
-
-.sync-sidebar-resizer::after {
-  inset: var(--retro-panel-radius) auto var(--retro-panel-radius) 4px;
-  width: 4px;
-  border-radius: 999px;
   background: transparent;
 }
 
@@ -9556,11 +9709,11 @@ summary {
   container: sync-history-layout / inline-size;
 }
 
-.sync-history-timeline.has-uncommitted {
+.sync-history-timeline.has-branch-unmapped {
   padding-top: 12px;
 }
 
-.sync-history-uncommitted {
+.sync-history-branch-unmapped {
   position: relative;
   overflow: visible;
   margin: 0 0 10px var(--sync-history-card-offset);
@@ -9577,7 +9730,7 @@ summary {
    already span the 12px the gap needs, so the anchor is all that is left. */
 /* The rail is drawn at the box grammar's own 2px stroke — a 1px thread reads
    as lint next to the ink-edged cards it connects. */
-.sync-history-uncommitted::after {
+.sync-history-branch-unmapped::after {
   content: "";
   position: absolute;
   z-index: 1;
@@ -9595,7 +9748,7 @@ summary {
 }
 
 /* The heading bar contains one label line; the fold lives in the rail. */
-.sync-history-uncommitted .sync-history-section-heading {
+.sync-history-branch-unmapped .sync-history-section-heading {
   min-height: 38px;
   display: flex;
   align-items: center;
@@ -9604,25 +9757,25 @@ summary {
   border-bottom: 1px solid var(--border-mid);
 }
 
-.sync-history-uncommitted.collapsed .sync-history-section-heading {
+.sync-history-branch-unmapped.collapsed .sync-history-section-heading {
   border-bottom: 0;
 }
 
-.sync-history-uncommitted .sync-history-section-heading h2 {
+.sync-history-branch-unmapped .sync-history-section-heading h2 {
   min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: var(--sync-history-row-title-gap);
 }
 
-.sync-history-uncommitted .sync-history-section-heading h2 > svg {
+.sync-history-branch-unmapped .sync-history-section-heading h2 > svg {
   width: var(--sync-history-row-icon-size);
   height: var(--sync-history-row-icon-size);
   flex: 0 0 var(--sync-history-row-icon-size);
   color: var(--text-2);
 }
 
-.sync-history-uncommitted .sync-history-thread-list.flat {
+.sync-history-branch-unmapped .sync-history-thread-list.flat {
   gap: 0;
   border: 0;
   border-radius: 0;
@@ -9630,19 +9783,19 @@ summary {
   box-shadow: none;
 }
 
-.sync-history-uncommitted .sync-history-thread-card {
+.sync-history-branch-unmapped .sync-history-thread-card {
   border: 0;
   border-radius: 0;
 }
 
-.sync-history-uncommitted .sync-history-thread-card + .sync-history-thread-card {
+.sync-history-branch-unmapped .sync-history-thread-card + .sync-history-thread-card {
   border-top: 1px solid var(--border-mid);
 }
 
 /* `isolation` keeps the rail's own node and line stacking self-contained, but
    it also caps everything inside it — including the debug popover's z-index: 60
    — at the rail's own level in the timeline. With no z-index the rail sat at 0,
-   so the uncommitted section's status badges (z-index 3) painted straight
+   so the branch-unmapped section's status badges (z-index 3) painted straight
    through an open popover. Rank the rail above them and the node marker (4). */
 .sync-history-commit-rail {
   isolation: isolate;
@@ -9675,7 +9828,7 @@ summary {
    by hit-testing three points through an overlapping commit. */
 
 /* Fold to fold, on the same offsets as the dashed segment above. The commit
-   below an Uncommitted group needs no special first-child reach: that group's
+   below a branch-unmapped group needs no special first-child reach: that group's
    own segment already runs down to this fold. */
 .sync-history-commit::before {
   content: "";
@@ -10048,17 +10201,27 @@ summary {
   border-top: 1px solid var(--border-mid);
 }
 
+/* Longhands, not the shorthand: a lone card is first AND last, and a shorthand
+   in the later rule wiped the top corners the earlier one set — so a non-git
+   project with one session painted its hover tint square into the frame's
+   rounded top. Each rule owns two corners and touches only those. */
 .sync-history-thread-list.flat > .sync-history-thread-card:first-child {
-  border-radius: calc(var(--retro-panel-radius) - 2px) calc(var(--retro-panel-radius) - 2px) 0 0;
+  border-top-left-radius: calc(var(--retro-panel-radius) - 2px);
+  border-top-right-radius: calc(var(--retro-panel-radius) - 2px);
 }
 
 .sync-history-thread-list.flat > .sync-history-thread-card:last-child {
-  border-radius: 0 0 calc(var(--retro-panel-radius) - 2px) calc(var(--retro-panel-radius) - 2px);
+  border-bottom-left-radius: calc(var(--retro-panel-radius) - 2px);
+  border-bottom-right-radius: calc(var(--retro-panel-radius) - 2px);
 }
 
-/* The empty sentence already sits in the list's own frame. */
+/* The empty sentence already sits in the list's own frame — and it is the
+   frame's only child, so it owns all four inner corners. Its own 5px radius
+   would paint the hatch square over the frame's 12px inner curve, eating the
+   ink at every corner the drop shadow does not cover. */
 .sync-history-thread-list.flat > .sync-history-state {
   border: 0;
+  border-radius: calc(var(--retro-panel-radius) - 2px);
 }
 
 .sync-history-thread-card {
@@ -10162,7 +10325,7 @@ summary {
    bottom border. Give it the matching inner radius instead — the outer panel
    radius less the 2px ink edge. */
 .sync-history-commit > .sync-history-thread-list > .sync-history-thread-card:last-child,
-.sync-history-uncommitted .sync-history-thread-card:last-child {
+.sync-history-branch-unmapped .sync-history-thread-card:last-child {
   border-radius: 0 0 calc(var(--retro-panel-radius) - 2px) calc(var(--retro-panel-radius) - 2px);
 }
 
@@ -10183,15 +10346,15 @@ summary {
 }
 
 /* Storage-only threads are one group, framed and hairline-separated like the
-   Uncommitted group and the commit cards, rather than five floating rows. */
+   branch-unmapped group and the commit cards, rather than five floating rows. */
 .sync-history-storage-only {
   position: relative;
-  /* Visible, like the Uncommitted group: the rows carry status tooltips that
+  /* Visible, like the branch-unmapped group: the rows carry status tooltips that
      must escape the frame. The rows are transparent, so the group's own
      rounded background is what shows at the corners. */
   overflow: visible;
   /* Top margin so the frame clears the tab strip above it rather than butting
-     into it; the bottom is the same 10px the Uncommitted frame keeps before
+     into it; the bottom is the same 10px the branch-unmapped frame keeps before
      the rail; the left inset matches the timeline cards, so this group's fold
      lands in the same rail column as every other fold on the page. */
   margin: 12px 0 10px var(--sync-history-card-offset);
@@ -10547,7 +10710,7 @@ summary {
 .sync-storage-card > header,
 .sync-resource-group-header,
 .sync-storage-repositories-heading,
-.sync-r2-guide {
+.storage-setup-guide {
   border-bottom-color: var(--border);
   background: var(--surface-subtle);
 }
@@ -10576,11 +10739,6 @@ summary {
 .sync-sync-selectable-row.selected {
   border-color: var(--border-strong);
   background: var(--surface-row-active);
-}
-
-.conversation-path-repair-notice {
-  border-radius: 4px;
-  box-shadow: none;
 }
 
 .sync-project-tabs {
@@ -10823,8 +10981,9 @@ summary {
 }
 
 /* The handle spans the main tile's 2px bottom edge, the gutter, and the
-   drawer's 2px top edge, then reaches 4px into the drawer for grip. Its tint
-   is the same slim pill the sidebar handles draw, centred in the gutter. */
+   drawer's 2px top edge, then reaches 4px into the drawer for grip. It draws
+   the same mark the sidebar seam does: one short 60×4 pill centred on the
+   seam, not a rule running its whole length, and the same ink while held. */
 .sync-log-drawer .log-resizer {
   top: calc(-2px - var(--retro-gutter) - 2px);
   height: calc(var(--retro-gutter) + 8px);
@@ -10836,17 +10995,22 @@ summary {
 
 .sync-log-drawer .log-resizer::after {
   top: calc(2px + (var(--retro-gutter) - 4px) / 2);
-  right: var(--retro-panel-radius);
-  left: var(--retro-panel-radius);
+  right: auto;
+  left: 50%;
+  width: 60px;
   height: 4px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: transparent;
+  transform: translateX(-50%);
 }
 
-.sync-log-drawer .log-resizer:hover::after,
+.sync-log-drawer .log-resizer:hover::after {
+  background: var(--text-2);
+}
+
 .sync-log-drawer .log-resizer:active::after,
 .sync-workspace.resizing-log .sync-log-drawer .log-resizer::after {
-  background: var(--border-strong);
+  background: var(--text-0);
 }
 
 .sync-log-drawer.open::before,

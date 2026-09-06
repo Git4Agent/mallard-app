@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import Icon, { type IconName } from "../Icons";
 import { menuOptions, moveMenuFocus } from "./menuKeyboard";
 
@@ -133,7 +133,7 @@ function verbTitle(item: PathBarMenuItem): string {
   return item.detail ? `${item.label} · ${item.detail}` : item.label;
 }
 
-function PathBarMenu({
+export function PathBarMenu({
   id,
   groups,
   header,
@@ -395,6 +395,15 @@ function PathBarMenu({
   );
 }
 
+/* The row under the bar. The shell's notice zone is one box for the whole
+ * workspace, but the bar belongs to the page that renders it, so the shell
+ * cannot put the zone between the bar and the page on its own. It hands the
+ * zone down through this context and the bar renders it right after its own
+ * row — where you are, then what happened — in the DOM as well as on screen,
+ * so the tab sequence reads in the same order the eye does. A screen with no
+ * path bar renders the zone under the shell's own titlebar instead. */
+export const PathBarBelow = createContext<ReactNode>(null);
+
 export default function SyncPathBar({
   crumbs,
   overflow,
@@ -490,10 +499,12 @@ export default function SyncPathBar({
 
   const overflowOpen = openMenu === "overflow";
   const overflowMenuId = `${baseId}-overflow`;
+  const below = useContext(PathBarBelow);
 
   return (
-    // The bar is the window's drag handle here; its children are buttons and
-    // do not carry the attribute, so they stay clickable.
+    <>
+    {/* The bar is the window's drag handle here; its children are buttons and
+        do not carry the attribute, so they stay clickable. */}
     <header ref={barRef} className="sync-pathbar sync-titlebar" data-tauri-drag-region>
       <ol className="sync-path" aria-label={ariaLabel} data-tauri-drag-region>
         {crumbs.map((crumb, index) => {
@@ -675,5 +686,7 @@ export default function SyncPathBar({
         )}
       </div>
     </header>
+    {below}
+    </>
   );
 }

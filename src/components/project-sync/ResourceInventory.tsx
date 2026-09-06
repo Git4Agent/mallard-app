@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
-import type { ProjectResourceCategory, ProjectResourceDescriptor } from "../../types";
+import type { InventoryResource, ProjectResourceCategory } from "../../types";
 import Icon from "../Icons";
-import { RESOURCE_GROUPS, applyPolicyLabel, categoryFor, kindLabel } from "./model";
+import { RESOURCE_GROUPS } from "./model";
 
 interface Props {
-  resources: ProjectResourceDescriptor[];
+  resources: InventoryResource[];
   selected: Set<string>;
   selectableResourceIds?: ReadonlySet<string>;
   disabled?: boolean;
@@ -23,9 +23,12 @@ const CATEGORY_ICON: Record<ProjectResourceCategory, "activity" | "settings" | "
   tools: "settings",
 };
 
-function resourceIcon(resource: ProjectResourceDescriptor): "activity" | "file" | "settings" {
-  if (resource.kind === "requirement") return "settings";
-  if (resource.kind.includes("conversation")) return "activity";
+/* The row glyph follows the category the registered adapter filed the
+   resource under, so a kind this build has never heard of still draws the
+   mark of the group it landed in instead of nothing. */
+function resourceIcon(resource: InventoryResource): "activity" | "file" | "settings" {
+  if (resource.category === "tools") return "settings";
+  if (resource.category === "conversations") return "activity";
   return "file";
 }
 
@@ -36,7 +39,7 @@ function ResourceRow({
   disabled,
   onToggle,
 }: {
-  resource: ProjectResourceDescriptor;
+  resource: InventoryResource;
   checked: boolean;
   selectable: boolean;
   disabled: boolean;
@@ -94,8 +97,11 @@ function ResourceRow({
             {resource.resource_id !== resource.display_name && (
               <><dt>Resource ID</dt><dd><code>{resource.resource_id}</code></dd></>
             )}
-            <dt>Kind</dt><dd>{kindLabel(resource.kind)}</dd>
-            {resource.apply_policy && <><dt>Apply</dt><dd>{applyPolicyLabel(resource.apply_policy)}</dd></>}
+            {/* Wire coordinates never reach the screen raw: the registered
+                contracts label the kind and say in words what will happen to
+                the file, and an unregistered coordinate is labelled by itself. */}
+            <dt>Kind</dt><dd>{resource.kind_label}</dd>
+            <dt>Apply</dt><dd>{resource.apply_policy_label}</dd>
           </dl>
           {resource.blocked_reason && (
             <div className="sync-resource-blocker"><Icon name="alert-triangle" size={14} /> {resource.blocked_reason}</div>
@@ -116,7 +122,7 @@ function ResourceGroup({
   onToggle,
 }: {
   group: (typeof RESOURCE_GROUPS)[number];
-  items: ProjectResourceDescriptor[];
+  items: InventoryResource[];
   selected: Set<string>;
   selectableResourceIds?: ReadonlySet<string>;
   disabled: boolean;
@@ -126,7 +132,7 @@ function ResourceGroup({
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const selectableItems = items.filter((item) => (
     !item.blocked_reason
-    && item.apply_policy !== "never"
+    && item.selectable
     && (selectableResourceIds?.has(item.resource_id) ?? true)
   ));
   const selectableIds = new Set(selectableItems.map((item) => item.resource_id));
@@ -209,9 +215,9 @@ export default function ResourceInventory({
   onToggle,
 }: Props) {
   const grouped = useMemo(() => {
-    const result = new Map<ProjectResourceCategory, ProjectResourceDescriptor[]>();
+    const result = new Map<ProjectResourceCategory, InventoryResource[]>();
     for (const group of RESOURCE_GROUPS) result.set(group.id, []);
-    for (const resource of resources) result.get(categoryFor(resource))?.push(resource);
+    for (const resource of resources) result.get(resource.category)?.push(resource);
     return result;
   }, [resources]);
 

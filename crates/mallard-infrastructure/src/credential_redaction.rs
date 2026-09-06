@@ -37,6 +37,7 @@ use mallard_domain::hex_lower;
 use regex::{Regex, RegexSet};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::payload::PayloadBytes;
@@ -48,6 +49,10 @@ pub const REDACTION_CODEC_V1: &str = "mallard.redact.v1";
 /// strings top out at 4.0 and UUIDs near log2(17), so digests and ids are
 /// structurally safe without special-casing.
 const ENTROPY_THRESHOLD_MILLIBITS: u32 = 4_500;
+
+/// A shorter candidate cannot exceed the entropy threshold because its
+/// maximum entropy is `log2(length)`, and `log2(22) < 4.5`.
+const MIN_ENTROPY_REDACTION_BYTES: usize = 23;
 
 const LABEL_SECRET: &str = "<secret>";
 const LABEL_PASSWORD: &str = "<password>";
@@ -362,6 +367,16 @@ const PRIORITY_TYPED: u8 = 0;
 const PRIORITY_PASSWORD: u8 = 1;
 const PRIORITY_SECRET: u8 = 2;
 
+/// Cache only strings large enough for detector reuse to outweigh hashing and
+/// map lookup. The measured hotspot is concentrated in strings above 4 KiB;
+/// the lower floor also catches repeated medium-sized message content.
+const DETECTION_CACHE_MIN_BYTES: usize = 1024;
+/// Bound per-publish metadata even when a valid document contains many unique
+/// string leaves. A full cache is an optimization miss, never a redaction
+/// failure.
+const DETECTION_CACHE_MAX_ENTRIES: usize = 16_384;
+const DETECTION_CACHE_MAX_REGIONS: usize = 65_536;
+
 /// A connection-string rule: candidate pattern, rule id, and the gate that
 /// decides whether a candidate is treated as credential-bearing.
 type ConnectionStringRule<'a> = (&'a Regex, &'static str, fn(&RedactionRuleset, &str) -> bool);
@@ -369,6 +384,7 @@ type ConnectionStringRule<'a> = (&'a Regex, &'static str, fn(&RedactionRuleset, 
 /// One detected region with its replacement label. `start..end` are byte
 /// offsets into the scanned string (always char-boundary-valid: they come
 /// from regex matches).
+#[derive(Clone)]
 struct LabeledRegion {
     start: usize,
     end: usize,
@@ -400,6 +416,68 @@ pub struct RedactionRuleset {
     generic_password_key: Regex,
     bracketed_placeholder_interior: Regex,
     fingerprint: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct DetectionCacheKey {
+    content_sha256: [u8; 32],
+    byte_len: usize,
+}
+
+struct DetectionCache {
+    entries: HashMap<DetectionCacheKey, Vec<LabeledRegion>>,
+    min_bytes: usize,
+    max_entries: usize,
+    max_regions: usize,
+    stored_regions: usize,
+    #[cfg(test)]
+    lookups: usize,
+    #[cfg(test)]
+    hits: usize,
+    #[cfg(test)]
+    inserted: usize,
+    #[cfg(test)]
+    hashed_bytes: usize,
+}
+
+impl DetectionCache {
+    fn new() -> Self {
+        Self::with_limits(
+            DETECTION_CACHE_MIN_BYTES,
+            DETECTION_CACHE_MAX_ENTRIES,
+            DETECTION_CACHE_MAX_REGIONS,
+        )
+    }
+
+    fn with_limits(min_bytes: usize, max_entries: usize, max_regions: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            min_bytes,
+            max_entries,
+            max_regions,
+            stored_regions: 0,
+            #[cfg(test)]
+            lookups: 0,
+            #[cfg(test)]
+            hits: 0,
+            #[cfg(test)]
+            inserted: 0,
+            #[cfg(test)]
+            hashed_bytes: 0,
+        }
+    }
+
+    fn disabled() -> Self {
+        Self::with_limits(usize::MAX, 0, 0)
+    }
+}
+
+/// One bounded, in-memory detector cache. Callers choose the lifetime; Push
+/// creates one run per conversation preparation, then drops it. The cache
+/// stores only SHA-256 keys and detector regions, never source strings.
+pub struct RedactionRun<'a> {
+    ruleset: &'a RedactionRuleset,
+    cache: DetectionCache,
 }
 
 /// The DB-prefixed credential key shape shared by the assignment regex and
@@ -498,14 +576,70 @@ impl RedactionRuleset {
         }
     }
 
+    /// Start one bounded in-memory reuse scope. No cache data survives the
+    /// returned value or enters machine-local or portable state.
+    pub fn begin_run(&self) -> RedactionRun<'_> {
+        RedactionRun {
+            ruleset: self,
+            cache: DetectionCache::new(),
+        }
+    }
+
+    fn uncached_run(&self) -> RedactionRun<'_> {
+        RedactionRun {
+            ruleset: self,
+            cache: DetectionCache::disabled(),
+        }
+    }
+
     // ------------------------------------------------------------------
     // Detection layers (all pure functions of one string).
     // ------------------------------------------------------------------
 
-    fn detect(&self, s: &str) -> Vec<LabeledRegion> {
+    fn detect(&self, s: &str, cache: &mut DetectionCache) -> Vec<LabeledRegion> {
+        let mode = value_scan_mode(s);
+        if mode == ValueScanMode::Skip {
+            return Vec::new();
+        }
+        if s.len() < cache.min_bytes || cache.max_entries == 0 {
+            return self.detect_uncached(s, mode);
+        }
+
+        let key = DetectionCacheKey {
+            content_sha256: Sha256::digest(s.as_bytes()).into(),
+            byte_len: s.len(),
+        };
+        #[cfg(test)]
+        {
+            cache.lookups += 1;
+            cache.hashed_bytes += s.len();
+        }
+        if let Some(regions) = cache.entries.get(&key).cloned() {
+            #[cfg(test)]
+            {
+                cache.hits += 1;
+            }
+            return regions;
+        }
+
+        let regions = self.detect_uncached(s, mode);
+        if cache.entries.len() < cache.max_entries
+            && regions.len() <= cache.max_regions.saturating_sub(cache.stored_regions)
+        {
+            cache.stored_regions += regions.len();
+            cache.entries.insert(key, regions.clone());
+            #[cfg(test)]
+            {
+                cache.inserted += 1;
+            }
+        }
+        regions
+    }
+
+    fn detect_uncached(&self, s: &str, mode: ValueScanMode) -> Vec<LabeledRegion> {
         let mut regions = Vec::new();
-        match value_scan_mode(s) {
-            ValueScanMode::Skip => return regions,
+        match mode {
+            ValueScanMode::Skip => unreachable!("skip values return before detector caching"),
             ValueScanMode::EntropyExempt => {}
             ValueScanMode::Full => self.detect_entropy(s, &mut regions),
         }
@@ -529,10 +663,10 @@ impl RedactionRuleset {
                     s.as_bytes()[start]
                 {
                     start += 1;
-                    if end - start < 10 {
-                        continue;
-                    }
                 }
+            }
+            if end - start < MIN_ENTROPY_REDACTION_BYTES {
+                continue;
             }
             if shannon_entropy_millibits(&s[start..end]) > ENTROPY_THRESHOLD_MILLIBITS {
                 regions.push(LabeledRegion {
@@ -768,13 +902,27 @@ impl RedactionRuleset {
     /// Redact one string: `Some(redacted)` when any layer fired, `None`
     /// when the string is untouched. Pure and deterministic.
     pub fn redact_str(&self, s: &str) -> Option<String> {
-        apply_regions(s, self.detect(s))
+        self.uncached_run().redact_str(s)
+    }
+
+    fn redact_str_with_cache(&self, s: &str, cache: &mut DetectionCache) -> Option<String> {
+        apply_regions(s, self.detect(s, cache))
     }
 
     /// The rule id of the first detected region, for content-free error
     /// payloads.
+    #[cfg(test)]
     fn first_finding_rule(&self, s: &str) -> Option<&'static str> {
-        let mut regions = self.detect(s);
+        let mut cache = DetectionCache::disabled();
+        self.first_finding_rule_with_cache(s, &mut cache)
+    }
+
+    fn first_finding_rule_with_cache(
+        &self,
+        s: &str,
+        cache: &mut DetectionCache,
+    ) -> Option<&'static str> {
+        let mut regions = self.detect(s, cache);
         if regions.is_empty() {
             return None;
         }
@@ -790,8 +938,12 @@ impl RedactionRuleset {
     /// rules. Keys are never rewritten; skip-listed subtrees are cloned
     /// verbatim. Returns the redacted value and whether anything changed.
     pub fn redact_value(&self, value: &Value) -> (Value, bool) {
+        self.uncached_run().redact_value(value)
+    }
+
+    fn redact_value_with_cache(&self, value: &Value, cache: &mut DetectionCache) -> (Value, bool) {
         let mut changed = false;
-        let redacted = self.redact_value_inner("", false, value, &mut changed);
+        let redacted = self.redact_value_inner("", false, value, &mut changed, cache);
         (redacted, changed)
     }
 
@@ -801,6 +953,7 @@ impl RedactionRuleset {
         credential_context: bool,
         value: &Value,
         changed: &mut bool,
+        cache: &mut DetectionCache,
     ) -> Value {
         match value {
             Value::Object(object) => {
@@ -813,7 +966,7 @@ impl RedactionRuleset {
                     let child_value = if should_skip_field(child_key) {
                         child.clone()
                     } else {
-                        self.redact_value_inner(child_key, child_context, child, changed)
+                        self.redact_value_inner(child_key, child_context, child, changed, cache)
                     };
                     output.insert(child_key.clone(), child_value);
                 }
@@ -822,11 +975,13 @@ impl RedactionRuleset {
             Value::Array(values) => Value::Array(
                 values
                     .iter()
-                    .map(|child| self.redact_value_inner("", credential_context, child, changed))
+                    .map(|child| {
+                        self.redact_value_inner("", credential_context, child, changed, cache)
+                    })
                     .collect(),
             ),
             Value::String(text) => {
-                let redacted = self.redact_leaf(key, credential_context, text);
+                let redacted = self.redact_leaf(key, credential_context, text, cache);
                 match redacted {
                     Some(redacted) => {
                         *changed = true;
@@ -842,8 +997,14 @@ impl RedactionRuleset {
     /// One string leaf: the detector layers, then the JSON credential-key
     /// promotion (a credential-shaped key forces `<password>` even for
     /// low-entropy values like `hunter2`).
-    fn redact_leaf(&self, key: &str, credential_context: bool, text: &str) -> Option<String> {
-        if let Some(redacted) = self.redact_str(text) {
+    fn redact_leaf(
+        &self,
+        key: &str,
+        credential_context: bool,
+        text: &str,
+        cache: &mut DetectionCache,
+    ) -> Option<String> {
+        if let Some(redacted) = self.redact_str_with_cache(text, cache) {
             return Some(redacted);
         }
         if self.is_credential_json_secret_key(key, credential_context)
@@ -856,8 +1017,12 @@ impl RedactionRuleset {
 
     /// The rule id and JSON pointer of the first finding in one value, for
     /// content-free error payloads.
-    fn first_value_finding(&self, value: &Value) -> Option<(String, &'static str)> {
-        self.first_value_finding_inner("", false, value, String::new())
+    fn first_value_finding(
+        &self,
+        value: &Value,
+        cache: &mut DetectionCache,
+    ) -> Option<(String, &'static str)> {
+        self.first_value_finding_inner("", false, value, String::new(), cache)
     }
 
     fn first_value_finding_inner(
@@ -866,6 +1031,7 @@ impl RedactionRuleset {
         credential_context: bool,
         value: &Value,
         pointer: String,
+        cache: &mut DetectionCache,
     ) -> Option<(String, &'static str)> {
         match value {
             Value::Object(object) => {
@@ -883,6 +1049,7 @@ impl RedactionRuleset {
                         child_context,
                         child,
                         child_pointer,
+                        cache,
                     ) {
                         return Some(found);
                     }
@@ -892,16 +1059,20 @@ impl RedactionRuleset {
             Value::Array(values) => {
                 for (index, child) in values.iter().enumerate() {
                     let child_pointer = format!("{pointer}/{index}");
-                    if let Some(found) =
-                        self.first_value_finding_inner("", credential_context, child, child_pointer)
-                    {
+                    if let Some(found) = self.first_value_finding_inner(
+                        "",
+                        credential_context,
+                        child,
+                        child_pointer,
+                        cache,
+                    ) {
                         return Some(found);
                     }
                 }
                 None
             }
             Value::String(text) => {
-                if let Some(rule) = self.first_finding_rule(text) {
+                if let Some(rule) = self.first_finding_rule_with_cache(text, cache) {
                     return Some((pointer, rule));
                 }
                 if self.is_credential_json_secret_key(key, credential_context)
@@ -921,12 +1092,21 @@ impl RedactionRuleset {
     /// that the output is a redaction fixpoint. Encoder bugs surface here
     /// as visible build failures, never as silent wire drift.
     pub fn redact_record_gated(&self, record: &Value) -> Result<Value, String> {
-        let (redacted, changed) = self.redact_value(record);
+        self.uncached_run().redact_record_gated(record)
+    }
+
+    fn redact_record_gated_with_cache(
+        &self,
+        record: &Value,
+        cache: &mut DetectionCache,
+    ) -> Result<Value, String> {
+        let (redacted, changed) = self.redact_value_with_cache(record, cache);
         if changed {
             verify_redaction_span_diff(record, &redacted)?;
-            self.verify_wire_value(&redacted).map_err(|error| {
-                format!("redaction_gate_failed: redacted record is not a fixpoint: {error}")
-            })?;
+            self.verify_wire_value_with_cache(&redacted, cache)
+                .map_err(|error| {
+                    format!("redaction_gate_failed: redacted record is not a fixpoint: {error}")
+                })?;
         }
         Ok(redacted)
     }
@@ -935,7 +1115,15 @@ impl RedactionRuleset {
     /// certificate — a wire value that fails carries something the ruleset
     /// can still detect.
     pub fn verify_wire_value(&self, wire: &Value) -> Result<(), String> {
-        match self.first_value_finding(wire) {
+        self.uncached_run().verify_wire_value(wire)
+    }
+
+    fn verify_wire_value_with_cache(
+        &self,
+        wire: &Value,
+        cache: &mut DetectionCache,
+    ) -> Result<(), String> {
+        match self.first_value_finding(wire, cache) {
             None => Ok(()),
             Some((pointer, rule)) => Err(format!(
                 "wire_secret_detected: rule '{rule}' still matches at '{pointer}'"
@@ -949,10 +1137,14 @@ impl RedactionRuleset {
 
     /// Collect `(key, original, redacted)` replacements from one parsed
     /// line, deduplicated by `(key, original)`.
-    fn collect_replacements(&self, value: &Value) -> Vec<JsonReplacement> {
+    fn collect_replacements(
+        &self,
+        value: &Value,
+        cache: &mut DetectionCache,
+    ) -> Vec<JsonReplacement> {
         let mut seen = std::collections::BTreeSet::new();
         let mut replacements = Vec::new();
-        self.collect_replacements_inner("", false, value, &mut seen, &mut replacements);
+        self.collect_replacements_inner("", false, value, &mut seen, &mut replacements, cache);
         replacements
     }
 
@@ -963,6 +1155,7 @@ impl RedactionRuleset {
         value: &Value,
         seen: &mut std::collections::BTreeSet<(String, String)>,
         replacements: &mut Vec<JsonReplacement>,
+        cache: &mut DetectionCache,
     ) {
         match value {
             Value::Object(object) => {
@@ -980,6 +1173,7 @@ impl RedactionRuleset {
                         child,
                         seen,
                         replacements,
+                        cache,
                     );
                 }
             }
@@ -991,11 +1185,12 @@ impl RedactionRuleset {
                         child,
                         seen,
                         replacements,
+                        cache,
                     );
                 }
             }
             Value::String(text) => {
-                if let Some(redacted) = self.redact_leaf(key, credential_context, text) {
+                if let Some(redacted) = self.redact_leaf(key, credential_context, text, cache) {
                     if seen.insert((key.to_string(), text.clone())) {
                         replacements.push(JsonReplacement {
                             key: key.to_string(),
@@ -1016,6 +1211,14 @@ impl RedactionRuleset {
     /// Each changed line is gate-checked in place: it must still parse, be
     /// a redaction fixpoint, and introduce only vocabulary tokens.
     pub fn redact_jsonl_text(&self, text: &str) -> Result<(String, usize), String> {
+        self.uncached_run().redact_jsonl_text(text)
+    }
+
+    fn redact_jsonl_text_with_cache(
+        &self,
+        text: &str,
+        cache: &mut DetectionCache,
+    ) -> Result<(String, usize), String> {
         let mut output = String::with_capacity(text.len());
         let mut changed_lines = 0_usize;
         for (index, line) in text.split('\n').enumerate() {
@@ -1029,7 +1232,7 @@ impl RedactionRuleset {
                 continue;
             }
             let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-                match self.redact_str(line) {
+                match self.redact_str_with_cache(line, cache) {
                     Some(redacted) => {
                         changed_lines += 1;
                         output.push_str(&redacted);
@@ -1038,13 +1241,13 @@ impl RedactionRuleset {
                 }
                 continue;
             };
-            let replacements = self.collect_replacements(&value);
+            let replacements = self.collect_replacements(&value, cache);
             if replacements.is_empty() {
                 output.push_str(line);
                 continue;
             }
             let spliced = apply_json_replacements(line, &replacements);
-            self.verify_spliced_line(line, &spliced, line_number)?;
+            self.verify_spliced_line(line, &spliced, line_number, cache)?;
             changed_lines += 1;
             output.push_str(&spliced);
         }
@@ -1059,13 +1262,14 @@ impl RedactionRuleset {
         original: &str,
         spliced: &str,
         line: usize,
+        cache: &mut DetectionCache,
     ) -> Result<(), String> {
         let Ok(value) = serde_json::from_str::<Value>(spliced.trim()) else {
             return Err(format!(
                 "redaction_gate_failed: line {line} no longer parses after redaction splice"
             ));
         };
-        if let Some((pointer, rule)) = self.first_value_finding(&value) {
+        if let Some((pointer, rule)) = self.first_value_finding(&value, cache) {
             return Err(format!(
                 "wire_secret_detected: line {line} still matches rule '{rule}' at '{pointer}' \
                  after redaction"
@@ -1085,6 +1289,14 @@ impl RedactionRuleset {
     /// takes the line-delimited path. Non-UTF-8 bytes pass through
     /// unchanged (documented residual: the detector is textual).
     pub fn redact_document(&self, bytes: Vec<u8>) -> Result<(Vec<u8>, bool), String> {
+        self.uncached_run().redact_document(bytes)
+    }
+
+    fn redact_document_with_cache(
+        &self,
+        bytes: Vec<u8>,
+        cache: &mut DetectionCache,
+    ) -> Result<(Vec<u8>, bool), String> {
         let Ok(text) = std::str::from_utf8(&bytes) else {
             return Ok((bytes, false));
         };
@@ -1092,15 +1304,15 @@ impl RedactionRuleset {
             return Ok((bytes, false));
         }
         if let Some(value) = parse_single_json_value(text) {
-            let replacements = self.collect_replacements(&value);
+            let replacements = self.collect_replacements(&value, cache);
             if replacements.is_empty() {
                 return Ok((bytes, false));
             }
             let spliced = apply_json_replacements(text, &replacements);
-            self.verify_spliced_document(text, &spliced)?;
+            self.verify_spliced_document(text, &spliced, cache)?;
             return Ok((spliced.into_bytes(), true));
         }
-        let (redacted, changed_lines) = self.redact_jsonl_text(text)?;
+        let (redacted, changed_lines) = self.redact_jsonl_text_with_cache(text, cache)?;
         if changed_lines == 0 {
             Ok((bytes, false))
         } else {
@@ -1108,14 +1320,19 @@ impl RedactionRuleset {
         }
     }
 
-    fn verify_spliced_document(&self, original: &str, spliced: &str) -> Result<(), String> {
+    fn verify_spliced_document(
+        &self,
+        original: &str,
+        spliced: &str,
+        cache: &mut DetectionCache,
+    ) -> Result<(), String> {
         let Some(value) = parse_single_json_value(spliced) else {
             return Err(
                 "redaction_gate_failed: document no longer parses after redaction splice"
                     .to_string(),
             );
         };
-        if let Some((pointer, rule)) = self.first_value_finding(&value) {
+        if let Some((pointer, rule)) = self.first_value_finding(&value, cache) {
             return Err(format!(
                 "wire_secret_detected: document still matches rule '{rule}' at '{pointer}' \
                  after redaction"
@@ -1133,12 +1350,20 @@ impl RedactionRuleset {
         &self,
         bytes: impl Into<PayloadBytes>,
     ) -> Result<RedactedWireBytes, String> {
+        self.uncached_run().certify_wire_document(bytes)
+    }
+
+    fn certify_wire_document_with_cache(
+        &self,
+        bytes: impl Into<PayloadBytes>,
+        cache: &mut DetectionCache,
+    ) -> Result<RedactedWireBytes, String> {
         let bytes = bytes.into();
         let Ok(text) = std::str::from_utf8(bytes.as_bytes()) else {
             return Ok(RedactedWireBytes { bytes });
         };
         if let Some(value) = parse_single_json_value(text) {
-            if let Some((pointer, rule)) = self.first_value_finding(&value) {
+            if let Some((pointer, rule)) = self.first_value_finding(&value, cache) {
                 return Err(format!(
                     "wire_secret_detected: rule '{rule}' matches at '{pointer}' in the wire \
                      document"
@@ -1153,7 +1378,7 @@ impl RedactionRuleset {
             }
             match serde_json::from_str::<Value>(trimmed) {
                 Ok(value) => {
-                    if let Some((pointer, rule)) = self.first_value_finding(&value) {
+                    if let Some((pointer, rule)) = self.first_value_finding(&value, cache) {
                         return Err(format!(
                             "wire_secret_detected: line {} matches rule '{rule}' at '{pointer}'",
                             index + 1
@@ -1161,7 +1386,7 @@ impl RedactionRuleset {
                     }
                 }
                 Err(_) => {
-                    if let Some(rule) = self.first_finding_rule(line) {
+                    if let Some(rule) = self.first_finding_rule_with_cache(line, cache) {
                         return Err(format!(
                             "wire_secret_detected: line {} matches rule '{rule}'",
                             index + 1
@@ -1174,21 +1399,92 @@ impl RedactionRuleset {
     }
 }
 
+impl RedactionRun<'_> {
+    pub fn redact_str(&mut self, s: &str) -> Option<String> {
+        self.ruleset.redact_str_with_cache(s, &mut self.cache)
+    }
+
+    pub fn redact_value(&mut self, value: &Value) -> (Value, bool) {
+        self.ruleset.redact_value_with_cache(value, &mut self.cache)
+    }
+
+    pub fn redact_record_gated(&mut self, record: &Value) -> Result<Value, String> {
+        self.ruleset
+            .redact_record_gated_with_cache(record, &mut self.cache)
+    }
+
+    pub fn verify_wire_value(&mut self, wire: &Value) -> Result<(), String> {
+        self.ruleset
+            .verify_wire_value_with_cache(wire, &mut self.cache)
+    }
+
+    pub fn redact_jsonl_text(&mut self, text: &str) -> Result<(String, usize), String> {
+        self.ruleset
+            .redact_jsonl_text_with_cache(text, &mut self.cache)
+    }
+
+    pub fn redact_document(&mut self, bytes: Vec<u8>) -> Result<(Vec<u8>, bool), String> {
+        self.ruleset
+            .redact_document_with_cache(bytes, &mut self.cache)
+    }
+
+    pub fn certify_wire_document(
+        &mut self,
+        bytes: impl Into<PayloadBytes>,
+    ) -> Result<RedactedWireBytes, String> {
+        self.ruleset
+            .certify_wire_document_with_cache(bytes, &mut self.cache)
+    }
+}
+
 /// Wire bytes certified to be a redaction fixpoint of the compiled-in
-/// ruleset. The only producers are the ruleset's own appliers and
-/// `certify_wire_document`; conversation publish paths require this type.
+/// ruleset. Producers either check the document or preserve the checks from
+/// a trusted record encoder. Conversation publish paths require this type.
+///
+/// Callers outside this crate cannot assert a certificate for arbitrary bytes:
+///
+/// ```compile_fail,E0624
+/// use mallard_infrastructure::credential_redaction::RedactedWireBytes;
+/// use mallard_infrastructure::payload::PayloadBytes;
+/// let payload = PayloadBytes::from(b"unchecked".to_vec());
+/// let _ = RedactedWireBytes::from_verified_payload(payload);
+/// ```
 #[derive(Clone, Debug)]
 pub struct RedactedWireBytes {
     bytes: PayloadBytes,
 }
 
 impl RedactedWireBytes {
+    /// Complete the trusted Codex Encode builder without another scan.
+    ///
+    /// The caller must have redacted source records, checked the final head
+    /// and inserted projection records, and preserved those checks through
+    /// serialization. Only excluded identity fields and numeric ordinals
+    /// may change after a record's check. The payload is immutable.
+    pub(crate) fn from_verified_payload(bytes: PayloadBytes) -> Self {
+        Self { bytes }
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
 
     pub fn into_bytes(self) -> PayloadBytes {
         self.bytes
+    }
+}
+
+impl AsRef<[u8]> for RedactedWireBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl std::ops::Deref for RedactedWireBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_bytes()
     }
 }
 
@@ -1846,6 +2142,10 @@ mod tests {
     fn entropy_layer_flags_random_tokens_and_spares_structure() {
         let token = "A7fK9q2ZpX4mW8vB1cN6dR3sT5uY0hgJL2eQ";
         assert_eq!(redact(&format!("token {token} ok")), "token <secret> ok");
+        let twenty_two = "abcdefghijklmnopqrstuv";
+        let twenty_three = "abcdefghijklmnopqrstuvw";
+        assert_eq!(redact(twenty_two), twenty_two);
+        assert_eq!(redact(twenty_three), "<secret>");
         // Hex digests and UUIDs are structurally below threshold.
         for safe in [
             "3f786850e387550fdab836ed7e6dc881de23001b",
@@ -2060,6 +2360,95 @@ mod tests {
         let (promoted, changed) = shared().redact_value(&shaped);
         assert!(changed);
         assert_eq!(promoted, json!({"db_password": "<password>"}));
+    }
+
+    #[test]
+    fn detection_cache_reuses_content_without_caching_json_context() {
+        let repeated = "hunter2".repeat(200);
+        let ordinary = json!({"content": repeated.clone()});
+        let credential = json!({"db_password": repeated.clone()});
+
+        let mut ordinary_first = shared().begin_run();
+        let (unchanged, changed) = ordinary_first.redact_value(&ordinary);
+        assert!(!changed);
+        assert_eq!(unchanged, ordinary);
+        let (redacted, changed) = ordinary_first.redact_value(&credential);
+        assert!(changed);
+        assert_eq!(redacted, json!({"db_password": "<password>"}));
+        assert_eq!(ordinary_first.cache.inserted, 1);
+        assert_eq!(ordinary_first.cache.hits, 1);
+
+        let mut credential_first = shared().begin_run();
+        let (redacted, changed) = credential_first.redact_value(&credential);
+        assert!(changed);
+        assert_eq!(redacted, json!({"db_password": "<password>"}));
+        let (unchanged, changed) = credential_first.redact_value(&ordinary);
+        assert!(!changed);
+        assert_eq!(unchanged, ordinary);
+        assert_eq!(credential_first.cache.inserted, 1);
+        assert_eq!(credential_first.cache.hits, 1);
+    }
+
+    #[test]
+    fn detection_cache_is_bounded_skips_data_uris_and_dies_with_the_run() {
+        let first = "safe sentence with ordinary words. ".repeat(64);
+        let second = "another plain paragraph with ordinary words. ".repeat(64);
+        let data_uri = format!("data:image/png;base64,{}", "A".repeat(2048));
+        let mut run = RedactionRun {
+            ruleset: shared(),
+            cache: DetectionCache::with_limits(1, 1, DETECTION_CACHE_MAX_REGIONS),
+        };
+
+        assert_eq!(run.redact_str(&first), None);
+        assert_eq!(run.redact_str(&second), None);
+        assert_eq!(run.cache.entries.len(), 1);
+        assert_eq!(run.cache.inserted, 1);
+        assert_eq!(run.redact_str(&first), None);
+        assert_eq!(run.cache.hits, 1);
+
+        let lookups_before_skip = run.cache.lookups;
+        let hashed_before_skip = run.cache.hashed_bytes;
+        assert_eq!(run.redact_str(&data_uri), None);
+        assert_eq!(run.cache.lookups, lookups_before_skip);
+        assert_eq!(run.cache.hashed_bytes, hashed_before_skip);
+        drop(run);
+
+        let mut next_run = RedactionRun {
+            ruleset: shared(),
+            cache: DetectionCache::with_limits(1, 1, DETECTION_CACHE_MAX_REGIONS),
+        };
+        assert_eq!(next_run.redact_str(&first), None);
+        assert_eq!(next_run.cache.hits, 0);
+        assert_eq!(next_run.cache.inserted, 1);
+
+        let secret = format!(
+            "{} sk-ant-api03-abcdefghijklmnop",
+            "ordinary words. ".repeat(80)
+        );
+        let mut no_region_capacity = RedactionRun {
+            ruleset: shared(),
+            cache: DetectionCache::with_limits(1, 1, 0),
+        };
+        assert!(no_region_capacity.redact_str(&secret).is_some());
+        assert!(no_region_capacity.cache.entries.is_empty());
+        assert_eq!(no_region_capacity.cache.stored_regions, 0);
+    }
+
+    #[test]
+    fn detection_cache_reuses_positive_and_negative_findings() {
+        let ordinary = "ordinary tool output with spaces and punctuation. ".repeat(48);
+        let credential = format!(
+            "{} sk-ant-api03-abcdefghijklmnop",
+            "ordinary tool output. ".repeat(48)
+        );
+        let mut run = shared().begin_run();
+
+        assert_eq!(run.redact_str(&ordinary), None);
+        assert_eq!(run.redact_str(&ordinary), None);
+        let expected = run.redact_str(&credential).unwrap();
+        assert_eq!(run.redact_str(&credential), Some(expected));
+        assert_eq!(run.cache.inserted, 2);
+        assert_eq!(run.cache.hits, 2);
     }
 
     #[test]

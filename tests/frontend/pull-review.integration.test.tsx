@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
   BundleReadiness,
   ConversationBlocker,
-  ConversationPlanAction,
-  ConversationPlanActionType,
   ConversationReviewAction,
   ConversationReviewRow,
   ProjectBinding,
-  RestorePlan,
+  PullReview,
   RestoreResult,
 } from "../../src/types";
 import RestorePlanView, {
@@ -24,6 +23,7 @@ import { isIrrecoverableSyncError } from "../../src/components/project-sync/sync
 import {
   buildPullReviewItems,
   buildPullReviewSelection,
+  pullActionResourceIds,
   recommendedPullSelection,
 } from "../../src/components/project-sync/pullReviewModel";
 import {
@@ -69,7 +69,7 @@ const cloudThreadId = "cloudthread-019fac21-4aba-7fc2-bb7d-df711c950987";
 const preservedThreadId = "019fac21-4aba-7fc2-bb7d-df711c950988";
 const preservedDisplayTitle = "Diverged conversation (Preserved 1 · Machine A)";
 
-const restorePlan: RestorePlan = {
+const restorePlan: PullReview = {
   schema_version: 1,
   plan_id: "plan-restore",
   storage_id: "storage-local",
@@ -83,7 +83,6 @@ const restorePlan: RestorePlan = {
   binding_revision: binding.revision,
   created_at: 1,
   expires_at: 2,
-  conversation_actions: [],
   conversation_review: [],
   actions: [{
     action_id: "action-session",
@@ -99,42 +98,6 @@ const restorePlan: RestorePlan = {
     requires_explicit_approval: false,
   }],
 };
-
-function conversationAction(
-  action: ConversationPlanActionType,
-): ConversationPlanAction {
-  return {
-    action_id: `conversation-${action}`,
-    action,
-    provider: "codex",
-    thread_id: localThreadId,
-    cloud_thread_id: cloudThreadId,
-    source_resource_id: `codex:conversation:${localThreadId}`,
-    pins: {
-      context: {
-        host_id: binding.host_id,
-        replica_id: binding.replica_id,
-        local_project_id: binding.local_project_id,
-        provider_profile_id: "profile-codex",
-        host_identity_revision: restorePlan.expected_host_identity_revision,
-        profile_revision: 0,
-        project_binding_revision: binding.revision,
-        bindings_document_revision: 0,
-      },
-      revision: {
-        bundle_revision: restorePlan.revision,
-        commit_id: restorePlan.commit_id,
-        manifest_sha256: restorePlan.manifest_sha256,
-        scope_revision: restorePlan.revision,
-        scope_sha256: "c".repeat(64),
-      },
-      tail: {},
-      target: { local: { state: "absent" }, provider_state: [] },
-      codec: "codex.lineage.v1",
-      expires_at: restorePlan.expires_at,
-    },
-  };
-}
 
 function conversationRow(
   action: ConversationReviewAction,
@@ -154,37 +117,22 @@ function conversationRow(
   };
 }
 
-function keepBothAction(): ConversationPlanAction {
-  return {
-    ...conversationAction("keep_both"),
-    action_id: "conversation-keep-both",
-    pins: {
-      ...conversationAction("keep_both").pins,
-      target: {
-        local: { state: "sha256", sha256: "d".repeat(64) },
-        provider_state: [],
-      },
-    },
-  };
-}
-
 function result(overrides: Partial<RestoreResult> = {}): RestoreResult {
   return {
     success: true,
-    status: "complete",
     message: "Applied restore actions",
     plan_id: restorePlan.plan_id,
     reviewed_base_advanced: true,
     applied_action_ids: [],
     failed_actions: [],
     preserved_threads: [],
-    codex_app_refresh: null,
+    after_pull_actions: [],
     ...overrides,
   };
 }
 
 function renderReview(
-  plan: RestorePlan,
+  plan: PullReview,
   error: string | null = null,
   onResetMetadata?: () => void,
 ) {
@@ -229,24 +177,21 @@ test("a replacement storage history offers unlinking without gating Pull", () =>
 test("only cloud-side or divergent conversation actions keep a Pull review open", () => {
   const plan = (
     rows: ConversationReviewRow[],
-    actions: ConversationPlanAction[] = [],
-  ): RestorePlan => ({
+  ): PullReview => ({
     ...restorePlan,
     actions: [],
-    conversation_actions: actions,
     conversation_review: rows,
   });
 
-  const adopt = conversationAction("adopt_cloud_metadata");
+  const adopt = conversationRow("adopt_cloud_metadata", "selection-adopt");
   assert.equal(hasPendingRestoreMutations(plan([
     conversationRow("no_changes"),
-    conversationRow("adopt_cloud_metadata", adopt.action_id),
+    adopt,
     conversationRow("report_push_eligible"),
     conversationRow("report_local_only"),
-  ], [adopt])), false);
-  const materialize = conversationAction("materialize_cloud");
+  ])), false);
+  const materialize = conversationRow("materialize_cloud", "selection-materialize");
   assert.equal(hasPendingRestoreMutations(plan(
-    [conversationRow("materialize_cloud", materialize.action_id)],
     [materialize],
   )), true);
   assert.equal(hasPendingRestoreMutations(plan([
@@ -255,10 +200,9 @@ test("only cloud-side or divergent conversation actions keep a Pull review open"
 });
 
 test("keep-both is one reviewed action with no second resolution payload", () => {
-  const plan: RestorePlan = {
+  const plan: PullReview = {
     ...restorePlan,
     actions: [],
-    conversation_actions: [keepBothAction()],
     conversation_review: [conversationRow("keep_both", "conversation-keep-both")],
   };
   const items = buildPullReviewItems(plan);
@@ -269,7 +213,6 @@ test("keep-both is one reviewed action with no second resolution payload", () =>
     resourceIds: [`codex:conversation:${localThreadId}`],
     restoreActionIds: ["conversation-keep-both"],
   });
-  assert.equal("keep_both" in plan.conversation_actions[0], false);
   assert.deepEqual(
     pullSelectableResourceIds(items, new Set(), new Set()),
     selected,
@@ -283,8 +226,8 @@ test("keep-both is one reviewed action with no second resolution payload", () =>
 });
 
 test("a mixed Pull starts empty and selecting one project file restores only that file", () => {
-  const conversation = conversationAction("materialize_cloud");
-  const plan: RestorePlan = {
+  const conversation = conversationRow("materialize_cloud", "selection-materialize", null, "Stored conversation");
+  const plan: PullReview = {
     ...restorePlan,
     project_content_eligibility: {
       state: "eligible",
@@ -304,9 +247,8 @@ test("a mixed Pull starts empty and selecting one project file restores only tha
       expected_target_sha256: null,
       requires_explicit_approval: true,
     }],
-    conversation_actions: [conversation],
     conversation_review: [
-      conversationRow("materialize_cloud", conversation.action_id, null, "Stored conversation"),
+      conversation,
     ],
   };
   const items = buildPullReviewItems(plan);
@@ -315,7 +257,7 @@ test("a mixed Pull starts empty and selecting one project file restores only tha
     .map((item) => item.resourceId);
   // The stored-only file is an add — nothing local replaced — so the files
   // step's Recommended now offers it alongside the conversation.
-  assert.deepEqual(recommendedIds, [conversation.source_resource_id, "file-ghost-story"]);
+  assert.deepEqual(recommendedIds, [conversation.resource_id, "file-ghost-story"]);
 
   const html = renderReview(plan);
   assert.match(html, /aria-label="Sessions, 0 selected"/);
@@ -353,7 +295,6 @@ test("blocked conversation evidence stays out of Pull review", () => {
   const plan = {
     ...restorePlan,
     actions: [],
-    conversation_actions: [],
     conversation_review: [conversationRow("blocked", null, "unknown_evidence")],
   };
   const items = buildPullReviewItems(plan);
@@ -372,12 +313,11 @@ test("blocked conversation evidence stays out of Pull review", () => {
    untitled cloud row would carry the identical name — which is what the
    deleted `Task ${threadId.slice(0, 8)}` fallback did. */
 test("a restored row is named by its stored title, or reads untitled", () => {
-  const materialize = conversationAction("materialize_cloud");
+  const materialize = conversationRow("materialize_cloud", "selection-materialize");
   const restoredFor = (displayTitle: string | null) => {
     const plan = {
       ...restorePlan,
       actions: [],
-      conversation_actions: [materialize],
       conversation_review: [
         conversationRow("materialize_cloud", materialize.action_id, null, displayTitle),
       ],
@@ -385,10 +325,10 @@ test("a restored row is named by its stored title, or reads untitled", () => {
     return buildPullOutcome({
       projectId: binding.local_project_id,
       plan,
-      result: result({ applied_action_ids: [materialize.action_id] }),
+      result: result({ applied_action_ids: [materialize.action_id!] }),
       readiness: { bundle_id: binding.bundle_id, state: "ready", issues: [] },
       items: buildPullReviewItems(plan),
-      completedResourceIds: new Set([materialize.source_resource_id!]),
+      completedResourceIds: new Set([materialize.resource_id]),
     });
   };
 
@@ -405,29 +345,29 @@ test("a restored row is named by its stored title, or reads untitled", () => {
   assert.equal(untitled.rows[0].threadId, materialize.thread_id);
 });
 
-test("keep-both completion reports the independent session and optional Codex refresh", () => {
-  const action = keepBothAction();
+test("keep-both completion reports the independent session and the provider's after-pull offer", () => {
+  const action = conversationRow("keep_both", "conversation-keep-both");
   const plan = {
     ...restorePlan,
     actions: [],
-    conversation_actions: [action],
-    conversation_review: [conversationRow("keep_both", action.action_id)],
+    conversation_review: [action],
   };
   const completed = result({
-    applied_action_ids: [action.action_id],
+    applied_action_ids: [action.action_id!],
     preserved_threads: [{
-      action_id: action.action_id,
+      action_id: action.action_id!,
       original_thread_id: action.thread_id!,
       preserved_thread_id: preservedThreadId,
       preserved_display_title: preservedDisplayTitle,
     }],
-    codex_app_refresh: {
-      operation_id: "operation-materialize",
-      app_kind: "codex",
-      app_name: "Codex",
-      state: "restart_available",
+    after_pull_actions: [{
+      provider: "codex",
+      action_id: "codex.app.restart",
+      label: "Restart Codex",
       message: "Restart Codex to refresh its task list.",
-    },
+      available: true,
+      arguments: { operation_id: "operation-materialize", app_kind: "codex" },
+    }],
   });
   const items = buildPullReviewItems(plan);
   const outcome = buildPullOutcome({
@@ -436,20 +376,21 @@ test("keep-both completion reports the independent session and optional Codex re
     result: completed,
     readiness: { bundle_id: binding.bundle_id, state: "ready", issues: [] },
     items,
-    completedResourceIds: new Set([action.source_resource_id!]),
+    completedResourceIds: new Set([action.resource_id]),
   });
 
   assert.equal(outcome.rows[0].status, "preserved");
   assert.equal(outcome.rows[0].threadId, preservedThreadId);
   // The row is named by the marker title the copy was renamed to.
   assert.equal(outcome.rows[0].title, "Diverged conversation (Preserved 1 · Machine A)");
-  assert.deepEqual(outcome.action, {
-    kind: "restart_codex",
+  // Label and title are the offer's own words; the offer rides along so the
+  // shell can hand it straight back to the generic maintenance command.
+  assert.deepEqual(outcome.actions, [{
+    kind: "after_pull_action",
     label: "Restart Codex",
-    title: "Shows restored sessions — active Codex chats are interrupted",
-    operationId: "operation-materialize",
-    appKind: "codex",
-  });
+    title: "Restart Codex to refresh its task list.",
+    offer: completed.after_pull_actions[0],
+  }]);
 
   const html = renderOutcome(outcome);
   assert.match(html, /Kept independently/);
@@ -457,20 +398,175 @@ test("keep-both completion reports the independent session and optional Codex re
   assert.doesNotMatch(html, /native fork|Retry fork/i);
 });
 
-test("recovery-required Pull directs the user back through the current Pull path", () => {
+test("Pull reports 35 restored and 3 failed threads from Review selection IDs", async () => {
+  const rows: ConversationReviewRow[] = Array.from({ length: 38 }, (_, index) => ({
+    provider: "codex",
+    thread_id: null,
+    cloud_thread_id: `cloudthread-fixture-${index}`,
+    resource_id: `codex:conversation:cloudthread-fixture-${index}`,
+    action: "create_local",
+    action_id: `selection-fixture-${index}`,
+    display_title: index < 35 ? `Restored thread ${index}` : "Hello from the second machine",
+  }));
+  const plan: PullReview = {
+    ...restorePlan,
+    actions: [],
+    conversation_review: rows,
+  };
+  const items = buildPullReviewItems(plan);
+  const selection = buildPullReviewSelection(
+    items,
+    new Set(items.map((item) => item.resourceId)),
+    new Set(),
+    new Set(),
+  );
+  const failedRows = rows.slice(35);
+  const completed = result({
+    success: false,
+    message: "Applied 35 actions; 3 require attention",
+    reviewed_base_advanced: false,
+    applied_action_ids: rows.slice(0, 35).map((row) => row.action_id!),
+    failed_actions: failedRows.map((row) => ({
+      action_id: row.action_id!,
+      display_name: null,
+      message: "Wire record failed its round-trip gate",
+    })),
+  });
+  const applied = await applyPullReview({
+    async applyRestore(review, actionIds) {
+      assert.equal(review, plan);
+      assert.deepEqual(new Set(actionIds), new Set(rows.map((row) => row.action_id)));
+      return completed;
+    },
+    async getRestoreReadiness() {
+      return {
+        bundle_id: binding.bundle_id,
+        state: "blocked",
+        issues: [{
+          issue_id: "restore-project-data",
+          category: "project_files",
+          title: "3 project data changes were left unchanged",
+          severity: "error",
+        }],
+      };
+    },
+  }, plan, selection, () => undefined);
+  const resourceByAction = pullActionResourceIds(plan);
+  const completedResourceIds = new Set(completed.applied_action_ids
+    .map((actionId) => resourceByAction.get(actionId)!));
+  const failedResourceIds = new Set(completed.failed_actions
+    .map((failure) => resourceByAction.get(failure.action_id)!));
+  assert.deepEqual(completedResourceIds, new Set(rows.slice(0, 35).map((row) => row.resource_id)));
+  assert.deepEqual(failedResourceIds, new Set(failedRows.map((row) => row.resource_id)));
+
+  const outcome = buildPullOutcome({
+    projectId: binding.local_project_id,
+    plan,
+    result: applied.restoreResult!,
+    readiness: applied.readiness,
+    items,
+    completedResourceIds,
+    error: applied.error,
+  });
+  assert.equal(outcome.title, "3 changes need attention");
+  assert.deepEqual(outcome.stats, [
+    { icon: "download", value: "35", label: "restored" },
+    { icon: "octagon-x", value: "3", label: "failed" },
+    { icon: "git-branch", label: "Revision", value: "1", lead: true },
+  ]);
+  assert.equal(outcome.rows.filter((row) => row.status === "synced").length, 35);
+  assert.deepEqual(outcome.rows.filter((row) => row.status === "failed"), failedRows.map((row) => ({
+    key: row.action_id,
+    title: row.display_title,
+    status: "failed",
+    reason: "Wire record failed its round-trip gate",
+    threadId: row.cloud_thread_id,
+  })));
+  assert.equal(outcome.rows.filter((row) => row.title === "Push is still blocked").length, 1);
+  assert.deepEqual(outcome.actions, [{ kind: "open_pull", label: "Open Pull review" }]);
+  const html = renderOutcome(outcome);
+  assert.match(html, /3 changes need attention/);
+  assert.match(html, /Hello from the second machine/);
+  assert.doesNotMatch(html, /selection-fixture-|3 project data changes were left unchanged/);
+});
+
+test("one unnamed failed thread has one failure and a separate Push hold", () => {
+  const row = conversationRow("keep_both", "selection-unnamed", null, "  ");
+  const plan: PullReview = {
+    ...restorePlan,
+    actions: [],
+    conversation_review: [row],
+  };
+  const outcome = buildPullOutcome({
+    projectId: binding.local_project_id,
+    plan,
+    result: result({
+      success: false,
+      reviewed_base_advanced: false,
+      failed_actions: [{ action_id: row.action_id!, display_name: null, message: "Source changed" }],
+    }),
+    readiness: null,
+    items: buildPullReviewItems(plan),
+    completedResourceIds: new Set(),
+  });
+  assert.equal(outcome.title, "1 change needs attention");
+  assert.equal(outcome.stats.find((stat) => stat.label === "failed")?.value, "1");
+  assert.equal(outcome.rows[0].title, "Untitled session");
+  assert.equal(outcome.rows[0].threadId, localThreadId);
+  assert.equal(outcome.rows[1].status, "held");
+  assert.equal(outcome.rows[1].title, "Push is still blocked");
+});
+
+test("a Push hold without an action failure keeps Pull available without a failure count", () => {
   const outcome = buildPullOutcome({
     projectId: binding.local_project_id,
     plan: restorePlan,
-    result: result({ status: "recovery_required" }),
-    readiness: { bundle_id: binding.bundle_id, state: "ready", issues: [] },
+    result: result({ reviewed_base_advanced: false }),
+    readiness: null,
     items: buildPullReviewItems(restorePlan),
     completedResourceIds: new Set(),
   });
-
+  assert.equal(outcome.title, "Pull complete — Push still blocked");
   assert.equal(outcome.tone, "warning");
-  assert.equal(outcome.title, "Pull paused for recovery");
-  assert.deepEqual(outcome.action, { kind: "open_pull", label: "Open Pull review" });
-  assert.match(renderOutcome(outcome), /Sync recovery is required/);
+  assert.equal(outcome.defaultOpen, true);
+  assert.equal(outcome.stats.some((stat) => stat.label === "failed"), false);
+  assert.deepEqual(outcome.actions, [{ kind: "open_pull", label: "Open Pull review" }]);
+});
+
+test("independent readiness errors stay visible without adding to failed action counts", () => {
+  const applied = result({ applied_action_ids: ["action-session"] });
+  const readiness: BundleReadiness = {
+    bundle_id: binding.bundle_id,
+    state: "needs_setup",
+    issues: [{
+      issue_id: "provider-home-codex",
+      category: "sessions",
+      title: "Codex needs setup",
+      detail: "Select a Codex profile.",
+      severity: "error",
+    }],
+  };
+  const outcomeFor = (restoreResult: RestoreResult) => buildPullOutcome({
+    projectId: binding.local_project_id,
+    plan: restorePlan,
+    result: restoreResult,
+    readiness,
+    items: buildPullReviewItems(restorePlan),
+    completedResourceIds: new Set(["codex:session:thread-a"]),
+  });
+  const setupOnly = outcomeFor(applied);
+  assert.equal(setupOnly.title, "1 change needs attention");
+  assert.equal(setupOnly.stats.some((stat) => stat.label === "failed"), false);
+  assert.equal(setupOnly.rows[1].title, "Codex needs setup");
+  assert.deepEqual(setupOnly.actions, [{ kind: "recheck", label: "Recheck" }]);
+
+  const withFailure = outcomeFor(result({
+    success: false,
+    failed_actions: [{ action_id: "action-other", display_name: "Other thread", message: "Write failed" }],
+  }));
+  assert.equal(withFailure.title, "2 changes need attention");
+  assert.equal(withFailure.stats.find((stat) => stat.label === "failed")?.value, "1");
+  assert.equal(withFailure.rows.some((row) => row.title === "Codex needs setup"), true);
 });
 
 test("irrecoverable sync metadata failures offer a local reset instead of retry", () => {
@@ -490,10 +586,10 @@ test("irrecoverable sync metadata failures offer a local reset instead of retry"
 
   assert.equal(isIrrecoverableSyncError(message), true);
   assert.equal(isIrrecoverableSyncError("storage is temporarily unavailable"), false);
-  assert.deepEqual(outcome.action, {
+  assert.deepEqual(outcome.actions, [{
     kind: "reset_metadata",
     label: "Reset local sync state",
-  });
+  }]);
   const html = renderOutcome(outcome);
   assert.match(html, /Reset local sync state/);
   assert.match(html, /data-icon="trash"/);
@@ -557,12 +653,12 @@ test("the Apply coordinator sends only approved action ids and verifies readines
   const applied = result({ applied_action_ids: ["action-session"] });
 
   const appliedResult = await applyPullReview({
-    async applyRestore(planId, actionIds) {
-      calls.push([planId, actionIds]);
+    async applyRestore(review, actionIds) {
+      calls.push([review, actionIds]);
       return applied;
     },
-    async getRestoreReadiness(planId) {
-      calls.push([planId]);
+    async getRestoreReadiness(review) {
+      calls.push([review]);
       return ready;
     },
   }, restorePlan, {
@@ -571,14 +667,14 @@ test("the Apply coordinator sends only approved action ids and verifies readines
   }, (phase) => phases.push(phase));
 
   assert.deepEqual(calls, [
-    [restorePlan.plan_id, ["action-session"]],
-    [restorePlan.plan_id],
+    [restorePlan, ["action-session"]],
+    [restorePlan],
   ]);
   assert.deepEqual(phases, ["restoring", "verifying", "complete"]);
   assert.equal(appliedResult.success, true);
 });
 
-test("the Apply coordinator rejects action ids outside the immutable plan", async () => {
+test("the Apply coordinator rejects action ids outside the comparison", async () => {
   await assert.rejects(() => applyPullReview({
     async applyRestore() {
       throw new Error("must not execute");
@@ -590,4 +686,78 @@ test("the Apply coordinator rejects action ids outside the immutable plan", asyn
     resourceIds: [],
     restoreActionIds: ["not-reviewed"],
   }, () => undefined), /no longer belong to this Pull review/);
+});
+
+test("after-pull offers keep their order; available actions run and unavailable actions stay prose", () => {
+  const action = conversationRow("keep_both", "conversation-keep-both");
+  const plan = {
+    ...restorePlan,
+    actions: [],
+    conversation_review: [action],
+  };
+  const items = buildPullReviewItems(plan);
+  const readiness: BundleReadiness = { bundle_id: binding.bundle_id, state: "ready", issues: [] };
+  const afterPullActions = [{
+    provider: "acme",
+    action_id: "acme.app.restart",
+    label: "Restart Acme Desktop",
+    message: "Restart Acme Desktop to show the restored sessions.",
+    available: true,
+    arguments: { operation_id: "operation-materialize" },
+  }, {
+    provider: "acme",
+    action_id: "acme.cli.refresh",
+    label: "Refresh Acme CLI",
+    message: "Run acme refresh by hand to update its session index.",
+    available: false,
+    arguments: { operation_id: "operation-materialize" },
+  }, {
+    provider: "other",
+    action_id: "other.app.reload",
+    label: "Reload Other Desktop",
+    message: "Reload Other Desktop to show the restored sessions.",
+    available: true,
+    arguments: { operation_id: "operation-materialize" },
+  }];
+  const outcome = buildPullOutcome({
+    projectId: binding.local_project_id,
+    plan,
+    result: result({
+      applied_action_ids: [action.action_id!],
+      after_pull_actions: afterPullActions,
+    }),
+    readiness,
+    items,
+    completedResourceIds: new Set([action.resource_id]),
+  });
+
+  assert.deepEqual(outcome.actions.map((candidate) => (
+    candidate.kind === "after_pull_action"
+      ? [candidate.label, candidate.offer.available]
+      : [candidate.label, true]
+  )), [
+    ["Restart Acme Desktop", true],
+    ["Refresh Acme CLI", false],
+    ["Reload Other Desktop", true],
+  ]);
+  const html = renderOutcome(outcome);
+  assert.match(html, />Restart Acme Desktop<\/button>/);
+  assert.match(html, />Reload Other Desktop<\/button>/);
+  assert.match(html, /title="Restart Acme Desktop to show the restored sessions\."/);
+  assert.match(html, /Run acme refresh by hand to update its session index\./);
+  assert.doesNotMatch(html, />Refresh Acme CLI<\/button>/);
+
+  // The shell follows the declared confirmation policy, then hands the exact
+  // offer back to the generic maintenance command.
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  assert.match(shell, /executeProviderMaintenanceAction\(\{\s*provider: action\.offer\.provider,\s*action_id: action\.offer\.action_id,\s*arguments: action\.offer\.arguments,\s*confirmed,\s*\}\)/);
+  assert.match(shell, /const descriptor = maintenanceActionFor\(/);
+  assert.match(shell, /descriptor\.requires_confirmation/);
+  assert.match(shell, /const remainingActions = outcome\.actions\.filter/);
+  assert.doesNotMatch(shell, /interrupted mid-turn|Close the affected/);
+  assert.doesNotMatch(shell, /CodexApp|codex_app|restart_codex/);
+  const model = readFileSync("src/components/project-sync/syncOutcome.ts", "utf8");
+  assert.match(model, /result\.after_pull_actions\.map\(\(offer\) =>/);
+  assert.doesNotMatch(model, /after_pull_actions\.find/);
+  assert.doesNotMatch(model, /codex_app|restart_codex|app_kind/);
 });

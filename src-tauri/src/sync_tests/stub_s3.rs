@@ -316,8 +316,20 @@ async fn handle(
                 }
             }
             (&Method::DELETE, false) => {
-                let _ = fs::remove_file(&object_path);
-                respond(StatusCode::NO_CONTENT, Bytes::new(), None)
+                let current = fs::read(&object_path).ok();
+                if current.is_none() && if_match.is_some() {
+                    xml_error(StatusCode::NOT_FOUND, "NoSuchKey")
+                } else if if_match.as_ref().is_some_and(|expected| {
+                    let expected = expected.trim().trim_matches('"');
+                    current
+                        .as_ref()
+                        .is_some_and(|data| sha256_bytes(data) != expected)
+                }) {
+                    xml_error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed")
+                } else {
+                    let _ = fs::remove_file(&object_path);
+                    respond(StatusCode::NO_CONTENT, Bytes::new(), None)
+                }
             }
             _ => xml_error(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed"),
         };

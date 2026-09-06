@@ -9,6 +9,7 @@
 //! appended complete records without re-reading consumed bytes; every
 //! disagreement is a typed invalid outcome, never an empty tail.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use crate::app_settings::conversation_file_limit_bytes;
@@ -17,9 +18,7 @@ use crate::codex_rollout::{
     CodexStructureAccumulator, MAX_CODEX_FORK_DEPTH,
 };
 use crate::conversation_codec::{CanonicalChainBuilder, ChainFeedOutcome};
-use crate::jsonl_tail_io::{
-    open_no_follow, read_bounded, safe_record_end, TailWindow, PROBE_WINDOW_BYTES,
-};
+use crate::jsonl_tail_io::{open_no_follow, safe_record_end, TailWindow, PROBE_WINDOW_BYTES};
 use mallard_domain::{
     compute_portable_conversation_tail, conversation_chain_digests, conversation_prefix_witness,
     sha256_hex, validate_conversation_chain, CanonicalConversationMessage, ConversationCheckpoint,
@@ -148,9 +147,9 @@ pub fn retained_root_is_byte_identical(
     Ok(digest == raw_range_pin.range_sha256)
 }
 
-struct SegmentSource {
+struct SegmentSource<'a> {
     path: PathBuf,
-    bytes: Vec<u8>,
+    bytes: Cow<'a, [u8]>,
     consumed_byte_len: u64,
     declared_end_ordinal_exclusive: Option<u64>,
     meta: CodexSessionMetaRecord,
@@ -164,8 +163,28 @@ pub fn resolve_codex_root(
     leaf_path: &Path,
     base_lookup: &dyn Fn(&str) -> Result<Option<PathBuf>, String>,
 ) -> Result<ResolvedCodexRoot, String> {
+    let (bytes, stamp) = crate::jsonl_tail_io::read_snapshot(leaf_path)?;
+    resolve_captured_codex_root(leaf_path, bytes.into(), stamp, base_lookup)
+        .map(|(resolved, _)| resolved)
+}
+
+pub type CodexSourceSnapshots = std::collections::BTreeMap<
+    PathBuf,
+    (
+        crate::payload::PayloadBytes,
+        crate::jsonl_tail_io::SourceStamp,
+    ),
+>;
+
+/// Resolve from the captured leaf and retain each ancestor read for encoding.
+pub fn resolve_captured_codex_root(
+    leaf_path: &Path,
+    leaf_bytes: crate::payload::PayloadBytes,
+    leaf_stamp: crate::jsonl_tail_io::SourceStamp,
+    base_lookup: &dyn Fn(&str) -> Result<Option<PathBuf>, String>,
+) -> Result<(ResolvedCodexRoot, CodexSourceSnapshots), String> {
     crate::sync_metrics::record_full_graph_resolve(leaf_path);
-    let leaf_bytes = read_bounded(leaf_path)?;
+    leaf_stamp.verify(leaf_path)?;
     let leaf_file_size = leaf_bytes.len() as u64;
     let leaf_safe_end = safe_record_end(&leaf_bytes);
     if leaf_safe_end == 0 {
@@ -181,17 +200,14 @@ pub fn resolve_codex_root(
     let leaf_meta = authoritative_session_meta(&leaf_bytes).map_err(|error| error.to_string())?;
     let mut next_reference = leaf_meta.history_base.clone();
     visited.insert(leaf_meta.id.clone());
-    segments.push(SegmentSource {
-        path: leaf_path.to_path_buf(),
-        consumed_byte_len: leaf_safe_end,
-        declared_end_ordinal_exclusive: None,
-        meta: leaf_meta.clone(),
-        bytes: {
-            let mut bytes = leaf_bytes;
-            bytes.truncate(leaf_safe_end as usize);
-            bytes
-        },
-    });
+    let mut sources = CodexSourceSnapshots::new();
+    sources.insert(leaf_path.to_path_buf(), (leaf_bytes, leaf_stamp));
+    segments.push((
+        leaf_path.to_path_buf(),
+        leaf_safe_end,
+        None,
+        leaf_meta.clone(),
+    ));
     while let Some(reference) = next_reference {
         if segments.len() > MAX_CODEX_FORK_DEPTH {
             return Err("Codex history chain exceeds the supported depth".to_string());
@@ -205,7 +221,7 @@ pub fn resolve_codex_root(
                 reference.thread_id
             )
         })?;
-        let bytes = read_bounded(&path)?;
+        let (bytes, stamp) = crate::jsonl_tail_io::read_snapshot(&path)?;
         if reference.end_byte_offset > bytes.len() as u64 {
             return Err(format!(
                 "Codex history base '{}' is shorter than its declared cutoff",
@@ -219,9 +235,8 @@ pub fn resolve_codex_root(
                 reference.thread_id
             ));
         }
-        let mut slice = bytes;
-        slice.truncate(cutoff);
-        let meta = authoritative_session_meta(&slice).map_err(|error| error.to_string())?;
+        let meta =
+            authoritative_session_meta(&bytes[..cutoff]).map_err(|error| error.to_string())?;
         if meta.id != reference.thread_id {
             return Err(format!(
                 "Codex history base '{}' resolved to rollout '{}'",
@@ -229,17 +244,71 @@ pub fn resolve_codex_root(
             ));
         }
         next_reference = meta.history_base.clone();
-        segments.push(SegmentSource {
+        sources.insert(path.clone(), (bytes.into(), stamp));
+        segments.push((
             path,
-            consumed_byte_len: reference.end_byte_offset,
-            declared_end_ordinal_exclusive: Some(reference.end_ordinal_exclusive),
+            reference.end_byte_offset,
+            Some(reference.end_ordinal_exclusive),
             meta,
-            bytes: slice,
-        });
+        ));
     }
     segments.reverse();
+    let segments = segments
+        .into_iter()
+        .map(
+            |(path, consumed_byte_len, declared_end_ordinal_exclusive, meta)| {
+                let bytes = &sources[&path].0;
+                SegmentSource {
+                    bytes: Cow::Borrowed(&bytes[..consumed_byte_len as usize]),
+                    path,
+                    consumed_byte_len,
+                    declared_end_ordinal_exclusive,
+                    meta,
+                }
+            },
+        )
+        .collect();
+    let resolved = resolve_segments(segments, leaf_meta, leaf_file_size, leaf_safe_end)?;
+    Ok((resolved, sources))
+}
 
+/// Resolve a verified standalone wire transcript without a filesystem round trip.
+/// A portable root cannot depend on provider-local history files.
+pub(crate) fn resolve_standalone_codex_bytes(bytes: &[u8]) -> Result<ResolvedCodexRoot, String> {
+    if bytes.len() as u64 > conversation_file_limit_bytes() {
+        return Err("cloud conversation transcript exceeds its read limit".to_string());
+    }
+    let leaf_safe_end = safe_record_end(bytes);
+    if leaf_safe_end == 0 || leaf_safe_end != bytes.len() as u64 {
+        return Err("cloud rollout must contain complete JSONL records".to_string());
+    }
+    let leaf_meta = authoritative_session_meta(bytes).map_err(|error| error.to_string())?;
+    if leaf_meta.history_base.is_some() {
+        return Err("cloud rollout references a provider-local history base".to_string());
+    }
+    let segment = SegmentSource {
+        path: PathBuf::from("cloud-transcript"),
+        bytes: Cow::Borrowed(bytes),
+        consumed_byte_len: leaf_safe_end,
+        declared_end_ordinal_exclusive: None,
+        meta: leaf_meta.clone(),
+    };
+    resolve_segments(vec![segment], leaf_meta, bytes.len() as u64, leaf_safe_end)
+}
+
+fn resolve_segments(
+    segments: Vec<SegmentSource<'_>>,
+    leaf_meta: CodexSessionMetaRecord,
+    leaf_file_size: u64,
+    leaf_safe_end: u64,
+) -> Result<ResolvedCodexRoot, String> {
     // One shared canonical projection across every segment, base -> leaf.
+    crate::sync_metrics::record_transcript_analysis(
+        segments
+            .iter()
+            .map(|segment| segment.consumed_byte_len)
+            .sum(),
+    );
     let mut builder = CanonicalChainBuilder::new();
     let mut resolved_segments = Vec::with_capacity(segments.len());
     let mut boundary = 0_u64;
@@ -1310,7 +1379,9 @@ mod tests {
     /// independently under its own layout.
     #[test]
     fn a_to_b_to_a_round_trip_is_stable_after_canonicalization() {
-        use crate::codex_standalone_builder::{build_standalone_codex_root, StandaloneBuildMode};
+        use crate::codex_standalone_builder::{
+            decode_standalone_codex_root, encode_standalone_codex_root,
+        };
         use mallard_domain::{
             compare_conversation_tail, compute_conversation_tail_state,
             compute_portable_conversation_tail, PortableConversationTail, RootTailLayout,
@@ -1334,15 +1405,6 @@ mod tests {
             codec: PORTABLE_TAIL_CODEC_V1.to_string(),
             partition_kind: TailPartitionKind::FixedPaginatedTail,
             start_record_count: start,
-        };
-        let encode = |root: &str| StandaloneBuildMode::Encode {
-            root: root.to_string(),
-            canonical_root: None,
-        };
-        let decode = |id: &str, root: &str| StandaloneBuildMode::Decode {
-            root_provider_thread_id: id.to_string(),
-            target_root: root.to_string(),
-            canonical_target_root: None,
         };
         let append = |path: &PathBuf, id: &str, body: &str| {
             let mut bytes = fs::read(path).unwrap();
@@ -1402,7 +1464,15 @@ mod tests {
         // A pushes: the artifact folds the wire-form tail it publishes; the
         // local twin is a different value under a different codec because
         // in-root content paths tokenized.
-        let push_one = build_standalone_codex_root(&resolved_a, &encode(ROOT_A), None).unwrap();
+        let push_one = encode_standalone_codex_root(
+            &resolved_a,
+            ROOT_A,
+            None,
+            None,
+            &mut crate::credential_redaction::shared().begin_run(),
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap();
         let cloud_v1 = push_one.portable_tail.clone();
         assert_eq!(cloud_v1.codec, PORTABLE_TAIL_CODEC_WIRE_V1);
         assert_eq!(cloud_v1.start_record_count, 5);
@@ -1432,16 +1502,18 @@ mod tests {
         .unwrap();
         assert_eq!(refolded, cloud_v1.accepted_tail_state);
         let imported = paginated_layout(5);
-        let pulled = build_standalone_codex_root(
+        let pulled = decode_standalone_codex_root(
             &resolved_staged,
-            &decode("b-local", ROOT_B),
+            "b-local",
+            ROOT_B,
+            None,
             Some(&imported),
         )
         .unwrap();
         let b_local_v1 = pulled.portable_tail.clone();
         assert_eq!(b_local_v1.codec, PORTABLE_TAIL_CODEC_V1);
         assert_eq!(b_local_v1.accepted_end_record_count, 8);
-        let text = String::from_utf8(pulled.root_bytes.clone()).unwrap();
+        let text = String::from_utf8(pulled.root_bytes.to_vec()).unwrap();
         assert!(text.contains("created /tmp/machine-b/readme"));
         assert!(text.contains("file:///tmp/machine-b/read%20me"));
         assert!(text.contains("/tmp/other-proj/x"));
@@ -1486,7 +1558,15 @@ mod tests {
             )),
             TailClassification::LocalOutstanding
         );
-        let push_two = build_standalone_codex_root(&resolved_a2, &encode(ROOT_A), None).unwrap();
+        let push_two = encode_standalone_codex_root(
+            &resolved_a2,
+            ROOT_A,
+            None,
+            None,
+            &mut crate::credential_redaction::shared().begin_run(),
+            &pulled.path_origins,
+        )
+        .unwrap();
         let cloud_v2 = push_two.portable_tail.clone();
         assert_eq!(cloud_v2.accepted_end_record_count, 9);
 
@@ -1526,9 +1606,11 @@ mod tests {
         // unchanged local layout; the tracked thread re-materializes the
         // cloud graph under a fresh alias with the remote layout.
         let preserved_bytes = fs::read(&b_local).unwrap();
-        let tracked = build_standalone_codex_root(
+        let tracked = decode_standalone_codex_root(
             &resolved_staged_two,
-            &decode("b-tracked", ROOT_B),
+            "b-tracked",
+            ROOT_B,
+            None,
             Some(&imported),
         )
         .unwrap();
@@ -1560,9 +1642,15 @@ mod tests {
             )),
             TailClassification::LocalOutstanding
         );
-        let push_three =
-            build_standalone_codex_root(&resolved_tracked, &encode(ROOT_B), Some(&imported))
-                .unwrap();
+        let push_three = encode_standalone_codex_root(
+            &resolved_tracked,
+            ROOT_B,
+            None,
+            Some(&imported),
+            &mut crate::credential_redaction::shared().begin_run(),
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap();
         let cloud_v3 = push_three.portable_tail.clone();
         assert_eq!(cloud_v3.codec, PORTABLE_TAIL_CODEC_WIRE_V1);
         assert_eq!(cloud_v3.start_record_count, 5);
@@ -1595,9 +1683,11 @@ mod tests {
             )),
             TailClassification::CloudOutstanding
         );
-        let a_adopted = build_standalone_codex_root(
+        let a_adopted = decode_standalone_codex_root(
             &resolved_staged_three,
-            &decode("a-tracked", ROOT_A),
+            "a-tracked",
+            ROOT_A,
+            None,
             Some(&imported),
         )
         .unwrap();
@@ -1631,8 +1721,15 @@ mod tests {
             )),
             TailClassification::MissingCloud
         );
-        let preserved_push =
-            build_standalone_codex_root(&resolved_b2, &encode(ROOT_B), Some(&imported)).unwrap();
+        let preserved_push = encode_standalone_codex_root(
+            &resolved_b2,
+            ROOT_B,
+            None,
+            Some(&imported),
+            &mut crate::credential_redaction::shared().begin_run(),
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap();
         assert_eq!(
             preserved_push.portable_tail.codec,
             PORTABLE_TAIL_CODEC_WIRE_V1
@@ -1651,7 +1748,9 @@ mod tests {
     /// not drift.
     #[test]
     fn a_to_b_to_a_round_trip_scrubs_planted_secrets() {
-        use crate::codex_standalone_builder::{build_standalone_codex_root, StandaloneBuildMode};
+        use crate::codex_standalone_builder::{
+            decode_standalone_codex_root, encode_standalone_codex_root,
+        };
         use crate::credential_redaction;
         use mallard_domain::{
             compare_conversation_tail, compute_portable_conversation_tail, SyncCurrency,
@@ -1673,15 +1772,6 @@ mod tests {
                 TailSideEvidence::Present(Clone::clone(cloud)),
             )
             .unwrap()
-        };
-        let encode = |root: &str| StandaloneBuildMode::Encode {
-            root: root.to_string(),
-            canonical_root: None,
-        };
-        let decode = |id: &str, root: &str| StandaloneBuildMode::Decode {
-            root_provider_thread_id: id.to_string(),
-            target_root: root.to_string(),
-            canonical_target_root: None,
         };
         let meta = |id: &str, root: &str| {
             serde_json::to_string(
@@ -1715,17 +1805,25 @@ mod tests {
 
         // A pushes: the artifact is a certified redaction fixpoint holding
         // typed placeholders and the path token, never the secrets.
-        let push_one = build_standalone_codex_root(&resolved_a, &encode(ROOT_A), None).unwrap();
+        let push_one = encode_standalone_codex_root(
+            &resolved_a,
+            ROOT_A,
+            None,
+            None,
+            &mut crate::credential_redaction::shared().begin_run(),
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap();
         let cloud_v1 = push_one.portable_tail.clone();
         assert_eq!(cloud_v1.codec, PORTABLE_TAIL_CODEC_WIRE_V1);
-        let wire_text = String::from_utf8(push_one.root_bytes.clone()).unwrap();
+        let wire_text = String::from_utf8(push_one.root_bytes.to_vec()).unwrap();
         assert!(!wire_text.contains(SECRET_ANTHROPIC));
         assert!(!wire_text.contains(SECRET_PASSWORD));
         assert!(wire_text.contains("<anthropic-api-key>"));
         assert!(wire_text.contains("DB_PASSWORD=<password>"));
-        assert!(wire_text.contains("/__mallard_root__/src/main.rs"));
+        assert!(wire_text.contains("/__mallard_root__/b;/src/main.rs"));
         credential_redaction::shared()
-            .certify_wire_document(push_one.root_bytes.clone())
+            .certify_wire_document(push_one.root_bytes.clone().into_bytes())
             .expect("published bytes are a redaction fixpoint");
         assert_ne!(cloud_v1.accepted_tail_state, a_local_v1.accepted_tail_state);
 
@@ -1743,11 +1841,10 @@ mod tests {
         let no_bases = |_: &str| Ok(None);
         let resolved_staged = resolve_codex_root(&staged, &no_bases).unwrap();
         let pulled =
-            build_standalone_codex_root(&resolved_staged, &decode("b-local", ROOT_B), None)
-                .unwrap();
+            decode_standalone_codex_root(&resolved_staged, "b-local", ROOT_B, None, None).unwrap();
         let b_local_v1 = pulled.portable_tail.clone();
         assert_eq!(b_local_v1.codec, PORTABLE_TAIL_CODEC_V1);
-        let b_text = String::from_utf8(pulled.root_bytes.clone()).unwrap();
+        let b_text = String::from_utf8(pulled.root_bytes.to_vec()).unwrap();
         assert!(!b_text.contains(SECRET_ANTHROPIC));
         assert!(!b_text.contains(SECRET_PASSWORD));
         assert!(b_text.contains("<anthropic-api-key>"));
@@ -1784,9 +1881,17 @@ mod tests {
         };
         append(&b_local, "m4", &format!("also use {SECRET_OPENAI} now"));
         let resolved_b2 = resolve_codex_root(&b_local, &machine_b.lookup()).unwrap();
-        let push_two = build_standalone_codex_root(&resolved_b2, &encode(ROOT_B), None).unwrap();
+        let push_two = encode_standalone_codex_root(
+            &resolved_b2,
+            ROOT_B,
+            None,
+            None,
+            &mut crate::credential_redaction::shared().begin_run(),
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap();
         let cloud_v2 = push_two.portable_tail.clone();
-        let wire_two = String::from_utf8(push_two.root_bytes.clone()).unwrap();
+        let wire_two = String::from_utf8(push_two.root_bytes.to_vec()).unwrap();
         assert!(!wire_two.contains(SECRET_OPENAI));
         assert!(wire_two.contains("<openai-api-key>"));
         let staged_two = machine_a.directory.path().join("staged-two.jsonl");
@@ -1811,9 +1916,9 @@ mod tests {
             TailClassification::CloudOutstanding
         );
         let a_adopted =
-            build_standalone_codex_root(&resolved_staged_two, &decode("a-tracked", ROOT_A), None)
+            decode_standalone_codex_root(&resolved_staged_two, "a-tracked", ROOT_A, None, None)
                 .unwrap();
-        let restored = String::from_utf8(a_adopted.root_bytes.clone()).unwrap();
+        let restored = String::from_utf8(a_adopted.root_bytes.to_vec()).unwrap();
         assert!(!restored.contains(SECRET_ANTHROPIC));
         assert!(!restored.contains(SECRET_OPENAI));
         assert!(restored.contains("<anthropic-api-key>"));
@@ -1844,7 +1949,7 @@ mod tests {
         // secret is refused by the Decode build's wire self-check — never
         // materialized — and the error payload never echoes the secret.
         let planted = "sk-ant-api03-ttttuuuuvvvvwwwwxxxx";
-        let doctored = String::from_utf8(push_two.root_bytes.clone())
+        let doctored = String::from_utf8(push_two.root_bytes.to_vec())
             .unwrap()
             .replace("plain closing text", &format!("stole {planted}"));
         assert!(doctored.contains(planted), "tamper fixture must apply");
@@ -1852,7 +1957,7 @@ mod tests {
         fs::write(&tampered, doctored.as_bytes()).unwrap();
         let resolved_tampered = resolve_codex_root(&tampered, &no_bases).unwrap();
         let error =
-            build_standalone_codex_root(&resolved_tampered, &decode("a-tampered", ROOT_A), None)
+            decode_standalone_codex_root(&resolved_tampered, "a-tampered", ROOT_A, None, None)
                 .unwrap_err();
         assert!(error.contains("wire_secret_detected"), "{error}");
         assert!(

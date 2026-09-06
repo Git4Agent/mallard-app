@@ -1,31 +1,35 @@
 //! Scope-level reconciliation and immutable review construction.
 //!
 //! Every Push and Pull plan addresses exactly one scope link — one storage,
-//! one kind repository — and carries one row or item per resource. The
+//! one coordinate repository — and carries one row or item per resource. The
 //! three-way comparison itself stays per resource: `derive_link_state` runs
 //! over each resource's accepted base, local capture, and stored copy.
+//! Nothing here names a provider, kind, or format: every format-specific
+//! question goes to the scope's registered codec and adapter.
 
-use super::adapters::adapter_for;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use mallard_domain::StorageId;
+
 use super::domain::{
-    pet_resource_id, skill_resource_id, CatalogClaim, CatalogClaimPin, CatalogForkSourceKind,
-    CatalogLinkState, CatalogPlanActionId, CatalogPlanId, CatalogPreservationPin,
-    CatalogPullAction, CatalogPullActionKind, CatalogPullDisposition, CatalogPullItem,
-    CatalogPushRow, CatalogResource, CatalogResourceForkPlan, CatalogResourceId, CatalogScope,
+    validate_component_name, CatalogClaim, CatalogClaimPin, CatalogLinkState, CatalogPlanActionId,
+    CatalogPlanId, CatalogPreservationPin, CatalogPullAction, CatalogPullActionKind,
+    CatalogPullDisposition, CatalogPullItem, CatalogPushRow, CatalogResourceEnvelope,
+    CatalogResourceForkPlan, CatalogResourceId, CatalogResourceRelation, CatalogScope,
     CatalogScopeLink, CatalogScopePullItem, CatalogScopePullPlan, CatalogScopePushPlan,
-    CatalogScopePushRow, CatalogTargetExpectation, LibraryHeadCoordinate, LocalCatalogTargetId,
-    PluginApplyMode, ProviderKey, MAX_GENERATED_NAME_ATTEMPTS,
+    CatalogScopePushRow, CatalogTargetConfig, CatalogTargetExpectation, CatalogTargetIdentity,
+    LibraryHeadCoordinate, NativePluginPlan, PluginApplyMode, MAX_GENERATED_NAME_ATTEMPTS,
 };
 use super::inventory::{CatalogLocalInventory, LocalResourceRecord};
 use super::profiles::ResolvedCatalogContext;
-use mallard_domain::{StorageId, StorageKind};
-use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use super::registry::{CaptureSupport, CatalogCapability};
 
 pub const CATALOG_RESOURCE_PLAN_LIFETIME_SECS: u64 = 24 * 60 * 60;
 
-pub fn relation_for_state(state: CatalogLinkState) -> super::domain::CatalogResourceRelation {
-    use super::domain::CatalogResourceRelation as Relation;
+pub fn relation_for_state(state: CatalogLinkState) -> CatalogResourceRelation {
+    use CatalogResourceRelation as Relation;
     match state {
         CatalogLinkState::New | CatalogLinkState::RemoteMissing => Relation::LocalOnly,
         CatalogLinkState::InSync => Relation::Matching,
@@ -95,80 +99,46 @@ pub fn scope_resource_state(
     )
 }
 
-pub(crate) fn scope_label(resource: &CatalogResource) -> Option<String> {
-    match resource {
-        CatalogResource::AgentSkill(skill) => {
-            Some(skill.descriptor.scope.display_label().to_string())
-        }
-        CatalogResource::PluginInstallIntent(_) => None,
-        CatalogResource::CodexPetV1(_) => Some("v1".to_string()),
-        CatalogResource::CodexPetV2(_) => Some("v2".to_string()),
-    }
-}
-
+/// The machine-local target one stored resource lands on under this profile:
+/// the capability's root whose class the resource's identity names (or its
+/// only root), and the member the codec derives from the identity. Directory
+/// resources also get their target path; provider-inventory resources have
+/// none.
 pub fn target_for_resource(
     context: &ResolvedCatalogContext,
-    resource: &CatalogResource,
-) -> Result<(LocalCatalogTargetId, Option<String>), String> {
-    match resource {
-        CatalogResource::AgentSkill(skill) => {
-            let root = context.skill_root(skill.descriptor.scope).ok_or_else(|| {
-                format!(
-                    "no {} skill root is active for this profile",
-                    skill.descriptor.scope.display_label()
-                )
-            })?;
-            Ok((
-                LocalCatalogTargetId::SkillDirectory {
-                    scope: skill.descriptor.scope,
-                    canonical_root: root.to_string_lossy().to_string(),
-                    install_directory: skill.descriptor.install_directory.clone(),
-                },
-                Some(
-                    root.join(&skill.descriptor.install_directory)
-                        .to_string_lossy()
-                        .to_string(),
-                ),
-            ))
-        }
-        CatalogResource::PluginInstallIntent(plugin) => {
-            let descriptor = &plugin.descriptor;
-            let profile = context.profile(descriptor.provider).ok_or_else(|| {
-                format!(
-                    "no {} profile is active",
-                    descriptor.provider.display_label()
-                )
-            })?;
-            Ok((
-                LocalCatalogTargetId::Plugin {
-                    provider: descriptor.provider,
-                    canonical_home: profile.canonical_home.to_string_lossy().to_string(),
-                    namespace: descriptor.provider_native_namespace.clone(),
-                    plugin_id: descriptor.plugin_id.clone(),
-                },
-                None,
-            ))
-        }
-        CatalogResource::CodexPetV1(pet) | CatalogResource::CodexPetV2(pet) => {
-            let profile = context
-                .profile(ProviderKey::Codex)
-                .ok_or("no Codex profile is active for this pet")?;
-            Ok((
-                LocalCatalogTargetId::PetDirectory {
-                    canonical_home: profile.canonical_home.to_string_lossy().to_string(),
-                    pet_id: pet.descriptor.pet_id.clone(),
-                },
-                Some(
-                    profile
-                        .canonical_home
-                        .join("pets")
-                        .join(&pet.descriptor.pet_id)
-                        .to_string_lossy()
-                        .to_string(),
-                ),
-            ))
-        }
-    }
+    capability: &CatalogCapability,
+    resource: &CatalogResourceEnvelope,
+) -> Result<(CatalogTargetConfig, Option<PathBuf>), String> {
+    let codec = capability.codec.as_ref();
+    let targets = context.targets_for(capability);
+    let target = match codec.root_class(resource)? {
+        Some(class) => targets
+            .iter()
+            .find(|target| target.root_class == class)
+            .copied()
+            .ok_or_else(|| format!("no {} target is active for this profile", class))?,
+        None => targets.first().copied().ok_or_else(|| {
+            format!(
+                "no {} target is active for this profile",
+                capability.descriptor.label
+            )
+        })?,
+    };
+    let member = codec.member_name(resource)?;
+    let config = CatalogTargetConfig::new(
+        capability.provider().clone(),
+        target.target.clone(),
+        &CatalogTargetIdentity {
+            canonical_root: target.canonical_root.to_string_lossy().to_string(),
+            root_class: target.root_class.clone(),
+            member: member.clone(),
+        },
+    )?;
+    let path = match capability.descriptor.capture {
+        CaptureSupport::DirectoryTree => Some(target.canonical_root.join(&member)),
+        CaptureSupport::ProviderInventory => None,
+    };
+    Ok((config, path))
 }
 
 pub fn generate_copy_name(
@@ -195,31 +165,19 @@ pub fn generate_copy_name(
     ))
 }
 
+/// The identity and content the reviewed copy of one local record would
+/// have, through the codec of the record's own coordinate.
 pub fn transformed_copy_identity(
     record: &LocalResourceRecord,
     copy_name: &str,
 ) -> Result<(CatalogResourceId, String), String> {
-    match (&record.target, &record.skill_tree, &record.pet) {
-        (LocalCatalogTargetId::SkillDirectory { scope, .. }, Some(tree), _) => {
-            let renamed = super::skill_tree::rename_skill_tree(&tree.files, copy_name)?;
-            let resource = super::skill_tree::skill_resource_from_tree(
-                *scope, copy_name, copy_name, &renamed,
-            )?;
-            Ok((
-                skill_resource_id(*scope, copy_name, copy_name),
-                resource.content_sha256,
-            ))
-        }
-        (LocalCatalogTargetId::PetDirectory { .. }, _, Some(pet)) => {
-            let renamed = super::codex_pet::renamed_pet(pet, copy_name)?;
-            let resource = super::codex_pet::pet_resource_from_capture(&renamed)?;
-            Ok((
-                pet_resource_id(pet.format, copy_name),
-                resource.content_sha256,
-            ))
-        }
-        _ => Err("the copy source has no captured payload".to_string()),
-    }
+    let captured = record
+        .captured
+        .as_ref()
+        .ok_or("the copy source has no captured payload")?;
+    let renamed = record.capability.codec.rename(captured, copy_name)?;
+    let envelope = renamed.to_envelope(&record.resource.coordinate());
+    Ok((envelope.resource_id, envelope.content_sha256))
 }
 
 /// Cross-storage claim pins for one target: every other storage that
@@ -227,7 +185,7 @@ pub fn transformed_copy_identity(
 pub fn claim_pins_for_target(
     claims: &[CatalogClaim],
     current_storage_id: &StorageId,
-    target: &LocalCatalogTargetId,
+    target: &CatalogTargetConfig,
     incoming_content_sha256: &str,
 ) -> Vec<CatalogClaimPin> {
     let mut pins: Vec<_> = claims
@@ -252,40 +210,25 @@ pub fn conflicting_claim_pins(
     claims: &[CatalogClaim],
     inventory: &CatalogLocalInventory,
     storage_id: &StorageId,
-    target: &LocalCatalogTargetId,
+    target: &CatalogTargetConfig,
     incoming_content_sha256: &str,
 ) -> Vec<CatalogClaimPin> {
-    let target_is_occupied = inventory
-        .resources
-        .values()
-        .any(|record| record.target == *target);
-    if !target_is_occupied {
+    if inventory.occupant(target).is_none() {
         return Vec::new();
     }
     claim_pins_for_target(claims, storage_id, target, incoming_content_sha256)
 }
 
-/// The local records that belong to a scope of this kind. The inventory keeps
-/// cross-format pet occupants so conflict handling can see them; the scope's
-/// own rows must not include them.
-pub fn scope_local_records<'a>(
-    inventory: &'a CatalogLocalInventory,
-    kind: super::domain::CatalogResourceKindTag,
-) -> impl Iterator<Item = (&'a CatalogResourceId, &'a LocalResourceRecord)> + 'a {
-    inventory
-        .resources
-        .iter()
-        .filter(move |(_, record)| record.resource.kind_tag() == kind)
-}
-
 pub struct ScopePushPlanInputs<'a> {
     pub scope: &'a CatalogScope,
+    pub capability: &'a CatalogCapability,
     pub link: &'a CatalogScopeLink,
-    pub storage_kind: StorageKind,
+    /// The storage occupies a machine-local folder (adapter-declared).
+    pub storage_is_local: bool,
     pub storage_identity_sha256: String,
     pub context: &'a ResolvedCatalogContext,
     pub inventory: &'a CatalogLocalInventory,
-    pub remote: &'a BTreeMap<CatalogResourceId, CatalogResource>,
+    pub remote: &'a BTreeMap<CatalogResourceId, CatalogResourceEnvelope>,
     pub observed_head: Option<LibraryHeadCoordinate>,
     pub now: u64,
 }
@@ -293,25 +236,24 @@ pub struct ScopePushPlanInputs<'a> {
 pub fn build_scope_push_plan(
     inputs: ScopePushPlanInputs<'_>,
 ) -> Result<CatalogScopePushPlan, String> {
-    let locals: BTreeMap<&CatalogResourceId, &LocalResourceRecord> =
-        scope_local_records(inputs.inventory, inputs.scope.resource_kind).collect();
-    let mut resource_ids: BTreeSet<&CatalogResourceId> = locals.keys().copied().collect();
+    let codec = inputs.capability.codec.as_ref();
+    let mut resource_ids: BTreeSet<&CatalogResourceId> =
+        inputs.inventory.resources.keys().collect();
     resource_ids.extend(inputs.remote.keys());
 
     let mut rows = Vec::new();
     let mut warning_digests = BTreeSet::new();
     for resource_id in resource_ids {
-        let local = locals.get(resource_id).copied();
+        let local = inputs.inventory.resources.get(resource_id);
         let remote = inputs.remote.get(resource_id);
         let state = scope_resource_state(
             inputs.link,
             resource_id,
-            local.map(|record| record.resource.content_sha256()),
-            remote.map(|resource| resource.content_sha256()),
+            local.map(|record| record.resource.content_sha256.as_str()),
+            remote.map(|resource| resource.content_sha256.as_str()),
         );
-        let presented = match local.map(|record| &record.resource).or(remote) {
-            Some(resource) => resource,
-            None => continue,
+        let Some(presented) = local.map(|record| &record.resource).or(remote) else {
+            continue;
         };
         let selectable = local.is_some()
             && matches!(
@@ -345,25 +287,22 @@ pub fn build_scope_push_plan(
         rows.push(CatalogScopePushRow {
             row: CatalogPushRow {
                 resource_id: (*resource_id).clone(),
-                kind: presented.kind_tag(),
-                display_name: presented.display_name(),
-                provider: presented.provider(),
-                scope_label: scope_label(presented),
+                coordinate: inputs.capability.coordinate(),
+                labels: inputs.capability.labels(),
+                display_name: codec.display_name(presented)?,
+                scope_label: codec.resource_label(presented),
                 relation: relation_for_state(state),
                 selectable,
                 selected_by_default: selectable,
                 held_for_pull: blocked_reason.is_some(),
-                local_content_sha256: local
-                    .map(|record| record.resource.content_sha256().to_string()),
-                storage_content_sha256: remote
-                    .map(|resource| resource.content_sha256().to_string()),
+                local_content_sha256: local.map(|record| record.resource.content_sha256.clone()),
+                storage_content_sha256: remote.map(|resource| resource.content_sha256.clone()),
                 blocked_reason,
                 warnings,
-                detail: selectable.then(|| match inputs.storage_kind {
-                    StorageKind::Local => {
+                detail: selectable.then(|| {
+                    if inputs.storage_is_local {
                         "Publish this resource to the linked local storage".to_string()
-                    }
-                    StorageKind::S3 => {
+                    } else {
                         "Publish this resource to the linked cloud storage".to_string()
                     }
                 }),
@@ -392,7 +331,7 @@ pub fn build_scope_push_plan(
         repository_id: inputs.link.repository_id.clone(),
         storage_identity_sha256: inputs.storage_identity_sha256,
         profile_pins: inputs.context.profile_pins(),
-        skill_root_pins: inputs.context.skill_root_pins(),
+        target_pins: inputs.context.target_pins(),
         observed_head: inputs.observed_head,
         rows,
         warning_digests: warning_digests.into_iter().collect(),
@@ -405,17 +344,23 @@ pub fn build_scope_push_plan(
     Ok(plan)
 }
 
+/// The root a target's copies land beside. Two preservation copies in one
+/// review collide only when they share a parent directory.
+fn copy_root(target: &CatalogTargetConfig) -> Result<String, String> {
+    Ok(target.decode()?.canonical_root)
+}
+
 fn preservation_pin(
     occupant: &LocalResourceRecord,
     storage_digest: &str,
-    source_name: &str,
     requested_copy_name: Option<&str>,
-    name_taken: &dyn Fn(&LocalCatalogTargetId, &str) -> bool,
+    name_taken: &dyn Fn(&CatalogTargetConfig, &str) -> bool,
 ) -> Result<CatalogPreservationPin, String> {
+    let identity = occupant.target.decode()?;
     let taken = |candidate: &str| name_taken(&occupant.target, candidate);
     let copy_name = match requested_copy_name {
         Some(requested) => {
-            super::domain::validate_component_name("preservation copy name", requested, 128)?;
+            validate_component_name("preservation copy name", requested, 128)?;
             if taken(requested) {
                 return Err(format!(
                     "the copy name '{}' is already in use; choose another",
@@ -424,95 +369,71 @@ fn preservation_pin(
             }
             requested.to_string()
         }
-        None => generate_copy_name(source_name, &taken)?,
+        // The seed is the occupant's own member name, a valid component by
+        // construction; display names are free text.
+        None => generate_copy_name(&identity.member, &taken)?,
     };
     let (copy_resource_id, transformed_content_sha256) =
         transformed_copy_identity(occupant, &copy_name)?;
-    let copy_target_path = match &occupant.target {
-        LocalCatalogTargetId::SkillDirectory { canonical_root, .. } => {
-            PathBuf::from(canonical_root).join(&copy_name)
-        }
-        LocalCatalogTargetId::PetDirectory { canonical_home, .. } => {
-            PathBuf::from(canonical_home).join("pets").join(&copy_name)
-        }
-        LocalCatalogTargetId::Plugin { .. } => {
-            return Err("plugins never use preservation copies".to_string())
-        }
-    };
     Ok(CatalogPreservationPin {
+        copy_target_path: Path::new(&identity.canonical_root)
+            .join(&copy_name)
+            .to_string_lossy()
+            .to_string(),
         copy_name,
         copy_resource_id,
-        copy_target_path: copy_target_path.to_string_lossy().to_string(),
         transformed_content_sha256,
-        original_content_sha256: occupant.resource.content_sha256().to_string(),
+        original_content_sha256: occupant.resource.content_sha256.clone(),
         storage_content_sha256: storage_digest.to_string(),
         reusable_witness: false,
     })
 }
 
 struct PullItemInputs<'a> {
+    capability: &'a CatalogCapability,
     context: &'a ResolvedCatalogContext,
     inventory: &'a CatalogLocalInventory,
-    remote_resource: &'a CatalogResource,
+    remote_resource: &'a CatalogResourceEnvelope,
     state: CatalogLinkState,
     requested_copy_name: Option<&'a str>,
-    name_taken: &'a dyn Fn(&LocalCatalogTargetId, &str) -> bool,
+    name_taken: &'a dyn Fn(&CatalogTargetConfig, &str) -> bool,
 }
 
 fn build_pull_item(inputs: &PullItemInputs<'_>) -> Result<CatalogPullItem, String> {
+    let codec = inputs.capability.codec.as_ref();
+    let remote = inputs.remote_resource;
     let mut item = CatalogPullItem {
-        resource_id: inputs.remote_resource.resource_id(),
-        kind: inputs.remote_resource.kind_tag(),
-        display_name: inputs.remote_resource.display_name(),
-        provider: inputs.remote_resource.provider(),
-        scope_label: scope_label(inputs.remote_resource),
+        resource_id: remote.resource_id.clone(),
+        coordinate: inputs.capability.coordinate(),
+        labels: inputs.capability.labels(),
+        display_name: codec.display_name(remote)?,
+        scope_label: codec.resource_label(remote),
         relation: relation_for_state(inputs.state),
         disposition: CatalogPullDisposition::KeptLocal,
         actions: Vec::new(),
         default_action_id: None,
         detail: None,
     };
-    let local = inputs
-        .inventory
-        .resources
-        .get(&inputs.remote_resource.resource_id());
-
-    match inputs.remote_resource {
-        CatalogResource::PluginInstallIntent(plugin) => {
-            build_plugin_item(inputs, &mut item, plugin, local)?;
-        }
-        CatalogResource::AgentSkill(_) => {
-            build_directory_item(inputs, &mut item, local, false)?;
-        }
-        CatalogResource::CodexPetV1(pet) | CatalogResource::CodexPetV2(pet) => {
-            let occupant = inputs.inventory.resources.values().find(|record| {
-                matches!(
-                    &record.target,
-                    LocalCatalogTargetId::PetDirectory { pet_id, .. }
-                        if pet_id == &pet.descriptor.pet_id
-                )
-            });
-            let cross_format = occupant.is_some_and(|record| {
-                record.resource.pet_format() != inputs.remote_resource.pet_format()
-            });
-            build_directory_item(
-                inputs,
-                &mut item,
-                if cross_format { occupant } else { local },
-                cross_format,
-            )?;
+    let (target, target_path) = target_for_resource(inputs.context, inputs.capability, remote)?;
+    match inputs.capability.descriptor.capture {
+        CaptureSupport::ProviderInventory => build_native_item(inputs, &mut item, &target)?,
+        CaptureSupport::DirectoryTree => {
+            let target_path = target_path.ok_or("directory resource has no target path")?;
+            build_directory_item(inputs, &mut item, &target, &target_path)?;
         }
     }
     Ok(item)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_action(
     item: &mut CatalogPullItem,
     kind: CatalogPullActionKind,
     destructive: bool,
-    target: &LocalCatalogTargetId,
-    target_path: Option<&str>,
-    expected: super::domain::CatalogTargetExpectation,
+    target: &CatalogTargetConfig,
+    target_path: Option<&Path>,
+    native: Option<NativePluginPlan>,
+    expected: CatalogTargetExpectation,
     incoming_digest: &str,
 ) -> Result<CatalogPlanActionId, String> {
     let action_id = CatalogPlanActionId::generate()?;
@@ -522,7 +443,8 @@ fn push_action(
         kind,
         requires_destructive_approval: destructive,
         target: target.clone(),
-        target_path: target_path.map(str::to_string),
+        target_path: target_path.map(|path| path.to_string_lossy().to_string()),
+        native,
         expected_target_state: expected,
         incoming_content_sha256: incoming_digest.to_string(),
     });
@@ -532,14 +454,16 @@ fn push_action(
 fn build_directory_item(
     inputs: &PullItemInputs<'_>,
     item: &mut CatalogPullItem,
-    occupant: Option<&LocalResourceRecord>,
-    cross_format: bool,
+    target: &CatalogTargetConfig,
+    target_path: &Path,
 ) -> Result<(), String> {
-    let (target, target_path) = target_for_resource(inputs.context, inputs.remote_resource)?;
-    let target_path = target_path.ok_or("directory resource has no target path")?;
-    let incoming_digest = inputs.remote_resource.content_sha256();
-    let local_digest = occupant.map(|record| record.resource.content_sha256());
-    let is_pet = inputs.remote_resource.pet_format().is_some();
+    let remote = inputs.remote_resource;
+    let incoming_digest = remote.content_sha256.as_str();
+    // Whatever sits at the target path is the occupant: this resource's own
+    // local capture, or a different resource (another identity, or a sibling
+    // version of the format) that happens to hold the same directory.
+    let occupant = inputs.inventory.occupant(target);
+    let local_digest = occupant.map(|record| record.resource.content_sha256.as_str());
     match inputs.state {
         CatalogLinkState::InSync => item.disposition = CatalogPullDisposition::AlreadyMatching,
         CatalogLinkState::LocalChanged
@@ -552,17 +476,13 @@ fn build_directory_item(
             if occupant.is_none() =>
         {
             item.disposition = CatalogPullDisposition::Executable;
-            let kind = if is_pet {
-                CatalogPullActionKind::InstallPet
-            } else {
-                CatalogPullActionKind::InstallSkill
-            };
             let action_id = push_action(
                 item,
-                kind,
+                CatalogPullActionKind::Install,
                 false,
-                &target,
-                Some(&target_path),
+                target,
+                Some(target_path),
+                None,
                 CatalogTargetExpectation::Absent,
                 incoming_digest,
             )?;
@@ -576,17 +496,13 @@ fn build_directory_item(
                 return Ok(());
             };
             item.disposition = CatalogPullDisposition::Executable;
-            let kind = if is_pet {
-                CatalogPullActionKind::UpdatePet
-            } else {
-                CatalogPullActionKind::UpdateSkill
-            };
             let action_id = push_action(
                 item,
-                kind,
+                CatalogPullActionKind::Update,
                 false,
-                &target,
-                Some(&target_path),
+                target,
+                Some(target_path),
+                None,
                 CatalogTargetExpectation::Sha256 {
                     sha256: local_digest.to_string(),
                 },
@@ -597,55 +513,42 @@ fn build_directory_item(
         CatalogLinkState::Diverged
         | CatalogLinkState::UnreviewedRemote
         | CatalogLinkState::LocalMissing
-            if occupant.is_some() || cross_format =>
+            if occupant.is_some() =>
         {
             let occupant = occupant.ok_or("the conflicting local resource disappeared")?;
-            let local_digest = occupant.resource.content_sha256();
+            let local_digest = occupant.resource.content_sha256.clone();
             item.disposition = CatalogPullDisposition::Executable;
             let pin = preservation_pin(
                 occupant,
                 incoming_digest,
-                copy_source_name(occupant),
                 inputs.requested_copy_name,
                 inputs.name_taken,
             )?;
             item.detail = Some(format!(
-                "Keep the local version as '{}' and overwrite with the stored {} resource",
-                pin.copy_name,
-                inputs
-                    .remote_resource
-                    .pet_format()
-                    .map_or("skill", |format| format.display_label())
+                "Keep the local version as '{}' and overwrite with the stored version",
+                pin.copy_name
             ));
-            let preserve = if is_pet {
-                CatalogPullActionKind::PreservePetAsCopyAndOverwrite { copy: pin }
-            } else {
-                CatalogPullActionKind::PreserveSkillAsCopyAndOverwrite { copy: pin }
-            };
             let action_id = push_action(
                 item,
-                preserve,
+                CatalogPullActionKind::PreserveAsCopyAndOverwrite { copy: pin },
                 false,
-                &target,
-                Some(&target_path),
+                target,
+                Some(target_path),
+                None,
                 CatalogTargetExpectation::Sha256 {
-                    sha256: local_digest.to_string(),
+                    sha256: local_digest.clone(),
                 },
                 incoming_digest,
             )?;
-            let overwrite = if is_pet {
-                CatalogPullActionKind::OverwritePetWithStorage
-            } else {
-                CatalogPullActionKind::OverwriteSkillWithStorage
-            };
             push_action(
                 item,
-                overwrite,
+                CatalogPullActionKind::OverwriteWithStorage,
                 true,
-                &target,
-                Some(&target_path),
+                target,
+                Some(target_path),
+                None,
                 CatalogTargetExpectation::Sha256 {
-                    sha256: local_digest.to_string(),
+                    sha256: local_digest,
                 },
                 incoming_digest,
             )?;
@@ -665,38 +568,14 @@ fn build_directory_item(
     Ok(())
 }
 
-fn build_plugin_item(
+fn build_native_item(
     inputs: &PullItemInputs<'_>,
     item: &mut CatalogPullItem,
-    plugin: &super::domain::PluginInstallIntentResource,
-    local: Option<&LocalResourceRecord>,
+    target: &CatalogTargetConfig,
 ) -> Result<(), String> {
-    use super::domain::PluginResolutionPolicy;
-    let descriptor = &plugin.descriptor;
+    let remote = inputs.remote_resource;
+    let local = inputs.inventory.resources.get(&remote.resource_id);
     let locally_present = local.is_some();
-    let (target, _) = target_for_resource(inputs.context, inputs.remote_resource)?;
-    if descriptor.resolution == PluginResolutionPolicy::ManualOnly {
-        item.disposition = CatalogPullDisposition::Manual {
-            message: format!(
-                "'{}' has no portable marketplace source; install it with the {} CLI",
-                descriptor.plugin_id,
-                descriptor.provider.display_label()
-            ),
-        };
-        return Ok(());
-    }
-    let marketplace_registered = inputs
-        .inventory
-        .plugin_inventories
-        .get(&descriptor.provider)
-        .and_then(|inventory| inventory.marketplace(&descriptor.provider_native_namespace))
-        .is_some();
-    let adapter = adapter_for(descriptor.provider);
-    let mode = if locally_present {
-        PluginApplyMode::OverwriteExisting
-    } else {
-        PluginApplyMode::InstallMissing
-    };
     match inputs.state {
         CatalogLinkState::InSync => {
             item.disposition = CatalogPullDisposition::AlreadyMatching;
@@ -710,13 +589,27 @@ fn build_plugin_item(
         }
         CatalogLinkState::Blocked => {
             item.disposition = CatalogPullDisposition::Blocked {
-                reason: "this plugin is blocked".to_string(),
+                reason: "this resource is blocked".to_string(),
             };
             return Ok(());
         }
         _ => {}
     }
-    let native = match adapter.plan_plugin_apply(descriptor, marketplace_registered, mode) {
+    let native_inventory = inputs
+        .inventory
+        .native
+        .as_ref()
+        .ok_or("the provider inventory was not observed")?;
+    let mode = if locally_present {
+        PluginApplyMode::OverwriteExisting
+    } else {
+        PluginApplyMode::InstallMissing
+    };
+    let native = match inputs
+        .capability
+        .adapter
+        .plan_native_apply(remote, native_inventory, mode)
+    {
         Ok(plan) => plan,
         Err(blocker) => {
             item.disposition = CatalogPullDisposition::Manual {
@@ -731,11 +624,11 @@ fn build_plugin_item(
             CatalogLinkState::Diverged | CatalogLinkState::UnreviewedRemote
         );
     let kind = if destructive {
-        CatalogPullActionKind::OverwritePluginWithStorage { plan: native }
+        CatalogPullActionKind::OverwriteWithStorage
     } else if locally_present {
-        CatalogPullActionKind::UpdatePlugin { plan: native }
+        CatalogPullActionKind::Update
     } else {
-        CatalogPullActionKind::InstallPlugin { plan: native }
+        CatalogPullActionKind::Install
     };
     item.disposition = CatalogPullDisposition::Executable;
     if destructive {
@@ -748,55 +641,32 @@ fn build_plugin_item(
         item,
         kind,
         destructive,
-        &target,
+        target,
         None,
+        Some(native),
         local.map_or(CatalogTargetExpectation::Absent, |record| {
             CatalogTargetExpectation::Sha256 {
-                sha256: record.resource.content_sha256().to_string(),
+                sha256: record.resource.content_sha256.clone(),
             }
         }),
-        &plugin.content_sha256,
+        &remote.content_sha256,
     )?;
     item.default_action_id = Some(action_id);
     Ok(())
 }
 
-/// The seed a generated copy name grows from: the occupant's own directory
-/// name, which is a valid component name by construction. Display names are
-/// free text — "Mallard Duck-local-copy" is not a directory name.
-fn copy_source_name(occupant: &LocalResourceRecord) -> &str {
-    match &occupant.target {
-        LocalCatalogTargetId::SkillDirectory {
-            install_directory, ..
-        } => install_directory,
-        LocalCatalogTargetId::PetDirectory { pet_id, .. } => pet_id,
-        LocalCatalogTargetId::Plugin { plugin_id, .. } => plugin_id,
-    }
-}
-
-/// Stable per-root key for the per-plan claimed-names set. Two preservation
-/// copies in one review collide only when they share a parent directory.
-fn copy_root_key(target: &LocalCatalogTargetId) -> String {
-    match target {
-        LocalCatalogTargetId::SkillDirectory { canonical_root, .. } => canonical_root.clone(),
-        LocalCatalogTargetId::PetDirectory { canonical_home, .. } => {
-            format!("{}/pets", canonical_home)
-        }
-        LocalCatalogTargetId::Plugin { .. } => String::new(),
-    }
-}
-
 pub struct ScopePullPlanInputs<'a> {
     pub scope: &'a CatalogScope,
+    pub capability: &'a CatalogCapability,
     pub link: &'a CatalogScopeLink,
     pub storage_identity_sha256: String,
     pub context: &'a ResolvedCatalogContext,
     pub inventory: &'a CatalogLocalInventory,
-    pub remote: &'a BTreeMap<CatalogResourceId, CatalogResource>,
+    pub remote: &'a BTreeMap<CatalogResourceId, CatalogResourceEnvelope>,
     pub head: LibraryHeadCoordinate,
     pub claims: &'a [CatalogClaim],
     pub requested_copy_names: &'a BTreeMap<CatalogResourceId, String>,
-    pub name_taken: &'a dyn Fn(&LocalCatalogTargetId, &str) -> bool,
+    pub name_taken: &'a dyn Fn(&CatalogTargetConfig, &str) -> bool,
     pub now: u64,
 }
 
@@ -806,11 +676,12 @@ pub fn build_scope_pull_plan(
     // Copy names chosen earlier in this plan are taken for the rest of it,
     // so two same-review preservation copies can never collide.
     let claimed_names: RefCell<BTreeSet<(String, String)>> = RefCell::new(BTreeSet::new());
-    let name_taken = |target: &LocalCatalogTargetId, candidate: &str| {
-        claimed_names
-            .borrow()
-            .contains(&(copy_root_key(target), candidate.to_lowercase()))
-            || (inputs.name_taken)(target, candidate)
+    let name_taken = |target: &CatalogTargetConfig, candidate: &str| {
+        copy_root(target).is_ok_and(|root| {
+            claimed_names
+                .borrow()
+                .contains(&(root, candidate.to_lowercase()))
+        }) || (inputs.name_taken)(target, candidate)
     };
 
     let mut items = Vec::new();
@@ -819,16 +690,16 @@ pub fn build_scope_pull_plan(
         let base_state = scope_resource_state(
             inputs.link,
             resource_id,
-            local.map(|record| record.resource.content_sha256()),
-            Some(remote_resource.content_sha256()),
+            local.map(|record| record.resource.content_sha256.as_str()),
+            Some(remote_resource.content_sha256.as_str()),
         );
-        let (target, _) = target_for_resource(inputs.context, remote_resource)?;
+        let (target, _) = target_for_resource(inputs.context, inputs.capability, remote_resource)?;
         let conflicting_claims = conflicting_claim_pins(
             inputs.claims,
             inputs.inventory,
             &inputs.link.storage_id,
             &target,
-            remote_resource.content_sha256(),
+            &remote_resource.content_sha256,
         );
         let state =
             if !conflicting_claims.is_empty() && base_state == CatalogLinkState::StorageChanged {
@@ -837,6 +708,7 @@ pub fn build_scope_pull_plan(
                 base_state
             };
         let item = build_pull_item(&PullItemInputs {
+            capability: inputs.capability,
             context: inputs.context,
             inventory: inputs.inventory,
             remote_resource,
@@ -851,7 +723,7 @@ pub fn build_scope_pull_plan(
             if let Some(pin) = action.kind.preservation() {
                 claimed_names
                     .borrow_mut()
-                    .insert((copy_root_key(&action.target), pin.copy_name.to_lowercase()));
+                    .insert((copy_root(&action.target)?, pin.copy_name.to_lowercase()));
             }
         }
         items.push(CatalogScopePullItem {
@@ -870,7 +742,7 @@ pub fn build_scope_pull_plan(
         repository_id: inputs.link.repository_id.clone(),
         storage_identity_sha256: inputs.storage_identity_sha256,
         profile_pins: inputs.context.profile_pins(),
-        skill_root_pins: inputs.context.skill_root_pins(),
+        target_pins: inputs.context.target_pins(),
         head: inputs.head,
         items,
         created_at: inputs.now,
@@ -920,11 +792,12 @@ pub fn validate_scope_pull_selection<'a>(
 
 pub struct ScopeForkPlanInputs<'a> {
     pub scope: &'a CatalogScope,
+    pub capability: &'a CatalogCapability,
     pub resource_id: &'a CatalogResourceId,
     pub context: &'a ResolvedCatalogContext,
     pub inventory: &'a CatalogLocalInventory,
     pub requested_name: &'a str,
-    pub name_taken: &'a dyn Fn(&LocalCatalogTargetId, &str) -> bool,
+    pub name_taken: &'a dyn Fn(&CatalogTargetConfig, &str) -> bool,
     pub now: u64,
 }
 
@@ -936,18 +809,10 @@ pub fn build_resource_fork_plan(
         .resources
         .get(inputs.resource_id)
         .ok_or("the Fork source is missing locally")?;
-    if record.resource.kind_tag() != inputs.scope.resource_kind {
+    if record.resource.coordinate() != inputs.capability.coordinate() {
         return Err("the Fork source does not belong to this Catalog row".to_string());
     }
-    let source_kind = match &record.resource {
-        CatalogResource::AgentSkill(_) => CatalogForkSourceKind::AgentSkill,
-        CatalogResource::CodexPetV1(_) => CatalogForkSourceKind::CodexPetV1,
-        CatalogResource::CodexPetV2(_) => CatalogForkSourceKind::CodexPetV2,
-        CatalogResource::PluginInstallIntent(_) => {
-            return Err("plugins do not support Fork".to_string())
-        }
-    };
-    super::domain::validate_component_name("Fork copy name", inputs.requested_name, 128)?;
+    validate_component_name("Fork copy name", inputs.requested_name, 128)?;
     if (inputs.name_taken)(&record.target, inputs.requested_name) {
         return Err(format!(
             "the name '{}' is already in use; choose another",
@@ -960,31 +825,24 @@ pub fn build_resource_fork_plan(
         .ok_or("the Fork source has no local directory")?;
     let (copy_resource_id, transformed_content_sha256) =
         transformed_copy_identity(record, inputs.requested_name)?;
-    let copy_target_path = match &record.target {
-        LocalCatalogTargetId::SkillDirectory { canonical_root, .. } => {
-            PathBuf::from(canonical_root).join(inputs.requested_name)
-        }
-        LocalCatalogTargetId::PetDirectory { canonical_home, .. } => PathBuf::from(canonical_home)
-            .join("pets")
-            .join(inputs.requested_name),
-        LocalCatalogTargetId::Plugin { .. } => {
-            return Err("plugins do not support Fork".to_string())
-        }
-    };
+    let identity = record.target.decode()?;
     let plan = CatalogResourceForkPlan {
         plan_id: CatalogPlanId::generate()?,
         scope_id: inputs.scope.scope_id.clone(),
         profile_pins: inputs.context.profile_pins(),
-        skill_root_pins: inputs.context.skill_root_pins(),
-        source_kind,
+        target_pins: inputs.context.target_pins(),
+        source_coordinate: inputs.capability.coordinate(),
         source_resource_id: (*inputs.resource_id).clone(),
-        source_display_name: record.resource.display_name(),
+        source_display_name: inputs.capability.codec.display_name(&record.resource)?,
         source_target: record.target.clone(),
         source_path: source_path.to_string_lossy().to_string(),
-        source_content_sha256: record.resource.content_sha256().to_string(),
+        source_content_sha256: record.resource.content_sha256.clone(),
         copy_name: inputs.requested_name.to_string(),
         copy_resource_id,
-        copy_target_path: copy_target_path.to_string_lossy().to_string(),
+        copy_target_path: Path::new(&identity.canonical_root)
+            .join(inputs.requested_name)
+            .to_string_lossy()
+            .to_string(),
         transformed_content_sha256,
         created_at: inputs.now,
         expires_at: inputs
@@ -997,102 +855,152 @@ pub fn build_resource_fork_plan(
 
 #[cfg(test)]
 mod tests {
+    use super::super::adapters::ResolvedCatalogTarget;
     use super::super::domain::{
-        sha256_hex, skill_resource_id, AgentSkillDescriptor, AgentSkillResource, AgentSkillScope,
-        CatalogActionOutcome, CatalogFileEntry, CatalogResourceKindTag, CatalogResourceRelation,
-        CatalogResourceRepositoryId, CatalogScopeId, LocalCatalogProfileId, ProviderKey,
+        CatalogActionOutcome, CatalogCommitId, CatalogCoordinate, CatalogLinkId,
+        CatalogResourceRepositoryId, CatalogScopeId, CatalogTargetKey, LocalCatalogProfileId,
+        ProviderKey,
     };
-    use super::super::profiles::{ResolvedCatalogProfile, ResolvedSkillRoot};
-    use super::super::skill_tree::{CapturedSkillFile, CapturedSkillTree};
+    use super::super::profiles::ResolvedCatalogProfile;
+    use super::super::registry::CatalogRegistry;
     use super::*;
-    use std::path::Path;
+    use std::fs;
+    use std::sync::Arc;
 
-    const SKILL_ROOT: &str = "/tmp/planning/codex-home/skills";
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        registry: Arc<CatalogRegistry>,
+        capability: Arc<CatalogCapability>,
+        context: ResolvedCatalogContext,
+        skills_root: PathBuf,
+        /// A second tree the "stored" side captures from.
+        stored_root: PathBuf,
+    }
 
-    fn context() -> ResolvedCatalogContext {
-        ResolvedCatalogContext {
+    fn fixture() -> Fixture {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex-home");
+        let skills_root = home.join("skills");
+        let stored_root = temp.path().join("stored");
+        fs::create_dir_all(&skills_root).unwrap();
+        fs::create_dir_all(&stored_root).unwrap();
+        let registry = CatalogRegistry::production();
+        let capability = registry
+            .capability(
+                &CatalogCoordinate::new("codex", "agent_skill", "agentskills.io.skill", 1).unwrap(),
+            )
+            .unwrap();
+        let context = ResolvedCatalogContext {
             profile: ResolvedCatalogProfile {
                 profile_id: LocalCatalogProfileId::generate().unwrap(),
-                provider_key: ProviderKey::Codex,
+                provider: ProviderKey::parse("codex").unwrap(),
                 revision: 1,
-                canonical_home: PathBuf::from("/tmp/planning/codex-home"),
+                canonical_home: home,
             },
-            skill_roots: vec![ResolvedSkillRoot {
-                scope: AgentSkillScope::CodexHome,
-                canonical_root: PathBuf::from(SKILL_ROOT),
+            targets: vec![ResolvedCatalogTarget {
+                target: CatalogTargetKey::parse("provider-home.skills").unwrap(),
+                canonical_root: skills_root.clone(),
+                root_class: "provider-home".to_string(),
+                summary: "Codex home".to_string(),
+                exclude_provider_owned: true,
             }],
+        };
+        Fixture {
+            _temp: temp,
+            registry,
+            capability,
+            context,
+            skills_root,
+            stored_root,
         }
     }
 
+    fn write_skill(root: &Path, install_directory: &str, declared_name: &str, body: &str) {
+        let dir = root.join(install_directory);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {}\n---\n{}\n", declared_name, body),
+        )
+        .unwrap();
+    }
+
+    /// A local record captured from the fixture's skills root.
     fn skill_record(
+        fixture: &Fixture,
         install_directory: &str,
         declared_name: &str,
         body: &str,
     ) -> LocalResourceRecord {
-        let skill_md = format!("---\nname: {}\n---\n{}\n", declared_name, body);
-        let files = BTreeMap::from([(
-            "SKILL.md".to_string(),
-            CapturedSkillFile {
-                bytes: skill_md.clone().into_bytes(),
-                mode: 0o644,
-            },
-        )]);
-        let entries = BTreeMap::from([(
-            "SKILL.md".to_string(),
-            CatalogFileEntry {
-                sha256: sha256_hex(skill_md.as_bytes()),
-                size: skill_md.len() as u64,
-                mode: 0o644,
-                object_key: format!("_objects/{}", sha256_hex(skill_md.as_bytes())),
-            },
-        )]);
-        let mut resource = AgentSkillResource {
-            descriptor: AgentSkillDescriptor {
-                scope: AgentSkillScope::CodexHome,
-                effective_name: declared_name.to_string(),
-                install_directory: install_directory.to_string(),
-            },
-            content_sha256: String::new(),
-            files: entries,
-        };
-        resource.content_sha256 = resource.compute_content_sha256();
+        write_skill(&fixture.skills_root, install_directory, declared_name, body);
+        let path = fixture.skills_root.join(install_directory);
+        let captured = fixture
+            .capability
+            .codec
+            .capture_directory(&path, "provider-home")
+            .unwrap();
+        let resource = captured.to_envelope(&fixture.capability.coordinate());
         LocalResourceRecord {
-            resource: CatalogResource::AgentSkill(resource),
-            target: LocalCatalogTargetId::SkillDirectory {
-                scope: AgentSkillScope::CodexHome,
-                canonical_root: SKILL_ROOT.to_string(),
-                install_directory: install_directory.to_string(),
-            },
-            target_path: Some(Path::new(SKILL_ROOT).join(install_directory)),
+            target: CatalogTargetConfig::new(
+                ProviderKey::parse("codex").unwrap(),
+                CatalogTargetKey::parse("provider-home.skills").unwrap(),
+                &CatalogTargetIdentity {
+                    canonical_root: fixture.skills_root.to_string_lossy().to_string(),
+                    root_class: "provider-home".to_string(),
+                    member: install_directory.to_string(),
+                },
+            )
+            .unwrap(),
+            resource,
+            capability: fixture.capability.clone(),
+            target_path: Some(path),
             local_modified_at: Some(1),
             warnings: Vec::new(),
-            skill_tree: Some(CapturedSkillTree {
-                files,
-                declared_name: Some(declared_name.to_string()),
-                warnings: Default::default(),
-            }),
-            pet: None,
+            captured: Some(captured),
         }
+    }
+
+    /// A stored envelope for the same identity, captured from a separate tree.
+    fn stored_skill(
+        fixture: &Fixture,
+        install_directory: &str,
+        declared_name: &str,
+        body: &str,
+    ) -> CatalogResourceEnvelope {
+        write_skill(&fixture.stored_root, install_directory, declared_name, body);
+        fixture
+            .capability
+            .codec
+            .capture_directory(
+                &fixture.stored_root.join(install_directory),
+                "provider-home",
+            )
+            .unwrap()
+            .to_envelope(&fixture.capability.coordinate())
     }
 
     fn inventory(records: Vec<LocalResourceRecord>) -> CatalogLocalInventory {
         CatalogLocalInventory {
             resources: records
                 .into_iter()
-                .map(|record| (record.resource.resource_id(), record))
+                .map(|record| (record.resource.resource_id.clone(), record))
                 .collect(),
+            siblings: BTreeMap::new(),
             blocked: Vec::new(),
             warnings: Vec::new(),
-            plugin_inventories: BTreeMap::new(),
+            native: None,
         }
     }
 
-    fn scope() -> CatalogScope {
+    fn scope(fixture: &Fixture) -> CatalogScope {
+        let coordinate = fixture.capability.coordinate();
         CatalogScope {
             scope_id: CatalogScopeId::generate().unwrap(),
-            provider: ProviderKey::Codex,
-            profile_id: LocalCatalogProfileId::generate().unwrap(),
-            resource_kind: CatalogResourceKindTag::AgentSkill,
+            provider: coordinate.provider,
+            profile_id: fixture.context.profile.profile_id.clone(),
+            resource_kind: coordinate.resource_kind,
+            format: coordinate.format,
+            format_version: coordinate.format_version,
             revision: 1,
             created_at: 1,
             updated_at: 1,
@@ -1100,17 +1008,15 @@ mod tests {
     }
 
     fn link(
+        fixture: &Fixture,
         scope: &CatalogScope,
         accepted: &[(CatalogResourceId, String)],
-    ) -> super::super::domain::CatalogScopeLink {
-        super::super::domain::CatalogScopeLink {
-            link_id: super::super::domain::CatalogLinkId::generate().unwrap(),
+    ) -> CatalogScopeLink {
+        CatalogScopeLink {
+            link_id: CatalogLinkId::generate().unwrap(),
             scope_id: scope.scope_id.clone(),
             storage_id: StorageId::parse("storage-a").unwrap(),
-            repository_id: CatalogResourceRepositoryId::for_kind(
-                scope.provider,
-                scope.resource_kind,
-            ),
+            repository_id: fixture.capability.repository_id(),
             accepted_head: None,
             accepted_resources: accepted.iter().cloned().collect(),
             revision: 1,
@@ -1119,15 +1025,19 @@ mod tests {
         }
     }
 
-    fn head(link: &super::super::domain::CatalogScopeLink) -> LibraryHeadCoordinate {
+    fn head(link: &CatalogScopeLink) -> LibraryHeadCoordinate {
         LibraryHeadCoordinate {
             repository_id: link.repository_id.clone(),
             revision: 3,
-            commit_id: super::super::domain::CatalogCommitId::generate().unwrap(),
+            commit_id: CatalogCommitId::generate().unwrap(),
             manifest_sha256: "d".repeat(64),
             manifest_size: 10,
             storage_identity_sha256: "e".repeat(64),
         }
+    }
+
+    fn never(_: &CatalogTargetConfig, _: &str) -> bool {
+        false
     }
 
     #[test]
@@ -1176,33 +1086,29 @@ mod tests {
 
     #[test]
     fn a_scope_push_plan_rows_the_union_of_local_and_stored_resources() {
-        let scope = scope();
-        let context = context();
-        let changed = skill_record("review", "review", "Changed locally.");
-        let changed_id = changed.resource.resource_id();
-        let local_only = skill_record("fresh", "fresh", "Local only.");
-        let changed_base = "b".repeat(64);
-        let stored_only = skill_record("remote", "remote", "Stored only.");
-        let stored_only_resource = stored_only.resource.clone();
+        let fixture = fixture();
+        let scope = scope(&fixture);
+        let changed = skill_record(&fixture, "review", "review", "Changed locally.");
+        let changed_id = changed.resource.resource_id.clone();
+        let local_only = skill_record(&fixture, "fresh", "fresh", "Local only.");
+        let stored_review = stored_skill(&fixture, "review", "review", "Original body.");
+        let changed_base = stored_review.content_sha256.clone();
+        let stored_only = stored_skill(&fixture, "remote", "remote", "Stored only.");
+        assert_eq!(stored_review.resource_id, changed_id);
 
-        // The stored side: `review` at the accepted base, plus one resource
-        // this machine has never seen.
-        let mut stored_review = skill_record("review", "review", "Original body.");
-        if let CatalogResource::AgentSkill(skill) = &mut stored_review.resource {
-            skill.content_sha256 = changed_base.clone();
-        }
         let remote = BTreeMap::from([
-            (changed_id.clone(), stored_review.resource.clone()),
-            (stored_only_resource.resource_id(), stored_only_resource),
+            (changed_id.clone(), stored_review),
+            (stored_only.resource_id.clone(), stored_only),
         ]);
-        let link = link(&scope, &[(changed_id.clone(), changed_base)]);
+        let link = link(&fixture, &scope, &[(changed_id.clone(), changed_base)]);
 
         let plan = build_scope_push_plan(ScopePushPlanInputs {
             scope: &scope,
+            capability: &fixture.capability,
             link: &link,
-            storage_kind: StorageKind::Local,
+            storage_is_local: true,
             storage_identity_sha256: "c".repeat(64),
-            context: &context,
+            context: &fixture.context,
             inventory: &inventory(vec![local_only, changed]),
             remote: &remote,
             observed_head: Some(head(&link)),
@@ -1222,6 +1128,8 @@ mod tests {
         let fresh = by_name("fresh").unwrap();
         assert_eq!(fresh.row.relation, CatalogResourceRelation::LocalOnly);
         assert!(fresh.row.selectable && fresh.resource.is_some());
+        assert_eq!(fresh.row.labels.kind_label, "Skills");
+        assert_eq!(fresh.row.scope_label.as_deref(), Some("Provider home"));
         let review = by_name("review").unwrap();
         assert_eq!(review.row.relation, CatalogResourceRelation::LocalChanged);
         assert!(review.row.selectable);
@@ -1237,22 +1145,23 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("Pull installs it"));
+        assert_eq!(plan.target_pins.len(), 1);
     }
 
     #[test]
     fn a_scope_pull_plan_items_every_stored_resource_and_installs_the_missing_one() {
-        let scope = scope();
-        let context = context();
-        let stored = skill_record("review", "review", "Stored body.");
-        let remote = BTreeMap::from([(stored.resource.resource_id(), stored.resource.clone())]);
-        let link = link(&scope, &[]);
-        let never = |_: &LocalCatalogTargetId, _: &str| false;
+        let fixture = fixture();
+        let scope = scope(&fixture);
+        let stored = stored_skill(&fixture, "review", "review", "Stored body.");
+        let remote = BTreeMap::from([(stored.resource_id.clone(), stored.clone())]);
+        let link = link(&fixture, &scope, &[]);
 
         let plan = build_scope_pull_plan(ScopePullPlanInputs {
             scope: &scope,
+            capability: &fixture.capability,
             link: &link,
             storage_identity_sha256: "c".repeat(64),
-            context: &context,
+            context: &fixture.context,
             inventory: &inventory(Vec::new()),
             remote: &remote,
             head: head(&link),
@@ -1269,48 +1178,52 @@ mod tests {
             item.item.disposition,
             CatalogPullDisposition::Executable
         ));
-        assert!(matches!(
-            item.item.actions[0].kind,
-            CatalogPullActionKind::InstallSkill
-        ));
+        let action = &item.item.actions[0];
+        assert!(matches!(action.kind, CatalogPullActionKind::Install));
         assert_eq!(
-            item.item.actions[0].expected_target_state,
+            action.expected_target_state,
             CatalogTargetExpectation::Absent
         );
+        assert!(action.native.is_none());
+        assert_eq!(
+            action.target_path.as_deref(),
+            Some(
+                fixture
+                    .skills_root
+                    .join("review")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(action.target.decode().unwrap().member, "review");
     }
 
     #[test]
     fn two_preservation_copies_in_one_review_get_distinct_names() {
-        let scope = scope();
-        let context = context();
+        let fixture = fixture();
+        let scope = scope(&fixture);
         // Two directory names identical up to the 96-character copy-name stem:
         // their generated copy names would collide without the per-plan
         // claimed-names set.
         let stem = "a".repeat(96);
         let first_name = format!("{stem}b");
         let second_name = format!("{stem}c");
-        let first_local = skill_record(&first_name, "review", "Local a.");
-        let second_local = skill_record(&second_name, "review", "Local b.");
-        let first_stored = skill_record(&first_name, "review", "Stored a.");
-        let second_stored = skill_record(&second_name, "review", "Stored b.");
+        let first_local = skill_record(&fixture, &first_name, "review-one", "Local a.");
+        let second_local = skill_record(&fixture, &second_name, "review-two", "Local b.");
+        let first_stored = stored_skill(&fixture, &first_name, "review-one", "Stored a.");
+        let second_stored = stored_skill(&fixture, &second_name, "review-two", "Stored b.");
         let remote = BTreeMap::from([
-            (
-                first_stored.resource.resource_id(),
-                first_stored.resource.clone(),
-            ),
-            (
-                second_stored.resource.resource_id(),
-                second_stored.resource.clone(),
-            ),
+            (first_stored.resource_id.clone(), first_stored),
+            (second_stored.resource_id.clone(), second_stored),
         ]);
-        let link = link(&scope, &[]);
-        let never = |_: &LocalCatalogTargetId, _: &str| false;
+        let link = link(&fixture, &scope, &[]);
 
         let plan = build_scope_pull_plan(ScopePullPlanInputs {
             scope: &scope,
+            capability: &fixture.capability,
             link: &link,
             storage_identity_sha256: "c".repeat(64),
-            context: &context,
+            context: &fixture.context,
             inventory: &inventory(vec![first_local, second_local]),
             remote: &remote,
             head: head(&link),
@@ -1336,20 +1249,17 @@ mod tests {
 
     #[test]
     fn a_cross_storage_claim_escalates_storage_changed_to_the_preserve_pair() {
-        let scope = scope();
-        let context = context();
-        let base = "b".repeat(64);
-        let mut local = skill_record("review", "review", "Base body.");
-        if let CatalogResource::AgentSkill(skill) = &mut local.resource {
-            skill.content_sha256 = base.clone();
-        }
-        let stored = skill_record("review", "review", "Newer stored body.");
-        let resource_id = stored.resource.resource_id();
-        let remote = BTreeMap::from([(resource_id.clone(), stored.resource.clone())]);
-        let link = link(&scope, &[(resource_id.clone(), base.clone())]);
-        let never = |_: &LocalCatalogTargetId, _: &str| false;
+        let fixture = fixture();
+        let scope = scope(&fixture);
+        let local = skill_record(&fixture, "review", "review", "Base body.");
+        let base = local.resource.content_sha256.clone();
+        let stored = stored_skill(&fixture, "review", "review", "Newer stored body.");
+        let resource_id = stored.resource_id.clone();
+        let remote = BTreeMap::from([(resource_id.clone(), stored)]);
+        let link = link(&fixture, &scope, &[(resource_id.clone(), base)]);
         let claims = vec![CatalogClaim {
             target: local.target.clone(),
+            coordinate: fixture.capability.coordinate(),
             storage_id: StorageId::parse("storage-other").unwrap(),
             resource_id: resource_id.clone(),
             content_sha256: "9".repeat(64),
@@ -1360,9 +1270,10 @@ mod tests {
 
         let plan = build_scope_pull_plan(ScopePullPlanInputs {
             scope: &scope,
+            capability: &fixture.capability,
             link: &link,
             storage_identity_sha256: "c".repeat(64),
-            context: &context,
+            context: &fixture.context,
             inventory: &inventory(vec![local]),
             remote: &remote,
             head: head(&link),
@@ -1384,27 +1295,74 @@ mod tests {
             .collect();
         assert_eq!(kinds, vec![true, false]);
         assert!(item.item.actions[1].requires_destructive_approval);
+        let pin = item.item.actions[0].kind.preservation().unwrap();
+        assert_eq!(pin.copy_name, "review-local-copy");
+        assert!(pin.copy_target_path.ends_with("skills/review-local-copy"));
+        // The copy keeps its content transform reproducible: renaming the
+        // same capture again yields the same identity and digest.
+        let inventory = inventory(vec![skill_record(
+            &fixture,
+            "review",
+            "review",
+            "Base body.",
+        )]);
+        let (copy_id, transformed) = transformed_copy_identity(
+            inventory.resources.values().next().unwrap(),
+            "review-local-copy",
+        )
+        .unwrap();
+        assert_eq!(copy_id, pin.copy_resource_id);
+        assert_eq!(transformed, pin.transformed_content_sha256);
+        assert_ne!(copy_id, resource_id);
+    }
+
+    #[test]
+    fn a_foreign_occupant_at_the_target_is_preserved_not_clobbered() {
+        let fixture = fixture();
+        let scope = scope(&fixture);
+        // The same directory holds a skill declaring another name: a
+        // different resource identity occupies the stored resource's target.
+        let occupant = skill_record(&fixture, "review", "review-renamed", "Local body.");
+        let stored = stored_skill(&fixture, "review", "review", "Stored body.");
+        assert_ne!(occupant.resource.resource_id, stored.resource_id);
+        let remote = BTreeMap::from([(stored.resource_id.clone(), stored)]);
+        let link = link(&fixture, &scope, &[]);
+        let plan = build_scope_pull_plan(ScopePullPlanInputs {
+            scope: &scope,
+            capability: &fixture.capability,
+            link: &link,
+            storage_identity_sha256: "c".repeat(64),
+            context: &fixture.context,
+            inventory: &inventory(vec![occupant]),
+            remote: &remote,
+            head: head(&link),
+            claims: &[],
+            requested_copy_names: &BTreeMap::new(),
+            name_taken: &never,
+            now: 100,
+        })
+        .unwrap();
+        let item = &plan.items[0];
+        assert_eq!(item.item.relation, CatalogResourceRelation::StorageOnly);
+        assert!(item.item.actions[0].kind.preservation().is_some());
+        assert!(item.item.actions[1].kind.is_destructive_overwrite());
     }
 
     #[test]
     fn pull_selections_validate_choices_and_destructive_acknowledgements() {
-        let scope = scope();
-        let context = context();
-        let base = "b".repeat(64);
-        let mut local = skill_record("review", "review", "Base body.");
-        if let CatalogResource::AgentSkill(skill) = &mut local.resource {
-            skill.content_sha256 = "9".repeat(64);
-        }
-        let stored = skill_record("review", "review", "Stored body.");
-        let resource_id = stored.resource.resource_id();
-        let remote = BTreeMap::from([(resource_id.clone(), stored.resource.clone())]);
-        let link = link(&scope, &[(resource_id.clone(), base)]);
-        let never = |_: &LocalCatalogTargetId, _: &str| false;
+        let fixture = fixture();
+        let scope = scope(&fixture);
+        let local = skill_record(&fixture, "review", "review", "Local body.");
+        let stored = stored_skill(&fixture, "review", "review", "Stored body.");
+        let resource_id = stored.resource_id.clone();
+        let remote = BTreeMap::from([(resource_id.clone(), stored)]);
+        let link = link(&fixture, &scope, &[(resource_id.clone(), "b".repeat(64))]);
         let plan = build_scope_pull_plan(ScopePullPlanInputs {
             scope: &scope,
+            capability: &fixture.capability,
             link: &link,
             storage_identity_sha256: "c".repeat(64),
-            context: &context,
+            context: &fixture.context,
             inventory: &inventory(vec![local]),
             remote: &remote,
             head: head(&link),
@@ -1415,6 +1373,7 @@ mod tests {
         })
         .unwrap();
         let item = &plan.items[0];
+        assert_eq!(item.item.relation, CatalogResourceRelation::ChangedBoth);
         let overwrite = item
             .item
             .actions
@@ -1442,7 +1401,7 @@ mod tests {
 
         // A foreign action id is refused outright.
         let foreign = BTreeMap::from([(
-            skill_resource_id(AgentSkillScope::CodexHome, "other", "other"),
+            stored_skill(&fixture, "other", "other", "x").resource_id,
             overwrite.action_id.clone(),
         )]);
         assert!(
@@ -1454,15 +1413,14 @@ mod tests {
 
     #[test]
     fn cross_storage_claim_pins_exclude_the_current_storage_and_matching_content() {
-        let target = LocalCatalogTargetId::SkillDirectory {
-            scope: AgentSkillScope::CodexHome,
-            canonical_root: SKILL_ROOT.to_string(),
-            install_directory: "review".to_string(),
-        };
+        let fixture = fixture();
+        let record = skill_record(&fixture, "review", "review", "body");
+        let target = record.target.clone();
         let claim = |storage: &str, digest: char| CatalogClaim {
             target: target.clone(),
+            coordinate: fixture.capability.coordinate(),
             storage_id: StorageId::parse(storage).unwrap(),
-            resource_id: skill_resource_id(AgentSkillScope::CodexHome, "review", "review"),
+            resource_id: record.resource.resource_id.clone(),
             content_sha256: digest.to_string().repeat(64),
             outcome: CatalogActionOutcome::Updated,
             recorded_at: 1,
@@ -1500,19 +1458,29 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["storage-a", "storage-b"]
         );
+
+        // A vacant target carries no conflict pins at all.
+        assert!(conflicting_claim_pins(
+            &claims,
+            &inventory(Vec::new()),
+            &StorageId::parse("storage-current").unwrap(),
+            &target,
+            &"c".repeat(64)
+        )
+        .is_empty());
     }
 
     #[test]
-    fn a_fork_plan_is_scope_keyed_and_kind_guarded() {
-        let scope = scope();
-        let context = context();
-        let record = skill_record("review", "review", "Fork me.");
-        let resource_id = record.resource.resource_id();
-        let never = |_: &LocalCatalogTargetId, _: &str| false;
+    fn a_fork_plan_is_scope_keyed_and_coordinate_guarded() {
+        let fixture = fixture();
+        let scope = scope(&fixture);
+        let record = skill_record(&fixture, "review", "review", "Fork me.");
+        let resource_id = record.resource.resource_id.clone();
         let plan = build_resource_fork_plan(ScopeForkPlanInputs {
             scope: &scope,
+            capability: &fixture.capability,
             resource_id: &resource_id,
-            context: &context,
+            context: &fixture.context,
             inventory: &inventory(vec![record]),
             requested_name: "review-fork",
             name_taken: &never,
@@ -1521,19 +1489,24 @@ mod tests {
         .unwrap();
         assert_eq!(plan.scope_id, scope.scope_id);
         assert_eq!(plan.copy_name, "review-fork");
-        assert_eq!(
-            plan.copy_resource_id,
-            skill_resource_id(AgentSkillScope::CodexHome, "review-fork", "review-fork")
-        );
+        assert_eq!(plan.source_coordinate, fixture.capability.coordinate());
+        assert!(plan.copy_target_path.ends_with("skills/review-fork"));
+        assert_ne!(plan.copy_resource_id, resource_id);
 
-        // A pets scope cannot fork a skill even if the id resolves.
-        let mut pets_scope = scope.clone();
-        pets_scope.resource_kind = CatalogResourceKindTag::CodexPetV1;
-        let record = skill_record("review", "review", "Fork me.");
+        // A row of another coordinate cannot fork this record even if the
+        // id resolves in the inventory it was handed.
+        let pets = fixture
+            .registry
+            .capability(
+                &CatalogCoordinate::new("codex", "desktop_pet", "openai.codex-pet", 1).unwrap(),
+            )
+            .unwrap();
+        let record = skill_record(&fixture, "review", "review", "Fork me.");
         let error = build_resource_fork_plan(ScopeForkPlanInputs {
-            scope: &pets_scope,
+            scope: &scope,
+            capability: &pets,
             resource_id: &resource_id,
-            context: &context,
+            context: &fixture.context,
             inventory: &inventory(vec![record]),
             requested_name: "review-fork",
             name_taken: &never,
@@ -1543,6 +1516,48 @@ mod tests {
         assert!(
             error.contains("does not belong to this Catalog row"),
             "{error}"
+        );
+
+        // A taken name is refused before any transform runs.
+        let record = skill_record(&fixture, "review", "review", "Fork me.");
+        let taken = |_: &CatalogTargetConfig, _: &str| true;
+        assert!(build_resource_fork_plan(ScopeForkPlanInputs {
+            scope: &scope,
+            capability: &fixture.capability,
+            resource_id: &resource_id,
+            context: &fixture.context,
+            inventory: &inventory(vec![record]),
+            requested_name: "review-fork",
+            name_taken: &taken,
+            now: 100,
+        })
+        .unwrap_err()
+        .contains("already in use"));
+    }
+
+    #[test]
+    fn targets_resolve_by_root_class_and_fail_when_the_root_is_absent() {
+        let fixture = fixture();
+        let stored = stored_skill(&fixture, "review", "review", "body");
+        let (target, path) =
+            target_for_resource(&fixture.context, &fixture.capability, &stored).unwrap();
+        assert_eq!(target.target.as_str(), "provider-home.skills");
+        assert_eq!(path.unwrap(), fixture.skills_root.join("review"));
+
+        // A shared-user skill needs the shared root, which this profile does
+        // not resolve.
+        let shared = fixture
+            .capability
+            .codec
+            .capture_directory(&fixture.stored_root.join("review"), "shared-user")
+            .unwrap()
+            .to_envelope(&fixture.capability.coordinate());
+        let error =
+            target_for_resource(&fixture.context, &fixture.capability, &shared).unwrap_err();
+        assert!(error.contains("no shared-user target is active"), "{error}");
+        assert_eq!(
+            CatalogResourceRepositoryId::for_coordinate(&fixture.capability.coordinate()),
+            fixture.capability.repository_id()
         );
     }
 }

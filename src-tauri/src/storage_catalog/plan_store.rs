@@ -83,8 +83,8 @@ pub fn discard_all(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::super::domain::{
-        CatalogLinkId, CatalogResourceKindTag, CatalogResourceRepositoryId, CatalogScopeId,
-        CatalogScopePushPlan, ProviderKey,
+        CatalogCoordinate, CatalogLinkId, CatalogResourceRepositoryId, CatalogScopeId,
+        CatalogScopePushPlan,
     };
     use super::*;
     use mallard_domain::StorageId;
@@ -96,13 +96,12 @@ mod tests {
             link_id: CatalogLinkId::generate().unwrap(),
             link_revision: 1,
             storage_id: StorageId::parse("storage-a").unwrap(),
-            repository_id: CatalogResourceRepositoryId::for_kind(
-                ProviderKey::Codex,
-                CatalogResourceKindTag::AgentSkill,
+            repository_id: CatalogResourceRepositoryId::for_coordinate(
+                &CatalogCoordinate::new("codex", "agent_skill", "agentskills.io.skill", 1).unwrap(),
             ),
             storage_identity_sha256: "a".repeat(64),
             profile_pins: Vec::new(),
-            skill_root_pins: Vec::new(),
+            target_pins: Vec::new(),
             observed_head: None,
             rows: Vec::new(),
             warning_digests: Vec::new(),

@@ -93,7 +93,6 @@ const codexSession = {
   ended_at: 1_752_803_600,
   transcript_path: CODEX_TRANSCRIPT_PATH,
   working_directory: "/Users/test/projects/mallard/packages/desktop",
-  branch: "main",
   recorded_sha: "a".repeat(40),
   is_active: false,
   user_round_count: 3,
@@ -113,7 +112,7 @@ const activity = {
   sessions: [codexSession],
   git: {
     selected_branch: "main",
-    branches: [{ name: "main", is_current: true, available: true }],
+    branches: [{ name: "main", is_current: true }],
     github_repository_url: "https://github.com/Git4Agent/mallard",
     commits: [{
       sha: "b".repeat(40),
@@ -176,13 +175,12 @@ function emptyComparison(overrides: Partial<ThreadSyncComparison> = {}): ThreadS
   };
 }
 
-test("the branch picker exposes branch state without using the native select menu", () => {
+test("the branch picker lists local branches without using the native select menu", () => {
   const html = renderToStaticMarkup(
     <BranchPicker
       branches={[
-        { name: "main", is_current: true, available: true },
-        { name: "release/0.1", is_current: false, available: true },
-        { name: "removed-experiment", is_current: false, available: false },
+        { name: "main", is_current: true },
+        { name: "release/0.1", is_current: false },
       ]}
       selectedBranch="main"
       disabled={false}
@@ -196,9 +194,23 @@ test("the branch picker exposes branch state without using the native select men
   // and the row subtitles are carried by the badges and the row title instead.
   assert.equal(html.match(/>Current</g)?.length, 1);
   assert.doesNotMatch(html, /Checked out locally|Local branch|Recorded session history only/);
-  assert.match(html, />History only</);
-  assert.match(html, /This branch is no longer available locally/);
+  assert.doesNotMatch(html, />History only</);
   assert.doesNotMatch(html, /<select/);
+});
+
+test("switching the Git rail does not clear Push or Pull selection", () => {
+  const source = readFileSync(
+    "src/components/project-sync/ProjectActivityPage.tsx",
+    "utf8",
+  );
+  const changeBranch = source.match(
+    /const changeBranch = useCallback\(\(nextBranch: string\) => \{([\s\S]*?)\n  \}, \[\]\);/,
+  )?.[1] ?? "";
+
+  assert.match(changeBranch, /setBranch\(nextBranch\)/);
+  assert.match(changeBranch, /setPages\(\[\]\)/);
+  assert.match(changeBranch, /load\(null, nextBranch\)/);
+  assert.doesNotMatch(changeBranch, /onDropSelection|setComparison|loadComparison/);
 });
 
 test("path bar counts tally the whole comparison, split by the button that clears them", () => {
@@ -578,7 +590,7 @@ test("a row with no comparison entry names why, instead of drawing nothing", () 
 });
 
 test("every row leads with exactly one glyph, so the titles form a column", () => {
-  // The bug this guards: the badge was conditional, and the empty "uncommitted"
+  // The bug this guards: the badge was conditional, and the empty branch-unmapped
   // placeholder that stood in for it was later rendered *beside* it instead of
   // instead of it. Either way some rows got a different number of leading
   // boxes, and their titles sat 26px off every other row's. Measured in a
@@ -1078,20 +1090,20 @@ test("Push and Pull reviews use only the outer workspace scroll", () => {
   assert.doesNotMatch(pushReviewHandler, /scrollIntoView/);
 });
 
-/* The Storage card and Uncommitted card are the same object drawn in two
+/* The Storage card and branch-unmapped card are the same object drawn in two
    subtrees, so their frames must stay aligned. */
-test("the storage card wears the uncommitted card's frame", () => {
+test("the storage card wears the branch-unmapped card's frame", () => {
   const css = readFileSync("src/App.css", "utf8");
   const declaration = (rule: string, property: string) =>
     rule.match(new RegExp(`[^-]${property}:\\s*([^;]+);`))?.[1];
 
   const cardRule = css.match(/\.project-storage-card\s*\{[^}]+\}/s)?.[0] ?? "";
-  const uncommittedRule = css.match(/\.sync-history-uncommitted\s*\{[^}]+\}/s)?.[0] ?? "";
+  const branchUnmappedRule = css.match(/\.sync-history-branch-unmapped\s*\{[^}]+\}/s)?.[0] ?? "";
   for (const property of ["border", "border-radius", "background"]) {
     assert.equal(
       declaration(cardRule, property),
-      declaration(uncommittedRule, property),
-      `storage card ${property} must match the uncommitted card's`,
+      declaration(branchUnmappedRule, property),
+      `storage card ${property} must match the branch-unmapped card's`,
     );
   }
   assert.match(cardRule, /margin:[^;]*var\(--sync-history-card-offset\)/,
@@ -1104,12 +1116,12 @@ test("the storage card wears the uncommitted card's frame", () => {
   assert.match(tokenScope, /\.project-storage-card/);
 
   const barRule = css.match(/\.project-storage-card > \.sync-history-section-heading\s*\{[^}]+\}/s)?.[0] ?? "";
-  const uncommittedBarRule = css.match(/\.sync-history-uncommitted \.sync-history-section-heading\s*\{[^}]+\}/s)?.[0] ?? "";
+  const branchUnmappedBarRule = css.match(/\.sync-history-branch-unmapped \.sync-history-section-heading\s*\{[^}]+\}/s)?.[0] ?? "";
   for (const property of ["min-height", "padding", "border-bottom"]) {
     assert.equal(
       declaration(barRule, property),
-      declaration(uncommittedBarRule, property),
-      `storage heading bar ${property} must match the uncommitted bar's`,
+      declaration(branchUnmappedBarRule, property),
+      `storage heading bar ${property} must match the branch-unmapped bar's`,
     );
   }
 });
@@ -1205,12 +1217,18 @@ test("activity content renders commit and session rows without repeating project
   assert.match(html, /aria-label="Show session debug info"/);
   assert.match(html, /aria-haspopup="dialog"/);
   assert.match(html, /aria-label="Session debug info"/);
-  assert.match(html, /aria-label="Copy resource id"/);
-  assert.match(html, /aria-label="Copy mallard thread id"/);
-  assert.match(html, /aria-label="Copy native session id"/);
-  assert.match(html, /aria-label="Copy transcript file"/);
-  assert.match(html, /aria-label="Copy working directory"/);
-  assert.doesNotMatch(html, /aria-label="Copy codex home"/);
+  // Each row is named from its own content — the label, then the value — so a
+  // screen reader hears the path it is about to copy. An aria-label would
+  // replace all of it with the verb, which is the one part already visible in
+  // the row's own `Copy`. The mouse tooltip keeps the verb; the last assertion
+  // is what stops an aria-label being helpfully added back.
+  assert.match(html, /title="Copy resource id"/);
+  assert.match(html, /title="Copy mallard thread id"/);
+  assert.match(html, /title="Copy native session id"/);
+  assert.match(html, /title="Copy transcript file"/);
+  assert.match(html, /title="Copy working directory"/);
+  assert.doesNotMatch(html, /title="Copy codex home"/);
+  assert.doesNotMatch(html, /class="sync-history-debug-copy"[^>]*aria-label=/);
   assert.ok(html.includes(CODEX_TRANSCRIPT_PATH));
   assert.match(html, /\/Users\/test\/projects\/mallard\/packages\/desktop/);
   assert.match(html, new RegExp(`<code>${codexResourceId}</code>`));
@@ -1517,7 +1535,7 @@ test("browse-mode session titles navigate without retaining the inline preview",
 });
 
 test("activity follows the project workspace without repeating project controls", () => {
-  const activityWithUncommitted = {
+  const activityWithBranchUnmapped = {
     ...activity,
     sessions: [{
       ...codexSession,
@@ -1531,7 +1549,7 @@ test("activity follows the project workspace without repeating project controls"
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
-      activity={activityWithUncommitted}
+      activity={activityWithBranchUnmapped}
     />,
   );
 
@@ -1540,8 +1558,8 @@ test("activity follows the project workspace without repeating project controls"
   // so the activity region drops a repeated title and keeps its accessible name.
   assert.doesNotMatch(html, /sync-history-embedded-title/);
   assert.match(html, /aria-label="Git history"/);
-  assert.match(html, /class="sync-history-timeline has-uncommitted"/);
-  assert.match(html, /<h2 id="uncommitted-heading"><svg[^>]*data-icon="edit"[^>]*>.*<\/svg>Uncommitted<\/h2>/s);
+  assert.match(html, /class="sync-history-timeline has-branch-unmapped"/);
+  assert.match(html, /<h2 id="branch-unmapped-heading"><svg[^>]*data-icon="edit"[^>]*>.*<\/svg>Uncommitted<\/h2>/s);
   // Local-only unmapped rows never conjure the storage-only group.
   assert.doesNotMatch(html, /storage-only-heading/);
   // The unmapped reason is bookkeeping, not something the reader needs on screen.
@@ -1551,13 +1569,13 @@ test("activity follows the project workspace without repeating project controls"
   // second glyph beside it pushed these rows' titles 26px right of every other
   // row's — measured, not guessed. The group heading still carries the pencil.
   assert.doesNotMatch(html, /sync-history-thread-kind/);
-  const uncommittedRow = html.slice(html.indexOf('id="uncommitted-list"'));
-  assert.match(uncommittedRow, /class="sync-thread-sync-indicator untracked"/);
+  const branchUnmappedRow = html.slice(html.indexOf('id="branch-unmapped-list"'));
+  assert.match(branchUnmappedRow, /class="sync-thread-sync-indicator untracked"/);
   assert.match(html, /<strong title="Test conversation — fork · 2026-08-01 09:00Z">Test conversation — fork<\/strong>/);
   // The count badge is gone from the heading; the fold control carries the
   // count so the group is still announced with its size.
-  assert.match(html, /aria-label="Collapse 1 session not linked to a commit"/);
-  assert.match(html, /class="sync-history-spine-fold"[^>]*aria-label="Collapse 1 session not linked to a commit"[^>]*aria-expanded="true"[^>]*aria-controls="uncommitted-list"/);
+  assert.match(html, /aria-label="Collapse 1 uncommitted session"/);
+  assert.match(html, /class="sync-history-spine-fold"[^>]*aria-label="Collapse 1 uncommitted session"[^>]*aria-expanded="true"[^>]*aria-controls="branch-unmapped-list"/);
   // The status legend is gone; the per-row tooltips carry the same meanings.
   assert.doesNotMatch(html, /sync-history-status-legend/);
   assert.doesNotMatch(html, /Cloud outstanding/);
@@ -1569,7 +1587,7 @@ test("activity follows the project workspace without repeating project controls"
   assert.doesNotMatch(html, /Local storage 1/);
 });
 
-test("storage-only sessions leave Uncommitted for their own group above the rail", () => {
+test("storage-only sessions leave branch-unmapped rows in their own group above the rail", () => {
   const storedId = "019f7798-5437-7632-9dbc-5b589cf68bf1";
   const storedResourceId = `codex:conversation:${storedId}`;
   const storedSession = {
@@ -1605,18 +1623,18 @@ test("storage-only sessions leave Uncommitted for their own group above the rail
   assert.ok(html.indexOf('id="storage-only-heading"') < html.indexOf("sync-history-timeline"));
   assert.match(html, /class="sync-history-heading-count"[^>]*aria-label="1 session not on this computer"/);
   assert.match(html, /class="sync-history-spine-fold"[^>]*aria-label="Collapse 1 session only in Local storage 1"[^>]*aria-expanded="true"[^>]*aria-controls="storage-only-list"/);
-  // Each list holds only its own rows; the local draft keeps Uncommitted and
-  // its fold count follows the split.
-  const storageList = html.slice(html.indexOf('id="storage-only-list"'), html.indexOf('id="uncommitted-list"'));
+  // Each list holds only its own rows; the local session stays in the
+  // branch-unmapped group and its fold count follows the split.
+  const storageList = html.slice(html.indexOf('id="storage-only-list"'), html.indexOf('id="branch-unmapped-list"'));
   assert.match(storageList, /Add horror story document/);
   assert.doesNotMatch(storageList, /Add Git history mapping/);
-  const uncommittedList = html.slice(html.indexOf('id="uncommitted-list"'));
-  assert.match(uncommittedList, /Add Git history mapping/);
-  assert.doesNotMatch(uncommittedList, /Add horror story document/);
-  assert.match(html, /aria-label="Collapse 1 session not linked to a commit"/);
+  const branchUnmappedList = html.slice(html.indexOf('id="branch-unmapped-list"'));
+  assert.match(branchUnmappedList, /Add Git history mapping/);
+  assert.doesNotMatch(branchUnmappedList, /Add horror story document/);
+  assert.match(html, /aria-label="Collapse 1 uncommitted session"/);
 });
 
-test("a page whose unmapped rows are all storage-only renders no Uncommitted group", () => {
+test("a page whose unmapped rows are all storage-only renders no branch-unmapped group", () => {
   const storedId = "019f7798-5437-7632-9dbc-5b589cf68bf1";
   const storedResourceId = `codex:conversation:${storedId}`;
   const storedSession = {
@@ -1644,9 +1662,9 @@ test("a page whose unmapped rows are all storage-only renders no Uncommitted gro
   );
 
   assert.match(html, /id="storage-only-heading"/);
-  // No local unmapped rows: no Uncommitted frame, and the timeline drops the
-  // padding that exists only to clear it.
-  assert.doesNotMatch(html, /uncommitted-heading|has-uncommitted/);
+  // No local unmapped rows: no branch-unmapped frame, and the timeline drops
+  // the padding that exists only to clear it.
+  assert.doesNotMatch(html, /branch-unmapped-heading|has-branch-unmapped/);
   assert.match(html, /class="sync-history-timeline"/);
   // The committed local session still renders on the rail as provenance.
   assert.match(html.slice(html.indexOf("sync-history-commit-rail")), /Add Git history mapping/);
@@ -1975,8 +1993,8 @@ test("unavailable sessions explain why they cannot be synced", () => {
   assert.doesNotMatch(html, /can.t tell which copy is newer/);
 });
 
-test("Push review hides assignment-conflicted sessions", () => {
-  const reason = "Codex Desktop assigns this thread here, but its authoritative home belongs to another live Codex Desktop project.";
+test("Push review hides sessions blocked by provider discovery", () => {
+  const reason = "The provider could not verify this session for sync.";
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
@@ -2108,7 +2126,7 @@ test("mixed-provider rows sort deterministically and never collide on native ids
   // Each row wears its own provider's mark, and both provider marks launch the
   // corresponding desktop app.
   assert.match(html, /aria-label="Open in Codex"><svg[^>]*data-icon="openai"/);
-  assert.match(html, /aria-label="Open in Claude"><svg[^>]*data-icon="claude"/);
+  assert.match(html, /aria-label="Open in Claude"><svg[^>]*data-icon="claude-mark"/);
   assert.ok(html.includes(CODEX_TRANSCRIPT_PATH));
   assert.ok(html.includes(CLAUDE_TRANSCRIPT_PATH));
   assert.equal((html.match(/type="checkbox"/g) ?? []).length, 2);
@@ -2167,7 +2185,7 @@ test("Pull review hides view-only rows but keeps their provider notice", () => {
   assert.equal((html.match(/type="checkbox"/g) ?? []).length, 0);
   assert.doesNotMatch(html, /sync-sync-selectable-row/);
   assert.doesNotMatch(html, /Claude remote session|Unknown provider session/);
-  assert.doesNotMatch(html, /aria-label="Copy transcript file"/);
+  assert.doesNotMatch(html, /title="Copy transcript file"/);
   // The per-provider notice explains the access state once, with the backend's
   // detail carried along — now as one item in the page's single notice zone
   // rather than a box of its own.
@@ -2365,6 +2383,7 @@ test("completed projects use their main row for history and only mark Git reposi
       storages={[]}
       storageUsage={{}}
       storageDrafts={[]}
+        storageProviders={[]}
       onOpenStorageDraft={() => undefined}
       onDiscardStorageDraft={() => undefined}
       activeProjectId={project.local_project_id}
@@ -2408,40 +2427,37 @@ test("completed projects use their main row for history and only mark Git reposi
   assert.match(html, /aria-label="Mallard local, Git repository"/);
   assert.doesNotMatch(html, /sync-repository-kind|>git<\/span>/);
   assert.doesNotMatch(html, /Default Codex|myconf3 · Codex/);
-  const primaryNav = html.slice(
-    html.indexOf('<nav class="sync-primary-nav"'),
-    html.indexOf("</nav>") + "</nav>".length,
+  // From inside the opening tag, so the nav's own label is not one of the tabs.
+  const stripStart = html.indexOf('<nav class="sidebar-root-tabs"');
+  const strip = html.slice(html.indexOf(">", stripStart) + 1, html.indexOf("</nav>"));
+  const tabs = [...strip.matchAll(/aria-label="([^"]+)"/g)].map((match) => match[1]);
+  // Each root is named once, here, and nowhere else in the sidebar: Catalog is
+  // a destination like Projects and Storages, Settings sits after them, and
+  // Logs stays last because it toggles a drawer instead of navigating.
+  assert.deepEqual(tabs, ["Projects", "Catalog", "Storages", "Settings", "Logs"]);
+  // Icon-only, so the open destination is stated and not only drawn.
+  assert.match(strip, /aria-current="page" aria-label="Projects"/);
+  assert.equal((strip.match(/aria-current="page"/g) ?? []).length, 1);
+  assert.doesNotMatch(strip, /> Projects<|> Storages<|> Catalog</);
+
+  // One rail below it, holding the root the workspace is standing in — with
+  // no page open that is Projects — and its count.
+  const rail = html.slice(
+    html.indexOf('<section class="sync-sidebar-rail"'),
+    html.indexOf("</section>") + "</section>".length,
   );
-  const projectsNavIndex = primaryNav.indexOf(" Projects</button>");
-  const storagesNavIndex = primaryNav.indexOf(" Storages</button>");
-  const catalogNavIndex = primaryNav.indexOf(" Catalog</button>");
-  const settingsNavIndex = primaryNav.indexOf(" Settings</button>");
-  const logsNavIndex = primaryNav.indexOf(" Logs</button>");
-  assert.ok(projectsNavIndex >= 0);
-  // Catalog is a destination like Projects and Storages, so it joins them in
-  // the nav; Settings sits above Logs, and Logs stays last because it toggles
-  // a drawer instead of navigating.
-  assert.ok(catalogNavIndex > projectsNavIndex);
-  assert.ok(storagesNavIndex > catalogNavIndex);
-  assert.ok(settingsNavIndex > storagesNavIndex);
-  assert.ok(logsNavIndex > settingsNavIndex);
-  assert.match(html, /aria-label="Storages"/);
-  assert.match(html, />Storages<\/span>/);
-  const catalogPaneIndex = html.indexOf('<section class="sidebar-split-pane sidebar-catalog-pane"');
-  const storagePaneIndex = html.indexOf('<section class="sidebar-split-pane sidebar-storage-pane"');
-  assert.ok(catalogPaneIndex >= 0 && storagePaneIndex > catalogPaneIndex);
-  // Every seam down the rail is a handle — each one is the same 3px of frame
-  // colour, so any that did nothing read as a handle that was simply broken.
-  assert.match(html, /role="separator" aria-label="Resize navigation and Projects sections" aria-orientation="horizontal"/);
-  assert.match(html, /aria-valuetext="Navigation height: fits contents"/);
-  assert.match(html, /role="separator" aria-label="Resize Projects and Catalog sections" aria-orientation="horizontal"/);
-  assert.match(html, /role="separator" aria-label="Resize Catalog and Storages sections" aria-orientation="horizontal"/);
-  assert.match(html, /aria-valuenow="56"/);
-  // Storages is content-sized (capped at 40% of the box), so it reports fitting
-  // its contents until the handle pins it to a height rather than carrying a
-  // share of the box.
-  assert.match(html, /aria-valuetext="Storage height: fits contents"/);
-  assert.doesNotMatch(html, /sidebar-section-count/);
+  assert.match(rail, /aria-label="Projects"/);
+  // One draft and two projects: the count is the rows, drafts included.
+  assert.match(rail, /class="sidebar-section-count">3</);
+  assert.match(rail, /<span>Mallard local<\/span>/);
+  assert.doesNotMatch(rail, /<span>Local storage 1<\/span>/);
+  // Nothing between the tiles is a handle any more: the head is fixed, the
+  // rail takes the rest, and neither is drag-sized.
+  assert.doesNotMatch(html, /role="separator" aria-orientation="horizontal"/);
+  // The heading is a label now, not a disclosure — aria-expanded belongs to
+  // the Logs tab alone, which owns a drawer.
+  assert.doesNotMatch(html, /sidebar-section-divider|sidebar-section-toggle/);
+  assert.equal((html.match(/aria-expanded=/g) ?? []).length, 1);
   assert.doesNotMatch(html, /Git Based|Non-Git Based/);
   assert.doesNotMatch(html, /Project settings for Mallard local/);
   assert.doesNotMatch(html, /View history for draft repo/);
@@ -2472,6 +2488,7 @@ test("the project menu accepts multiple bound provider profiles", () => {
       storages={[]}
       storageUsage={{}}
       storageDrafts={[]}
+        storageProviders={[]}
       onOpenStorageDraft={() => undefined}
       onDiscardStorageDraft={() => undefined}
       activeProjectId="project-multiple-profiles"
@@ -2520,190 +2537,69 @@ test("the project menu accepts multiple bound provider profiles", () => {
   assert.equal((html.match(/sync-sidebar-profile-warning/g) ?? []).length, 1);
 });
 
-/* One prop bundle for the collapse tests; the fixtures vary per test. */
-const sidebarChrome = {
-  activeDraftId: null,
-  storageUsage: {},
-  onOpenStorageDraft: () => undefined,
-  onDiscardStorageDraft: () => undefined,
-  activeProjectId: null,
-  activeStorageId: null,
-  activeCatalogScopeId: null,
-  addingCatalogScope: false,
-  settingsOpen: false,
-  catalogIndexOpen: false,
-  storageIndexOpen: false,
-  loading: false,
-  busy: false,
-  activityOpen: false,
-  unreadLogs: 0,
-  onOpenProjects: () => undefined,
-  onSelectProject: () => undefined,
-  onRemoveProject: () => undefined,
-  onSelectDraft: () => undefined,
-  onDiscardDraft: () => undefined,
-  onToggleActivity: () => undefined,
-  onAddProject: () => undefined,
-  onOpenSettings: () => undefined,
-  onOpenStorage: () => undefined,
-  onRemoveStorage: () => undefined,
-  onAddStorage: () => undefined,
-  onOpenCatalogIndex: () => undefined,
-  onOpenCatalogScope: () => undefined,
-  onAddCatalogScope: () => undefined,
-  onRemoveCatalogScope: () => undefined,
-  onOpenStorageIndex: () => undefined,
-} satisfies Partial<ComponentProps<typeof ProjectSidebar>>;
-
-test("every section heading is a disclosure and a fresh render opens all three", () => {
-  const html = renderToStaticMarkup(
-    <ProjectSidebar
-      {...sidebarChrome}
-      projects={[project]}
-      drafts={[]}
-      storages={[]}
-      storageDrafts={[]}
-      catalogScopes={[]}
-    />,
-  );
-  // The label half of each heading is the toggle — a real button, so the add
-  // action must be its sibling, never its child.
-  assert.equal((html.match(/sidebar-section-toggle/g) ?? []).length, 3);
-  assert.equal((html.match(/aria-expanded="true" aria-controls="sidebar-[a-z]+-list"/g) ?? []).length, 3);
-  for (const section of ["projects", "catalog", "storages"]) {
-    assert.match(html, new RegExp(`aria-controls="sidebar-${section}-list"`));
-    assert.match(html, new RegExp(`id="sidebar-${section}-list"`));
-  }
-  // Open panes hide nothing and carry no collapsed dressing: no hidden lists,
-  // no closed-tile class, no count chips (gated above too), live handles only.
-  assert.doesNotMatch(html, /hidden=""/);
-  assert.doesNotMatch(html, /sidebar-split-pane sidebar-[a-z]+-pane collapsed/);
-  assert.doesNotMatch(html, /sidebar-section-divider inert/);
-  assert.doesNotMatch(html, /aria-disabled="true" tabindex="-1"/);
-});
-
-test("collapsed sections keep their signals and quiet their handles", () => {
-  // The collapse set is read from browser storage at render time, and these
-  // renders are the one place a stubbed window stands in for it.
-  const globals = globalThis as { window?: unknown };
-  globals.window = {
-    localStorage: {
-      getItem: (key: string) => (key === "mallard.sidebar-section-collapsed" ? "projects,storages" : null),
-    },
-  };
-  try {
-    const html = renderToStaticMarkup(
-      <ProjectSidebar
-        {...sidebarChrome}
-        projects={[project, { ...project, local_project_id: "project-no-profile", local_alias: "No profile", profile_ids: {} }]}
-        drafts={[]}
-        storages={[{
-          id: "storage-local",
-          name: "Local storage 1",
-          kind: "local",
-          bucket: "",
-          access_key_id: "",
-          secret_access_key: "",
-          account_id: "",
-          s3_endpoint: "",
-          region: "",
-          local_dir: "/tmp/storage",
-        }]}
-        storageIssues={{ "storage-local": "The storage folder is missing." }}
-        storageDrafts={[]}
-        catalogScopes={[]}
-      />,
-    );
-    // Closed panes: toggle reports the state, the list is hidden, the tile
-    // wears the collapsed class; Catalog stays open between them. (Scoped to
-    // the toggles — the Logs nav button also carries aria-expanded.)
-    assert.equal((html.match(/class="sidebar-section-toggle" aria-expanded="false"/g) ?? []).length, 2);
-    assert.equal((html.match(/class="sidebar-section-toggle" aria-expanded="true"/g) ?? []).length, 1);
-    assert.equal((html.match(/hidden=""/g) ?? []).length, 2);
-    assert.match(html, /sidebar-split-pane sidebar-project-pane collapsed/);
-    assert.match(html, /sidebar-split-pane sidebar-storage-pane collapsed/);
-    assert.match(html, /sidebar-split-pane sidebar-catalog-pane"/);
-    // A closed heading still reports its list: the count chip, and the flag
-    // named on the button rather than only drawn (both panes carry one here).
-    assert.equal((html.match(/sidebar-section-count/g) ?? []).length, 2);
-    assert.match(html, /aria-label="Projects, 2 rows, contains a flagged row"/);
-    assert.match(html, /aria-label="Storages, 1 row, contains a flagged row"/);
-    assert.equal((html.match(/sidebar-section-alert/g) ?? []).length, 2);
-    // Both handles border a closed pane, so both are inert: seam kept, drag
-    // affordance and keyboard stop gone.
-    assert.equal((html.match(/sidebar-section-divider inert/g) ?? []).length, 2);
-    assert.equal((html.match(/aria-disabled="true" tabindex="-1"/g) ?? []).length, 2);
-    // Closed rows are min-content; the open Catalog keeps its elastic factor
-    // between them. (The factor's digits are floating-point noise; the row
-    // shape is what this pins.)
-    assert.match(html, /grid-template-rows:min-content 8px minmax\(96px, [0-9.]+fr\) 8px min-content/);
-    // The closed Storages tile sheds its 96px floor with its list.
-    assert.doesNotMatch(html, /aria-label="Storages"[^>]*style="min-height:96px"/);
-  } finally {
-    delete globals.window;
-  }
-});
-
-test("a closed Catalog passes the Storages pin through both gutters", () => {
-  const globals = globalThis as { window?: unknown };
-  globals.window = {
-    localStorage: {
-      getItem: (key: string) => (key === "mallard.sidebar-section-collapsed" ? "catalog" : null),
-    },
-  };
-  try {
-    const html = renderToStaticMarkup(
-      <ProjectSidebar
-        {...sidebarChrome}
-        projects={[project]}
-        drafts={[]}
-        storages={[]}
-        storageDrafts={[]}
-        catalogScopes={[]}
-      />,
-    );
-    // Neither gutter dies with the closed tile between them: both re-pin
-    // Storages across it, named for the panes the drag actually moves, the
-    // way a sash resizes across a collapsed view in VS Code.
-    assert.doesNotMatch(html, /sidebar-section-divider inert/);
-    assert.equal(
-      (html.match(/aria-label="Resize Projects and Storages sections"/g) ?? []).length,
-      2,
-    );
-    // Both carry the pin's value, not the share's percentage.
-    assert.equal((html.match(/aria-valuetext="Storage height: fits contents"/g) ?? []).length, 2);
-    assert.doesNotMatch(html, /aria-valuenow="56"/);
-  } finally {
-    delete globals.window;
-  }
-});
-
-test("the Catalog pane starts empty and lists one row per added scope", () => {
+test("the Catalog rail starts empty and lists one row per added scope", () => {
+  // Rows in the backend's shape: a registered capability — the coordinate,
+  // its labels, its presentation hint — and the scope at that coordinate
+  // joined to it, the way the shell joins them.
+  const shapes = {
+    Skills: { resource_kind: "agent_skill", format: "agentskills.io.skill", format_version: 1, icon: "skill", kind_label: "Skills", singular_label: "Skill", format_label: "Agent Skill" },
+    "Pets v1": { resource_kind: "desktop_pet", format: "openai.codex-pet", format_version: 1, icon: "pet", kind_label: "Pets", singular_label: "Pet v1", format_label: "Codex pet v1" },
+    "Pets v2": { resource_kind: "desktop_pet", format: "openai.codex-pet", format_version: 2, icon: "pet-v2", kind_label: "Pets", singular_label: "Pet v2", format_label: "Codex pet v2" },
+  } as const;
   const scopeView = (
     scopeId: string,
-    resourceKind: "agent_skill" | "plugin_install_intent" | "codex_pet_v1" | "codex_pet_v2",
+    label: keyof typeof shapes,
     displayName: string,
-  ) => ({
-    scope: {
-      scope_id: scopeId,
-      provider: "codex" as const,
-      profile_id: `catprofile-${displayName}`,
-      resource_kind: resourceKind,
-      revision: 1,
-      created_at: 1,
-      updated_at: 1,
-    },
-    profile: {
-      profile_id: `catprofile-${displayName}`,
-      provider_key: "codex" as const,
-      display_name: displayName,
-      configured_home: `/Users/user/${displayName}`,
-      revision: 1,
-      created_at: 1,
-      updated_at: 1,
-    },
-  });
-  const render = (scopes: ReturnType<typeof scopeView>[], activeScopeId: string | null) =>
+  ): ComponentProps<typeof ProjectSidebar>["catalogScopes"][number] => {
+    const shape = shapes[label];
+    const capability = {
+      provider: "codex",
+      provider_label: "Codex",
+      resource_kind: shape.resource_kind,
+      format: shape.format,
+      format_version: shape.format_version,
+      label,
+      singular_label: shape.singular_label,
+      presentation: { icon: shape.icon, kind_label: shape.kind_label, format_label: shape.format_label },
+      capture: "directory_tree" as const,
+      apply: "automatic" as const,
+      targets: [],
+    };
+    return {
+      scope: {
+        scope_id: scopeId,
+        provider: capability.provider,
+        profile_id: `catprofile-${displayName}`,
+        resource_kind: capability.resource_kind,
+        format: capability.format,
+        format_version: capability.format_version,
+        revision: 1,
+        created_at: 1,
+        updated_at: 1,
+      },
+      profile: {
+        profile_id: `catprofile-${displayName}`,
+        provider: "codex",
+        provider_label: "Codex",
+        display_name: displayName,
+        configured_home: `/Users/user/${displayName}`,
+        revision: 1,
+        created_at: 1,
+        updated_at: 1,
+      },
+      provider_label: capability.provider_label,
+      kind_label: capability.presentation.kind_label,
+      format_label: capability.presentation.format_label,
+      label,
+      available: true,
+      capability,
+    };
+  };
+  const render = (
+    scopes: ReturnType<typeof scopeView>[],
+    activeScopeId: string | null,
+    capabilities: NonNullable<ReturnType<typeof scopeView>["capability"]>[] = [],
+  ) =>
     renderToStaticMarkup(
       <ProjectSidebar
         projects={[project]}
@@ -2712,14 +2608,18 @@ test("the Catalog pane starts empty and lists one row per added scope", () => {
         storages={[]}
         storageUsage={{}}
         storageDrafts={[]}
+        storageProviders={[]}
         onOpenStorageDraft={() => undefined}
         onDiscardStorageDraft={() => undefined}
         activeProjectId={null}
         activeStorageId={null}
         catalogScopes={scopes}
+        catalogCapabilities={capabilities}
         activeCatalogScopeId={activeScopeId}
         addingCatalogScope={false}
-        catalogIndexOpen={false}
+        /* The rail shows the root the workspace is standing in: a selected
+           row puts Catalog there, and with none selected the index does. */
+        catalogIndexOpen={activeScopeId === null}
         storageIndexOpen={false}
         settingsOpen={false}
         loading={false}
@@ -2744,38 +2644,64 @@ test("the Catalog pane starts empty and lists one row per added scope", () => {
         onOpenStorageIndex={() => undefined}
       />,
     );
+  // The rail, not the strip: the Catalog tab carries the same name.
   const catalogPane = (html: string) => {
-    const start = html.indexOf('aria-label="Catalog"');
+    const start = html.indexOf('<section class="sync-sidebar-rail" aria-label="Catalog"');
     return html.slice(start, html.indexOf("</section>", start));
   };
 
-  // Fresh state: no permanent Skills/Plugins/Pets rows, just the Add prompt.
-  const emptyHtml = render([], null);
+  // Fresh state: no permanent Skills/Plugins/Pets rows. One dashed tile per
+  // shape the registry offers — glyph and plus, no words — each opening Add
+  // with that Kind already chosen; the heading keeps the bare verb.
+  const registered = (label: Parameters<typeof scopeView>[1]) => {
+    const { capability } = scopeView("catscope-registry", label, "Codex home");
+    assert.ok(capability);
+    return capability;
+  };
+  const emptyHtml = render([], null, [registered("Skills"), registered("Pets v1")]);
   const emptyPane = catalogPane(emptyHtml);
   assert.match(emptyPane, /aria-label="Add Catalog resource"/);
-  assert.match(emptyPane, /Add your first resource/);
-  assert.doesNotMatch(emptyPane, /<span>Skills<\/span>|<span>Plugins<\/span>|<span>Pets<\/span>/);
+  const tiles = [...emptyPane.matchAll(/class="sidebar-door" title="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(tiles, ["Add Skills", "Add Pets v1"]);
+  assert.match(emptyPane, /aria-label="Add Skills"[^]*?data-icon="lightbulb"[^]*?data-icon="plus"/);
+  assert.match(emptyPane, /aria-label="Add Pets v1"[^]*?data-icon="paw"/);
+  assert.doesNotMatch(emptyPane, /Add your first|sync-sidebar-empty|<span>Skills<\/span>|<span>Plugins<\/span>|<span>Pets<\/span>/);
+  // Before the registry answers, the one tile is the chooser itself.
+  assert.match(catalogPane(render([], null)), /class="sidebar-door" title="Add resource"[^]*?data-icon="catalog"/);
 
   // Two Codex configs give the same kind two distinct rows, labelled by
   // config name; pet v1 and v2 from one config are two separate rows.
   const html = render([
-    scopeView("catscope-1", "agent_skill", "Codex home"),
-    scopeView("catscope-2", "agent_skill", "conf2"),
-    scopeView("catscope-3", "codex_pet_v1", "Codex home"),
-    scopeView("catscope-4", "codex_pet_v2", "Codex home"),
+    scopeView("catscope-1", "Skills", "Codex home"),
+    scopeView("catscope-2", "Skills", "conf2"),
+    scopeView("catscope-3", "Pets v1", "Codex home"),
+    scopeView("catscope-4", "Pets v2", "Codex home"),
   ], "catscope-2");
   const pane = catalogPane(html);
+  // Each row wears the glyph its capability's presentation hint names.
+  assert.match(pane, /data-icon="lightbulb"[^]*?Skills · Codex home/);
+  assert.match(pane, /data-icon="paw"[^]*?Pets v1 · Codex home/);
+  assert.match(pane, /data-icon="cat"[^]*?Pets v2 · Codex home/);
   assert.match(pane, /<span>Skills · Codex home<\/span>/);
   assert.match(pane, /<span>Skills · conf2<\/span>/);
   assert.match(pane, /<span>Pets v1 · Codex home<\/span>/);
   assert.match(pane, /<span>Pets v2 · Codex home<\/span>/);
   assert.match(pane, /sidebar-profile-item active[^]*?Skills · conf2/);
   assert.match(pane, /aria-label="Remove the Skills · conf2 row"/);
-  assert.doesNotMatch(pane, /Add your first resource/);
+  assert.doesNotMatch(pane, /sidebar-door/);
 });
 
-test("an empty Storages pane prompts the way Projects and Catalog do", () => {
-  const render = (storages: ComponentProps<typeof ProjectSidebar>["storages"]) =>
+test("an empty Storages rail prompts the way Projects and Catalog do", () => {
+  const providers = [
+    { key: "local", config_version: 1, display_name: "Local folder", description: "A folder.", icon: "drive", fields: [] },
+    { key: "cloud-a", config_version: 1, display_name: "Cloud A", description: "A bucket.", icon: "cloud", fields: [] },
+    // A second config version of a provider is the same door.
+    { key: "cloud-a", config_version: 2, display_name: "Cloud A", description: "A bucket.", icon: "cloud", fields: [] },
+  ] as unknown as ComponentProps<typeof ProjectSidebar>["storageProviders"];
+  const render = (
+    storages: ComponentProps<typeof ProjectSidebar>["storages"],
+    storageProviders: ComponentProps<typeof ProjectSidebar>["storageProviders"] = providers,
+  ) =>
     renderToStaticMarkup(
       <ProjectSidebar
         projects={[project]}
@@ -2784,6 +2710,7 @@ test("an empty Storages pane prompts the way Projects and Catalog do", () => {
         storages={storages}
         storageUsage={{}}
         storageDrafts={[]}
+        storageProviders={storageProviders}
         onOpenStorageDraft={() => undefined}
         onDiscardStorageDraft={() => undefined}
         activeProjectId={null}
@@ -2792,7 +2719,8 @@ test("an empty Storages pane prompts the way Projects and Catalog do", () => {
         activeCatalogScopeId={null}
         addingCatalogScope={false}
         catalogIndexOpen={false}
-        storageIndexOpen={false}
+        /* Storages owns the rail while its index is the page. */
+        storageIndexOpen={true}
         settingsOpen={false}
         loading={false}
         busy={false}
@@ -2817,53 +2745,59 @@ test("an empty Storages pane prompts the way Projects and Catalog do", () => {
       />,
     );
 
+  // The rail, not the strip: the Storages tab carries the same name.
   const storagePane = (html: string) => {
-    const start = html.indexOf('aria-label="Storages"');
+    const start = html.indexOf('<section class="sync-sidebar-rail" aria-label="Storages"');
     return html.slice(start, html.indexOf("</section>", start));
   };
 
-  // The three panes say the same thing when they are empty, in the same row.
+  // All three roots say the same thing when they are empty: dashed tiles,
+  // one per way Add can start — here one per provider the build ships.
   const empty = storagePane(render([]));
-  assert.match(empty, /class="sync-sidebar-empty"/);
-  assert.match(empty, /Add your first storage/);
+  const tiles = [...empty.matchAll(/class="sidebar-door" title="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(tiles, ["Add Local folder storage", "Add Cloud A storage"]);
+  assert.match(empty, /aria-label="Add Local folder storage"[^]*?data-icon="drive"[^]*?data-icon="plus"/);
+  assert.match(empty, /aria-label="Add Cloud A storage"[^]*?data-icon="cloud"/);
+  assert.doesNotMatch(empty, /Add your first|sync-sidebar-empty/);
+  // Before the descriptors arrive, the one tile is the picker itself.
+  assert.match(storagePane(render([], [])), /class="sidebar-door" title="Add storage"[^]*?data-icon="drive"/);
 
   // And it is a first-run prompt, not a permanent Add row.
   const settled = storagePane(render([{
-    id: "storage-1",
+    storage_id: "storage-1",
     name: "Local storage 1",
-    kind: "local",
-    bucket: "",
-    access_key_id: "",
-    secret_access_key: "",
-    account_id: "",
-    s3_endpoint: "",
-    region: "",
-    local_dir: "/tmp/storage",
+    provider: "local",
+    config_version: 1,
+    provider_label: "Local folder",
+    icon: "drive",
+    available: true,
+    summary: [{ field_id: "directory", label: "Folder", value: "/tmp/storage", is_path: true }],
   }]));
   assert.match(settled, /<span>Local storage 1<\/span>/);
-  assert.doesNotMatch(settled, /Add your first storage/);
+  assert.doesNotMatch(settled, /sidebar-door/);
 });
 
 test("the sidebar locks project and storage navigation during a sync workflow", () => {
-  const html = renderToStaticMarkup(
+  // One rail shows one root, so the lock is read on each of the two it can
+  // lock: the project rows on Projects, the storage rows on Storages.
+  const render = (storageIndexOpen: boolean) => renderToStaticMarkup(
     <ProjectSidebar
       projects={[project]}
       drafts={[]}
       activeDraftId={null}
       storages={[{
-        id: "storage-1",
+        storage_id: "storage-1",
         name: "Local storage 1",
-        kind: "local",
-        bucket: "",
-        access_key_id: "",
-        secret_access_key: "",
-        account_id: "",
-        s3_endpoint: "",
-        region: "",
-        local_dir: "/tmp/storage",
+        provider: "local",
+        config_version: 1,
+        provider_label: "Local folder",
+        icon: "drive",
+        available: true,
+        summary: [{ field_id: "directory", label: "Folder", value: "/tmp/storage", is_path: true }],
       }]}
       storageUsage={{ "storage-1": 1 }}
       storageDrafts={[]}
+        storageProviders={[]}
       onOpenStorageDraft={() => undefined}
       onDiscardStorageDraft={() => undefined}
       storageIssues={{ "storage-1": "Storage folder unavailable." }}
@@ -2873,7 +2807,7 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
       activeCatalogScopeId={null}
       addingCatalogScope={false}
       catalogIndexOpen={false}
-      storageIndexOpen={false}
+      storageIndexOpen={storageIndexOpen}
       settingsOpen={false}
       loading={false}
       busy
@@ -2898,16 +2832,18 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
     />,
   );
 
-  const projectMarker = html.indexOf("<span>Mallard local</span>");
-  const projectButton = html.slice(html.lastIndexOf("<button", projectMarker), html.indexOf(">", html.lastIndexOf("<button", projectMarker)) + 1);
-  const storageMarker = html.indexOf("<span>Local storage 1</span>");
-  const storageButton = html.slice(html.lastIndexOf("<button", storageMarker), html.indexOf(">", html.lastIndexOf("<button", storageMarker)) + 1);
-  const addStorageMarker = html.indexOf('aria-label="Add storage"');
-  const addStorageButton = html.slice(html.lastIndexOf("<button", addStorageMarker), html.indexOf(">", addStorageMarker) + 1);
-  const removeStorageMarker = html.indexOf('aria-label="Remove Local storage 1 from Mallard"');
-  const removeStorageButton = html.slice(
-    html.lastIndexOf("<button", removeStorageMarker),
-    html.indexOf("</button>", removeStorageMarker) + "</button>".length,
+  const html = render(false);
+  const storageHtml = render(true);
+  const buttonAt = (source: string, marker: number) =>
+    source.slice(source.lastIndexOf("<button", marker), source.indexOf(">", source.lastIndexOf("<button", marker)) + 1);
+
+  const projectButton = buttonAt(html, html.indexOf("<span>Mallard local</span>"));
+  const storageButton = buttonAt(storageHtml, storageHtml.indexOf("<span>Local storage 1</span>"));
+  const addStorageButton = buttonAt(storageHtml, storageHtml.indexOf('aria-label="Add storage"'));
+  const removeStorageMarker = storageHtml.indexOf('aria-label="Remove Local storage 1 from Mallard"');
+  const removeStorageButton = storageHtml.slice(
+    storageHtml.lastIndexOf("<button", removeStorageMarker),
+    storageHtml.indexOf("</button>", removeStorageMarker) + "</button>".length,
   );
 
   assert.match(projectButton, /disabled=""/);
@@ -2917,8 +2853,11 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
   assert.match(removeStorageButton, /disabled=""/);
   assert.match(removeStorageButton, /data-icon="trash"/);
   assert.doesNotMatch(html, /data-icon="more"/);
-  assert.match(html, /sync-sidebar-storage-warning/);
+  assert.match(storageHtml, /sync-sidebar-storage-warning/);
   assert.match(storageButton, /Storage issue: Storage folder unavailable\./);
+  // Busy locks the strip as well: no destination can be left mid-workflow.
+  // Logs is the exception — a drawer over the page, not a way off it.
+  assert.equal((html.match(/class="sidebar-root-tab[^"]*"[^>]*disabled=""/g) ?? []).length, 4);
 });
 
 test("the rail's foot names the day one press lands on", () => {
@@ -3026,17 +2965,6 @@ test("an empty rail is still the rail, and says which of three things happened",
   );
   assert.match(unborn, /<strong>No commits yet<\/strong>/);
 
-  const historyOnly = renderToStaticMarkup(
-    <ProjectChatHistoryContent
-      {...contentDefaults}
-      activity={{
-        ...activity,
-        git: { ...noCommits, branches: [{ name: "main", is_current: false, available: false }] },
-      }}
-    />,
-  );
-  assert.match(historyOnly, /<strong>Branch not checked out here<\/strong>/);
-  assert.match(historyOnly, /data-icon="git-branch"/);
 });
 
 test("a project with no repository gets the same control, minus the rail", () => {
@@ -3089,6 +3017,98 @@ test("a review shows the whole span at once: no paging, no fold, unlisted entrie
   assert.match(standing, /<strong>Load earlier<\/strong>/);
 });
 
+test("a Push candidate missing from the selected branch projection remains visible", () => {
+  const nativeId = "claude-off-rail";
+  const sessionResourceId = `claude:conversation:${nativeId}`;
+  const reviewResourceId = `claude:session:${nativeId}`;
+  const claudeSession = {
+    ...codexSession,
+    resource_id: sessionResourceId,
+    provider: "claude",
+    provider_display_name: "Claude",
+    provider_session_id: nativeId,
+    logical_thread_id: nativeId,
+    transcript_path: CLAUDE_TRANSCRIPT_PATH,
+    title: "Claude session absent from this commit rail",
+    actions: [],
+  };
+  const entry: ThreadSyncEntry = {
+    provider: "claude",
+    provider_display_name: "Claude",
+    access: "bound_ready",
+    thread_id: nativeId,
+    conversation_resource_id: sessionResourceId,
+    resource_id: reviewResourceId,
+    display_name: claudeSession.title,
+    state: "local_only",
+    local_present: true,
+    storage_present: false,
+    compared_against_storage: true,
+    provider_thread_id: nativeId,
+    push_decision: { action: "create_cloud", selectable: true },
+    pull_decision: { action: "no_changes", selectable: false },
+  };
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{
+        ...activity,
+        sessions: [claudeSession],
+        git: {
+          ...activity.git,
+          commits: [{ ...activity.git.commits[0], session_refs: [] }],
+          unique_session_count: 0,
+        },
+        // A defensive Push/Pull invariant: even if an Activity projection is
+        // incomplete, the comparison entry must not disappear with it.
+        unmapped: [],
+      }}
+      comparison={emptyComparison({ entries: [entry] })}
+      activeStorageName="Local storage 1"
+      selectionMode="push"
+      selectedResourceIds={new Set([reviewResourceId])}
+      selectableResourceIds={new Set([reviewResourceId])}
+    />,
+  );
+
+  assert.match(html, /aria-label="Sessions without an activity row"/);
+  assert.match(html, /<strong>Claude session absent from this commit rail<\/strong>/);
+  assert.match(html, /aria-label="Claude thread"/);
+  assert.match(html, /aria-label="Exclude Claude session absent from this commit rail, Claude thread claude-off-rail"/);
+});
+
+test("an empty flat list names its window only when paging could fill it", () => {
+  // The rail's rule, applied to the list a non-git project draws instead: a
+  // project whose homes hold no session at all has no "Load earlier" step,
+  // so its sentence must not blame a 30-day window it cannot page past.
+  const nothingEver = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{ ...activity, git: null, sessions: [], older: null }}
+    />,
+  );
+  assert.match(nothingEver, /class="sync-history-state">No sessions yet\.</);
+  assert.doesNotMatch(nothingEver, /No sessions in |sync-history-rail-step/);
+
+  const olderCommitsOnly = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{ ...activity, git: null, sessions: [], older: { newest_at: 1_749_000_000, commits: 3, sessions: 0 } }}
+    />,
+  );
+  assert.match(olderCommitsOnly, /No sessions yet\./);
+
+  const emptyWindow = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{ ...activity, git: null, sessions: [] }}
+    />,
+  );
+  assert.match(emptyWindow, /No sessions in [^<]+\./);
+  assert.doesNotMatch(emptyWindow, /No sessions yet/);
+  assert.match(emptyWindow, /<strong>Load earlier<\/strong>/);
+});
+
 test("non-git browse also omits the terminal footer", () => {
   const html = renderToStaticMarkup(
     <ProjectChatHistoryContent
@@ -3097,4 +3117,38 @@ test("non-git browse also omits the terminal footer", () => {
     />,
   );
   assert.doesNotMatch(html, /sync-history-rail-floor|nothing earlier/);
+});
+
+test("the empty sentence in a flat list keeps all four inner corners", () => {
+  // The frame's only child: its generic 5px radius painted the hatched fill
+  // square over the frame's 12px inner curve, and the top-left, top-right and
+  // bottom-left corners read as missing — the bottom-right hid under the drop
+  // shadow (2026-09-05). Source gate, as for the lone card below.
+  const css = readFileSync("src/App.css", "utf8");
+  const rule = css.match(/\.sync-history-thread-list\.flat > \.sync-history-state \{([^}]*)\}/)?.[1];
+  assert.ok(rule, "flat empty-state rule exists");
+  assert.match(rule, /border-radius: calc\(var\(--retro-panel-radius\) - 2px\)/);
+});
+
+test("a lone card in a flat list keeps all four inner corners", () => {
+  // `:first-child` and `:last-child` both match a lone card, and each rule
+  // owns two corners. They have to be written as longhands: a `border-radius`
+  // shorthand in either wipes the other's corners, and a non-git project with
+  // one session then paints its hover tint square into the list's rounded
+  // top — the "missing corners" of 2026-09-04. A source gate is the only kind
+  // a node test can hold here; the cascade itself was measured in a probe.
+  const css = readFileSync("src/App.css", "utf8");
+  const rule = (pseudo: string) => css.match(
+    new RegExp(`\\.sync-history-thread-list\\.flat > \\.sync-history-thread-card:${pseudo} \\{([^}]*)\\}`),
+  )?.[1];
+  const first = rule("first-child");
+  const last = rule("last-child");
+  assert.ok(first && last, "both corner rules exist");
+  assert.doesNotMatch(first, /\bborder-radius:/, "first-child sets its two corners as longhands");
+  assert.doesNotMatch(last, /\bborder-radius:/, "last-child sets its two corners as longhands");
+  const inner = String.raw`calc\(var\(--retro-panel-radius\) - 2px\);`;
+  assert.match(first, new RegExp(`border-top-left-radius: ${inner}`));
+  assert.match(first, new RegExp(`border-top-right-radius: ${inner}`));
+  assert.match(last, new RegExp(`border-bottom-left-radius: ${inner}`));
+  assert.match(last, new RegExp(`border-bottom-right-radius: ${inner}`));
 });

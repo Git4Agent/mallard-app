@@ -6,7 +6,8 @@
 
 mod support;
 
-use mallard_domain::{StorageConfig, StorageId, StorageKind};
+use mallard_domain::StorageId;
+use mallard_infrastructure::storage_providers::local::local_storage_config;
 use support::catalog_flow::{run_catalog_flow_with_storage_reset, CatalogFlowInputs};
 
 #[test]
@@ -36,19 +37,11 @@ fn skills_and_codex_pets_round_trip_update_and_preserve_divergence() {
     std::fs::write(codex_home_a.join("auth.json"), auth_a).expect("write fake myconf1 auth");
     std::fs::write(codex_home_b.join("auth.json"), auth_b).expect("write fake myconf2 auth");
 
-    let storage = StorageConfig {
-        id: StorageId::parse("catalog-e2e-local").expect("valid test storage id"),
-        name: "Catalog E2E local storage".to_string(),
-        kind: StorageKind::Local,
-        bucket: String::new(),
-        access_key_id: String::new(),
-        secret_access_key: String::new(),
-        account_id: String::new(),
-        s3_endpoint: String::new(),
-        region: String::new(),
-        local_dir: storage_root.to_string_lossy().to_string(),
-        supports_conditional_writes: None,
-    };
+    let storage = local_storage_config(
+        StorageId::parse("catalog-e2e-local").expect("valid test storage id"),
+        "Catalog E2E local storage",
+        &storage_root,
+    );
     let privacy_needles = [
         machine_home_a.to_string_lossy().as_bytes().to_vec(),
         machine_home_b.to_string_lossy().as_bytes().to_vec(),

@@ -114,14 +114,35 @@ export interface ProviderCliLauncher {
   display_name: string;
 }
 
+/** Where a provider-declared maintenance action applies. */
+export type MaintenanceActionScope = "profile" | "after_pull";
+
+/** One provider-declared maintenance action. The frontend renders declared
+ *  actions and never checks a provider key to decide whether to show one. */
+export interface MaintenanceActionDescriptor {
+  action_id: string;
+  label: string;
+  description: string;
+  scope: MaintenanceActionScope;
+  requires_confirmation: boolean;
+  read_only: boolean;
+  /** Display order among one provider's actions. */
+  display_rank: number;
+}
+
 export interface ProviderDescriptor {
   key: ProviderKey;
   display_name: string;
+  /** Lower ranks first, then key order. The backend already sorts by it;
+   *  the UI keeps that order. */
+  display_rank: number;
   profile_label: string;
   default_profile_directory?: string | null;
   setup_default: boolean;
   /** Present when the provider ships an agent CLI that takes a prompt. */
   cli_launcher?: ProviderCliLauncher | null;
+  /** Declared maintenance actions, in display order. */
+  maintenance_actions: MaintenanceActionDescriptor[];
 }
 
 export type ProviderAccessState =
@@ -135,26 +156,53 @@ export type ProjectResourceCategory =
   | "project_files"
   | "tools";
 
-export type ProjectResourceKind =
-  | "conversation"
-  | "provider_state"
-  | "project_content_file"
-  | "project_content_directory"
-  | "requirement";
-export type ProjectApplyPolicy = "safe_file" | "merge" | "explicit_review" | "manual_only" | "never";
+/**
+ * One exact portable contract — a resource kind or an apply policy — as an
+ * open versioned coordinate, never a closed union. A registered backend
+ * adapter resolves it; the frontend only renders the labels it is handed and
+ * never compares a key against a literal.
+ */
+export interface ContractCoordinate {
+  key: string;
+  version: number;
+}
 
+/** Provenance as a versioned kind plus bounded, codec-typed fields. */
+export interface ProvenanceEnvelope {
+  kind: string;
+  version: number;
+  fields: Record<string, unknown>;
+}
+
+/** One portable resource exactly as the manifest carries it. */
 export interface ProjectResourceDescriptor {
   resource_id: string;
-  kind: ProjectResourceKind;
+  kind: ContractCoordinate;
   provider?: ProviderKey | null;
+  /** Presentation-only provider subtype (`session`, `memory`, `todo`, …). */
   provider_resource_type?: string | null;
   display_name: string;
-  provenance: Record<string, unknown>;
-  apply_policy: ProjectApplyPolicy;
+  provenance: ProvenanceEnvelope;
+  apply_policy: ContractCoordinate;
+  /** The provider content codec version, independent of every contract
+   *  version above. */
   codec_version: number;
-  metadata: Record<string, string>;
-  // Inventory DTO presentation hints; these are not manifest identity.
-  category?: ProjectResourceCategory;
+  /** Bounded, kind-typed JSON object. */
+  attributes: Record<string, unknown>;
+}
+
+/**
+ * The flattened `InventoryResource` DTO: the descriptor plus the safe
+ * presentation the registered contracts supply. The frontend renders these
+ * labels; it never dispatches on a kind or policy key.
+ */
+export interface InventoryResource extends ProjectResourceDescriptor {
+  category: ProjectResourceCategory;
+  kind_label: string;
+  apply_policy_label: string;
+  /** The resource can be selected for sync in this build: its contracts are
+   *  registered and its policy is not `never`. */
+  selectable: boolean;
   description?: string | null;
   logical_paths?: string[];
   /** Always emitted (`InventoryResource.default_selected`, no serde skip). */
@@ -164,7 +212,9 @@ export interface ProjectResourceDescriptor {
 
 export interface RecipeEntry {
   resource_id: string;
-  apply_policy: ProjectApplyPolicy;
+  /** Copied verbatim from the resource's descriptor; the backend aligns
+   *  recipe policies to the descriptor anyway. */
+  apply_policy: ContractCoordinate;
   required: boolean;
 }
 
@@ -177,7 +227,7 @@ export interface BundleRecipe {
 export interface ResourceInventory {
   project: string;
   bundle_id?: string | null;
-  resources: ProjectResourceDescriptor[];
+  resources: InventoryResource[];
   recipe: BundleRecipe;
   generated_at?: number;
   warnings?: string[];
@@ -250,10 +300,6 @@ export interface ProjectSyncMetadataResetResult {
   conversation_checkpoints_removed: number;
   conversation_bindings_removed: number;
   materializations_removed: number;
-  journal_operations_removed: number;
-  restore_plans_removed: number;
-  push_plans_removed: number;
-  unreadable_plan_files_retained: number;
 }
 
 /** Result of permanently clearing Mallard-managed objects from one storage. */
@@ -265,7 +311,6 @@ export interface StorageDataClearResult {
   project_links_reset: number;
   catalog_links_reset: number;
   local_records_removed: number;
-  unreadable_plan_files_retained: number;
 }
 
 export interface ProjectContentPreferences {
@@ -287,31 +332,38 @@ export interface ProjectBinding {
   updated_at: number;
 }
 
-export interface CodexConversationPathIssue {
-  thread_id: string;
-  transcript_path: string;
-  recorded_cwd: string;
-  target_cwd: string;
+/** The generic request every maintenance action receives. */
+export interface MaintenanceActionRequest {
+  provider: ProviderKey;
+  action_id: string;
+  /** Adapter-typed arguments, for example the ones an after-pull offer
+   *  handed out. */
+  arguments?: Record<string, unknown>;
+  /** The user confirmed the action's declared confirmation prompt. */
+  confirmed: boolean;
 }
 
-export interface CodexConversationPathAudit {
-  local_project_id: string;
-  profile_id?: string | null;
-  profile_path?: string | null;
-  project_root: string;
-  assigned_thread_count: number;
-  matching_thread_count: number;
-  issues: CodexConversationPathIssue[];
-  blockers: string[];
-  warnings: string[];
+/** The generic report every maintenance action returns. Provider-typed
+ *  extras travel in `facts`; the frontend renders the common fields. */
+export interface MaintenanceActionResult {
+  provider: ProviderKey;
+  action_id: string;
   ready: boolean;
-  can_repair: boolean;
+  summary: string;
+  facts: Record<string, unknown>;
 }
 
-export interface CodexConversationPathRepairResult {
-  audit: CodexConversationPathAudit;
-  repaired_thread_ids: string[];
-  backup_dir?: string | null;
+/** One action a completed Pull offers, declared by the provider adapter. */
+export interface AfterPullActionOffer {
+  provider: ProviderKey;
+  action_id: string;
+  label: string;
+  message: string;
+  /** The action can run now; otherwise the message explains what to do
+   *  by hand. */
+  available: boolean;
+  /** Safe, adapter-typed arguments the shell hands back on execution. */
+  arguments: Record<string, unknown>;
 }
 
 export interface LocalProjectSummary {
@@ -372,7 +424,7 @@ export interface ConversationApplyReceipt {
   cloud_manifest_sha256: string;
   published_origin_host_token?: string | null;
   published_origin_replica_token?: string | null;
-  journal_operation_id: string;
+  operation_id: string;
   accepted_tail?: PortableConversationTail | null;
   preserved_thread_id?: string | null;
   preserved_display_title?: string | null;
@@ -408,9 +460,9 @@ export type DraftProfileSelection =
   | { kind: "existing"; profile_id: string }
   | { kind: "pending"; path: string; display_name: string };
 
-export type DraftStorageSelection =
-  | { kind: "existing"; storage_id: string }
-  | { kind: "pending"; storage: StorageConfig };
+export interface DraftStorageSelection {
+  storage_id: string;
+}
 
 export type DraftRepositoryChoice =
   | { kind: "new" }
@@ -541,71 +593,175 @@ export const PROJECT_SYNC_SCHEMA = 1;
 export interface SyncConfig {
   schema: typeof PROJECT_SYNC_SCHEMA;
   revision: number;
-  storages: StorageConfig[];
+  /** Redacted storage summaries built by each storage adapter. Never a
+   *  secret, never a full provider configuration. */
+  storages: StorageSummary[];
   projects: LocalProjectRegistration[];
   links: ProjectStorageLink[];
 }
 
-/** Secret-bearing request sent only across the local Tauri IPC boundary. */
-export interface UpsertR2StorageRequest {
-  storage_id?: string | null;
-  /** Setup draft to resolve a blank secret from; a successful save also
-   *  discards it. The three draft fields are all-or-none and mutually
-   *  exclusive with `storage_id`. */
-  draft_id?: string | null;
-  /** Exact draft revision whose settings were reviewed by the user. */
-  draft_revision?: number | null;
-  /** Exact inert draft storage identity whose settings were reviewed. */
-  draft_storage_id?: string | null;
-  name: string;
-  api_url: string;
-  access_key_id: string;
-  /** Blank preserves the backend-held secret for an existing R2 storage
-   *  (or the drafted one when `draft_id` is set). */
-  secret_access_key: string;
-  expected_config_revision: number;
+/** Stable storage-provider identity (`local`, `r2`, …); never a closed union. */
+export type StorageProviderKey = string;
+
+export type StorageFieldKind = "text" | "url" | "directory";
+
+/** One safe, editable configuration field a storage provider declares. */
+export interface StorageFieldDescriptor {
+  field_id: string;
+  label: string;
+  kind: StorageFieldKind;
+  required: boolean;
+  placeholder?: string | null;
+  help?: string | null;
+  /** Documentation the field's help mark opens. */
+  help_url?: string | null;
+  /** Filled in from another field as it is typed; the backend still validates. */
+  derive?: StorageFieldDerivation | null;
 }
 
-/** Sanitized result: destination and credential fields are intentionally absent. */
-export interface UpsertR2StorageResult {
+/** A suggested storage name: capture group `group` of `pattern` matched
+ *  against the `source` field. */
+export interface StorageNameSuggestion {
+  source: string;
+  pattern: string;
+  group: number;
+}
+
+/** One declarative extraction: capture group `group` of `pattern` matched
+ *  against the `source` field becomes this field's value; no match clears it. */
+export interface StorageFieldDerivation {
+  source: string;
+  pattern: string;
+  group: number;
+}
+
+/** One secret a storage provider accepts. Its value never returns. */
+export interface StorageSecretDescriptor {
+  secret_id: string;
+  label: string;
+  required: boolean;
+  placeholder?: string | null;
+  help?: string | null;
+  help_url?: string | null;
+}
+
+export interface StorageSetupAssistantDescriptor {
+  label: string;
+  description: string;
+}
+
+/** Serializable storage-provider facts. The UI renders these; it never
+ *  holds a fixed provider array. */
+export interface StorageProviderDescriptor {
+  key: StorageProviderKey;
+  config_version: number;
+  display_name: string;
+  description: string;
+  /** The stem a new draft's name starts from (`{stem} {n}`). */
+  default_name?: string | null;
+  /** Where a suggested name comes from while the form is filled; applied only
+   *  while the name is still the default or the previous suggestion. */
+  name_suggestion?: StorageNameSuggestion | null;
+  /** Lower ranks first, then key order. */
+  display_rank: number;
+  /** A generic presentation hint (`cloud`, `drive`). */
+  icon: string;
+  /** Deletion semantics for the storage-wide clear action. */
+  clear_mode: "revision_checked" | "unconditional" | "unavailable";
+  fields: StorageFieldDescriptor[];
+  secrets: StorageSecretDescriptor[];
+  setup_assistant?: StorageSetupAssistantDescriptor | null;
+  /** The provider's setup documentation, offered as a "Setup guide" link. */
+  setup_guide_url?: string | null;
+  /** The sentence introducing the manual fields; defaults to a generic one. */
+  manual_setup_hint?: string | null;
+}
+
+/** One safe, redacted fact about a configured storage. */
+export interface StorageSummaryField {
+  field_id: string;
+  label: string;
+  value: string;
+  /** The value is a machine-local path the UI may reveal. */
+  is_path: boolean;
+}
+
+/** One configured storage as every listing shows it. */
+export interface StorageSummary {
   storage_id: string;
-  config_revision: number;
-  verified: boolean;
+  name: string;
+  provider: StorageProviderKey;
+  config_version: number;
+  provider_label: string;
+  icon: string;
+  /** False when this build has no adapter for the provider and version:
+   *  the record is preserved and shown, never edited, tested, or synced. */
+  available: boolean;
+  summary: StorageSummaryField[];
 }
 
-/** Sanitized result of a commit-free R2 connection test. */
-export interface TestR2StorageResult {
-  /** The revision the request was checked against — nothing was committed. */
-  config_revision: number;
-  verified: boolean;
+/** Safe provider settings: a bounded JSON object of scalar-ish values. */
+export type StorageSettings = Record<string, unknown>;
+
+/** A secret presence operation. A saved value is never returned to the
+ *  form; the form reports only what should happen to it. */
+export type SecretOperation =
+  | { op: "set"; value: string }
+  | { op: "replace"; value: string }
+  | { op: "clear" }
+  | { op: "unchanged" };
+
+export interface StorageDraftSecretState {
+  secret_id: string;
+  present: boolean;
+  /** Only on the exact fetch of a draft that creates a new storage: the
+   *  machine-local value, shown for review before Finish setup. */
+  value?: string | null;
 }
 
-/** The client-editable storage form fields — `StorageConfig` minus its id.
- *  A blank `secret_access_key` means "no secret typed this session"; an
- *  update then keeps the drafted one. */
-export type StorageSetupDraftPayload = Omit<StorageConfig, "id" | "supports_conditional_writes">;
-
-/** A storage setup draft summary. List/create/update responses redact
- *  `storage.secret_access_key`; `secret_present` says whether persistence
- *  holds one. */
+/** A storage setup draft as it crosses IPC. Edit drafts expose only secret
+ *  presence; an exact fetch of a new draft can include its draft-owned values. */
 export interface StorageSetupDraft {
   draft_id: string;
-  secret_present: boolean;
-  storage: StorageConfig;
+  storage_id: string;
+  name: string;
+  provider: StorageProviderKey;
+  config_version: number;
+  provider_label: string;
+  available: boolean;
+  settings: StorageSettings;
+  secrets: StorageDraftSecretState[];
+  /** The draft edits a storage that already exists in the configuration. */
+  edits_existing: boolean;
   revision: number;
   created_at: number;
   updated_at: number;
 }
 
-/** The exact draft opened by ID. Its shape is unchanged, but unlike summary
- *  responses its `storage.secret_access_key` contains the machine-local
- *  draft secret so the user can review it in Mallard. */
-export type StorageSetupDraftDetail = StorageSetupDraft;
-
 export interface StorageSetupDraftList {
   drafts: StorageSetupDraft[];
   /** Fixed value-free sentences — a draft file may hold a secret. */
   warnings: string[];
+}
+
+export interface UpdateStorageSetupDraftRequest {
+  draft_id: string;
+  revision: number;
+  name: string;
+  settings: StorageSettings;
+  secrets: Record<string, SecretOperation>;
+}
+
+export interface TestStorageDraftResult {
+  draft_id: string;
+  draft_revision: number;
+  verified: boolean;
+}
+
+export interface CommitStorageDraftResult {
+  storage_id: string;
+  config_revision: number;
+  replaced: boolean;
 }
 
 /** Filesystem watcher events contain no credential-bearing config fields. */
@@ -615,20 +771,6 @@ export interface ProjectSyncConfigChangedEvent {
 
 /** Value-free signal; draft contents are reloaded through the redacting IPC. */
 export type StorageSetupDraftsChangedEvent = Record<string, never>;
-
-export interface StorageConfig {
-  id: string;
-  name: string;
-  kind: "s3" | "local";
-  bucket: string;
-  access_key_id: string;
-  secret_access_key: string;
-  account_id: string;
-  s3_endpoint: string;
-  region: string;
-  local_dir: string;
-  supports_conditional_writes?: boolean | null;
-}
 
 export type ResourceSyncState =
   | "synced"
@@ -697,10 +839,17 @@ export interface ProjectOperationResult {
   operation_id?: string;
   resources_changed?: number;
   revision?: number;
+  /**
+   * Manifest resources as `synced` or `unchanged`, plus one row per selected
+   * conversation the Push did not publish: `failed` with its error, or
+   * `held` when a Pull resolves it. Those rows are keyed by the review's
+   * resource ids, so the comparison the Push was reviewed against supplies
+   * their titles.
+   */
   results?: Array<{
     resource_id: string;
-    state: string;
-    message?: string;
+    state: "synced" | "unchanged" | "held" | "failed";
+    message?: string | null;
   }>;
 }
 
@@ -784,8 +933,6 @@ export interface PushReviewContext {
   thread_comparison_error: string | null;
   project_files: ProjectContentInventory | null;
   project_files_error: string | null;
-  conversation_push_plan_id?: string | null;
-  conversation_action_ids?: Record<string, string>;
   prepared_at: number;
 }
 
@@ -834,15 +981,6 @@ export interface RestoreAction {
   requires_explicit_approval: boolean;
 }
 
-export type ConversationTargetExpectation =
-  | { state: "absent" }
-  | { state: "sha256"; sha256: string };
-
-export interface ConversationProviderStateExpectation {
-  target_path: string;
-  expectation: ConversationTargetExpectation;
-}
-
 /**
  * Portable provenance of a divergent keep-both preservation: the origin
  * thread the preserved copy split from and its 1-based per-origin ordinal.
@@ -850,69 +988,6 @@ export interface ConversationProviderStateExpectation {
 export interface PreservedProvenance {
   preserved_from: string;
   ordinal: number;
-}
-
-export interface ConversationRawRangePin {
-  start_byte_offset: number;
-  end_byte_offset: number;
-  range_sha256: string;
-}
-
-export interface ConversationContextPins {
-  host_id: string;
-  replica_id: string;
-  local_project_id: string;
-  provider_profile_id: string;
-  host_identity_revision: number;
-  profile_revision: number;
-  project_binding_revision: number;
-  bindings_document_revision: number;
-  binding_revision?: number | null;
-}
-
-export interface ConversationRevisionPins {
-  bundle_revision: number;
-  commit_id: string;
-  manifest_sha256: string;
-  scope_revision: number;
-  scope_sha256: string;
-}
-
-export interface ConversationTailPins {
-  accepted?: PortableConversationTail | null;
-  accepted_local?: PortableConversationTail | null;
-  local?: PortableConversationTail | null;
-  cloud?: PortableConversationTail | null;
-  checkpoint_generation?: number | null;
-  lineage_digest?: string | null;
-  semantic_digest?: string | null;
-  raw_range?: ConversationRawRangePin | null;
-}
-
-export interface ConversationTargetPins {
-  local: ConversationTargetExpectation;
-  provider_state: ConversationProviderStateExpectation[];
-}
-
-export interface ConversationActionPins {
-  context: ConversationContextPins;
-  revision: ConversationRevisionPins;
-  tail: ConversationTailPins;
-  target: ConversationTargetPins;
-  codec: string;
-  expires_at: number;
-}
-
-export interface ConversationPlanAction {
-  action_id: string;
-  action: ConversationPlanActionType;
-  provider: ProviderKey;
-  /** Local thread; null exactly for create_local (minted at apply). */
-  thread_id: string | null;
-  /** Reviewed cloud row; null exactly for an unmapped create_cloud. */
-  cloud_thread_id: string | null;
-  source_resource_id?: string | null;
-  pins: ConversationActionPins;
 }
 
 export interface ConversationReviewRow {
@@ -928,7 +1003,8 @@ export interface ConversationReviewRow {
   display_title?: string | null;
 }
 
-export interface RestorePlan {
+/** Pull comparison DTO. Executable conversation actions stay in the backend. */
+export interface PullReview {
   schema_version: 1;
   plan_id: string;
   storage_id: string;
@@ -943,13 +1019,10 @@ export interface RestorePlan {
   created_at: number;
   expires_at: number;
   actions: RestoreAction[];
-  conversation_actions: ConversationPlanAction[];
   conversation_review: ConversationReviewRow[];
   project_content_eligibility?: ProjectFileSyncEligibility | null;
   remote_continuity?: RemoteContinuity | null;
 }
-
-export type RestoreApplyStatus = "complete" | "recovery_required";
 
 export interface PreservedThreadResult {
   action_id: string;
@@ -961,7 +1034,6 @@ export interface PreservedThreadResult {
 
 export interface RestoreResult {
   success: boolean;
-  status: RestoreApplyStatus;
   message: string;
   plan_id?: string | null;
   /**
@@ -973,18 +1045,10 @@ export interface RestoreResult {
   applied_action_ids: string[];
   failed_actions: Array<{ action_id: string; display_name?: string | null; message: string }>;
   preserved_threads: PreservedThreadResult[];
-  codex_app_refresh?: {
-    operation_id: string;
-    app_kind: "codex" | "codex_plus_plus";
-    app_name: string;
-    state: "restart_available" | "manual_restart";
-    message: string;
-  } | null;
-}
-
-export interface CodexAppRestartResult {
-  success: boolean;
-  message: string;
+  /** Provider-declared follow-ups this Pull offers (a desktop app restart,
+   *  say), executed through the generic maintenance command. The frontend
+   *  renders them; it never checks a provider key. */
+  after_pull_actions: AfterPullActionOffer[];
 }
 
 export interface BundleReadinessIssue {
@@ -1047,7 +1111,6 @@ export interface ProjectSessionSummary {
   working_directory?: string | null;
   /** Machine-local reason this visible session cannot participate in sync. */
   sync_blocked_reason?: string | null;
-  branch?: string | null;
   recorded_sha?: string | null;
   is_active: boolean;
   user_round_count: number;
@@ -1217,14 +1280,6 @@ export type ThreadSyncState =
   | "unknown";
 
 
-export type ConversationPlanActionType =
-  | "publish"
-  | "create_cloud"
-  | "adopt_cloud_metadata"
-  | "materialize_cloud"
-  | "keep_both"
-  | "create_local";
-
 export type ConversationReviewAction =
   | "publish"
   | "create_cloud"
@@ -1250,8 +1305,7 @@ export type ConversationBlocker =
   | "busy"
   | "redaction_ruleset_mismatch"
   | "path_map_codec_mismatch"
-  | "capture_budget"
-  | "too_large";
+  | "observation_failed";
 
 export interface ThreadSyncDecision {
   action: ConversationReviewAction;
@@ -1291,16 +1345,11 @@ export interface ThreadSyncEntry {
   pull_decision: ThreadSyncDecision;
 }
 
-/** The push capture budget a review fitted its candidates against. Nothing
- *  in it predicts future pushes; every review recomputes it. */
+/** The aggregate byte limit shown by a Push review. */
 export interface CaptureBudget {
   limit_bytes: number;
   /** Bytes the push always carries besides conversations (tools, provider state). */
   reserved_bytes: number;
-  /** What the conversations this push carries weigh together. */
-  admitted_bytes: number;
-  held_count: number;
-  held_bytes: number;
 }
 
 export interface ThreadSyncCounts {
@@ -1334,7 +1383,7 @@ export interface ThreadSyncComparison {
   scopes: ScopeSyncRow[];
   provider_errors: Record<ProviderKey, string>;
   warnings: string[];
-  /** Present on the comparison a Push review was prepared from. */
+  /** Apply limit and non-conversation bytes reserved within it. */
   capture_budget?: CaptureBudget | null;
   remote_continuity: RemoteContinuity;
 }
@@ -1350,7 +1399,6 @@ export interface GitCommitSummary {
 export interface GitBranchSummary {
   name: string;
   is_current: boolean;
-  available: boolean;
 }
 
 export interface GitHistoryPage {

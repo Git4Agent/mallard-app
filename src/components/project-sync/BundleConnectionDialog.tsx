@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import type { BundleSnapshotSummary, StorageConfig } from "../../types";
-import Icon from "../Icons";
+import type { BundleSnapshotSummary, StorageSummary } from "../../types";
+import Icon, { iconNameFromHint } from "../Icons";
 import Notice, { NoticeZone, type NoticeItem } from "../notice/Notice";
 import { formatRelativeTime } from "./model";
 
@@ -8,7 +8,7 @@ interface Props {
   projectName: string;
   currentBundleId: string;
   projectFingerprint?: string | null;
-  storage: StorageConfig;
+  storage: StorageSummary;
   matches: BundleSnapshotSummary[];
   reason: "link" | "missing" | "sibling";
   busy: boolean;
@@ -116,7 +116,7 @@ export default function BundleConnectionDialog({
 
         <div className="sync-modal-body">
           <div className="sync-bundle-context">
-            <Icon name={storage.kind === "local" ? "drive" : "cloud"} size={17} />
+            <Icon name={iconNameFromHint(storage.icon, "drive")} size={17} />
             <span><strong>{storage.name}</strong><small>Current local repo {currentBundleId.slice(0, 12)}…</small></span>
           </div>
 

@@ -22,17 +22,18 @@ resources portable across teammates and machines.
 
 ## What Mallard does
 
-- Maps Codex sessions onto a Git branch's first-parent commit history, so a
-  team can explore the reasoning behind a diff.
+- Maps all project sessions onto any selected Git branch's first-parent commit
+  history, so a team can explore the reasoning behind a diff.
 - Parses session summaries and conversation previews locally, with metrics for
   start and end times, user turns, tokens, agent messages, and tool calls.
 - Syncs selected project conversations and provider-home resources — memory
   and session state — through a local folder or Cloudflare R2.
 - Compares local and stored resources before Push or Pull, including
   local-only, storage-only, ahead, synchronized, and conflict states.
-- Publishes immutable, SHA-256-verified bundle revisions and presents an
-  explicit restore plan before applying changes. Pulls create backups and
-  retain apply receipts.
+- Publishes immutable, SHA-256-verified bundle revisions after an explicit
+  comparison review. Push and Pull capture and build current actions only in
+  Apply; they persist no executable plan or conversation recovery journal.
+  Pulls create backups and retain result receipts.
 - Optionally syncs selected ordinary files and folders for non-Git projects.
   Git-managed project content continues to travel through Git.
 - Manages user-global Agent Skills, provider-native plugin install intent, and
@@ -111,6 +112,24 @@ open the system browser if sign-in or consent is required.
 Manual **Finish setup** and **Save storage** use the same exact R2 capability
 probe before committing connection changes. Leaving the Secret Access Key
 blank while editing an existing storage preserves the backend-held value.
+
+**Clear storage data** is available for local-folder and R2 storage. The
+confirmation names the storage and requires you to confirm that sync has
+stopped on all machines. It deletes all synced repositories and Library
+resources under `.mallard/v1/repositories/` and `.mallard/v1/library/`.
+Mallard validates and retains `.mallard/_storage.json`. It preserves unrelated
+objects, local files, provider sessions, and the storage connection.
+
+Local-folder clear checks each listed object revision. R2 clear uses
+unconditional deletion because R2 does not support revision-bound
+`DeleteObject`. Normal object deletion still requires a revision check;
+R2 does not provide that operation. Keep sync stopped until clear completes.
+A configuration change after the confirmation opens stops the operation.
+Local sync metadata resets only after remote deletion succeeds. If clear
+fails, the error reports confirmed or possible partial deletion. Use
+**Clear storage data** again to delete the remaining objects. There is no
+automatic retry of the whole clear operation. Schema and storage layout
+versions remain 1.
 
 Credentials and machine-specific paths are stored only in Mallard's local
 metadata under `~/.mallard/`; they are never uploaded inside a portable
@@ -193,9 +212,9 @@ This flow works with a new or existing Git project, or with a non-Git folder.
    work.
 2. In Mallard, choose **Add project**, select the folder and Codex profile,
    choose the configured R2 storage, and select **New repository**.
-3. Finish setup and open **Project History**. Git projects show the selected
-   branch's commit-to-session mapping; both Git and non-Git projects show
-   summaries, conversation previews, and session metrics.
+3. Finish setup and open **Project History**. Git projects show all project
+   sessions against the selected branch's commit history; both Git and non-Git
+   projects show summaries, conversation previews, and session metrics.
 4. Choose **Push** and review **Git & sessions** and the final **Review**
    step.
 5. For a non-Git project, optionally open **Project files**, run
@@ -209,17 +228,23 @@ This flow works with a new or existing Git project, or with a non-Git folder.
 
 ## How session-to-commit mapping works
 
-Mallard parses Codex JSONL archives locally to recover session metadata,
-activity windows, branch information, and recorded commit references. For a
-Git project, it places sessions on the selected branch's first-parent history
-when the evidence is strong enough: a commit can occur during the session or
-be the nearest follow-up commit within 24 hours. Ambiguous sessions remain
-visible as unmapped rather than being assigned to a commit without evidence.
+Mallard parses provider session archives locally to recover session metadata,
+activity windows, recorded branch provenance, and recorded commit references.
+For a Git project, every selected local branch shows the same project-session
+set for the loaded time range. Mallard independently places those sessions on
+the selected branch's first-parent history when the evidence is strong enough:
+a commit can occur during the session or be the nearest follow-up commit
+within 24 hours. A provider-recorded branch never controls visibility, Push,
+or Pull. Sessions without a suitable commit remain visible as not mapped to
+that branch.
 
 ## Push, Pull, and project-file safety
 
 - Every Push and Pull is reviewed by resource before it changes shared or
   local state.
+- A conversation that fails during Push or Pull fails alone: the other
+  selected conversations still publish or apply, and the result names the
+  failed one with its reason.
 - Mallard captures only provider-home state; it never captures configuration
   or instruction files from inside a Git-managed project directory. That
   content travels with Git.
@@ -339,9 +364,9 @@ twenty deterministic loopback headless resumes. The count is deliberately a
 CLI-turn count; the first content tool-using turn can require more than one
 provider HTTP exchange. The scenario exercises two isolated machine homes
 through project revision 11, including paginated dependency histories,
-reviewed Push/Pull, stale-plan rejection, divergence in both directions, Keep
-Both, and a no-op fixed point. It then clears the local-folder storage through
-the production operation on both replicas, proves both Codex homes are
+reviewed Push/Pull, changed-after-comparison rejection, divergence in both
+directions, Keep Both, and a no-op fixed point. It then clears the local-folder
+storage through the production operation on both replicas, proves both Codex homes are
 unchanged, republishes the same ten conversations as fresh revision 1, and
 reaches a new fixed point before the Library and resume phases. The same
 topology also shares and updates nested Codex skills and fake v1/v2 pets
@@ -379,7 +404,7 @@ you intend to pay for three Sonnet 5 turns:
 MALLARD_RUN_LIVE_CLAUDE_TUZI_E2E=1 npm run test:live-claude-tuzi-e2e
 ```
 
-The runner requires Node.js 20.15.0 or newer and exactly Claude Code 2.1.250.
+The runner requires Node.js 20.15.0 or newer and exactly Claude Code 2.1.260.
 Before Cargo starts, it validates `.env.local` as a bounded, no-follow,
 mode-`0600` three-field JSON document and performs a bounded authenticated
 catalog lookup for exact model ID `claude-sonnet-5`. It never passes the key
@@ -413,7 +438,7 @@ privacy, and full-depth no-follow state scans. The USD caps are client-side
 estimates; Tuzi's final consumption log remains authoritative, including for
 failed or disconnected calls.
 
-The Claude Code 2.1.250 gate passed on September 1, 2026 with `1 passed, 0
+The Claude Code 2.1.259 gate passed on September 1, 2026 with `1 passed, 0
 failed`; the Rust body completed in 32.33 seconds. The earlier Claude Code
 2.1.235 gate passed on August 19, 2026. No execution automatically retried.
 The Tuzi consumption log remains authoritative for the earlier development
@@ -471,11 +496,98 @@ an ordinary `exec_command` function call invokes the reviewed `apply_patch`
 command, then an exact tool-result call ID selects the fixed final response.
 Every other prompt marker is unique, and every fixed response is selected only
 after the mock validates the complete ordered marker history.
-Mallard planning may additionally start bounded, ephemeral Codex app-server
-children only to allocate native UUIDv7 thread IDs. Those children perform no
-turn, disable plugins, run under disposable provider/process homes, inherit no
-provider or proxy credentials, and are excluded from deterministic turn and
-Responses-request accounting.
+Pull allocates Codex thread IDs locally during Apply. It uses the existing
+random version-7 format, validation, and bounded collision checks. ID allocation
+starts no Codex process and makes no API request. The schemas remain at 1.
+
+Pull prepares cloud transcripts in a bounded worker queue. It uses the existing
+local worker setting, which defaults to four, and a 64 MiB source-byte budget.
+Running jobs and completed results keep their reservations until installation
+finishes. One transcript above that budget runs alone if the existing file
+limit permits it. Installation follows action order. Source checks, provider
+index changes, bindings, checkpoints, and receipts stay in that serial step.
+
+Codex preparation uses downloaded bytes directly. It does not write and read
+an intermediate transcript file. Both providers analyze cloud content and the
+final local content once each. An immutable result binds the local bytes to
+their digest, provider, codec, thread ID, project root, lineage, and semantic
+digest. Materialization checks those facts against the current operation and
+binding. It verifies the staged SHA-256 without another semantic analysis.
+The output layout, path-map, redaction, shared-index, and destination checks
+remain in place. A preparation or installation failure affects that thread.
+
+Conversation path conversion preserves literal marker text and destination
+paths. Tagged references retain absolute, alias, tilde, and URI spellings.
+On return to the same bindings, conversation text is unchanged except for
+credential redaction. Restore IDs and record layout can change.
+
+Local bindings reference immutable path-origin files. These files hold strict
+record hashes and inverse edits. Retained history uses those edits on later
+Push; only new records are scanned. Missing or stale referenced data fails
+that thread. Origin files stay in the Mallard home and never enter a portable
+manifest. Metadata reset retains this local history data. The format remains
+schema 1 and requires a clean test-data reset for this cutover.
+See [codec details and formal checks](formal/pathmap-origins-v1/README.md).
+
+Apply phase logs report cloud verification, reconstruction, output verification,
+and serial stage/commit time. The preparation total includes its three worker
+phases. Worker durations can overlap each other and serial installation; do
+not add them to estimate wall time. The pipeline phase reports wall time and
+peak admitted jobs and source bytes. The source-byte budget is not a total
+memory limit: parsed records, output bytes, and existing capture state use
+additional memory.
+
+The ignored `pull_transcript::tests::preparation_benchmark` test measures eight
+synthetic Codex transcripts with fixed destination IDs. Set
+`MALLARD_PULL_BENCH_WORKERS=1` or `4` and run it with `--ignored --nocapture`.
+It reports preparation wall time, summed worker time, input/output bytes,
+queue bounds, and temporary transcript reads. It uses a temporary fixture
+directory. The normal tests compare serial and parallel bytes and checkpoints
+for both providers, check queue reservations, and verify the analysis count.
+
+The same command also runs five-thread failure isolation on a separate pair
+of temporary replicas. Push selects five threads, then retries the two failed
+threads, then the last failed thread. Its completion counts are 3, 1, and 1.
+Pull also completes 3, 1, and 1 threads. Each selected local source is checked
+once during Apply. A detected update fails only that thread, with no automatic
+retry. This includes an approved Keep both action. The final attempt writes a
+new local message after the check and confirms that Apply still completes.
+Service phase callbacks make real Codex turns append
+fixed fake-API responses after capture. The checks cover exact failed
+identities, unchanged completed content, accepted checkpoints, and the next
+review's remaining work. Pull retries approve Keep both for divergent local
+history and verify that the preserved branches keep every local message.
+Seven disposable history resumes verify the five final stored histories and
+two preserved branches. This adds 24 turns and requests, for exactly 62 local
+Responses requests in the complete suite. Each attempt reports its elapsed
+time. Pull also reports the source check count, byte count, and elapsed time.
+It verifies two semantic analyses per prepared transcript and reports summed
+preparation time, stage/commit time, and pipeline wall time.
+Per-source read and hash counters verify that each attempt checks each source
+once, including a failed check.
+All fixtures remain temporary; the local and portable schemas stay at 1.
+
+Pull uses the local snapshot captured at the start of the Apply attempt as its
+fixed comparison baseline. Preparation uses that captured digest. After cloud
+verification, one bounded source read and SHA-256 comparison runs before each
+existing thread is installed. A changed, missing, or unreadable source fails
+that thread. Cloud-only creation and metadata-only adoption need no source check.
+
+The rule covers normal updates and approved Keep both actions. In-place
+replacements can overwrite a change made after the check. Their backups use
+the bytes returned by that check, with no further live transcript read.
+Cloud and staged payload verification, destination collision checks, path,
+file-type and size checks, approval checks, and identity and binding revision
+checks remain. Shared provider files, including the Codex session index, retain
+their digest checks through commit. A later write or shared-file conflict can
+still fail the thread. Only successful installation advances its accepted
+checkpoint; successful sibling threads remain applied.
+
+Source-check cost is linear in the total bytes read. The check adds at most
+one transcript buffer. Checked bytes are kept only for the backup or the
+retained-source checkpoint, then released. There is no additional cloud
+request, wait loop, or automatic retry. Internal checked bytes are not
+serialized; schemas remain at 1 without a migration or legacy execution path.
 
 Codex `MaterializeCloud` is always copy-on-write. A native fork can begin
 referencing an unchanged parent between review and apply, so neither a digest
@@ -534,7 +646,7 @@ npm install
 MALLARD_RUN_LIVE_CLAUDE_AIMOCK_E2E=1 npm run test:live-claude-aimock-e2e
 ```
 
-The current native-format gate requires exactly Claude Code `2.1.250`,
+The current native-format gate requires exactly Claude Code `2.1.260`,
 `@copilotkit/aimock` `1.39.0`, Node.js 20.15.0 or newer, and the mock model
 identifier `claude-sonnet-4-6`. The runner strips inherited provider,
 provider-home, endpoint, and proxy state before Cargo starts. Each Claude
@@ -559,7 +671,7 @@ revision 1, and verifies one incremental cursor append.
 
 The accounting is exact: 12 Claude model-turn processes make 13 authenticated
 `POST /v1/messages?beta=true` requests, because the first content tool round
-uses two Messages calls. Claude Code 2.1.250 also makes one credential-free
+uses two Messages calls. Claude Code 2.1.260 also makes one credential-free
 `HEAD /api/hello` compatibility probe per process. The raw boundary therefore
 requires exactly 25 requests: 13 model requests plus 12 probes. The Messages
 requests are separately reconciled with all 13 semantic aimock scenarios. Any
@@ -602,8 +714,8 @@ implementation notes, and safety contract.
   fetch, integrity checks, restore planning, backups, and apply.
 - `crates/mallard-infrastructure/src/storage_core/` — the shared object-store
   transport, including the local-folder and S3/R2 stores.
-- `crates/mallard-infrastructure/src/r2_setup_journal.rs` — bounded,
-  non-secret recovery state for interrupted R2 capability probes.
+- `crates/mallard-infrastructure/src/storage_setup_journal.rs` — bounded,
+  provider-neutral recovery state for interrupted storage setup.
 - `src/components/storage-catalog/` and `src-tauri/src/storage_catalog/` — the
   independent scope-rowed Library UI, provider adapters, plans, persistence,
   per-resource remote protocol, and journaled apply behavior.

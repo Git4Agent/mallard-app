@@ -8,19 +8,25 @@ pub mod history;
 pub mod materialization;
 
 use super::traits::{
-    MaterializationTargetRequest, PlannedProviderTarget, ProviderCliLauncher, ProviderDescriptor,
-    SessionActionContext, SessionActionDescriptor, SessionActionOutcome, SessionActionRequest,
-    SessionAdapter, SessionAnalysis, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
-    SessionFileMetadata, SessionFileSummary, SessionTimelineContext, SessionTimelineIndex,
-    SessionTimelinePageSlice, SessionTimelineQuery,
+    shell_quote, AfterPullActionOffer, MaintenanceActionDescriptor, MaintenanceActionScope,
+    MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand, ProviderCliLauncher,
+    ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionOutcome,
+    SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
+    SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
+    SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::conversation_codec::{
     analyze_codex_transcript, CODEX_CODEC_VERSION, CODEX_LINEAGE_CODEC_KEY,
 };
-use crate::provider_capture::{scan_session_metadata_with, ParsedSessionMetadata};
+use crate::provider_capture::{
+    scan_session_metadata_with, Discovery, ParsedSessionMetadata, MAX_FILE_BYTES,
+};
 use mallard_domain::ProviderKey;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 pub use actions::codex_app_project_open_command;
@@ -92,6 +98,7 @@ impl SessionAdapter for CodexAdapter {
         ProviderDescriptor {
             key: provider_key(),
             display_name: "Codex".to_string(),
+            display_rank: 10,
             profile_label: ".codex profile".to_string(),
             default_profile_directory: Some(".codex".to_string()),
             setup_default: true,
@@ -99,7 +106,141 @@ impl SessionAdapter for CodexAdapter {
                 program: "codex".to_string(),
                 display_name: "Codex".to_string(),
             }),
+            maintenance_actions: self.maintenance_actions(),
         }
+    }
+
+    fn watch_roots(&self) -> &'static [&'static str] {
+        &["sessions", "archived_sessions"]
+    }
+
+    fn session_title_index(&self) -> Option<&'static str> {
+        Some("session_index.jsonl")
+    }
+
+    fn refresh_session_titles(
+        &self,
+        discovery: &mut crate::provider_capture::Discovery,
+        canonical_home: &Path,
+    ) -> Result<(), String> {
+        refresh_codex_session_titles(discovery, canonical_home)
+    }
+
+    fn reconstructs_rollout_graph(&self) -> bool {
+        true
+    }
+
+    fn mint_provider_thread_id(&self, taken: &dyn Fn(&str) -> bool) -> Result<String, String> {
+        crate::codex_thread_allocator::allocate_codex_thread_ids_local(1, &taken)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Codex thread allocation returned no id".to_string())
+    }
+
+    fn tail_layout_codec(&self) -> Option<&'static str> {
+        Some(mallard_domain::PORTABLE_TAIL_CODEC_V1)
+    }
+
+    fn conversation_wire_rules(&self) -> Option<mallard_domain::ConversationWireRules> {
+        Some(mallard_domain::ConversationWireRules {
+            requires_redaction_stamp: true,
+            requires_portable_tail: true,
+            path_map: mallard_domain::PathMapDeclaration::InBand,
+            tail_wire: mallard_domain::TailWireKind::CodexRollout,
+        })
+    }
+
+    fn decode_portable_display_title(
+        &self,
+        title: &str,
+        project_root: &str,
+        canonical_project_root: &str,
+    ) -> Result<String, String> {
+        crate::session_path_map::validate_pathmap_root("project root", project_root)?;
+        let home = std::env::var("HOME").ok();
+        let mapper = crate::session_path_map::SessionPathMapper::new(
+            project_root,
+            (canonical_project_root != project_root).then_some(canonical_project_root),
+            home.as_deref(),
+        )?;
+        let wire = serde_json::Value::String(title.to_string());
+        mapper
+            .verify_wire_record(&wire)
+            .map_err(|error| format!("portable Codex display title: {error}"))?;
+        match mapper.decode_record(&wire)? {
+            serde_json::Value::String(decoded) => Ok(decoded),
+            _ => Err("portable Codex display title did not decode to text".to_string()),
+        }
+    }
+
+    fn maintenance_actions(&self) -> Vec<MaintenanceActionDescriptor> {
+        let action = |id: &str| mallard_domain::ActionKey::parse(id).expect("static action key");
+        vec![MaintenanceActionDescriptor {
+            action_id: action("codex.app.restart"),
+            label: "Restart Codex App".to_string(),
+            description: "Relaunch the Codex desktop app so restored sessions appear.".to_string(),
+            scope: MaintenanceActionScope::AfterPull,
+            requires_confirmation: true,
+            read_only: false,
+            display_rank: 10,
+        }]
+    }
+
+    fn project_open_commands(&self, home: &Path, project_root: &str) -> Vec<ProjectOpenCommand> {
+        let environment = format!("CODEX_HOME={}", shell_quote(&home.to_string_lossy()));
+        let project = shell_quote(project_root);
+        let mut commands = vec![
+            ProjectOpenCommand {
+                label: "Codex — new".to_string(),
+                command: format!("{} codex -C {}", environment, project),
+            },
+            ProjectOpenCommand {
+                label: "Codex — resume".to_string(),
+                command: format!("{} codex resume -C {}", environment, project),
+            },
+        ];
+        // The desktop app is launched through a deep link, not the CLI, so it
+        // needs its own line rather than a variation on the two above.
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(command) = codex_app_project_open_command(home, Path::new(project_root)) {
+                commands.push(ProjectOpenCommand {
+                    label: "Codex app — new".to_string(),
+                    command,
+                });
+            }
+            // Resuming a thread in the app takes two sequenced deep links, so
+            // it has no pasteable form; point at the button that performs
+            // them instead.
+            commands.push(ProjectOpenCommand {
+                label: "Codex app — resume".to_string(),
+                command: "use Open in Codex (one deep link cannot carry both project and chat)"
+                    .to_string(),
+            });
+        }
+        commands
+    }
+    fn after_pull_offer(
+        &self,
+        operation_id: &mallard_domain::ConversationOperationId,
+        provider_home: Option<&Path>,
+    ) -> Option<AfterPullActionOffer> {
+        let offer = crate::codex_app_refresh::refresh_offer(operation_id.clone(), provider_home)?;
+        let arguments = mallard_domain::BoundedConfigObject::from_json(&serde_json::json!({
+            "operation_id": offer.operation_id.as_str(),
+            "app_kind": offer.app_kind,
+        }))
+        .ok()?;
+        Some(AfterPullActionOffer {
+            provider: provider_key(),
+            action_id: mallard_domain::ActionKey::parse("codex.app.restart")
+                .expect("static action key"),
+            label: format!("Restart {}", offer.app_name),
+            message: offer.message,
+            available: offer.state
+                == crate::codex_app_refresh::CodexAppRefreshState::RestartAvailable,
+            arguments,
+        })
     }
 
     fn codec_key(&self) -> &str {
@@ -139,6 +280,23 @@ impl SessionAdapter for CodexAdapter {
             record_count: analysis.record_count,
             lineage: analysis.lineage,
         }
+    }
+
+    fn analyze_and_summarize(
+        &self,
+        bytes: &[u8],
+    ) -> (SessionAnalysis, Result<SessionFileSummary, String>) {
+        let (analysis, summary) = history::analyze_and_summarize(bytes);
+        (
+            SessionAnalysis {
+                source_provider_session_id: analysis.source_thread_id,
+                source_cwd: analysis.source_cwd,
+                is_internal_subagent: analysis.is_internal_subagent,
+                record_count: analysis.record_count,
+                lineage: analysis.lineage,
+            },
+            summary,
+        )
     }
 
     fn verify_index_fragment(&self, bytes: &[u8], expected_session_id: &str) -> Result<(), String> {
@@ -206,6 +364,61 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[cfg(unix)]
+    #[test]
+    fn pull_thread_ids_are_minted_without_starting_codex() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD: &str = "MALLARD_TEST_LOCAL_CODEX_IDS";
+        if std::env::var_os(CHILD).is_some() {
+            let adapter = CodexAdapter::new();
+            let mut occupied = BTreeSet::new();
+            for _ in 0..35 {
+                let id = adapter
+                    .mint_provider_thread_id(&|candidate| occupied.contains(candidate))
+                    .unwrap();
+                crate::codex_thread_allocator::validate_uuid_v7(&id).unwrap();
+                assert!(occupied.insert(id));
+            }
+            return;
+        }
+
+        // Isolate PATH and homes in a child test process. A CLI allocation
+        // would start this sentinel even if it then fell back to local IDs.
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("codex");
+        let launch_log = temp.path().join("codex-launches");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'started\\n' >> \"$MALLARD_TEST_CODEX_LAUNCH_LOG\"\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "providers::codex::tests::pull_thread_ids_are_minted_without_starting_codex",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, "1")
+            .env("MALLARD_TEST_CODEX_LAUNCH_LOG", &launch_log)
+            .env("PATH", temp.path())
+            .env("HOME", temp.path())
+            .env("USERPROFILE", temp.path())
+            .env("CODEX_HOME", temp.path())
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "local ID test failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!launch_log.exists(), "Pull ID allocation started Codex");
+    }
+
     fn jsonl(records: impl IntoIterator<Item = Value>) -> String {
         records
             .into_iter()
@@ -265,4 +478,58 @@ mod tests {
         assert_eq!(metadata.session_id, "current-session");
         assert_eq!(metadata.authorized_home, temp.path());
     }
+}
+
+/// Re-run only the session-index title enrichment over a cached discovery:
+/// a replaced `session_index.jsonl` invalidates display titles, never tail
+/// evidence or membership.
+fn refresh_codex_session_titles(
+    discovery: &mut Discovery,
+    canonical_home: &Path,
+) -> Result<(), String> {
+    let index = canonical_home.join("session_index.jsonl");
+    discovery.refresh_conversation_titles(&provider_key(), |ids| {
+        if ids.is_empty() || !index.is_file() {
+            return Ok(BTreeMap::new());
+        }
+        Ok(parse_session_index_titles(
+            &filter_codex_session_index_by_ids(&index, ids)?,
+        ))
+    })
+}
+
+pub(crate) fn filter_codex_session_index_by_ids(
+    path: &Path,
+    ids: &BTreeSet<String>,
+) -> Result<Vec<u8>, String> {
+    let meta = fs::metadata(path).map_err(|e| format!("inspect '{}': {}", path.display(), e))?;
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(format!(
+            "'{}' exceeds {} bytes",
+            path.display(),
+            MAX_FILE_BYTES
+        ));
+    }
+    let file = fs::File::open(path).map_err(|e| format!("open '{}': {}", path.display(), e))?;
+    let mut output = Vec::new();
+    for line in BufReader::new(file).split(b'\n') {
+        let line = line.map_err(|e| format!("read '{}': {}", path.display(), e))?;
+        if line.len() > 1024 * 1024 {
+            continue;
+        }
+        let row: CodexSessionIndexIdentity = match serde_json::from_slice(&line) {
+            Ok(row) => row,
+            Err(_) => continue,
+        };
+        if ids.contains(&row.id) {
+            output.extend_from_slice(&line);
+            output.push(b'\n');
+        }
+    }
+    Ok(output)
+}
+
+#[derive(Deserialize)]
+struct CodexSessionIndexIdentity {
+    id: String,
 }

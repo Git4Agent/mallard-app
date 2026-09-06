@@ -6,7 +6,7 @@ import Icon, { type IconName } from "../Icons";
  *  empty slot — which is the same defect this component exists to remove. */
 const PROVIDER_MARKS: Record<string, IconName> = {
   codex: "openai",
-  claude: "claude",
+  claude: "claude-mark",
 };
 
 export default function ProviderMark({ provider, displayName, size = 14 }: {

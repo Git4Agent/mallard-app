@@ -1,4 +1,4 @@
-import type { LocalProjectSummary, ProviderProfileSummary, StorageConfig } from "../../types";
+import type { LocalProjectSummary, ProviderDescriptor, ProviderProfileSummary, StorageSummary } from "../../types";
 import Icon from "../Icons";
 import ProviderMark from "../sync-review/ProviderMark";
 import LandingPicker from "./LandingPicker";
@@ -10,26 +10,43 @@ import { compactProjectPath, projectLabel, providerLabel } from "./model";
  * the binding's profile ids, never from a resource scan: `providers` on the
  * summary is only filled for the active project), and the linked storage's
  * name.
+ *
+ * Empty, it has one door: Add project opens the folder dialog straight away,
+ * so there is nothing to choose before it. The door wears every agent the
+ * build knows, which is what a project can bind to.
  */
-export default function ProjectPicker({ projects, profiles, storages, onAddProject, onSelectProject }: {
+export default function ProjectPicker({ projects, profiles, providers, storages, onAddProject, onSelectProject }: {
   projects: LocalProjectSummary[];
   profiles: ProviderProfileSummary[];
-  storages: StorageConfig[];
+  providers: ProviderDescriptor[];
+  storages: StorageSummary[];
   onAddProject: () => void;
   onSelectProject: (projectId: string) => void;
 }) {
-  const storageNames = new Map(storages.map((storage) => [storage.id, storage.name]));
+  const storageNames = new Map(storages.map((storage) => [storage.storage_id, storage.name]));
   const profileNames = new Map(profiles.map((profile) => [profile.profile_id, profile.display_name]));
   return (
     <LandingPicker
       title="Projects"
       count={projects.length === 1 ? "1 on this machine" : `${projects.length} on this machine`}
       actionLabel="Add project…"
-      emptyTitle="No projects yet"
       onAction={onAddProject}
+      doors={[{
+        key: "folder",
+        icon: "folder",
+        label: "Pick a folder…",
+        ariaLabel: "Add project: pick a folder",
+        marks: providers.length > 0
+          ? providers.map((provider) => (
+            <ProviderMark key={provider.key} provider={provider.key} displayName={provider.display_name} />
+          ))
+          : undefined,
+        onOpen: onAddProject,
+      }]}
+      caption={{ icons: ["cloud"], text: "Sessions & memory travel with it" }}
       cards={projects.map((project) => {
         const label = projectLabel(project);
-        const providers = Object.entries(project.profile_ids ?? {});
+        const boundProviders = Object.entries(project.profile_ids ?? {});
         const linkedNames = (project.linked_storage_ids ?? [])
           .map((storageId) => storageNames.get(storageId))
           .filter((name): name is string => Boolean(name));
@@ -38,8 +55,8 @@ export default function ProjectPicker({ projects, profiles, storages, onAddProje
           icon: project.is_git_repository === true ? "git-folder" : "folder",
           title: label,
           ariaLabel: project.is_git_repository === true ? `${label}, Git repository` : label,
-          marks: providers.length > 0
-            ? providers.map(([provider, profileId]) => (
+          marks: boundProviders.length > 0
+            ? boundProviders.map(([provider, profileId]) => (
               <ProviderMark
                 key={provider}
                 provider={provider}

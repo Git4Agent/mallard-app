@@ -11,6 +11,7 @@ serde_json = "1"
 sha2 = "0.10"
 hmac = "0.12"
 getrandom = "0.3"
+zeroize = "1"
 
 [features]
 # Exposes test-only helpers (e.g. classify_conversation_relation) to other

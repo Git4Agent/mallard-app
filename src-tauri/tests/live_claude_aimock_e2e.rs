@@ -15,11 +15,10 @@
 //! by default.
 
 use mallard_domain::{
-    ActionId, BundleId, CloudThreadId, ConversationMaterializationState,
-    ConversationPlanActionType, ConversationReviewAction, DraftProfileSelection,
-    DraftRepositoryChoice, DraftStorageSelection, LocalConversationBinding, LocalProjectId,
-    ProjectBinding, ProjectSetupDraft, ProviderKey, ResourceId, RestoreActionKind, RestorePlan,
-    StorageConfig, StorageId, StorageKind, ThreadId, MAX_CONVERSATION_FILE_BYTES,
+    ActionId, BundleId, CloudThreadId, ConversationMaterializationState, ConversationReviewAction,
+    DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection, LocalConversationBinding,
+    LocalProjectId, ProjectBinding, ProjectSetupDraft, ProviderKey, ResourceId, RestoreActionKind,
+    RestorePlan, StorageConfig, StorageId, ThreadId, MAX_CONVERSATION_FILE_BYTES,
 };
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::project_activity::{ProjectSessionSummary, SessionSourceState};
@@ -29,6 +28,7 @@ use mallard_infrastructure::providers::{
     SessionTimelineQuery, SessionToolCallStatus, SessionToolCategory,
 };
 use mallard_infrastructure::session_path_map::SessionPathMapper;
+use mallard_infrastructure::storage_providers::local::local_storage_config;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -52,8 +52,8 @@ const MODEL: &str = "claude-sonnet-4-6";
 const LIVE_TUZI_TEST_GATE: &str = "MALLARD_RUN_LIVE_CLAUDE_TUZI_E2E";
 const LIVE_TUZI_MODEL: &str = "claude-sonnet-5";
 const LIVE_TUZI_SOURCE_SESSION_ID: &str = "018f3f2e-7b91-7ad0-8000-000000000301";
-const EXPECTED_AIMOCK_CLAUDE_VERSION: &str = "2.1.250 (Claude Code)";
-const EXPECTED_TUZI_CLAUDE_VERSION: &str = "2.1.250 (Claude Code)";
+const EXPECTED_AIMOCK_CLAUDE_VERSION: &str = "2.1.260 (Claude Code)";
+const EXPECTED_TUZI_CLAUDE_VERSION: &str = "2.1.260 (Claude Code)";
 const PLACEHOLDER_API_KEY: &str = "mallard-local-aimock-placeholder";
 const INHERITED_SECRET_MARKER: &str = "mallard-inherited-secret-sentinel";
 const READ_TOOL_CALL_ID: &str = "mallard_claude_read_r1";
@@ -88,7 +88,7 @@ const MAX_STORAGE_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TREE_ENTRIES: usize = 20_000;
 const MAX_TIMELINE_EVENTS: usize = 1024;
 const CLAUDE_TIMEOUT: Duration = Duration::from_secs(60);
-const LIVE_TUZI_CLAUDE_TIMEOUT: Duration = Duration::from_secs(120);
+const LIVE_TUZI_CLAUDE_TIMEOUT: Duration = Duration::from_secs(210);
 const MAX_LIVE_TUZI_COST_PER_TURN_USD: f64 = 0.05;
 const EXPECTED_LIVE_TUZI_PROCESSES: usize = 3;
 const AIMOCK_START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1641,7 +1641,7 @@ fn run_live_tuzi_claude(
         .env("CLAUDE_CODE_MAX_RETRIES", "0")
         .env("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK", "1")
         .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "1024")
-        .env("API_TIMEOUT_MS", "120000")
+        .env("API_TIMEOUT_MS", "180000")
         .env("DISABLE_TELEMETRY", "1")
         .env("DISABLE_ERROR_REPORTING", "1")
         .env("DISABLE_UPDATES", "1")
@@ -2191,44 +2191,38 @@ fn assert_private_tree(root: &Path, sensitive: &[Vec<u8>], label: &str) {
 }
 
 fn local_storage(storage_root: &Path) -> StorageConfig {
-    StorageConfig {
-        id: StorageId::parse("storage-live-claude-aimock").expect("static storage ID"),
-        name: "Live Claude aimock storage".to_string(),
-        kind: StorageKind::Local,
-        bucket: String::new(),
-        access_key_id: String::new(),
-        secret_access_key: String::new(),
-        account_id: String::new(),
-        s3_endpoint: String::new(),
-        region: String::new(),
-        local_dir: storage_root.to_string_lossy().into_owned(),
-        supports_conditional_writes: None,
-    }
+    local_storage_config(
+        StorageId::parse("storage-live-claude-aimock").expect("static storage ID"),
+        "Live Claude aimock storage",
+        storage_root,
+    )
 }
 
 fn live_tuzi_storage(storage_root: &Path) -> StorageConfig {
-    StorageConfig {
-        id: StorageId::parse("storage-live-claude-tuzi").expect("static storage ID"),
-        name: "Live Claude Tuzi storage".to_string(),
-        kind: StorageKind::Local,
-        bucket: String::new(),
-        access_key_id: String::new(),
-        secret_access_key: String::new(),
-        account_id: String::new(),
-        s3_endpoint: String::new(),
-        region: String::new(),
-        local_dir: storage_root.to_string_lossy().into_owned(),
-        supports_conditional_writes: None,
-    }
+    local_storage_config(
+        StorageId::parse("storage-live-claude-tuzi").expect("static storage ID"),
+        "Live Claude Tuzi storage",
+        storage_root,
+    )
 }
 
 fn finish_setup(
+    state: &LocalStateRepository,
     service: &ProjectSyncService<'_>,
     project_root: &Path,
     claude_home: &Path,
     storage: StorageConfig,
     repository: DraftRepositoryChoice,
 ) -> ProjectDetail {
+    let storage_id = storage.id.clone();
+    let mut config = redacted(state.load_config(), "cannot load storage configuration");
+    if !config.storages.iter().any(|stored| stored.id == storage_id) {
+        config.storages.push(storage);
+        redacted(
+            state.save_config(config),
+            "cannot save storage configuration",
+        );
+    }
     let mut draft: ProjectSetupDraft = redacted(
         service.create_setup_draft(project_root),
         "cannot create Claude-only setup draft",
@@ -2244,7 +2238,7 @@ fn finish_setup(
             display_name: String::new(),
         },
     );
-    draft.storage = Some(DraftStorageSelection::Pending { storage });
+    draft.storage = Some(DraftStorageSelection { storage_id });
     draft.repository = repository;
     let draft = redacted(
         service.update_setup_draft(draft),
@@ -2270,18 +2264,9 @@ fn approved_pull_actions(plan: &RestorePlan) -> Vec<ActionId> {
         .filter(|action| !matches!(action.kind, RestoreActionKind::Manual { .. }))
         .map(|action| action.action_id.clone())
         .chain(
-            plan.conversation_actions
+            plan.conversation_review
                 .iter()
-                .filter(|action| {
-                    matches!(
-                        action.action,
-                        ConversationPlanActionType::AdoptCloudMetadata
-                            | ConversationPlanActionType::MaterializeCloud
-                            | ConversationPlanActionType::KeepBoth
-                            | ConversationPlanActionType::CreateLocal
-                    )
-                })
-                .map(|action| action.action_id.clone()),
+                .filter_map(|row| row.action_id.clone()),
         )
         .collect()
 }
@@ -2297,7 +2282,7 @@ fn pull_and_apply(
         "cannot plan reviewed Claude Pull",
     );
     let result = redacted(
-        service.apply_bundle_restore(&plan.plan_id, approved_pull_actions(&plan)),
+        service.apply_bundle_restore(&plan, approved_pull_actions(&plan)),
         "cannot apply reviewed Claude Pull",
     );
     assert!(result.success && result.failed_actions.is_empty());
@@ -2419,11 +2404,11 @@ fn local_thread_of_cloud(
 
 fn assert_keep_both_offered(plan: &RestorePlan, thread_id: &ThreadId) {
     let actions = plan
-        .conversation_actions
+        .conversation_review
         .iter()
-        .filter(|action| {
-            action.thread_id.as_ref() == Some(thread_id)
-                && action.action == ConversationPlanActionType::KeepBoth
+        .filter(|row| {
+            row.thread_id.as_ref() == Some(thread_id)
+                && row.action == ConversationReviewAction::KeepBoth
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -2897,7 +2882,7 @@ fn assert_pull_is_no_op(
         "fixed-point Pull has conversation actions"
     );
     let result = redacted(
-        service.apply_bundle_restore(&plan.plan_id, Vec::new()),
+        service.apply_bundle_restore(&plan, Vec::new()),
         "cannot apply fixed-point reviewed Claude Pull",
     );
     assert!(result.success, "fixed-point reviewed Pull did not succeed");
@@ -3084,7 +3069,7 @@ fn assert_transcript_structure_and_history(
         .chain()
         .expect("Claude lineage is complete")
         .len();
-    // Claude Code 2.1.250 can link the final tool-round response either
+    // Claude Code 2.1.260 can link the final tool-round response either
     // through the tool-result row or directly through the tool-use row. The
     // latter leaves exactly that result off the active ancestry; the timeline
     // checks below still require the tool result and its marker.
@@ -3965,6 +3950,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
     // Setup publishes the registration-only revision 1. Content revision 2:
     // replica A creates and publishes a real tool-bearing Claude session.
     let first = finish_setup(
+        &repository_a,
         &service_a,
         &project_a,
         &claude_home_a,
@@ -4151,6 +4137,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
     // Content revision 3: B pulls revision 2, receives machine-local
     // identities, resumes the relocated transcript, and publishes it.
     let second = finish_setup(
+        &repository_b,
         &service_b,
         &project_b,
         &claude_home_b,
@@ -4366,10 +4353,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
     );
     assert_keep_both_offered(&divergent_plan_a, &logical_primary_a);
     let divergent_apply_a = redacted(
-        service_a.apply_bundle_restore(
-            &divergent_plan_a.plan_id,
-            approved_pull_actions(&divergent_plan_a),
-        ),
+        service_a.apply_bundle_restore(&divergent_plan_a, approved_pull_actions(&divergent_plan_a)),
         "cannot apply replica-A Claude Keep Both",
     );
     assert!(divergent_apply_a.success);
@@ -4533,10 +4517,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
     );
     assert_keep_both_offered(&divergent_plan_b, &logical_primary_b);
     let divergent_apply_b = redacted(
-        service_b.apply_bundle_restore(
-            &divergent_plan_b.plan_id,
-            approved_pull_actions(&divergent_plan_b),
-        ),
+        service_b.apply_bundle_restore(&divergent_plan_b, approved_pull_actions(&divergent_plan_b)),
         "cannot apply replica-B Claude Keep Both",
     );
     assert!(divergent_apply_b.success);
@@ -5230,6 +5211,7 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
     // create one real, zero-tool Sonnet 5 session on A and publish it through
     // the reviewed production Push path.
     let first = finish_setup(
+        &repository_a,
         &service_a,
         &project_a,
         &claude_home_a,
@@ -5316,6 +5298,7 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
     // identities, resumes the production-relocated transcript through Tuzi,
     // and publishes the remote continuation.
     let second = finish_setup(
+        &repository_b,
         &service_b,
         &project_b,
         &claude_home_b,
@@ -5338,9 +5321,9 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
     assert!(initial_pull.preserved_threads.is_empty());
     assert_eq!(
         initial_plan
-            .conversation_actions
+            .conversation_review
             .iter()
-            .filter(|action| action.action == ConversationPlanActionType::CreateLocal)
+            .filter(|row| row.action == ConversationReviewAction::CreateLocal)
             .count(),
         1,
         "initial paid Pull did not review exactly one local creation"
@@ -5454,10 +5437,7 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
     );
     assert_keep_both_offered(&divergent_plan, &logical_primary_a);
     let divergent_apply = redacted(
-        service_a.apply_bundle_restore(
-            &divergent_plan.plan_id,
-            approved_pull_actions(&divergent_plan),
-        ),
+        service_a.apply_bundle_restore(&divergent_plan, approved_pull_actions(&divergent_plan)),
         "cannot apply paid divergent Claude Keep Both",
     );
     assert!(divergent_apply.success && divergent_apply.failed_actions.is_empty());

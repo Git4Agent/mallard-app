@@ -19,17 +19,22 @@ const ROW_PRESENTATION: Record<
 
 function actionIcon(action: SyncOutcomeAction): IconName {
   if (action.kind === "open_pull") return "download";
-  if (action.kind === "push_again") return "upload";
   if (action.kind === "reset_metadata") return "trash";
   return "refresh";
 }
 
 function actionTitle(action: SyncOutcomeAction): string | undefined {
-  if (action.kind === "restart_codex") return action.title;
+  if (action.kind === "after_pull_action") return action.title;
   if (action.kind === "reset_metadata") {
-    return "Forget this project's local sync bases, mappings, results, and saved plans";
+    return "Forget this project's local sync bases, mappings, and results";
   }
   return undefined;
+}
+
+function actionKey(action: SyncOutcomeAction, index: number): string {
+  return action.kind === "after_pull_action"
+    ? `${action.kind}:${action.offer.provider}:${action.offer.action_id}:${index}`
+    : `${action.kind}:${index}`;
 }
 
 function formatTime(seconds: number): string {
@@ -53,7 +58,7 @@ export default function SyncOutcomeNotice({
 }: {
   outcome: SyncOutcome;
   busy?: boolean;
-  onAction?: () => void;
+  onAction?: (action: SyncOutcomeAction) => void;
   onDismiss: () => void;
 }) {
   const [open, setOpen] = useState(outcome.defaultOpen);
@@ -63,6 +68,15 @@ export default function SyncOutcomeNotice({
     setOpen(outcome.defaultOpen);
   }
   const bodyId = `sync-outcome-body-${useId().replace(/:/g, "")}`;
+  const runnableActions = outcome.actions.filter((action) => (
+    action.kind !== "after_pull_action" || action.offer.available
+  ));
+  const manualActions = outcome.actions.filter((action): action is Extract<
+    SyncOutcomeAction,
+    { kind: "after_pull_action" }
+  > => (
+    action.kind === "after_pull_action" && !action.offer.available
+  ));
 
   return (
     <div
@@ -83,18 +97,21 @@ export default function SyncOutcomeNotice({
             ))}
           </span>
         </span>
-        {outcome.action && onAction && (
+        {runnableActions.length > 0 && onAction && (
           <span className="sync-outcome-actions">
-            <button
-              type="button"
-              className="btn btn-ghost"
-              disabled={busy}
-              title={actionTitle(outcome.action)}
-              onClick={onAction}
-            >
-              <Icon name={actionIcon(outcome.action)} size={13} />
-              {outcome.action.label}
-            </button>
+            {runnableActions.map((action, index) => (
+              <button
+                key={actionKey(action, index)}
+                type="button"
+                className="btn btn-ghost"
+                disabled={busy}
+                title={actionTitle(action)}
+                onClick={() => onAction(action)}
+              >
+                <Icon name={actionIcon(action)} size={13} />
+                {action.label}
+              </button>
+            ))}
           </span>
         )}
         <span className="sync-outcome-head-actions">
@@ -119,6 +136,13 @@ export default function SyncOutcomeNotice({
           </button>
         </span>
       </div>
+      {manualActions.length > 0 && (
+        <div className="sync-outcome-guidance">
+          {manualActions.map((action, index) => (
+            <p key={actionKey(action, index)}>{action.title}</p>
+          ))}
+        </div>
+      )}
       <div className="sync-outcome-body" id={bodyId}>
         <div className="sync-history-thread-list sync-outcome-threads">
           {outcome.rows.map((row) => {

@@ -1,114 +1,57 @@
 //! Approved catalog mutation: target-safe directory replacement, the
 //! composite preservation transaction, the standalone Fork copy, the native
-//! plugin executor, and startup recovery.
+//! executor, and startup recovery.
 //!
-//! Every skill/pet mutation is journaled before it changes the target,
-//! staged on the target filesystem, digest-verified, backed up, activated by
-//! rename with no-clobber claims, verified again, and recoverable from the
-//! same journal. Recovery resumes the same operation and name; a retry never
-//! mints a second copy.
+//! Every directory mutation is journaled before it changes the target, staged
+//! on the target filesystem, digest-verified, backed up, activated by rename
+//! with no-clobber claims, verified again, and recoverable from the same
+//! journal. Recovery resumes the same operation and name; a retry never
+//! mints a second copy. Every format-specific step — capture, materialize,
+//! rename, verification — goes through the registered codec of the
+//! directory's own coordinate; nothing here names a provider, kind, or
+//! format.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use mallard_domain::StorageId;
+use mallard_domain::{hex_lower, update_length_prefixed, StorageId};
+use sha2::{Digest, Sha256};
 
-use super::adapters::{adapter_for, redact, PluginProcessRunner};
-use super::codex_pet::{
-    capture_pet, materialize_pet, observed_pet_digest, pet_resource_from_capture, renamed_pet,
-};
+use super::adapters::{redact, PluginProcessRunner};
+use super::codec::{read_directory_tree, CapturedFile, CapturedResource, TreeLimits};
 use super::domain::{
-    CatalogActionOutcome, CatalogActionResult, CatalogClaim, CatalogOperationId,
+    CatalogActionOutcome, CatalogActionResult, CatalogClaim, CatalogCoordinate, CatalogOperationId,
     CatalogOperationJournalEntry, CatalogOperationKind, CatalogOperationPhase, CatalogPlanActionId,
     CatalogPlanId, CatalogPreservationPin, CatalogPreservationWitness, CatalogPullAction,
-    CatalogPullActionKind, CatalogPullDisposition, CatalogPullItem, CatalogResource,
-    CatalogResourceForkPlan, CatalogResourceId, CatalogTargetExpectation, CodexPetDescriptor,
-    CodexPetFormat, LocalCatalogTargetId, NativePluginPlan, PluginApplyMode,
+    CatalogPullActionKind, CatalogPullDisposition, CatalogPullItem, CatalogResourceEnvelope,
+    CatalogResourceForkPlan, CatalogResourceId, CatalogTargetConfig, CatalogTargetExpectation,
+    NativePluginPlan, PluginApplyMode, MAX_CATALOG_FILES, MAX_CATALOG_FILE_BYTES,
+    MAX_REVISION_PAYLOAD_BYTES,
 };
+use super::inventory::classify_directory;
 use super::persistence::CatalogStateRepository;
-use super::skill_tree::{
-    capture_skill_tree, materialize_skill_tree, rename_skill_tree, skill_resource_from_tree,
-    verify_tree_matches, CapturedSkillFile,
-};
+use super::registry::{CatalogCapability, CatalogRegistry};
 
-/// The storage version of one directory resource, fully fetched and verified
-/// before any local mutation.
-pub enum IncomingDirectoryPayload {
-    Skill {
-        scope: super::domain::AgentSkillScope,
-        effective_name: String,
-        install_directory: String,
-        files: BTreeMap<String, CapturedSkillFile>,
-    },
-    Pet {
-        format: CodexPetFormat,
-        descriptor: CodexPetDescriptor,
-        atlas: Vec<u8>,
-    },
+/// What a directory target currently holds: the registered version that
+/// claims it and its exact content.
+pub struct DirectoryObservation {
+    pub capability: Arc<CatalogCapability>,
+    pub envelope: CatalogResourceEnvelope,
+    pub captured: CapturedResource,
 }
 
-impl IncomingDirectoryPayload {
-    fn content_sha256(&self) -> Result<String, String> {
-        match self {
-            IncomingDirectoryPayload::Skill {
-                scope,
-                effective_name,
-                install_directory,
-                files,
-            } => Ok(
-                skill_resource_from_tree(*scope, effective_name, install_directory, files)?
-                    .content_sha256,
-            ),
-            IncomingDirectoryPayload::Pet {
-                format,
-                descriptor,
-                atlas,
-            } => {
-                let captured = super::codex_pet::CapturedPet {
-                    format: *format,
-                    pet_id: descriptor.pet_id.clone(),
-                    display_name: descriptor.display_name.clone(),
-                    description: descriptor.description.clone(),
-                    atlas_basename: descriptor.atlas_basename.clone(),
-                    atlas_bytes: atlas.clone(),
-                    extra_files: Vec::new(),
-                };
-                Ok(pet_resource_from_capture(&captured)?.content_sha256)
-            }
-        }
-    }
-
-    fn materialize(&self, stage: &Path) -> Result<(), String> {
-        match self {
-            IncomingDirectoryPayload::Skill { files, .. } => materialize_skill_tree(stage, files),
-            IncomingDirectoryPayload::Pet {
-                format,
-                descriptor,
-                atlas,
-            } => materialize_pet(stage, *format, descriptor, atlas),
-        }
-    }
-
-    fn verify_at(&self, target: &Path) -> Result<(), String> {
-        match self {
-            IncomingDirectoryPayload::Skill { files, .. } => verify_tree_matches(target, files),
-            IncomingDirectoryPayload::Pet { format, .. } => {
-                let (observed_format, _) = observed_pet_digest(target)?;
-                if observed_format != *format {
-                    return Err("the activated pet does not match its format".to_string());
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-/// Observed digest of a directory target, or `None` when absent.
-pub fn observed_directory_digest(
-    target: &LocalCatalogTargetId,
+/// Observe one directory target: `None` when absent, else the coordinate
+/// that claims it and its current content. Classification starts from the
+/// scope's own codec and falls through to the sibling versions sharing the
+/// root, exactly as inventory does, so what a review saw is what apply sees.
+pub fn observe_directory(
+    registry: &CatalogRegistry,
+    capability: &Arc<CatalogCapability>,
+    root_class: &str,
     path: &Path,
-) -> Result<Option<String>, String> {
+) -> Result<Option<DirectoryObservation>, String> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("inspect '{}': {}", path.display(), error)),
@@ -117,27 +60,135 @@ pub fn observed_directory_digest(
         }
         Ok(_) => {}
     }
-    match target {
-        LocalCatalogTargetId::SkillDirectory { scope, .. } => {
-            let tree = capture_skill_tree(path)?;
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or("skill directory name is not UTF-8")?;
-            let effective = tree
-                .declared_name
-                .clone()
-                .unwrap_or_else(|| name.to_string());
-            Ok(Some(
-                skill_resource_from_tree(*scope, &effective, name, &tree.files)?.content_sha256,
+    let (claimed, captured) = classify_directory(registry, capability, root_class, path)?;
+    let envelope = captured.to_envelope(&claimed.coordinate());
+    Ok(Some(DirectoryObservation {
+        capability: claimed,
+        envelope,
+        captured,
+    }))
+}
+
+fn observed_digest(
+    registry: &CatalogRegistry,
+    capability: &Arc<CatalogCapability>,
+    root_class: &str,
+    path: &Path,
+) -> Result<Option<String>, String> {
+    Ok(observe_directory(registry, capability, root_class, path)?
+        .map(|observation| observation.envelope.content_sha256))
+}
+
+fn captured_tree_sha256(files: &BTreeMap<String, CapturedFile>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mallard-catalog-backup-tree-v1\0");
+    for (path, file) in files {
+        update_length_prefixed(&mut hasher, path.as_bytes());
+        hasher.update(file.mode.to_be_bytes());
+        update_length_prefixed(&mut hasher, &file.bytes);
+    }
+    hex_lower(&hasher.finalize())
+}
+
+fn backup_tree_sha256(path: &Path) -> Result<String, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err("catalog backup is not a real directory".to_string()),
+        Err(error) => return Err(format!("inspect catalog backup: {error}")),
+    }
+    let files = read_directory_tree(
+        path,
+        &TreeLimits {
+            max_files: MAX_CATALOG_FILES,
+            max_file_bytes: MAX_CATALOG_FILE_BYTES,
+            max_total_bytes: MAX_REVISION_PAYLOAD_BYTES,
+        },
+    )?;
+    Ok(captured_tree_sha256(&files))
+}
+
+fn restore_verified_backup(
+    backup: &Path,
+    target: &Path,
+    expected_tree_sha256: &str,
+) -> Result<bool, String> {
+    match fs::symlink_metadata(target) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("inspect restore target: {error}")),
+        Ok(_) => return Ok(false),
+    }
+    if backup_tree_sha256(backup)? != expected_tree_sha256 {
+        return Ok(false);
+    }
+    fs::rename(backup, target).map_err(|error| format!("restore catalog backup: {error}"))?;
+    Ok(true)
+}
+
+/// One directory resource fully assembled in memory, ready to stage: the
+/// codec of its own coordinate, its envelope, and its exact payload bytes.
+pub struct IncomingDirectoryPayload {
+    capability: Arc<CatalogCapability>,
+    envelope: CatalogResourceEnvelope,
+    files: BTreeMap<String, CapturedFile>,
+}
+
+impl IncomingDirectoryPayload {
+    fn from_capture(capability: Arc<CatalogCapability>, captured: CapturedResource) -> Self {
+        let envelope = captured.to_envelope(&capability.coordinate());
+        Self {
+            capability,
+            envelope,
+            files: captured.files,
+        }
+    }
+
+    fn content_sha256(&self) -> &str {
+        &self.envelope.content_sha256
+    }
+
+    fn materialize(&self, stage: &Path) -> Result<(), String> {
+        self.capability
+            .codec
+            .materialize(stage, &self.envelope, &self.files)
+    }
+
+    /// The directory at `path` must recapture to exactly this resource.
+    fn verify_at(
+        &self,
+        registry: &CatalogRegistry,
+        root_class: &str,
+        path: &Path,
+    ) -> Result<(), String> {
+        let observed = observe_directory(registry, &self.capability, root_class, path)?;
+        let matches = observed.as_ref().is_some_and(|observation| {
+            observation.envelope.coordinate() == self.envelope.coordinate()
+                && observation.envelope.content_sha256 == self.envelope.content_sha256
+        });
+        if matches {
+            Ok(())
+        } else {
+            Err(format!(
+                "'{}' does not match its verified content",
+                path.display()
             ))
         }
-        LocalCatalogTargetId::PetDirectory { .. } => {
-            let (_, digest) = observed_pet_digest(path)?;
-            Ok(Some(digest))
-        }
-        LocalCatalogTargetId::Plugin { .. } => Err("plugins have no directory target".to_string()),
     }
+}
+
+/// The transformed local copy of an observed directory, through the codec
+/// of the directory's own coordinate.
+fn build_transformed_copy(
+    source: &DirectoryObservation,
+    copy_name: &str,
+) -> Result<IncomingDirectoryPayload, String> {
+    let renamed = source
+        .capability
+        .codec
+        .rename(&source.captured, copy_name)?;
+    Ok(IncomingDirectoryPayload::from_capture(
+        source.capability.clone(),
+        renamed,
+    ))
 }
 
 fn expectation_matches(
@@ -192,6 +243,40 @@ fn journal_phase(
     })
 }
 
+/// A journal entry with every optional field empty; callers fill what their
+/// operation pins.
+fn journal_entry(
+    operation_id: CatalogOperationId,
+    kind: CatalogOperationKind,
+    coordinate: CatalogCoordinate,
+    target: CatalogTargetConfig,
+    now: u64,
+) -> CatalogOperationJournalEntry {
+    CatalogOperationJournalEntry {
+        operation_id,
+        kind,
+        coordinate,
+        storage_id: None,
+        plan_id: None,
+        action_id: None,
+        target,
+        target_path: None,
+        backup_path: None,
+        backup_tree_sha256: None,
+        copy_target_path: None,
+        copy_name: None,
+        copy_resource_id: None,
+        expected_target_sha256: None,
+        incoming_content_sha256: None,
+        copy_content_sha256: None,
+        phase: CatalogOperationPhase::Journaled,
+        outcome: None,
+        message: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
 /// Atomically claim-and-activate a staged directory at a target that must not
 /// exist: `create_dir` is the no-clobber claim, then the stage renames in.
 fn activate_stage_no_clobber(stage: &Path, target: &Path) -> Result<(), String> {
@@ -238,7 +323,12 @@ fn backup_target(
     plan_id: &CatalogPlanId,
     operation_id: &CatalogOperationId,
     target_path: &Path,
+    expected_tree_sha256: &str,
+    now: u64,
 ) -> Result<PathBuf, String> {
+    if backup_tree_sha256(target_path)? != expected_tree_sha256 {
+        return Err("the target changed before it could be backed up".to_string());
+    }
     let name = target_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -246,36 +336,105 @@ fn backup_target(
     let preferred = repository
         .backup_dir(plan_id)?
         .join(format!("{}-{}", operation_id, name));
+    record_backup_intent(
+        repository,
+        operation_id,
+        &preferred,
+        expected_tree_sha256,
+        now,
+    )?;
     match fs::rename(target_path, &preferred) {
-        Ok(()) => Ok(preferred),
+        Ok(()) => {
+            complete_backup(
+                repository,
+                operation_id,
+                &preferred,
+                expected_tree_sha256,
+                now,
+            )?;
+            Ok(preferred)
+        }
         Err(_) => {
-            // Cross-filesystem: keep the backup beside the target as a
-            // hidden, journaled sibling instead of a recursive delete.
             let sibling = target_path
                 .parent()
                 .ok_or("backup target has no parent")?
                 .join(format!(".mallard-backup-{}-{}", operation_id, name));
+            record_backup_intent(
+                repository,
+                operation_id,
+                &sibling,
+                expected_tree_sha256,
+                now,
+            )?;
             fs::rename(target_path, &sibling)
                 .map_err(|error| format!("back up '{}': {}", target_path.display(), error))?;
+            complete_backup(
+                repository,
+                operation_id,
+                &sibling,
+                expected_tree_sha256,
+                now,
+            )?;
             Ok(sibling)
         }
     }
+}
+
+fn record_backup_intent(
+    repository: &CatalogStateRepository,
+    operation_id: &CatalogOperationId,
+    backup: &Path,
+    backup_tree_sha256: &str,
+    now: u64,
+) -> Result<(), String> {
+    repository.mutate_operations(|document| {
+        let entry = document
+            .operations
+            .iter_mut()
+            .find(|entry| &entry.operation_id == operation_id)
+            .ok_or("catalog operation journal entry disappeared")?;
+        entry.backup_path = Some(backup.to_string_lossy().to_string());
+        entry.backup_tree_sha256 = Some(backup_tree_sha256.to_string());
+        entry.updated_at = now;
+        Ok(())
+    })
+}
+
+fn complete_backup(
+    repository: &CatalogStateRepository,
+    operation_id: &CatalogOperationId,
+    backup: &Path,
+    expected_tree_sha256: &str,
+    now: u64,
+) -> Result<(), String> {
+    if backup_tree_sha256(backup)? != expected_tree_sha256 {
+        return Err("the catalog backup changed before it could be recorded".to_string());
+    }
+    journal_phase(
+        repository,
+        operation_id,
+        CatalogOperationPhase::OriginalBackedUp,
+        None,
+        None,
+        now,
+    )
 }
 
 struct DirectoryReplaceRequest<'a> {
     storage_id: StorageId,
     plan_id: CatalogPlanId,
     action_id: CatalogPlanActionId,
-    target: &'a LocalCatalogTargetId,
+    coordinate: CatalogCoordinate,
+    target: &'a CatalogTargetConfig,
     target_path: &'a Path,
     expected: &'a CatalogTargetExpectation,
     incoming: &'a IncomingDirectoryPayload,
     now: u64,
 }
 
-/// One whole-directory replacement transaction. There is no
-/// per-file merge.
+/// One whole-directory replacement transaction. There is no per-file merge.
 fn replace_directory_target(
+    registry: &CatalogRegistry,
     repository: &CatalogStateRepository,
     request: DirectoryReplaceRequest<'_>,
 ) -> Result<(), String> {
@@ -283,11 +442,23 @@ fn replace_directory_target(
         .target_path
         .parent()
         .ok_or("directory target has no parent")?;
+    let root_class = request.target.decode()?.root_class;
     let _target_lock = repository.acquire_target_lock(root)?;
 
-    let observed = observed_directory_digest(request.target, request.target_path)?;
-    expectation_matches(request.expected, observed.as_deref())?;
-    let incoming_digest = request.incoming.content_sha256()?;
+    let observed = observe_directory(
+        registry,
+        &request.incoming.capability,
+        &root_class,
+        request.target_path,
+    )?;
+    let observed_digest = observed
+        .as_ref()
+        .map(|observation| observation.envelope.content_sha256.as_str());
+    expectation_matches(request.expected, observed_digest)?;
+    let original_tree_sha256 = observed
+        .as_ref()
+        .map(|_| backup_tree_sha256(request.target_path))
+        .transpose()?;
 
     let operation_id = CatalogOperationId::generate()?;
     let target_name = request
@@ -296,67 +467,43 @@ fn replace_directory_target(
         .and_then(|name| name.to_str())
         .ok_or("directory target has no name")?;
     let stage_parent = stage_dir_for(root, &operation_id, "");
-    let stage = match staged_child(&stage_parent, target_name) {
+    let staged = staged_child(&stage_parent, target_name).and_then(|stage| {
+        request.incoming.materialize(&stage)?;
+        request.incoming.verify_at(registry, &root_class, &stage)?;
+        Ok(stage)
+    });
+    let stage = match staged {
         Ok(stage) => stage,
         Err(error) => {
             let _ = fs::remove_dir_all(&stage_parent);
             return Err(error);
         }
     };
-    let staged = request.incoming.materialize(&stage);
-    if let Err(error) = staged {
-        let _ = fs::remove_dir_all(&stage_parent);
-        return Err(error);
-    }
-    if let Err(error) = request.incoming.verify_at(&stage) {
-        let _ = fs::remove_dir_all(&stage_parent);
-        return Err(error);
-    }
 
-    journal_upsert(
-        repository,
-        CatalogOperationJournalEntry {
-            operation_id: operation_id.clone(),
-            kind: CatalogOperationKind::DirectoryReplace,
-            storage_id: Some(request.storage_id.clone()),
-            plan_id: Some(request.plan_id.clone()),
-            action_id: Some(request.action_id.clone()),
-            target: request.target.clone(),
-            target_path: Some(request.target_path.to_string_lossy().to_string()),
-            backup_path: None,
-            copy_target_path: None,
-            copy_name: None,
-            copy_resource_id: None,
-            expected_target_sha256: observed.clone(),
-            incoming_content_sha256: Some(incoming_digest.clone()),
-            copy_content_sha256: None,
-            phase: CatalogOperationPhase::Journaled,
-            outcome: None,
-            message: None,
-            created_at: request.now,
-            updated_at: request.now,
-        },
-    )?;
+    let mut entry = journal_entry(
+        operation_id.clone(),
+        CatalogOperationKind::DirectoryReplace,
+        request.coordinate.clone(),
+        request.target.clone(),
+        request.now,
+    );
+    entry.storage_id = Some(request.storage_id.clone());
+    entry.plan_id = Some(request.plan_id.clone());
+    entry.action_id = Some(request.action_id.clone());
+    entry.target_path = Some(request.target_path.to_string_lossy().to_string());
+    entry.expected_target_sha256 = observed_digest.map(str::to_string);
+    entry.incoming_content_sha256 = Some(request.incoming.content_sha256().to_string());
+    journal_upsert(repository, entry)?;
 
-    let backup = if observed.is_some() {
+    let backup = if let Some(original_tree_sha256) = original_tree_sha256.as_deref() {
         let backup = backup_target(
             repository,
             &request.plan_id,
             &operation_id,
             request.target_path,
+            original_tree_sha256,
+            request.now,
         )?;
-        repository.mutate_operations(|document| {
-            if let Some(entry) = document
-                .operations
-                .iter_mut()
-                .find(|entry| entry.operation_id == operation_id)
-            {
-                entry.backup_path = Some(backup.to_string_lossy().to_string());
-                entry.phase = CatalogOperationPhase::OriginalBackedUp;
-                entry.updated_at = request.now;
-            }
-            Ok(())
-        })?;
         Some(backup)
     } else {
         None
@@ -365,24 +512,40 @@ fn replace_directory_target(
     let activation = activate_stage_no_clobber(&stage, request.target_path);
     let _ = fs::remove_dir_all(&stage_parent);
     if let Err(error) = activation {
-        // Roll the backup into place when safe; the stage is discarded.
-        if let Some(backup) = &backup {
-            if fs::symlink_metadata(request.target_path).is_err() {
-                let _ = fs::rename(backup, request.target_path);
+        let restored = match (&backup, original_tree_sha256.as_deref()) {
+            (Some(backup), Some(expected)) => {
+                restore_verified_backup(backup, request.target_path, expected).unwrap_or(false)
             }
-        }
+            _ => false,
+        };
+        let message = if restored {
+            error.clone()
+        } else {
+            format!("{error}; the original backup was left unchanged")
+        };
         journal_phase(
             repository,
             &operation_id,
-            CatalogOperationPhase::RolledBack,
-            Some(CatalogActionOutcome::Failed),
-            Some(error.clone()),
+            if restored {
+                CatalogOperationPhase::RolledBack
+            } else {
+                CatalogOperationPhase::Failed
+            },
+            Some(if restored {
+                CatalogActionOutcome::Failed
+            } else {
+                CatalogActionOutcome::Partial
+            }),
+            Some(message.clone()),
             request.now,
         )?;
-        return Err(error);
+        return Err(message);
     }
 
-    if let Err(error) = request.incoming.verify_at(request.target_path) {
+    if let Err(error) = request
+        .incoming
+        .verify_at(registry, &root_class, request.target_path)
+    {
         journal_phase(
             repository,
             &operation_id,
@@ -408,17 +571,19 @@ struct PreservationRequest<'a> {
     storage_id: StorageId,
     plan_id: CatalogPlanId,
     action_id: CatalogPlanActionId,
+    coordinate: CatalogCoordinate,
     resource_id: CatalogResourceId,
-    target: &'a LocalCatalogTargetId,
+    target: &'a CatalogTargetConfig,
     target_path: &'a Path,
     pin: &'a CatalogPreservationPin,
     incoming: &'a IncomingDirectoryPayload,
     now: u64,
 }
 
-/// The composite preservation transaction: create the
-/// validated named copy, witness it, then back up and overwrite the original.
+/// The composite preservation transaction: create the validated named copy,
+/// witness it, then back up and overwrite the original.
 fn preserve_and_overwrite(
+    registry: &CatalogRegistry,
     repository: &CatalogStateRepository,
     request: PreservationRequest<'_>,
 ) -> Result<(), String> {
@@ -426,17 +591,25 @@ fn preserve_and_overwrite(
         .target_path
         .parent()
         .ok_or("preservation target has no parent")?;
+    let root_class = request.target.decode()?.root_class;
     let _target_lock = repository.acquire_target_lock(root)?;
 
-    // 1. Revalidate every pin.
-    let observed = observed_directory_digest(request.target, request.target_path)?
-        .ok_or("the diverged local version disappeared before preservation")?;
-    if observed != request.pin.original_content_sha256 {
+    // 1. Revalidate every pin against what actually sits at the target,
+    // through whichever registered version claims it.
+    let source = observe_directory(
+        registry,
+        &request.incoming.capability,
+        &root_class,
+        request.target_path,
+    )?
+    .ok_or("the diverged local version disappeared before preservation")?;
+    if source.envelope.content_sha256 != request.pin.original_content_sha256 {
         return Err(
             "the local version changed after review; refresh the catalog and review again"
                 .to_string(),
         );
     }
+    let original_tree_sha256 = backup_tree_sha256(request.target_path)?;
     let copy_target = PathBuf::from(&request.pin.copy_target_path);
     let operation_id = CatalogOperationId::generate()?;
 
@@ -455,10 +628,15 @@ fn preserve_and_overwrite(
     let copy_exists = fs::symlink_metadata(&copy_target).is_ok();
     let witness_valid = existing_witness.is_some()
         && copy_exists
-        && observed_directory_digest(request.target, &copy_target)
-            .ok()
-            .flatten()
-            .as_deref()
+        && observed_digest(
+            registry,
+            &request.incoming.capability,
+            &root_class,
+            &copy_target,
+        )
+        .ok()
+        .flatten()
+        .as_deref()
             == Some(request.pin.transformed_content_sha256.as_str());
     if copy_exists && !witness_valid {
         return Err(format!(
@@ -476,69 +654,62 @@ fn preserve_and_overwrite(
         .ok_or("preservation target has no name")?;
     let copy_stage_parent = stage_dir_for(root, &operation_id, "-copy");
     let incoming_stage_parent = stage_dir_for(root, &operation_id, "-incoming");
-    let cleanup = |left: &Path, right: &Path| {
-        let _ = fs::remove_dir_all(left);
-        let _ = fs::remove_dir_all(right);
+    let cleanup = || {
+        let _ = fs::remove_dir_all(&copy_stage_parent);
+        let _ = fs::remove_dir_all(&incoming_stage_parent);
     };
-    let copy_stage = if witness_valid {
-        copy_stage_parent.join(&request.pin.copy_name)
-    } else {
-        let copy_stage = staged_child(&copy_stage_parent, &request.pin.copy_name)
-            .inspect_err(|_| cleanup(&copy_stage_parent, &incoming_stage_parent))?;
-        let transformed = build_transformed_copy(request.target, request.target_path, request.pin)?;
-        if let Err(error) = transformed.materialize(&copy_stage) {
-            cleanup(&copy_stage_parent, &incoming_stage_parent);
+    let staged = (|| -> Result<(PathBuf, PathBuf), String> {
+        let copy_stage = if witness_valid {
+            copy_stage_parent.join(&request.pin.copy_name)
+        } else {
+            let copy_stage = staged_child(&copy_stage_parent, &request.pin.copy_name)?;
+            let transformed = build_transformed_copy(&source, &request.pin.copy_name)?;
+            if transformed.content_sha256() != request.pin.transformed_content_sha256 {
+                return Err("the transformed copy failed digest validation".to_string());
+            }
+            transformed.materialize(&copy_stage)?;
+            transformed.verify_at(registry, &root_class, &copy_stage)?;
+            copy_stage
+        };
+        let incoming_stage = staged_child(&incoming_stage_parent, target_name)?;
+        request.incoming.materialize(&incoming_stage)?;
+        request
+            .incoming
+            .verify_at(registry, &root_class, &incoming_stage)?;
+        Ok((copy_stage, incoming_stage))
+    })();
+    let (copy_stage, incoming_stage) = match staged {
+        Ok(stages) => stages,
+        Err(error) => {
+            cleanup();
             return Err(error);
         }
-        let copy_target_id = preserved_target_for(request.target, &request.pin.copy_name);
-        let staged_digest = observed_directory_digest(&copy_target_id, &copy_stage)?;
-        if staged_digest.as_deref() != Some(request.pin.transformed_content_sha256.as_str()) {
-            cleanup(&copy_stage_parent, &incoming_stage_parent);
-            return Err("the transformed copy failed digest validation".to_string());
-        }
-        copy_stage
     };
-    let incoming_stage = staged_child(&incoming_stage_parent, target_name)
-        .inspect_err(|_| cleanup(&copy_stage_parent, &incoming_stage_parent))?;
-    if let Err(error) = request.incoming.materialize(&incoming_stage) {
-        cleanup(&copy_stage_parent, &incoming_stage_parent);
-        return Err(error);
-    }
-    if let Err(error) = request.incoming.verify_at(&incoming_stage) {
-        cleanup(&copy_stage_parent, &incoming_stage_parent);
-        return Err(error);
-    }
 
     // 5. Journal the pinned operation and chosen name.
-    journal_upsert(
-        repository,
-        CatalogOperationJournalEntry {
-            operation_id: operation_id.clone(),
-            kind: CatalogOperationKind::Preservation,
-            storage_id: Some(request.storage_id.clone()),
-            plan_id: Some(request.plan_id.clone()),
-            action_id: Some(request.action_id.clone()),
-            target: request.target.clone(),
-            target_path: Some(request.target_path.to_string_lossy().to_string()),
-            backup_path: None,
-            copy_target_path: Some(request.pin.copy_target_path.clone()),
-            copy_name: Some(request.pin.copy_name.clone()),
-            copy_resource_id: Some(request.pin.copy_resource_id.clone()),
-            expected_target_sha256: Some(request.pin.original_content_sha256.clone()),
-            incoming_content_sha256: Some(request.pin.storage_content_sha256.clone()),
-            copy_content_sha256: Some(request.pin.transformed_content_sha256.clone()),
-            phase: CatalogOperationPhase::Journaled,
-            outcome: None,
-            message: None,
-            created_at: request.now,
-            updated_at: request.now,
-        },
-    )?;
+    let mut entry = journal_entry(
+        operation_id.clone(),
+        CatalogOperationKind::Preservation,
+        request.coordinate.clone(),
+        request.target.clone(),
+        request.now,
+    );
+    entry.storage_id = Some(request.storage_id.clone());
+    entry.plan_id = Some(request.plan_id.clone());
+    entry.action_id = Some(request.action_id.clone());
+    entry.target_path = Some(request.target_path.to_string_lossy().to_string());
+    entry.copy_target_path = Some(request.pin.copy_target_path.clone());
+    entry.copy_name = Some(request.pin.copy_name.clone());
+    entry.copy_resource_id = Some(request.pin.copy_resource_id.clone());
+    entry.expected_target_sha256 = Some(request.pin.original_content_sha256.clone());
+    entry.incoming_content_sha256 = Some(request.pin.storage_content_sha256.clone());
+    entry.copy_content_sha256 = Some(request.pin.transformed_content_sha256.clone());
+    journal_upsert(repository, entry)?;
 
     // 6. Activate the copy with no-clobber semantics and verify it.
     if !witness_valid {
         if let Err(error) = activate_stage_no_clobber(&copy_stage, &copy_target) {
-            cleanup(&copy_stage_parent, &incoming_stage_parent);
+            cleanup();
             journal_phase(
                 repository,
                 &operation_id,
@@ -550,8 +721,12 @@ fn preserve_and_overwrite(
             return Err(error);
         }
         let _ = fs::remove_dir_all(&copy_stage_parent);
-        let copy_target_id = preserved_target_for(request.target, &request.pin.copy_name);
-        let activated = observed_directory_digest(&copy_target_id, &copy_target)?;
+        let activated = observed_digest(
+            registry,
+            &request.incoming.capability,
+            &root_class,
+            &copy_target,
+        )?;
         if activated.as_deref() != Some(request.pin.transformed_content_sha256.as_str()) {
             journal_phase(
                 repository,
@@ -574,6 +749,7 @@ fn preserve_and_overwrite(
     )?;
 
     // 7. Persist the preservation witness before changing the original.
+    let preserved_target = request.target.with_member(&request.pin.copy_name)?;
     repository.mutate_preservations(|document| {
         document.witnesses.retain(|witness| {
             !(witness.source_target == *request.target
@@ -581,12 +757,13 @@ fn preserve_and_overwrite(
         });
         document.witnesses.push(CatalogPreservationWitness {
             storage_id: request.storage_id.clone(),
+            coordinate: request.coordinate.clone(),
             source_resource_id: request.resource_id.clone(),
             source_target: request.target.clone(),
             local_source_sha256: request.pin.original_content_sha256.clone(),
             storage_source_sha256: request.pin.storage_content_sha256.clone(),
             preserved_resource_id: request.pin.copy_resource_id.clone(),
-            preserved_target: preserved_target_for(request.target, &request.pin.copy_name),
+            preserved_target: preserved_target.clone(),
             preserved_content_sha256: request.pin.transformed_content_sha256.clone(),
             operation_id: operation_id.clone(),
             created_at: request.now,
@@ -608,37 +785,41 @@ fn preserve_and_overwrite(
         &request.plan_id,
         &operation_id,
         request.target_path,
+        &original_tree_sha256,
+        request.now,
     )?;
-    repository.mutate_operations(|document| {
-        if let Some(entry) = document
-            .operations
-            .iter_mut()
-            .find(|entry| entry.operation_id == operation_id)
-        {
-            entry.backup_path = Some(backup.to_string_lossy().to_string());
-            entry.phase = CatalogOperationPhase::OriginalBackedUp;
-            entry.updated_at = request.now;
-        }
-        Ok(())
-    })?;
     let activation = activate_stage_no_clobber(&incoming_stage, request.target_path);
     let _ = fs::remove_dir_all(&incoming_stage_parent);
     if let Err(error) = activation {
-        // The verified copy stays; restore the original from backup.
-        if fs::symlink_metadata(request.target_path).is_err() {
-            let _ = fs::rename(&backup, request.target_path);
-        }
+        let restored = restore_verified_backup(&backup, request.target_path, &original_tree_sha256)
+            .unwrap_or(false);
+        let message = if restored {
+            error.clone()
+        } else {
+            format!("{error}; the original backup was left unchanged")
+        };
         journal_phase(
             repository,
             &operation_id,
-            CatalogOperationPhase::RolledBack,
-            Some(CatalogActionOutcome::Failed),
-            Some(error.clone()),
+            if restored {
+                CatalogOperationPhase::RolledBack
+            } else {
+                CatalogOperationPhase::Failed
+            },
+            Some(if restored {
+                CatalogActionOutcome::Failed
+            } else {
+                CatalogActionOutcome::Partial
+            }),
+            Some(message.clone()),
             request.now,
         )?;
-        return Err(error);
+        return Err(message);
     }
-    if let Err(error) = request.incoming.verify_at(request.target_path) {
+    if let Err(error) = request
+        .incoming
+        .verify_at(registry, &root_class, request.target_path)
+    {
         journal_phase(
             repository,
             &operation_id,
@@ -662,67 +843,14 @@ fn preserve_and_overwrite(
     Ok(())
 }
 
-fn preserved_target_for(source: &LocalCatalogTargetId, copy_name: &str) -> LocalCatalogTargetId {
-    match source {
-        LocalCatalogTargetId::SkillDirectory {
-            scope,
-            canonical_root,
-            ..
-        } => LocalCatalogTargetId::SkillDirectory {
-            scope: *scope,
-            canonical_root: canonical_root.clone(),
-            install_directory: copy_name.to_string(),
-        },
-        LocalCatalogTargetId::PetDirectory { canonical_home, .. } => {
-            LocalCatalogTargetId::PetDirectory {
-                canonical_home: canonical_home.clone(),
-                pet_id: copy_name.to_string(),
-            }
-        }
-        LocalCatalogTargetId::Plugin { .. } => source.clone(),
-    }
-}
-
-/// Build the transformed local copy payload from the current on-disk source.
-fn build_transformed_copy(
-    target: &LocalCatalogTargetId,
-    source_path: &Path,
-    pin: &CatalogPreservationPin,
-) -> Result<IncomingDirectoryPayload, String> {
-    match target {
-        LocalCatalogTargetId::SkillDirectory { scope, .. } => {
-            let tree = capture_skill_tree(source_path)?;
-            let files = rename_skill_tree(&tree.files, &pin.copy_name)?;
-            Ok(IncomingDirectoryPayload::Skill {
-                scope: *scope,
-                effective_name: pin.copy_name.clone(),
-                install_directory: pin.copy_name.clone(),
-                files,
-            })
-        }
-        LocalCatalogTargetId::PetDirectory { .. } => {
-            let captured = capture_pet(source_path)?;
-            let renamed = renamed_pet(&captured, &pin.copy_name)?;
-            let resource = pet_resource_from_capture(&renamed)?;
-            Ok(IncomingDirectoryPayload::Pet {
-                format: renamed.format,
-                descriptor: resource.descriptor,
-                atlas: renamed.atlas_bytes,
-            })
-        }
-        LocalCatalogTargetId::Plugin { .. } => {
-            Err("plugins never use preservation copies".to_string())
-        }
-    }
-}
-
 /// Apply the standalone resource Fork plan: the same semantic rename,
 /// staging, no-clobber activation, verification, journal, and recovery
 /// primitive as Pull preservation, ending after the verified copy. It never
-/// overwrites another target, never records a Pull preservation witness, and
-/// never invokes any thread command or native thread-fork executor.
+/// overwrites another target and never records a Pull preservation witness.
 pub fn apply_resource_fork(
+    registry: &CatalogRegistry,
     repository: &CatalogStateRepository,
+    capability: &Arc<CatalogCapability>,
     plan: &CatalogResourceForkPlan,
     now: u64,
 ) -> Result<CatalogActionResult, String> {
@@ -735,70 +863,49 @@ pub fn apply_resource_fork(
     let root = copy_target
         .parent()
         .ok_or("fork copy target has no parent")?;
+    let root_class = plan.source_target.decode()?.root_class;
     let _target_lock = repository.acquire_target_lock(root)?;
 
-    let observed = observed_directory_digest(&plan.source_target, &source_path)?
+    let source = observe_directory(registry, capability, &root_class, &source_path)?
         .ok_or("the fork source disappeared; refresh and review again")?;
-    if observed != plan.source_content_sha256 {
+    if source.envelope.content_sha256 != plan.source_content_sha256 {
         return Err("the fork source changed after review; review it again".to_string());
     }
 
     let operation_id = CatalogOperationId::generate()?;
     let stage_parent = stage_dir_for(root, &operation_id, "-fork");
-    let stage = staged_child(&stage_parent, &plan.copy_name)?;
-    let pin = CatalogPreservationPin {
-        copy_name: plan.copy_name.clone(),
-        copy_resource_id: plan.copy_resource_id.clone(),
-        copy_target_path: plan.copy_target_path.clone(),
-        transformed_content_sha256: plan.transformed_content_sha256.clone(),
-        original_content_sha256: plan.source_content_sha256.clone(),
-        storage_content_sha256: plan.source_content_sha256.clone(),
-        reusable_witness: false,
-    };
-    let payload = match build_transformed_copy(&plan.source_target, &source_path, &pin) {
-        Ok(payload) => payload,
+    let staged = staged_child(&stage_parent, &plan.copy_name).and_then(|stage| {
+        let payload = build_transformed_copy(&source, &plan.copy_name)?;
+        if payload.content_sha256() != plan.transformed_content_sha256 {
+            return Err("the fork copy failed digest validation".to_string());
+        }
+        payload.materialize(&stage)?;
+        payload.verify_at(registry, &root_class, &stage)?;
+        Ok(stage)
+    });
+    let stage = match staged {
+        Ok(stage) => stage,
         Err(error) => {
             let _ = fs::remove_dir_all(&stage_parent);
             return Err(error);
         }
     };
-    if let Err(error) = payload.materialize(&stage) {
-        let _ = fs::remove_dir_all(&stage_parent);
-        return Err(error);
-    }
-    let staged_digest = observed_directory_digest(
-        &preserved_target_for(&plan.source_target, &plan.copy_name),
-        &stage,
-    )?;
-    if staged_digest.as_deref() != Some(plan.transformed_content_sha256.as_str()) {
-        let _ = fs::remove_dir_all(&stage_parent);
-        return Err("the fork copy failed digest validation".to_string());
-    }
 
-    journal_upsert(
-        repository,
-        CatalogOperationJournalEntry {
-            operation_id: operation_id.clone(),
-            kind: CatalogOperationKind::Fork,
-            storage_id: None,
-            plan_id: Some(plan.plan_id.clone()),
-            action_id: None,
-            target: plan.source_target.clone(),
-            target_path: Some(plan.source_path.clone()),
-            backup_path: None,
-            copy_target_path: Some(plan.copy_target_path.clone()),
-            copy_name: Some(plan.copy_name.clone()),
-            copy_resource_id: Some(plan.copy_resource_id.clone()),
-            expected_target_sha256: Some(plan.source_content_sha256.clone()),
-            incoming_content_sha256: None,
-            copy_content_sha256: Some(plan.transformed_content_sha256.clone()),
-            phase: CatalogOperationPhase::Journaled,
-            outcome: None,
-            message: None,
-            created_at: now,
-            updated_at: now,
-        },
-    )?;
+    let mut entry = journal_entry(
+        operation_id.clone(),
+        CatalogOperationKind::Fork,
+        plan.source_coordinate.clone(),
+        plan.source_target.clone(),
+        now,
+    );
+    entry.plan_id = Some(plan.plan_id.clone());
+    entry.target_path = Some(plan.source_path.clone());
+    entry.copy_target_path = Some(plan.copy_target_path.clone());
+    entry.copy_name = Some(plan.copy_name.clone());
+    entry.copy_resource_id = Some(plan.copy_resource_id.clone());
+    entry.expected_target_sha256 = Some(plan.source_content_sha256.clone());
+    entry.copy_content_sha256 = Some(plan.transformed_content_sha256.clone());
+    journal_upsert(repository, entry)?;
 
     let activation = activate_stage_no_clobber(&stage, &copy_target);
     let _ = fs::remove_dir_all(&stage_parent);
@@ -813,8 +920,7 @@ pub fn apply_resource_fork(
         )?;
         return Err(error);
     }
-    let verify_target = preserved_target_for(&plan.source_target, &plan.copy_name);
-    let activated = observed_directory_digest(&verify_target, &copy_target)?;
+    let activated = observed_digest(registry, capability, &root_class, &copy_target)?;
     if activated.as_deref() != Some(plan.transformed_content_sha256.as_str()) {
         journal_phase(
             repository,
@@ -849,62 +955,44 @@ pub fn apply_resource_fork(
     })
 }
 
-/// Execute one approved native plugin operation and verify the result. A
-/// clean exit with failed verification is `partial`, never success.
+/// Execute one approved native operation and verify the result through the
+/// adapter. A clean exit with failed verification is `partial`, never
+/// success.
 #[allow(clippy::too_many_arguments)]
-fn execute_plugin_action(
+fn execute_native_action(
     repository: &CatalogStateRepository,
     runner: &dyn PluginProcessRunner,
+    capability: &CatalogCapability,
     storage_id: &StorageId,
     plan_id: &CatalogPlanId,
     action: &CatalogPullAction,
     native: &NativePluginPlan,
-    intent: &super::domain::PluginInstallIntentDescriptor,
+    resource: &CatalogResourceEnvelope,
     home: &Path,
     now: u64,
 ) -> Result<CatalogActionOutcome, String> {
+    let adapter = capability.adapter.as_ref();
     let _target_lock = repository.acquire_target_lock(home)?;
-    let operation_id = CatalogOperationId::generate()?;
-    journal_upsert(
-        repository,
-        CatalogOperationJournalEntry {
-            operation_id: operation_id.clone(),
-            kind: CatalogOperationKind::PluginApply,
-            storage_id: Some(storage_id.clone()),
-            plan_id: Some(plan_id.clone()),
-            action_id: Some(action.action_id.clone()),
-            target: action.target.clone(),
-            target_path: None,
-            backup_path: None,
-            copy_target_path: None,
-            copy_name: None,
-            copy_resource_id: None,
-            expected_target_sha256: None,
-            incoming_content_sha256: Some(action.incoming_content_sha256.clone()),
-            copy_content_sha256: None,
-            phase: CatalogOperationPhase::Journaled,
-            outcome: None,
-            message: None,
-            created_at: now,
-            updated_at: now,
-        },
-    )?;
-
-    let adapter = adapter_for(native.provider);
-    // Pre-launch recheck through fresh native inventory. The reviewed local
-    // semantic intent (or reviewed absence) must still be exact before a
-    // provider command can launch.
     let current = adapter
-        .discover_plugins(home, runner)
+        .discover_native(home, runner)
         .map_err(|blocker| blocker.to_string())?;
-    let current_digest = current
-        .observation(&intent.plugin_id)
-        .filter(|observation| observation.installed)
-        .and_then(|observation| adapter.portable_intent(observation, &current))
-        .map(|resource| resource.content_sha256);
-    if let Err(error) =
-        expectation_matches(&action.expected_target_state, current_digest.as_deref())
-    {
+    let current_digest = adapter.native_state(resource, &current)?;
+    expectation_matches(&action.expected_target_state, current_digest.as_deref())?;
+
+    let operation_id = CatalogOperationId::generate()?;
+    let mut entry = journal_entry(
+        operation_id.clone(),
+        CatalogOperationKind::NativeApply,
+        capability.coordinate(),
+        action.target.clone(),
+        now,
+    );
+    entry.storage_id = Some(storage_id.clone());
+    entry.plan_id = Some(plan_id.clone());
+    entry.action_id = Some(action.action_id.clone());
+    entry.incoming_content_sha256 = Some(action.incoming_content_sha256.clone());
+    journal_upsert(repository, entry)?;
+    let fail = |error: String| {
         journal_phase(
             repository,
             &operation_id,
@@ -912,98 +1000,81 @@ fn execute_plugin_action(
             Some(CatalogActionOutcome::Failed),
             Some(error.clone()),
             now,
-        )?;
-        return Err(error);
-    }
+        )
+        .and(Err(error))
+    };
 
     let mut argv_sets: Vec<&Vec<String>> = native.marketplace_argv.iter().collect();
     argv_sets.push(&native.argv);
     for argv in argv_sets {
-        let output = runner
-            .run(native.provider, home, argv)
-            .inspect_err(|error| {
-                let _ = journal_phase(
-                    repository,
-                    &operation_id,
-                    CatalogOperationPhase::Failed,
-                    Some(CatalogActionOutcome::Failed),
-                    Some(error.clone()),
-                    now,
-                );
-            })?;
+        let output = match runner.run(&native.provider, home, argv) {
+            Ok(output) => output,
+            Err(error) => return fail(error),
+        };
         if !output.success {
             let detail = redact(output.stderr.trim());
             let message = format!(
                 "{} exited unsuccessfully: {}",
-                native.provider.as_str(),
+                native.provider,
                 if detail.is_empty() {
                     redact(output.stdout.trim())
                 } else {
                     detail
                 }
             );
-            journal_phase(
-                repository,
-                &operation_id,
-                CatalogOperationPhase::Failed,
-                Some(CatalogActionOutcome::Failed),
-                Some(message.clone()),
-                now,
-            )?;
-            return Err(message);
+            return fail(message);
         }
     }
 
-    // Post-exit re-inventory: the plugin must be present AND the resulting
-    // semantic intent must match what was approved. A clean exit that leaves
+    // Post-exit re-inventory: the resource must be present AND the resulting
+    // portable intent must match what was approved. A clean exit that leaves
     // a different intent installed is partial, never success. Presence and
-    // intent are read from one snapshot — resolving an observation against a
-    // later inventory can report a matching install as partial.
+    // intent are read from one snapshot.
     let after = adapter
-        .discover_plugins(home, runner)
+        .discover_native(home, runner)
         .map_err(|blocker| blocker.to_string())?;
-    let installed = after
-        .observation(&intent.plugin_id)
-        .filter(|observation| observation.installed);
-    let resulting_intent_matches = installed
-        .and_then(|observation| adapter.portable_intent(observation, &after))
-        .is_some_and(|rebuilt| rebuilt.content_sha256 == action.incoming_content_sha256);
-    if resulting_intent_matches {
-        let outcome = match native.mode {
-            PluginApplyMode::InstallMissing => CatalogActionOutcome::Installed,
-            PluginApplyMode::OverwriteExisting => CatalogActionOutcome::Updated,
-        };
-        journal_phase(
-            repository,
-            &operation_id,
-            CatalogOperationPhase::Completed,
-            Some(outcome),
-            None,
-            now,
-        )?;
-        Ok(outcome)
-    } else {
-        let detail = if installed.is_some() {
-            format!(
-                "{} reports the plugin installed, but its install intent does not match the approved catalog intent yet",
-                native.provider.as_str()
-            )
-        } else {
-            format!(
-                "{} does not report '{}' installed after the operation",
-                native.provider.as_str(),
-                intent.plugin_id
-            )
-        };
-        journal_phase(
-            repository,
-            &operation_id,
-            CatalogOperationPhase::Completed,
-            Some(CatalogActionOutcome::Partial),
-            Some(detail),
-            now,
-        )?;
-        Ok(CatalogActionOutcome::Partial)
+    let display_name = capability
+        .codec
+        .display_name(resource)
+        .unwrap_or_else(|_| resource.resource_id.to_string());
+    match adapter.native_state(resource, &after)? {
+        Some(digest) if digest == action.incoming_content_sha256 => {
+            let outcome = match native.mode {
+                PluginApplyMode::InstallMissing => CatalogActionOutcome::Installed,
+                PluginApplyMode::OverwriteExisting => CatalogActionOutcome::Updated,
+            };
+            journal_phase(
+                repository,
+                &operation_id,
+                CatalogOperationPhase::Completed,
+                Some(outcome),
+                None,
+                now,
+            )?;
+            Ok(outcome)
+        }
+        installed => {
+            let detail = if installed.is_some() {
+                format!(
+                    "{} reports '{}' installed, but its portable intent does not match the approved catalog intent yet",
+                    native.provider, display_name
+                )
+            } else {
+                format!(
+                    "{} does not report '{}' installed after the operation",
+                    native.provider, display_name
+                )
+            };
+            journal_phase(
+                repository,
+                &operation_id,
+                CatalogOperationPhase::Completed,
+                Some(CatalogActionOutcome::Partial),
+                Some(detail),
+                now,
+            )?;
+            Ok(CatalogActionOutcome::Partial)
+        }
     }
 }
 
@@ -1013,47 +1084,47 @@ pub type PayloadFetcher<'a> = dyn Fn(&str, u64) -> Result<Vec<u8>, String> + 'a;
 pub struct PullApplyEnvironment<'a> {
     pub repository: &'a CatalogStateRepository,
     pub runner: &'a dyn PluginProcessRunner,
+    pub registry: &'a CatalogRegistry,
+    pub capability: Arc<CatalogCapability>,
     pub fetch_payload: &'a PayloadFetcher<'a>,
 }
 
+/// The storage version of one directory resource, fully fetched and verified
+/// against its envelope before any local mutation.
 fn incoming_payload_for(
-    resource: &CatalogResource,
+    capability: &Arc<CatalogCapability>,
+    resource: &CatalogResourceEnvelope,
     fetch: &PayloadFetcher<'_>,
 ) -> Result<IncomingDirectoryPayload, String> {
-    match resource {
-        CatalogResource::AgentSkill(skill) => {
-            let mut files = BTreeMap::new();
-            for (path, entry) in &skill.files {
-                let bytes = fetch(&entry.sha256, entry.size)?;
-                files.insert(
-                    path.clone(),
-                    CapturedSkillFile {
-                        bytes,
-                        mode: entry.mode,
-                    },
-                );
-            }
-            Ok(IncomingDirectoryPayload::Skill {
-                scope: skill.descriptor.scope,
-                effective_name: skill.descriptor.effective_name.clone(),
-                install_directory: skill.descriptor.install_directory.clone(),
-                files,
-            })
-        }
-        CatalogResource::CodexPetV1(pet) => Ok(IncomingDirectoryPayload::Pet {
-            format: CodexPetFormat::V1,
-            descriptor: pet.descriptor.clone(),
-            atlas: fetch(&pet.descriptor.atlas.sha256, pet.descriptor.atlas.size)?,
-        }),
-        CatalogResource::CodexPetV2(pet) => Ok(IncomingDirectoryPayload::Pet {
-            format: CodexPetFormat::V2,
-            descriptor: pet.descriptor.clone(),
-            atlas: fetch(&pet.descriptor.atlas.sha256, pet.descriptor.atlas.size)?,
-        }),
-        CatalogResource::PluginInstallIntent(_) => {
-            Err("plugins own no payload directory".to_string())
-        }
+    capability.codec.validate(resource)?;
+    let mut files = BTreeMap::new();
+    for file in &resource.files {
+        files.insert(
+            file.path.clone(),
+            CapturedFile {
+                bytes: fetch(&file.sha256, file.size)?,
+                mode: file.mode,
+            },
+        );
     }
+    // The assembled bytes must reproduce the stored envelope exactly.
+    let rebuilt = CapturedResource {
+        identity: resource.identity.clone(),
+        descriptor: resource.descriptor.clone(),
+        files: files.clone(),
+        display_name: String::new(),
+        warnings: Vec::new(),
+        notes: Vec::new(),
+    }
+    .to_envelope(&resource.coordinate());
+    if rebuilt.content_sha256 != resource.content_sha256 {
+        return Err("the fetched payload does not match the stored resource".to_string());
+    }
+    Ok(IncomingDirectoryPayload {
+        capability: capability.clone(),
+        envelope: resource.clone(),
+        files,
+    })
 }
 
 /// Execute the single approved action (or explicit Skip) for one Pull item.
@@ -1064,7 +1135,7 @@ pub fn execute_scope_pull_item(
     environment: &PullApplyEnvironment<'_>,
     storage_id: &StorageId,
     plan_id: &CatalogPlanId,
-    manifest_resources: &BTreeMap<CatalogResourceId, CatalogResource>,
+    manifest_resources: &BTreeMap<CatalogResourceId, CatalogResourceEnvelope>,
     item: &CatalogPullItem,
     approved: Option<&CatalogPullAction>,
     now: u64,
@@ -1135,71 +1206,92 @@ fn execute_one_action(
     environment: &PullApplyEnvironment<'_>,
     storage_id: &StorageId,
     plan_id: &CatalogPlanId,
-    manifest_resources: &BTreeMap<CatalogResourceId, CatalogResource>,
+    manifest_resources: &BTreeMap<CatalogResourceId, CatalogResourceEnvelope>,
     action: &CatalogPullAction,
     now: u64,
 ) -> Result<CatalogActionOutcome, String> {
-    match &action.kind {
-        CatalogPullActionKind::InstallPlugin { plan: native }
-        | CatalogPullActionKind::UpdatePlugin { plan: native }
-        | CatalogPullActionKind::OverwritePluginWithStorage { plan: native } => {
-            let resource = manifest_resources
-                .get(&action.resource_id)
-                .ok_or("the plugin left the catalog after review")?;
-            let CatalogResource::PluginInstallIntent(intent) = resource else {
-                return Err("the plugin resource changed kind after review".to_string());
-            };
-            let LocalCatalogTargetId::Plugin { canonical_home, .. } = &action.target else {
-                return Err("plugin action target mismatch".to_string());
-            };
-            let outcome = execute_plugin_action(
-                environment.repository,
-                environment.runner,
-                storage_id,
-                plan_id,
-                action,
-                native,
-                &intent.descriptor,
-                Path::new(canonical_home),
-                now,
-            )?;
-            if !matches!(
-                outcome,
-                CatalogActionOutcome::Failed | CatalogActionOutcome::Partial
-            ) {
-                record_claim(
-                    environment.repository,
-                    storage_id,
-                    &action.target,
-                    &action.resource_id,
-                    &action.incoming_content_sha256,
-                    outcome,
-                    plan_id,
-                    now,
-                )?;
-            }
-            Ok(outcome)
+    let resource = manifest_resources
+        .get(&action.resource_id)
+        .ok_or("the resource left the catalog after review")?;
+    let coordinate = environment.capability.coordinate();
+    if resource.coordinate() != coordinate {
+        return Err("the resource changed coordinate after review".to_string());
+    }
+    let claim = |outcome: CatalogActionOutcome| {
+        record_claim(
+            environment.repository,
+            storage_id,
+            &coordinate,
+            &action.target,
+            &action.resource_id,
+            &action.incoming_content_sha256,
+            outcome,
+            plan_id,
+            now,
+        )
+    };
+
+    if let Some(native) = &action.native {
+        let home = PathBuf::from(action.target.decode()?.canonical_root);
+        let outcome = execute_native_action(
+            environment.repository,
+            environment.runner,
+            &environment.capability,
+            storage_id,
+            plan_id,
+            action,
+            native,
+            resource,
+            &home,
+            now,
+        )?;
+        if !matches!(
+            outcome,
+            CatalogActionOutcome::Failed | CatalogActionOutcome::Partial
+        ) {
+            claim(outcome)?;
         }
-        CatalogPullActionKind::InstallSkill
-        | CatalogPullActionKind::UpdateSkill
-        | CatalogPullActionKind::OverwriteSkillWithStorage
-        | CatalogPullActionKind::InstallPet
-        | CatalogPullActionKind::UpdatePet
-        | CatalogPullActionKind::OverwritePetWithStorage => {
-            let resource = manifest_resources
-                .get(&action.resource_id)
-                .ok_or("the resource left the catalog after review")?;
-            let incoming = incoming_payload_for(resource, environment.fetch_payload)?;
-            let target_path = action
-                .target_path
-                .as_ref()
-                .ok_or("directory action lost its target path")?;
+        return Ok(outcome);
+    }
+
+    let incoming =
+        incoming_payload_for(&environment.capability, resource, environment.fetch_payload)?;
+    let target_path = action
+        .target_path
+        .as_ref()
+        .ok_or("directory action lost its target path")?;
+    match &action.kind {
+        CatalogPullActionKind::PreserveAsCopyAndOverwrite { copy } => {
+            preserve_and_overwrite(
+                environment.registry,
+                environment.repository,
+                PreservationRequest {
+                    storage_id: storage_id.clone(),
+                    plan_id: plan_id.clone(),
+                    action_id: action.action_id.clone(),
+                    coordinate: coordinate.clone(),
+                    resource_id: action.resource_id.clone(),
+                    target: &action.target,
+                    target_path: Path::new(target_path),
+                    pin: copy,
+                    incoming: &incoming,
+                    now,
+                },
+            )?;
+            claim(CatalogActionOutcome::PreservedAndUpdated)?;
+            Ok(CatalogActionOutcome::PreservedAndUpdated)
+        }
+        CatalogPullActionKind::Install
+        | CatalogPullActionKind::Update
+        | CatalogPullActionKind::OverwriteWithStorage => {
             replace_directory_target(
+                environment.registry,
                 environment.repository,
                 DirectoryReplaceRequest {
                     storage_id: storage_id.clone(),
                     plan_id: plan_id.clone(),
                     action_id: action.action_id.clone(),
+                    coordinate: coordinate.clone(),
                     target: &action.target,
                     target_path: Path::new(target_path),
                     expected: &action.expected_target_state,
@@ -1211,53 +1303,8 @@ fn execute_one_action(
                 CatalogTargetExpectation::Absent => CatalogActionOutcome::Installed,
                 _ => CatalogActionOutcome::Updated,
             };
-            record_claim(
-                environment.repository,
-                storage_id,
-                &action.target,
-                &action.resource_id,
-                &action.incoming_content_sha256,
-                outcome,
-                plan_id,
-                now,
-            )?;
+            claim(outcome)?;
             Ok(outcome)
-        }
-        CatalogPullActionKind::PreserveSkillAsCopyAndOverwrite { copy }
-        | CatalogPullActionKind::PreservePetAsCopyAndOverwrite { copy } => {
-            let resource = manifest_resources
-                .get(&action.resource_id)
-                .ok_or("the resource left the catalog after review")?;
-            let incoming = incoming_payload_for(resource, environment.fetch_payload)?;
-            let target_path = action
-                .target_path
-                .as_ref()
-                .ok_or("preservation action lost its target path")?;
-            preserve_and_overwrite(
-                environment.repository,
-                PreservationRequest {
-                    storage_id: storage_id.clone(),
-                    plan_id: plan_id.clone(),
-                    action_id: action.action_id.clone(),
-                    resource_id: action.resource_id.clone(),
-                    target: &action.target,
-                    target_path: Path::new(target_path),
-                    pin: copy,
-                    incoming: &incoming,
-                    now,
-                },
-            )?;
-            record_claim(
-                environment.repository,
-                storage_id,
-                &action.target,
-                &action.resource_id,
-                &action.incoming_content_sha256,
-                CatalogActionOutcome::PreservedAndUpdated,
-                plan_id,
-                now,
-            )?;
-            Ok(CatalogActionOutcome::PreservedAndUpdated)
         }
     }
 }
@@ -1266,7 +1313,8 @@ fn execute_one_action(
 fn record_claim(
     repository: &CatalogStateRepository,
     storage_id: &StorageId,
-    target: &LocalCatalogTargetId,
+    coordinate: &CatalogCoordinate,
+    target: &CatalogTargetConfig,
     resource_id: &CatalogResourceId,
     content_sha256: &str,
     outcome: CatalogActionOutcome,
@@ -1279,6 +1327,7 @@ fn record_claim(
             .retain(|claim| !(claim.target == *target && &claim.storage_id == storage_id));
         document.claims.push(CatalogClaim {
             target: target.clone(),
+            coordinate: coordinate.clone(),
             storage_id: storage_id.clone(),
             resource_id: resource_id.clone(),
             content_sha256: content_sha256.to_string(),
@@ -1290,10 +1339,119 @@ fn record_claim(
     })
 }
 
-/// Startup recovery over the operations journal: verify, roll
-/// back, or report every unfinished skill/pet operation, and never replay a
-/// plugin operation automatically.
+struct RecoveryPaths {
+    target: PathBuf,
+    copy: Option<PathBuf>,
+    backup: Option<PathBuf>,
+    root_class: String,
+}
+
+fn recovery_paths(
+    repository: &CatalogStateRepository,
+    entry: &CatalogOperationJournalEntry,
+) -> Result<RecoveryPaths, String> {
+    let identity = entry.target.decode()?;
+    let target = Path::new(&identity.canonical_root).join(&identity.member);
+    if entry.target_path.as_deref().map(Path::new) != Some(target.as_path()) {
+        return Err("catalog recovery target path does not match its identity".to_string());
+    }
+
+    let copy = match (&entry.copy_target_path, &entry.copy_name) {
+        (Some(path), Some(name)) => {
+            let expected = Path::new(&identity.canonical_root).join(name);
+            if Path::new(path) != expected {
+                return Err("catalog recovery copy path does not match its identity".to_string());
+            }
+            Some(expected)
+        }
+        (None, None) => None,
+        _ => return Err("catalog recovery copy path is incomplete".to_string()),
+    };
+
+    let backup = match &entry.backup_path {
+        Some(path) => {
+            let target_name = target
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("catalog recovery target has no name")?;
+            let plan_id = entry
+                .plan_id
+                .as_ref()
+                .ok_or("catalog recovery backup has no plan")?;
+            let repository_backup = repository
+                .root()
+                .join("backups")
+                .join("catalog_resources")
+                .join(plan_id.as_str())
+                .join(format!("{}-{}", entry.operation_id, target_name));
+            let sibling_backup = target
+                .parent()
+                .ok_or("catalog recovery target has no parent")?
+                .join(format!(
+                    ".mallard-backup-{}-{}",
+                    entry.operation_id, target_name
+                ));
+            let path = PathBuf::from(path);
+            if path != repository_backup && path != sibling_backup {
+                return Err(
+                    "catalog recovery backup path is not bound to its operation".to_string()
+                );
+            }
+            Some(path)
+        }
+        None => None,
+    };
+
+    Ok(RecoveryPaths {
+        target,
+        copy,
+        backup,
+        root_class: identity.root_class,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RecoveryObservation {
+    Absent,
+    Present(String),
+    Unverifiable,
+}
+
+fn recovery_observation(
+    registry: &CatalogRegistry,
+    capability: Option<&Arc<CatalogCapability>>,
+    root_class: &str,
+    path: &Path,
+) -> RecoveryObservation {
+    let Some(capability) = capability else {
+        return RecoveryObservation::Unverifiable;
+    };
+    match observed_digest(registry, capability, root_class, path) {
+        Ok(None) => RecoveryObservation::Absent,
+        Ok(Some(digest)) => RecoveryObservation::Present(digest),
+        Err(_) => RecoveryObservation::Unverifiable,
+    }
+}
+
+fn backup_observation(path: &Path) -> RecoveryObservation {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => RecoveryObservation::Absent,
+        Err(_) => RecoveryObservation::Unverifiable,
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            match backup_tree_sha256(path) {
+                Ok(digest) => RecoveryObservation::Present(digest),
+                Err(_) => RecoveryObservation::Unverifiable,
+            }
+        }
+        Ok(_) => RecoveryObservation::Unverifiable,
+    }
+}
+
+/// Startup recovery verifies every journal binding before it touches a
+/// resource. Native operations are never replayed. A missing target is
+/// distinct from one this build cannot verify.
 pub fn recover_catalog_operations(
+    registry: &CatalogRegistry,
     repository: &CatalogStateRepository,
     now: u64,
 ) -> Result<Vec<String>, String> {
@@ -1304,7 +1462,7 @@ pub fn recover_catalog_operations(
             continue;
         }
         match entry.kind {
-            CatalogOperationKind::PluginApply => {
+            CatalogOperationKind::NativeApply => {
                 // Never replay stale native arguments; fresh inventory decides.
                 journal_phase(
                     repository,
@@ -1312,57 +1470,73 @@ pub fn recover_catalog_operations(
                     CatalogOperationPhase::Failed,
                     Some(CatalogActionOutcome::Partial),
                     Some(
-                        "a plugin operation was interrupted; Refresh to re-inventory the provider"
+                        "a native operation was interrupted; Refresh to re-inventory the provider"
                             .to_string(),
                     ),
                     now,
                 )?;
                 messages.push(format!(
-                    "A {} plugin operation was interrupted and needs a fresh review",
-                    match entry.target {
-                        LocalCatalogTargetId::Plugin { provider, .. } => provider.as_str(),
-                        _ => "provider",
-                    }
+                    "A {} native operation was interrupted and needs a fresh review",
+                    entry.target.provider
                 ));
             }
             CatalogOperationKind::DirectoryReplace
             | CatalogOperationKind::Preservation
             | CatalogOperationKind::Fork => {
-                let target_path = entry.target_path.as_ref().map(PathBuf::from);
-                let copy_path = entry.copy_target_path.as_ref().map(PathBuf::from);
-                let backup_path = entry.backup_path.as_ref().map(PathBuf::from);
-
-                // A verified copy survives recovery untouched.
-                let copy_ok = match (&copy_path, &entry.copy_content_sha256) {
-                    (Some(copy), Some(expected)) => {
-                        observed_directory_digest(
-                            &preserved_target_for(
-                                &entry.target,
-                                entry.copy_name.as_deref().unwrap_or("copy"),
-                            ),
-                            copy,
-                        )
-                        .ok()
-                        .flatten()
-                        .as_deref()
-                            == Some(expected.as_str())
+                let paths = match recovery_paths(repository, &entry) {
+                    Ok(paths) => paths,
+                    Err(_) => {
+                        let message =
+                            "interrupted; its recovery journal is invalid and was left unchanged";
+                        journal_phase(
+                            repository,
+                            &entry.operation_id,
+                            CatalogOperationPhase::Failed,
+                            Some(CatalogActionOutcome::Failed),
+                            Some(message.to_string()),
+                            now,
+                        )?;
+                        messages.push(format!("A catalog operation was {message}"));
+                        continue;
                     }
-                    _ => false,
                 };
+                let capability = registry.capability(&entry.coordinate);
+                let target_state = recovery_observation(
+                    registry,
+                    capability.as_ref(),
+                    &paths.root_class,
+                    &paths.target,
+                );
+                let copy_state = match &paths.copy {
+                    Some(copy) => {
+                        recovery_observation(registry, capability.as_ref(), &paths.root_class, copy)
+                    }
+                    None => RecoveryObservation::Absent,
+                };
+                let copy_ok = matches!(
+                    (&copy_state, &entry.copy_content_sha256),
+                    (RecoveryObservation::Present(observed), Some(expected)) if observed == expected
+                );
 
-                // The original target: verified incoming content counts as
-                // completed; otherwise restore the backup when it is safe.
+                let completed = matches!(
+                    (&target_state, &entry.incoming_content_sha256),
+                    (RecoveryObservation::Present(observed), Some(expected)) if observed == expected
+                );
                 let mut restored = false;
-                if let (Some(target_path), Some(backup)) = (&target_path, &backup_path) {
-                    let target_state = observed_directory_digest(&entry.target, target_path)
-                        .ok()
-                        .flatten();
-                    let completed = entry
-                        .incoming_content_sha256
-                        .as_ref()
-                        .is_some_and(|expected| target_state.as_deref() == Some(expected.as_str()));
-                    if !completed && target_state.is_none() && backup.exists() {
-                        restored = fs::rename(backup, target_path).is_ok();
+                let mut unverifiable = matches!(target_state, RecoveryObservation::Unverifiable)
+                    || paths.copy.is_some()
+                        && matches!(copy_state, RecoveryObservation::Unverifiable);
+                if !completed && matches!(target_state, RecoveryObservation::Absent) {
+                    if let (Some(backup), Some(expected)) =
+                        (&paths.backup, &entry.backup_tree_sha256)
+                    {
+                        match backup_observation(backup) {
+                            RecoveryObservation::Present(observed) if observed == *expected => {
+                                restored = fs::rename(backup, &paths.target).is_ok();
+                            }
+                            RecoveryObservation::Unverifiable => unverifiable = true,
+                            RecoveryObservation::Absent | RecoveryObservation::Present(_) => {}
+                        }
                     }
                 }
 
@@ -1371,10 +1545,12 @@ pub fn recover_catalog_operations(
                 } else {
                     CatalogOperationPhase::Failed
                 };
-                let message = if copy_ok {
-                    "interrupted; the preserved copy is intact and will be reused on retry"
+                let message = if unverifiable {
+                    "interrupted; its state could not be verified and was left unchanged"
                 } else if restored {
                     "interrupted; the original was restored from its backup"
+                } else if copy_ok {
+                    "interrupted; the preserved copy is intact and will be reused on retry"
                 } else {
                     "interrupted; review the catalog again"
                 };
@@ -1388,14 +1564,13 @@ pub fn recover_catalog_operations(
                 )?;
                 messages.push(format!(
                     "A catalog operation on '{}' was {}",
-                    entry
-                        .copy_name
-                        .as_deref()
-                        .unwrap_or(entry.target_path.as_deref().unwrap_or("a target")),
+                    entry.copy_name.as_deref().unwrap_or("a target"),
                     message
                 ));
-                // Witnesses for missing or modified copies are invalid.
-                if !copy_ok {
+                if entry.kind == CatalogOperationKind::Preservation
+                    && !copy_ok
+                    && !matches!(copy_state, RecoveryObservation::Unverifiable)
+                {
                     repository.mutate_preservations(|document| {
                         document
                             .witnesses
@@ -1403,23 +1578,356 @@ pub fn recover_catalog_operations(
                         Ok(())
                     })?;
                 }
-                // Stray stages are removed; backups are never deleted.
-                if let Some(target_path) = &target_path {
-                    if let Some(root) = target_path.parent() {
-                        let _ = fs::remove_dir_all(stage_dir_for(root, &entry.operation_id, ""));
-                        let _ =
-                            fs::remove_dir_all(stage_dir_for(root, &entry.operation_id, "-copy"));
-                        let _ = fs::remove_dir_all(stage_dir_for(
-                            root,
-                            &entry.operation_id,
-                            "-incoming",
-                        ));
-                        let _ =
-                            fs::remove_dir_all(stage_dir_for(root, &entry.operation_id, "-fork"));
-                    }
-                }
             }
         }
     }
     Ok(messages)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::super::adapters::{CmdOutput, MarketplaceObservation, ProviderInventory};
+    use super::super::domain::{
+        CatalogOperationJournalEntry, CatalogOperationsDocument, CatalogTargetIdentity,
+        CatalogTargetKey, ProviderKey, CATALOG_SCHEMA,
+    };
+    use super::super::plugin_intent::{
+        GitMarketplaceSource, PluginInstallIntent, PluginInstallIntentDescriptor,
+        PluginInstallIntentIdentity, PluginResolutionPolicy, PortablePluginSource,
+    };
+    use super::*;
+
+    #[derive(Default)]
+    struct ChangedMarketplaceRunner {
+        calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl ChangedMarketplaceRunner {
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl PluginProcessRunner for ChangedMarketplaceRunner {
+        fn run(
+            &self,
+            provider: &ProviderKey,
+            _home: &Path,
+            argv: &[String],
+        ) -> Result<CmdOutput, String> {
+            assert_eq!(provider.as_str(), "codex");
+            self.calls.lock().unwrap().push(argv.to_vec());
+            let stdout = match argv.join(" ").as_str() {
+                "plugin marketplace list --json" => {
+                    r#"{"marketplaces":[{"name":"acme","marketplaceSource":{"sourceType":"git","source":"https://example.com/acme/repository-b","ref":"release"}}]}"#
+                }
+                "plugin list --json" => r#"{"installed":[]}"#,
+                command => return Err(format!("unexpected native invocation: {command}")),
+            };
+            Ok(CmdOutput {
+                success: true,
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn native_apply_rejects_changed_marketplace_before_journal_or_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex-home");
+        std::fs::create_dir(&home).unwrap();
+        let home = home.canonicalize().unwrap();
+        let repository = CatalogStateRepository::from_home_dir(temp.path()).unwrap();
+        let provider = ProviderKey::parse("codex").unwrap();
+        let resource = PluginInstallIntent {
+            identity: PluginInstallIntentIdentity {
+                namespace: "acme".to_string(),
+                plugin_id: "tools@acme".to_string(),
+            },
+            descriptor: PluginInstallIntentDescriptor {
+                source: PortablePluginSource::ProviderMarketplace {
+                    namespace: "acme".to_string(),
+                    git: Some(GitMarketplaceSource {
+                        location: "https://example.com/acme/repository-a".to_string(),
+                        git_ref: Some("release".to_string()),
+                    }),
+                },
+                resolution: PluginResolutionPolicy::ProviderResolved,
+            },
+        }
+        .envelope(&provider)
+        .unwrap();
+        let registry = CatalogRegistry::production();
+        let capability = registry.require_capability(&resource.coordinate()).unwrap();
+        let approved_inventory = ProviderInventory {
+            marketplaces: vec![MarketplaceObservation {
+                name: "acme".to_string(),
+                source_type: "git".to_string(),
+                source: "https://example.com/acme/repository-a".to_string(),
+                git_ref: Some("release".to_string()),
+                root: None,
+            }],
+            ..Default::default()
+        };
+        let native = capability
+            .adapter
+            .plan_native_apply(
+                &resource,
+                &approved_inventory,
+                PluginApplyMode::InstallMissing,
+            )
+            .unwrap();
+        let target = CatalogTargetConfig::new(
+            provider,
+            CatalogTargetKey::parse("user.plugins").unwrap(),
+            &CatalogTargetIdentity {
+                canonical_root: home.to_string_lossy().to_string(),
+                root_class: "user".to_string(),
+                member: "tools@acme".to_string(),
+            },
+        )
+        .unwrap();
+        let action = CatalogPullAction {
+            action_id: CatalogPlanActionId::parse("action-000000000000000000000000").unwrap(),
+            resource_id: resource.resource_id.clone(),
+            kind: CatalogPullActionKind::Install,
+            requires_destructive_approval: false,
+            target,
+            target_path: None,
+            native: Some(native.clone()),
+            expected_target_state: CatalogTargetExpectation::Absent,
+            incoming_content_sha256: resource.content_sha256.clone(),
+        };
+        action.validate().unwrap();
+        let runner = ChangedMarketplaceRunner::default();
+
+        let error = execute_native_action(
+            &repository,
+            &runner,
+            capability.as_ref(),
+            &StorageId::parse("storage-a").unwrap(),
+            &CatalogPlanId::parse("catplan-000000000000000000000000").unwrap(),
+            &action,
+            &native,
+            &resource,
+            &home,
+            1,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("no longer matches the approved source and ref"));
+        let calls = runner.calls();
+        assert_eq!(
+            calls.iter().map(|argv| argv.join(" ")).collect::<Vec<_>>(),
+            vec!["plugin marketplace list --json", "plugin list --json"]
+        );
+        assert!(repository.load_operations().unwrap().operations.is_empty());
+        assert!(repository
+            .load_materializations()
+            .unwrap()
+            .claims
+            .is_empty());
+    }
+
+    fn interrupted_replace(root: &Path, backup_path: &Path) -> CatalogOperationJournalEntry {
+        let operation_id = CatalogOperationId::parse("catop-000000000000000000000000").unwrap();
+        let target = CatalogTargetConfig::new(
+            ProviderKey::parse("future").unwrap(),
+            CatalogTargetKey::parse("user.plugins").unwrap(),
+            &CatalogTargetIdentity {
+                canonical_root: root.to_string_lossy().to_string(),
+                root_class: "user".to_string(),
+                member: "tools".to_string(),
+            },
+        )
+        .unwrap();
+        CatalogOperationJournalEntry {
+            operation_id,
+            kind: CatalogOperationKind::DirectoryReplace,
+            coordinate: CatalogCoordinate::new("future", "plugin", "future.plugin", 1).unwrap(),
+            storage_id: Some(StorageId::parse("storage-a").unwrap()),
+            plan_id: Some(CatalogPlanId::parse("catplan-000000000000000000000000").unwrap()),
+            action_id: Some(CatalogPlanActionId::parse("action-000000000000000000000000").unwrap()),
+            target,
+            target_path: Some(root.join("tools").to_string_lossy().to_string()),
+            backup_path: Some(backup_path.to_string_lossy().to_string()),
+            backup_tree_sha256: Some("c".repeat(64)),
+            copy_target_path: None,
+            copy_name: None,
+            copy_resource_id: None,
+            expected_target_sha256: Some("a".repeat(64)),
+            incoming_content_sha256: Some("b".repeat(64)),
+            copy_content_sha256: None,
+            phase: CatalogOperationPhase::OriginalBackedUp,
+            outcome: None,
+            message: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn recovery_distinguishes_unverifiable_from_absent_and_verifies_the_backup_digest() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("plugins");
+        std::fs::create_dir_all(&root).unwrap();
+        let operation_id = CatalogOperationId::parse("catop-000000000000000000000000").unwrap();
+        let backup = root.join(format!(".mallard-backup-{operation_id}-tools"));
+        std::fs::create_dir(&backup).unwrap();
+        let repository = CatalogStateRepository::from_home_dir(temp.path()).unwrap();
+        repository
+            .mutate_operations(|document| {
+                document
+                    .operations
+                    .push(interrupted_replace(&root, &backup));
+                Ok(())
+            })
+            .unwrap();
+
+        recover_catalog_operations(CatalogRegistry::production().as_ref(), &repository, 2).unwrap();
+
+        assert!(backup.is_dir());
+        assert!(!root.join("tools").exists());
+        assert_eq!(
+            repository.load_operations().unwrap().operations[0].phase,
+            CatalogOperationPhase::Failed
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("skills");
+        std::fs::create_dir_all(&root).unwrap();
+        let operation_id = CatalogOperationId::parse("catop-000000000000000000000000").unwrap();
+        let backup = root.join(format!(".mallard-backup-{operation_id}-tools"));
+        std::fs::create_dir(&backup).unwrap();
+        let mut entry = interrupted_replace(&root, &backup);
+        entry.coordinate =
+            CatalogCoordinate::new("codex", "agent_skill", "agentskills.io.skill", 1).unwrap();
+        entry.target = CatalogTargetConfig::new(
+            ProviderKey::parse("codex").unwrap(),
+            CatalogTargetKey::parse("provider-home.skills").unwrap(),
+            &CatalogTargetIdentity {
+                canonical_root: root.to_string_lossy().to_string(),
+                root_class: "provider-home".to_string(),
+                member: "tools".to_string(),
+            },
+        )
+        .unwrap();
+        let repository = CatalogStateRepository::from_home_dir(temp.path()).unwrap();
+        repository
+            .mutate_operations(|document| {
+                document.operations.push(entry);
+                Ok(())
+            })
+            .unwrap();
+
+        recover_catalog_operations(CatalogRegistry::production().as_ref(), &repository, 2).unwrap();
+
+        assert!(backup.is_dir());
+        assert!(!root.join("tools").exists());
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("skills");
+        std::fs::create_dir_all(&root).unwrap();
+        let operation_id = CatalogOperationId::parse("catop-000000000000000000000000").unwrap();
+        let backup = root.join(format!(".mallard-backup-{operation_id}-tools"));
+        std::fs::create_dir(&backup).unwrap();
+        let mut entry = interrupted_replace(&root, &backup);
+        entry.coordinate =
+            CatalogCoordinate::new("codex", "agent_skill", "agentskills.io.skill", 1).unwrap();
+        entry.target = CatalogTargetConfig::new(
+            ProviderKey::parse("codex").unwrap(),
+            CatalogTargetKey::parse("provider-home.skills").unwrap(),
+            &CatalogTargetIdentity {
+                canonical_root: root.to_string_lossy().to_string(),
+                root_class: "provider-home".to_string(),
+                member: "tools".to_string(),
+            },
+        )
+        .unwrap();
+        entry.backup_tree_sha256 = Some(backup_tree_sha256(&backup).unwrap());
+        let repository = CatalogStateRepository::from_home_dir(temp.path()).unwrap();
+        repository
+            .mutate_operations(|document| {
+                document.operations.push(entry);
+                Ok(())
+            })
+            .unwrap();
+
+        recover_catalog_operations(CatalogRegistry::production().as_ref(), &repository, 2).unwrap();
+
+        assert!(!backup.exists());
+        assert!(root.join("tools").is_dir());
+    }
+
+    #[test]
+    fn operation_journal_rejects_unbound_paths_digests_and_kind_phases() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("plugins");
+        std::fs::create_dir_all(&root).unwrap();
+        let operation_id = CatalogOperationId::parse("catop-000000000000000000000000").unwrap();
+        let valid_backup = root.join(format!(".mallard-backup-{operation_id}-tools"));
+        let entry = interrupted_replace(&root, &valid_backup);
+
+        let mut invalid_entries = Vec::new();
+        let mut bad_path = entry.clone();
+        bad_path.backup_path = Some(
+            temp.path()
+                .join("unrelated")
+                .join(format!("{operation_id}-tools"))
+                .to_string_lossy()
+                .to_string(),
+        );
+        invalid_entries.push(bad_path);
+        let mut bad_digest = entry.clone();
+        bad_digest.incoming_content_sha256 = Some("bad".to_string());
+        invalid_entries.push(bad_digest);
+        let mut bad_phase = entry.clone();
+        bad_phase.phase = CatalogOperationPhase::CopyActivated;
+        invalid_entries.push(bad_phase);
+        let mut bad_kind = entry;
+        bad_kind.kind = CatalogOperationKind::NativeApply;
+        invalid_entries.push(bad_kind);
+
+        for invalid in invalid_entries {
+            let document = CatalogOperationsDocument {
+                schema: CATALOG_SCHEMA,
+                revision: 0,
+                operations: vec![invalid],
+            };
+            assert!(document.validate().is_err());
+        }
+
+        let forged_backup = temp
+            .path()
+            .join("foreign")
+            .join("backups")
+            .join("catalog_resources")
+            .join("catplan-000000000000000000000000")
+            .join(format!("{operation_id}-tools"));
+        std::fs::create_dir_all(&forged_backup).unwrap();
+        let forged = interrupted_replace(&root, &forged_backup);
+        CatalogOperationsDocument {
+            schema: CATALOG_SCHEMA,
+            revision: 0,
+            operations: vec![forged.clone()],
+        }
+        .validate()
+        .unwrap();
+        let repository =
+            CatalogStateRepository::from_home_dir(temp.path().join("state-home")).unwrap();
+        repository
+            .mutate_operations(|document| {
+                document.operations.push(forged);
+                Ok(())
+            })
+            .unwrap();
+
+        recover_catalog_operations(CatalogRegistry::production().as_ref(), &repository, 2).unwrap();
+
+        assert!(forged_backup.is_dir());
+        assert!(!root.join("tools").exists());
+    }
 }

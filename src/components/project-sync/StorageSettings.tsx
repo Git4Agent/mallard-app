@@ -1,449 +1,472 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { StorageConfig } from "../../types";
-import Icon from "../Icons";
+import { useState, type ReactNode } from "react";
+import type {
+  SecretOperation,
+  StorageProviderDescriptor,
+  StorageProviderKey,
+  StorageSettings,
+  StorageSetupDraft,
+  StorageSummary,
+} from "../../types";
+import Icon, { iconNameFromHint } from "../Icons";
 import { openExternalUrl } from "./externalLink";
+import { compactProjectPath } from "./model";
 
-const R2_SETUP_DOC = "https://developers.cloudflare.com/r2/get-started/s3/";
-const R2_BUCKET_DOC = "https://developers.cloudflare.com/r2/buckets/create-buckets/";
-const R2_CREDENTIALS_DOC = "https://developers.cloudflare.com/r2/api/tokens/";
-const CLOUDFLARE_ACCOUNT_ID_DOC = "https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/";
+/**
+ * The storage form, drawn from a provider descriptor: every field, secret,
+ * and assistant it shows was declared by the backend adapter. Nothing here
+ * knows a provider by name.
+ *
+ * The form's own state is small on purpose. Settings are the descriptor's
+ * fields as strings; secret values stay only in the open editor. The backend
+ * reports a stored secret as a `present` flag.
+ */
+export interface StorageEditorForm {
+  name: string;
+  settings: Record<string, string>;
+  /** Secret text in the field: typed this session, or revealed by the exact
+   *  fetch of a new draft. It stays for the life of the open editor so its
+   *  password mask and Show control do not change after a save. */
+  typedSecrets: Record<string, string>;
+  /** Secret values that the open editor knows are already stored. A field
+   *  still equal to this local baseline does not travel again. */
+  persistedSecrets?: Record<string, string>;
+}
 
-export type R2Jurisdiction = "default" | "eu" | "fedramp";
+/** Which declared secrets the backend draft currently holds. */
+export type SecretPresence = Record<string, boolean>;
 
-const R2_ACCOUNT_ID_PATTERN = /^[0-9a-f]{32}$/i;
-const R2_BUCKET_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/;
-const R2_ENDPOINT_PATTERN = /^https:\/\/([0-9a-f]{32})(?:\.(eu|fedramp))?\.r2\.cloudflarestorage\.com$/i;
-const R2_S3_API_URL_PATTERN = /^https:\/\/([0-9a-f]{32})(?:\.(eu|fedramp))?\.r2\.cloudflarestorage\.com\/([^/?#%]+)$/i;
+export function findStorageProvider(
+  providers: readonly StorageProviderDescriptor[],
+  provider: StorageProviderKey,
+  configVersion: number,
+): StorageProviderDescriptor | null {
+  return providers.find((candidate) => (
+    candidate.key === provider && candidate.config_version === configVersion
+  )) ?? null;
+}
 
-function HelpButton({ url, label }: { url: string; label: string }) {
+/** Settings cross IPC as a bounded JSON object; the form edits text. */
+export function settingString(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
+export function formFromDraft(
+  descriptor: Pick<StorageProviderDescriptor, "fields">,
+  draft: Pick<StorageSetupDraft, "name" | "settings"> & Partial<Pick<StorageSetupDraft, "secrets">>,
+): StorageEditorForm {
+  // A new draft's exact fetch carries its own secret values; they sit in the
+  // field for review, masked, with Show to reveal — as a typed value would.
+  const persisted = Object.fromEntries((draft.secrets ?? [])
+    .filter((secret) => typeof secret.value === "string" && secret.value.length > 0)
+    .map((secret) => [secret.secret_id, secret.value as string]));
+  return {
+    name: draft.name,
+    settings: Object.fromEntries(descriptor.fields.map((field) => [
+      field.field_id,
+      settingString(draft.settings[field.field_id]),
+    ])),
+    typedSecrets: { ...persisted },
+    ...(Object.keys(persisted).length > 0 ? { persistedSecrets: persisted } : {}),
+  };
+}
+
+export function secretPresenceOf(draft: Pick<StorageSetupDraft, "secrets">): SecretPresence {
+  return Object.fromEntries(draft.secrets.map((secret) => [secret.secret_id, secret.present]));
+}
+
+/** The settings object a draft update carries: the form's declared fields
+ *  over whatever else the adapter keeps in the draft, which the form never
+ *  shows and must not drop. */
+export function draftSettingsFromForm(
+  descriptor: Pick<StorageProviderDescriptor, "fields">,
+  form: Pick<StorageEditorForm, "settings">,
+  base: StorageSettings,
+): StorageSettings {
+  return {
+    ...base,
+    ...Object.fromEntries(descriptor.fields.map((field) => [
+      field.field_id,
+      (form.settings[field.field_id] ?? "").trim(),
+    ])),
+  };
+}
+
+/** Only the secrets the user touched travel; a saved one is `replace`, a
+ *  missing one is `set`, and everything untyped stays as the backend has it. */
+export function secretOperationsFromForm(
+  form: Pick<StorageEditorForm, "typedSecrets" | "persistedSecrets">,
+  presence: SecretPresence,
+): Record<string, SecretOperation> {
+  const operations: Record<string, SecretOperation> = {};
+  for (const [secretId, value] of Object.entries(form.typedSecrets)) {
+    // A persisted value still in the field is already stored.
+    if (form.persistedSecrets?.[secretId] === value) continue;
+    if (!value) continue;
+    operations[secretId] = presence[secretId] ? { op: "replace", value } : { op: "set", value };
+  }
+  return operations;
+}
+
+function fieldSet(form: Pick<StorageEditorForm, "settings">, fieldId: string): boolean {
+  return (form.settings[fieldId] ?? "").trim().length > 0;
+}
+
+function secretSet(
+  form: Pick<StorageEditorForm, "typedSecrets">,
+  presence: SecretPresence,
+  secretId: string,
+): boolean {
+  return !!presence[secretId] || (form.typedSecrets[secretId] ?? "").length > 0;
+}
+
+/** Test and Finish open once the name, every required field, and every
+ *  required secret (stored or typed) are in. The backend validates again. */
+export function storageDraftReady(
+  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets">,
+  form: StorageEditorForm,
+  presence: SecretPresence,
+): boolean {
+  return form.name.trim().length > 0
+    && descriptor.fields.every((field) => !field.required || fieldSet(form, field.field_id))
+    && descriptor.secrets.every((secret) => !secret.required || secretSet(form, presence, secret.secret_id));
+}
+
+/** The tally under the form: required fields plus required secrets, and how
+ *  many of them are set. */
+export function fieldsSet(
+  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets">,
+  form: StorageEditorForm,
+  presence: SecretPresence,
+): { set: number; total: number } {
+  const requiredFields = descriptor.fields.filter((field) => field.required);
+  const requiredSecrets = descriptor.secrets.filter((secret) => secret.required);
+  return {
+    set: requiredFields.filter((field) => fieldSet(form, field.field_id)).length
+      + requiredSecrets.filter((secret) => secretSet(form, presence, secret.secret_id)).length,
+    total: requiredFields.length + requiredSecrets.length,
+  };
+}
+
+/** The one-line "where is it" every listing shows: the first path-shaped
+ *  fact, else the first fact, else the provider's own label. */
+export function storageSubtitle(storage: Pick<StorageSummary, "summary" | "provider_label">): string {
+  const path = storage.summary.find((field) => field.is_path);
+  if (path) return compactProjectPath(path.value);
+  return storage.summary[0]?.value || storage.provider_label;
+}
+
+// A path subtitle keeps the mono face; any other fact reads as prose. The
+// menu says which one it is handing over so the stylesheet reads a class.
+export function storageSubtitleIsPath(storage: Pick<StorageSummary, "summary">): boolean {
+  return storage.summary.some((field) => field.is_path);
+}
+
+/** The `?` beside a field: opens the declared documentation when the
+ *  descriptor names one, otherwise it only carries the tooltip. Always a
+ *  button so the mark keeps its 18px circle. */
+function HelpMark({ text, url }: { text: string; url?: string | null }) {
   return (
     <button
       type="button"
       className="field-help"
-      onClick={() => void openExternalUrl(url)}
-      title={label}
-      aria-label={label}
+      onClick={url ? () => void openExternalUrl(url) : undefined}
+      title={text}
+      aria-label={text}
     >
       ?
     </button>
   );
 }
 
-export function isCloudflareR2AccountId(value: string): boolean {
-  return R2_ACCOUNT_ID_PATTERN.test(value.trim());
+/** The name the descriptor's suggestion rule proposes for these settings,
+ *  or null when the rule is absent, unmatched, or invalid. */
+export function suggestStorageName(
+  descriptor: Pick<StorageProviderDescriptor, "name_suggestion">,
+  settings: Record<string, string>,
+): string | null {
+  const rule = descriptor.name_suggestion;
+  if (!rule) return null;
+  try {
+    const matched = (settings[rule.source] ?? "").match(new RegExp(rule.pattern));
+    const suggested = matched?.[rule.group]?.trim() ?? "";
+    return suggested.length > 0 ? suggested : null;
+  } catch {
+    return null;
+  }
 }
 
-export function isCloudflareR2BucketName(value: string): boolean {
-  return R2_BUCKET_PATTERN.test(value);
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function r2EndpointForAccount(
-  accountId: string,
-  jurisdiction: R2Jurisdiction = "default",
-): string {
-  const account = accountId.trim().toLowerCase();
-  if (!isCloudflareR2AccountId(account)) return "";
-  const jurisdictionLabel = jurisdiction === "default" ? "" : `.${jurisdiction}`;
-  return `https://${account}${jurisdictionLabel}.r2.cloudflarestorage.com`;
+/** Whether the name is still Mallard's — empty, the numbered default a new
+ *  draft opens with, or the suggestion its current settings produce — so a
+ *  later suggestion may replace it. A name the user typed is never touched. */
+export function storageNameIsAuto(
+  descriptor: Pick<StorageProviderDescriptor, "name_suggestion" | "default_name">,
+  form: Pick<StorageEditorForm, "name" | "settings">,
+): boolean {
+  const name = form.name.trim();
+  if (name.length === 0) return true;
+  const stem = descriptor.default_name?.trim();
+  if (stem && new RegExp(`^${escapeRegExp(stem)} \\d+$`).test(name)) return true;
+  return name === suggestStorageName(descriptor, form.settings);
 }
 
-export function parseR2Endpoint(value: string): {
-  accountId: string;
-  jurisdiction: R2Jurisdiction;
-} | null {
-  const match = R2_ENDPOINT_PATTERN.exec(value);
-  if (!match) return null;
-  return {
-    accountId: match[1].toLowerCase(),
-    jurisdiction: (match[2]?.toLowerCase() as Exclude<R2Jurisdiction, "default"> | undefined) ?? "default",
-  };
-}
-
-export function r2S3ApiUrl(
-  accountId: string,
-  bucket: string,
-  storedEndpoint?: string,
-): string {
-  if (!isCloudflareR2BucketName(bucket)) return "";
-  const account = accountId.trim().toLowerCase();
-  const endpoint = storedEndpoint === undefined
-    ? r2EndpointForAccount(account)
-    : (() => {
-        const parsed = parseR2Endpoint(storedEndpoint);
-        return parsed?.accountId === account
-          ? r2EndpointForAccount(parsed.accountId, parsed.jurisdiction)
-          : "";
-      })();
-  return endpoint ? `${endpoint}/${bucket}` : "";
-}
-
-export function parseR2S3ApiUrl(value: string): {
-  accountId: string;
-  bucket: string;
-  jurisdiction: R2Jurisdiction;
-} | null {
-  const match = R2_S3_API_URL_PATTERN.exec(value);
-  if (!match) return null;
-  const bucket = match[3];
-  if (!isCloudflareR2BucketName(bucket)) return null;
-  return {
-    accountId: match[1].toLowerCase(),
-    bucket,
-    jurisdiction: (match[2]?.toLowerCase() as Exclude<R2Jurisdiction, "default"> | undefined) ?? "default",
-  };
-}
-
-/**
- * `secretStored` says whether the backend already holds a secret for this
- * storage. It has to be passed in: the config the backend serves redacts the
- * secret, so an already-saved storage always reads as blank here even though
- * saving it again preserves the stored value. There is deliberately no default
- * — every caller states which case it is in.
- */
-export function storageConfigReady(storage: StorageConfig, secretStored: boolean): boolean {
-  if (!storage.name?.trim()) return false;
-  if (storage.kind === "local") return !!storage.local_dir?.trim();
-  const accountId = storage.account_id?.trim().toLowerCase() ?? "";
-  const endpoint = parseR2Endpoint(storage.s3_endpoint ?? "");
-  return isCloudflareR2BucketName(storage.bucket ?? "")
-    && isCloudflareR2AccountId(accountId)
-    && endpoint?.accountId === accountId
-    && !!storage.access_key_id?.trim()
-    && (secretStored || !!storage.secret_access_key?.trim());
-}
-
-export function newStorage(kind: "s3" | "local", index: number): StorageConfig {
-  return {
-    id: `storage-${crypto.randomUUID()}`,
-    name: kind === "local" ? `Local storage ${index}` : `R2 storage ${index}`,
-    kind,
-    bucket: "",
-    access_key_id: "",
-    secret_access_key: "",
-    account_id: "",
-    s3_endpoint: "",
-    region: kind === "s3" ? "auto" : "",
-    local_dir: "",
-  };
-}
-
-export function storageNameForKind(name: string, kind: "s3" | "local"): string {
-  const defaultName = /^(?:Local storage|R2 storage) (\d+)$/.exec(name);
-  if (!defaultName) return name;
-  return `${kind === "local" ? "Local storage" : "R2 storage"} ${defaultName[1]}`;
-}
-
-/** Counts the five rendered connection fields, including a typed or stored secret. */
-export function r2FieldsSet(storage: StorageConfig, secretStored: boolean): number {
-  return [
-    r2S3ApiUrl(storage.account_id ?? "", storage.bucket ?? "", storage.s3_endpoint ?? ""),
-    storage.bucket,
-    storage.account_id,
-    storage.access_key_id,
-    secretStored ? "stored" : storage.secret_access_key,
-  ].filter((value) => !!value?.trim()).length;
+/** Apply every declared derivation whose source is `changedFieldId`: a match
+ *  fills the derived field from its capture group, no match clears it. An
+ *  invalid pattern leaves the field alone. */
+export function applyFieldDerivations(
+  descriptor: Pick<StorageProviderDescriptor, "fields">,
+  settings: Record<string, string>,
+  changedFieldId: string,
+): Record<string, string> {
+  const next = { ...settings };
+  for (const field of descriptor.fields) {
+    const rule = field.derive;
+    if (!rule || rule.source !== changedFieldId) continue;
+    let matched: RegExpMatchArray | null;
+    try {
+      matched = (settings[changedFieldId] ?? "").trim().match(new RegExp(rule.pattern));
+    } catch {
+      continue;
+    }
+    next[field.field_id] = matched?.[rule.group] ?? "";
+  }
+  return next;
 }
 
 export function StorageEditor({
-  storage,
+  descriptor,
+  providers,
+  form,
+  secretPresence,
   disabled,
+  editsExisting,
   onChange,
+  onSwitchProvider,
   onRemove,
   primaryAction,
-  secretStored,
-  showNameField = true,
-  showProgress = true,
   agentSlot,
 }: {
-  storage: StorageConfig;
+  descriptor: StorageProviderDescriptor;
+  /** Every provider this build offers, in the backend's order: the header's
+   *  type switch lists them. Defaults to the draft's own. */
+  providers?: readonly StorageProviderDescriptor[];
+  form: StorageEditorForm;
+  secretPresence: SecretPresence;
   disabled: boolean;
-  onChange: (storage: StorageConfig) => void;
+  /** The draft edits a storage that already exists: the name stays in the
+   *  page heading and the card opens on the configured guide row. */
+  editsExisting: boolean;
+  onChange: (form: StorageEditorForm) => void;
+  /** Switching type restarts the draft on the chosen provider; absent (and
+   *  for an existing storage) the switch is shown locked. */
+  onSwitchProvider?: (provider: StorageProviderDescriptor) => void;
+  /** The trash at the header's end, for a storage that already exists. */
   onRemove?: () => void;
+  /** An existing storage's save sits in the card's own footer. */
   primaryAction?: ReactNode;
-  /** True when the backend holds an R2 secret. Committed configurations stay
-   *  redacted; an exact open setup draft may also carry the value in this
-   *  controlled editor so the user can reveal and review it. */
-  secretStored: boolean;
-  showNameField?: boolean;
-  /** False when the setup page hoists the R2 tally into its own footer. */
-  showProgress?: boolean;
-  /** The workspace owns copying the agent instruction and listening for the
-   *  CLI's update to the exact persisted draft; the editor only seats it. */
+  /** The workspace owns the assistant hand-off and its lifecycle; the editor
+   *  only seats it, in the row the descriptor's assistant labels. */
   agentSlot?: ReactNode;
 }) {
-  const set = (patch: Partial<StorageConfig>) => onChange({ ...storage, ...patch });
-  const derivedS3ApiUrl = r2S3ApiUrl(
-    storage.account_id ?? "",
-    storage.bucket ?? "",
-    storage.s3_endpoint ?? "",
-  );
-  const [s3ApiUrlDraft, setS3ApiUrlDraft] = useState(derivedS3ApiUrl);
-  const [secretVisible, setSecretVisible] = useState(false);
-  const editingS3ApiUrl = useRef(false);
-  const storedEndpoint = parseR2Endpoint(storage.s3_endpoint ?? "");
-  const jurisdiction = useRef<R2Jurisdiction>(storedEndpoint?.jurisdiction ?? "default");
-  const parsedS3ApiUrl = parseR2S3ApiUrl(s3ApiUrlDraft);
-  useEffect(() => {
-    if (!editingS3ApiUrl.current) setS3ApiUrlDraft(derivedS3ApiUrl);
-  }, [derivedS3ApiUrl]);
-  useEffect(() => {
-    const parsed = parseR2Endpoint(storage.s3_endpoint ?? "");
-    if (parsed) jurisdiction.current = parsed.jurisdiction;
-  }, [storage.s3_endpoint]);
-  const setAccountId = (accountId: string) => set({
-    account_id: accountId,
-    s3_endpoint: r2EndpointForAccount(accountId, jurisdiction.current),
-    region: "auto",
+  const [secretVisible, setSecretVisible] = useState<Record<string, boolean>>({});
+  const setName = (name: string) => onChange({ ...form, name });
+  const setSetting = (fieldId: string, value: string) => {
+    const settings = applyFieldDerivations(descriptor, { ...form.settings, [fieldId]: value }, fieldId);
+    // The name follows the settings only while it is still Mallard's own;
+    // a typed name stays, and the field stays editable either way.
+    const suggested = storageNameIsAuto(descriptor, form) ? suggestStorageName(descriptor, settings) : null;
+    onChange({ ...form, settings, name: suggested ?? form.name });
+  };
+  const setSecret = (secretId: string, value: string) => onChange({
+    ...form,
+    typedSecrets: { ...form.typedSecrets, [secretId]: value },
   });
-  const setS3ApiUrl = (value: string) => {
-    setS3ApiUrlDraft(value);
-    const parsed = parseR2S3ApiUrl(value);
-    if (parsed) jurisdiction.current = parsed.jurisdiction;
-    set(parsed ? {
-      account_id: parsed.accountId,
-      bucket: parsed.bucket,
-      s3_endpoint: r2EndpointForAccount(parsed.accountId, parsed.jurisdiction),
-      region: "auto",
-    } : {
-      account_id: "",
-      bucket: "",
-      s3_endpoint: "",
-      region: "auto",
-    });
-  };
-  const chooseFolder = async () => {
+  const chooseFolder = async (fieldId: string) => {
     const picked = await open({ directory: true, multiple: false });
-    if (typeof picked === "string" && picked) set({ local_dir: picked });
+    if (typeof picked === "string" && picked) setSetting(fieldId, picked);
   };
-  const storageTypeLocked = disabled || secretStored || !showNameField;
+
+  const folderFields = descriptor.fields.filter((field) => field.kind === "directory");
+  const gridFields = descriptor.fields.filter((field) => field.kind !== "directory");
+  const assistant = descriptor.setup_assistant ?? null;
+  const credentialed = descriptor.secrets.length > 0 || assistant !== null;
 
   return (
     <article className="sync-storage-card">
       <header>
-        <span className="sync-storage-icon"><Icon name={storage.kind === "local" ? "drive" : "cloud"} size={18} /></span>
-        {showNameField ? (
-          <input value={storage.name} onChange={(event) => set({ name: event.target.value })} disabled={disabled} aria-label="Storage name" />
-        ) : (
+        <span className="sync-storage-icon"><Icon name={iconNameFromHint(descriptor.icon, "drive")} size={18} /></span>
+        {editsExisting ? (
           <h2 className="sync-storage-editor-title">Storage settings</h2>
+        ) : (
+          <input
+            value={form.name}
+            onChange={(event) => setName(event.target.value)}
+            disabled={disabled}
+            aria-label="Storage name"
+            placeholder="Storage name"
+          />
         )}
+        {/* The type switch lists every provider this build offers. A new
+            draft restarts on the chosen one; an existing storage keeps its
+            type, so the switch only states it. */}
         <div className="sync-segmented" role="radiogroup" aria-label="Storage type">
-          <button
-            type="button"
-            role="radio"
-            aria-checked={storage.kind !== "local"}
-            className={storage.kind !== "local" ? "active" : undefined}
-            onClick={() => set({
-              name: storageNameForKind(storage.name, "s3"),
-              kind: "s3",
-              bucket: "",
-              access_key_id: "",
-              secret_access_key: "",
-              account_id: "",
-              s3_endpoint: "",
-              region: "auto",
-              local_dir: "",
-              supports_conditional_writes: undefined,
-            })}
-            disabled={storageTypeLocked}
-          >
-            Cloudflare R2
-          </button>
-          <button
-            type="button"
-            role="radio"
-            aria-checked={storage.kind === "local"}
-            className={storage.kind === "local" ? "active" : undefined}
-            onClick={() => set({
-              name: storageNameForKind(storage.name, "local"),
-              kind: "local",
-              bucket: "",
-              access_key_id: "",
-              secret_access_key: "",
-              account_id: "",
-              s3_endpoint: "",
-              region: "",
-              supports_conditional_writes: undefined,
-            })}
-            disabled={storageTypeLocked}
-          >
-            Local folder
-          </button>
+          {(providers ?? [descriptor]).map((provider) => {
+            const current = provider.key === descriptor.key && provider.config_version === descriptor.config_version;
+            return (
+              <button
+                key={`${provider.key}@${provider.config_version}`}
+                type="button"
+                role="radio"
+                aria-checked={current}
+                className={current ? "active" : undefined}
+                onClick={() => { if (!current) onSwitchProvider?.(provider); }}
+                disabled={disabled || editsExisting || !onSwitchProvider}
+              >
+                {provider.display_name}
+              </button>
+            );
+          })}
         </div>
         {onRemove && (
           <button type="button" className="btn btn-ghost danger" onClick={onRemove} disabled={disabled} title="Remove storage" aria-label="Remove storage"><Icon name="trash" size={14} /></button>
         )}
       </header>
-      {storage.kind === "local" ? (
-        <label className="sync-folder-field compact">
-          <span className="sync-field-name">Location path</span>
+
+      {folderFields.map((field) => (
+        <label key={field.field_id} className="sync-folder-field compact">
+          <span className="sync-field-name">{field.label}</span>
           <div>
             <input
               type="text"
-              value={storage.local_dir ?? ""}
-              onChange={(event) => set({ local_dir: event.target.value })}
-              placeholder="e.g. /Volumes/backup/mallard-storage"
+              value={form.settings[field.field_id] ?? ""}
+              onChange={(event) => setSetting(field.field_id, event.target.value)}
+              placeholder={field.placeholder ?? undefined}
               disabled={disabled}
+              required={field.required}
               spellCheck={false}
               autoCapitalize="none"
               autoCorrect="off"
               autoComplete="off"
             />
-            <button type="button" className="btn" onClick={() => void chooseFolder()} disabled={disabled}>
+            <button type="button" className="btn" onClick={() => void chooseFolder(field.field_id)} disabled={disabled}>
               <Icon name="folder" size={13} /> Browse…
             </button>
           </div>
+          {field.help && <small>{field.help}</small>}
         </label>
-      ) : (
-        <>
-          {showNameField ? (
-            <>
-              {/* The two routes are named lanes, not one run-on sentence: the
-                  agent lane carries the hand-off cluster and its lifecycle,
-                  the manual lane introduces the fields it sits above. */}
-              <div className="sync-r2-route-row agent" role="note">
-                <Icon name="terminal" size={13} />
-                <span className="sync-r2-zone-label">Agent setup</span>
-                <span className="sync-r2-guide-copy">Fills these values for your review — you complete Cloudflare sign-in, MFA, and consent in the browser, and finish setup yourself.</span>
-                {agentSlot}
-              </div>
-              <div className="sync-r2-route-row" role="note">
-                <Icon name="info" size={13} />
-                <span className="sync-r2-zone-label">Manual setup</span>
-                <span className="sync-r2-guide-copy">Enter an existing R2 connection in the fields below.</span>
-                <button type="button" className="btn-link" onClick={() => void openExternalUrl(R2_SETUP_DOC)}>Setup guide <Icon name="external-link" size={11} /></button>
-              </div>
-            </>
-          ) : (
-            <div className="sync-r2-guide" role="note">
-              <Icon name={secretStored ? "check-circle" : "info"} size={13} />
-              <span className="sync-r2-guide-copy">
-                {secretStored
-                  ? "Configured. You can review or update the connection values below."
-                  : "Enter the R2 connection values below."}
-              </span>
-              <button type="button" className="btn-link" onClick={() => void openExternalUrl(R2_SETUP_DOC)}>Setup guide</button>
-              {agentSlot}
-            </div>
-          )}
+      ))}
 
-          <div className="sync-storage-fields sync-r2-fields" aria-label="Cloudflare R2 connection details">
-            <label className="sync-r2-url-field">
-              <span className="form-label-row">
-                <span className="sync-field-name">S3 API URL</span>
-                <HelpButton url={R2_SETUP_DOC} label="How to find the Cloudflare R2 S3 API URL" />
-              </span>
-              <input
-                type="url"
-                value={s3ApiUrlDraft}
-                onFocus={() => { editingS3ApiUrl.current = true; }}
-                onChange={(event) => setS3ApiUrl(event.target.value)}
-                onBlur={() => {
-                  editingS3ApiUrl.current = false;
-                  if (parsedS3ApiUrl) {
-                    setS3ApiUrlDraft(r2S3ApiUrl(
-                      parsedS3ApiUrl.accountId,
-                      parsedS3ApiUrl.bucket,
-                      r2EndpointForAccount(parsedS3ApiUrl.accountId, parsedS3ApiUrl.jurisdiction),
-                    ));
-                  }
-                }}
-                placeholder="Example: https://9cc0c910ec***41511aca1.r2.cloudflarestorage.com/agent"
-                disabled={disabled}
-                spellCheck={false}
-                autoCapitalize="none"
-                autoCorrect="off"
-                autoComplete="off"
-                aria-invalid={s3ApiUrlDraft.trim() && !parsedS3ApiUrl ? true : undefined}
-              />
-            </label>
-            <label>
-              <span className="form-label-row">
-                <span className="sync-field-name">Bucket name</span>
-                <HelpButton url={R2_BUCKET_DOC} label="How to create a Cloudflare R2 bucket" />
-              </span>
-              <input
-                value={storage.bucket ?? ""}
-                onChange={(event) => set({ bucket: event.target.value })}
-                placeholder="Example: codex-sync-backups"
-                disabled={disabled}
-                required
-                spellCheck={false}
-                autoCapitalize="none"
-                autoCorrect="off"
-                autoComplete="off"
-              />
-            </label>
-            <label>
-              <span className="form-label-row">
-                <span className="sync-field-name">Account ID</span>
-                <HelpButton url={CLOUDFLARE_ACCOUNT_ID_DOC} label="Where to find your Cloudflare Account ID" />
-              </span>
-              <input
-                value={storage.account_id ?? ""}
-                onChange={(event) => setAccountId(event.target.value)}
-                placeholder="Example: 023e105f4ecef8ad9ca31a8372d0c353"
-                disabled={disabled}
-                required
-                spellCheck={false}
-                autoCapitalize="none"
-                autoCorrect="off"
-                autoComplete="off"
-              />
-            </label>
-            <label>
-              <span className="form-label-row">
-                <span className="sync-field-name">Access Key ID</span>
-                <HelpButton url={R2_CREDENTIALS_DOC} label="How to create an R2 Access Key ID" />
-              </span>
-              <input
-                value={storage.access_key_id ?? ""}
-                onChange={(event) => set({ access_key_id: event.target.value })}
-                placeholder="Example: 4a2b…91ef"
-                disabled={disabled}
-                required
-                spellCheck={false}
-                autoCapitalize="none"
-                autoCorrect="off"
-                autoComplete="off"
-              />
-            </label>
-            <label>
-              <span className="form-label-row">
-                <span className="sync-field-name">Secret Access Key</span>
-                <HelpButton url={R2_CREDENTIALS_DOC} label="How to create an R2 Secret Access Key" />
-              </span>
-              {/* Exact open setup drafts may include the local secret for
-                  review. Committed storage snapshots remain redacted. */}
-              <span className="sync-secret-input">
-                <input
-                  type={secretVisible ? "text" : "password"}
-                  value={storage.secret_access_key ?? ""}
-                  onChange={(event) => set({ secret_access_key: event.target.value })}
-                  placeholder={secretStored ? "Stored — type to replace" : "Example: a1B2…x9Y0"}
-                  disabled={disabled}
-                  required={!secretStored}
-                  autoComplete="new-password"
-                />
-                <button
-                  type="button"
-                  className="sync-secret-reveal"
-                  onClick={() => setSecretVisible((visible) => !visible)}
-                  aria-pressed={secretVisible}
-                  disabled={disabled}
-                >
-                  {secretVisible ? "Hide" : "Show"}
-                </button>
-              </span>
-            </label>
+      {!editsExisting && assistant && (
+        <>
+          {/* The two routes are named lanes, not one run-on sentence: the
+              agent lane carries the hand-off cluster and its lifecycle, the
+              manual lane introduces the fields it sits above. Both take their
+              words from the descriptor, never from a provider name. */}
+          <div className="storage-setup-route-row agent" role="note">
+            <Icon name="terminal" size={13} />
+            <span className="storage-setup-route-label">{assistant.label}</span>
+            <span className="storage-setup-guide-copy">{assistant.description}</span>
+            {agentSlot}
+          </div>
+          <div className="storage-setup-route-row" role="note">
+            <Icon name="info" size={13} />
+            <span className="storage-setup-route-label">Manual setup</span>
+            <span className="storage-setup-guide-copy">
+              {descriptor.manual_setup_hint ?? `Enter an existing ${descriptor.display_name} connection in the fields below.`}
+            </span>
+            {descriptor.setup_guide_url && (
+              <button type="button" className="btn-link" onClick={() => void openExternalUrl(descriptor.setup_guide_url!)}>
+                Setup guide <Icon name="external-link" size={11} />
+              </button>
+            )}
           </div>
         </>
       )}
-      {(primaryAction || (storage.kind !== "local" && showProgress)) && (
+      {editsExisting && credentialed && (
+        <div className="storage-setup-guide" role="note">
+          <Icon name="check-circle" size={13} />
+          <span className="storage-setup-guide-copy">Configured. You can review or update the connection values below.</span>
+          {descriptor.setup_guide_url && (
+            <button type="button" className="btn-link" onClick={() => void openExternalUrl(descriptor.setup_guide_url!)}>Setup guide</button>
+          )}
+          {agentSlot}
+        </div>
+      )}
+
+      {(gridFields.length > 0 || descriptor.secrets.length > 0) && (
+        <div className="sync-storage-fields storage-provider-fields" aria-label={`${descriptor.display_name} connection details`}>
+          {gridFields.map((field) => (
+            <label key={field.field_id} className={field.kind === "url" ? "storage-provider-url-field" : undefined}>
+              <span className="form-label-row">
+                <span className="sync-field-name">{field.label}</span>
+                {(field.help || field.help_url) && (
+                  <HelpMark text={field.help ?? field.label} url={field.help_url} />
+                )}
+              </span>
+              <input
+                type={field.kind === "url" ? "url" : "text"}
+                value={form.settings[field.field_id] ?? ""}
+                onChange={(event) => setSetting(field.field_id, event.target.value)}
+                placeholder={field.placeholder ?? undefined}
+                disabled={disabled}
+                required={field.required}
+                spellCheck={false}
+                autoCapitalize="none"
+                autoCorrect="off"
+                autoComplete="off"
+              />
+            </label>
+          ))}
+          {descriptor.secrets.map((secret) => {
+            const present = !!secretPresence[secret.secret_id];
+            const visible = !!secretVisible[secret.secret_id];
+            return (
+              <label key={secret.secret_id}>
+                <span className="form-label-row">
+                  <span className="sync-field-name">{secret.label}</span>
+                  {(secret.help || secret.help_url) && (
+                    <HelpMark text={secret.help ?? secret.label} url={secret.help_url} />
+                  )}
+                </span>
+                {/* Backend updates return presence only. A value known by the
+                    open editor remains here for stable masking and review;
+                    otherwise the field accepts a replacement. */}
+                <span className="sync-secret-input">
+                  <input
+                    type={visible ? "text" : "password"}
+                    value={form.typedSecrets[secret.secret_id] ?? ""}
+                    onChange={(event) => setSecret(secret.secret_id, event.target.value)}
+                    placeholder={present ? "Stored — type to replace" : (secret.placeholder ?? undefined)}
+                    disabled={disabled}
+                    required={secret.required && !present}
+                    autoComplete="new-password"
+                  />
+                  <button
+                    type="button"
+                    className="sync-secret-reveal"
+                    onClick={() => setSecretVisible((current) => ({ ...current, [secret.secret_id]: !visible }))}
+                    aria-pressed={visible}
+                    disabled={disabled}
+                  >
+                    {visible ? "Hide" : "Show"}
+                  </button>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      )}
+      {primaryAction && (
         <footer className="sync-storage-editor-footer">
-          {storage.kind !== "local" && showProgress && (
+          {descriptor.secrets.length > 0 && (
             <span className="sync-storage-editor-progress" aria-live="polite">
-              {r2FieldsSet(storage, secretStored)} of 5 set
+              {fieldsSet(descriptor, form, secretPresence).set} of {fieldsSet(descriptor, form, secretPresence).total} set
             </span>
           )}
           {primaryAction}

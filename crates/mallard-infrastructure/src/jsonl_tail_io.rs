@@ -39,9 +39,50 @@ pub(crate) fn open_no_follow(path: &Path) -> Result<fs::File, String> {
         .map_err(|error| format!("open session transcript '{}': {}", path.display(), error))
 }
 
+/// Machine-local identity of the exact captured file. Never portable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceStamp {
+    len: u64,
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+
+impl SourceStamp {
+    fn from_metadata(meta: &fs::Metadata) -> Result<Self, String> {
+        if !meta.is_file() {
+            return Err("session transcript is not a regular file".to_string());
+        }
+        Ok(Self {
+            len: meta.len(),
+            modified: meta.modified().map_err(|error| error.to_string())?,
+            #[cfg(unix)]
+            identity: {
+                use std::os::unix::fs::MetadataExt;
+                (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec())
+            },
+        })
+    }
+
+    pub fn verify(&self, path: &Path) -> Result<(), String> {
+        let file = open_no_follow(path)?;
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        if &Self::from_metadata(&metadata)? != self {
+            return Err(
+                "session transcript changed after capture; refresh and push again".to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Read one transcript with the module's safety contract: a canonical
 /// no-follow regular file within the bounded transcript limit.
 pub fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
+    read_snapshot(path).map(|(bytes, _)| bytes)
+}
+
+pub fn read_snapshot(path: &Path) -> Result<(Vec<u8>, SourceStamp), String> {
     use std::io::Read;
 
     let mut file = open_no_follow(path)?;
@@ -78,14 +119,16 @@ pub fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
             path.display()
         ));
     }
-    if after.len() != before.len() || bytes.len() as u64 != before.len() {
+    let stamp = SourceStamp::from_metadata(&before)?;
+    if SourceStamp::from_metadata(&after)? != stamp || bytes.len() as u64 != before.len() {
         return Err(format!(
             "session transcript '{}' changed while it was read",
             path.display()
         ));
     }
     crate::sync_metrics::record_transcript_bytes_read(path, bytes.len() as u64);
-    Ok(bytes)
+    stamp.verify(path)?;
+    Ok((bytes, stamp))
 }
 
 /// Read a saved cursor's probe window and appended tail without reading the

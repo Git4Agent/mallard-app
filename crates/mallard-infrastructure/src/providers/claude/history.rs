@@ -7,12 +7,12 @@ use crate::app_settings::{
 };
 use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
-    most_specific_project_relative_path, timeline_tool_detail_budgets, SessionCount,
-    SessionCountQuality, SessionDetailWarning, SessionEventCounts, SessionEventDetail,
-    SessionFileSummary, SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent,
-    SessionTimelineEventKind, SessionTimelineIndex, SessionTimelineIndexEntry,
-    SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus,
-    SessionToolCategory, SessionToolIndexEntry, SessionTurnToolSummary,
+    attach_turn_tool_summaries, most_specific_project_relative_path, timeline_tool_detail_budgets,
+    SessionCount, SessionCountQuality, SessionDetailWarning, SessionEventCounts,
+    SessionEventDetail, SessionFileSummary, SessionSourceSpan, SessionTimelineContext,
+    SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
+    SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
+    SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
 };
 use mallard_domain::NoticeSeverity;
 use serde_json::Value;
@@ -118,62 +118,102 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
             conversation_file_limit_bytes()
         ));
     }
-    let mut summary = SessionFileSummary {
-        metrics_complete: true,
-        ..SessionFileSummary::default()
+    let mut summary = SummaryAccumulator::new();
+    for record in crate::conversation_codec::parsed_records(bytes) {
+        summary.observe(&record);
+    }
+    summary.finish()
+}
+
+pub(crate) fn analyze_and_summarize(
+    bytes: &[u8],
+) -> (
+    crate::providers::SessionAnalysis,
+    Result<SessionFileSummary, String>,
+) {
+    let mut summary = SummaryAccumulator::new();
+    let mut records =
+        crate::conversation_codec::parsed_records(bytes).inspect(|record| summary.observe(record));
+    let analysis = super::codec::analyze_claude_records(bytes, &mut records);
+    records.for_each(drop);
+    let summary = if bytes.len() as u64 > conversation_file_limit_bytes() {
+        Err(format!(
+            "Claude session exceeds {} bytes",
+            conversation_file_limit_bytes()
+        ))
+    } else {
+        summary.finish()
     };
-    let mut identity = ClaudeSessionIdentityTracker::default();
-    let mut first_user_text: Option<String> = None;
-    let mut summary_title: Option<String> = None;
-    let mut ai_title: Option<String> = None;
-    let mut custom_title: Option<String> = None;
-    let mut user_turn_ids = BTreeSet::new();
-    let mut unidentified_user_turns = 0_u64;
-    let mut agent_message_ids = BTreeSet::new();
-    let mut unidentified_agent_messages = 0_u64;
-    let mut token_usage_by_message_id = BTreeMap::<String, ClaudeTokenUsage>::new();
-    for raw in bytes.split(|byte| *byte == b'\n') {
-        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-        if raw.is_empty() {
-            continue;
+    (analysis, summary)
+}
+
+#[derive(Default)]
+struct SummaryAccumulator {
+    summary: SessionFileSummary,
+    identity: ClaudeSessionIdentityTracker,
+    first_user_text: Option<String>,
+    summary_title: Option<String>,
+    ai_title: Option<String>,
+    custom_title: Option<String>,
+    user_turn_ids: BTreeSet<String>,
+    unidentified_user_turns: u64,
+    agent_message_ids: BTreeSet<String>,
+    unidentified_agent_messages: u64,
+    token_usage_by_message_id: BTreeMap<String, ClaudeTokenUsage>,
+}
+
+impl SummaryAccumulator {
+    fn new() -> Self {
+        Self {
+            summary: SessionFileSummary {
+                metrics_complete: true,
+                ..Default::default()
+            },
+            ..Default::default()
         }
-        let Ok(value) = serde_json::from_slice::<Value>(raw) else {
-            summary.metrics_complete = false;
-            continue;
+    }
+
+    fn observe(&mut self, record: &Result<Value, serde_json::Error>) {
+        let Ok(value) = record else {
+            self.summary.metrics_complete = false;
+            return;
         };
-        identity.observe(&value);
+        self.identity.observe(&value);
         let Some(object) = value.as_object() else {
-            summary.metrics_complete = false;
-            continue;
+            self.summary.metrics_complete = false;
+            return;
         };
         if let Some(timestamp) = object.get("timestamp").and_then(parse_timestamp_value) {
-            if summary.started_at.is_none_or(|start| timestamp < start) {
-                summary.started_at = Some(timestamp);
+            if self
+                .summary
+                .started_at
+                .is_none_or(|start| timestamp < start)
+            {
+                self.summary.started_at = Some(timestamp);
             }
-            if summary.ended_at.is_none_or(|end| timestamp > end) {
-                summary.ended_at = Some(timestamp);
+            if self.summary.ended_at.is_none_or(|end| timestamp > end) {
+                self.summary.ended_at = Some(timestamp);
             }
         }
         if let Some(branch) = object.get("gitBranch").and_then(Value::as_str) {
             if !branch.is_empty() {
-                summary.branch = Some(branch.to_string());
-                summary.recorded_branches.insert(branch.to_string());
+                self.summary.branch = Some(branch.to_string());
             }
         }
         match object.get("type").and_then(Value::as_str) {
             Some("summary") => {
                 if let Some(title) = title_candidate(object.get("summary")) {
-                    summary_title = Some(title);
+                    self.summary_title = Some(title);
                 }
             }
             Some("ai-title") => {
                 if let Some(title) = title_candidate(object.get("aiTitle")) {
-                    ai_title = Some(title);
+                    self.ai_title = Some(title);
                 }
             }
             Some("custom-title") => {
                 if let Some(title) = title_candidate(object.get("customTitle")) {
-                    custom_title = Some(title);
+                    self.custom_title = Some(title);
                 }
             }
             Some("user") if !is_meta_record(object) => {
@@ -183,14 +223,15 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
                         .and_then(Value::as_str)
                         .filter(|id| !id.is_empty())
                     {
-                        Some(id) => user_turn_ids.insert(id.to_string()),
+                        Some(id) => self.user_turn_ids.insert(id.to_string()),
                         None => {
-                            unidentified_user_turns = unidentified_user_turns.saturating_add(1);
+                            self.unidentified_user_turns =
+                                self.unidentified_user_turns.saturating_add(1);
                             true
                         }
                     };
-                    if is_new_turn && first_user_text.is_none() {
-                        first_user_text = Some(truncate_chars(&text, TITLE_CHARS));
+                    if is_new_turn && self.first_user_text.is_none() {
+                        self.first_user_text = Some(truncate_chars(&text, TITLE_CHARS));
                     }
                 }
             }
@@ -213,11 +254,11 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
                         .filter(|id| !id.is_empty())
                     {
                         Some(id) => {
-                            agent_message_ids.insert(id.to_string());
+                            self.agent_message_ids.insert(id.to_string());
                         }
                         None => {
-                            unidentified_agent_messages =
-                                unidentified_agent_messages.saturating_add(1);
+                            self.unidentified_agent_messages =
+                                self.unidentified_agent_messages.saturating_add(1);
                         }
                     }
                 }
@@ -229,7 +270,7 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
                         .iter()
                         .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_use"))
                         .count() as u64;
-                    summary.tool_calls = summary.tool_calls.saturating_add(calls);
+                    self.summary.tool_calls = self.summary.tool_calls.saturating_add(calls);
                 }
                 if let Some(usage) = value
                     .get("message")
@@ -257,7 +298,7 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
                             .or_else(|| object.get("uuid").and_then(Value::as_str))
                             .filter(|id| !id.is_empty());
                         if let Some(message_id) = message_id {
-                            token_usage_by_message_id
+                            self.token_usage_by_message_id
                                 .entry(message_id.to_string())
                                 .and_modify(|current| {
                                     if observed.total() > current.total() {
@@ -266,7 +307,7 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
                                 })
                                 .or_insert(observed);
                         } else {
-                            summary.metrics_complete = false;
+                            self.summary.metrics_complete = false;
                         }
                     }
                 }
@@ -274,33 +315,49 @@ pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String
             _ => {}
         }
     }
-    if !token_usage_by_message_id.is_empty() {
-        let (input, output) =
-            token_usage_by_message_id
-                .values()
-                .fold((0_u64, 0_u64), |(input, output), usage| {
+
+    fn finish(self) -> Result<SessionFileSummary, String> {
+        let Self {
+            mut summary,
+            identity,
+            first_user_text,
+            summary_title,
+            ai_title,
+            custom_title,
+            user_turn_ids,
+            unidentified_user_turns,
+            agent_message_ids,
+            unidentified_agent_messages,
+            token_usage_by_message_id,
+        } = self;
+        if !token_usage_by_message_id.is_empty() {
+            let (input, output) = token_usage_by_message_id.values().fold(
+                (0_u64, 0_u64),
+                |(input, output), usage| {
                     (
                         input.saturating_add(usage.input),
                         output.saturating_add(usage.output),
                     )
-                });
-        summary.total_input_tokens = Some(input);
-        summary.total_output_tokens = Some(output);
-        summary.total_tokens = Some(input.saturating_add(output));
+                },
+            );
+            summary.total_input_tokens = Some(input);
+            summary.total_output_tokens = Some(output);
+            summary.total_tokens = Some(input.saturating_add(output));
+        }
+        summary.session_id = identity
+            .leaf_identity()
+            .0
+            .ok_or_else(|| "Claude session file has no leaf session ID".to_string())?;
+        summary.user_rounds = (user_turn_ids.len() as u64).saturating_add(unidentified_user_turns);
+        summary.agent_messages =
+            (agent_message_ids.len() as u64).saturating_add(unidentified_agent_messages);
+        summary.summary = first_user_text.clone();
+        summary.title = custom_title
+            .or(ai_title)
+            .or(summary_title)
+            .or(first_user_text);
+        Ok(summary)
     }
-    summary.session_id = identity
-        .leaf_identity()
-        .0
-        .ok_or_else(|| "Claude session file has no leaf session ID".to_string())?;
-    summary.user_rounds = (user_turn_ids.len() as u64).saturating_add(unidentified_user_turns);
-    summary.agent_messages =
-        (agent_message_ids.len() as u64).saturating_add(unidentified_agent_messages);
-    summary.summary = first_user_text.clone();
-    summary.title = custom_title
-        .or(ai_title)
-        .or(summary_title)
-        .or(first_user_text);
-    Ok(summary)
 }
 
 #[derive(Clone, Debug)]
@@ -670,44 +727,16 @@ impl ClaudeTimelineBuilder {
         } else {
             SessionCountQuality::Exact
         };
-        let mut tools_by_turn = BTreeMap::<String, u64>::new();
-        for pending in &self.events {
-            if pending.entry.kind == SessionTimelineEventKind::ToolCall {
-                if let Some(turn_id) = &pending.entry.turn_id {
-                    *tools_by_turn.entry(turn_id.clone()).or_default() += 1;
-                }
-            }
-        }
-        for (turn_id, value) in tools_by_turn {
-            let leading_position = self
-                .events
-                .iter()
-                .position(|pending| {
-                    pending.entry.turn_id.as_deref() == Some(turn_id.as_str())
-                        && pending.entry.kind != SessionTimelineEventKind::ToolCall
-                })
-                .or_else(|| {
-                    self.events.iter().position(|pending| {
-                        pending.entry.turn_id.as_deref() == Some(turn_id.as_str())
-                    })
-                });
-            if let Some(position) = leading_position {
-                let leading = &mut self.events[position];
-                leading.entry.turn_tool_summary = Some(SessionTurnToolSummary {
-                    turn_id: turn_id.clone(),
-                    tool_calls: claude_count(
-                        value,
-                        tool_quality,
-                        claude_tool_explanation(tool_quality),
-                    ),
-                });
-            }
-        }
-        let entries = self
+        let mut entries = self
             .events
             .into_iter()
             .map(|pending| pending.entry)
             .collect::<Vec<_>>();
+        attach_turn_tool_summaries(
+            &mut entries,
+            tool_quality,
+            claude_tool_explanation(tool_quality),
+        );
         let counts = claude_counts(
             &entries,
             self.degraded_all,

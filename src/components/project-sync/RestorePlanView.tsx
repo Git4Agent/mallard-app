@@ -3,7 +3,7 @@ import type {
   BundleReadiness,
   LocalProjectSummary,
   ProjectBinding,
-  RestorePlan,
+  PullReview,
   RestoreResult,
 } from "../../types";
 import Icon from "../Icons";
@@ -40,7 +40,7 @@ interface Props {
   projectName: string;
   project?: LocalProjectSummary;
   storageName?: string | null;
-  plan: RestorePlan;
+  plan: PullReview;
   binding: ProjectBinding;
   readiness: BundleReadiness | null;
   restoreResult: RestoreResult | null;
@@ -174,8 +174,7 @@ function ItemList({
         const checked = selected.has(item.resourceId) && !completed;
         const expanded = expandedItems.has(item.resourceId);
         const activeRestore = phase === "restoring" && checked && restoreActionIds(item).some((id) => !completedActionIds.has(id));
-        const conversationAction = item.conversationReviewRows[0]?.action
-          ?? item.conversationActions[0]?.action;
+        const conversationAction = item.conversationReviewRows[0]?.action;
         const status: string | null = conversationAction === "adopt_cloud_metadata"
           ? checked ? "Mark synced" : "Not selected"
           : conversationAction === "blocked"
@@ -249,9 +248,6 @@ function ItemList({
                   <span>Resource</span><code>{item.resourceId}</code>
                   {item.restoreActions.map((action) => (
                     <Fragment key={action.action_id}><span>Restore</span><code>{action.action_id}</code></Fragment>
-                  ))}
-                  {item.conversationActions.map((action) => (
-                    <Fragment key={action.action_id}><span>Conversation</span><code>{action.action}</code></Fragment>
                   ))}
                 </div>
               </div>

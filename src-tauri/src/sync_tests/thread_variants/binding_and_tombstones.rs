@@ -2,7 +2,8 @@ use super::harness::{
     chain, codex_scope, codex_scope_key, harness_captured_with, publish_request, publish_with_head,
     scope_pin, sha256, ThreadSpec, VariantWorld,
 };
-use mallard_domain::{BundleRecipe, CloudThreadId, Tombstone, TombstoneTarget};
+use mallard_domain::portable::contracts;
+use mallard_domain::{BundleRecipe, CloudThreadId, Tombstone};
 use mallard_infrastructure::bundle_engine::{
     PublishBundleRequest, PublishExpectation, ScopePublishInput,
 };
@@ -30,9 +31,7 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
     );
     let initial = world.publish(&[t1.clone(), t2.clone()], origin.clone(), 10);
     let tombstone = Tombstone {
-        target: TombstoneTarget::ConversationThread {
-            thread_id: t2_id.clone(),
-        },
+        target: contracts::tombstone_conversation_thread(&t2_id).unwrap(),
         last_sha256: Some(sha256(&t2.transcript)),
         deleted_at: 20,
     };
@@ -49,7 +48,7 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         .get_mut(&codex_scope_key())
         .unwrap()
         .tombstones
-        .insert(tombstone.canonical_key(), tombstone.clone());
+        .insert(tombstone.structural_key(), tombstone.clone());
     let engine = world.engine();
     let deleted = publish_with_head(&engine, delete_thread).unwrap();
     assert!(deleted.published);
@@ -74,20 +73,18 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         .get_mut(&codex_scope_key())
         .unwrap()
         .tombstones
-        .insert(tombstone.canonical_key(), tombstone.clone());
+        .insert(tombstone.structural_key(), tombstone.clone());
     let repeated = publish_with_head(&engine, repeated).unwrap();
     assert!(!repeated.published);
     assert_eq!(repeated.snapshot.head.revision, 2);
 
     let final_tombstone = Tombstone {
-        target: TombstoneTarget::ConversationThread {
-            thread_id: t1_id.clone(),
-        },
+        target: contracts::tombstone_conversation_thread(&t1_id).unwrap(),
         last_sha256: Some(sha256(&t1.transcript)),
         deleted_at: 40,
     };
     let mut tombstones = codex_scope(&repeated.snapshot.manifest).tombstones.clone();
-    tombstones.insert(final_tombstone.canonical_key(), final_tombstone);
+    tombstones.insert(final_tombstone.structural_key(), final_tombstone);
     let delete_all = PublishBundleRequest {
         identity: repeated.snapshot.manifest.bundle.clone(),
         published_by_origin: origin,
@@ -146,11 +143,8 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         .manifest
         .all_tombstones()
         .any(|(_, _, tombstone)| {
-            matches!(
-                &tombstone.target,
-                TombstoneTarget::ConversationThread { thread_id }
-                    if thread_id.as_str() == t1_id.as_str()
-            )
+            tombstone.target.kind.as_str() == contracts::CONVERSATION_THREAD
+                && tombstone.target.identity.get_str("thread_id") == Some(t1_id.as_str())
         }));
     let fixed_point = publish_request(
         world.bundle_id.clone(),

@@ -1,11 +1,11 @@
+use mallard_domain::portable::contracts;
 pub(crate) use mallard_domain::sha256_hex as sha256;
 use mallard_domain::{
-    cloud_conversation_resource_id, cloud_conversation_transcript_path, ApplyPolicy, BundleId,
-    BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleScope, BundleSnapshot,
-    CapturedWith, CloudThreadId, ConversationFileRef, ConversationFileRole,
-    ConversationLineageStatus, ConversationThread, PortableOrigin, PreservedProvenance, Provenance,
-    ProviderKey, RecipeEntry, ReplicaId, ResourceDescriptor, ResourceKind, SessionPresentation,
-    StorageId, SyncScopeKey,
+    cloud_conversation_resource_id, cloud_conversation_transcript_path, BundleId, BundleIdentity,
+    BundleKind, BundleManifest, BundleRecipe, BundleScope, BundleSnapshot, CapturedWith,
+    CloudThreadId, ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
+    ConversationThread, PortableOrigin, PreservedProvenance, ProviderKey, RecipeEntry, ReplicaId,
+    ResourceDescriptor, SessionPresentation, StorageId, SyncScopeKey,
 };
 use mallard_infrastructure::bundle_engine::{
     self, BundleBytes, BundleEngine, CapturedBundleFile, HeadToken, PublishBundleRequest,
@@ -292,21 +292,21 @@ pub fn publish_request(
             resource_id.clone(),
             ResourceDescriptor {
                 resource_id: resource_id.clone(),
-                kind: ResourceKind::Conversation,
+                kind: contracts::conversation(),
                 provider: Some(provider.clone()),
                 provider_resource_type: None,
                 display_name: spec.title.clone(),
-                provenance: Provenance::Unknown,
-                apply_policy: ApplyPolicy::SafeFile,
+                provenance: contracts::provenance_unknown(),
+                apply_policy: contracts::safe_file(),
                 codec_version: 1,
-                metadata: BTreeMap::new(),
+                attributes: mallard_domain::BoundedPortableObject::empty(),
             },
         );
         recipe.entries.insert(
             resource_id.clone(),
             RecipeEntry {
                 resource_id: resource_id.clone(),
-                apply_policy: ApplyPolicy::SafeFile,
+                apply_policy: contracts::safe_file(),
                 required: false,
             },
         );
@@ -462,16 +462,14 @@ pub fn assert_manifest_consistent(world: &VariantWorld) {
         repository.load_config().unwrap();
         repository.load_bindings().unwrap();
         repository.load_conversation_bindings().unwrap();
-        repository.load_conversation_sync_journal().unwrap();
         repository.load_materializations().unwrap();
-        let operations = repository.root().join("conversation_operations");
-        if operations.exists() {
-            assert!(
-                fs::read_dir(&operations).unwrap().next().is_none(),
-                "repository '{}' retained an unfinished conversation operation",
-                repository.root().display()
-            );
-        }
+        assert!(!repository
+            .root()
+            .join("conversation_sync_journal.json")
+            .exists());
+        assert!(!repository.root().join("conversation_operations").exists());
+        assert!(!repository.root().join("conversation_push_plans").exists());
+        assert!(!repository.root().join("restore_plans").exists());
     }
     for entry in walkdir::WalkDir::new(world.store.local_root().unwrap()).follow_links(false) {
         let entry = entry.unwrap();

@@ -3,24 +3,25 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icons";
 import Notice from "../notice/Notice";
+import ProviderMark from "../sync-review/ProviderMark";
 import { expandHomePath, isAbsoluteProfilePath } from "../../profilePath";
 import { errorMessage } from "../../storageError";
 import { storageCatalogApi } from "./api";
-import { CATALOG_KINDS, providerLabel } from "./model";
+import { catalogDoors, catalogProviderList, type CatalogAddChoice } from "./model";
 import type {
-  CatalogCapability,
-  CatalogProviderKey,
-  CatalogResourceKind,
-  CatalogScopeView,
-  LocalCatalogProfile,
+  CatalogCapabilityDescriptor,
+  CatalogProfile,
+  CatalogScopeDto,
 } from "./types";
 
 interface Props {
   workflowEpoch: number;
   isWorkflowCurrent: (workflowEpoch: number) => boolean;
   busy: boolean;
+  /** The Kind a door chose on the way in, as a choice key; null asks. */
+  initialChoiceKey: string | null;
   onClose: () => void;
-  onCreated: (scope: CatalogScopeView, workflowEpoch: number) => void;
+  onCreated: (scope: CatalogScopeDto, workflowEpoch: number) => void;
 }
 
 function attentionBadge(show: boolean) {
@@ -34,21 +35,25 @@ function attentionBadge(show: boolean) {
 
 /** Adding a Catalog row is Kind then provider home, and nothing else: no
  * storage, no repository, no resource. Those belong to the row's own page,
- * chosen per resource link. */
+ * chosen per resource link. Kind is a portable shape the backend registers,
+ * offered in the backend's order; the providers offered are the ones it is
+ * registered for. */
 export default function AddCatalogScopeWorkspace({
   workflowEpoch,
   isWorkflowCurrent,
   busy,
+  initialChoiceKey,
   onClose,
   onCreated,
 }: Props) {
-  const [kind, setKind] = useState<CatalogResourceKind | null>(null);
-  const [provider, setProvider] = useState<CatalogProviderKey | null>(null);
+  // A key no registered shape answers to simply leaves Kind unchosen.
+  const [choiceKey, setChoiceKey] = useState<string | null>(initialChoiceKey);
+  const [provider, setProvider] = useState<string | null>(null);
   const [profileId, setProfileId] = useState<string | null>(null);
-  const [profiles, setProfiles] = useState<LocalCatalogProfile[]>([]);
-  const [capabilities, setCapabilities] = useState<CatalogCapability[]>([]);
+  const [profiles, setProfiles] = useState<CatalogProfile[]>([]);
+  const [capabilities, setCapabilities] = useState<CatalogCapabilityDescriptor[]>([]);
   const [profileEditor, setProfileEditor] = useState<{
-    provider: CatalogProviderKey;
+    provider: string;
     path: string;
   } | null>(null);
   const [homePath, setHomePath] = useState<string | null>(null);
@@ -98,24 +103,35 @@ export default function AddCatalogScopeWorkspace({
     };
   }, []);
 
-  const supportedProviders = useMemo(
-    () => capabilities
-      .filter((capability) => kind === null || capability.kinds.includes(kind))
-      .map((capability) => capability.provider),
-    [capabilities, kind],
-  );
+  /** The Add chooser's choices, each wearing the glyph of the shape it names:
+   * the very list the Catalog landing draws as doors, so the door you opened
+   * is still on screen, now as the choice it made. */
+  const choices = useMemo(() => catalogDoors(capabilities), [capabilities]);
+  const choice = choices.find((candidate) => candidate.key === choiceKey) ?? null;
+  /** The providers on offer, with the backend's labels: those registered for
+   * the chosen shape, or every registered provider before a shape is chosen,
+   * so choosing a profile first stays usable. */
+  const supportedProviders = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const capability of choice ? choice.providers : capabilities) {
+      if (!seen.has(capability.provider)) seen.set(capability.provider, capability.provider_label);
+    }
+    return [...seen].map(([key, label]) => ({ key, label }));
+  }, [capabilities, choice]);
+  const labelForProvider = (key: string) =>
+    capabilities.find((capability) => capability.provider === key)?.provider_label ?? key;
   const compatibleProfiles = useMemo(
-    () => profiles.filter((profile) => provider !== null && profile.provider_key === provider),
+    () => profiles.filter((profile) => provider !== null && profile.provider === provider),
     [profiles, provider],
   );
+  const selectedProfile = compatibleProfiles.find((profile) => profile.profile_id === profileId) ?? null;
 
-  const chooseKind = (next: CatalogResourceKind) => {
-    setKind(next);
+  const chooseKind = (next: CatalogAddChoice) => {
+    setChoiceKey(next.key);
     setError(null);
-    // A provider the new kind cannot use is dropped rather than kept invalid.
-    const stillSupported = capabilities
-      .some((capability) => capability.kinds.includes(next)
-        && capability.provider === provider);
+    // A provider the new shape is not registered for is dropped rather than
+    // kept invalid.
+    const stillSupported = next.providers.some((capability) => capability.provider === provider);
     if (!stillSupported) {
       setProvider(null);
       setProfileId(null);
@@ -123,12 +139,12 @@ export default function AddCatalogScopeWorkspace({
     }
   };
 
-  const chooseProvider = (next: CatalogProviderKey | null) => {
+  const chooseProvider = (next: string | null) => {
     setProvider(next);
     setProfileEditor(null);
     setProfileId(
       next
-        ? profiles.find((profile) => profile.provider_key === next)?.profile_id ?? null
+        ? profiles.find((profile) => profile.provider === next)?.profile_id ?? null
         : null,
     );
   };
@@ -148,20 +164,23 @@ export default function AddCatalogScopeWorkspace({
   const working = busy || submitting;
   const expandedProfilePath = expandHomePath(profileEditor?.path ?? "", homePath);
   const customPathReady = profileEditor !== null && isAbsoluteProfilePath(expandedProfilePath);
+  /** The one descriptor the two choices name: the chosen shape at the chosen
+   * provider. Its coordinate is what the row records. */
+  const descriptor = choice?.providers.find((capability) => capability.provider === provider) ?? null;
 
   /** A pending path is saved as part of Add itself — its name derives from
    * the folder, and renaming afterwards lives on the row's page. If scope
    * creation then fails, the freshly saved profile stays selected so a retry
    * is just pressing Add again. */
   const submit = async () => {
-    if (!kind || !provider) return;
+    if (!descriptor) return;
     setSubmitting(true);
     setError(null);
     try {
       let chosenProfileId = profileId;
       if (chosenProfileId === null) {
         if (!customPathReady) return;
-        const saved = await storageCatalogApi.saveProfile(provider, expandedProfilePath);
+        const saved = await storageCatalogApi.saveProfile(descriptor.provider, expandedProfilePath);
         if (!workflowIsActive()) return;
         setProfiles((current) => (
           current.some((profile) => profile.profile_id === saved.profile_id)
@@ -172,7 +191,7 @@ export default function AddCatalogScopeWorkspace({
         setProfileId(saved.profile_id);
         chosenProfileId = saved.profile_id;
       }
-      const created = await storageCatalogApi.createScope(provider, chosenProfileId, kind);
+      const created = await storageCatalogApi.createScope(descriptor, chosenProfileId);
       if (!workflowIsActive()) return;
       onCreated(created, workflowEpoch);
     } catch (reason) {
@@ -183,8 +202,7 @@ export default function AddCatalogScopeWorkspace({
     }
   };
 
-  const canAdd = kind !== null
-    && provider !== null
+  const canAdd = descriptor !== null
     && (profileId !== null || customPathReady)
     && !working;
   const customPathHint = profileEditor
@@ -192,7 +210,7 @@ export default function AddCatalogScopeWorkspace({
       ? "Type or paste a path, or Browse. ~ means your home folder."
       : !isAbsoluteProfilePath(expandedProfilePath)
         ? "Paths must be absolute — start with ~/, / or a drive letter."
-        : `${provider ? providerLabel(provider) : "Agent"} profile ·`
+        : `${provider ? labelForProvider(provider) : "Agent"} profile ·`
     : null;
 
   return (
@@ -223,25 +241,40 @@ export default function AddCatalogScopeWorkspace({
             <section className="sync-setup-section">
               <div className="sync-card-heading">
                 <div><strong>Kind</strong></div>
-                {attentionBadge(kind === null)}
+                {attentionBadge(choice === null)}
               </div>
-              <div className="sync-bundle-match-options" role="radiogroup" aria-label="Resource kind">
-                {CATALOG_KINDS.map((option) => {
-                  const active = kind === option.kind;
+              <div className="setup-choice-grid" role="radiogroup" aria-label="Resource kind">
+                {choices.map((option) => {
+                  const active = choiceKey === option.key;
                   return (
                     <button
-                      key={option.kind}
+                      key={option.key}
                       type="button"
                       role="radio"
                       aria-checked={active}
-                      className={`sync-bundle-match-option separate${active ? " active" : ""}`}
+                      className={`setup-choice-card${active ? " active" : ""}`}
                       disabled={working}
-                      onClick={() => chooseKind(option.kind)}
+                      onClick={() => chooseKind(option)}
                     >
-                      <span className="sync-bundle-radio"><span /></span>
-                      <span className="sync-bundle-match-copy">
+                      <span className="setup-choice-card-head">
+                        <span className="setup-choice-mark" aria-hidden="true">
+                          <Icon name={option.icon} size={24} />
+                        </span>
                         <strong>{option.label}</strong>
-                        <span>{option.kind.startsWith("codex_pet") ? "Codex only" : "Codex and Claude"}</span>
+                        <span className="setup-choice-card-check" aria-hidden="true">
+                          {active && <Icon name="check" size={12} />}
+                        </span>
+                      </span>
+                      <span className="setup-choice-card-foot">
+                        {option.providers.map((capability) => (
+                          <ProviderMark
+                            key={capability.provider}
+                            provider={capability.provider}
+                            displayName={capability.provider_label}
+                            size={12}
+                          />
+                        ))}
+                        {catalogProviderList(option.providers.map((capability) => capability.provider_label))}
                       </span>
                     </button>
                   );
@@ -253,92 +286,107 @@ export default function AddCatalogScopeWorkspace({
             <section className="sync-setup-section">
               <div className="sync-card-heading">
                 <div><strong>Agent profile</strong></div>
-                {attentionBadge(kind !== null
+                {attentionBadge(choice !== null
                   && (provider === null || (profileId === null && !customPathReady)))}
               </div>
-              <div className="sync-profile-select-row">
-                <span className="sync-select-shell">
-                  <select
-                    aria-label="Provider"
-                    value={provider ?? ""}
-                    disabled={working}
-                    onChange={(event) => chooseProvider(
-                      (event.target.value || null) as CatalogProviderKey | null,
-                    )}
-                  >
-                    <option value="">Choose provider</option>
-                    {supportedProviders.map((supported) => (
-                      <option key={supported} value={supported}>{providerLabel(supported)}</option>
-                    ))}
-                  </select>
-                </span>
+              {/* Two or three registered agents is a row, not a menu — and a
+                  native select cannot hold the mark that tells them apart. */}
+              <div className="setup-pill-row" role="radiogroup" aria-label="Provider">
+                {supportedProviders.map((supported) => {
+                  const active = provider === supported.key;
+                  return (
+                    <button
+                      key={supported.key}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      className={`setup-pill${active ? " active" : ""}`}
+                      disabled={working}
+                      onClick={() => chooseProvider(supported.key)}
+                    >
+                      <ProviderMark provider={supported.key} displayName={supported.label} size={12} />
+                      <span className="setup-pill-label">{supported.label}</span>
+                      <span className="setup-pill-check" aria-hidden="true">
+                        {active && <Icon name="check" size={12} />}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
               {provider && (
-                <div className={`sync-agent-profile-row${profileEditor ? " has-custom-path" : ""}`}>
-                  <span className="sync-select-shell">
-                    <select
-                      aria-label={`${providerLabel(provider)} profile`}
-                      value={profileEditor ? "__pending" : profileId ?? ""}
+                /* The list is what supplies the row's container: without it
+                   the narrow-window fallback, where the path field takes its
+                   own line, has nothing to query and never fires. */
+                <div className="sync-agent-profile-list">
+                  <div className={`sync-agent-profile-row${profileEditor ? " has-custom-path" : ""}`}>
+                    <span className="sync-select-shell">
+                      <select
+                        aria-label={`${labelForProvider(provider)} profile`}
+                        value={profileEditor ? "__pending" : profileId ?? ""}
+                        disabled={working}
+                        aria-describedby={profileEditor ? `catalog-profile-path-hint-${provider}` : undefined}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          if (next === "__pending") {
+                            setProfileId(null);
+                            setProfileEditor({ provider, path: "" });
+                            return;
+                          }
+                          setProfileEditor(null);
+                          setProfileId(next || null);
+                        }}
+                      >
+                        <option value="">Choose profile</option>
+                        {compatibleProfiles.map((profile) => (
+                          <option key={profile.profile_id} value={profile.profile_id}>
+                            {profile.display_name}
+                          </option>
+                        ))}
+                        <option value="__pending">Custom path…</option>
+                      </select>
+                    </span>
+                    {profileEditor && (
+                      <input
+                        value={profileEditor.path}
+                        disabled={working}
+                        aria-label={`${labelForProvider(provider)} custom profile path`}
+                        aria-describedby={`catalog-profile-path-hint-${provider}`}
+                        placeholder={`${labelForProvider(provider)} profile path`}
+                        spellCheck={false}
+                        autoFocus
+                        onChange={(event) => setProfileEditor({
+                          ...profileEditor,
+                          path: event.target.value,
+                        })}
+                      />
+                    )}
+                    <button
+                      type="button"
+                      className="btn"
                       disabled={working}
-                      aria-describedby={profileEditor ? `catalog-profile-path-hint-${provider}` : undefined}
-                      onChange={(event) => {
-                        const next = event.target.value;
-                        if (next === "__pending") {
-                          setProfileId(null);
-                          setProfileEditor({ provider, path: "" });
-                          return;
-                        }
-                        setProfileEditor(null);
-                        setProfileId(next || null);
-                      }}
+                      onClick={() => void chooseProfileFolder()}
                     >
-                      <option value="">Choose profile</option>
-                      {compatibleProfiles.map((profile) => (
-                        <option key={profile.profile_id} value={profile.profile_id}>
-                          {profile.display_name}
-                        </option>
-                      ))}
-                      <option value="__pending">Custom path…</option>
-                    </select>
-                  </span>
-                  {profileEditor && (
-                    <input
-                      value={profileEditor.path}
-                      disabled={working}
-                      aria-label={`${providerLabel(provider)} custom profile path`}
-                      aria-describedby={`catalog-profile-path-hint-${provider}`}
-                      placeholder={`${providerLabel(provider)} profile path`}
-                      spellCheck={false}
-                      autoFocus
-                      onChange={(event) => setProfileEditor({
-                        ...profileEditor,
-                        path: event.target.value,
-                      })}
-                    />
-                  )}
-                  <button
-                    type="button"
-                    className="btn"
-                    disabled={working}
-                    onClick={() => void chooseProfileFolder()}
-                  >
-                    <Icon name="folder" size={13} /> Browse
-                  </button>
-                  {profileEditor && customPathHint && (
-                    <p
-                      id={`catalog-profile-path-hint-${provider}`}
-                      className="sync-setup-path-hint mute"
-                    >
-                      {customPathHint}
-                      {customPathReady && <code>{expandedProfilePath}</code>}
-                    </p>
-                  )}
+                      <Icon name="folder" size={13} /> Browse
+                    </button>
+                    {profileEditor && customPathHint && (
+                      <p
+                        id={`catalog-profile-path-hint-${provider}`}
+                        className="sync-setup-path-hint mute"
+                      >
+                        {customPathHint}
+                        {customPathReady && <code>{expandedProfilePath}</code>}
+                      </p>
+                    )}
+                    {/* A saved home says where it points in the same slot a
+                        typed one does; column 2 holds Browse here, so this one
+                        spans the row. */}
+                    {!profileEditor && selectedProfile && (
+                      <p className="sync-setup-path-hint ok spans-row">
+                        {labelForProvider(provider)} profile ·<code>{selectedProfile.configured_home}</code>
+                      </p>
+                    )}
+                  </div>
                 </div>
-              )}
-              {kind !== null && provider === null && (
-                <small className="sync-setup-hint">
-                  Each Catalog resource tracks one kind from one agent profile.
-                </small>
               )}
             </section>
 

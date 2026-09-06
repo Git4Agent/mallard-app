@@ -2928,6 +2928,7 @@ dependencies = [
  "mallard-domain",
  "mallard-infrastructure",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "url",
@@ -2963,6 +2964,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "zeroize",
 ]
 
 [[package]]
@@ -2989,6 +2991,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "url",
  "walkdir",
  "windows-sys 0.61.2",
  "zeroize",

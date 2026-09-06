@@ -1,4 +1,5 @@
 import {
+
   lazy,
   Suspense,
   useCallback,
@@ -13,7 +14,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type {
   BundleFetchProgress,
   BundleSnapshotSummary,
-  CodexConversationPathAudit,
+  CommitStorageDraftResult,
   LocalProjectSummary,
   ProjectBinding,
   ProjectStorageLink,
@@ -22,11 +23,12 @@ import type {
   ProviderProfileSummary,
   RemoteBundleSummary,
   SiblingBundleStatus,
-  StorageConfig,
+  StorageProviderDescriptor,
   StorageSetupDraft,
-  StorageSetupDraftPayload,
+  StorageSummary,
+  StorageProviderKey,
 } from "../../types";
-import Icon from "../Icons";
+import Icon, { iconNameFromHint } from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import { formatDateTime, toEpochMilliseconds } from "../../clock";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
@@ -36,9 +38,6 @@ import type {
   ActiveProjectSubview,
   OpenSessionDetailRequest,
 } from "./session-detail/sessionDetailModel";
-import ConversationPathRepairNotice, {
-  shouldShowConversationPathRepairNotice,
-} from "./ConversationPathRepairNotice";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import ProviderMark from "../sync-review/ProviderMark";
 import ProjectPicker from "./ProjectPicker";
@@ -48,12 +47,26 @@ import SyncOutcomeNotice from "./SyncOutcomeNotice";
 import { writeClipboardText } from "../sync-review/clipboard";
 import SiblingRepoNotice from "./SiblingRepoNotice";
 import { isIrrecoverableSyncError } from "./syncError";
-import type { SyncOutcome } from "./syncOutcome";
-import { newStorage, r2FieldsSet, storageConfigReady, StorageEditor } from "./StorageSettings";
+import type { SyncOutcome, SyncOutcomeAction } from "./syncOutcome";
+import {
+  draftSettingsFromForm,
+  fieldsSet,
+  findStorageProvider,
+  formFromDraft,
+  secretOperationsFromForm,
+  secretPresenceOf,
+  storageDraftReady,
+  storageSubtitle,
+  storageSubtitleIsPath,
+  StorageEditor,
+  storageNameIsAuto,
+  type StorageEditorForm,
+} from "./StorageSettings";
 import { storageCatalogApi } from "../storage-catalog/api";
-import { catalogKindMeta } from "../storage-catalog/model";
-import type { CatalogStorageRepository } from "../storage-catalog/types";
+import { catalogPresentation, catalogStorageRepositoryViews } from "../storage-catalog/model";
+import type { CatalogStorageRepositoryView } from "../storage-catalog/types";
 import { projectSyncApi } from "./api";
+import { StorageDraftSaveQueue } from "./storageDraftSaveQueue";
 import {
   compactProjectPath,
   formatRelativeTime,
@@ -66,11 +79,10 @@ type LinkKey = { projectId: string; storageId: string };
 export type StorageReviewKind = "pull" | "push";
 type StorageEditorRequest =
   | { mode: "open"; storageId: string; settingsExpanded: boolean; requestId: number }
-  | { mode: "create"; storageKind: "local" | "s3"; requestId: number }
   | { mode: "resume-draft"; draft: StorageSetupDraft; requestId: number }
   | { mode: "close"; requestId: number };
 
-/** Autosave cadence for the New-storage form, matching project setup. */
+/** Autosave cadence for the storage form, matching project setup. */
 const STORAGE_DRAFT_AUTOSAVE_DELAY_MS = 700;
 type InlineStorageReview = {
   kind: StorageReviewKind;
@@ -108,19 +120,18 @@ interface Props {
   activeProjectSubview: ActiveProjectSubview;
   bindings: ProjectBinding[];
   profiles: ProviderProfileSummary[];
-  /** Registered provider descriptors. The agent-setup cluster derives its
-   *  run buttons from these; it never holds a fixed provider list. */
+  /** Registered agent provider descriptors. The agent-setup cluster derives
+   *  its run buttons from these; it never holds a fixed provider list. */
   providers: ProviderDescriptor[];
-  storages: StorageConfig[];
+  /** Compiled storage provider descriptors: every field, secret, and
+   *  assistant the storage form shows comes from one of these. */
+  storageProviders: StorageProviderDescriptor[];
+  storages: StorageSummary[];
   /** Redacted machine-local drafts, refreshed when the CLI updates one. */
   storageSetupDrafts: StorageSetupDraft[];
   links: ProjectStorageLink[];
   loading: boolean;
   busy: boolean;
-  error: string | null;
-  conversationPathAudits: Record<string, CodexConversationPathAudit>;
-  conversationPathAuditErrors: Record<string, string>;
-  conversationPathAuditLoading: boolean;
   fetchProgress?: BundleFetchProgress | null;
   onSelectStorage: (projectId: string, storageId: string) => Promise<void> | void;
   onOpenSessionDetail: (projectId: string, request: OpenSessionDetailRequest) => void;
@@ -142,7 +153,6 @@ interface Props {
     matches: BundleSnapshotSummary[],
   ) => void;
   onConfigureBinding: (projectId: string) => Promise<void> | void;
-  onRepairConversationPaths: (projectId: string) => Promise<void> | void;
   onRenameProject: (projectId: string, alias: string | null) => Promise<RenameResult> | RenameResult;
   onResetProjectMetadata: (projectId: string) => Promise<void> | void;
   onRefresh: () => void;
@@ -156,31 +166,33 @@ interface Props {
    */
   appActions: PathBarMenuGroup[];
   onAddStorage: () => void;
+  /** Mint a draft on a provider and open its form; the type switch uses it
+   *  to restart a new draft, carrying a typed name along. */
+  onCreateStorageDraft: (provider: StorageProviderKey, name?: string) => Promise<void>;
   /** Open a storage's page; `settingsExpanded` lands with the editor open. */
   onOpenStorage: (storageId: string, settingsExpanded: boolean) => void;
   /** The Storages crumb every storage page is rooted at. */
   onOpenStorageIndex: () => void;
   onClearStorage: (storageId: string) => void;
   onRemoveStorage: (storageId: string) => void;
-  onSaveStorage: (
-    storage: StorageConfig,
-    expectedBaseline: StorageConfig | null,
-    setupDraftId?: string | null,
-    setupDraftRevision?: number | null,
-    setupDraftStorageId?: string | null,
-  ) => Promise<boolean | void> | boolean | void;
-  /** Commit-free probe of the New-storage form against R2. Resolves true on
-   *  a verified connection; failures surface through the shared error zone. */
-  onTestStorage?: (
-    storage: StorageConfig,
-    setupDraftId?: string | null,
-    setupDraftRevision?: number | null,
-    setupDraftStorageId?: string | null,
-  ) => Promise<boolean>;
+  /** Rename a settled storage in place. Resolves false when the rename was
+   *  refused; the shell has already shown why. */
+  onRenameStorage: (storageId: string, name: string) => Promise<boolean>;
+  /** Verify and commit the exact draft revision the user reviewed. Resolves
+   *  null on refusal; the shell has already shown why. */
+  onCommitStorageDraft: (
+    draftId: string,
+    expectedDraftRevision: number,
+  ) => Promise<CommitStorageDraftResult | null>;
+  /** Commit-free probe of the exact draft revision. Resolves true on a
+   *  verified connection; failures surface through the shared error zone. */
+  onTestStorageDraft: (draftId: string, expectedRevision: number) => Promise<boolean>;
   /** The persisted storage-draft list changed (created, updated, discarded). */
   onStorageDraftsChanged?: () => void;
+  storageDraftSaveQueue: StorageDraftSaveQueue;
   storageEditorRequest?: StorageEditorRequest | null;
   onStorageEditorRequestHandled?: () => void;
+  onStorageNavigationGuardChange?: (guard: (() => Promise<boolean>) | null) => void;
   onStorageEditorChange?: (storageId: string | null) => void;
   onStorageIssueChange?: (storageId: string, issue: string | null) => void;
   newProjectSetup?: ReactNode;
@@ -191,140 +203,70 @@ interface Props {
   storageRefreshEpoch?: number;
   inlineStorageReview?: InlineStorageReview | null;
   storageNotice?: StorageNotice | null;
-  onStorageNoticeAction?: (outcome: SyncOutcome) => void;
+  onStorageNoticeAction?: (outcome: SyncOutcome, action: SyncOutcomeAction) => void;
   onDismissStorageNotice?: () => void;
 }
 
 const SessionDetailPage = lazy(() => import("./session-detail/SessionDetailPage"));
 
-/** The client-editable draft fields. The storage id stays server-owned: the
- *  backend mints it and returns it only as metadata that Test/Finish echoes
- *  separately as `draft_storage_id` to pin the exact saved snapshot. */
-export function storageDraftPayload(storage: StorageConfig): StorageSetupDraftPayload {
-  const { id: _id, supports_conditional_writes: _writes, ...payload } = storage;
-  return payload;
-}
+/** The open storage form: the backend draft it edits — the last revision the
+ *  backend returned, with secret presence — and the local edits on top. */
+export type StorageDraftSession = {
+  draft: StorageSetupDraft;
+  form: StorageEditorForm;
+};
 
-export function storageSubtitle(storage: StorageConfig): string {
-  if (storage.kind === "local") return compactProjectPath(storage.local_dir || "Folder not configured");
-  if (storage.bucket) return `Bucket · ${storage.bucket}`;
-  return storage.s3_endpoint ? "S3 endpoint configured" : "S3 storage not configured";
-}
+type StorageDraftSaveSnapshot = {
+  session: number;
+  editVersion: number;
+  draftId: string;
+  name: string;
+  settings: StorageSetupDraft["settings"];
+  typedSecrets: Record<string, string>;
+};
 
-// Only the local subtitle is a path; the rest are phrases. The menu says which
-// one it is handing over so the stylesheet reads a class instead of guessing.
-export function storageSubtitleIsPath(storage: StorageConfig): boolean {
-  return storage.kind === "local";
-}
-
-function sameStorage(left: StorageConfig, right: StorageConfig): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
-export type StorageDraftReconciliation =
-  | { kind: "unchanged" }
-  | { kind: "adopt"; storage: StorageConfig }
-  | { kind: "close" }
-  | { kind: "conflict"; reason: "changed" | "removed" };
-
-/** Pure decision used when the config watcher supplies a newer snapshot. */
-export function reconcileStorageDraft(
-  baseline: StorageConfig,
-  draft: StorageConfig,
-  incoming: StorageConfig | null,
-): StorageDraftReconciliation {
-  const incomingChanged = !incoming || !sameStorage(incoming, baseline);
-  if (!incomingChanged) return { kind: "unchanged" };
-  if (incoming && sameStorage(draft, incoming)) {
-    return { kind: "adopt", storage: incoming };
-  }
-  if (!sameStorage(draft, baseline)) {
-    return { kind: "conflict", reason: incoming ? "changed" : "removed" };
-  }
-  return incoming ? { kind: "adopt", storage: incoming } : { kind: "close" };
-}
-
+/** What the page handed the agent: the exact draft revision the instruction
+ *  names, and the name it was asked to prepare under. Credential-free. */
 export type AgentSetupMarker = {
-  draftFingerprint: string;
-  editingDraftId: string;
-  setupDraftId: string;
-  setupDraftRevision: number;
-  setupStorageId: string;
+  draftId: string;
+  revision: number;
+  storageId: string;
   requestedName: string;
 };
 
 export type AgentSetupReconciliation =
   | { kind: "adopt"; draft: StorageSetupDraft }
-  | { kind: "preserve"; reason: "draft_changed" | "no_update" | "invalid" };
-
-function storageDraftFingerprint(storage: StorageConfig): string {
-  const {
-    access_key_id,
-    secret_access_key,
-    ...nonCredentialFields
-  } = storage;
-  const redactedSnapshot = JSON.stringify({
-    ...nonCredentialFields,
-    has_access_key_id: access_key_id.length > 0,
-    has_secret_access_key: secret_access_key.length > 0,
-  });
-  // Keep the marker fixed-size and credential-free. Draft edits invalidate
-  // the live marker immediately; this redacted fingerprint additionally makes
-  // the pure reconciliation decision independent of credential contents.
-  let hash = 0xcbf29ce484222325n;
-  for (const character of redactedSnapshot) {
-    hash ^= BigInt(character.codePointAt(0) ?? 0);
-    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
-  }
-  return hash.toString(16).padStart(16, "0");
-}
-
-function normalizedStorageName(name: string): string {
-  return name.trim();
-}
+  | { kind: "preserve"; reason: "no_update" | "invalid" };
 
 export function createAgentSetupMarker(
-  draft: StorageConfig,
-  setupDraftId: string,
-  setupDraftRevision: number,
-  editingDraftId: string,
-  setupStorageId: string,
+  saved: Pick<StorageSetupDraft, "draft_id" | "revision" | "storage_id">,
+  requestedName: string,
 ): AgentSetupMarker {
   return {
-    draftFingerprint: storageDraftFingerprint(draft),
-    editingDraftId,
-    setupDraftId,
-    setupDraftRevision,
-    setupStorageId,
-    requestedName: normalizedStorageName(draft.name),
+    draftId: saved.draft_id,
+    revision: saved.revision,
+    storageId: saved.storage_id,
+    requestedName: requestedName.trim(),
   };
 }
 
-/** Decide whether the CLI updated the exact persisted draft the open form
+/** Decide whether the CLI advanced the exact persisted draft the open form
  *  handed it. Name matching is deliberately insufficient: another draft can
- *  have the same label, and an older refresh must not look like CLI success. */
+ *  have the same label, and an older refresh must not look like CLI success.
+ *  An edit in the form kills the marker before this is ever consulted. */
 export function reconcileAgentSetup(
   marker: AgentSetupMarker,
-  draft: StorageConfig,
-  editingDraftId: string,
+  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets">,
   setupDrafts: readonly StorageSetupDraft[],
 ): AgentSetupReconciliation {
-  if (
-    marker.editingDraftId !== editingDraftId
-    || marker.draftFingerprint !== storageDraftFingerprint(draft)
-  ) {
-    return { kind: "preserve", reason: "draft_changed" };
-  }
-  const candidate = setupDrafts.find(({ draft_id }) => draft_id === marker.setupDraftId);
-  if (!candidate || candidate.revision <= marker.setupDraftRevision) {
+  const candidate = setupDrafts.find(({ draft_id }) => draft_id === marker.draftId);
+  if (!candidate || candidate.revision <= marker.revision) {
     return { kind: "preserve", reason: "no_update" };
   }
   if (
-    candidate.revision !== marker.setupDraftRevision + 1
-    || candidate.storage.id !== marker.setupStorageId
-    || candidate.storage.kind !== "s3"
-    || normalizedStorageName(candidate.storage.name) !== marker.requestedName
-    || !storageConfigReady(candidate.storage, candidate.secret_present)
+    candidate.storage_id !== marker.storageId
+    || candidate.name.trim() !== marker.requestedName
+    || !storageDraftReady(descriptor, formFromDraft(descriptor, candidate), secretPresenceOf(candidate))
   ) {
     return { kind: "preserve", reason: "invalid" };
   }
@@ -339,70 +281,6 @@ export type AgentSetupNotice =
   | { kind: "launched"; agent: string }
   | { kind: "ready"; message: string }
   | { kind: "error"; message: string };
-
-export type AgentSetupEditorAdoption = {
-  editingStorage: LinkKey;
-  storageDraft: StorageConfig;
-  storageBaseline: null;
-  storageSetupDraftId: string;
-  storageSetupSecretPresent: boolean;
-  storageSetupDraftRevision: number;
-  storageDetailsExpanded: true;
-  status: string;
-};
-
-/** State transition that keeps the editable New-storage form open. Nothing is
- *  committed until the user presses Finish setup. */
-export function agentSetupEditorAdoption(draft: StorageSetupDraft): AgentSetupEditorAdoption {
-  return {
-    editingStorage: { projectId: "", storageId: draft.storage.id },
-    storageDraft: { ...draft.storage },
-    storageBaseline: null,
-    storageSetupDraftId: draft.draft_id,
-    storageSetupSecretPresent: draft.secret_present,
-    storageSetupDraftRevision: draft.revision,
-    storageDetailsExpanded: true,
-    status: "R2 settings filled in. Review or edit them, optionally test the connection, then finish setup yourself.",
-  };
-}
-
-export function buildR2AgentSetupInstruction({
-  storageName,
-  cliPath,
-  draftId,
-  expectedRevision,
-}: {
-  storageName: string;
-  cliPath: string;
-  draftId: string;
-  expectedRevision: number;
-}): string {
-  const requestedName = storageName.trim() || "Cloudflare R2";
-  return [
-    `Prepare the Cloudflare R2 storage “${requestedName}” draft through the Mallard CLI for my later review. Do not finish the setup for me. Do not invoke Computer Use for any purpose, including read-only verification.`,
-    "",
-    "Use this Mallard CLI:",
-    cliPath,
-    "",
-    "Treat that as a literal executable path and quote it for the current shell; do not interpret it as shell syntax.",
-    "",
-    "First check the required runtime dependency without installing anything: run `wrangler --version` and confirm that `wrangler` is available on PATH.",
-    "",
-    "If Wrangler is missing or `wrangler --version` fails, stop before invoking Mallard setup. Tell me that Mallard requires a working `wrangler` command on PATH, ask me to approve installing it, and show me this exact command: `npm install --global wrangler@latest`. Do not run that installation unless I explicitly approve it. Before an approved installation, run `npm --version`; if npm is missing, report that separately and ask how I want to install Node.js and npm—do not choose or install a package manager on your own. After an approved installation, rerun `wrangler --version` and continue only if it succeeds. Mallard invokes `wrangler` directly, so do not substitute `npx wrangler` or a project-local-only installation.",
-    "",
-    "Once the Wrangler dependency check succeeds, run the Mallard CLI’s `storage r2 --help` command.",
-    "",
-    "Before invoking setup, check whether your command-execution environment restricts writing to the current user’s ~/.mallard directory or launching the system browser. If it does, ask me for one-time approval to run the exact, fully quoted Mallard setup command described next with permission to write to the current user’s ~/.mallard directory and launch the system browser. Request approval only for that exact setup command, not for a shell or a broader command prefix. Do not invoke setup until I explicitly approve it; if I decline, stop.",
-    "",
-    `Then run its \`storage r2 setup\` command with all three required options: \`--name\` with the exact storage name shown above as one literal argument, \`--draft-id\` with the exact literal value \`${draftId}\`, and \`--expected-revision\` with the exact decimal value \`${expectedRevision}\`. Quote the executable path, storage name, and draft ID correctly for the current shell; do not interpret any value as shell syntax.`,
-    "",
-    "The Mallard CLI uses the existing Wrangler login and may open the system browser. I—not the agent—will review and complete Cloudflare login, MFA, and consent. Do not control the browser or inspect its contents. Wait for the CLI to finish; the agent should observe only its success or failure result.",
-    "",
-    "Complete only the draft-preparation handoff through the CLI. Do not work around an execution restriction by changing HOME, using temporary or project-local Mallard state, using sudo, editing ~/.mallard, or editing Mallard’s open setup form. Do not request or handle credentials, put a secret in an argument or environment variable, or print credentials.",
-    "",
-    "The setup command only prepares the exact schema-1 draft named above; it does not test the connection or commit the storage. Mallard is listening for that draft and will automatically fill the existing editable setup form when the CLI finishes. The CLI success or failure result is the end of the agent’s task. Do not use screenshots, browser automation, UI automation, or direct inspection of Mallard’s window or form to confirm the update. Report only the CLI success or failure result, then stop. I will confirm that the fields appeared, review or edit them, optionally test the connection, and personally click Finish setup when I am ready.",
-  ].join("\n");
-}
 
 /** The fold: everything the storage listing knows about a repository beyond
  * its chips. Absent facts don't render — no dash placeholders. */
@@ -478,20 +356,21 @@ export function StorageRepositoryRow({ bundle }: { bundle: RemoteBundleSummary }
  * Codex"), the same chips and fold. When the derived id answers but cannot
  * be read, the row states the refusal where the chips would be — on a
  * listing, a silent hole reads as "nothing stored". */
-export function CatalogStorageRepositoryRow({ repo }: { repo: CatalogStorageRepository }) {
+export function CatalogStorageRepositoryRow({ repo }: { repo: CatalogStorageRepositoryView }) {
   const [open, setOpen] = useState(false);
-  const meta = catalogKindMeta(repo.resource_kind);
-  const name = `${meta.plural} · ${providerLabel(repo.provider)}`;
+  const glyph = catalogPresentation(repo.capability);
+  /* The capability's own label when this build registers the coordinate;
+     the backend's raw labels for one it does not. */
+  const name = `${repo.capability?.label ?? repo.kind_label} · ${repo.provider_label}`;
   const detailsId = `catalog-repo-details-${repo.repository_id}`;
   const unreadable = repo.error != null;
-  /* The fold names the whole set until it stops being a glance. */
   const shownNames = repo.resource_names.slice(0, 12);
   const moreNames = repo.resource_names.length - shownNames.length;
   return (
     <div className="sync-storage-repository-item">
       <div className="sync-storage-repository-row">
         <span className={`sync-storage-repository-icon${unreadable ? " danger" : ""}`}>
-          <Icon name={unreadable ? "alert-triangle" : meta.icon} size={14} />
+          <Icon name={unreadable ? "alert-triangle" : glyph.icon} size={14} />
         </span>
         <strong className="sync-storage-repository-name">{name}</strong>
         {unreadable ? (
@@ -544,15 +423,6 @@ export function CatalogStorageRepositoryRow({ repo }: { repo: CatalogStorageRepo
   );
 }
 
-export function conversationPathsBlockSync(
-  hasBinding: boolean,
-  audit: CodexConversationPathAudit | undefined,
-  auditError: string | undefined,
-  auditLoading: boolean,
-): boolean {
-  return hasBinding && (auditLoading || !!auditError || !audit || !audit.ready);
-}
-
 export function projectPushActionLabel({
   preparing,
   publishing,
@@ -596,15 +466,12 @@ export default function ProjectLinksWorkspace({
   bindings,
   profiles,
   providers,
+  storageProviders,
   storages,
   storageSetupDrafts,
   links,
   loading,
   busy,
-  error,
-  conversationPathAudits,
-  conversationPathAuditErrors,
-  conversationPathAuditLoading,
   fetchProgress,
   onSelectStorage,
   onOpenSessionDetail,
@@ -616,7 +483,6 @@ export default function ProjectLinksWorkspace({
   siblingNotice,
   onConnectSibling,
   onConfigureBinding,
-  onRepairConversationPaths,
   onRenameProject,
   onResetProjectMetadata,
   onRefresh,
@@ -624,15 +490,19 @@ export default function ProjectLinksWorkspace({
   onSelectProject,
   appActions,
   onAddStorage,
+  onCreateStorageDraft,
   onOpenStorage,
   onOpenStorageIndex,
-  onTestStorage,
   onStorageDraftsChanged,
   onClearStorage,
   onRemoveStorage,
-  onSaveStorage,
+  onRenameStorage,
+  onCommitStorageDraft,
+  onTestStorageDraft,
   storageEditorRequest,
   onStorageEditorRequestHandled,
+  storageDraftSaveQueue,
+  onStorageNavigationGuardChange,
   onStorageEditorChange,
   onStorageIssueChange,
   newProjectSetup,
@@ -645,10 +515,14 @@ export default function ProjectLinksWorkspace({
 }: Props) {
   const [linkingProjectId, setLinkingProjectId] = useState<string | null>(null);
   const [runningAction, setRunningAction] = useState<string | null>(null);
+  /* The storage page: the settled storage it shows, or — for a draft that
+     never became one — the storage id the draft was minted with. */
   const [editingStorage, setEditingStorage] = useState<LinkKey | null>(null);
-  const [storageDraft, setStorageDraft] = useState<StorageConfig | null>(null);
-  const [storageBaseline, setStorageBaseline] = useState<StorageConfig | null>(null);
-  const [storageConflict, setStorageConflict] = useState<"changed" | "removed" | null>(null);
+  /* The open form. Every draft is a backend object: the session holds the
+     last revision the backend returned plus the edits typed on top, and the
+     ref mirrors it synchronously so queued saves read the latest form. */
+  const [storageSession, setStorageSession] = useState<StorageDraftSession | null>(null);
+  const storageSessionRef = useRef<StorageDraftSession | null>(null);
   const [agentNotice, setAgentNotice] = useState<AgentSetupNotice | null>(null);
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
   /* Which run button faces the split cluster: the last agent picked this
@@ -656,31 +530,59 @@ export default function ProjectLinksWorkspace({
   const [preferredLauncher, setPreferredLauncher] = useState<ProviderKey | null>(null);
   const [copyAgainFlashed, setCopyAgainFlashed] = useState(false);
   const [storageDetailsExpanded, setStorageDetailsExpanded] = useState(false);
-  /* The persisted setup draft behind the New-storage form. The id and the
-     secret flag render; the revision is server-owned bookkeeping and the
-     session counter invalidates async draft work when the form's identity
-     changes — the same job bundleRequestRef does for listings. */
-  const [storageSetupDraftId, setStorageSetupDraftId] = useState<string | null>(null);
-  const [storageSetupSecretPresent, setStorageSetupSecretPresent] = useState(false);
+  /* Opening a settled storage's settings asks the backend for an edit draft
+     first; the panel shows its loading line until that draft arrives. */
+  const [storageSessionLoading, setStorageSessionLoading] = useState(false);
   const [storageTestVerified, setStorageTestVerified] = useState(false);
   const [storageDraftActionError, setStorageDraftActionError] = useState<string | null>(null);
-  const storageSetupDraftIdRef = useRef<string | null>(null);
-  const storageSetupDraftRevisionRef = useRef(0);
+  /* The draft's server revision is bookkeeping read only at the head of the
+     save queue; the session counter invalidates async draft work when the
+     form's identity changes — the same job bundleRequestRef does for
+     listings. */
+  const draftRevisionRef = useRef(0);
   const draftDirtyRef = useRef(false);
-  const draftSavingRef = useRef(false);
-  const draftSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const saveBeforeNavigationRef = useRef<() => Promise<boolean>>(async () => true);
   const draftEditVersionRef = useRef(0);
   const draftSessionRef = useRef(0);
-  const resetStorageSetupDraftState = () => {
+  const committingRef = useRef(false);
+  const draftListedRef = useRef(false);
+  const editSessionRequestRef = useRef(0);
+  const editingStorageRef = useRef<LinkKey | null>(null);
+  editingStorageRef.current = editingStorage;
+  const commitStorageSession = (next: StorageDraftSession | null) => {
+    storageSessionRef.current = next;
+    setStorageSession(next);
+  };
+  const updateStorageSession = (mutate: (current: StorageDraftSession) => StorageDraftSession) => {
+    const current = storageSessionRef.current;
+    if (current) commitStorageSession(mutate(current));
+  };
+  const resetStorageSession = () => {
     draftSessionRef.current += 1;
     draftEditVersionRef.current += 1;
+    editSessionRequestRef.current += 1;
     draftDirtyRef.current = false;
-    storageSetupDraftIdRef.current = null;
-    storageSetupDraftRevisionRef.current = 0;
-    setStorageSetupDraftId(null);
-    setStorageSetupSecretPresent(false);
+    draftRevisionRef.current = 0;
+    committingRef.current = false;
+    draftListedRef.current = false;
+    commitStorageSession(null);
     setStorageTestVerified(false);
     setStorageDraftActionError(null);
+    setStorageSessionLoading(false);
+  };
+  /** Seat a backend draft in the form. The descriptor shapes the form; a
+   *  draft this build has no descriptor for opens empty and uneditable. */
+  const openStorageSession = (draft: StorageSetupDraft, descriptor: StorageProviderDescriptor | null) => {
+    resetStorageSession();
+    draftRevisionRef.current = draft.revision;
+    commitStorageSession({
+      draft,
+      form: descriptor
+        ? formFromDraft(descriptor, draft)
+        : { name: draft.name, settings: {}, typedSecrets: {} },
+    });
+    agentSetupMarkerRef.current = null;
+    setAgentNotice(null);
   };
   const [renamingStorageId, setRenamingStorageId] = useState<string | null>(null);
   const [storageNameDraft, setStorageNameDraft] = useState("");
@@ -690,7 +592,7 @@ export default function ProjectLinksWorkspace({
   /* The Catalog's kind repositories in the same storage, listed beside the
      project ones. Their failure has its own surface — a callout under the
      list — so one broken half never hides the other. */
-  const [catalogRepos, setCatalogRepos] = useState<CatalogStorageRepository[] | null>(null);
+  const [catalogRepos, setCatalogRepos] = useState<CatalogStorageRepositoryView[] | null>(null);
   const [catalogRepoError, setCatalogRepoError] = useState<string | null>(null);
   /* Revealing is `reveal_item_in_dir`, not `open_path`: the capability grants
      open_path only for the log folder, so a project root or a storage folder
@@ -778,10 +680,15 @@ export default function ProjectLinksWorkspace({
     return () => onStorageEditorChange?.(null);
   }, [editingStorage?.storageId, onStorageEditorChange]);
 
+  const savedEditedStorage = editingStorage
+    ? storages.find((storage) => storage.storage_id === editingStorage.storageId) ?? null
+    : null;
+
   useEffect(() => {
     setRenamingStorageId(null);
-    setStorageNameDraft(storageDraft?.name ?? "");
-  }, [storageDraft?.id]);
+    setStorageNameDraft(savedEditedStorage?.name ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingStorage?.storageId]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -816,12 +723,10 @@ export default function ProjectLinksWorkspace({
     .filter((candidate) => candidate.state === "active")
     .map((candidate) => [candidate.local_project_id, candidate])), [bindings]);
 
-  const savedEditedStorage = editingStorage
-    ? storages.find((storage) => storage.id === editingStorage.storageId) ?? null
-    : null;
-  const editedStorageConfig = savedEditedStorage
-    ?? (storageDraft?.id === editingStorage?.storageId ? storageDraft : null);
-  const creatingStorage = !!editingStorage && storageBaseline === null;
+  /* A draft whose storage id is not in the config is a storage being
+     created; its page is the New-storage form. An edit draft shares its
+     storage's id and rides that storage's page instead. */
+  const creatingStorage = !!editingStorage && savedEditedStorage === null;
   const orderedRemoteBundles = [...(remoteBundles ?? [])].sort((left, right) => {
     return (right.updated_at ?? 0) - (left.updated_at ?? 0);
   });
@@ -839,17 +744,29 @@ export default function ProjectLinksWorkspace({
     }
   };
 
-  const loadStorageBundles = async (storage: StorageConfig) => {
-    const storageId = storage.id;
+  const loadStorageBundles = async (storage: StorageSummary) => {
+    const storageId = storage.storage_id;
     const requestId = ++bundleRequestRef.current;
     setRemoteBundles(null);
     setBundleError(null);
     setCatalogRepos(null);
     setCatalogRepoError(null);
+    if (!storage.available) {
+      // Nothing to ask: this build cannot open the store. The page says so
+      // in the repositories card; it is not a storage issue to flag.
+      setRemoteBundles([]);
+      setCatalogRepos([]);
+      setBundleLoading(false);
+      onStorageIssueChange?.(storageId, null);
+      return;
+    }
     setBundleLoading(true);
     // Both reads start together under the one loading gate.
     const bundlesRead = projectSyncApi.listRemoteBundleSnapshots(storageId);
-    const catalogRead = storageCatalogApi.listStorageRepositories(storageId);
+    const catalogRead = Promise.all([
+      storageCatalogApi.listStorageRepositories(storageId),
+      storageCatalogApi.listCapabilities(),
+    ]);
     try {
       const bundles = await bundlesRead;
       if (bundleRequestRef.current === requestId) {
@@ -864,8 +781,10 @@ export default function ProjectLinksWorkspace({
       }
     }
     try {
-      const repositories = await catalogRead;
-      if (bundleRequestRef.current === requestId) setCatalogRepos(repositories);
+      const [repositories, capabilities] = await catalogRead;
+      if (bundleRequestRef.current === requestId) {
+        setCatalogRepos(catalogStorageRepositoryViews(repositories, capabilities));
+      }
     } catch (reason) {
       if (bundleRequestRef.current === requestId) {
         setCatalogRepoError(storageAccessErrorMessage(storage, reason));
@@ -876,87 +795,114 @@ export default function ProjectLinksWorkspace({
   };
 
   useEffect(() => {
-    if (!storageRefreshEpoch || !editedStorageConfig) return;
-    void loadStorageBundles(editedStorageConfig);
+    if (!storageRefreshEpoch || !savedEditedStorage) return;
+    void loadStorageBundles(savedEditedStorage);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageRefreshEpoch]);
 
-  /* Every navigation away funnels through the close request, so this is
-     where the persisted draft gets its last best-effort save — the debounced
-     autosave usually landed already, and a save already in flight carries
-     the same edits, so neither case flushes twice. The draft file itself
-     survives the close; only the form state resets. */
-  const flushStorageSetupDraft = () => {
-    if (
-      !draftDirtyRef.current
-      || draftSavingRef.current
-      || !storageSetupDraftIdRef.current
-      || !storageDraft
-    ) return;
-    draftDirtyRef.current = false;
-    void projectSyncApi
-      .updateStorageSetupDraft(
-        storageSetupDraftIdRef.current,
-        storageSetupDraftRevisionRef.current,
-        storageDraftPayload(storageDraft),
-      )
-      .then(() => onStorageDraftsChanged?.())
-      .catch(() => {
-        // Best-effort: at most the last debounce window of typing is lost,
-        // the same guarantee project setup gives.
-      });
+  const clearStorageListing = () => {
+    bundleRequestRef.current += 1;
+    setRemoteBundles(null);
+    setBundleError(null);
+    setCatalogRepos(null);
+    setCatalogRepoError(null);
+    setBundleLoading(false);
   };
 
-  /** Serialize saves of the open draft. The agent handoff may be clicked
-   *  while the debounce save is still in flight; reading the id and revision
-   *  refs only when this operation reaches the head of the queue makes the
-   *  second write update the draft just created by the first one. */
-  const persistStorageSetupDraft = (
-    storage: StorageConfig,
+  const descriptorFor = (draft: Pick<StorageSetupDraft, "provider" | "config_version">) => (
+    findStorageProvider(storageProviders, draft.provider, draft.config_version)
+  );
+
+  const captureStorageDraftSave = (
     session: number,
+    editVersion: number,
+  ): StorageDraftSaveSnapshot | null => {
+    const current = storageSessionRef.current;
+    if (draftSessionRef.current !== session || !current) return null;
+    const descriptor = descriptorFor(current.draft);
+    return {
+      session,
+      editVersion,
+      draftId: current.draft.draft_id,
+      name: current.form.name,
+      settings: descriptor
+        ? draftSettingsFromForm(descriptor, current.form, current.draft.settings)
+        : current.draft.settings,
+      typedSecrets: { ...current.form.typedSecrets },
+    };
+  };
+
+  const saveStorageDraftSnapshot = async (
+    snapshot: StorageDraftSaveSnapshot,
   ): Promise<StorageSetupDraft | null> => {
-    const operation = draftSaveQueueRef.current.then(async () => {
-      if (draftSessionRef.current !== session) return null;
-      draftSavingRef.current = true;
-      try {
-        const draftId = storageSetupDraftIdRef.current;
-        const saved = draftId
-          ? await projectSyncApi.updateStorageSetupDraft(
-              draftId,
-              storageSetupDraftRevisionRef.current,
-              storageDraftPayload(storage),
-            )
-          : await projectSyncApi.createStorageSetupDraft(storageDraftPayload(storage));
-        if (draftSessionRef.current !== session) return null;
-        storageSetupDraftIdRef.current = saved.draft_id;
-        storageSetupDraftRevisionRef.current = saved.revision;
-        setStorageSetupDraftId(saved.draft_id);
-        setStorageSetupSecretPresent(saved.secret_present);
-        onStorageDraftsChanged?.();
-        return saved;
-      } finally {
-        draftSavingRef.current = false;
+    const current = storageSessionRef.current;
+    if (
+      draftSessionRef.current !== snapshot.session
+      || current?.draft.draft_id !== snapshot.draftId
+    ) return null;
+    try {
+      const descriptor = descriptorFor(current.draft);
+      const secrets = descriptor
+        ? secretOperationsFromForm(
+          {
+            typedSecrets: snapshot.typedSecrets,
+            persistedSecrets: current.form.persistedSecrets,
+          },
+          secretPresenceOf(current.draft),
+        )
+        : {};
+      const saved = await projectSyncApi.updateStorageSetupDraft({
+        draft_id: snapshot.draftId,
+        revision: draftRevisionRef.current,
+        name: snapshot.name,
+        settings: snapshot.settings,
+        secrets,
+      });
+      if (
+        draftSessionRef.current !== snapshot.session
+        || storageSessionRef.current?.draft.draft_id !== snapshot.draftId
+      ) return null;
+      draftRevisionRef.current = saved.revision;
+      updateStorageSession((latest) => {
+        const persistedSecrets = { ...latest.form.persistedSecrets };
+        for (const [secretId, value] of Object.entries(snapshot.typedSecrets)) {
+          if (value && latest.form.typedSecrets[secretId] === value) {
+            persistedSecrets[secretId] = value;
+          }
+        }
+        return { draft: saved, form: { ...latest.form, persistedSecrets } };
+      });
+      if (draftEditVersionRef.current === snapshot.editVersion) {
+        draftDirtyRef.current = false;
+        setStorageDraftActionError(null);
       }
-    });
-    draftSaveQueueRef.current = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-    return operation;
+      onStorageDraftsChanged?.();
+      return saved;
+    } catch (reason) {
+      if (draftSessionRef.current === snapshot.session) draftDirtyRef.current = true;
+      throw reason;
+    }
+  };
+
+  const persistStorageSetupDraft = (
+    session: number,
+    editVersion = draftEditVersionRef.current,
+  ): Promise<StorageSetupDraft | null> => {
+    const snapshot = captureStorageDraftSave(session, editVersion);
+    if (!snapshot) return Promise.resolve(null);
+    return storageDraftSaveQueue.enqueue(() => saveStorageDraftSnapshot(snapshot));
   };
 
   /** Test and Finish must act on the exact snapshot the user reviewed. Put
    *  that snapshot behind any autosave already in flight, then reject the
    *  action if the form changed while the guarded save was pending. */
   const persistStorageSetupDraftForAction = async (
-    storage: StorageConfig,
     session: number,
     editVersion: number,
     action: "testing the connection" | "finishing setup",
   ): Promise<StorageSetupDraft | null> => {
-    draftDirtyRef.current = false;
     try {
-      const saved = await persistStorageSetupDraft(storage, session);
+      const saved = await persistStorageSetupDraft(session, editVersion);
       if (!saved || draftSessionRef.current !== session) return null;
       if (draftEditVersionRef.current !== editVersion) {
         setStorageDraftActionError(
@@ -979,282 +925,266 @@ export default function ProjectLinksWorkspace({
     }
   };
 
+  const saveStorageDraftBeforeNavigation = async (): Promise<boolean> => {
+    const session = draftSessionRef.current;
+    const current = storageSessionRef.current;
+    if (!current) return true;
+    const editVersion = draftEditVersionRef.current;
+    const snapshot = captureStorageDraftSave(session, editVersion);
+    if (!snapshot) return false;
+    try {
+      await storageDraftSaveQueue.beforeNavigation(
+        async () => {
+          const saved = await saveStorageDraftSnapshot(snapshot);
+          if (
+            !saved
+            || draftSessionRef.current !== session
+            || draftEditVersionRef.current !== editVersion
+          ) throw new Error("storage form changed while saving");
+          return saved;
+        },
+        resetStorageSession,
+      );
+      return true;
+    } catch (reason) {
+      if (draftSessionRef.current === session) {
+        draftDirtyRef.current = true;
+        setStorageDraftActionError(draftEditVersionRef.current !== editVersion
+          ? "The storage form changed while Mallard was saving it. Review the latest values and try again."
+          : `Mallard could not save the current storage draft before leaving: ${errorMessage(reason)}`);
+      }
+      return false;
+    }
+  };
+  saveBeforeNavigationRef.current = saveStorageDraftBeforeNavigation;
+
+  useEffect(() => {
+    const guard = () => saveBeforeNavigationRef.current();
+    onStorageNavigationGuardChange?.(guard);
+    return () => onStorageNavigationGuardChange?.(null);
+  }, [onStorageNavigationGuardChange]);
+
+  /** Open the edit draft for a settled storage: the one already listed for
+   *  it, else a fresh copy of its configuration minted by the backend. The
+   *  draft carries the saved secrets server-side and reports them present. */
+  const ensureStorageEditSession = async (storage: StorageSummary) => {
+    if (!storage.available || storageSessionRef.current) return;
+    const requestId = ++editSessionRequestRef.current;
+    setStorageSessionLoading(true);
+    setStorageDraftActionError(null);
+    try {
+      const listed = storageSetupDrafts.find((draft) => (
+        draft.edits_existing && draft.storage_id === storage.storage_id
+      ));
+      const resumed = listed ? await projectSyncApi.getStorageSetupDraft(listed.draft_id) : null;
+      const draft = resumed ?? await storageDraftSaveQueue.enqueue(
+        () => projectSyncApi.createStorageEditDraft(storage.storage_id),
+      );
+      if (
+        requestId !== editSessionRequestRef.current
+        || editingStorageRef.current?.storageId !== storage.storage_id
+      ) return;
+      openStorageSession(draft, descriptorFor(draft));
+      if (!resumed) onStorageDraftsChanged?.();
+    } catch (reason) {
+      if (requestId !== editSessionRequestRef.current) return;
+      setStorageSessionLoading(false);
+      setStorageDraftActionError(`Mallard could not open the storage settings: ${errorMessage(reason)}`);
+    }
+  };
+
   useEffect(() => {
     if (!storageEditorRequest) return;
     agentSetupMarkerRef.current = null;
     if (storageEditorRequest.mode === "close") {
-      bundleRequestRef.current += 1;
-      flushStorageSetupDraft();
-      resetStorageSetupDraftState();
+      resetStorageSession();
+      clearStorageListing();
       setEditingStorage(null);
-      setStorageDraft(null);
-      setStorageBaseline(null);
-      setStorageConflict(null);
       setAgentNotice(null);
       setStorageDetailsExpanded(false);
-      setRemoteBundles(null);
-      setBundleError(null);
-      setCatalogRepos(null);
-      setCatalogRepoError(null);
-      setBundleLoading(false);
-      onStorageEditorRequestHandled?.();
-      return;
-    }
-    if (storageEditorRequest.mode === "create") {
-      const storage = newStorage(storageEditorRequest.storageKind, storages.length + 1);
-      bundleRequestRef.current += 1;
-      resetStorageSetupDraftState();
-      setEditingStorage({ projectId: "", storageId: storage.id });
-      setStorageDraft(storage);
-      setStorageBaseline(null);
-      setStorageConflict(null);
-      setAgentNotice(null);
-      setStorageDetailsExpanded(true);
-      setRemoteBundles(null);
-      setBundleError(null);
-      setCatalogRepos(null);
-      setCatalogRepoError(null);
-      setBundleLoading(false);
       onStorageEditorRequestHandled?.();
       return;
     }
     if (storageEditorRequest.mode === "resume-draft") {
       const draft = storageEditorRequest.draft;
-      bundleRequestRef.current += 1;
-      resetStorageSetupDraftState();
-      setEditingStorage({ projectId: "", storageId: draft.storage.id });
-      // Opening one exact draft is the narrow IPC path that includes its
-      // secret, so the existing password field can reveal it for review.
-      // Background draft listings remain redacted.
-      setStorageDraft({ ...draft.storage });
-      setStorageBaseline(null);
-      setStorageConflict(null);
-      setAgentNotice(null);
+      clearStorageListing();
+      // An edit draft rides its storage's page with the settings open; a
+      // draft for a storage that does not exist yet is the New-storage page.
+      const settled = draft.edits_existing
+        ? storages.find((candidate) => candidate.storage_id === draft.storage_id) ?? null
+        : null;
+      setEditingStorage({ projectId: "", storageId: draft.storage_id });
+      openStorageSession(draft, descriptorFor(draft));
       setStorageDetailsExpanded(true);
-      setRemoteBundles(null);
-      setBundleError(null);
-      setCatalogRepos(null);
-      setCatalogRepoError(null);
-      setBundleLoading(false);
-      setStorageSetupDraftId(draft.draft_id);
-      storageSetupDraftIdRef.current = draft.draft_id;
-      setStorageSetupSecretPresent(draft.secret_present);
-      storageSetupDraftRevisionRef.current = draft.revision;
+      if (settled) void loadStorageBundles(settled);
       onStorageEditorRequestHandled?.();
       return;
     }
-    const storage = storages.find((candidate) => candidate.id === storageEditorRequest.storageId);
+    const storage = storages.find((candidate) => candidate.storage_id === storageEditorRequest.storageId);
     if (!storage) {
       onStorageEditorRequestHandled?.();
       return;
     }
-
-    if (editingStorage?.storageId !== storage.id) {
-      flushStorageSetupDraft();
-      resetStorageSetupDraftState();
-      setEditingStorage({ projectId: "", storageId: storage.id });
-      setStorageDraft({ ...storage });
-      setStorageBaseline({ ...storage });
-      setStorageConflict(null);
+    if (editingStorage?.storageId !== storage.storage_id) {
+      resetStorageSession();
+      setEditingStorage({ projectId: "", storageId: storage.storage_id });
       setAgentNotice(null);
-      void loadStorageBundles(storage);
     }
+    // Every open is a navigation onto the page, so the listing reloads —
+    // a commit that just replaced the connection settings lands here too.
+    void loadStorageBundles(storage);
     setStorageDetailsExpanded(storageEditorRequest.settingsExpanded);
+    if (storageEditorRequest.settingsExpanded) void ensureStorageEditSession(storage);
     onStorageEditorRequestHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageEditorRequest?.requestId]);
 
-  /* Debounced autosave of the New-storage form, mirroring the project setup
-     recipe: the draft file is created lazily on the first edit, updated on
-     later ones, and a change of form identity cancels the pending timer —
-     the close funnel does its own flush. Only server-owned fields are
-     adopted back; the editor is keyed by the storage id, so the view's
-     server-minted id would remount the form mid-typing. */
   useEffect(() => {
-    if (
-      !creatingStorage
-      || !storageDraft
-      || !draftDirtyRef.current
-    ) return;
+    if (!storageSession || !draftDirtyRef.current) return;
     const session = draftSessionRef.current;
+    const editVersion = draftEditVersionRef.current;
     const timer = window.setTimeout(() => {
       void (async () => {
-        if (
-          draftSessionRef.current !== session
-          || !draftDirtyRef.current
-        ) return;
-        draftDirtyRef.current = false;
+        if (draftSessionRef.current !== session || !draftDirtyRef.current) return;
         try {
-          await persistStorageSetupDraft(storageDraft, session);
-        } catch {
-          // The form stays the source of truth while open; the next edit
-          // retries. A draft is a safety net, not a gate.
+          await persistStorageSetupDraft(session, editVersion);
+        } catch (reason) {
+          if (draftSessionRef.current === session) {
+            setStorageDraftActionError(`Mallard could not save the storage draft: ${errorMessage(reason)}`);
+          }
         }
       })();
     }, STORAGE_DRAFT_AUTOSAVE_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [storageDraft, storageSetupDraftId, creatingStorage]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageSession]);
 
-  const openStorageEditorWithSettings = async (storage: StorageConfig) => {
-    const switchingStorage = editingStorage?.storageId !== storage.id;
+  const openStorageEditorWithSettings = async (storage: StorageSummary) => {
+    const switchingStorage = editingStorage?.storageId !== storage.storage_id;
     if (switchingStorage) {
+      if (!(await saveStorageDraftBeforeNavigation())) return;
       agentSetupMarkerRef.current = null;
-      setEditingStorage({ projectId: "", storageId: storage.id });
-      setStorageDraft({ ...storage });
-      setStorageBaseline({ ...storage });
-      setStorageConflict(null);
+      clearStorageListing();
+      setEditingStorage({ projectId: "", storageId: storage.storage_id });
       setAgentNotice(null);
     }
-
     setStorageDetailsExpanded(true);
     if (switchingStorage) await loadStorageBundles(storage);
+    void ensureStorageEditSession(storage);
   };
+
+  /* The rail can discard the draft this form is editing. Its disappearance
+     from the list is the signal — once the list has carried it at all, so a
+     listing that started before the draft existed cannot be mistaken for a
+     discard — and a commit in flight consumes it on purpose. The check runs
+     again when a session opens, because the list may already hold its draft
+     and not change again before the discard. */
+  const openDraftId = storageSession?.draft.draft_id ?? null;
+  useEffect(() => {
+    const session = storageSessionRef.current;
+    if (!session || committingRef.current) return;
+    if (storageSetupDrafts.some((draft) => draft.draft_id === session.draft.draft_id)) {
+      draftListedRef.current = true;
+      return;
+    }
+    if (!draftListedRef.current) return;
+    const wasNew = !session.draft.edits_existing;
+    resetStorageSession();
+    setStorageDetailsExpanded(false);
+    if (wasNew) {
+      clearStorageListing();
+      setEditingStorage(null);
+      onOpenStorageIndex();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageSetupDrafts, openDraftId]);
 
   useEffect(() => {
     const marker = agentSetupMarkerRef.current;
-    if (!marker || !editingStorage || !storageDraft || storageBaseline) return;
-    const reconciliation = reconcileAgentSetup(
-      marker,
-      storageDraft,
-      editingStorage.storageId,
-      storageSetupDrafts,
-    );
+    const session = storageSessionRef.current;
+    if (!marker || !session) return;
+    const descriptor = descriptorFor(session.draft);
+    if (!descriptor) return;
+    const reconciliation = reconcileAgentSetup(marker, descriptor, storageSetupDrafts);
     if (reconciliation.kind === "preserve") {
-      if (reconciliation.reason === "draft_changed" || reconciliation.reason === "invalid") {
+      if (reconciliation.reason === "invalid") {
         agentSetupMarkerRef.current = null;
-        if (reconciliation.reason === "invalid") {
-          setAgentNotice({
-            kind: "error",
-            message: "Mallard received an incomplete R2 draft. Review the CLI result, then try the agent setup again.",
-          });
-        }
+        setAgentNotice({
+          kind: "error",
+          message: `Mallard received an incomplete ${descriptor.display_name} draft. Review the CLI result, then try the agent setup again.`,
+        });
       }
       return;
     }
 
-    // Draft listings stay redacted because the watcher refreshes them in the
-    // background. Reveal only the exact, pinned draft the CLI advanced, then
-    // revalidate every identity and form-session guard after the IPC read.
-    const session = draftSessionRef.current;
+    // Draft listings arrive in the background. Re-read the exact, pinned
+    // draft the CLI advanced, then revalidate every identity and
+    // form-session guard after the IPC read. Only settings and secret
+    // presence come back; no value ever does.
+    const token = draftSessionRef.current;
     const editVersion = draftEditVersionRef.current;
-    const editingDraftId = editingStorage.storageId;
-    const formSnapshot = { ...storageDraft };
     let cancelled = false;
     void (async () => {
       try {
-        const revealed = await projectSyncApi.getStorageSetupDraft(marker.setupDraftId);
+        const revealed = await projectSyncApi.getStorageSetupDraft(marker.draftId);
         if (
           cancelled
           || agentSetupMarkerRef.current !== marker
-          || draftSessionRef.current !== session
+          || draftSessionRef.current !== token
           || draftEditVersionRef.current !== editVersion
         ) return;
         const revealedReconciliation = revealed
-          ? reconcileAgentSetup(marker, formSnapshot, editingDraftId, [revealed])
+          ? reconcileAgentSetup(marker, descriptor, [revealed])
           : { kind: "preserve", reason: "invalid" } as const;
-        if (
-          !revealed
-          || revealedReconciliation.kind !== "adopt"
-          || !revealed.secret_present
-          || !revealed.storage.secret_access_key
-        ) {
+        if (!revealed || revealedReconciliation.kind !== "adopt") {
           agentSetupMarkerRef.current = null;
           setAgentNotice({
             kind: "error",
-            message: "Mallard could not load the complete R2 values prepared by the CLI. Copy fresh agent setup instructions and try again.",
+            message: "Mallard could not load the complete values prepared by the CLI. Copy fresh agent setup instructions and try again.",
           });
           return;
         }
-
-        agentSetupMarkerRef.current = null;
-        // Invalidate any pending debounce from before the CLI update. The
-        // exact-get response includes the secret so the existing editable
-        // password field can show it on request; the form remains uncommitted.
-        draftSessionRef.current += 1;
-        draftEditVersionRef.current += 1;
-        draftDirtyRef.current = false;
-        const adoption = agentSetupEditorAdoption(revealedReconciliation.draft);
-        storageSetupDraftIdRef.current = adoption.storageSetupDraftId;
-        storageSetupDraftRevisionRef.current = adoption.storageSetupDraftRevision;
-        setEditingStorage(adoption.editingStorage);
-        setStorageDraft(adoption.storageDraft);
-        setStorageBaseline(adoption.storageBaseline);
-        setStorageSetupDraftId(adoption.storageSetupDraftId);
-        setStorageSetupSecretPresent(adoption.storageSetupSecretPresent);
-        setStorageTestVerified(false);
-        setStorageConflict(null);
-        setStorageDetailsExpanded(adoption.storageDetailsExpanded);
-        setRemoteBundles(null);
-        setBundleError(null);
-        setStorageDraftActionError(null);
-        setAgentNotice({ kind: "ready", message: adoption.status });
+        // Adopting reseats the form on the CLI's revision, which also
+        // invalidates any pending debounce from before the update. The form
+        // remains uncommitted until the user presses Finish setup.
+        openStorageSession(revealedReconciliation.draft, descriptor);
+        setAgentNotice({
+          kind: "ready",
+          message: `${descriptor.display_name} settings filled in. Review or edit them, optionally test the connection, then finish setup yourself.`,
+        });
       } catch {
         if (
           cancelled
           || agentSetupMarkerRef.current !== marker
-          || draftSessionRef.current !== session
+          || draftSessionRef.current !== token
           || draftEditVersionRef.current !== editVersion
         ) return;
         agentSetupMarkerRef.current = null;
         setAgentNotice({
           kind: "error",
-          message: "Mallard could not load the R2 values prepared by the CLI. Copy fresh agent setup instructions and try again.",
+          message: "Mallard could not load the values prepared by the CLI. Copy fresh agent setup instructions and try again.",
         });
       }
     })();
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageSetupDrafts]);
 
+  /* A removed settled storage leaves the page and its edit draft invalid. */
   useEffect(() => {
-    if (!editingStorage || !storageDraft) return;
-    const incoming = storages.find((candidate) => candidate.id === editingStorage.storageId) ?? null;
-    if (!storageBaseline) {
-      if (incoming && sameStorage(incoming, storageDraft)) {
-        setStorageBaseline({ ...incoming });
-        setStorageDraft({ ...incoming });
-      }
-      return;
-    }
-    const reconciliation = reconcileStorageDraft(storageBaseline, storageDraft, incoming);
-    if (reconciliation.kind === "adopt") {
-      setStorageBaseline({ ...reconciliation.storage });
-      setStorageDraft({ ...reconciliation.storage });
-      setStorageConflict(null);
-    } else if (reconciliation.kind === "close") {
-      setEditingStorage(null);
-      setStorageDraft(null);
-      setStorageBaseline(null);
-      setStorageConflict(null);
-      setStorageDetailsExpanded(false);
-    } else if (reconciliation.kind === "conflict") {
-      setStorageConflict(reconciliation.reason);
-    }
-  }, [editingStorage?.storageId, storageBaseline, storageDraft, storages]);
-
-  const reloadExternalStorage = async () => {
     if (!editingStorage) return;
-    // The draft can hold values shown exactly once (an R2 secret key), so it
-    // is never dropped silently: loading the current configuration is the
-    // only action offered, and it asks first when it would lose edits.
-    if (storageDraft && (!storageBaseline || !sameStorage(storageDraft, storageBaseline))) {
-      const approved = await confirm(
-        "Discard your unsaved draft and load the current configuration?\n\nAnything typed here that was never saved — including a secret access key — cannot be recovered.",
-        { title: "Discard draft" },
-      );
-      if (!approved) return;
-    }
-    const incoming = storages.find((candidate) => candidate.id === editingStorage.storageId) ?? null;
+    const session = storageSessionRef.current;
+    if (session && !session.draft.edits_existing) return;
+    const incoming = storages.find((candidate) => candidate.storage_id === editingStorage.storageId) ?? null;
     if (!incoming) {
+      resetStorageSession();
+      clearStorageListing();
       setEditingStorage(null);
-      setStorageDraft(null);
-      setStorageBaseline(null);
-      setStorageConflict(null);
       setStorageDetailsExpanded(false);
       return;
     }
-    setStorageBaseline({ ...incoming });
-    setStorageDraft({ ...incoming });
-    setStorageConflict(null);
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingStorage?.storageId, storages]);
 
   const clearCopyAgainFlash = () => {
     if (copyAgainTimerRef.current !== null) {
@@ -1289,26 +1219,28 @@ export default function ProjectLinksWorkspace({
     };
   }, [agentMenuOpen]);
 
-  /** Persist the exact form snapshot, build the guarded instruction, run one
-   *  hand-off verb with it, then arm the listener. Both verbs share every
-   *  fence: the pending debounce is cancelled, the CLI receives the persisted
-   *  id and revision, and a form that changed mid-flight refuses the marker. */
+  /** Persist the exact form snapshot, run one hand-off verb against the
+   *  saved draft revision, then arm the listener. Both verbs share every
+   *  fence: the pending debounce is cancelled, the backend renders the
+   *  instruction for the persisted id and revision, and a form that changed
+   *  mid-flight refuses the marker. */
   const runAgentSetupHandoff = async (
-    action: (instruction: string) => Promise<void>,
+    action: (storageProvider: string, draftId: string, expectedRevision: number) => Promise<void>,
     failure: (reason: unknown) => string,
     notice: AgentSetupNotice,
   ) => {
-    if (!storageDraft || storageDraft.kind !== "s3" || agentSetupBusyRef.current) return;
+    const current = storageSessionRef.current;
+    const descriptor = current ? descriptorFor(current.draft) : null;
+    if (!current || !descriptor?.setup_assistant || agentSetupBusyRef.current) return;
     agentSetupBusyRef.current = true;
     setAgentMenuOpen(false);
     clearCopyAgainFlash();
     setAgentNotice(null);
     const session = draftSessionRef.current;
     const editVersion = draftEditVersionRef.current;
-    const draftSnapshot = { ...storageDraft };
+    const requestedName = current.form.name;
     try {
-      draftDirtyRef.current = false;
-      const saved = await persistStorageSetupDraft(draftSnapshot, session);
+      const saved = await persistStorageSetupDraft(session, editVersion);
       if (
         !saved
         || draftSessionRef.current !== session
@@ -1316,28 +1248,14 @@ export default function ProjectLinksWorkspace({
       ) {
         throw new Error("the storage form changed before the agent handoff was ready");
       }
-      const cliPath = await projectSyncApi.getMallardCliPath();
-      const instruction = buildR2AgentSetupInstruction({
-        storageName: draftSnapshot.name,
-        cliPath,
-        draftId: saved.draft_id,
-        expectedRevision: saved.revision,
-      });
-      await action(instruction);
+      await action(descriptor.key, saved.draft_id, saved.revision);
       if (
         draftSessionRef.current !== session
         || draftEditVersionRef.current !== editVersion
       ) {
         throw new Error("the storage form changed during the agent handoff");
       }
-      agentInstructionRef.current = instruction;
-      agentSetupMarkerRef.current = createAgentSetupMarker(
-        draftSnapshot,
-        saved.draft_id,
-        saved.revision,
-        draftSnapshot.id,
-        saved.storage.id,
-      );
+      agentSetupMarkerRef.current = createAgentSetupMarker(saved, requestedName);
       setAgentNotice(notice);
     } catch (reason) {
       setAgentNotice({ kind: "error", message: failure(reason) });
@@ -1347,18 +1265,30 @@ export default function ProjectLinksWorkspace({
   };
 
   const copyAgentSetupInstruction = () => runAgentSetupHandoff(
-    (instruction) => writeClipboardText(instruction),
-    (reason) => `Could not copy agent setup instructions: ${String(reason)}`,
+    async (storageProvider, draftId, expectedRevision) => {
+      const instruction = await projectSyncApi.getStorageSetupAssistantInstruction(
+        storageProvider,
+        draftId,
+        expectedRevision,
+      );
+      await writeClipboardText(instruction);
+      agentInstructionRef.current = instruction;
+    },
+    (reason) => `Could not copy agent setup instructions: ${errorMessage(reason)}`,
     { kind: "listening" },
   );
 
-  const launchAgentSetup = (provider: ProviderKey, agent: string) => runAgentSetupHandoff(
-    (instruction) => projectSyncApi.launchR2AgentSetup(provider, instruction),
-    (reason) => `Could not open ${agent}: ${String(reason)}`,
+  const launchAgentSetup = (agentProvider: ProviderKey, agent: string) => runAgentSetupHandoff(
+    (storageProvider, draftId, expectedRevision) => projectSyncApi.launchStorageSetupAssistant(
+      storageProvider,
+      agentProvider,
+      draftId,
+      expectedRevision,
+    ),
+    (reason) => `Could not open ${agent}: ${errorMessage(reason)}`,
     { kind: "launched", agent },
   );
 
-  /** Re-copy the exact instruction the live marker was armed for. */
   const copyAgentInstructionAgain = async () => {
     const instruction = agentInstructionRef.current;
     if (!instruction) return;
@@ -1371,11 +1301,10 @@ export default function ProjectLinksWorkspace({
         setCopyAgainFlashed(false);
       }, 1100);
     } catch (reason) {
-      setAgentNotice({ kind: "error", message: `Could not copy agent setup instructions: ${String(reason)}` });
+      setAgentNotice({ kind: "error", message: `Could not copy agent setup instructions: ${errorMessage(reason)}` });
     }
   };
 
-  /** The user backs out of the hand-off: the marker dies, the offer returns. */
   const cancelAgentSetup = () => {
     agentSetupMarkerRef.current = null;
     agentInstructionRef.current = null;
@@ -1442,13 +1371,14 @@ export default function ProjectLinksWorkspace({
     ? linkedByProject.get(workspaceProject.local_project_id) ?? []
     : [];
   const workspaceLinkedStorages = workspaceLinks
-    .map((link) => storages.find((storage) => storage.id === link.storage_id))
-    .filter((storage): storage is StorageConfig => !!storage);
+    .map((link) => storages.find((storage) => storage.storage_id === link.storage_id))
+    .filter((storage): storage is StorageSummary => !!storage);
   const workspaceStorage = workspaceLinkedStorages.find((storage) => (
-    workspaceProject?.local_project_id === activeProjectId && storage.id === activeStorageId
+    workspaceProject?.local_project_id === activeProjectId && storage.storage_id === activeStorageId
   )) ?? workspaceLinkedStorages[0] ?? null;
+  // Only storages this build can open are offered for linking.
   const workspaceAvailableStorages = storages.filter((storage) => (
-    !workspaceLinks.some((link) => link.storage_id === storage.id)
+    storage.available && !workspaceLinks.some((link) => link.storage_id === storage.storage_id)
   ));
   const workspaceBindingActive = workspaceBinding?.state === "active";
   const workspaceReadableProfiles = workspaceProfiles.filter(({ profile }) => (
@@ -1458,39 +1388,21 @@ export default function ProjectLinksWorkspace({
   const workspaceProfilesWritable = workspaceReadableProfiles.some(({ profile }) => !!profile?.writable);
   const workspaceCanSync = workspaceBindingActive && workspaceProfilesReadable;
   const workspaceCanRestore = workspaceBindingActive && workspaceProfilesWritable;
-  const workspaceCodexProfile = workspaceProfiles.find(({ provider }) => provider === "codex")?.profile;
-  const workspaceCodexConfigured = workspaceBindingActive && !!workspaceCodexProfile;
-  const workspacePathAudit = workspaceProject
-    ? conversationPathAudits[workspaceProject.local_project_id]
-    : undefined;
-  const workspacePathAuditError = workspaceProject
-    ? conversationPathAuditErrors[workspaceProject.local_project_id]
-    : undefined;
-  const workspacePathBlocked = conversationPathsBlockSync(
-    workspaceCodexConfigured,
-    workspacePathAudit,
-    workspacePathAuditError,
-    conversationPathAuditLoading,
-  );
-  const workspacePathTitle = workspaceCodexConfigured
-    ? conversationPathAuditLoading
-      ? "Checking Codex conversation paths"
-      : workspacePathAuditError
-        ? `Codex conversation paths could not be verified: ${workspacePathAuditError}`
-        : workspacePathAudit && !workspacePathAudit.ready
-          ? "Repair Codex conversation paths before Push or Pull"
-          : null
-    : null;
   const workspaceProfileIssue = workspaceBindingActive && !workspaceProfilesReadable
     ? "No selected agent profile is available on this machine"
     : null;
+  // Push and Pull stand down on a storage this build has no adapter for.
+  const workspaceStorageUnavailable = !!workspaceStorage && !workspaceStorage.available;
+  const workspaceStorageIssue = workspaceStorage && workspaceStorageUnavailable
+    ? `This build has no ${workspaceStorage.provider_label} adapter, so ${workspaceStorage.name || "this storage"} cannot sync`
+    : null;
 
   const workspaceActionPrefix = workspaceProject && workspaceStorage
-    ? `${workspaceProject.local_project_id}:${workspaceStorage.id}`
+    ? `${workspaceProject.local_project_id}:${workspaceStorage.storage_id}`
     : null;
   const workspaceReviewOpen = !!workspaceActionPrefix
     && inlineStorageReview?.projectId === workspaceProject?.local_project_id
-    && inlineStorageReview?.storageId === workspaceStorage?.id;
+    && inlineStorageReview?.storageId === workspaceStorage?.storage_id;
   const workspaceReviewKind = workspaceReviewOpen ? inlineStorageReview?.kind ?? null : null;
   const workspacePushReviewOpen = workspaceReviewOpen && inlineStorageReview?.kind === "push";
   const workspacePullReviewOpen = workspaceReviewOpen && inlineStorageReview?.kind === "pull";
@@ -1540,139 +1452,159 @@ export default function ProjectLinksWorkspace({
   };
 
   const saveStorageName = async () => {
-    if (!storageDraft || !editedStorageConfig || renamingStorageId !== storageDraft.id) return;
+    const storage = savedEditedStorage;
+    if (!storage || renamingStorageId !== storage.storage_id) return;
     const name = storageNameDraft.trim();
-    if (!name || name === storageDraft.name) return;
-    agentSetupMarkerRef.current = null;
-    await run(`rename-storage:${storageDraft.id}`, async () => {
-      const renamedStorage = { ...editedStorageConfig, name };
-      const saved = await onSaveStorage(renamedStorage, editedStorageConfig);
-      if (saved === false) return;
-      setStorageDraft((current) => current?.id === renamedStorage.id ? { ...current, name } : current);
-      // The rename saved only the persisted snapshot, not the editor's other
-      // controlled values. Advance the baseline to that renamed snapshot so a
-      // watcher echo is not mistaken for an external change; the draft update
-      // above changes only its name and therefore keeps any typed R2 secret.
-      setStorageBaseline({ ...renamedStorage });
+    if (!name || name === storage.name) return;
+    await run(`rename-storage:${storage.storage_id}`, async () => {
+      const renamed = await onRenameStorage(storage.storage_id, name);
+      if (!renamed) return;
+      // An open edit draft would write the old name back on Finish, so it
+      // follows the rename; the autosave carries it.
+      const session = storageSessionRef.current;
+      if (session?.draft.edits_existing && session.form.name !== name) {
+        draftDirtyRef.current = true;
+        updateStorageSession((current) => ({ ...current, form: { ...current.form, name } }));
+      }
       setStorageNameDraft(name);
       setRenamingStorageId(null);
     });
   };
 
-  if (editingStorage && storageDraft && editedStorageConfig) {
-    // A storage that is not a fresh draft is already saved, so the backend
-    // holds its secret even though the redacted config renders the field
-    // blank. A resumed setup draft holds one the same server-side way.
-    const secretStored = !creatingStorage || storageSetupSecretPresent;
-    const storageReady = storageConfigReady(storageDraft, secretStored);
-    const showStorageDetails = creatingStorage || storageDetailsExpanded;
-    const storageDetailsId = `storage-${storageDraft.id}-settings`;
-    const storageNameChanged = !!storageNameDraft.trim() && storageNameDraft.trim() !== storageDraft.name;
-    const storageName = storageDraft.name || "(unnamed)";
-    const storageLinkCount = links.filter((link) => link.storage_id === editedStorageConfig.id).length;
-    const renamingStorage = renamingStorageId === storageDraft.id;
-    const saveEditedStorage = () => run(`storage:${editedStorageConfig.id}`, async () => {
-      const storageSnapshot = { ...storageDraft };
-      const baselineSnapshot = storageBaseline ? { ...storageBaseline } : null;
-      const wasCreatingR2 = creatingStorage && storageSnapshot.kind === "s3";
-      let setupDraftId = creatingStorage ? storageSetupDraftId : null;
-      let setupDraftRevision: number | null = null;
-      let setupDraftStorageId: string | null = null;
-      agentSetupMarkerRef.current = null;
-      setAgentNotice(null);
-      if (wasCreatingR2) {
-        const session = draftSessionRef.current;
-        const editVersion = draftEditVersionRef.current;
-        const savedDraft = await persistStorageSetupDraftForAction(
-          storageSnapshot,
-          session,
-          editVersion,
-          "finishing setup",
-        );
-        if (!savedDraft) return;
-        setupDraftId = savedDraft.draft_id;
-        setupDraftRevision = savedDraft.revision;
-        setupDraftStorageId = savedDraft.storage.id;
-      }
-      setStorageTestVerified(false);
-      const saved = await onSaveStorage(
-        storageSnapshot,
-        baselineSnapshot,
-        setupDraftId,
-        setupDraftRevision,
-        setupDraftStorageId,
-      );
-      if (saved === false) return;
-      // A successful create consumes the draft. Only form state remains.
-      if (creatingStorage) resetStorageSetupDraftState();
-      setStorageConflict(null);
-      if (wasCreatingR2) {
-        setStorageDetailsExpanded(false);
-        setEditingStorage(null);
-        setStorageDraft(null);
-        setStorageBaseline(null);
-        return;
-      }
-      const savedStorage = storageSnapshot.kind === "s3"
-        ? { ...storageSnapshot, secret_access_key: "" }
-        : storageSnapshot;
-      if (storageSnapshot.kind === "s3") {
-        // The backend retains the submitted secret. Drop the one-time draft
-        // value immediately after success; a failed save returns above and
-        // deliberately leaves it available for correction and retry.
-        setStorageDraft({ ...savedStorage });
-        setStorageBaseline({ ...savedStorage });
-      }
-      setStorageDetailsExpanded(false);
-      await loadStorageBundles(savedStorage);
-    });
+  if (editingStorage && (savedEditedStorage || storageSession)) {
+    const pageStorageId = editingStorage.storageId;
+    const descriptor = storageSession
+      ? descriptorFor(storageSession.draft)
+      : savedEditedStorage
+        ? findStorageProvider(storageProviders, savedEditedStorage.provider, savedEditedStorage.config_version)
+        : null;
+    const secretPresence = storageSession ? secretPresenceOf(storageSession.draft) : {};
+    const storageReady = !!storageSession && !!descriptor
+      && storageDraftReady(descriptor, storageSession.form, secretPresence);
+    const progress = storageSession && descriptor
+      ? fieldsSet(descriptor, storageSession.form, secretPresence)
+      : null;
+    /* Nothing yet to name a draft that is being created; an edit draft's
+       storage is named by the settled record. */
+    const storageName = creatingStorage
+      ? storageSession?.form.name || "(unnamed)"
+      : savedEditedStorage?.name || "(unnamed)";
+    const providerLabelForPage = savedEditedStorage?.provider_label
+      ?? storageSession?.draft.provider_label
+      ?? "";
+    const storageAvailable = savedEditedStorage?.available ?? storageSession?.draft.available ?? false;
+    const supportsManagedClear = storageAvailable && (descriptor?.clear_mode === "revision_checked" || descriptor?.clear_mode === "unconditional");
+    const showStorageDetails = creatingStorage
+      || (storageDetailsExpanded && (!!storageSession || storageSessionLoading));
+    const storageDetailsId = `storage-${pageStorageId}-settings`;
+    const storageNameChanged = !!storageNameDraft.trim() && storageNameDraft.trim() !== savedEditedStorage?.name;
+    const storageLinkCount = links.filter((link) => link.storage_id === pageStorageId).length;
+    const renamingStorage = renamingStorageId === pageStorageId;
+    const pathFact = savedEditedStorage?.summary.find((field) => field.is_path) ?? null;
+    const formLocked = busy || !!runningAction;
 
-    /* The advisory twin of Create: same gate, same probe, no commit. The
-       verdict is only as fresh as the fields it tested, so every edit, save,
-       and close clears it. */
-    const testStorageConnection = () => run(`test-storage:${editedStorageConfig.id}`, async () => {
-      if (!onTestStorage) return;
+    const saveEditedStorage = () => run(`storage:${pageStorageId}`, async () => {
+      if (!storageSession) return;
       agentSetupMarkerRef.current = null;
       setAgentNotice(null);
-      setStorageTestVerified(false);
-      const storageSnapshot = { ...storageDraft };
       const session = draftSessionRef.current;
       const editVersion = draftEditVersionRef.current;
       const savedDraft = await persistStorageSetupDraftForAction(
-        storageSnapshot,
+        session,
+        editVersion,
+        "finishing setup",
+      );
+      if (!savedDraft) return;
+      setStorageTestVerified(false);
+      committingRef.current = true;
+      const result = await onCommitStorageDraft(savedDraft.draft_id, savedDraft.revision);
+      committingRef.current = false;
+      if (!result || draftSessionRef.current !== session) return;
+      // A successful commit consumes the draft. Only the page remains, now on
+      // the settled storage, whether it was created or replaced.
+      resetStorageSession();
+      setStorageDetailsExpanded(false);
+      onOpenStorage(result.storage_id, false);
+    });
+
+    /* The advisory twin of Finish: same gate, same probe, no commit. The
+       verdict is only as fresh as the fields it tested, so every edit, save,
+       and close clears it. */
+    const testStorageConnection = () => run(`test-storage:${pageStorageId}`, async () => {
+      if (!storageSession) return;
+      agentSetupMarkerRef.current = null;
+      setAgentNotice(null);
+      setStorageTestVerified(false);
+      const session = draftSessionRef.current;
+      const editVersion = draftEditVersionRef.current;
+      const savedDraft = await persistStorageSetupDraftForAction(
         session,
         editVersion,
         "testing the connection",
       );
       if (!savedDraft) return;
-      const verified = await onTestStorage(
-        storageSnapshot,
-        savedDraft.draft_id,
-        savedDraft.revision,
-        savedDraft.storage.id,
-      );
-      if (verified) setStorageTestVerified(true);
+      const verified = await onTestStorageDraft(savedDraft.draft_id, savedDraft.revision);
+      if (verified && draftSessionRef.current === session) setStorageTestVerified(true);
     });
 
-    const discardStorageDraftAndClose = () => run(`discard-draft:${editedStorageConfig.id}`, async () => {
-      if (!storageSetupDraftId) return;
-      const discardImpact = storageDraft.kind === "s3"
-        ? "This removes only Mallard’s local setup draft. It does not delete any Cloudflare bucket or access key that may have been created during preparation."
-        : "This removes only Mallard’s local setup draft. The selected folder and its contents are not changed.";
+    const discardStorageDraftAndClose = () => run(`discard-draft:${pageStorageId}`, async () => {
+      const session = storageSessionRef.current;
+      if (!session) return;
       const approved = await confirm(
-        `Discard the storage draft for ${storageDraft.name || "(unnamed)"}?\n\n${discardImpact}`,
+        `Discard the storage draft for ${session.form.name || "(unnamed)"}?\n\nThis removes only Mallard’s local setup draft; external storage resources are not changed.`,
         { title: "Discard storage draft" },
       );
       if (!approved) return;
+      const wasNew = !session.draft.edits_existing;
       try {
-        await projectSyncApi.discardStorageSetupDraft(storageSetupDraftId);
-      } catch {
-        // The draft row, if it survives, can be discarded from its page.
+        await storageDraftSaveQueue.enqueue(
+          () => projectSyncApi.discardStorageSetupDraft(session.draft.draft_id),
+        );
+      } catch (reason) {
+        setStorageDraftActionError(`Mallard could not discard the storage draft: ${errorMessage(reason)}`);
+        return;
       }
-      resetStorageSetupDraftState();
+      resetStorageSession();
+      setStorageDetailsExpanded(false);
       onStorageDraftsChanged?.();
-      onOpenStorageIndex();
+      if (wasNew) onOpenStorageIndex();
     });
+
+    /* The header's type switch restarts a new draft on another provider:
+       the current draft goes, a typed name comes along, a default one is
+       re-minted for the new type. */
+    const switchStorageProvider = (provider: StorageProviderDescriptor) => run(`switch-provider:${pageStorageId}`, async () => {
+      const session = storageSessionRef.current;
+      if (!session || !descriptor) return;
+      if (provider.key === descriptor.key && provider.config_version === descriptor.config_version) return;
+      const keptName = storageNameIsAuto(descriptor, session.form) ? undefined : session.form.name;
+      agentSetupMarkerRef.current = null;
+      setAgentNotice(null);
+      try {
+        await storageDraftSaveQueue.enqueue(
+          () => projectSyncApi.discardStorageSetupDraft(session.draft.draft_id),
+        );
+      } catch (reason) {
+        setStorageDraftActionError(`Mallard could not discard the storage draft: ${errorMessage(reason)}`);
+        return;
+      }
+      resetStorageSession();
+      setStorageDetailsExpanded(false);
+      onStorageDraftsChanged?.();
+      await onCreateStorageDraft(provider.key, keptName);
+    });
+
+    /* Hide keeps the draft: it is autosaved and listed on the rail, and the
+       page's own Discard is the way to drop it. */
+    const toggleStorageDetails = async () => {
+      if (storageDetailsExpanded && storageSession) {
+        if (!(await saveStorageDraftBeforeNavigation())) return;
+        setStorageDetailsExpanded(false);
+        return;
+      }
+      setStorageDetailsExpanded(true);
+      if (savedEditedStorage && !storageSession) void ensureStorageEditSession(savedEditedStorage);
+    };
 
     // The trail starts at the Storages index the crumb leads back to; the
     // storage itself carries the switcher; the section names the page. A
@@ -1689,35 +1621,35 @@ export default function ProjectLinksWorkspace({
         onActivate: onOpenStorageIndex,
         disabled: busy,
       },
-      creatingStorage
+      creatingStorage || !savedEditedStorage
         ? { id: "storage", label: "New storage" }
         : {
             id: "storage",
             label: storageName,
-            title: `${storageName} · ${storageSubtitle(editedStorageConfig)}`,
+            title: `${storageName} · ${storageSubtitle(savedEditedStorage)}`,
             ariaLabel: `${storageName}. Storage menu`,
             // The page below is this storage, so its verbs stay in the page's
             // overflow; the crumb menu is the header naming where you are and
             // the ways to be somewhere else.
             menuHeader: {
               label: storageName,
-              detail: storageSubtitle(editedStorageConfig),
-              detailIsPath: storageSubtitleIsPath(editedStorageConfig),
-              icon: editedStorageConfig.kind === "local" ? "drive" : "cloud",
+              detail: storageSubtitle(savedEditedStorage),
+              detailIsPath: storageSubtitleIsPath(savedEditedStorage),
+              icon: iconNameFromHint(savedEditedStorage.icon, "drive"),
             },
             menu: [
-              ...(storages.some((candidate) => candidate.id !== editedStorageConfig.id) ? [{
+              ...(storages.some((candidate) => candidate.storage_id !== pageStorageId) ? [{
                 label: "Switch to",
                 items: storages
-                  .filter((candidate) => candidate.id !== editedStorageConfig.id)
+                  .filter((candidate) => candidate.storage_id !== pageStorageId)
                   .map((candidate) => ({
-                    id: candidate.id,
+                    id: candidate.storage_id,
                     label: candidate.name || "(unnamed)",
                     detail: storageSubtitle(candidate),
                     detailIsPath: storageSubtitleIsPath(candidate),
-                    icon: candidate.kind === "local" ? ("drive" as const) : ("cloud" as const),
+                    icon: iconNameFromHint(candidate.icon, "drive"),
                     disabled: busy,
-                    onSelect: () => onOpenStorage(candidate.id, false),
+                    onSelect: () => onOpenStorage(candidate.storage_id, false),
                   })),
               }] : []),
               {
@@ -1741,43 +1673,45 @@ export default function ProjectLinksWorkspace({
     ];
 
     // Storage commands plus the sidebar's storage shortcuts. A draft receives
-    // only app-level commands.
+    // only app-level commands. A storage this build cannot open keeps the
+    // record's verbs — rename, remove — and loses the adapter's: settings,
+    // clearing its data.
     const storagePathOverflow: PathBarMenuGroup[] = creatingStorage ? appActions : [
       {
         label: "Storage",
         items: [
-          ...(editedStorageConfig.kind === "local" && editedStorageConfig.local_dir ? [{
+          ...(pathFact ? [{
             id: "reveal",
             label: "Reveal in Finder",
-            detail: compactProjectPath(editedStorageConfig.local_dir),
+            detail: compactProjectPath(pathFact.value),
             icon: "folder" as const,
-            onSelect: () => revealPath(editedStorageConfig.local_dir as string),
+            onSelect: () => revealPath(pathFact.value),
           }] : []),
-          {
+          ...(storageAvailable ? [{
             id: "storage-settings",
-            label: storageDetailsExpanded ? "Hide storage settings" : "Storage settings",
+            label: storageDetailsExpanded && storageSession ? "Hide storage settings" : "Storage settings",
             icon: "settings" as const,
             disabled: busy,
-            onSelect: () => setStorageDetailsExpanded((current) => !current),
-          },
+            onSelect: toggleStorageDetails,
+          }] : []),
           {
             id: "rename",
             label: "Rename storage…",
             icon: "edit" as const,
             disabled: busy,
             onSelect: () => {
-              setStorageNameDraft(storageDraft.name);
-              setRenamingStorageId(storageDraft.id);
+              setStorageNameDraft(savedEditedStorage?.name ?? "");
+              setRenamingStorageId(pageStorageId);
             },
           },
-          {
+          ...(supportsManagedClear ? [{
             id: "clear",
             label: "Clear storage data…",
             icon: "trash" as const,
             danger: true,
             disabled: busy,
-            onSelect: () => onClearStorage(editedStorageConfig.id),
-          },
+            onSelect: () => onClearStorage(pageStorageId),
+          }] : []),
           {
             id: "remove",
             label: "Remove storage…",
@@ -1790,7 +1724,7 @@ export default function ProjectLinksWorkspace({
             title: storageLinkCount > 0
               ? `${storageName} is linked to ${storageLinkCount} project${storageLinkCount === 1 ? "" : "s"}; unlink it before removing`
               : `Remove ${storageName}; synced files stay in storage`,
-            onSelect: () => onRemoveStorage(editedStorageConfig.id),
+            onSelect: () => onRemoveStorage(pageStorageId),
           },
         ],
       },
@@ -1799,40 +1733,33 @@ export default function ProjectLinksWorkspace({
 
     // Creation uses the form's commit bar. A settled storage exposes Refresh
     // in the path bar.
-    const storagePathActions = creatingStorage ? undefined : (
+    const storagePathActions = creatingStorage || !savedEditedStorage ? undefined : (
       <button
         type="button"
         className="sync-path-sync"
-        disabled={busy || bundleLoading}
+        disabled={busy || bundleLoading || !storageAvailable}
         title={`Refresh repositories in ${storageName}`}
         aria-label={`Refresh repositories in ${storageName}`}
-        onClick={() => void loadStorageBundles(editedStorageConfig)}
+        onClick={() => void loadStorageBundles(savedEditedStorage)}
       >
         <Icon name="refresh" size={14} className={bundleLoading ? "icon-spin" : undefined} />
         <span className="sync-path-sync-label">Refresh</span>
       </button>
     );
 
-    /* One box takes the loudest storage-editor, repository, or conflict
-     * notice. The conflict appears only inside the expanded panel. */
     const storageNotices: NoticeItem[] = [];
-    if (showStorageDetails && storageConflict) {
-      storageNotices.push({
-        key: "storage-changed-externally",
-        severity: "warning",
-        message: `This storage was ${storageConflict === "removed" ? "removed" : "changed"} outside this editor, so this draft can no longer be saved. Loading the current configuration discards the draft.`,
-        action: (
-          <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void reloadExternalStorage()}>
-            Load current
-          </button>
-        ),
-      });
-    }
     if (storageDraftActionError) {
       storageNotices.push({
         key: "storage-draft-save-failed",
         severity: "danger",
         message: storageDraftActionError,
+      });
+    }
+    if (storageSession && !descriptor) {
+      storageNotices.push({
+        key: "storage-provider-unavailable",
+        severity: "warning",
+        message: `This build has no ${providerLabelForPage} adapter (configuration version ${storageSession.draft.config_version}), so this draft cannot be edited, tested, or finished here.`,
       });
     }
     if (!creatingStorage && !bundleLoading && bundleError) {
@@ -1844,20 +1771,134 @@ export default function ProjectLinksWorkspace({
     if (revealError) {
       storageNotices.push({ key: "reveal-failed", severity: "danger", message: revealError });
     }
-    if (error && !renamingStorage) {
-      storageNotices.push({ key: "storage-action-failed", severity: "danger", message: error });
-    }
-    /* Standing by default: both read failures are set by the load this page
-     * starts as it opens, and `error` arrives as a prop, so all three are on
-     * screen the moment the view renders and must not announce. The two that
-     * ARE events re-time the whole box — a reveal the user asked for came
-     * back refused, and the conflict lands from the config watcher while the
-     * draft is open and stops it from ever being saved. */
+    /* Initial read failures are standing notices. Action failures announce. */
     const storageNoticeTiming: NoticeTiming = storageDraftActionError
       || revealError
-      || (showStorageDetails && storageConflict)
       ? { timing: "blocking" }
       : { timing: "standing", label: "Problems with this storage" };
+
+    const agentSlot = !storageSession || !descriptor?.setup_assistant || !creatingStorage
+      ? undefined
+      : agentNotice?.kind === "launched" ? (
+        <>
+          <span className="storage-setup-guide-wait" role="status">
+            <span className="status-loader" /> {agentNotice.agent} is running the setup — finish any sign-in it asks for when the browser opens…
+          </span>
+          <button type="button" className="btn-link" onClick={cancelAgentSetup}>Cancel</button>
+        </>
+      )
+      : agentNotice?.kind === "listening" ? (
+        <>
+          <span className="storage-setup-guide-connected" role="status">
+            <Icon name="check-circle" size={13} /> Copied.
+          </span>
+          <span className="storage-setup-guide-wait" role="status">
+            <span className="status-loader" /> Listening for your agent…
+          </span>
+          <button
+            type="button"
+            className={copyAgainFlashed
+              ? "btn storage-setup-guide-button storage-setup-copied-flash"
+              : "btn storage-setup-guide-button"}
+            onClick={() => void copyAgentInstructionAgain()}
+          >
+            <Icon name={copyAgainFlashed ? "check" : "copy"} size={13} /> {copyAgainFlashed ? "Copied" : "Copy again"}
+          </button>
+          <button type="button" className="btn-link" onClick={cancelAgentSetup}>Cancel</button>
+        </>
+      )
+      : agentNotice?.kind === "ready" ? (
+        <span className="storage-setup-guide-connected" role="status">
+          <Icon name="check-circle" size={13} /> {agentNotice.message}
+        </span>
+      )
+      : agentNotice?.kind === "error" ? (
+        <>
+          <span className="storage-setup-guide-error" role="alert">{agentNotice.message}</span>
+          <button
+            type="button"
+            className="btn storage-setup-guide-button"
+            disabled={busy}
+            onClick={() => void copyAgentSetupInstruction()}
+          >
+            <Icon name="copy" size={13} /> Copy agent instruction
+          </button>
+          <button type="button" className="btn-link" onClick={cancelAgentSetup}>Try again</button>
+        </>
+      )
+      : defaultAgentLauncher ? (
+        <div className="storage-setup-agent-split" ref={agentSplitRef}>
+          <button
+            type="button"
+            className="btn storage-setup-guide-button storage-setup-agent-cta"
+            disabled={busy}
+            title={`Opens ${defaultAgentLauncher.launcher.display_name} in a terminal window with the setup instruction as its prompt`}
+            onClick={() => void launchAgentSetup(defaultAgentLauncher.key, defaultAgentLauncher.launcher.display_name)}
+          >
+            <ProviderMark
+              provider={defaultAgentLauncher.key}
+              displayName={defaultAgentLauncher.launcher.display_name}
+              size={13}
+            /> Run with {defaultAgentLauncher.launcher.display_name}
+          </button>
+          <button
+            type="button"
+            className="btn storage-setup-guide-button storage-setup-agent-cta storage-setup-agent-split-arrow"
+            disabled={busy}
+            aria-haspopup="menu"
+            aria-expanded={agentMenuOpen}
+            aria-label="More agent setup routes"
+            onClick={() => setAgentMenuOpen((open) => !open)}
+          >
+            <Icon name="chevron-down" size={11} />
+          </button>
+          {agentMenuOpen && (
+            <div className="sync-path-menu end" role="menu">
+              {agentLaunchers
+                .filter(({ key }) => key !== defaultAgentLauncher.key)
+                .map(({ key, launcher }) => (
+                  <button
+                    key={key}
+                    type="button"
+                    className="sync-path-menu-item"
+                    role="menuitem"
+                    onClick={() => {
+                      setPreferredLauncher(key);
+                      void launchAgentSetup(key, launcher.display_name);
+                    }}
+                  >
+                    <ProviderMark provider={key} displayName={launcher.display_name} size={13} />
+                    <span className="storage-setup-agent-menu-text">
+                      Run with {launcher.display_name}
+                      <small>Opens a terminal window with the instruction as its prompt</small>
+                    </span>
+                  </button>
+                ))}
+              <button
+                type="button"
+                className="sync-path-menu-item"
+                role="menuitem"
+                onClick={() => void copyAgentSetupInstruction()}
+              >
+                <Icon name="copy" size={13} />
+                <span className="storage-setup-agent-menu-text">
+                  Copy agent instruction
+                  <small>Paste into any other coding agent yourself</small>
+                </span>
+              </button>
+            </div>
+          )}
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="btn storage-setup-guide-button storage-setup-agent-cta"
+          disabled={busy}
+          onClick={() => void copyAgentSetupInstruction()}
+        >
+          <Icon name="copy" size={13} /> Copy agent instruction
+        </button>
+      );
 
     return (
       <>
@@ -1893,25 +1934,20 @@ export default function ProjectLinksWorkspace({
                 disabled={busy}
                 autoFocus
               />
-              <button type="submit" className="btn btn-primary" disabled={busy || !storageNameChanged || !!storageConflict}>
-                {runningAction === `rename-storage:${storageDraft.id}` ? "Saving…" : "Save"}
+              <button type="submit" className="btn btn-primary" disabled={busy || !storageNameChanged}>
+                {runningAction === `rename-storage:${pageStorageId}` ? "Saving…" : "Save"}
               </button>
               <button
                 type="button"
                 className="btn btn-ghost"
                 disabled={busy}
                 onClick={() => {
-                  setStorageNameDraft(storageDraft.name);
+                  setStorageNameDraft(savedEditedStorage?.name ?? "");
                   setRenamingStorageId(null);
                 }}
               >
                 Cancel
               </button>
-              {error && (
-                <div className="sync-path-rename-error" role="alert">
-                  <Icon name="alert-triangle" size={13} /> {error}
-                </div>
-              )}
             </form>
           )}
 
@@ -1927,22 +1963,53 @@ export default function ProjectLinksWorkspace({
               {...storageNoticeTiming}
             />
 
+
             <div
               id={storageDetailsId}
               className="sync-storage-details-panel"
               hidden={!showStorageDetails}
             >
-              {showStorageDetails && (
+              {showStorageDetails && storageSessionLoading && (
+                <div className="sync-storage-repository-state"><span className="status-loader" /> Opening storage settings…</div>
+              )}
+              {showStorageDetails && storageSession && descriptor && (
                 <StorageEditor
-                  /* Identity, so every per-storage ref inside the editor —
-                     the R2 jurisdiction, the S3 API URL draft and its
-                     editing flag — resets when the storage does. Without it
-                     a new R2 draft inherited the previous storage's
-                     jurisdiction until the endpoint happened to parse. */
-                  key={storageDraft.id}
-                  storage={storageDraft}
-                  disabled={busy || !!runningAction || !!storageConflict}
-                  onChange={(nextDraft) => {
+                  /* Identity, so every per-draft control state inside the
+                     editor — which secrets are revealed — resets when the
+                     draft does. */
+                  key={storageSession.draft.draft_id}
+                  descriptor={descriptor}
+                  providers={storageProviders}
+                  form={storageSession.form}
+                  secretPresence={secretPresence}
+                  disabled={formLocked}
+                  editsExisting={!creatingStorage}
+                  onSwitchProvider={creatingStorage ? switchStorageProvider : undefined}
+                  onRemove={!creatingStorage && storageLinkCount === 0 ? () => onRemoveStorage(pageStorageId) : undefined}
+                  // A draft's create is the page's verb and lives in the
+                  // commit bar below; a settled storage's save belongs to the
+                  // drawer it commits.
+                  primaryAction={creatingStorage ? undefined : (
+                    <>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={formLocked || !storageReady}
+                        onClick={() => void testStorageConnection()}
+                      >
+                        {runningAction === `test-storage:${pageStorageId}` ? "Testing…" : "Test connection"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={formLocked || !storageReady}
+                        onClick={() => void saveEditedStorage()}
+                      >
+                        {runningAction === `storage:${pageStorageId}` ? "Saving…" : "Save storage"}
+                      </button>
+                    </>
+                  )}
+                  onChange={(nextForm) => {
                     // An edit orphans the copied instruction, so the marker
                     // dies — and with it the row's claim to be listening.
                     draftEditVersionRef.current += 1;
@@ -1952,170 +2019,87 @@ export default function ProjectLinksWorkspace({
                         ? null
                         : current
                     ));
-                    // The same edit stales a Test verdict and, on the setup
-                    // page, arms the draft autosave.
+                    // The same edit stales a Test verdict and arms the
+                    // draft autosave.
                     setStorageTestVerified(false);
                     setStorageDraftActionError(null);
-                    if (creatingStorage) draftDirtyRef.current = true;
-                    setStorageDraft(nextDraft);
+                    draftDirtyRef.current = true;
+                    updateStorageSession((current) => ({ ...current, form: nextForm }));
                   }}
-                  secretStored={secretStored}
-                  showNameField={creatingStorage}
-                  showProgress={!creatingStorage}
-                  agentSlot={storageDraft.kind !== "s3" ? undefined
-                    : agentNotice?.kind === "launched" ? (
-                      <>
-                        <span className="sync-r2-guide-wait" role="status">
-                          <span className="status-loader" /> {agentNotice.agent} is running the setup — finish Cloudflare sign-in when the browser opens…
-                        </span>
-                        <button type="button" className="btn-link" onClick={cancelAgentSetup}>Cancel</button>
-                      </>
-                    )
-                    : agentNotice?.kind === "listening" ? (
-                      <>
-                        <span className="sync-r2-guide-connected" role="status">
-                          <Icon name="check-circle" size={13} /> Copied.
-                        </span>
-                        <span className="sync-r2-guide-wait" role="status">
-                          <span className="status-loader" /> Listening for your agent…
-                        </span>
-                        <button
-                          type="button"
-                          className={copyAgainFlashed
-                            ? "btn sync-r2-guide-btn sync-r2-copied-flash"
-                            : "btn sync-r2-guide-btn"}
-                          onClick={() => void copyAgentInstructionAgain()}
-                        >
-                          <Icon name={copyAgainFlashed ? "check" : "copy"} size={13} /> {copyAgainFlashed ? "Copied" : "Copy again"}
-                        </button>
-                        <button type="button" className="btn-link" onClick={cancelAgentSetup}>Cancel</button>
-                      </>
-                    )
-                    : agentNotice?.kind === "ready" ? (
-                      <span className="sync-r2-guide-connected" role="status">
-                        <Icon name="check-circle" size={13} /> {agentNotice.message}
-                      </span>
-                    )
-                    : agentNotice?.kind === "error" ? (
-                      <>
-                        <span className="sync-r2-guide-error" role="alert">{agentNotice.message}</span>
-                        {creatingStorage && (
-                          <>
-                            <button
-                              type="button"
-                              className="btn sync-r2-guide-btn"
-                              disabled={busy || !storageDraft.name.trim()}
-                              onClick={() => void copyAgentSetupInstruction()}
-                            >
-                              <Icon name="copy" size={13} /> Copy agent instruction
-                            </button>
-                            <button type="button" className="btn-link" onClick={cancelAgentSetup}>Try again</button>
-                          </>
-                        )}
-                      </>
-                    )
-                    : creatingStorage ? (
-                      defaultAgentLauncher ? (
-                        <div className="sync-r2-split" ref={agentSplitRef}>
-                          <button
-                            type="button"
-                            className="btn sync-r2-guide-btn sync-r2-agent-cta"
-                            disabled={busy || !storageDraft.name.trim()}
-                            title={`Opens ${defaultAgentLauncher.launcher.display_name} in a terminal window with the setup instruction as its prompt`}
-                            onClick={() => void launchAgentSetup(defaultAgentLauncher.key, defaultAgentLauncher.launcher.display_name)}
-                          >
-                            <ProviderMark
-                              provider={defaultAgentLauncher.key}
-                              displayName={defaultAgentLauncher.launcher.display_name}
-                              size={13}
-                            /> Run with {defaultAgentLauncher.launcher.display_name}
-                          </button>
-                          <button
-                            type="button"
-                            className="btn sync-r2-guide-btn sync-r2-agent-cta sync-r2-split-arrow"
-                            disabled={busy || !storageDraft.name.trim()}
-                            aria-haspopup="menu"
-                            aria-expanded={agentMenuOpen}
-                            aria-label="More agent setup routes"
-                            onClick={() => setAgentMenuOpen((open) => !open)}
-                          >
-                            <Icon name="chevron-down" size={11} />
-                          </button>
-                          {agentMenuOpen && (
-                            <div className="sync-path-menu end" role="menu">
-                              {agentLaunchers
-                                .filter(({ key }) => key !== defaultAgentLauncher.key)
-                                .map(({ key, launcher }) => (
-                                  <button
-                                    key={key}
-                                    type="button"
-                                    className="sync-path-menu-item"
-                                    role="menuitem"
-                                    onClick={() => {
-                                      setPreferredLauncher(key);
-                                      void launchAgentSetup(key, launcher.display_name);
-                                    }}
-                                  >
-                                    <ProviderMark provider={key} displayName={launcher.display_name} size={13} />
-                                    <span className="sync-r2-menu-text">
-                                      Run with {launcher.display_name}
-                                      <small>Opens a terminal window with the instruction as its prompt</small>
-                                    </span>
-                                  </button>
-                                ))}
-                              <button
-                                type="button"
-                                className="sync-path-menu-item"
-                                role="menuitem"
-                                onClick={() => void copyAgentSetupInstruction()}
-                              >
-                                <Icon name="copy" size={13} />
-                                <span className="sync-r2-menu-text">
-                                  Copy agent instruction
-                                  <small>Paste into any other coding agent yourself</small>
-                                </span>
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          className="btn sync-r2-guide-btn sync-r2-agent-cta"
-                          disabled={busy || !storageDraft.name.trim()}
-                          onClick={() => void copyAgentSetupInstruction()}
-                        >
-                          <Icon name="copy" size={13} /> Copy agent instruction
-                        </button>
-                      )
-                    ) : undefined}
-                  // A draft's create is the page's verb and lives in the
-                  // commit bar below; a settled storage's save belongs to the
-                  // drawer it commits.
-                  primaryAction={creatingStorage ? undefined : (
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      disabled={busy || !!storageConflict || !storageReady || (!!storageBaseline && sameStorage(storageDraft, storageBaseline))}
-                      onClick={() => void saveEditedStorage()}
-                    >
-                      {runningAction === `storage:${editedStorageConfig.id}` ? "Saving…" : "Save storage"}
-                    </button>
-                  )}
+                  agentSlot={agentSlot}
                 />
               )}
             </div>
 
+            {creatingStorage && showStorageDetails && storageSession && (
+              <footer className="sync-storage-setup-footer">
+                {progress && progress.total > 0 && (descriptor?.secrets.length ?? 0) > 0 && (
+                  <span className="sync-storage-editor-progress" aria-live="polite">
+                    {progress.set} of {progress.total} set
+                  </span>
+                )}
+                <div>
+                  {/* The verdict rides with the verbs rather than sitting in
+                      the caption slot beside the tally: it is the fact that
+                      unlocks Finish setup, so it belongs where the eye is on
+                      its way there, and it wears a chip so it carries at a
+                      glance rather than reading as more chrome. */}
+                  {storageTestVerified && (
+                    <span className="storage-setup-verified" role="status">
+                      <Icon name="check-circle" size={13} /> Connection verified
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    disabled={busy}
+                    onClick={() => void discardStorageDraftAndClose()}
+                  >
+                    Discard draft…
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    disabled={busy}
+                    onClick={onOpenStorageIndex}
+                    aria-label="Close setup; the draft is kept"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={formLocked || !storageReady}
+                    onClick={() => void testStorageConnection()}
+                  >
+                    {runningAction === `test-storage:${pageStorageId}` ? "Testing…" : "Test connection"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={formLocked || !storageReady}
+                    onClick={() => void saveEditedStorage()}
+                  >
+                    {descriptor && (descriptor.secrets.length > 0 || descriptor.setup_assistant)
+                      ? runningAction === `storage:${pageStorageId}` ? "Finishing…" : "Finish setup"
+                      : runningAction === `storage:${pageStorageId}` ? "Creating…" : "Create storage"}
+                  </button>
+                </div>
+              </footer>
+            )}
+
             {!creatingStorage && (
               <section className="sync-storage-repositories" aria-labelledby="storage-repositories-heading">
-                {/* Refresh is the page's verb and lives in the path bar; the
-                    card heading only names what it frames. */}
                 <div className="sync-storage-repositories-heading">
                   <h2 id="storage-repositories-heading">Repositories</h2>
                 </div>
 
                 {bundleLoading ? (
                   <div className="sync-storage-repository-state"><span className="status-loader" /> Loading repositories…</div>
+                ) : !storageAvailable ? (
+                  <div className="sync-storage-repository-state">
+                    {`This build has no ${providerLabelForPage} adapter, so the repositories in this storage cannot be listed.`}
+                  </div>
                 ) : orderedRemoteBundles.length === 0 && orderedCatalogRepos.length === 0 ? (
                   /* Emptiness is tested before failure, because the two lists
                      are read independently: a project-bundle listing that
@@ -2141,67 +2125,6 @@ export default function ProjectLinksWorkspace({
                 )}
               </section>
             )}
-
-            {/* The draft's verbs close its column, under the fields they act
-                on. Cancel is the crumb's way back said plainly beside the
-                commit; anything typed keeps living in the autosaved draft,
-                which waits on the Storages index until finished or
-                discarded. */}
-            {creatingStorage && (
-              <footer className="sync-storage-setup-footer">
-                {storageDraft.kind !== "local" && (
-                  <span className="sync-storage-editor-progress" aria-live="polite">
-                    {r2FieldsSet(storageDraft, secretStored)} of 5 set
-                  </span>
-                )}
-                {storageTestVerified && (
-                  <span className="sync-r2-guide-connected" role="status">
-                    <Icon name="check-circle" size={13} /> Connection verified
-                  </span>
-                )}
-                <div>
-                  {storageSetupDraftId && (
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      disabled={busy}
-                      onClick={() => void discardStorageDraftAndClose()}
-                    >
-                      Discard draft…
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    disabled={busy}
-                    onClick={onOpenStorageIndex}
-                    aria-label={storageSetupDraftId ? "Close setup; the draft is kept" : "Close setup"}
-                  >
-                    Cancel
-                  </button>
-                  {storageDraft.kind === "s3" && (
-                    <button
-                      type="button"
-                      className="btn"
-                      disabled={busy || !!storageConflict || !storageReady || !!runningAction}
-                      onClick={() => void testStorageConnection()}
-                    >
-                      {runningAction === `test-storage:${editedStorageConfig.id}` ? "Testing…" : "Test connection"}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    disabled={busy || !!storageConflict || !storageReady || !!runningAction}
-                    onClick={() => void saveEditedStorage()}
-                  >
-                    {storageDraft.kind === "s3"
-                      ? runningAction === `storage:${editedStorageConfig.id}` ? "Finishing…" : "Finish setup"
-                      : runningAction === `storage:${editedStorageConfig.id}` ? "Creating…" : "Create storage"}
-                  </button>
-                </div>
-              </footer>
-            )}
           </div>
         </section>
       </main>
@@ -2209,7 +2132,7 @@ export default function ProjectLinksWorkspace({
     );
   }
 
-  /* What the R2 agent handover left behind, said once on each of the two
+  /* What the agent handover left behind, said once on each of the two
    * screens that outlive the editor. Both surviving kinds are receipts — the
    * CLI's draft is ready for user review, or the copy itself failed — so the
    * non-error one is `success`, which is also the check-circle the row draws.
@@ -2239,6 +2162,7 @@ export default function ProjectLinksWorkspace({
         <ProjectPicker
           projects={projects}
           profiles={profiles}
+          providers={providers}
           storages={storages}
           onAddProject={onAddProject}
           onSelectProject={onSelectProject}
@@ -2268,7 +2192,7 @@ export default function ProjectLinksWorkspace({
             : "Working — storage can't change right now."
         : undefined;
       const otherStorages = workspaceLinkedStorages.filter((storage) => (
-        storage.id !== workspaceStorage.id
+        storage.storage_id !== workspaceStorage.storage_id
       ));
       const storageMenu: PathBarMenuGroup[] = [
         {
@@ -2289,7 +2213,7 @@ export default function ProjectLinksWorkspace({
               title: "Stop syncing this pairing; files already in storage are kept",
               onSelect: () => void run(
                 `unlink:${workspaceActionPrefix}`,
-                () => onUnlinkStorage(workspaceProject.local_project_id, workspaceStorage.id),
+                () => onUnlinkStorage(workspaceProject.local_project_id, workspaceStorage.storage_id),
               ),
             },
           ],
@@ -2297,15 +2221,15 @@ export default function ProjectLinksWorkspace({
         ...(otherStorages.length > 0 ? [{
           label: "Switch to",
           items: otherStorages.map((storage) => ({
-            id: storage.id,
+            id: storage.storage_id,
             label: storage.name || "(unnamed)",
             detail: storageSubtitle(storage),
             detailIsPath: storageSubtitleIsPath(storage),
-            icon: storage.kind === "local" ? ("drive" as const) : ("cloud" as const),
+            icon: iconNameFromHint(storage.icon, "drive"),
             disabled: workspaceControlsLocked,
             onSelect: () => {
               if (workspaceReviewOpen) inlineStorageReview?.onClose();
-              void onSelectStorage(workspaceProject.local_project_id, storage.id);
+              void onSelectStorage(workspaceProject.local_project_id, storage.storage_id);
             },
           })),
         }] : []),
@@ -2345,7 +2269,7 @@ export default function ProjectLinksWorkspace({
       pathCrumbs.push({
         id: "storage",
         label: workspaceStorage.name || "(unnamed)",
-        icon: workspaceStorage.kind === "local" ? "drive" : "cloud",
+        icon: iconNameFromHint(workspaceStorage.icon, "drive"),
         tone: "root",
         title: `${workspaceStorage.name || "Storage"} · ${storageSubtitle(workspaceStorage)}`,
         ariaLabel: `${workspaceStorage.name || "Unnamed storage"}. Storage menu`,
@@ -2353,7 +2277,7 @@ export default function ProjectLinksWorkspace({
           label: workspaceStorage.name || "(unnamed)",
           detail: storageSubtitle(workspaceStorage),
           detailIsPath: storageSubtitleIsPath(workspaceStorage),
-          icon: workspaceStorage.kind === "local" ? "drive" : "cloud",
+          icon: iconNameFromHint(workspaceStorage.icon, "drive"),
         },
         menuBanner: storageMenuBanner,
         menu: storageMenu,
@@ -2423,7 +2347,7 @@ export default function ProjectLinksWorkspace({
               icon: "trash" as const,
               danger: true,
               disabled: busy,
-              title: "Forget local sync bases, conversation mappings, recovery records, and saved plans; files and cloud data are kept",
+              title: "Forget local sync bases, conversation mappings, and results; files and cloud data are kept",
               onSelect: () => void onResetProjectMetadata(workspaceProject.local_project_id),
             },
           ],
@@ -2491,8 +2415,8 @@ export default function ProjectLinksWorkspace({
         tone: "section",
         // Which branch the history is showing is part of where you are, so it
         // rides the crumb that names the section rather than a row of its own.
-        // A session replaces this crumb outright, and the branch goes with it:
-        // the branch scopes the list, and inside a session there is no list.
+        // A session replaces this crumb outright. The branch selects the Git
+        // commit rail; sessions remain project-wide.
         scope: activityHeader && activityHeader.branches.length > 0 ? (
           <BranchPicker
             branches={activityHeader.branches}
@@ -2617,7 +2541,7 @@ export default function ProjectLinksWorkspace({
         className={`sync-path-sync${workspacePullReviewOpen ? " active" : ""}`}
         disabled={busy
           || !!runningAction
-          || workspacePathBlocked
+          || workspaceStorageUnavailable
           || (workspaceBindingActive && !workspaceCanRestore)
           || storageActionLockedForReview(workspaceReviewKind, "pull")
           || (workspacePullReviewOpen && inlineStorageReview?.continueDisabled)}
@@ -2632,10 +2556,10 @@ export default function ProjectLinksWorkspace({
           setLinkingProjectId(null);
           void run(
             `pull:${workspaceActionPrefix}`,
-            () => onPull(workspaceProject.local_project_id, workspaceStorage.id),
+            () => onPull(workspaceProject.local_project_id, workspaceStorage.storage_id),
           );
         }}
-        title={workspacePathTitle
+        title={workspaceStorageIssue
           ?? workspaceProfileIssue
           ?? (!workspaceBindingActive
             ? "Confirm project setup before pulling"
@@ -2669,7 +2593,7 @@ export default function ProjectLinksWorkspace({
         className={`sync-path-sync${workspacePushReviewOpen ? " active" : ""}`}
         disabled={busy
           || !!runningAction
-          || workspacePathBlocked
+          || workspaceStorageUnavailable
           || !workspaceCanSync
           || storageActionLockedForReview(workspaceReviewKind, "push")
           || (workspacePushReviewOpen && inlineStorageReview?.continueDisabled)}
@@ -2681,13 +2605,13 @@ export default function ProjectLinksWorkspace({
           setLinkingProjectId(null);
           void run(
             `push:${workspaceActionPrefix}`,
-            () => onPush(workspaceProject.local_project_id, workspaceStorage.id),
+            () => onPush(workspaceProject.local_project_id, workspaceStorage.storage_id),
           );
         }}
-        title={workspacePathTitle
+        title={workspaceStorageIssue
           ?? workspaceProfileIssue
           ?? (workspacePushReviewOpen
-            ? "Push the selected resources to this storage"
+            ? (inlineStorageReview?.continueTitle ?? "Push the selected resources to this storage")
             : "Choose resources, then push them to this storage")}
         aria-label={workspacePushReviewOpen
           ? `Push selected resources to ${workspaceStorage.name || "storage"}`
@@ -2856,50 +2780,16 @@ export default function ProjectLinksWorkspace({
             {[workspaceProject].map((project) => {
               const projectLinks = linkedByProject.get(project.local_project_id) ?? [];
               const linkedStorages = projectLinks
-                .map((link) => storages.find((storage) => storage.id === link.storage_id))
-                .filter((storage): storage is StorageConfig => !!storage);
+                .map((link) => storages.find((storage) => storage.storage_id === link.storage_id))
+                .filter((storage): storage is StorageSummary => !!storage);
               const selectedStorage = linkedStorages.find((storage) => (
-                project.local_project_id === activeProjectId && storage.id === activeStorageId
+                project.local_project_id === activeProjectId && storage.storage_id === activeStorageId
               )) ?? linkedStorages[0] ?? null;
               const availableStorages = storages.filter((storage) => (
-                !projectLinks.some((link) => link.storage_id === storage.id)
+                storage.available && !projectLinks.some((link) => link.storage_id === storage.storage_id)
               ));
               const projectBinding = bindingByProject.get(project.local_project_id);
               const bindingActive = projectBinding?.state === "active";
-              const projectProfiles = Object.entries(projectBinding?.profile_ids ?? {}).map(
-                ([provider, profileId]) => ({
-                  provider,
-                  profile: profiles.find((candidate) => candidate.profile_id === profileId),
-                }),
-              );
-              // Codex conversation-path repair is provider-specific
-              // maintenance; it appears exactly when a Codex profile is bound.
-              const codexProfile = projectProfiles.find(({ provider }) => provider === "codex")?.profile;
-              const codexConfigured = bindingActive && !!codexProfile;
-              const conversationPathAudit = conversationPathAudits[project.local_project_id];
-              const conversationPathAuditError = conversationPathAuditErrors[project.local_project_id];
-              const conversationPathNoticeBlocked = !!conversationPathAuditError
-                || !!conversationPathAudit?.blockers.length;
-              const conversationPathNotice = codexConfigured
-                && !conversationPathAuditLoading
-                && shouldShowConversationPathRepairNotice(
-                  conversationPathAudit,
-                  conversationPathAuditError,
-                ) ? (
-                <ConversationPathRepairNotice
-                  audit={conversationPathAudit}
-                  auditError={conversationPathAuditError}
-                  projectName={projectLabel(project)}
-                  profileName={codexProfile?.display_name ?? "Codex"}
-                  profilePath={codexProfile?.path ?? conversationPathAudit?.profile_path}
-                  showScope={false}
-                  busy={busy || runningAction === `repair-paths:${project.local_project_id}`}
-                  onRepair={() => run(
-                    `repair-paths:${project.local_project_id}`,
-                    () => onRepairConversationPaths(project.local_project_id),
-                  )}
-                />
-              ) : null;
               const renderStorageConnectionActions = () => (
                 <>
                   {availableStorages.length > 0 && (
@@ -2934,12 +2824,11 @@ export default function ProjectLinksWorkspace({
                 </>
               );
               // The bar is the activity page's own section heading — same h2,
-              // count chip and icon-button vocabulary as Uncommitted below it,
+              // count chip and icon-button vocabulary as branch-unmapped below it,
               // so the two card headings cannot drift apart.
               const storageHeading = (
                 <div className="sync-history-section-heading">
                   <h2><Icon name="link" size={14} />Storage</h2>
-                  {!conversationPathNoticeBlocked && conversationPathNotice}
                   <span className="project-storage-heading-actions">
                     {projectLinks.length > 0 && (
                       <span
@@ -2968,20 +2857,17 @@ export default function ProjectLinksWorkspace({
 
               // Storage identity and actions live in the path bar. Do not draw
               // an empty frame when this group has no notice or review.
-              const storageGroupNotice = (conversationPathNoticeBlocked || selectedStorage)
-                && conversationPathNotice;
               const storageBlockShown = !!selectedStorage
                 && (!!(storageNotice
                   && storageNotice.projectId === project.local_project_id
-                  && storageNotice.storageId === selectedStorage.id)
+                  && storageNotice.storageId === selectedStorage.storage_id)
                   || !!(siblingNotice
                     && siblingNotice.projectId === project.local_project_id
-                    && siblingNotice.storageId === selectedStorage.id
+                    && siblingNotice.storageId === selectedStorage.storage_id
                     && siblingNotice.status.state !== "none")
                   || (inlineStorageReview?.projectId === project.local_project_id
-                    && inlineStorageReview.storageId === selectedStorage.id));
-              const storageGroupEmpty = !storageGroupNotice
-                && !!selectedStorage
+                    && inlineStorageReview.storageId === selectedStorage.storage_id));
+              const storageGroupEmpty = !!selectedStorage
                 && projectLinks.length > 0
                 && !storageBlockShown
                 && linkingProjectId !== project.local_project_id;
@@ -2997,8 +2883,6 @@ export default function ProjectLinksWorkspace({
                       className={`project-storage-card${project.is_git_repository ? "" : " project-storage-card-non-git"}`}
                       aria-label={`${projectLabel(project)} storage`}
                     >
-                      {storageGroupNotice}
-
                       {!selectedStorage && storageHeading}
                     {projectLinks.length === 0 && (
                       <div className="project-storage-empty">
@@ -3039,18 +2923,18 @@ export default function ProjectLinksWorkspace({
                     {selectedStorage && (() => {
                       const storage = selectedStorage;
                       const reviewOpen = inlineStorageReview?.projectId === project.local_project_id
-                        && inlineStorageReview.storageId === storage.id;
-                      const actionPrefix = `${project.local_project_id}:${storage.id}`;
+                        && inlineStorageReview.storageId === storage.storage_id;
+                      const actionPrefix = `${project.local_project_id}:${storage.storage_id}`;
                       const reviewPanelId = `storage-review-${actionPrefix.replace(/[^a-z0-9_-]/gi, "-")}`;
                       const activeNotice = storageNotice
                         && storageNotice.projectId === project.local_project_id
-                        && storageNotice.storageId === storage.id
+                        && storageNotice.storageId === storage.storage_id
                         ? storageNotice
                         : null;
                       const noticeActionsDisabled = busy || !!runningAction;
                       const activeSibling = siblingNotice
                         && siblingNotice.projectId === project.local_project_id
-                        && siblingNotice.storageId === storage.id
+                        && siblingNotice.storageId === storage.storage_id
                         && siblingNotice.status.state !== "none"
                         ? siblingNotice.status
                         : null;
@@ -3087,7 +2971,7 @@ export default function ProjectLinksWorkspace({
                                 type="button"
                                 className="btn btn-ghost"
                                 disabled={noticeActionsDisabled}
-                                onClick={() => void run(`pull:${actionPrefix}`, () => onPull(project.local_project_id, storage.id))}
+                                onClick={() => void run(`pull:${actionPrefix}`, () => onPull(project.local_project_id, storage.storage_id))}
                               >
                                 <Icon name="download" size={13} />
                                 Open Pull review
@@ -3110,7 +2994,7 @@ export default function ProjectLinksWorkspace({
                                 type="button"
                                 className="btn btn-ghost"
                                 disabled={noticeActionsDisabled}
-                                onClick={() => onOpenStorage(storage.id, true)}
+                                onClick={() => onOpenStorage(storage.storage_id, true)}
                               >
                                 Storage settings
                               </button>
@@ -3118,7 +3002,7 @@ export default function ProjectLinksWorkspace({
                                 type="button"
                                 className="btn btn-ghost danger"
                                 disabled={noticeActionsDisabled}
-                                onClick={() => void run(`unlink:${actionPrefix}`, () => onUnlinkStorage(project.local_project_id, storage.id))}
+                                onClick={() => void run(`unlink:${actionPrefix}`, () => onUnlinkStorage(project.local_project_id, storage.storage_id))}
                               >
                                 Unlink storage…
                               </button>
@@ -3138,7 +3022,7 @@ export default function ProjectLinksWorkspace({
                                 type="button"
                                 className="btn btn-ghost danger"
                                 disabled={noticeActionsDisabled}
-                                onClick={() => void run(`unlink:${actionPrefix}`, () => onUnlinkStorage(project.local_project_id, storage.id))}
+                                onClick={() => void run(`unlink:${actionPrefix}`, () => onUnlinkStorage(project.local_project_id, storage.storage_id))}
                               >
                                 Unlink storage…
                               </button>
@@ -3146,7 +3030,7 @@ export default function ProjectLinksWorkspace({
                                 type="button"
                                 className="btn btn-ghost"
                                 disabled={noticeActionsDisabled}
-                                onClick={() => void run(`pull:${actionPrefix}`, () => onPull(project.local_project_id, storage.id))}
+                                onClick={() => void run(`pull:${actionPrefix}`, () => onPull(project.local_project_id, storage.storage_id))}
                               >
                                 <Icon name="download" size={13} />
                                 Review &amp; adopt
@@ -3185,7 +3069,7 @@ export default function ProjectLinksWorkspace({
                                   disabled={noticeActionsDisabled}
                                   onClick={() => void run(
                                     `${failedAction}:${actionPrefix}`,
-                                    () => (failedAction === "push" ? onPush : onPull)(project.local_project_id, storage.id),
+                                    () => (failedAction === "push" ? onPush : onPull)(project.local_project_id, storage.storage_id),
                                   )}
                                 >
                                   Retry
@@ -3198,7 +3082,7 @@ export default function ProjectLinksWorkspace({
 
                       return (
                         <div
-                          key={storage.id}
+                          key={storage.storage_id}
                           className={`storage-link-block selected${reviewOpen ? " sync-review-open" : ""}`}
                           aria-busy={reviewOpen && busy}
                         >
@@ -3208,7 +3092,7 @@ export default function ProjectLinksWorkspace({
                               busy={noticeActionsDisabled}
                               onConnect={(matches) => onConnectSibling?.(
                                 project.local_project_id,
-                                storage.id,
+                                storage.storage_id,
                                 matches,
                               )}
                             />
@@ -3217,7 +3101,7 @@ export default function ProjectLinksWorkspace({
                             <SyncOutcomeNotice
                               outcome={activeNotice.outcome}
                               busy={noticeActionsDisabled}
-                              onAction={() => onStorageNoticeAction?.(activeNotice.outcome)}
+                              onAction={(action) => onStorageNoticeAction?.(activeNotice.outcome, action)}
                               onDismiss={() => onDismissStorageNotice?.()}
                             />
                           )}
@@ -3259,15 +3143,15 @@ export default function ProjectLinksWorkspace({
                         <div className="storage-link-picker">
                           {availableStorages.map((storage) => (
                             <button
-                              key={storage.id}
+                              key={storage.storage_id}
                               type="button"
                               disabled={busy}
-                              onClick={() => void run(`link:${project.local_project_id}:${storage.id}`, async () => {
-                                await onLinkStorage(project.local_project_id, storage.id);
+                              onClick={() => void run(`link:${project.local_project_id}:${storage.storage_id}`, async () => {
+                                await onLinkStorage(project.local_project_id, storage.storage_id);
                                 setLinkingProjectId(null);
                               })}
                             >
-                              <Icon name={storage.kind === "local" ? "drive" : "cloud"} size={15} />
+                              <Icon name={iconNameFromHint(storage.icon, "drive")} size={15} />
                               {storage.name || "(unnamed)"}
                               <Icon name="chevron-right" size={13} />
                             </button>
@@ -3321,7 +3205,7 @@ export default function ProjectLinksWorkspace({
               <ProjectFilesActivityPage
                 project={activeProject}
                 activeStorageId={activeStorageId}
-                activeStorageName={storages.find((storage) => storage.id === activeStorageId)?.name ?? null}
+                activeStorageName={storages.find((storage) => storage.storage_id === activeStorageId)?.name ?? null}
                 refreshEpoch={historyRefreshEpoch}
                 onHeaderModelChange={handleFilesActivityHeaderChange}
                 onOpenFile={(relativePath) => openProjectFile(activeProject.local_project_id, relativePath)}
@@ -3333,7 +3217,7 @@ export default function ProjectLinksWorkspace({
                 binding={activeBindingByProject.get(activeProject.local_project_id) ?? null}
                 refreshEpoch={historyRefreshEpoch}
                 activeStorageId={activeStorageId}
-                activeStorageName={storages.find((storage) => storage.id === activeStorageId)?.name ?? null}
+                activeStorageName={storages.find((storage) => storage.storage_id === activeStorageId)?.name ?? null}
                 onUnlinkStorage={activeStorageId ? () => {
                   void run(
                     `unlink:${activeProject.local_project_id}:${activeStorageId}`,

@@ -1,29 +1,40 @@
-//! Crash-consistent provider-file materialization for reviewed conversation
-//! actions.
+//! Best-effort provider-file materialization for conversation actions.
 //!
-//! Provider transcripts, indexes, sidecars, bindings, and receipts cannot be
-//! committed by one filesystem rename. This module uses the durable
-//! conversation journal as the source of truth and makes every step
-//! restartable and idempotent.
+//! New destinations use no-clobber publication. Existing transcripts use one
+//! source check before installation; later transcript updates can be replaced.
+//! Shared provider files retain digest checks through commit. A multi-file
+//! action is not replayed, rolled back, or resumed after failure.
 
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::conversation_codec::CodecLineage;
-use crate::persistence::LocalStateRepository;
+use crate::payload::PayloadBytes;
+pub use crate::persistence::ConversationPublicationState;
+use crate::persistence::{LocalStateRepository, LockedConversationPull};
+use crate::verified_transcript::VerifiedTranscript;
 use mallard_domain::{
     conversation_resource_id, hex_lower, sha256_hex, ActionId, ActionStatus, ApplyReceipt,
-    ConversationApplyReceipt, ConversationBindings, ConversationFileRole,
-    ConversationJournalTarget, ConversationMaterializationState, ConversationOperationId,
-    ConversationPlanDirection, ConversationSourceDisposition, ConversationSyncOperation,
-    ConversationSyncOperationKind, MaterializationId, MaterializationRecord, MaterializationStatus,
-    PullJournalPhase, PushJournalPhase, RestoreActionType, SyncConfig, TargetExpectation,
-    LOCAL_SCHEMA,
+    ConversationApplyKind, ConversationApplyOperation, ConversationApplyReceipt,
+    ConversationApplyTarget, ConversationBindings, ConversationFileRole,
+    ConversationMaterializationState, ConversationOperationId, ConversationPlanDirection,
+    ConversationSourceDisposition, HostIdentity, MachineProjectState, MaterializationId,
+    MaterializationRecord, MaterializationStatus, Materializations, RestoreActionType,
+    TargetExpectation, LOCAL_SCHEMA, MAX_CONVERSATION_FILES,
 };
 
 const MAX_PROVIDER_TARGET_BYTES: u64 = 512 * 1024 * 1024;
+
+struct StageCleanup(Vec<PathBuf>);
+
+impl Drop for StageCleanup {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConversationTargetPayload {
@@ -33,77 +44,17 @@ pub struct ConversationTargetPayload {
     /// The provider index row ids this payload rewrites; non-empty exactly
     /// for `ProviderIndexFragment` payloads.
     pub index_rows: Vec<String>,
-    pub bytes: Vec<u8>,
+    pub bytes: PayloadBytes,
 }
 
 #[derive(Clone, Debug)]
 pub struct ConversationMaterializationRequest {
-    pub operation: ConversationSyncOperation,
+    pub operation: ConversationApplyOperation,
     pub targets: Vec<ConversationTargetPayload>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ConversationFailpoint {
-    BeforeJournal,
-    AfterJournal,
-    BeforeStage {
-        index: usize,
-        role: ConversationFileRole,
-    },
-    AfterStage {
-        index: usize,
-        role: ConversationFileRole,
-    },
-    BeforeStaged,
-    AfterStaged,
-    BeforeCloudPublication,
-    AfterCloudHeadCas,
-    BeforeHeadAdvanced,
-    AfterHeadAdvanced,
-    BeforeTargetCommit {
-        index: usize,
-        role: ConversationFileRole,
-    },
-    AfterTargetWrite {
-        index: usize,
-        role: ConversationFileRole,
-    },
-    AfterTargetCommit {
-        index: usize,
-        role: ConversationFileRole,
-    },
-    BeforeProviderCommitted,
-    AfterProviderCommitted,
-    BeforeBindingCommit,
-    AfterBindingCommit,
-    BeforeConfigCommit,
-    AfterConfigCommit,
-    BeforeReceipt,
-    AfterReceipt,
-    BeforeLocalCommitted,
-    AfterLocalCommitted,
-    BeforeCleanup,
-    AfterCleanup,
-}
-
-pub trait ConversationFailpoints {
-    fn hit(&mut self, point: &ConversationFailpoint) -> Result<(), String>;
-}
-
-#[derive(Default)]
-pub struct NoConversationFailpoints;
-
-impl ConversationFailpoints for NoConversationFailpoints {
-    fn hit(&mut self, _point: &ConversationFailpoint) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ConversationRecoveryReport {
-    pub completed: Vec<ConversationOperationId>,
-    pub rolled_back: Vec<ConversationOperationId>,
-    pub recovery_required: Vec<ConversationOperationId>,
+    pub transcript: VerifiedTranscript,
+    /// Bytes returned by the source check, required only when the transcript
+    /// is replaced in place. Kept in memory for its backup, never serialized.
+    pub checked_transcript: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,229 +64,17 @@ pub struct ConversationCloudPublication {
     pub manifest_sha256: String,
 }
 
-fn push_phase(operation: &ConversationSyncOperation) -> Option<PushJournalPhase> {
-    match &operation.operation {
-        ConversationSyncOperationKind::CloudPublication(publication) => Some(publication.phase),
-        ConversationSyncOperationKind::ProviderMaterialization(_) => None,
-    }
-}
-
-fn pull_phase(operation: &ConversationSyncOperation) -> Option<PullJournalPhase> {
-    match &operation.operation {
-        ConversationSyncOperationKind::ProviderMaterialization(materialization) => {
-            Some(materialization.phase)
-        }
-        ConversationSyncOperationKind::CloudPublication(_) => None,
-    }
-}
-
-fn set_push_phase(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-    phase: PushJournalPhase,
-    updated_at: u64,
-) -> Result<ConversationSyncOperation, String> {
-    let (_, updated) = mutate_operation(repository, operation_id, |operation| {
-        match &mut operation.operation {
-            ConversationSyncOperationKind::CloudPublication(publication) => {
-                publication.phase = phase;
-            }
-            ConversationSyncOperationKind::ProviderMaterialization(_) => {
-                return Err("push phase on a materialization operation".to_string());
-            }
-        }
-        operation.updated_at = operation.updated_at.max(updated_at);
-        Ok(())
-    })?;
-    Ok(updated)
-}
-
-fn set_pull_phase(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-    phase: PullJournalPhase,
-    updated_at: u64,
-) -> Result<ConversationSyncOperation, String> {
-    let (_, updated) = mutate_operation(repository, operation_id, |operation| {
-        match &mut operation.operation {
-            ConversationSyncOperationKind::ProviderMaterialization(materialization) => {
-                materialization.phase = phase;
-            }
-            ConversationSyncOperationKind::CloudPublication(_) => {
-                return Err("pull phase on a publication operation".to_string());
-            }
-        }
-        operation.updated_at = operation.updated_at.max(updated_at);
-        Ok(())
-    })?;
-    Ok(updated)
-}
-
-/// Install one journaled whole-document after-state: idempotent when the
-/// current document already equals the after-state, a plain replacement when
-/// it still equals the before-state, and a typed corruption block otherwise.
-fn install_journaled_bindings(
-    repository: &LocalStateRepository,
-    before: &ConversationBindings,
-    after: &ConversationBindings,
-) -> Result<(), String> {
-    let current = repository.load_conversation_bindings()?;
-    if &current == after {
-        return Ok(());
-    }
-    if &current != before {
-        return Err(
-            "conversation bindings are neither the journaled before nor after state".to_string(),
-        );
-    }
-    repository.install_conversation_bindings_snapshot(after.clone())
-}
-
-fn install_journaled_sync_config(
-    repository: &LocalStateRepository,
-    before: &SyncConfig,
-    after: &SyncConfig,
-) -> Result<(), String> {
-    let current = repository.load_config()?;
-    if &current == after {
-        return Ok(());
-    }
-    if &current != before {
-        return Err("sync config is neither the journaled before nor after state".to_string());
-    }
-    repository.install_journaled_config_snapshot(after.clone())
-}
-
-/// Complete journaled publication payloads with the exact coordinates the
-/// fused publish installed. Only rows this batch wrote are rewritten: each
-/// operation's after-document gets the batch checkpoints' accepted pins moved
-/// from the reviewed-anchor placeholder to the published head, and each
-/// successor's before-document is re-chained from its predecessor's patched
-/// after-document so sequential installation matches disk exactly. The first
-/// operation's before-document is the pristine pre-batch load and is never
-/// touched; pre-existing rows outside the batch are never touched either,
-/// even when their accepted pin happens to equal the reviewed anchor.
-fn patch_publication_payload(
-    payload: &mut mallard_domain::ConversationPublicationOperation,
-    storage_id: &mallard_domain::StorageId,
-    batch: &[(mallard_domain::SyncScopeKey, mallard_domain::ThreadId)],
-    publication: &ConversationCloudPublication,
-    chained_before: Option<&mallard_domain::SyncConfig>,
-) {
-    payload.candidate_commit_id = publication.commit_id.clone();
-    payload.candidate_manifest_sha256 = publication.manifest_sha256.clone();
-    if let Some(before) = chained_before {
-        payload.sync_config_before = before.clone();
-    }
-    for link in payload
-        .sync_config_after
-        .links
-        .iter_mut()
-        .filter(|link| &link.storage_id == storage_id)
-    {
-        for (scope, thread_id) in batch {
-            if let Some(accepted) = link
-                .conversation_checkpoints
-                .get_mut(scope)
-                .and_then(|threads| threads.get_mut(thread_id))
-                .and_then(|checkpoint| checkpoint.accepted.as_mut())
-            {
-                accepted.accepted_at_commit_id = publication.commit_id.clone();
-                accepted.accepted_at_manifest_sha256 = publication.manifest_sha256.clone();
-            }
-        }
-    }
-}
-
-/// Commit a publishing Push's local after-state and receipt from its
-/// journaled documents, then retire the operation. `publication` carries the
-/// exact head coordinates the CAS installed.
-fn finish_cloud_publication(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-    publication: &ConversationCloudPublication,
-    failpoints: &mut impl ConversationFailpoints,
-) -> Result<ConversationApplyReceipt, String> {
-    let ConversationSyncOperationKind::CloudPublication(payload) = &operation.operation else {
-        return Err("cloud publication finish requires a publication operation".to_string());
-    };
-    failpoints.hit(&ConversationFailpoint::BeforeBindingCommit)?;
-    install_journaled_bindings(
-        repository,
-        &payload.bindings_before,
-        &payload.bindings_after,
-    )?;
-    failpoints.hit(&ConversationFailpoint::AfterBindingCommit)?;
-    failpoints.hit(&ConversationFailpoint::BeforeConfigCommit)?;
-    install_journaled_sync_config(
-        repository,
-        &payload.sync_config_before,
-        &payload.sync_config_after,
-    )?;
-    failpoints.hit(&ConversationFailpoint::AfterConfigCommit)?;
-    let operation = set_push_phase(
-        repository,
-        &operation.operation_id,
-        PushJournalPhase::LocalCommitted,
-        operation.updated_at,
-    )?;
-    failpoints.hit(&ConversationFailpoint::BeforeReceipt)?;
-    let receipt = commit_receipt(
-        repository,
-        &operation,
-        publication.revision,
-        &publication.commit_id,
-        &publication.manifest_sha256,
-    );
-    let (receipt, terminal_phase) = match receipt {
-        Ok(receipt) => (receipt, PushJournalPhase::Complete),
-        Err(_) => {
-            // The local commit is durable; regenerate the receipt from the
-            // journal and terminalize with a warning instead of failing.
-            let regenerated = conversation_receipt(
-                &operation,
-                publication.revision,
-                &publication.commit_id,
-                &publication.manifest_sha256,
-            );
-            (regenerated, PushJournalPhase::CompleteWithWarnings)
-        }
-    };
-    failpoints.hit(&ConversationFailpoint::AfterReceipt)?;
-    failpoints.hit(&ConversationFailpoint::BeforeLocalCommitted)?;
-    set_push_phase(
-        repository,
-        &operation.operation_id,
-        terminal_phase,
-        operation.updated_at,
-    )?;
-    failpoints.hit(&ConversationFailpoint::AfterLocalCommitted)?;
-    failpoints.hit(&ConversationFailpoint::BeforeCleanup)?;
-    cleanup_and_retire(repository, &operation.operation_id)?;
-    failpoints.hit(&ConversationFailpoint::AfterCleanup)?;
-    Ok(receipt)
-}
-
-/// Journal a reviewed Push, publish through the caller's production bundle
-/// engine, and finalize the local receipt. `inspect_after_error` closes the
-/// important CAS ambiguity: an object store may commit the head and then
-/// return an I/O error.
+/// Publish one Push apply operation and finalize its local receipt.
 #[cfg(any(test, feature = "test-support"))]
 pub fn apply_conversation_cloud_publication(
     repository: &LocalStateRepository,
-    operation: ConversationSyncOperation,
+    operation: ConversationApplyOperation,
+    state: ConversationPublicationState,
     publish: impl FnOnce() -> Result<ConversationCloudPublication, String>,
-    inspect_after_error: impl FnOnce() -> Result<Option<ConversationCloudPublication>, String>,
-    failpoints: &mut impl ConversationFailpoints,
 ) -> Result<ConversationApplyReceipt, String> {
     let _host_guard = repository.acquire_host_operation()?;
-    let receipts = apply_conversation_cloud_publications_locked(
-        repository,
-        vec![operation],
-        publish,
-        inspect_after_error,
-        failpoints,
-    )?;
+    let receipts =
+        apply_conversation_cloud_publications_locked(repository, vec![operation], state, publish)?;
     receipts
         .into_iter()
         .next()
@@ -346,14 +85,13 @@ pub fn apply_conversation_cloud_publication(
 /// orchestrator holds the host-operation guard across generic and
 /// conversation publication. Candidate objects, the immutable manifest, and
 /// the candidate commit are already uploaded (orphan-safe) by the caller;
-/// this function journals the decision, advances the head once by CAS, and
-/// installs the exact journaled local after-states.
+/// this function advances the head once by CAS and installs the local
+/// after-states during the same attempt.
 pub fn apply_conversation_cloud_publications_locked(
     repository: &LocalStateRepository,
-    operations: Vec<ConversationSyncOperation>,
+    operations: Vec<ConversationApplyOperation>,
+    mut state: ConversationPublicationState,
     publish: impl FnOnce() -> Result<ConversationCloudPublication, String>,
-    inspect_after_error: impl FnOnce() -> Result<Option<ConversationCloudPublication>, String>,
-    failpoints: &mut impl ConversationFailpoints,
 ) -> Result<Vec<ConversationApplyReceipt>, String> {
     if operations.is_empty() {
         return Err("cloud publication requires at least one conversation action".to_string());
@@ -361,14 +99,23 @@ pub fn apply_conversation_cloud_publications_locked(
     let mut operation_ids = std::collections::BTreeSet::new();
     let mut result_threads = std::collections::BTreeSet::new();
     let first = &operations[0];
+    let current = repository.load_project_activity_state_snapshot()?;
+    state.validate(&current)?;
     for operation in &operations {
-        if push_phase(operation) != Some(PushJournalPhase::CandidateUploaded)
-            || !operation.targets.is_empty()
+        if !matches!(
+            operation.operation,
+            ConversationApplyKind::CloudPublication(_)
+        ) || !operation.targets.is_empty()
         {
-            return Err("cloud publication requires CandidateUploaded Push operations".to_string());
+            return Err("cloud publication requires Push apply operations".to_string());
         }
         operation.validate()?;
-        validate_operation_scope(repository, operation)?;
+        validate_operation_scope_from_state(
+            &current.host_identity,
+            &current.bindings,
+            &current.conversation_bindings,
+            operation,
+        )?;
         if operation.plan_id != first.plan_id
             || operation.cloud != first.cloud
             || operation.host_id != first.host_id
@@ -386,424 +133,176 @@ pub fn apply_conversation_cloud_publications_locked(
         }
     }
 
-    failpoints.hit(&ConversationFailpoint::BeforeJournal)?;
-    insert_operations(repository, &operations)?;
-    failpoints.hit(&ConversationFailpoint::AfterJournal)?;
-    failpoints.hit(&ConversationFailpoint::BeforeCloudPublication)?;
-    let publication = match publish() {
-        Ok(publication) => publication,
-        Err(error) => match inspect_after_error()? {
-            Some(publication) => publication,
-            None => {
-                for operation in &operations {
-                    set_push_phase(
-                        repository,
-                        &operation.operation_id,
-                        PushJournalPhase::AbortedCasLost,
-                        operation.updated_at,
-                    )?;
-                    cleanup_and_retire(repository, &operation.operation_id)?;
-                }
-                return Err(error);
-            }
-        },
-    };
-    failpoints.hit(&ConversationFailpoint::AfterCloudHeadCas)?;
-    failpoints.hit(&ConversationFailpoint::BeforeHeadAdvanced)?;
-    let batch_pairs: Vec<(mallard_domain::SyncScopeKey, mallard_domain::ThreadId)> = operations
-        .iter()
-        .map(|operation| {
-            (
-                mallard_domain::SyncScopeKey::Provider(operation.provider.clone()),
-                operation.thread_id.clone(),
-            )
-        })
-        .collect();
-    let journal = repository.load_conversation_sync_journal()?;
-    repository.mutate_conversation_sync_journal(journal.revision, |journal| {
-        let mut chained_before: Option<mallard_domain::SyncConfig> = None;
-        for operation_id in &operation_ids {
-            let operation = journal
-                .operations
-                .iter_mut()
-                .find(|operation| &operation.operation_id == operation_id)
-                .ok_or_else(|| format!("conversation operation '{}' disappeared", operation_id))?;
-            match &mut operation.operation {
-                ConversationSyncOperationKind::CloudPublication(publication_payload) => {
-                    publication_payload.phase = PushJournalPhase::HeadAdvanced;
-                    patch_publication_payload(
-                        publication_payload,
-                        &operation.cloud.storage_id,
-                        &batch_pairs,
-                        &publication,
-                        chained_before.as_ref(),
-                    );
-                    chained_before = Some(publication_payload.sync_config_after.clone());
-                }
-                ConversationSyncOperationKind::ProviderMaterialization(_) => {
-                    return Err("publication batch contains a materialization".to_string());
-                }
-            }
+    drop(current);
+    let publication = publish()?;
+    let mut receipts = Vec::with_capacity(operations.len());
+    let mut records = Vec::with_capacity(operations.len());
+    for operation in &operations {
+        // Only this batch's project and thread checkpoints accept the new
+        // head. Other checkpoints retain their original publication pins.
+        if let Some(accepted) = state
+            .sync_config_after
+            .links
+            .iter_mut()
+            .find(|link| {
+                link.storage_id == operation.cloud.storage_id
+                    && link.local_project_id == operation.local_project_id
+            })
+            .and_then(|link| {
+                link.conversation_checkpoints
+                    .get_mut(&mallard_domain::SyncScopeKey::Provider(
+                        operation.provider.clone(),
+                    ))
+            })
+            .and_then(|threads| threads.get_mut(&operation.thread_id))
+            .and_then(|checkpoint| checkpoint.accepted.as_mut())
+        {
+            accepted.accepted_at_commit_id = publication.commit_id.clone();
+            accepted.accepted_at_manifest_sha256 = publication.manifest_sha256.clone();
+        }
+        let (receipt, record) = prepare_receipt(
+            operation,
+            publication.revision,
+            &publication.commit_id,
+            &publication.manifest_sha256,
+        )?;
+        receipts.push(receipt);
+        records.push(record);
+    }
+    repository.commit_conversation_publication(&state, |materializations| {
+        for record in records {
+            insert_receipt_record(materializations, record)?;
         }
         Ok(())
     })?;
-    failpoints.hit(&ConversationFailpoint::AfterHeadAdvanced)?;
-
-    let mut receipts = Vec::with_capacity(operation_ids.len());
-    for operation_id in operation_ids {
-        let operation = repository
-            .load_conversation_sync_journal()?
-            .operations
-            .into_iter()
-            .find(|operation| operation.operation_id == operation_id)
-            .ok_or_else(|| format!("conversation operation '{}' disappeared", operation_id))?;
-        receipts.push(finish_cloud_publication(
-            repository,
-            &operation,
-            &publication,
-            failpoints,
-        )?);
-    }
     Ok(receipts)
 }
 
-/// Recover Push operations with a caller-supplied immutable-head inspector.
-/// The inspector must prove the candidate commit is the current head or a
-/// verified descendant before returning a publication; orphan objects never
-/// justify promotion.
-#[cfg(any(test, feature = "test-support"))]
-pub fn recover_conversation_cloud_publications(
-    repository: &LocalStateRepository,
-    mut inspect: impl FnMut(
-        &ConversationSyncOperation,
-    ) -> Result<Option<ConversationCloudPublication>, String>,
-) -> Result<ConversationRecoveryReport, String> {
-    let _host_guard = repository.acquire_host_operation()?;
-    let mut report = ConversationRecoveryReport::default();
-    let operations = repository.load_conversation_sync_journal()?.operations;
-    let mut no_failpoints = NoConversationFailpoints;
-    for operation in operations {
-        let Some(phase) = push_phase(&operation) else {
-            continue;
-        };
-        let operation_id = operation.operation_id.clone();
-        if phase.is_blocked() {
-            report.recovery_required.push(operation_id);
-            continue;
-        }
-        if phase.is_terminal() {
-            cleanup_and_retire(repository, &operation_id)?;
-            report.completed.push(operation_id);
-            continue;
-        }
-        match phase {
-            PushJournalPhase::CandidateUploaded => match inspect(&operation)? {
-                Some(publication) => {
-                    let operation = set_push_phase(
-                        repository,
-                        &operation_id,
-                        PushJournalPhase::HeadAdvanced,
-                        operation.updated_at,
-                    )?;
-                    finish_cloud_publication(
-                        repository,
-                        &operation,
-                        &publication,
-                        &mut no_failpoints,
-                    )?;
-                    report.completed.push(operation_id);
-                }
-                None => {
-                    set_push_phase(
-                        repository,
-                        &operation_id,
-                        PushJournalPhase::AbortedCasLost,
-                        operation.updated_at,
-                    )?;
-                    cleanup_and_retire(repository, &operation_id)?;
-                    report.rolled_back.push(operation_id);
-                }
-            },
-            PushJournalPhase::HeadAdvanced | PushJournalPhase::LocalCommitted => {
-                match inspect(&operation)? {
-                    Some(publication) => {
-                        finish_cloud_publication(
-                            repository,
-                            &operation,
-                            &publication,
-                            &mut no_failpoints,
-                        )?;
-                        report.completed.push(operation_id);
-                    }
-                    None => {
-                        mark_recovery_blocked(repository, &operation_id)?;
-                        report.recovery_required.push(operation_id);
-                    }
-                }
-            }
-            _ => unreachable!("terminal and blocked phases handled above"),
-        }
-    }
-    Ok(report)
-}
-
-/// Apply one reviewed Pull materialization. All target expectations and local
-/// scope revisions are checked before the TargetStaged record is written.
+/// Apply one reviewed Pull materialization. Existing transcripts have already
+/// passed their one source check. Other targets and local scope revisions are
+/// checked before any target stage is written.
 #[cfg(any(test, feature = "test-support"))]
 pub fn apply_conversation_materialization(
     repository: &LocalStateRepository,
     request: ConversationMaterializationRequest,
-    failpoints: &mut impl ConversationFailpoints,
 ) -> Result<ConversationApplyReceipt, String> {
     let _host_guard = repository.acquire_host_operation()?;
-    apply_conversation_materialization_locked(repository, request, failpoints)
+    let mut state = repository.lock_conversation_pull()?;
+    apply_conversation_materialization_locked(&mut state, request)
 }
 
-/// Apply one reviewed materializing Pull (including keep-both) while the
-/// command orchestrator holds the host-operation guard. The journaled
-/// operation embeds the exact whole-document bindings and `SyncConfig`
-/// before/after states; committing local state is installation, never
-/// recomputation.
+/// Apply one reviewed materializing Pull, including keep-both, while the
+/// command orchestrator holds the host-operation and persistence guards. The
+/// operation carries after-states and checks the batch's current revisions.
+/// The source check authorizes an in-place transcript replacement; other
+/// targets retain their digest guards.
 pub fn apply_conversation_materialization_locked(
-    repository: &LocalStateRepository,
-    request: ConversationMaterializationRequest,
-    failpoints: &mut impl ConversationFailpoints,
+    state: &mut LockedConversationPull<'_>,
+    mut request: ConversationMaterializationRequest,
 ) -> Result<ConversationApplyReceipt, String> {
+    let current = state.current()?;
     request.operation.validate()?;
-    if pull_phase(&request.operation) != Some(PullJournalPhase::TargetStaged) {
-        return Err("conversation materialization must begin TargetStaged".to_string());
-    }
-    validate_operation_scope(repository, &request.operation)?;
-    ensure_provider_target_parents(repository, &request.operation, &request.targets)?;
-    let (operation, payloads) = prepare_operation(repository, request)?;
-    validate_target_expectations(&operation.targets)?;
-
-    failpoints.hit(&ConversationFailpoint::BeforeJournal)?;
-    insert_operation(repository, &operation)?;
-    failpoints.hit(&ConversationFailpoint::AfterJournal)?;
-
-    for (index, bytes) in payloads.iter().enumerate() {
-        write_intent_payload(repository, &operation.operation_id, index, bytes)?;
-    }
-
-    stage_targets(repository, &operation, failpoints)?;
-    failpoints.hit(&ConversationFailpoint::BeforeStaged)?;
-    failpoints.hit(&ConversationFailpoint::AfterStaged)?;
-    finish_materialization(repository, operation, failpoints)
-}
-
-/// Drive a TargetStaged materialization to its terminal phase: commit
-/// provider targets no-clobber, install the journaled document after-states,
-/// and write the receipt.
-fn finish_materialization(
-    repository: &LocalStateRepository,
-    operation: ConversationSyncOperation,
-    failpoints: &mut impl ConversationFailpoints,
-) -> Result<ConversationApplyReceipt, String> {
-    let ConversationSyncOperationKind::ProviderMaterialization(payload) = &operation.operation
+    let ConversationApplyKind::ProviderMaterialization(payload) = &request.operation.operation
     else {
-        return Err("materialization finish requires a materialization operation".to_string());
+        return Err("conversation materialization requires a Pull apply operation".to_string());
     };
-    let payload = payload.clone();
-    if let Err(error) = commit_provider_targets(repository, &operation.operation_id, failpoints) {
-        // A foreign target collision aborts safely: no clobber, the original
-        // graph preserved, committed Mallard targets recorded as recoverable
-        // orphans through the terminal journal record. Every other failure
-        // (crash, I/O) leaves the journal at its durable phase for recovery.
-        if is_target_collision(&error) {
-            set_pull_phase(
-                repository,
-                &operation.operation_id,
-                PullJournalPhase::AbortedProviderCollision,
-                operation.updated_at,
-            )?;
-            cleanup_and_retire(repository, &operation.operation_id)?;
-        }
-        return Err(error);
+    if payload.expected_config_revision != current.config.revision {
+        return Err("sync config changed during apply".to_string());
     }
-    failpoints.hit(&ConversationFailpoint::BeforeProviderCommitted)?;
-    let operation = set_pull_phase(
-        repository,
-        &operation.operation_id,
-        PullJournalPhase::ProviderCommitted,
-        operation.updated_at,
+    validate_operation_scope_from_state(
+        &current.host_identity,
+        &current.bindings,
+        &current.conversation_bindings,
+        &request.operation,
     )?;
-    failpoints.hit(&ConversationFailpoint::AfterProviderCommitted)?;
-
-    failpoints.hit(&ConversationFailpoint::BeforeBindingCommit)?;
-    install_journaled_bindings(
-        repository,
-        &payload.bindings_before,
-        &payload.bindings_after,
-    )?;
-    failpoints.hit(&ConversationFailpoint::AfterBindingCommit)?;
-    failpoints.hit(&ConversationFailpoint::BeforeConfigCommit)?;
-    install_journaled_sync_config(
-        repository,
-        &payload.sync_config_before,
-        &payload.sync_config_after,
-    )?;
-    failpoints.hit(&ConversationFailpoint::AfterConfigCommit)?;
-    let operation = set_pull_phase(
-        repository,
-        &operation.operation_id,
-        PullJournalPhase::LocalCommitted,
-        operation.updated_at,
-    )?;
-
-    failpoints.hit(&ConversationFailpoint::BeforeReceipt)?;
-    let anchor = operation.cloud.clone();
-    let receipt = commit_receipt(
-        repository,
-        &operation,
-        anchor.revision,
-        &anchor.commit_id,
-        &anchor.manifest_sha256,
+    verify_transcript_request(&current.bindings, &request)?;
+    ensure_provider_target_parents(&current.bindings, &request.operation, &request.targets)?;
+    let repository = state.repository();
+    let checked_transcript = request.checked_transcript.take();
+    let (operation, payloads) = prepare_operation(repository, request)?;
+    validate_target_expectations(&operation.targets, checked_transcript.as_deref())?;
+    let _stage_cleanup = StageCleanup(
+        operation
+            .targets
+            .iter()
+            .filter_map(|target| target.staged_path.as_ref().map(PathBuf::from))
+            .collect(),
     );
-    let (receipt, terminal_phase) = match receipt {
-        Ok(receipt) => (receipt, PullJournalPhase::Complete),
-        Err(_) => {
-            let regenerated = conversation_receipt(
-                &operation,
-                anchor.revision,
-                &anchor.commit_id,
-                &anchor.manifest_sha256,
-            );
-            (regenerated, PullJournalPhase::CompleteWithWarnings)
-        }
-    };
-    failpoints.hit(&ConversationFailpoint::AfterReceipt)?;
-    failpoints.hit(&ConversationFailpoint::BeforeLocalCommitted)?;
-    set_pull_phase(
-        repository,
-        &operation.operation_id,
-        terminal_phase,
-        operation.updated_at,
-    )?;
-    failpoints.hit(&ConversationFailpoint::AfterLocalCommitted)?;
-    failpoints.hit(&ConversationFailpoint::BeforeCleanup)?;
-    cleanup_and_retire(repository, &operation.operation_id)?;
-    failpoints.hit(&ConversationFailpoint::AfterCleanup)?;
-    Ok(receipt)
-}
 
-/// Reconcile every durable nonterminal journal operation to one
-/// deterministic fixed point. Pull operations roll forward from their last
-/// durable phase or abort before any visible mutation; Push operations need
-/// head inspection and are only marked for the caller's publication-recovery
-/// entry point.
-pub fn recover_conversation_materializations(
-    repository: &LocalStateRepository,
-) -> Result<ConversationRecoveryReport, String> {
-    let _host_guard = repository.acquire_host_operation()?;
-    let mut report = ConversationRecoveryReport::default();
-    let operations = repository.load_conversation_sync_journal()?.operations;
-    for operation in operations {
-        let operation_id = operation.operation_id.clone();
-        let result = (|| -> Result<RecoveryOutcome, String> {
-            if operation.direction() == ConversationPlanDirection::Push {
-                // Head inspection needs the caller's storage engine; startup
-                // recovery only surfaces the pending operation.
-                return Ok(RecoveryOutcome::RecoveryRequired);
-            }
-            let Some(phase) = pull_phase(&operation) else {
-                return Ok(RecoveryOutcome::RecoveryRequired);
-            };
-            if phase.is_blocked() {
-                return Ok(RecoveryOutcome::RecoveryRequired);
-            }
-            if phase.is_terminal() {
-                cleanup_and_retire(repository, &operation_id)?;
-                return Ok(RecoveryOutcome::Completed);
-            }
-            let mut no_failpoints = NoConversationFailpoints;
-            match phase {
-                PullJournalPhase::TargetStaged => {
-                    // The journal is the durable commit decision: roll
-                    // forward whenever the staged state can be completed —
-                    // re-staging from intent payloads when a crash landed
-                    // between the journal and the stage files.
-                    let can_restage = operation.targets.iter().enumerate().all(|(index, _)| {
-                        intent_payload_path(repository, &operation_id, index).is_file()
-                    });
-                    if operation.targets.iter().all(staged_target_is_valid)
-                        || operation.targets.iter().any(|target| target.committed)
-                        || can_restage
-                    {
-                        if !operation.targets.iter().all(staged_target_is_valid) {
-                            stage_targets(repository, &operation, &mut no_failpoints)?;
-                        }
-                        finish_materialization(repository, operation, &mut no_failpoints)?;
-                        Ok(RecoveryOutcome::Completed)
-                    } else if operation.targets.iter().all(target_is_uncommitted) {
-                        // Nothing visible was mutated and the payloads are
-                        // gone: abort before commit.
-                        set_pull_phase(
-                            repository,
-                            &operation_id,
-                            PullJournalPhase::AbortedPrecommit,
-                            operation.updated_at,
-                        )?;
-                        rollback_staged(repository, &operation)?;
-                        Ok(RecoveryOutcome::RolledBack)
-                    } else {
-                        mark_recovery_blocked(repository, &operation_id)?;
-                        Ok(RecoveryOutcome::RecoveryRequired)
-                    }
+    for (target, bytes) in operation.targets.iter().zip(&payloads) {
+        let staged = Path::new(
+            target
+                .staged_path
+                .as_deref()
+                .ok_or_else(|| "conversation target lacks a staging path".to_string())?,
+        );
+        ensure_canonical_parent(staged)?;
+        write_new_file(staged, bytes)?;
+        verify_provider_payload(&operation, target, staged)?;
+        if let (TargetExpectation::Sha256(expected), Some(backup)) =
+            (&target.expected, target.backup_path.as_deref())
+        {
+            let backup = Path::new(backup);
+            create_private_directory_all(
+                repository.root(),
+                backup
+                    .parent()
+                    .ok_or_else(|| "conversation backup has no parent".to_string())?,
+            )?;
+            if read_regular_file_digest(backup)?.is_none() {
+                if replaces_transcript(target) {
+                    write_new_file(
+                        backup,
+                        checked_transcript
+                            .as_deref()
+                            .expect("replacement requires checked source bytes"),
+                    )?;
+                } else {
+                    copy_new_file(Path::new(&target.target_path), backup)?;
                 }
-                PullJournalPhase::ProviderCommitted | PullJournalPhase::LocalCommitted => {
-                    finish_materialization(repository, operation, &mut no_failpoints)?;
-                    Ok(RecoveryOutcome::Completed)
-                }
-                _ => unreachable!("terminal and blocked phases handled above"),
             }
-        })();
-        match result {
-            Ok(RecoveryOutcome::Completed) => report.completed.push(operation_id),
-            Ok(RecoveryOutcome::RolledBack) => report.rolled_back.push(operation_id),
-            Ok(RecoveryOutcome::RecoveryRequired) => report.recovery_required.push(operation_id),
-            Err(error) => {
-                let remains_pending = repository
-                    .load_conversation_sync_journal()?
-                    .operations
-                    .iter()
-                    .any(|candidate| candidate.operation_id == operation_id);
-                if !remains_pending {
-                    report.rolled_back.push(operation_id);
-                    continue;
-                }
-                let _ = mark_recovery_blocked(repository, &operation_id);
-                report.recovery_required.push(operation_id);
-                if error.contains("different host") {
-                    continue;
-                }
+            if read_regular_file_digest(backup)?.as_deref() != Some(expected) {
+                return Err("conversation backup digest mismatch".to_string());
             }
         }
     }
-    Ok(report)
-}
 
-enum RecoveryOutcome {
-    Completed,
-    RolledBack,
-    RecoveryRequired,
+    for target in &operation.targets {
+        commit_one_target(target)?;
+    }
+
+    let (receipt, record) = prepare_receipt(
+        &operation,
+        operation.cloud.revision,
+        &operation.cloud.commit_id,
+        &operation.cloud.manifest_sha256,
+    )?;
+    let ConversationApplyKind::ProviderMaterialization(payload) = operation.operation else {
+        unreachable!("materialization operation was checked above");
+    };
+    state.commit(
+        payload.sync_config_after,
+        payload.bindings_after,
+        |records| insert_receipt_record(records, record),
+    )?;
+    Ok(receipt)
 }
 
 fn prepare_operation(
     repository: &LocalStateRepository,
     request: ConversationMaterializationRequest,
-) -> Result<(ConversationSyncOperation, Vec<Vec<u8>>), String> {
+) -> Result<(ConversationApplyOperation, Vec<PayloadBytes>), String> {
     let mut operation = request.operation;
     if !matches!(
         operation.operation,
-        ConversationSyncOperationKind::ProviderMaterialization(_)
+        ConversationApplyKind::ProviderMaterialization(_)
     ) {
-        return Err("provider materialization requires a materialization journal".to_string());
+        return Err("provider materialization requires a Pull apply operation".to_string());
     }
     if !operation.targets.is_empty() {
-        return Err("new conversation operation must begin without journaled targets".to_string());
+        return Err("new conversation operation must begin without prepared targets".to_string());
     }
-    if request.targets.len() > 64 {
+    if request.targets.len() > MAX_CONVERSATION_FILES {
         return Err("conversation materialization has too many provider targets".to_string());
     }
     if operation.materialization_state == ConversationMaterializationState::Resumable
@@ -838,9 +337,9 @@ fn prepare_operation(
                 .join(operation.operation_id.as_str())
                 .join(format!("{index}.bak"))
         });
-        let staged_sha256 = sha256_hex(&payload.bytes);
+        let staged_sha256 = payload.bytes.sha256().to_string();
         payloads.push(payload.bytes);
-        targets.push(ConversationJournalTarget {
+        targets.push(ConversationApplyTarget {
             target_path: path_text(&target_path)?,
             role: payload.role,
             expected: payload.expected,
@@ -851,8 +350,6 @@ fn prepare_operation(
                 .transpose()?,
             staged_sha256: Some(staged_sha256),
             index_rows: payload.index_rows,
-            commit_started: false,
-            committed: false,
         });
     }
     operation.targets = targets;
@@ -860,50 +357,17 @@ fn prepare_operation(
     Ok((operation, payloads))
 }
 
-/// The intent payload makes a Prepared operation restartable even if the
-/// process exits before creating its provider-parent staging files. It stays
-/// below Mallard's private root and is removed with the journal operation.
-fn write_intent_payload(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-    index: usize,
-    bytes: &[u8],
+fn validate_operation_scope_from_state(
+    identity: &HostIdentity,
+    machine: &MachineProjectState,
+    bindings: &ConversationBindings,
+    operation: &ConversationApplyOperation,
 ) -> Result<(), String> {
-    let directory = intent_directory(repository, operation_id);
-    create_private_directory_all(repository.root(), &directory)?;
-    let path = directory.join(format!("{index}.payload"));
-    write_new_file(&path, bytes)
-}
-
-fn intent_directory(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-) -> PathBuf {
-    repository
-        .root()
-        .join("conversation_operations")
-        .join(operation_id.as_str())
-}
-
-fn intent_payload_path(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-    index: usize,
-) -> PathBuf {
-    intent_directory(repository, operation_id).join(format!("{index}.payload"))
-}
-
-fn validate_operation_scope(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-) -> Result<(), String> {
-    let identity = repository.load_or_create_host_identity()?;
     if identity.host_id != operation.host_id
         || identity.revision != operation.expected_host_identity_revision
     {
         return Err("conversation operation belongs to a different or changed host".to_string());
     }
-    let machine = repository.load_bindings()?;
     let project_binding = machine
         .bindings
         .iter()
@@ -931,7 +395,6 @@ fn validate_operation_scope(
     {
         return Err("conversation provider profile changed after review".to_string());
     }
-    let bindings = repository.load_conversation_bindings()?;
     if bindings.revision != operation.expected_bindings_document_revision {
         return Err("conversation bindings changed after review".to_string());
     }
@@ -939,14 +402,13 @@ fn validate_operation_scope(
 }
 
 fn ensure_provider_target_parents(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
+    machine: &MachineProjectState,
+    operation: &ConversationApplyOperation,
     targets: &[ConversationTargetPayload],
 ) -> Result<(), String> {
     if targets.is_empty() {
         return Ok(());
     }
-    let machine = repository.load_bindings()?;
     let profile = machine
         .profiles
         .iter()
@@ -1023,9 +485,28 @@ fn ensure_provider_target_parents(
     Ok(())
 }
 
-fn validate_target_expectations(targets: &[ConversationJournalTarget]) -> Result<(), String> {
+fn replaces_transcript(target: &ConversationApplyTarget) -> bool {
+    target.role == ConversationFileRole::Transcript
+        && matches!(target.expected, TargetExpectation::Sha256(_))
+}
+
+fn validate_target_expectations(
+    targets: &[ConversationApplyTarget],
+    checked_transcript: Option<&[u8]>,
+) -> Result<(), String> {
+    match (targets.iter().any(replaces_transcript), checked_transcript) {
+        (true, Some(bytes)) if bytes.len() as u64 <= MAX_PROVIDER_TARGET_BYTES => {}
+        (false, None) => {}
+        _ => return Err("conversation replacement requires its checked source bytes".to_string()),
+    }
     for target in targets {
         let path = Path::new(&target.target_path);
+        if replaces_transcript(target) {
+            // The source check already authorized replacement. Stat for
+            // file-type and size safety, but do not read its contents again.
+            inspect_regular_file(path)?;
+            continue;
+        }
         match (&target.expected, read_regular_file_digest(path)?) {
             (TargetExpectation::Absent, None) => {}
             (TargetExpectation::Sha256(expected), Some(actual)) if expected == &actual => {}
@@ -1035,184 +516,8 @@ fn validate_target_expectations(targets: &[ConversationJournalTarget]) -> Result
     Ok(())
 }
 
-fn insert_operation(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-) -> Result<(), String> {
-    insert_operations(repository, std::slice::from_ref(operation))
-}
-
-fn insert_operations(
-    repository: &LocalStateRepository,
-    operations: &[ConversationSyncOperation],
-) -> Result<(), String> {
-    let journal = repository.load_conversation_sync_journal()?;
-    repository.mutate_conversation_sync_journal(journal.revision, |journal| {
-        for (index, operation) in operations.iter().enumerate() {
-            if journal
-                .operations
-                .iter()
-                .any(|existing| existing.operation_id == operation.operation_id)
-            {
-                return Err(format!(
-                    "conversation operation '{}' already exists",
-                    operation.operation_id
-                ));
-            }
-            // One thread never carries two concurrent journal operations:
-            // a pending checkpoint must be verified or canceled before any
-            // new Push or Pull mutation of the same conversation begins.
-            // The claim is checked in both identity spaces — a retried
-            // pull action mints fresh local identities, so only its cloud
-            // id (and plan action) can correlate it with the journaled
-            // first attempt. The cloud key is deliberately not
-            // provider-qualified: cloud ids are bundle-global.
-            if journal
-                .operations
-                .iter()
-                .chain(operations[..index].iter())
-                .any(|existing| {
-                    existing.local_project_id == operation.local_project_id
-                        && existing.provider == operation.provider
-                        && existing.thread_id == operation.thread_id
-                })
-            {
-                return Err(format!(
-                    "conversation thread '{}' already has a pending sync operation; \
-                     resolve or retry it before syncing this conversation again",
-                    operation.thread_id
-                ));
-            }
-            if journal
-                .operations
-                .iter()
-                .chain(operations[..index].iter())
-                .any(|existing| {
-                    existing.local_project_id == operation.local_project_id
-                        && existing.cloud_thread_id == operation.cloud_thread_id
-                })
-            {
-                return Err(format!(
-                    "cloud thread '{}' already has a pending sync operation; \
-                     resolve or retry it before syncing this conversation again",
-                    operation.cloud_thread_id
-                ));
-            }
-            if operation.plan_id.is_some()
-                && operation.plan_action_id.is_some()
-                && journal
-                    .operations
-                    .iter()
-                    .chain(operations[..index].iter())
-                    .any(|existing| {
-                        existing.plan_id == operation.plan_id
-                            && existing.plan_action_id == operation.plan_action_id
-                    })
-            {
-                return Err(format!(
-                    "conversation plan action '{}' already has a journaled operation",
-                    operation
-                        .plan_action_id
-                        .as_ref()
-                        .map(|action_id| action_id.as_str())
-                        .unwrap_or("unknown")
-                ));
-            }
-        }
-        for operation in operations {
-            journal.operations.push(operation.clone());
-        }
-        Ok(())
-    })
-}
-
-fn mutate_operation<T>(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-    mutate: impl FnOnce(&mut ConversationSyncOperation) -> Result<T, String>,
-) -> Result<(T, ConversationSyncOperation), String> {
-    let journal = repository.load_conversation_sync_journal()?;
-    let mut operation_after = None;
-    let result = repository.mutate_conversation_sync_journal(journal.revision, |journal| {
-        let operation = journal
-            .operations
-            .iter_mut()
-            .find(|operation| &operation.operation_id == operation_id)
-            .ok_or_else(|| format!("conversation operation '{}' disappeared", operation_id))?;
-        let result = mutate(operation)?;
-        operation_after = Some(operation.clone());
-        Ok(result)
-    })?;
-    Ok((
-        result,
-        operation_after.expect("operation was found before mutation"),
-    ))
-}
-
-fn stage_targets(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-    failpoints: &mut impl ConversationFailpoints,
-) -> Result<(), String> {
-    for (index, target) in operation.targets.iter().enumerate() {
-        let point = ConversationFailpoint::BeforeStage {
-            index,
-            role: target.role.clone(),
-        };
-        failpoints.hit(&point)?;
-        let intent = intent_payload_path(repository, &operation.operation_id, index);
-        let expected = target
-            .staged_sha256
-            .as_deref()
-            .ok_or_else(|| "conversation target lacks a staged digest".to_string())?;
-        if read_regular_file_digest(&intent)?.as_deref() != Some(expected) {
-            return Err("conversation intent payload failed verification".to_string());
-        }
-        verify_provider_payload(repository, operation, target, &intent)?;
-        let staged = Path::new(
-            target
-                .staged_path
-                .as_deref()
-                .ok_or_else(|| "conversation target lacks a staging path".to_string())?,
-        );
-        ensure_canonical_parent(staged)?;
-        match read_regular_file_digest(staged)? {
-            Some(actual) if actual == expected => {}
-            Some(_) => return Err("conversation staging path is already occupied".to_string()),
-            None => copy_new_file(&intent, staged)?,
-        }
-        verify_provider_payload(repository, operation, target, staged)?;
-        if let (TargetExpectation::Sha256(expected_target), Some(backup)) =
-            (&target.expected, target.backup_path.as_deref())
-        {
-            let backup = Path::new(backup);
-            create_private_directory_all(
-                repository.root(),
-                backup
-                    .parent()
-                    .ok_or_else(|| "conversation backup has no parent".to_string())?,
-            )?;
-            match read_regular_file_digest(backup)? {
-                Some(actual) if &actual == expected_target => {}
-                Some(_) => return Err("conversation backup digest mismatch".to_string()),
-                None => copy_new_file(Path::new(&target.target_path), backup)?,
-            }
-        }
-        sync_directory(
-            staged
-                .parent()
-                .ok_or_else(|| "conversation stage has no parent".to_string())?,
-        )?;
-        failpoints.hit(&ConversationFailpoint::AfterStage {
-            index,
-            role: target.role.clone(),
-        })?;
-    }
-    Ok(())
-}
-
 fn verify_target_role_set(
-    operation: &ConversationSyncOperation,
+    operation: &ConversationApplyOperation,
     targets: &[ConversationTargetPayload],
 ) -> Result<(), String> {
     if operation.materialization_state == ConversationMaterializationState::StoredOnly {
@@ -1240,7 +545,8 @@ fn verify_target_role_set(
     // Provider index rows are conditional presentation metadata (Codex keeps
     // `session_index.jsonl`); the registered adapter declares how many one
     // operation may carry. Providers without an index allow none.
-    let adapter = crate::providers::ProviderRegistry::production().require(&operation.provider)?;
+    let adapter =
+        crate::providers::AgentProviderRegistry::production().require(&operation.provider)?;
     if indexes > adapter.index_fragment_limit() {
         return Err(format!(
             "{} conversations allow at most {} index fragment(s)",
@@ -1251,12 +557,55 @@ fn verify_target_role_set(
     Ok(())
 }
 
+fn verify_transcript_request(
+    machine: &MachineProjectState,
+    request: &ConversationMaterializationRequest,
+) -> Result<(), String> {
+    let operation = &request.operation;
+    let ConversationApplyKind::ProviderMaterialization(materialization) = &operation.operation
+    else {
+        return Err("transcript outside a materialization".to_string());
+    };
+    let project = machine
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.host_id == operation.host_id
+                && binding.replica_id == operation.replica_id
+                && binding.local_project_id == operation.local_project_id
+        })
+        .ok_or("transcript project replica disappeared")?;
+    let adapter =
+        crate::providers::AgentProviderRegistry::production().require(&operation.provider)?;
+    let target = request
+        .targets
+        .iter()
+        .find(|target| target.role == ConversationFileRole::Transcript)
+        .ok_or("materialization lacks its transcript")?;
+    if !request.transcript.matches_target(
+        &operation.provider,
+        adapter.codec_key(),
+        operation.provider_thread_id.as_deref(),
+        &project.project_root,
+        &project.canonical_project_root,
+        &materialization.pinned_lineage_digest,
+        &materialization.pinned_semantic_digest,
+        &target.bytes,
+    ) {
+        return Err("verified transcript does not match the materialization target".to_string());
+    }
+    Ok(())
+}
+
 fn verify_provider_payload(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-    target: &ConversationJournalTarget,
+    operation: &ConversationApplyOperation,
+    target: &ConversationApplyTarget,
     path: &Path,
 ) -> Result<(), String> {
+    if target.role == ConversationFileRole::Transcript {
+        // Commit checks the staged digest against the immutable verified bytes.
+        return Ok(());
+    }
     let bytes = fs::read(path).map_err(|error| {
         format!(
             "read staged provider payload '{}': {}",
@@ -1264,141 +613,28 @@ fn verify_provider_payload(
             error
         )
     })?;
+    // Provider payload shapes belong to the registered adapter; the core
+    // keeps the boundary, digest, and no-clobber checks around them.
+    let adapter =
+        crate::providers::AgentProviderRegistry::production().require(&operation.provider)?;
     match &target.role {
-        ConversationFileRole::Transcript => {
-            // Typed verification through the registered adapter: the staged
-            // bytes must re-analyze to the reviewed destination session in
-            // the reviewed project with exactly the pinned lineage and
-            // semantic digests. No provider ever falls back to generic
-            // copying.
-            let adapter =
-                crate::providers::ProviderRegistry::production().require(&operation.provider)?;
-            let analysis = adapter.analyze(&bytes);
-            if analysis.source_provider_session_id.as_deref()
-                != operation.provider_thread_id.as_deref()
-            {
-                return Err(format!(
-                    "staged {} transcript has the wrong provider session id",
-                    operation.provider
-                ));
-            }
-            let machine = repository.load_bindings()?;
-            let project = machine
-                .bindings
-                .iter()
-                .find(|binding| {
-                    binding.host_id == operation.host_id
-                        && binding.replica_id == operation.replica_id
-                        && binding.local_project_id == operation.local_project_id
-                })
-                .ok_or_else(|| "staged transcript project replica disappeared".to_string())?;
-            if analysis.source_cwd.as_deref() != Some(project.project_root.as_str())
-                && analysis.source_cwd.as_deref() != Some(project.canonical_project_root.as_str())
-            {
-                return Err(format!(
-                    "staged {} transcript has the wrong project cwd",
-                    operation.provider
-                ));
-            }
-            let ConversationSyncOperationKind::ProviderMaterialization(materialization) =
-                &operation.operation
-            else {
-                return Err("staged transcript outside a materialization".to_string());
-            };
-            match analysis.lineage {
-                CodecLineage::Complete {
-                    lineage_digest,
-                    semantic_digest,
-                    ..
-                } if lineage_digest == materialization.pinned_lineage_digest
-                    && semantic_digest == materialization.pinned_semantic_digest => {}
-                _ => {
-                    return Err(format!(
-                        "staged {} transcript changed lineage or semantic content",
-                        operation.provider
-                    ))
-                }
-            }
-        }
+        ConversationFileRole::Transcript => unreachable!("transcript verified before staging"),
         ConversationFileRole::ProviderIndexFragment => {
-            // The journaled target names every row this fragment rewrites
+            // The prepared target names every row this fragment rewrites
             // (destination and, on keep-both, the preserved rename); the
             // domain guarantees the list is non-empty for this role.
-            let adapter =
-                crate::providers::ProviderRegistry::production().require(&operation.provider)?;
             for thread_id in &target.index_rows {
                 adapter.verify_index_fragment(&bytes, thread_id)?;
             }
         }
-        ConversationFileRole::Sidecar { .. } => {
-            serde_json::from_slice::<serde_json::Value>(&bytes)
-                .map_err(|_| "conversation sidecar is not valid JSON".to_string())?;
+        ConversationFileRole::Sidecar { sidecar_kind } => {
+            adapter.verify_sidecar(sidecar_kind, &bytes)?;
         }
     }
     Ok(())
 }
 
-/// The no-clobber verdicts from `commit_one_target` that prove a foreign
-/// writer owns the target. Everything else is retryable.
-fn is_target_collision(error: &str) -> bool {
-    error.contains("cannot prove ownership")
-        || error.contains("changed during apply")
-        || error.contains("committed conversation provider target changed")
-}
-
-fn commit_provider_targets(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-    failpoints: &mut impl ConversationFailpoints,
-) -> Result<(), String> {
-    let count = repository
-        .load_conversation_sync_journal()?
-        .operations
-        .iter()
-        .find(|operation| &operation.operation_id == operation_id)
-        .ok_or_else(|| "conversation operation disappeared".to_string())?
-        .targets
-        .len();
-    for index in 0..count {
-        let operation = repository
-            .load_conversation_sync_journal()?
-            .operations
-            .into_iter()
-            .find(|operation| &operation.operation_id == operation_id)
-            .ok_or_else(|| "conversation operation disappeared".to_string())?;
-        let target = operation.targets[index].clone();
-        failpoints.hit(&ConversationFailpoint::BeforeTargetCommit {
-            index,
-            role: target.role.clone(),
-        })?;
-        if !target.commit_started {
-            mutate_operation(repository, operation_id, |operation| {
-                operation.targets[index].commit_started = true;
-                Ok(())
-            })?;
-        }
-        commit_one_target(&target)?;
-        failpoints.hit(&ConversationFailpoint::AfterTargetWrite {
-            index,
-            role: target.role.clone(),
-        })?;
-        mutate_operation(repository, operation_id, |operation| {
-            operation.targets[index].commit_started = true;
-            operation.targets[index].committed = true;
-            Ok(())
-        })?;
-        if let Some(stage) = &target.staged_path {
-            remove_file_if_exists(Path::new(stage))?;
-        }
-        failpoints.hit(&ConversationFailpoint::AfterTargetCommit {
-            index,
-            role: target.role,
-        })?;
-    }
-    Ok(())
-}
-
-fn commit_one_target(target: &ConversationJournalTarget) -> Result<(), String> {
+fn commit_one_target(target: &ConversationApplyTarget) -> Result<(), String> {
     let path = Path::new(&target.target_path);
     let stage = Path::new(
         target
@@ -1410,39 +646,15 @@ fn commit_one_target(target: &ConversationJournalTarget) -> Result<(), String> {
         .staged_sha256
         .as_deref()
         .ok_or_else(|| "conversation target lacks a digest".to_string())?;
-    let current = read_regular_file_digest(path)?;
-    if target.committed {
-        return if current.as_deref() == Some(staged_digest) {
-            Ok(())
-        } else {
-            Err("committed conversation provider target changed".to_string())
-        };
-    }
-    if target.commit_started && current.as_deref() == Some(staged_digest) {
-        match &target.expected {
-            TargetExpectation::Absent => {
-                if stage.exists() && same_file(stage, path)? {
-                    return Ok(());
-                }
-                return Err("cannot prove ownership of an occupied conversation target".to_string());
-            }
-            TargetExpectation::Sha256(expected) => {
-                let backup = target
-                    .backup_path
-                    .as_deref()
-                    .ok_or_else(|| "replacement lacks a recoverable backup".to_string())?;
-                if read_regular_file_digest(Path::new(backup))?.as_deref() == Some(expected) {
-                    return Ok(());
-                }
-                return Err("conversation replacement backup failed verification".to_string());
-            }
-        }
-    }
     if read_regular_file_digest(stage)?.as_deref() != Some(staged_digest) {
         return Err("conversation staged provider target is unavailable".to_string());
     }
-    match (&target.expected, current) {
-        (TargetExpectation::Absent, None) => {
+    ensure_canonical_parent(path)?;
+    match &target.expected {
+        TargetExpectation::Absent => {
+            if inspect_regular_file(path)? {
+                return Err("conversation provider target changed during apply".to_string());
+            }
             fs::hard_link(stage, path).map_err(|error| {
                 format!(
                     "publish no-clobber conversation target '{}': {}",
@@ -1451,7 +663,14 @@ fn commit_one_target(target: &ConversationJournalTarget) -> Result<(), String> {
                 )
             })?;
         }
-        (TargetExpectation::Sha256(expected), Some(actual)) if expected == &actual => {
+        TargetExpectation::Sha256(expected) => {
+            if replaces_transcript(target) {
+                // The one source check permits a missed transcript update.
+                // Shared provider files still require their current digest.
+                inspect_regular_file(path)?;
+            } else if read_regular_file_digest(path)?.as_ref() != Some(expected) {
+                return Err("conversation provider target changed during apply".to_string());
+            }
             fs::rename(stage, path).map_err(|error| {
                 format!(
                     "replace conversation target '{}': {}",
@@ -1460,7 +679,6 @@ fn commit_one_target(target: &ConversationJournalTarget) -> Result<(), String> {
                 )
             })?;
         }
-        _ => return Err("conversation provider target changed during apply".to_string()),
     }
     sync_directory(
         path.parent()
@@ -1468,7 +686,7 @@ fn commit_one_target(target: &ConversationJournalTarget) -> Result<(), String> {
     )
 }
 
-fn transcript_target_digest(operation: &ConversationSyncOperation) -> Option<String> {
+fn transcript_target_digest(operation: &ConversationApplyOperation) -> Option<String> {
     operation
         .targets
         .iter()
@@ -1476,14 +694,12 @@ fn transcript_target_digest(operation: &ConversationSyncOperation) -> Option<Str
         .and_then(|target| target.staged_sha256.clone())
 }
 
-fn commit_receipt(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
+fn prepare_receipt(
+    operation: &ConversationApplyOperation,
     cloud_revision: u64,
     cloud_commit_id: &str,
     cloud_manifest_sha256: &str,
-) -> Result<ConversationApplyReceipt, String> {
-    let anchor = operation.cloud.clone();
+) -> Result<(ConversationApplyReceipt, MaterializationRecord), String> {
     let receipt = conversation_receipt(
         operation,
         cloud_revision,
@@ -1494,100 +710,108 @@ fn commit_receipt(
         .plan_id
         .clone()
         .ok_or_else(|| "conversation operation lacks a plan id".to_string())?;
-    repository.mutate_materializations(|_, materializations| {
-        if materializations.records.iter().any(|record| {
-            record.receipts.iter().any(|receipt| {
-                receipt
-                    .conversation
-                    .as_ref()
-                    .is_some_and(|existing| existing.journal_operation_id == operation.operation_id)
-            })
-        }) {
-            return Ok(());
-        }
-        let action_id = operation
-            .plan_action_id
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(|| stable_action_id(&operation.operation_id))?;
-        let resource_id = conversation_resource_id(&operation.provider, &operation.thread_id)?;
-        let action_type = match operation.direction() {
+    let action_id = operation
+        .plan_action_id
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| stable_action_id(&operation.operation_id))?;
+    let apply_receipt = ApplyReceipt {
+        action_id,
+        resource_id: conversation_resource_id(&operation.provider, &operation.thread_id)?,
+        action_type: match operation.direction() {
             ConversationPlanDirection::Push => RestoreActionType::PublishConversation,
             ConversationPlanDirection::Pull => RestoreActionType::MaterializeConversation,
-        };
-        let apply_receipt = ApplyReceipt {
-            action_id,
-            resource_id,
-            action_type,
-            logical_path: None,
-            source_sha256: None,
-            target_path: operation
-                .targets
-                .iter()
-                .find(|target| target.role == ConversationFileRole::Transcript)
-                .map(|target| target.target_path.clone()),
-            target_sha256_after: receipt.local_file_sha256_after.clone(),
-            status: ActionStatus::Applied,
-            applied_at: operation.updated_at,
-            error: None,
-            conversation: Some(receipt.clone()),
-        };
-        if let Some(record) = materializations
-            .records
-            .iter_mut()
-            .find(|record| record.plan_id == plan_id)
+        },
+        logical_path: None,
+        source_sha256: None,
+        target_path: operation
+            .targets
+            .iter()
+            .find(|target| target.role == ConversationFileRole::Transcript)
+            .map(|target| target.target_path.clone()),
+        target_sha256_after: receipt.local_file_sha256_after.clone(),
+        status: ActionStatus::Applied,
+        applied_at: operation.updated_at,
+        error: None,
+        conversation: Some(receipt.clone()),
+    };
+    let record = MaterializationRecord {
+        materialization_id: stable_materialization_id(&operation.operation_id)?,
+        plan_id,
+        host_id: operation.host_id.clone(),
+        replica_id: operation.replica_id.clone(),
+        local_project_id: operation.local_project_id.clone(),
+        storage_id: operation.cloud.storage_id.clone(),
+        bundle_id: operation.cloud.bundle_id.clone(),
+        revision: cloud_revision,
+        commit_id: cloud_commit_id.to_string(),
+        manifest_sha256: cloud_manifest_sha256.to_string(),
+        binding_revision: operation.expected_project_binding_revision,
+        status: MaterializationStatus::Complete,
+        applied_at: operation.updated_at,
+        receipts: vec![apply_receipt],
+    };
+    Ok((receipt, record))
+}
+
+fn insert_receipt_record(
+    materializations: &mut Materializations,
+    mut incoming: MaterializationRecord,
+) -> Result<(), String> {
+    let operation_id = &incoming.receipts[0]
+        .conversation
+        .as_ref()
+        .expect("prepared record has a conversation receipt")
+        .operation_id;
+    if materializations.records.iter().any(|record| {
+        record.receipts.iter().any(|receipt| {
+            receipt
+                .conversation
+                .as_ref()
+                .is_some_and(|existing| &existing.operation_id == operation_id)
+        })
+    }) {
+        return Ok(());
+    }
+    if let Some(record) = materializations
+        .records
+        .iter_mut()
+        .find(|record| record.plan_id == incoming.plan_id)
+    {
+        if record.host_id != incoming.host_id
+            || record.replica_id != incoming.replica_id
+            || record.local_project_id != incoming.local_project_id
+            || record.storage_id != incoming.storage_id
+            || record.bundle_id != incoming.bundle_id
         {
-            if record.host_id != operation.host_id
-                || record.replica_id != operation.replica_id
-                || record.local_project_id != operation.local_project_id
-                || record.storage_id != anchor.storage_id
-                || record.bundle_id != anchor.bundle_id
-            {
-                return Err(
-                    "conversation receipt plan scope disagrees with materialization".to_string(),
-                );
-            }
-            record.receipts.push(apply_receipt);
-            record.applied_at = record.applied_at.max(operation.updated_at);
-        } else {
-            materializations.records.push(MaterializationRecord {
-                materialization_id: stable_materialization_id(&operation.operation_id)?,
-                plan_id,
-                host_id: operation.host_id.clone(),
-                replica_id: operation.replica_id.clone(),
-                local_project_id: operation.local_project_id.clone(),
-                storage_id: anchor.storage_id.clone(),
-                bundle_id: anchor.bundle_id.clone(),
-                revision: cloud_revision,
-                commit_id: cloud_commit_id.to_string(),
-                manifest_sha256: cloud_manifest_sha256.to_string(),
-                binding_revision: operation.expected_project_binding_revision,
-                status: MaterializationStatus::Complete,
-                applied_at: operation.updated_at,
-                receipts: vec![apply_receipt],
-            });
+            return Err(
+                "conversation receipt plan scope disagrees with materialization".to_string(),
+            );
         }
-        materializations.schema = LOCAL_SCHEMA;
-        Ok(())
-    })?;
-    Ok(receipt)
+        record.receipts.append(&mut incoming.receipts);
+        record.applied_at = record.applied_at.max(incoming.applied_at);
+    } else {
+        materializations.records.push(incoming);
+    }
+    materializations.schema = LOCAL_SCHEMA;
+    Ok(())
 }
 
 fn conversation_receipt(
-    operation: &ConversationSyncOperation,
+    operation: &ConversationApplyOperation,
     cloud_revision: u64,
     cloud_commit_id: &str,
     cloud_manifest_sha256: &str,
 ) -> ConversationApplyReceipt {
     let (accepted_tail, preserved_thread_id, preserved_display_title, source_disposition) =
         match &operation.operation {
-            ConversationSyncOperationKind::CloudPublication(publication) => (
+            ConversationApplyKind::CloudPublication(publication) => (
                 Some(publication.tail_after.clone()),
                 None,
                 None,
                 Some(ConversationSourceDisposition::Retained),
             ),
-            ConversationSyncOperationKind::ProviderMaterialization(materialization) => (
+            ConversationApplyKind::ProviderMaterialization(materialization) => (
                 Some(materialization.accepted_tail_after.clone()),
                 materialization
                     .keep_both
@@ -1615,99 +839,11 @@ fn conversation_receipt(
         cloud_manifest_sha256: cloud_manifest_sha256.to_string(),
         published_origin_host_token: None,
         published_origin_replica_token: None,
-        journal_operation_id: operation.operation_id.clone(),
+        operation_id: operation.operation_id.clone(),
         accepted_tail,
         preserved_thread_id,
         preserved_display_title,
         source_disposition,
-    }
-}
-
-fn cleanup_and_retire(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-) -> Result<(), String> {
-    let operation = repository
-        .load_conversation_sync_journal()?
-        .operations
-        .into_iter()
-        .find(|operation| &operation.operation_id == operation_id)
-        .ok_or_else(|| format!("conversation operation '{}' disappeared", operation_id))?;
-    for target in &operation.targets {
-        if let Some(stage) = &target.staged_path {
-            remove_file_if_exists(Path::new(stage))?;
-        }
-    }
-    remove_directory_tree_if_owned(
-        &intent_directory(repository, operation_id),
-        repository.root(),
-    )?;
-    let journal = repository.load_conversation_sync_journal()?;
-    repository.mutate_conversation_sync_journal(journal.revision, |journal| {
-        journal
-            .operations
-            .retain(|operation| &operation.operation_id != operation_id);
-        Ok(())
-    })
-}
-
-fn rollback_staged(
-    repository: &LocalStateRepository,
-    operation: &ConversationSyncOperation,
-) -> Result<(), String> {
-    for target in &operation.targets {
-        if let Some(stage) = &target.staged_path {
-            remove_file_if_exists(Path::new(stage))?;
-        }
-    }
-    cleanup_and_retire(repository, &operation.operation_id)
-}
-
-/// Gate the touched resources for explicit repair: the blocked phase is
-/// durable and is neither retried nor released by routine recovery.
-fn mark_recovery_blocked(
-    repository: &LocalStateRepository,
-    operation_id: &ConversationOperationId,
-) -> Result<(), String> {
-    let (_, _) = mutate_operation(repository, operation_id, |operation| {
-        match &mut operation.operation {
-            ConversationSyncOperationKind::CloudPublication(publication) => {
-                publication.phase = PushJournalPhase::RecoveryBlockedCorruption;
-            }
-            ConversationSyncOperationKind::ProviderMaterialization(materialization) => {
-                materialization.phase = PullJournalPhase::RecoveryBlockedCorruption;
-            }
-        }
-        Ok(())
-    })?;
-    Ok(())
-}
-
-fn staged_target_is_valid(target: &ConversationJournalTarget) -> bool {
-    target
-        .staged_path
-        .as_deref()
-        .zip(target.staged_sha256.as_deref())
-        .and_then(|(path, digest)| {
-            read_regular_file_digest(Path::new(path))
-                .ok()
-                .flatten()
-                .map(|actual| (actual, digest))
-        })
-        .is_some_and(|(actual, digest)| actual == digest)
-}
-
-fn target_is_uncommitted(target: &ConversationJournalTarget) -> bool {
-    if target.commit_started || target.committed {
-        return false;
-    }
-    match (
-        &target.expected,
-        read_regular_file_digest(Path::new(&target.target_path)),
-    ) {
-        (TargetExpectation::Absent, Ok(None)) => true,
-        (TargetExpectation::Sha256(expected), Ok(Some(actual))) => expected == &actual,
-        _ => false,
     }
 }
 
@@ -1733,10 +869,10 @@ fn ensure_canonical_parent(path: &Path) -> Result<(), String> {
     canonical_target_path(path).map(|_| ())
 }
 
-fn read_regular_file_digest(path: &Path) -> Result<Option<String>, String> {
+fn inspect_regular_file(path: &Path) -> Result<bool, String> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(format!("inspect '{}': {}", path.display(), error)),
     };
     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
@@ -1750,6 +886,13 @@ fn read_regular_file_digest(path: &Path) -> Result<Option<String>, String> {
             "'{}' exceeds the provider target limit",
             path.display()
         ));
+    }
+    Ok(true)
+}
+
+fn read_regular_file_digest(path: &Path) -> Result<Option<String>, String> {
+    if !inspect_regular_file(path)? {
+        return Ok(None);
     }
     let mut file =
         File::open(path).map_err(|error| format!("open '{}': {}", path.display(), error))?;
@@ -1772,6 +915,8 @@ fn read_regular_file_digest(path: &Path) -> Result<Option<String>, String> {
         }
         hasher.update(&buffer[..count]);
     }
+    crate::sync_metrics::record_transcript_bytes_read(path, total);
+    crate::sync_metrics::record_bytes_hashed(path, total);
     Ok(Some(hex_lower(&hasher.finalize())))
 }
 
@@ -1813,6 +958,7 @@ fn copy_new_file(source: &Path, target: &Path) -> Result<(), String> {
     }
     let bytes =
         fs::read(source).map_err(|error| format!("read '{}': {}", source.display(), error))?;
+    crate::sync_metrics::record_transcript_bytes_read(source, bytes.len() as u64);
     write_new_file(target, &bytes)
 }
 
@@ -1851,61 +997,6 @@ fn create_private_directory_all(root: &Path, path: &Path) -> Result<(), String> 
     Ok(())
 }
 
-fn remove_directory_tree_if_owned(path: &Path, root: &Path) -> Result<(), String> {
-    if !path.starts_with(root) {
-        return Err("conversation cleanup escapes Mallard state".to_string());
-    }
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
-            fs::remove_dir_all(path)
-                .map_err(|error| format!("remove '{}': {}", path.display(), error))?;
-            sync_directory(
-                path.parent()
-                    .ok_or_else(|| "conversation cleanup has no parent".to_string())?,
-            )
-        }
-        Ok(_) => Err(format!("'{}' is not a real directory", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("inspect '{}': {}", path.display(), error)),
-    }
-}
-
-fn remove_file_if_exists(path: &Path) -> Result<(), String> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
-            fs::remove_file(path)
-                .map_err(|error| format!("remove '{}': {}", path.display(), error))?;
-            sync_directory(
-                path.parent()
-                    .ok_or_else(|| "removed file has no parent".to_string())?,
-            )
-        }
-        Ok(_) => Err(format!(
-            "'{}' is not a regular no-follow file",
-            path.display()
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("inspect '{}': {}", path.display(), error)),
-    }
-}
-
-fn same_file(left: &Path, right: &Path) -> Result<bool, String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let left = fs::metadata(left)
-            .map_err(|error| format!("inspect '{}': {}", left.display(), error))?;
-        let right = fs::metadata(right)
-            .map_err(|error| format!("inspect '{}': {}", right.display(), error))?;
-        Ok(left.dev() == right.dev() && left.ino() == right.ino())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (left, right);
-        Ok(false)
-    }
-}
-
 fn sync_directory(path: &Path) -> Result<(), String> {
     let directory = File::open(path)
         .map_err(|error| format!("open directory '{}': {}", path.display(), error))?;
@@ -1938,4 +1029,167 @@ fn stable_materialization_id(
         "materialization-conversation-{}",
         stable_fragment(operation_id.as_str())
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(
+        root: &Path,
+        name: &str,
+        role: ConversationFileRole,
+        existing: Option<&[u8]>,
+    ) -> ConversationApplyTarget {
+        let path = root.join(name);
+        if let Some(bytes) = existing {
+            fs::write(&path, bytes).unwrap();
+        }
+        let stage = root.join(format!("{name}.stage"));
+        fs::write(&stage, b"verified cloud payload").unwrap();
+        let index_rows = if role == ConversationFileRole::ProviderIndexFragment {
+            vec!["thread-one".to_string()]
+        } else {
+            Vec::new()
+        };
+        ConversationApplyTarget {
+            target_path: path_text(&path).unwrap(),
+            role,
+            expected: existing
+                .map(|bytes| TargetExpectation::Sha256(sha256_hex(bytes)))
+                .unwrap_or(TargetExpectation::Absent),
+            staged_path: Some(path_text(&stage).unwrap()),
+            backup_path: existing.map(|_| path_text(&root.join(format!("{name}.bak"))).unwrap()),
+            staged_sha256: Some(sha256_hex(b"verified cloud payload")),
+            index_rows,
+        }
+    }
+
+    #[test]
+    fn checked_transcript_is_replaced_without_another_source_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let transcript = target(
+            &root,
+            "source",
+            ConversationFileRole::Transcript,
+            Some(b"captured"),
+        );
+        let metrics = crate::sync_metrics::register_root(Path::new(&transcript.target_path));
+        assert!(validate_target_expectations(&[transcript.clone()], None).is_err());
+        fs::write(&transcript.target_path, b"changed after the source check").unwrap();
+        validate_target_expectations(&[transcript.clone()], Some(b"captured")).unwrap();
+        commit_one_target(&transcript).unwrap();
+        assert_eq!(
+            fs::read(&transcript.target_path).unwrap(),
+            b"verified cloud payload"
+        );
+        assert_eq!(metrics.snapshot().transcript_bytes_read, 0);
+        assert_eq!(metrics.snapshot().bytes_hashed, 0);
+    }
+
+    #[test]
+    fn shared_index_conflicts_still_fail_before_staging_and_at_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let transcript = target(
+            &root,
+            "source",
+            ConversationFileRole::Transcript,
+            Some(b"captured"),
+        );
+        let index = target(
+            &root,
+            "index",
+            ConversationFileRole::ProviderIndexFragment,
+            Some(b"old index"),
+        );
+        let targets = [transcript, index.clone()];
+        validate_target_expectations(&targets, Some(b"captured")).unwrap();
+        fs::write(&index.target_path, b"updated unrelated thread entry").unwrap();
+        assert!(validate_target_expectations(&targets, Some(b"captured")).is_err());
+        assert!(commit_one_target(&index).is_err());
+        assert_eq!(
+            fs::read(&index.target_path).unwrap(),
+            b"updated unrelated thread entry"
+        );
+    }
+
+    #[test]
+    fn new_transcript_destinations_still_reject_occupants() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let transcript = target(&root, "source", ConversationFileRole::Transcript, None);
+        assert!(validate_target_expectations(&[transcript.clone()], Some(b"unneeded")).is_err());
+        validate_target_expectations(&[transcript.clone()], None).unwrap();
+        fs::write(&transcript.target_path, b"another thread").unwrap();
+        assert!(validate_target_expectations(&[transcript.clone()], None).is_err());
+        assert!(commit_one_target(&transcript).is_err());
+        assert_eq!(
+            fs::read(&transcript.target_path).unwrap(),
+            b"another thread"
+        );
+    }
+
+    #[test]
+    fn checked_transcript_does_not_bypass_staged_payload_verification() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let transcript = target(
+            &root,
+            "source",
+            ConversationFileRole::Transcript,
+            Some(b"captured"),
+        );
+        validate_target_expectations(&[transcript.clone()], Some(b"captured")).unwrap();
+        fs::write(
+            transcript.staged_path.as_deref().unwrap(),
+            b"corrupted stage",
+        )
+        .unwrap();
+        assert!(commit_one_target(&transcript).is_err());
+        assert_eq!(fs::read(&transcript.target_path).unwrap(), b"captured");
+    }
+
+    #[test]
+    fn checked_transcript_still_rejects_directories_and_oversized_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let transcript = target(
+            &root,
+            "source",
+            ConversationFileRole::Transcript,
+            Some(b"captured"),
+        );
+        validate_target_expectations(&[transcript.clone()], Some(b"captured")).unwrap();
+        fs::remove_file(&transcript.target_path).unwrap();
+        fs::create_dir(&transcript.target_path).unwrap();
+        assert!(commit_one_target(&transcript).is_err());
+        fs::remove_dir(&transcript.target_path).unwrap();
+        File::create(&transcript.target_path)
+            .unwrap()
+            .set_len(MAX_PROVIDER_TARGET_BYTES + 1)
+            .unwrap();
+        assert!(commit_one_target(&transcript).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_transcript_still_rejects_a_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let transcript = target(
+            &root,
+            "source",
+            ConversationFileRole::Transcript,
+            Some(b"captured"),
+        );
+        validate_target_expectations(&[transcript.clone()], Some(b"captured")).unwrap();
+        let unrelated = root.join("unrelated");
+        fs::write(&unrelated, b"unrelated content").unwrap();
+        fs::remove_file(&transcript.target_path).unwrap();
+        std::os::unix::fs::symlink(&unrelated, &transcript.target_path).unwrap();
+        assert!(commit_one_target(&transcript).is_err());
+        assert_eq!(fs::read(&unrelated).unwrap(), b"unrelated content");
+    }
 }

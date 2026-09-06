@@ -15,7 +15,7 @@ use crate::project_activity::{discover_github_repository_url, resolve_activity_p
 use crate::provider_capture::{modified_secs, LocalSessionView};
 use crate::providers::traits::timeline_tool_detail_budgets;
 use crate::providers::{
-    ProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionCheckpoint,
+    AgentProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionCheckpoint,
     SessionCount, SessionCountQuality, SessionDetailWarning, SessionEventCounts,
     SessionEventDetail, SessionFileSummary, SessionTimelineContext, SessionTimelineEvent,
     SessionTimelineEventKind, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
@@ -720,7 +720,7 @@ fn validate_page_slice(
 
 fn resolve_local_session(
     repository: &LocalStateRepository,
-    registry: &ProviderRegistry,
+    registry: &AgentProviderRegistry,
     local_project_id: &LocalProjectId,
     resource_id: &str,
     views: &[LocalSessionView],
@@ -978,7 +978,7 @@ fn refresh_file_state(session: &mut ResolvedLocalSession) -> SessionDetailResult
 
 fn load_or_build_index(
     repository: &LocalStateRepository,
-    registry: &ProviderRegistry,
+    registry: &AgentProviderRegistry,
     session: &mut ResolvedLocalSession,
 ) -> SessionDetailResult<(
     SessionTimelineIndex,
@@ -1108,7 +1108,7 @@ fn load_or_build_index(
     ))
 }
 
-fn provider_display_name(registry: &ProviderRegistry, provider: &ProviderKey) -> String {
+fn provider_display_name(registry: &AgentProviderRegistry, provider: &ProviderKey) -> String {
     registry
         .get(provider)
         .map(|adapter| adapter.descriptor().display_name)
@@ -1286,7 +1286,7 @@ fn with_checkpoint_count(
             value: Some(u64::from(value.is_some())),
             quality: SessionCountQuality::Inferred,
             explanation: Some(
-                "Checkpoints are inferred from the first successor commit on the session branch."
+                "Checkpoints are inferred from the first successor commit on the provider-recorded branch."
                     .to_string(),
             ),
         },
@@ -1359,7 +1359,7 @@ pub fn encode_session_event_detail_response(
 }
 
 fn summarize_session(
-    registry: &ProviderRegistry,
+    registry: &AgentProviderRegistry,
     session: &ResolvedLocalSession,
 ) -> SessionDetailResult<crate::providers::SessionFileSummary> {
     let adapter = registry.require(&session.provider).map_err(|_| {
@@ -1566,7 +1566,7 @@ fn validate_slice_against_query(
 /// that makes a remote session resumable and richly viewable.
 pub fn get_project_session_detail(
     repository: &LocalStateRepository,
-    registry: &ProviderRegistry,
+    registry: &AgentProviderRegistry,
     local_project_id: &LocalProjectId,
     resource_id: &str,
     views: &[LocalSessionView],
@@ -1657,7 +1657,7 @@ pub fn get_project_session_detail(
 /// index. Provider filtering occurs before pagination.
 pub fn get_project_session_timeline_page(
     repository: &LocalStateRepository,
-    registry: &ProviderRegistry,
+    registry: &AgentProviderRegistry,
     local_project_id: &LocalProjectId,
     resource_id: &str,
     request: ProjectSessionTimelineRequest,
@@ -1795,7 +1795,7 @@ fn truncate_to_bytes(value: &mut Option<String>, limit: usize, truncated: &mut b
 /// addressable through this command.
 pub fn get_project_session_event_detail(
     repository: &LocalStateRepository,
-    registry: &ProviderRegistry,
+    registry: &AgentProviderRegistry,
     local_project_id: &LocalProjectId,
     resource_id: &str,
     snapshot_id_value: &str,
@@ -1968,7 +1968,6 @@ mod tests {
             ended_at: None,
             branch: None,
             recorded_sha: None,
-            recorded_branches: BTreeSet::new(),
             user_rounds: 0,
             agent_messages: 0,
             tool_calls: 0,
@@ -2450,6 +2449,7 @@ mod tests {
                     display_name: "Test Provider".to_string(),
                     path: provider_home.to_string_lossy().into_owned(),
                     canonical_path: canonical_provider_home.to_string_lossy().into_owned(),
+                    provider_config: mallard_domain::AgentProviderConfig::version_1(),
                     revision: 0,
                     created_at: 1,
                     updated_at: 1,
@@ -2501,15 +2501,15 @@ mod tests {
         let views = vec![LocalSessionView {
             descriptor: crate::provider_capture::ResourceCandidate {
                 resource_id: resource_id.to_string(),
-                kind: crate::provider_capture::CaptureResourceKind::Conversation,
+                kind: mallard_domain::portable::contracts::conversation(),
                 provider: Some(provider.clone()),
                 provider_resource_type: Some("session".to_string()),
                 display_name: "Session one".to_string(),
-                apply_policy: crate::provider_capture::CaptureApplyPolicy::SafeFile,
+                apply_policy: mallard_domain::portable::contracts::safe_file(),
                 selected_by_default: true,
                 blocked_reason: None,
                 logical_paths: vec!["sessions/session-1.jsonl".to_string()],
-                metadata: BTreeMap::new(),
+                project_content: None,
             },
             provider: provider.clone(),
             provider_thread_id: provider_session_id.to_string(),
@@ -2519,7 +2519,7 @@ mod tests {
             source_size: transcript_metadata.len(),
             capture_bytes: transcript_metadata.len(),
         }];
-        let registry = ProviderRegistry::with_test_provider();
+        let registry = AgentProviderRegistry::with_test_provider();
         let before = get_project_session_detail(
             &repository,
             &registry,

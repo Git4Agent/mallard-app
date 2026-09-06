@@ -1,33 +1,27 @@
 //! Standalone reconstruction of one resolved Codex logical root.
 //!
-//! Every selected conversation passes through this one builder: dependencies
-//! resolved, the in-cwd path layer transformed through the shared
-//! `session_path_map` matcher, supported identity edges rewritten, output
-//! emitted as one paginated null-base rollout, and every output record gated
-//! and re-verified against the resolved canonical chain before anything is
-//! published or installed.
+//! Push verifies physical source origins, maps new records, and redacts
+//! credentials. The wire form keeps source records with tagged path
+//! references and one authoritative metadata head. Redundant display
+//! records are checked and omitted.
 //!
-//! `Encode` builds the machine-neutral **wire form** Push publishes: every
-//! in-root path occurrence becomes the `/__mallard_root__` token, detected
-//! credentials become typed placeholders (`credential_redaction`, composed
-//! after the path layer so the fixpoint certificate covers the final
-//! bytes), the authoritative head carries the `__mallard_path_map__` codec
-//! marker, and the artifact's tail and digests are wire-form values.
-//! `Decode` builds the **local form** Pull installs: tokens expand to the
-//! pulling machine's project root, the marker is stripped, redaction is
-//! one-way (placeholders materialize verbatim), and the artifact's tail,
-//! digests, and prefix witness are local-form values. The round-trip gates
-//! — the span-bounded structural diffs at encode and the
-//! `encode∘decode = id` path self-check plus the `redact(w) == w` leak
-//! certificate — run inside the matching build; the identity layer (fresh
-//! root id, head fold, `item_completed` thread stamps, ordinals) is proven
-//! by the structural checks, never by byte comparison across it.
+//! Pull decodes references and captures their inverse edits. It then builds
+//! native display records from the decoded sources. Generated display and
+//! lifecycle records are marked derived in local origins. Thus HTML entity
+//! decoding and file-URI formatting cannot turn display text into path syntax.
+//!
+//! Output analysis checks canonical message identities, digests, and the
+//! fixed tail partition. Local hashes cover final provider IDs and ordinals.
+//! Credential redaction is the only permitted conversation-text loss.
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
+use std::time::{Duration, Instant};
 
 use crate::app_settings::conversation_file_limit_bytes;
-use crate::codex_history_graph::ResolvedCodexRoot;
+use crate::codex_history_graph::{ResolvedCodexRoot, ResolvedSegment};
+use crate::codex_paginated_projection::project_with_sources;
 use crate::codex_paginated_projection::{
     complete_paginated_item_projection, verify_projection_fixpoint,
 };
@@ -35,9 +29,12 @@ use crate::codex_rollout::{session_meta_id, structural_record_type};
 use crate::conversation_codec::{analyze_codex_transcript, CodecLineage};
 use crate::credential_redaction;
 use crate::jsonl_tail_io::read_bounded;
+use crate::payload::PayloadBytes;
 use crate::session_path_map::{
     path_map_marker, validate_path_map_marker, SessionPathMapper, PATH_MAP_FIELD,
 };
+use crate::session_path_origins::{PathOrigins, RecordPathOrigins};
+use crate::verified_transcript::VerifiedTranscript;
 use mallard_domain::{
     compute_portable_conversation_tail_with_codec, conversation_prefix_witness, hex_lower,
     update_length_prefixed, ConversationPrefixWitness, PortableConversationTail,
@@ -46,30 +43,15 @@ use mallard_domain::{
 
 const ARTIFACT_DOMAIN_V1: &[u8] = b"mallard-codex-artifact-v1";
 
-/// How the builder transforms the path layer and assigns the output root's
-/// provider identity.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StandaloneBuildMode {
-    /// Build the token-form wire object from local bytes: Push objects.
-    /// Keeps the selected local identity.
+enum BuildMode<'a> {
     Encode {
-        /// The binding's project root — the only base paths are remapped
-        /// under.
-        root: String,
-        /// The binding's canonical alias spelling when it differs (macOS
-        /// `/var` ↔ `/private/var`); matched identically.
-        canonical_root: Option<String>,
+        root: &'a str,
+        canonical_root: Option<&'a str>,
     },
-    /// Materialize the local form from a staged wire object under a
-    /// plan-persisted fresh identity: Pull targets.
     Decode {
-        root_provider_thread_id: String,
-        /// The pulling machine's binding project root.
-        target_root: String,
-        /// The pulling binding's canonical alias spelling when it differs.
-        /// The pull gate re-encodes under the same patterns a future push
-        /// from this machine will use, so alias collisions surface at pull.
-        canonical_target_root: Option<String>,
+        root_provider_thread_id: &'a str,
+        target_root: &'a str,
+        canonical_target_root: Option<&'a str>,
     },
 }
 
@@ -77,9 +59,10 @@ pub enum StandaloneBuildMode {
 /// witness — belongs to the **output form**: wire values from `Encode`,
 /// local values from `Decode`. Forms are never cross-compared.
 #[derive(Clone, Debug)]
-pub struct StandaloneConversationArtifact {
+pub struct StandaloneConversationArtifact<B> {
     pub root_provider_thread_id: String,
-    pub root_bytes: Vec<u8>,
+    pub root_bytes: B,
+    pub path_origins: PathOrigins,
     /// Output-form portable tail: `PORTABLE_TAIL_CODEC_WIRE_V1` from
     /// `Encode`, `PORTABLE_TAIL_CODEC_V1` from `Decode`.
     pub portable_tail: PortableConversationTail,
@@ -95,6 +78,8 @@ pub struct StandaloneConversationArtifact {
     pub lineage_digest: String,
     pub semantic_digest: String,
     pub artifact_sha256: String,
+    pub(crate) verification: VerifiedTranscript,
+    pub(crate) output_verification_elapsed: Duration,
 }
 
 /// Build the deterministic standalone encoding of one resolved root and
@@ -106,106 +91,288 @@ pub struct StandaloneConversationArtifact {
 /// carries the stored binding layout when one exists, so a republish from a
 /// pulled machine keeps the imported paginated partition instead of moving
 /// the start to the local file's null native base.
-pub fn build_standalone_codex_root(
+pub fn encode_standalone_codex_root(
     resolved: &ResolvedCodexRoot,
-    mode: &StandaloneBuildMode,
+    root: &str,
+    canonical_root: Option<&str>,
     layout: Option<&mallard_domain::RootTailLayout>,
-) -> Result<StandaloneConversationArtifact, String> {
+    redactor: &mut credential_redaction::RedactionRun<'_>,
+    origins: &PathOrigins,
+) -> Result<StandaloneConversationArtifact<credential_redaction::RedactedWireBytes>, String> {
+    encode_codex_root_with_reader(
+        resolved,
+        root,
+        canonical_root,
+        layout,
+        redactor,
+        origins,
+        &|segment| read_bounded(&segment.path).map(Cow::Owned),
+    )
+}
+
+/// Encode the same snapshots used for resolution and checkpoint seeding.
+pub fn encode_captured_codex_root(
+    resolved: &ResolvedCodexRoot,
+    sources: &crate::codex_history_graph::CodexSourceSnapshots,
+    root: &str,
+    canonical_root: Option<&str>,
+    layout: Option<&mallard_domain::RootTailLayout>,
+    redactor: &mut credential_redaction::RedactionRun<'_>,
+    origins: &PathOrigins,
+) -> Result<StandaloneConversationArtifact<credential_redaction::RedactedWireBytes>, String> {
+    let verify_sources = || -> Result<(), String> {
+        for (path, (_, stamp)) in sources {
+            stamp.verify(path)?;
+        }
+        Ok(())
+    };
+    verify_sources()?;
+    let artifact = encode_codex_root_with_reader(
+        resolved,
+        root,
+        canonical_root,
+        layout,
+        redactor,
+        origins,
+        &|segment| {
+            sources
+                .get(&segment.path)
+                .map(|(bytes, _)| Cow::Borrowed(bytes.as_bytes()))
+                .ok_or_else(|| "resolved Codex segment has no captured bytes".to_string())
+        },
+    )?;
+    verify_sources()?;
+    Ok(artifact)
+}
+
+fn encode_codex_root_with_reader(
+    resolved: &ResolvedCodexRoot,
+    root: &str,
+    canonical_root: Option<&str>,
+    layout: Option<&mallard_domain::RootTailLayout>,
+    redactor: &mut credential_redaction::RedactionRun<'_>,
+    origins: &PathOrigins,
+    read_segment: &SegmentReader<'_>,
+) -> Result<StandaloneConversationArtifact<credential_redaction::RedactedWireBytes>, String> {
+    let artifact = reconstruct_codex_root(
+        resolved,
+        BuildMode::Encode {
+            root,
+            canonical_root,
+        },
+        layout,
+        redactor,
+        origins,
+        read_segment,
+    )?;
+    Ok(StandaloneConversationArtifact {
+        root_provider_thread_id: artifact.root_provider_thread_id,
+        root_bytes: credential_redaction::RedactedWireBytes::from_verified_payload(
+            artifact.root_bytes,
+        ),
+        path_origins: artifact.path_origins,
+        portable_tail: artifact.portable_tail,
+        prefix_witness: artifact.prefix_witness,
+        message_count: artifact.message_count,
+        last_canonical_message_id: artifact.last_canonical_message_id,
+        last_synthetic_turn_id: artifact.last_synthetic_turn_id,
+        next_synthetic_turn_ordinal: artifact.next_synthetic_turn_ordinal,
+        lineage_digest: artifact.lineage_digest,
+        semantic_digest: artifact.semantic_digest,
+        artifact_sha256: artifact.artifact_sha256,
+        verification: artifact.verification,
+        output_verification_elapsed: artifact.output_verification_elapsed,
+    })
+}
+
+/// Filesystem fixture helper. Production Pull decodes its downloaded bytes
+/// directly; this helper is absent from production builds.
+#[cfg(any(test, feature = "test-support"))]
+pub fn decode_standalone_codex_root(
+    resolved: &ResolvedCodexRoot,
+    root_provider_thread_id: &str,
+    target_root: &str,
+    canonical_target_root: Option<&str>,
+    layout: Option<&mallard_domain::RootTailLayout>,
+) -> Result<StandaloneConversationArtifact<PayloadBytes>, String> {
+    let mut redaction = credential_redaction::shared().begin_run();
+    reconstruct_codex_root(
+        resolved,
+        BuildMode::Decode {
+            root_provider_thread_id,
+            target_root,
+            canonical_target_root,
+        },
+        layout,
+        &mut redaction,
+        &PathOrigins::default(),
+        &|segment| read_bounded(&segment.path).map(Cow::Owned),
+    )
+}
+
+pub(crate) fn decode_standalone_codex_bytes(
+    resolved: &ResolvedCodexRoot,
+    bytes: &[u8],
+    root_provider_thread_id: &str,
+    target_root: &str,
+    canonical_target_root: Option<&str>,
+    layout: &mallard_domain::RootTailLayout,
+) -> Result<StandaloneConversationArtifact<PayloadBytes>, String> {
+    if resolved.segments.len() != 1 || resolved.leaf_file_size != bytes.len() as u64 {
+        return Err("wire bytes do not match their standalone resolution".to_string());
+    }
+    reconstruct_codex_root(
+        resolved,
+        BuildMode::Decode {
+            root_provider_thread_id,
+            target_root,
+            canonical_target_root,
+        },
+        Some(layout),
+        &mut credential_redaction::shared().begin_run(),
+        &PathOrigins::default(),
+        &|_| Ok(Cow::Borrowed(bytes)),
+    )
+}
+
+type SegmentReader<'a> = dyn Fn(&ResolvedSegment) -> Result<Cow<'a, [u8]>, String> + 'a;
+
+fn reconstruct_codex_root(
+    resolved: &ResolvedCodexRoot,
+    mode: BuildMode<'_>,
+    layout: Option<&mallard_domain::RootTailLayout>,
+    redactor: &mut credential_redaction::RedactionRun<'_>,
+    previous_origins: &PathOrigins,
+    read_segment: &SegmentReader<'_>,
+) -> Result<StandaloneConversationArtifact<PayloadBytes>, String> {
     let home = std::env::var("HOME").ok();
     let (output_root_id, mapper, encode_mode) = match mode {
-        StandaloneBuildMode::Encode {
+        BuildMode::Encode {
             root,
             canonical_root,
         } => (
             resolved.leaf_meta.id.clone(),
-            SessionPathMapper::new(root, canonical_root.as_deref(), home.as_deref())?,
+            SessionPathMapper::new(root, canonical_root, home.as_deref())?,
             true,
         ),
-        StandaloneBuildMode::Decode {
+        BuildMode::Decode {
             root_provider_thread_id,
             target_root,
             canonical_target_root,
         } => (
-            root_provider_thread_id.clone(),
-            SessionPathMapper::new(
-                target_root,
-                canonical_target_root.as_deref(),
-                home.as_deref(),
-            )?,
+            root_provider_thread_id.to_string(),
+            SessionPathMapper::new(target_root, canonical_target_root, home.as_deref())?,
             false,
         ),
     };
 
-    // A standalone paginated rollout has exactly one authoritative metadata
-    // record at ordinal zero. Metadata from history-source segments is not
-    // conversation history, while later same-thread metadata in the leaf is
-    // folded into this effective head record. The path layer transforms
-    // before the identity stage; each direction's §4.4 gate runs strictly
-    // within the path layer.
-    let folded_head = effective_authoritative_meta(resolved)?;
-    let redactor = credential_redaction::shared();
-    let authoritative = if encode_mode {
-        let mut head = mapper
-            .encode_record_gated(&folded_head)
-            .map_err(|error| format!("authoritative session metadata: {error}"))?;
-        head = redactor
-            .redact_record_gated(&head)
-            .map_err(|error| format!("authoritative session metadata: {error}"))?;
-        rewrite_meta_record(&mut head, &output_root_id)?;
-        head_payload_mut(&mut head)?.insert(PATH_MAP_FIELD.to_string(), path_map_marker());
-        head
-    } else {
-        let mut head = folded_head;
-        let marker = head_payload_mut(&mut head)?
-            .remove(PATH_MAP_FIELD)
-            .ok_or_else(|| "conversation wire object lacks its path-map declaration".to_string())?;
-        validate_path_map_marker(&marker)?;
-        mapper
-            .verify_wire_record(&head)
-            .map_err(|error| format!("authoritative session metadata: {error}"))?;
-        redactor
-            .verify_wire_value(&head)
-            .map_err(|error| format!("authoritative session metadata: {error}"))?;
-        let mut head = mapper.decode_record(&head)?;
-        rewrite_meta_record(&mut head, &output_root_id)?;
-        head
-    };
-    let original = collect_flattened_non_metadata_records(resolved, &mapper, encode_mode)?;
-    let projected = complete_paginated_item_projection(original, &output_root_id)?;
-
-    // Wire self-check over the complete emitted body, projection-inserted
-    // records included: every emitted record must sit in a declared wire
-    // form (`encode(decode(w)) == w`). Any projection change minting an
-    // undeclared spelling fails here, at push, not at some later pull.
+    // Transform each physical source record before folding metadata. This
+    // preserves exact record ownership through metadata updates and forks.
+    let mut path_origins = PathOrigins::default();
+    let (mut authoritative, original) = read_source_records(
+        resolved,
+        read_segment,
+        &mapper,
+        encode_mode,
+        redactor,
+        previous_origins,
+        &mut path_origins,
+    )?;
     if encode_mode {
-        let mut normalized_head = authoritative.clone();
-        head_payload_mut(&mut normalized_head)?.remove(PATH_MAP_FIELD);
-        mapper
-            .verify_wire_record(&normalized_head)
-            .map_err(|error| format!("authoritative session metadata: {error}"))?;
-        redactor
-            .verify_wire_value(&normalized_head)
-            .map_err(|error| format!("authoritative session metadata: {error}"))?;
-        for (index, record) in projected.iter().enumerate() {
-            mapper
-                .verify_wire_record(record)
-                .map_err(|error| format!("emitted record {}: {error}", index + 1))?;
-            redactor
-                .verify_wire_value(record)
-                .map_err(|error| format!("emitted record {}: {error}", index + 1))?;
-        }
+        rewrite_meta_record(&mut authoritative, &output_root_id)?;
+        head_payload_mut(&mut authoritative)?.insert(PATH_MAP_FIELD.to_string(), path_map_marker());
+        redactor.verify_wire_value(&authoritative)?;
+    } else {
+        let marker = head_payload_mut(&mut authoritative)?
+            .remove(PATH_MAP_FIELD)
+            .ok_or("conversation wire object lacks its path-map declaration")?;
+        validate_path_map_marker(&marker)?;
+        rewrite_meta_record(&mut authoritative, &output_root_id)?;
     }
-
     let mut output = Vec::new();
-    let mut next_ordinal = append_output_record(&mut output, authoritative, 0)?;
-    for record in projected {
-        next_ordinal = append_output_record(&mut output, record, next_ordinal)?;
+    if encode_mode {
+        // Classify redundant display records in the native source form.
+        // Path mapping must not precede HTML decoding or URI projection.
+        let native = project_with_sources(
+            original.iter().map(|record| record.local.clone()).collect(),
+            &output_root_id,
+            &mut |_| Ok(()),
+        )?;
+        // Retain the redaction gate for secrets exposed by display decoding.
+        // Generated wire projections are proof inputs, never published.
+        complete_paginated_item_projection(
+            original.iter().map(|record| record.wire.clone()).collect(),
+            &output_root_id,
+            &mut |record| redactor.verify_wire_value(record),
+        )?;
+        let mut ordinal = append_output_record(&mut output, authoritative, 0)?;
+        for projected in native {
+            let Some(index) = projected.source_index else {
+                continue;
+            };
+            let source = &original[index];
+            if projected.derived && !source.covered {
+                path_origins
+                    .sources
+                    .get_mut(source.source)
+                    .expect("captured source")[source.ordinal]
+                    .derived = true;
+                continue;
+            }
+            let mut wire = source.wire.clone();
+            normalize_item_identity(&mut wire, &output_root_id);
+            mapper.verify_wire_record(&wire)?;
+            ordinal = append_output_record(&mut output, wire, ordinal)?;
+        }
+    } else {
+        authoritative
+            .as_object_mut()
+            .ok_or("metadata is not an object")?
+            .insert("ordinal".into(), Value::from(0));
+        let head = mapper.decode_record_with_origins(&authoritative)?;
+        path_origins.push(&output_root_id, head.origins);
+        append_output_record(&mut output, head.local, 0)?;
+        let decoded = original
+            .into_iter()
+            .map(|source| {
+                let mut wire = source.wire;
+                normalize_item_identity(&mut wire, &output_root_id);
+                mapper.decode_record_with_origins(&wire)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let projected = project_with_sources(
+            decoded.iter().map(|record| record.local.clone()).collect(),
+            &output_root_id,
+            &mut |_| Ok(()),
+        )?;
+        for (index, projected) in projected.into_iter().enumerate() {
+            let mut record = projected.value;
+            let (fields, derived) = if let Some(source) = projected.source_index {
+                if record != decoded[source].local {
+                    return Err("projection changed retained source text".into());
+                }
+                (decoded[source].origins.fields.clone(), false)
+            } else {
+                (Vec::new(), true)
+            };
+            record
+                .as_object_mut()
+                .ok_or("projected record is not an object")?
+                .insert("ordinal".into(), Value::from((index + 1) as u64));
+            let mut origins = RecordPathOrigins::capture(&record, fields)?;
+            origins.derived = derived;
+            path_origins.push(&output_root_id, origins);
+            append_output_record(&mut output, record, (index + 1) as u64)?;
+        }
     }
     if output.len() as u64 > conversation_file_limit_bytes() {
         return Err("standalone Codex output exceeds the bounded transcript limit".to_string());
     }
+    let output_verification_started = Instant::now();
     validate_standalone_record_layout(&output)?;
-    validate_projection_fixpoint(&output, &output_root_id)?;
+    if !encode_mode {
+        validate_projection_fixpoint(&output, &output_root_id)?;
+    }
 
     // Full verification: the output must re-analyze to a canonical chain
     // with exactly the resolved chain's message identities under the output
@@ -217,6 +384,8 @@ pub fn build_standalone_codex_root(
     if analysis.is_internal_subagent {
         return Err("standalone output claims to be an internal subagent".to_string());
     }
+    let output = PayloadBytes::from(output);
+    let verification = VerifiedTranscript::from_codex_analysis(output.clone(), &analysis)?;
     let last_canonical_message_id = analysis.last_canonical_message_id.clone();
     let last_synthetic_turn_id = analysis.last_synthetic_turn_id.clone();
     let next_synthetic_turn_ordinal = analysis.next_synthetic_turn_ordinal;
@@ -264,6 +433,7 @@ pub fn build_standalone_codex_root(
         root_provider_thread_id: output_root_id,
         message_count: chain.len() as u64,
         root_bytes: output,
+        path_origins,
         portable_tail,
         prefix_witness,
         last_canonical_message_id,
@@ -272,84 +442,9 @@ pub fn build_standalone_codex_root(
         lineage_digest,
         semantic_digest,
         artifact_sha256,
+        verification,
+        output_verification_elapsed: output_verification_started.elapsed(),
     })
-}
-
-/// Collect the flattened non-metadata records of every resolved segment in
-/// source order with the path layer applied: encode (with its span-bounded
-/// gate) toward the wire, or the pull gate followed by decode toward the
-/// local form. Stale top-level ordinals are removed; serialization assigns
-/// fresh ordinals later.
-fn collect_flattened_non_metadata_records(
-    resolved: &ResolvedCodexRoot,
-    mapper: &SessionPathMapper,
-    encode_mode: bool,
-) -> Result<Vec<Value>, String> {
-    let mut records = Vec::new();
-    for segment in &resolved.segments {
-        let bytes = read_bounded(&segment.path)?;
-        if (bytes.len() as u64) < segment.consumed_byte_len {
-            return Err(format!(
-                "Codex segment '{}' shrank below its resolved cutoff",
-                segment.provider_thread_id
-            ));
-        }
-        let consumed = &bytes[..segment.consumed_byte_len as usize];
-        let mut record_number = 0_usize;
-        for raw in consumed.split(|byte| *byte == b'\n') {
-            let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-            if raw.is_empty() {
-                continue;
-            }
-            record_number += 1;
-            let mut value: Value = serde_json::from_slice(raw).map_err(|_| {
-                format!(
-                    "Codex segment '{}' contains malformed JSON",
-                    segment.provider_thread_id
-                )
-            })?;
-            if structural_record_type(&value) == Some("session_meta") {
-                continue;
-            }
-            value = if encode_mode {
-                let encoded = mapper.encode_record_gated(&value).map_err(|error| {
-                    format!(
-                        "Codex segment '{}' record {}: {error}",
-                        segment.provider_thread_id, record_number
-                    )
-                })?;
-                credential_redaction::shared()
-                    .redact_record_gated(&encoded)
-                    .map_err(|error| {
-                        format!(
-                            "Codex segment '{}' record {}: {error}",
-                            segment.provider_thread_id, record_number
-                        )
-                    })?
-            } else {
-                mapper.verify_wire_record(&value).map_err(|error| {
-                    format!(
-                        "Codex segment '{}' record {}: {error}",
-                        segment.provider_thread_id, record_number
-                    )
-                })?;
-                credential_redaction::shared()
-                    .verify_wire_value(&value)
-                    .map_err(|error| {
-                        format!(
-                            "Codex segment '{}' record {}: {error}",
-                            segment.provider_thread_id, record_number
-                        )
-                    })?;
-                mapper.decode_record(&value)?
-            };
-            if let Some(record) = value.as_object_mut() {
-                record.remove("ordinal");
-            }
-            records.push(value);
-        }
-    }
-    Ok(records)
 }
 
 /// Prove the serialized output is a fixpoint of the projection pass: parsing
@@ -376,55 +471,137 @@ fn validate_projection_fixpoint(bytes: &[u8], output_root_id: &str) -> Result<()
 
 /// Domain-separated integrity digest over the complete root output and the
 /// ordered `(file role, provider ID, byte length, SHA-256)` file list.
-fn artifact_digest(root_bytes: &[u8], root_provider_thread_id: &str) -> String {
+fn artifact_digest(root_bytes: &PayloadBytes, root_provider_thread_id: &str) -> String {
     let mut hasher = Sha256::new();
     update_length_prefixed(&mut hasher, ARTIFACT_DOMAIN_V1);
     hasher.update(1_u64.to_be_bytes());
     update_length_prefixed(&mut hasher, b"transcript");
     update_length_prefixed(&mut hasher, root_provider_thread_id.as_bytes());
     hasher.update((root_bytes.len() as u64).to_be_bytes());
-    hasher.update(Sha256::digest(root_bytes));
+    hasher.update(root_bytes.sha256_digest());
     hex_lower(&hasher.finalize())
 }
 
-/// Fold the leaf's same-thread metadata records into one effective head,
-/// without any path or identity transformation.
-fn effective_authoritative_meta(resolved: &ResolvedCodexRoot) -> Result<Value, String> {
-    let leaf = resolved
-        .segments
-        .last()
-        .ok_or_else(|| "resolved Codex root has no segments".to_string())?;
-    let bytes = read_bounded(&leaf.path)?;
-    if (bytes.len() as u64) < leaf.consumed_byte_len {
-        return Err(format!(
-            "Codex segment '{}' shrank below its resolved cutoff",
-            leaf.provider_thread_id
-        ));
+fn normalize_item_identity(record: &mut Value, root: &str) {
+    if record.get("type").and_then(Value::as_str) == Some("event_msg")
+        && record.pointer("/payload/type").and_then(Value::as_str) == Some("item_completed")
+    {
+        if let Some(payload) = record.get_mut("payload").and_then(Value::as_object_mut) {
+            payload.insert("thread_id".into(), Value::String(root.to_string()));
+        }
     }
+}
+
+struct SourceRecord<'a> {
+    local: Value,
+    wire: Value,
+    source: &'a str,
+    ordinal: usize,
+    covered: bool,
+}
+
+/// Parse each source once, folding the leaf metadata and collecting its body.
+fn read_source_records<'a>(
+    resolved: &'a ResolvedCodexRoot,
+    read_segment: &SegmentReader<'_>,
+    mapper: &SessionPathMapper,
+    encode_mode: bool,
+    redactor: &mut credential_redaction::RedactionRun<'_>,
+    previous: &PathOrigins,
+    origins: &mut PathOrigins,
+) -> Result<(Value, Vec<SourceRecord<'a>>), String> {
     let mut effective: Option<Value> = None;
-    for raw in bytes[..leaf.consumed_byte_len as usize].split(|byte| *byte == b'\n') {
-        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-        if raw.is_empty() {
-            continue;
+    let mut records = Vec::new();
+    for (index, segment) in resolved.segments.iter().enumerate() {
+        let bytes = read_segment(segment)?;
+        if (bytes.len() as u64) < segment.consumed_byte_len {
+            return Err(format!(
+                "Codex segment '{}' shrank below its resolved cutoff",
+                segment.provider_thread_id
+            ));
         }
-        let value: Value = serde_json::from_slice(raw)
-            .map_err(|_| "Codex leaf contains malformed JSON".to_string())?;
-        if structural_record_type(&value) != Some("session_meta") {
-            continue;
+        let mut record_number = 0;
+        for raw in bytes[..segment.consumed_byte_len as usize].split(|byte| *byte == b'\n') {
+            let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+            if raw.is_empty() {
+                continue;
+            }
+            record_number += 1;
+            let value: Value = serde_json::from_slice(raw).map_err(|_| {
+                format!(
+                    "Codex segment '{}' contains malformed JSON",
+                    segment.provider_thread_id
+                )
+            })?;
+            let prior = previous.record(&segment.provider_thread_id, record_number - 1);
+            if encode_mode {
+                if let Some(prior) = prior.filter(|origin| origin.derived) {
+                    prior.verify_record(&value)?;
+                    origins.push(&segment.provider_thread_id, prior.clone());
+                    continue;
+                }
+            }
+            let mut local = value.clone();
+            let mut value = (|| -> Result<Value, String> {
+                if encode_mode {
+                    let encoded = mapper.encode_record_with_origins(&value, prior)?;
+                    origins.push(&segment.provider_thread_id, encoded.origins);
+                    redactor.redact_record_gated(&encoded.wire)
+                } else {
+                    mapper.verify_wire_record(&value)?;
+                    redactor.verify_wire_value(&value)?;
+                    Ok(value)
+                }
+            })()
+            .map_err(|error| {
+                format!(
+                    "Codex segment '{}' record {}: {error}",
+                    segment.provider_thread_id, record_number
+                )
+            })?;
+            if structural_record_type(&value) != Some("session_meta") {
+                if let Some(record) = value.as_object_mut() {
+                    record.remove("ordinal");
+                }
+                if let Some(record) = local.as_object_mut() {
+                    record.remove("ordinal");
+                }
+                records.push(SourceRecord {
+                    local,
+                    wire: value,
+                    source: &segment.provider_thread_id,
+                    ordinal: record_number - 1,
+                    covered: prior.is_some(),
+                });
+                continue;
+            }
+            if index + 1 != resolved.segments.len() {
+                continue;
+            }
+            let payload = value
+                .get("payload")
+                .and_then(Value::as_object)
+                .ok_or("session metadata record has no payload")?;
+            if session_meta_id(payload) != Some(resolved.leaf_meta.id.as_str()) {
+                continue;
+            }
+            match effective.as_mut() {
+                Some(current) => fold_session_meta(current, &value)?,
+                None => effective = Some(value),
+            }
         }
-        let payload = value
-            .get("payload")
-            .and_then(Value::as_object)
-            .ok_or_else(|| "session metadata record has no payload".to_string())?;
-        if session_meta_id(payload) != Some(resolved.leaf_meta.id.as_str()) {
-            continue;
-        }
-        match effective.as_mut() {
-            Some(current) => fold_session_meta(current, &value)?,
-            None => effective = Some(value),
+        if encode_mode {
+            previous.verify_source_length(
+                &segment.provider_thread_id,
+                record_number,
+                index + 1 != resolved.segments.len(),
+            )?;
         }
     }
-    effective.ok_or_else(|| "Codex leaf has no session metadata".to_string())
+    Ok((
+        effective.ok_or("Codex leaf has no session metadata")?,
+        records,
+    ))
 }
 
 /// Merge fields explicitly carried by a later same-thread metadata update.
@@ -561,21 +738,6 @@ mod tests {
 
     const SOURCE_ROOT: &str = "/tmp/project";
 
-    fn encode_mode() -> StandaloneBuildMode {
-        StandaloneBuildMode::Encode {
-            root: SOURCE_ROOT.to_string(),
-            canonical_root: None,
-        }
-    }
-
-    fn decode_mode(root_id: &str, target_root: &str) -> StandaloneBuildMode {
-        StandaloneBuildMode::Decode {
-            root_provider_thread_id: root_id.to_string(),
-            target_root: target_root.to_string(),
-            canonical_target_root: None,
-        }
-    }
-
     fn meta_line(id: &str, base: Option<(&str, u64, u64)>) -> String {
         let mut payload = json!({
             "id": id,
@@ -662,6 +824,348 @@ mod tests {
     }
 
     #[test]
+    fn captured_encoding_reuses_reads_and_matches_serial_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let metrics = crate::sync_metrics::register_root(directory.path());
+        let mut files = BTreeMap::new();
+        let base = write(
+            &directory,
+            &mut files,
+            "base",
+            &[
+                meta_line("base", None),
+                message_line("m1", "Read /tmp/project/readme."),
+            ],
+        );
+        let base_len = std::fs::metadata(&base).unwrap().len();
+        let leaf = write(
+            &directory,
+            &mut files,
+            "leaf",
+            &[
+                meta_line("leaf", Some(("base", 2, base_len))),
+                message_line("m2", "DB_PASSWORD=hunter2"),
+            ],
+        );
+        let lookup = |id: &str| Ok(files.get(id).cloned());
+        let (bytes, stamp) = crate::jsonl_tail_io::read_snapshot(&leaf).unwrap();
+        let leaf_len = bytes.len() as u64;
+        let bytes = PayloadBytes::from(bytes);
+        let (resolved, sources) = crate::codex_history_graph::resolve_captured_codex_root(
+            &leaf,
+            bytes.clone(),
+            stamp,
+            &lookup,
+        )
+        .unwrap();
+        let seed = crate::codex_history_graph::seed_codex_root(&resolved, &bytes, None).unwrap();
+        assert_eq!(sources[&leaf].0.as_ptr(), bytes.as_ptr());
+        let encode = || {
+            encode_captured_codex_root(
+                &resolved,
+                &sources,
+                SOURCE_ROOT,
+                None,
+                None,
+                &mut credential_redaction::shared().begin_run(),
+                &PathOrigins::default(),
+            )
+        };
+        let mut outputs = Vec::new();
+        for (workers, admitted_jobs) in [(1, 1), (4, 4), (4, 2)] {
+            let mut run = Vec::new();
+            let bounds = crate::ordered_preparation::for_each_prepared(
+                (0..8).collect(),
+                workers,
+                admitted_jobs * (base_len + leaf_len),
+                |_| base_len + leaf_len,
+                |index| {
+                    if index == 3 {
+                        return Err("injected source failure".to_string());
+                    }
+                    let artifact = encode()?;
+                    Ok((
+                        artifact.root_bytes.into_bytes(),
+                        artifact.portable_tail,
+                        artifact.prefix_witness,
+                        artifact.artifact_sha256,
+                        artifact.path_origins,
+                    ))
+                },
+                |index, result| run.push((index, result)),
+            );
+            assert!(bounds.peak_jobs <= workers.min(admitted_jobs as usize));
+            assert!(bounds.peak_source_bytes <= admitted_jobs * (base_len + leaf_len));
+            outputs.push(run);
+        }
+        assert_eq!(outputs[0], outputs[1]);
+        assert_eq!(outputs[0], outputs[2]);
+        assert!(outputs[1][3].1.is_err());
+        assert!(outputs[1][7].1.is_ok());
+        assert_eq!(
+            metrics.snapshot().transcript_bytes_read,
+            base_len + leaf_len
+        );
+        let disk = encode_standalone_codex_root(
+            &resolved,
+            SOURCE_ROOT,
+            None,
+            None,
+            &mut credential_redaction::shared().begin_run(),
+            &PathOrigins::default(),
+        )
+        .unwrap();
+        let captured = outputs[0][0].1.as_ref().unwrap();
+        assert_eq!(captured.0.as_bytes(), disk.root_bytes.as_bytes());
+        assert_eq!(captured.1, disk.portable_tail);
+        assert_eq!(captured.2, disk.prefix_witness);
+        assert_eq!(captured.3, disk.artifact_sha256);
+        assert_eq!(
+            seed.observed_tail.start_record_count,
+            disk.portable_tail.start_record_count
+        );
+        // An ancestor edit after resolution must invalidate the snapshot too.
+        let before = std::fs::read(&base).unwrap();
+        let mut edited = before.clone();
+        let position = edited.iter().position(|byte| *byte == b'R').unwrap();
+        edited[position] = b'W';
+        std::fs::write(&base, edited).unwrap();
+        assert!(encode().unwrap_err().contains("changed after capture"));
+    }
+
+    #[test]
+    fn captured_source_changes_fail_before_resolution() {
+        for change in ["append", "truncate", "rewrite", "replace", "symlink"] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut files = BTreeMap::new();
+            let leaf = write(
+                &directory,
+                &mut files,
+                "leaf",
+                &[meta_line("leaf", None), message_line("m1", "hello")],
+            );
+            let (bytes, stamp) = crate::jsonl_tail_io::read_snapshot(&leaf).unwrap();
+            match change {
+                "append" => {
+                    let mut new = bytes.clone();
+                    new.push(b'\n');
+                    std::fs::write(&leaf, new).unwrap();
+                }
+                "truncate" => std::fs::write(&leaf, &bytes[..bytes.len() - 1]).unwrap(),
+                "rewrite" => {
+                    let mut new = bytes.clone();
+                    let index = new.windows(5).position(|part| part == b"hello").unwrap();
+                    new[index] = b'j';
+                    std::fs::write(&leaf, new).unwrap();
+                }
+                "replace" => {
+                    let replacement = directory.path().join("replacement");
+                    std::fs::write(&replacement, &bytes).unwrap();
+                    std::fs::rename(replacement, &leaf).unwrap();
+                }
+                "symlink" => {
+                    #[cfg(unix)]
+                    {
+                        let target = directory.path().join("target");
+                        std::fs::rename(&leaf, &target).unwrap();
+                        std::os::unix::fs::symlink(target, &leaf).unwrap();
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        continue;
+                    }
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                crate::codex_history_graph::resolve_captured_codex_root(
+                    &leaf,
+                    bytes.into(),
+                    stamp,
+                    &|_| Ok(None),
+                )
+                .is_err(),
+                "{change}"
+            );
+        }
+    }
+
+    #[test]
+    fn encoded_fixture_preserves_bytes_hashes_and_tail() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut files = BTreeMap::new();
+        let base = write(
+            &directory,
+            &mut files,
+            "fixture-base",
+            &[
+                meta_line("fixture-base", None),
+                message_line("m1", "Read /tmp/project/readme."),
+                message_line("m2", "DB_PASSWORD=hunter2"),
+            ],
+        );
+        let base_len = std::fs::metadata(base).unwrap().len();
+        let leaf = write(
+            &directory,
+            &mut files,
+            "fixture-leaf",
+            &[
+                meta_line("fixture-leaf", Some(("fixture-base", 3, base_len))),
+                message_line("m3", "Literal /__mallard_root__/example."),
+                event_line(
+                    "2026-09-04T10:00:00Z",
+                    json!({"type": "agent_reasoning", "text": "Check the source."}),
+                ),
+                event_line(
+                    "2026-09-04T10:00:01Z",
+                    json!({"type": "agent_message", "message": "Updated /tmp/project/readme."}),
+                ),
+            ],
+        );
+        let lookup = |thread: &str| Ok(files.get(thread).cloned());
+        let resolved = resolve_codex_root(&leaf, &lookup).unwrap();
+        let wire = encode_standalone_codex_root(
+            &resolved,
+            SOURCE_ROOT,
+            None,
+            None,
+            &mut crate::credential_redaction::shared().begin_run(),
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            &wire.root_bytes[..],
+            include_bytes!("fixtures/standalone_codex_wire.jsonl")
+        );
+        credential_redaction::shared()
+            .certify_wire_document(wire.root_bytes.clone().into_bytes())
+            .unwrap();
+        let payload = wire.root_bytes.clone().into_bytes();
+        assert_eq!(payload.as_bytes().as_ptr(), wire.root_bytes.as_ptr());
+        assert_eq!(payload.sha256(), mallard_domain::sha256_hex(&payload));
+        let actual = json!({
+            "content_sha256": payload.sha256(),
+            "artifact_sha256": wire.artifact_sha256,
+            "portable_tail": wire.portable_tail,
+            "prefix_witness": wire.prefix_witness,
+            "lineage_digest": wire.lineage_digest,
+            "semantic_digest": wire.semantic_digest,
+            "message_count": wire.message_count,
+        });
+        assert_eq!(
+            actual,
+            json!({
+                "artifact_sha256": "9bf92ec55209f4ae8a7bf51e2750126601237003d83978f2f73778094dd84e57",
+                "content_sha256": "935f9ac76ce614272b84383874310e0125e2fc4f275f5757a0c8ad75bd8eebb6",
+                "lineage_digest": "e5f9fa8338870ba4ee8c353f1000204247ad6903fc9c90e99ac425df3fa771a6",
+                "semantic_digest": "dd5b4127c3e51f7ec87357b216e9b340a7ce6d911b6589d340e947b79d371bda",
+                "message_count": 3,
+                "portable_tail": {
+                    "accepted_end_record_count": 3,
+                    "accepted_tail_state": "e4fd3bdcfccb6a413faad80e2d860fca3debaf88d716d42aa2696403b2a35bc8",
+                    "codec": "mallard-codex-portable-tail-wire-v1",
+                    "partition_kind": "fixed_paginated_tail",
+                    "start_record_count": 2
+                },
+                "prefix_witness": {
+                    "lineage_digest": "0b9e8f6c2ff396e7977fbdd091408bbfb1c06f5604ffdfdd1d1eee41cbc4709f",
+                    "semantic_digest": "587832fca4d8fa0cac08fe8203e90368325f8daf2b64efd29af5336e4a088f83"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn encode_rejects_credentials_revealed_by_hook_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut files = BTreeMap::new();
+        let hook = json!({
+            "timestamp": "2026-09-04T10:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message", "id": "hook-1", "role": "user",
+                "content": [{"type": "input_text", "text":
+                    "<hook_prompt hook_run_id=\"run-1\">DB_PASSWOR&#68;=hunter2</hook_prompt>"}]
+            }
+        });
+        let mut redactor = credential_redaction::shared().begin_run();
+        // The encoded spelling is clean; XML decoding creates the finding.
+        assert_eq!(redactor.redact_record_gated(&hook).unwrap(), hook);
+        let leaf = write(
+            &directory,
+            &mut files,
+            "hook-root",
+            &[meta_line("hook-root", None), hook.to_string()],
+        );
+        let lookup = |thread: &str| Ok(files.get(thread).cloned());
+        let resolved = resolve_codex_root(&leaf, &lookup).unwrap();
+        let error = encode_standalone_codex_root(
+            &resolved,
+            SOURCE_ROOT,
+            None,
+            None,
+            &mut redactor,
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap_err();
+        assert!(error.contains("inserted record"), "{error}");
+        assert!(error.contains("wire_secret_detected"), "{error}");
+        assert!(!error.contains("hunter2"), "{error}");
+    }
+
+    #[test]
+    fn mcp_projection_retains_redaction_from_source_credential_context() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut files = BTreeMap::new();
+        let leaf = write(
+            &directory,
+            &mut files,
+            "mcp-root",
+            &[
+                meta_line("mcp-root", None),
+                message_line("m1", "Read the result."),
+                event_line(
+                    "2026-09-04T10:00:00Z",
+                    json!({
+                        "type": "mcp_tool_call_end", "call_id": "call-1",
+                        "host": "db.example", "user": "fixture",
+                        "invocation": {"server": "fixture", "tool": "read", "arguments": null},
+                        "result": {"Ok": {"password": "hunter2"}},
+                        "duration": {"secs": 1, "nanos": 0}
+                    }),
+                ),
+            ],
+        );
+        let lookup = |thread: &str| Ok(files.get(thread).cloned());
+        let resolved = resolve_codex_root(&leaf, &lookup).unwrap();
+        let wire = encode_standalone_codex_root(
+            &resolved,
+            SOURCE_ROOT,
+            None,
+            None,
+            &mut credential_redaction::shared().begin_run(),
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap();
+        let staged = directory.path().join("mcp-wire.jsonl");
+        std::fs::write(&staged, &wire.root_bytes).unwrap();
+        let restaged = resolve_codex_root(&staged, &|_| Ok(None)).unwrap();
+        let local =
+            decode_standalone_codex_root(&restaged, "fresh", SOURCE_ROOT, None, None).unwrap();
+        let records = output_records(&local.root_bytes);
+        let item = records
+            .iter()
+            .find(|record| record["payload"]["item"]["type"] == "McpToolCall")
+            .unwrap();
+        // Projection drops the source host/user context. Its copied result
+        // must still carry the placeholder produced before projection.
+        assert_eq!(item["payload"]["item"]["result"]["password"], "<password>");
+        credential_redaction::shared()
+            .certify_wire_document(wire.root_bytes.into_bytes())
+            .unwrap();
+    }
+
+    #[test]
     fn encode_emits_token_wire_and_decode_restores_target_paths() {
         let directory = tempfile::tempdir().unwrap();
         let mut files = BTreeMap::new();
@@ -691,13 +1195,21 @@ mod tests {
 
         // Encode: token wire, wire codec, marker on the head, no source
         // paths on the wire, out-of-root bytes verbatim.
-        let wire = build_standalone_codex_root(&resolved, &encode_mode(), None).unwrap();
+        let wire = encode_standalone_codex_root(
+            &resolved,
+            SOURCE_ROOT,
+            None,
+            None,
+            &mut crate::credential_redaction::shared().begin_run(),
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap();
         assert_eq!(wire.root_provider_thread_id, "p1");
         assert_eq!(wire.message_count, 3);
         assert_eq!(wire.portable_tail.codec, PORTABLE_TAIL_CODEC_WIRE_V1);
         assert_eq!(wire.portable_tail.start_record_count, 2);
         assert_standalone_record_layout(&wire.root_bytes);
-        let text = String::from_utf8(wire.root_bytes.clone()).unwrap();
+        let text = String::from_utf8(wire.root_bytes.to_vec()).unwrap();
         assert!(text.contains("\"history_base\":null"));
         assert!(text.contains(ROOT_TOKEN));
         assert!(text.contains("__mallard_path_map__"));
@@ -707,7 +1219,7 @@ mod tests {
             text.contains("/tmp/other/readme"),
             "out-of-root bytes must ship verbatim"
         );
-        assert!(text.contains("file:///__mallard_root__/read%20me"));
+        assert!(text.contains("/__mallard_root__/bu;/read%20me"));
         let head_cwd = output_records(&wire.root_bytes)[0]["payload"]["cwd"].clone();
         assert_eq!(head_cwd, json!(ROOT_TOKEN));
 
@@ -725,9 +1237,11 @@ mod tests {
             partition_kind: mallard_domain::TailPartitionKind::FixedPaginatedTail,
             start_record_count: 2,
         };
-        let local = build_standalone_codex_root(
+        let local = decode_standalone_codex_root(
             &restaged,
-            &decode_mode("fresh-root", "/home/other/project"),
+            "fresh-root",
+            "/home/other/project",
+            None,
             Some(&imported),
         )
         .unwrap();
@@ -746,7 +1260,7 @@ mod tests {
         assert_eq!(local.prefix_witness, expected_witness);
         let wire_witness = mallard_domain::conversation_prefix_witness(&restaged.chain, 2).unwrap();
         assert_ne!(local.prefix_witness, wire_witness);
-        let text = String::from_utf8(local.root_bytes.clone()).unwrap();
+        let text = String::from_utf8(local.root_bytes.to_vec()).unwrap();
         assert!(!text.contains("__mallard_path_map__"));
         assert!(!text.contains("__mallard_root__"));
         assert!(!text.contains("\"p1\""));
@@ -765,7 +1279,15 @@ mod tests {
         assert_ne!(wire.portable_tail.codec, local.portable_tail.codec);
 
         // Determinism: the artifact digest is stable for identical inputs.
-        let again = build_standalone_codex_root(&resolved, &encode_mode(), None).unwrap();
+        let again = encode_standalone_codex_root(
+            &resolved,
+            SOURCE_ROOT,
+            None,
+            None,
+            &mut crate::credential_redaction::shared().begin_run(),
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap();
         assert_eq!(again.artifact_sha256, wire.artifact_sha256);
     }
 
@@ -801,21 +1323,26 @@ mod tests {
         );
         let lookup = |thread: &str| Ok(files.get(thread).cloned());
         let resolved = resolve_codex_root(&leaf, &lookup).unwrap();
-        let wire = build_standalone_codex_root(&resolved, &encode_mode(), None).unwrap();
-        let text = String::from_utf8(wire.root_bytes.clone()).unwrap();
-        assert!(text.contains("/__mallard_root__/frontend"));
-        assert!(text.contains("/__mallard_root__/README.md"));
+        let wire = encode_standalone_codex_root(
+            &resolved,
+            SOURCE_ROOT,
+            None,
+            None,
+            &mut crate::credential_redaction::shared().begin_run(),
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap();
+        let text = String::from_utf8(wire.root_bytes.to_vec()).unwrap();
+        assert!(text.contains("/__mallard_root__/b;/frontend"));
+        assert!(text.contains("/__mallard_root__/b;/README.md"));
 
         let staged = directory.path().join("staged.jsonl");
         std::fs::write(&staged, &wire.root_bytes).unwrap();
         let no_bases = |_: &str| Ok(None);
         let restaged = resolve_codex_root(&staged, &no_bases).unwrap();
-        let local = build_standalone_codex_root(
-            &restaged,
-            &decode_mode("fresh", "/homeB/projact_beta"),
-            None,
-        )
-        .unwrap();
+        let local =
+            decode_standalone_codex_root(&restaged, "fresh", "/homeB/projact_beta", None, None)
+                .unwrap();
         let records = output_records(&local.root_bytes);
         assert_eq!(
             records[0]["payload"]["cwd"],
@@ -829,12 +1356,12 @@ mod tests {
             turn["payload"]["cwd"],
             json!("/homeB/projact_beta/frontend")
         );
-        let text = String::from_utf8(local.root_bytes).unwrap();
+        let text = String::from_utf8(local.root_bytes.to_vec()).unwrap();
         assert!(text.contains("/homeB/projact_beta/README.md"));
     }
 
     #[test]
-    fn foreign_cwds_and_reserved_tokens_hold_their_contracts() {
+    fn foreign_cwds_and_literal_markers_hold_their_contracts() {
         let directory = tempfile::tempdir().unwrap();
         let mut files = BTreeMap::new();
         let foreign_turn = serde_json::to_string(&json!({
@@ -855,14 +1382,44 @@ mod tests {
         {
             let lookup = |thread: &str| Ok(files.get(thread).cloned());
             let resolved = resolve_codex_root(&leaf, &lookup).unwrap();
-            let wire = build_standalone_codex_root(&resolved, &encode_mode(), None).unwrap();
-            let text = String::from_utf8(wire.root_bytes.clone()).unwrap();
+            let wire = encode_standalone_codex_root(
+                &resolved,
+                SOURCE_ROOT,
+                None,
+                None,
+                &mut crate::credential_redaction::shared().begin_run(),
+                &crate::session_path_origins::PathOrigins::default(),
+            )
+            .unwrap();
+            let text = String::from_utf8(wire.root_bytes.to_vec()).unwrap();
             // The foreign structural cwd never tokenizes.
             assert!(text.contains("/somewhere/else"));
         }
 
-        // A reserved token in source content blocks the build with a typed
-        // error naming the record.
+        let command_output = concat!(
+            "literal file:///__mallard_root__/readme\n",
+            "project /tmp/project/src\n",
+            "escape /__mallard_escape__/r"
+        );
+        let command_result = event_line(
+            "2026-09-03T18:00:00Z",
+            json!({
+                "type": "exec_command_end",
+                "call_id": "call-marker",
+                "turn_id": "turn-marker",
+                "command": ["rg", "__mallard_root__"],
+                "cwd": SOURCE_ROOT,
+                "parsed_cmd": [{"type": "search"}],
+                "source": "agent",
+                "status": "completed",
+                "stdout": command_output,
+                "stderr": "",
+                "aggregated_output": command_output,
+                "formatted_output": command_output,
+                "exit_code": 0,
+                "duration": {"secs": 0, "nanos": 1},
+            }),
+        );
         let leaf = write(
             &directory,
             &mut files,
@@ -870,17 +1427,74 @@ mod tests {
             &[
                 meta_line("p2", None),
                 message_line("m1", "mention of /__mallard_root__/x"),
+                command_result,
             ],
         );
         let lookup = |thread: &str| Ok(files.get(thread).cloned());
         let resolved = resolve_codex_root(&leaf, &lookup).unwrap();
-        let error = build_standalone_codex_root(&resolved, &encode_mode(), None).unwrap_err();
-        assert!(error.contains("reserved wire token"), "{error}");
-        assert!(error.contains("record 2"), "{error}");
+        let wire = encode_standalone_codex_root(
+            &resolved,
+            SOURCE_ROOT,
+            None,
+            None,
+            &mut crate::credential_redaction::shared().begin_run(),
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap();
+        let records = output_records(&wire.root_bytes);
+        let message = records
+            .iter()
+            .find(|record| record["payload"]["id"] == json!("m1"))
+            .unwrap();
+        assert_eq!(
+            message["payload"]["content"],
+            json!("mention of /__mallard_escape__/r/x")
+        );
+        let command = records
+            .iter()
+            .find(|record| record["payload"]["type"] == json!("exec_command_end"))
+            .unwrap();
+        let command = &command["payload"];
+        let expected_wire_output = concat!(
+            "literal file:///__mallard_escape__/r/readme\n",
+            "project /__mallard_root__/b;/src\n",
+            "escape /__mallard_escape__/e/r"
+        );
+        assert_eq!(command["stdout"], json!(expected_wire_output));
+        assert_eq!(command["aggregated_output"], json!(expected_wire_output));
+
+        let staged = directory.path().join("literal-markers.jsonl");
+        std::fs::write(&staged, &wire.root_bytes).unwrap();
+        let no_bases = |_: &str| Ok(None);
+        let restaged = resolve_codex_root(&staged, &no_bases).unwrap();
+        let local =
+            decode_standalone_codex_root(&restaged, "fresh", "/homeB/projact_beta", None, None)
+                .unwrap();
+        let records = output_records(&local.root_bytes);
+        let message = records
+            .iter()
+            .find(|record| record["payload"]["id"] == json!("m1"))
+            .unwrap();
+        assert_eq!(
+            message["payload"]["content"],
+            json!("mention of /__mallard_root__/x")
+        );
+        let command = records
+            .iter()
+            .find(|record| record["payload"]["item"]["type"] == json!("CommandExecution"))
+            .unwrap();
+        let command = &command["payload"]["item"];
+        let expected_local_output = concat!(
+            "literal file:///__mallard_root__/readme\n",
+            "project /homeB/projact_beta/src\n",
+            "escape /__mallard_escape__/r"
+        );
+        assert_eq!(command["stdout"], json!(expected_local_output));
+        assert_eq!(command["aggregated_output"], json!(expected_local_output));
     }
 
     #[test]
-    fn decode_blocks_on_missing_marker_unknown_codec_and_collisions() {
+    fn decode_preserves_destination_literals_and_blocks_invalid_declarations() {
         let directory = tempfile::tempdir().unwrap();
         let mut files = BTreeMap::new();
         let leaf = write(
@@ -895,22 +1509,50 @@ mod tests {
         );
         let lookup = |thread: &str| Ok(files.get(thread).cloned());
         let resolved = resolve_codex_root(&leaf, &lookup).unwrap();
-        let wire = build_standalone_codex_root(&resolved, &encode_mode(), None).unwrap();
+        let wire = encode_standalone_codex_root(
+            &resolved,
+            SOURCE_ROOT,
+            None,
+            None,
+            &mut crate::credential_redaction::shared().begin_run(),
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap();
         let staged = directory.path().join("staged.jsonl");
         std::fs::write(&staged, &wire.root_bytes).unwrap();
         let no_bases = |_: &str| Ok(None);
         let restaged = resolve_codex_root(&staged, &no_bases).unwrap();
 
-        // Target-root collision: the verbatim out-of-root path equals the
-        // target root + suffix, so the pull gate blocks with the record
-        // named; a non-colliding root pulls the same content cleanly.
-        let error =
-            build_standalone_codex_root(&restaged, &decode_mode("fresh", "/b/project"), None)
-                .unwrap_err();
-        assert!(error.contains("round-trip gate"), "{error}");
-        assert!(error.contains("record 3"), "{error}");
-        build_standalone_codex_root(&restaged, &decode_mode("fresh", "/homeB/clean"), None)
-            .unwrap();
+        // The literal target path and a rendered reference coexist. Replay
+        // uses saved origin spans and must not tokenize the literal path.
+        let local =
+            decode_standalone_codex_root(&restaged, "fresh", "/b/project", None, None).unwrap();
+        let local_path = directory.path().join("local.jsonl");
+        std::fs::write(&local_path, &local.root_bytes).unwrap();
+        let resolved_local = resolve_codex_root(&local_path, &no_bases).unwrap();
+        let again = encode_standalone_codex_root(
+            &resolved_local,
+            "/b/project",
+            None,
+            None,
+            &mut credential_redaction::shared().begin_run(),
+            &local.path_origins,
+        )
+        .unwrap();
+        assert_eq!(again.portable_tail, wire.portable_tail);
+        std::fs::write(&staged, &again.root_bytes).unwrap();
+        let restaged = resolve_codex_root(&staged, &no_bases).unwrap();
+        let returned =
+            decode_standalone_codex_root(&restaged, "returned", SOURCE_ROOT, None, None).unwrap();
+        let records = output_records(&returned.root_bytes);
+        assert_eq!(
+            records[1]["payload"]["content"],
+            "created /tmp/project/readme"
+        );
+        assert_eq!(
+            records[2]["payload"]["content"],
+            "verbatim other machine path /b/project/x"
+        );
 
         // A wire object without the marker, or with an unknown codec, is a
         // typed block.
@@ -927,9 +1569,8 @@ mod tests {
         }
         std::fs::write(&stripped, &bytes).unwrap();
         let restaged = resolve_codex_root(&stripped, &no_bases).unwrap();
-        let error =
-            build_standalone_codex_root(&restaged, &decode_mode("fresh", "/homeB/clean"), None)
-                .unwrap_err();
+        let error = decode_standalone_codex_root(&restaged, "fresh", "/homeB/clean", None, None)
+            .unwrap_err();
         assert!(error.contains("path-map declaration"), "{error}");
 
         let mut records = output_records(&wire.root_bytes);
@@ -942,10 +1583,9 @@ mod tests {
         }
         std::fs::write(&unknown, &bytes).unwrap();
         let restaged = resolve_codex_root(&unknown, &no_bases).unwrap();
-        let error =
-            build_standalone_codex_root(&restaged, &decode_mode("fresh", "/homeB/clean"), None)
-                .unwrap_err();
-        assert!(error.contains("update Mallard"), "{error}");
+        let error = decode_standalone_codex_root(&restaged, "fresh", "/homeB/clean", None, None)
+            .unwrap_err();
+        assert!(error.contains("unsupported path-map codec"), "{error}");
     }
 
     fn event_line(timestamp: &str, payload: Value) -> String {
@@ -963,13 +1603,8 @@ mod tests {
         let mut files = BTreeMap::new();
         // Turn-1 opens in the base segment and completes in the leaf, so the
         // association state must survive the physical boundary. The exec
-        // event carries a legacy plain cwd with a space, so projection must
-        // emit the escaped URI wire context (the undeclared-third-form
-        // hazard, pinned).
-        let space_root = StandaloneBuildMode::Encode {
-            root: "/tmp/my project".to_string(),
-            canonical_root: None,
-        };
+        // event carries a plain cwd with a space. The portable form keeps
+        // that source; the local display must use a percent-encoded URI.
         let space_meta = serde_json::to_string(&json!({
             "type": "session_meta",
             "payload": {"id": "p0", "cwd": "/tmp/my project", "history_mode": "paginated"}
@@ -1027,21 +1662,25 @@ mod tests {
         let lookup = |thread: &str| Ok(files.get(thread).cloned());
         let resolved = resolve_codex_root(&leaf, &lookup).unwrap();
 
-        let wire = build_standalone_codex_root(&resolved, &space_root, None).unwrap();
+        let wire = encode_standalone_codex_root(
+            &resolved,
+            "/tmp/my project",
+            None,
+            None,
+            &mut crate::credential_redaction::shared().begin_run(),
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap();
         assert_standalone_record_layout(&wire.root_bytes);
         assert_eq!(wire.message_count, 2);
-        let text = String::from_utf8(wire.root_bytes.clone()).unwrap();
-        // Projection converted the token-form exec cwd through
-        // path_to_file_uri into the declared URI wire context.
-        assert!(
-            text.contains("file:///__mallard_root__/sub%20dir"),
-            "{text}"
-        );
+        let text = String::from_utf8(wire.root_bytes.to_vec()).unwrap();
+        // Only the source cwd is portable. Pull builds the URI after
+        // path decoding, so URI formatting cannot alter a wire token.
+        assert!(text.contains("/__mallard_root__/b;/sub dir"), "{text}");
         assert!(!text.contains("/tmp/my project"), "source root leaked");
 
-        // Pull decode → re-encode reproduces the wire record (the §4.4 gate
-        // over projection-inserted records), and the synthesized URI stays
-        // valid end to end.
+        // Pull builds native display records from decoded source values.
+        // Their URI values must be valid on the destination.
         let staged = directory.path().join("staged.jsonl");
         std::fs::write(&staged, &wire.root_bytes).unwrap();
         let no_bases = |_: &str| Ok(None);
@@ -1051,13 +1690,10 @@ mod tests {
             partition_kind: wire.portable_tail.partition_kind,
             start_record_count: wire.portable_tail.start_record_count,
         };
-        let local = build_standalone_codex_root(
-            &restaged,
-            &decode_mode("fresh", "/homeB/plain"),
-            Some(&imported),
-        )
-        .unwrap();
-        let text = String::from_utf8(local.root_bytes.clone()).unwrap();
+        let local =
+            decode_standalone_codex_root(&restaged, "fresh", "/homeB/plain", None, Some(&imported))
+                .unwrap();
+        let text = String::from_utf8(local.root_bytes.to_vec()).unwrap();
         assert!(text.contains("file:///homeB/plain/sub%20dir"), "{text}");
         let records = output_records(&local.root_bytes);
         let items: Vec<&Value> = records
@@ -1075,13 +1711,13 @@ mod tests {
         let local_path = directory.path().join("local.jsonl");
         std::fs::write(&local_path, &local.root_bytes).unwrap();
         let re_resolved = resolve_codex_root(&local_path, &no_bases).unwrap();
-        let republished = build_standalone_codex_root(
+        let republished = encode_standalone_codex_root(
             &re_resolved,
-            &StandaloneBuildMode::Encode {
-                root: "/homeB/plain".to_string(),
-                canonical_root: None,
-            },
+            "/homeB/plain",
+            None,
             Some(&imported),
+            &mut crate::credential_redaction::shared().begin_run(),
+            &local.path_origins,
         )
         .unwrap();
         assert_eq!(republished.portable_tail, wire.portable_tail);
@@ -1142,7 +1778,15 @@ mod tests {
         let lookup = |thread: &str| Ok(files.get(thread).cloned());
         let resolved = resolve_codex_root(&leaf, &lookup).unwrap();
 
-        let artifact = build_standalone_codex_root(&resolved, &encode_mode(), None).unwrap();
+        let artifact = encode_standalone_codex_root(
+            &resolved,
+            SOURCE_ROOT,
+            None,
+            None,
+            &mut crate::credential_redaction::shared().begin_run(),
+            &crate::session_path_origins::PathOrigins::default(),
+        )
+        .unwrap();
         assert_standalone_record_layout(&artifact.root_bytes);
         let records = output_records(&artifact.root_bytes);
         let metadata = records[0]
@@ -1166,5 +1810,169 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["m1", "m2", "m3"]
         );
+    }
+    #[test]
+    fn hook_entities_and_literal_markers_survive_projection_and_republication() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_root = "/tmp/a&amp;b";
+        let target_root = "/tmp/target";
+        let original = concat!(
+            "<hook_prompt hook_run_id=\"run-1\">",
+            "&#47;__mallard_root__/b; /__mallard_escape__/e ",
+            "/tmp/a&amp;b/file and /tmp/target/literal ",
+            "é 🦆 \\n &#0;",
+            "</hook_prompt>"
+        );
+        let mut files = BTreeMap::new();
+        let leaf = write(
+            &directory,
+            &mut files,
+            "source",
+            &[
+                json!({"type":"session_meta", "payload":{"id":"source", "cwd":source_root,
+                "history_mode":"paginated"}})
+                .to_string(),
+                json!({"type":"response_item", "timestamp":"2026-09-04T10:00:00Z", "payload":{
+                "id":"hook", "type":"message", "role":"user",
+                "content":[{"type":"input_text", "text":original}]}})
+                .to_string(),
+            ],
+        );
+        let resolved = resolve_codex_root(&leaf, &|_| Ok(None)).unwrap();
+        let wire = encode_standalone_codex_root(
+            &resolved,
+            source_root,
+            None,
+            None,
+            &mut credential_redaction::shared().begin_run(),
+            &PathOrigins::default(),
+        )
+        .unwrap();
+        let wire_path = directory.path().join("wire.jsonl");
+        std::fs::write(&wire_path, &wire.root_bytes).unwrap();
+        let resolved = resolve_codex_root(&wire_path, &|_| Ok(None)).unwrap();
+        let local = decode_standalone_codex_root(&resolved, "destination", target_root, None, None)
+            .unwrap();
+        assert!(local.path_origins.sources["destination"]
+            .iter()
+            .any(|record| record.derived));
+        let local_path = directory.path().join("local.jsonl");
+        std::fs::write(&local_path, &local.root_bytes).unwrap();
+        let resolved = resolve_codex_root(&local_path, &|_| Ok(None)).unwrap();
+        let again = encode_standalone_codex_root(
+            &resolved,
+            target_root,
+            None,
+            None,
+            &mut credential_redaction::shared().begin_run(),
+            &local.path_origins,
+        )
+        .unwrap();
+        assert_eq!(again.portable_tail, wire.portable_tail);
+        assert_eq!(
+            output_records(&again.root_bytes)[1],
+            output_records(&wire.root_bytes)[1]
+        );
+        std::fs::write(&wire_path, &again.root_bytes).unwrap();
+        let resolved = resolve_codex_root(&wire_path, &|_| Ok(None)).unwrap();
+        let returned =
+            decode_standalone_codex_root(&resolved, "returned", source_root, None, None).unwrap();
+        let records = output_records(&returned.root_bytes);
+        let message = records
+            .iter()
+            .find(|record| record["payload"]["id"] == "hook")
+            .unwrap();
+        assert_eq!(message["payload"]["content"][0]["text"], original);
+    }
+
+    #[test]
+    fn origin_coverage_survives_append_metadata_and_native_fork() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut files = BTreeMap::new();
+        let root = write(
+            &directory,
+            &mut files,
+            "source",
+            &[
+                meta_line("source", None),
+                message_line("m1", "/b/project/literal /tmp/project/mapped"),
+            ],
+        );
+        let resolved = resolve_codex_root(&root, &|_| Ok(None)).unwrap();
+        let wire = encode_standalone_codex_root(
+            &resolved,
+            SOURCE_ROOT,
+            None,
+            None,
+            &mut credential_redaction::shared().begin_run(),
+            &PathOrigins::default(),
+        )
+        .unwrap();
+        let staged = directory.path().join("wire.jsonl");
+        std::fs::write(&staged, &wire.root_bytes).unwrap();
+        let resolved = resolve_codex_root(&staged, &|_| Ok(None)).unwrap();
+        let local =
+            decode_standalone_codex_root(&resolved, "parent", "/b/project", None, None).unwrap();
+        let parent = directory.path().join("parent.jsonl");
+        std::fs::write(&parent, &local.root_bytes).unwrap();
+        files.insert("parent".into(), parent.clone());
+        let length = local.root_bytes.len() as u64;
+        let child = write(&directory, &mut files, "child", &[
+            json!({"type":"session_meta", "payload":{"id":"child", "cwd":"/b/project",
+                "history_mode":"paginated", "history_base":{"thread_id":"parent",
+                "end_ordinal_exclusive":2,"end_byte_offset":length}}}).to_string(),
+            message_line("m2", "/b/project/new"),
+            json!({"type":"session_meta", "payload":{"id":"child", "cwd":"/b/project", "memory_mode":"enabled"}}).to_string(),
+        ]);
+        let resolved = resolve_codex_root(&child, &|id| Ok(files.get(id).cloned())).unwrap();
+        let branch = encode_standalone_codex_root(
+            &resolved,
+            "/b/project",
+            None,
+            None,
+            &mut credential_redaction::shared().begin_run(),
+            &local.path_origins,
+        )
+        .unwrap();
+        let records = output_records(&branch.root_bytes);
+        assert_eq!(
+            records[1]["payload"]["content"],
+            "/b/project/literal /__mallard_root__/b;/mapped"
+        );
+        assert_eq!(records[2]["payload"]["content"], "/__mallard_root__/b;/new");
+        assert_eq!(records[0]["payload"]["memory_mode"], "enabled");
+        assert!(branch.path_origins.sources.contains_key("parent"));
+        assert_eq!(branch.path_origins.sources["child"].len(), 3);
+        let again = encode_standalone_codex_root(
+            &resolved,
+            "/b/project",
+            None,
+            None,
+            &mut credential_redaction::shared().begin_run(),
+            &branch.path_origins,
+        )
+        .unwrap();
+        assert_eq!(&again.root_bytes[..], &branch.root_bytes[..]);
+        let mut edited = output_records(&local.root_bytes);
+        edited[1]["payload"]["content"] = json!("changed");
+        std::fs::write(
+            &parent,
+            edited
+                .iter()
+                .map(|record| format!("{record}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let resolved = resolve_codex_root(&parent, &|_| Ok(None)).unwrap();
+        let error = encode_standalone_codex_root(
+            &resolved,
+            "/b/project",
+            None,
+            None,
+            &mut credential_redaction::shared().begin_run(),
+            &local.path_origins,
+        )
+        .unwrap_err();
+        assert!(error.contains("path origins no longer match"), "{error}");
     }
 }

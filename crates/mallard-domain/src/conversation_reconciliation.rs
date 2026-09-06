@@ -264,7 +264,7 @@ fn blocked_reason(blocker: ConversationBlocker) -> &'static str {
             "No verified local-to-cloud conversation binding exists."
         }
         ConversationBlocker::Busy => {
-            "A journaled sync operation still owns this conversation. Finish or recover it first."
+            "Another sync operation still owns this conversation. Wait for it to finish."
         }
         ConversationBlocker::DetachedRequiresPull => {
             "This conversation's local mapping was replaced. Pull to re-establish it."
@@ -280,12 +280,8 @@ fn blocked_reason(blocker: ConversationBlocker) -> &'static str {
             "This conversation's stored path encoding does not match this app version. \
              Update Mallard everywhere before syncing it."
         }
-        ConversationBlocker::CaptureBudget => {
-            "This push is full with newer conversations, so this one does not fit. \
-             Push again after this one."
-        }
-        ConversationBlocker::TooLarge => {
-            "This conversation is larger than one push carries, so it cannot be synced."
+        ConversationBlocker::ObservationFailed => {
+            "This conversation's local session could not be read for review."
         }
     }
 }

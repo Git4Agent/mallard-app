@@ -1,30 +1,36 @@
 //! Draft-linked Library resources, independent of every project and project
 //! repository bundle.
 //!
-//! `domain` owns validated portable and plan types; `persistence` owns
+//! `domain` owns validated portable and plan types; `registry` is the
+//! compile-time table of (provider, kind, format, version) capabilities;
+//! `codec` is the format-codec contract with `agent_skill`, `plugin_intent`,
+//! and `codex_pet` as its registered codecs; `adapters` are the provider
+//! adapters (target roots, launch, native inventory); `persistence` owns
 //! machine-local state; `plan_store` holds pending reviewed plans in memory;
-//! `profiles` resolves provider homes and global skill roots; `adapters`
-//! speaks the native plugin CLIs; `skill_tree` and `codex_pet` validate and
-//! transform payload directories; `inventory` assembles the local view;
-//! `resource_engine` owns the independent remote repository protocol;
-//! `resource_planning` reconciles and pins scope-level plans; `apply`
-//! executes approved mutations; `service` is the non-Tauri application
-//! boundary shared by tests and `resource_commands`, the Tauri surface.
+//! `profiles` resolves provider homes and their target roots; `inventory`
+//! assembles the local view; `resource_engine` owns the independent remote
+//! repository protocol; `resource_planning` reconciles and pins scope-level
+//! plans; `apply` executes approved mutations; `service` is the non-Tauri
+//! application boundary shared by tests and `resource_commands`, the Tauri
+//! surface.
 
 pub mod adapters;
+pub mod agent_skill;
 pub mod apply;
+pub mod codec;
 pub mod codex_pet;
 pub mod domain;
 pub mod inventory;
 pub mod persistence;
 pub mod pet_preview;
 pub mod plan_store;
+pub mod plugin_intent;
 pub mod profiles;
+pub mod registry;
 pub mod resource_commands;
 pub mod resource_engine;
 pub mod resource_planning;
 pub mod service;
-pub mod skill_tree;
 
 /// Cross-feature deletion guard over the shared storage registry. This is the
 /// only project-sync integration point: it exposes no Library DTO and never

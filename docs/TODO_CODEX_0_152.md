@@ -4,7 +4,7 @@
 - Audit date: 2026-08-31
 - Paid rerun date: 2026-09-01
 - Codex version: `codex-cli 0.152.0`
-- Claude Code version: `2.1.250 (Claude Code)`
+- Claude Code version: `2.1.259 (Claude Code)`
 - Mallard version during the audit: `0.1.2`
 
 ## 1. Executive status
@@ -37,8 +37,8 @@ The audit updated the live-test gates as follows:
 |---|---:|---:|---|
 | Paid Codex | `codex-cli 0.147.x` | `codex-cli 0.152.x` | Updated |
 | Credential-free Codex aimock | `codex-cli 0.149.x` | `codex-cli 0.152.x` | Updated |
-| Paid Claude Tuzi | Claude Code `2.1.235` | Claude Code `2.1.250` exactly | Updated |
-| Credential-free Claude aimock | Claude Code `2.1.250` exactly | Claude Code `2.1.250` exactly | Already current |
+| Paid Claude Tuzi | Claude Code `2.1.235` | Claude Code `2.1.259` exactly | Updated |
+| Credential-free Claude aimock | Claude Code `2.1.250` exactly | Claude Code `2.1.259` exactly | Updated |
 
 The current-format Codex fixture markers now use `cli_version: 0.152.0`.
 

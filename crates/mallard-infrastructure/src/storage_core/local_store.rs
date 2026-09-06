@@ -9,8 +9,8 @@ use tempfile::NamedTempFile;
 use walkdir::WalkDir;
 
 use super::object_store::{
-    CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome, ObjectStore, StageOutcome,
-    StoreListPage, StoredMetadata, VerifiedBody,
+    CasExpectation, CasOutcome, DeleteOutcome, ExpectedObject, ImmutablePutOutcome, ObjectStore,
+    StageOutcome, StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody,
 };
 use super::{
     sha256_reader, ObjectKey, ObjectPrefix, LOCAL_STORAGE_LOCK, MALLARD_ROOT, MAX_LIST_PAGE,
@@ -290,15 +290,27 @@ impl ObjectStore for LocalObjectStore {
         })
     }
 
-    fn delete(&self, key: &ObjectKey) -> Result<(), String> {
+    fn supports_conditional_delete(&self) -> bool {
+        true
+    }
+
+    fn delete(&self, key: &ObjectKey, expected_etag: &str) -> Result<DeleteOutcome, String> {
         let _guard = self.lock()?;
         let Some(path) = checked_existing_object_path(&self.root, key)? else {
-            return Ok(());
+            return Ok(DeleteOutcome::Missing);
         };
         let metadata = fs::symlink_metadata(&path)
             .map_err(|error| format!("inspect object '{}': {}", key, error))?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(format!("object '{}' is not a regular no-follow file", key));
+        }
+        // The revision is verified under the store lock, so a concurrent
+        // writer cannot slip a new object under a stale deletion.
+        let Some(current_etag) = self.current_etag_unlocked(key)? else {
+            return Ok(DeleteOutcome::Missing);
+        };
+        if current_etag != expected_etag {
+            return Ok(DeleteOutcome::Conflict { current_etag });
         }
         fs::remove_file(&path).map_err(|error| format!("delete object '{}': {}", key, error))?;
         // Empty parent directories go with their last object. The store's
@@ -318,7 +330,8 @@ impl ObjectStore for LocalObjectStore {
                 None => break,
             }
         }
-        sync_directory(&directory)
+        sync_directory(&directory)?;
+        Ok(DeleteOutcome::Deleted)
     }
 
     fn list(
@@ -341,7 +354,7 @@ impl ObjectStore for LocalObjectStore {
             Ok(meta) => meta,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(StoreListPage {
-                    keys: Vec::new(),
+                    entries: Vec::new(),
                     next_cursor: None,
                 })
             }
@@ -360,6 +373,7 @@ impl ObjectStore for LocalObjectStore {
             ));
         }
 
+        let _guard = self.lock()?;
         let mut keys = Vec::new();
         for entry in WalkDir::new(&namespace_root)
             .follow_links(false)
@@ -394,7 +408,19 @@ impl ObjectStore for LocalObjectStore {
         let has_more = keys.len() > limit;
         keys.truncate(limit);
         let next_cursor = has_more.then(|| keys.last().unwrap().as_str().to_string());
-        Ok(StoreListPage { keys, next_cursor })
+        // The revision of a local object is its content digest, computed
+        // under the same lock that guards deletion.
+        let mut entries = Vec::with_capacity(keys.len());
+        for key in keys {
+            let etag = self
+                .current_etag_unlocked(&key)?
+                .ok_or_else(|| format!("listed object '{}' disappeared", key))?;
+            entries.push(StoreListEntry { key, etag });
+        }
+        Ok(StoreListPage {
+            entries,
+            next_cursor,
+        })
     }
 
     fn local_root(&self) -> Option<&Path> {
@@ -587,7 +613,10 @@ mod tests {
                 100,
             )
             .unwrap();
-        assert_eq!(page.keys, vec![repository_key]);
+        assert_eq!(
+            page.keys().cloned().collect::<Vec<_>>(),
+            vec![repository_key]
+        );
     }
 
     #[test]
@@ -611,7 +640,21 @@ mod tests {
 
         // The emptied chain under the deleted object goes; the sibling
         // repository and the shared parents above it stay.
-        store.delete(&deep).unwrap();
+        assert_eq!(
+            store.delete(&deep, "stale").unwrap(),
+            DeleteOutcome::Conflict {
+                current_etag: sha256_hex(b"payload")
+            }
+        );
+        assert!(store.get_metadata(&deep, 64).unwrap().is_some());
+        assert_eq!(
+            store.delete(&deep, &sha256_hex(b"payload")).unwrap(),
+            DeleteOutcome::Deleted
+        );
+        assert_eq!(
+            store.delete(&deep, &sha256_hex(b"payload")).unwrap(),
+            DeleteOutcome::Missing
+        );
         assert!(!root
             .join(format!(".mallard/v1/library/library-{}", "a".repeat(32)))
             .exists());
@@ -624,7 +667,10 @@ mod tests {
 
         // Deleting the last object leaves no husk anywhere below the store
         // root — the root itself stays.
-        store.delete(&sibling).unwrap();
+        assert_eq!(
+            store.delete(&sibling, &sha256_hex(b"tag")).unwrap(),
+            DeleteOutcome::Deleted
+        );
         assert!(!root.join(".mallard/v1").exists());
         assert!(root.exists());
     }

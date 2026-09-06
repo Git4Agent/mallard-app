@@ -5,27 +5,25 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type {
   BundleSnapshotSummary,
   SiblingBundleStatus,
-  StorageConfig,
+  StorageSummary,
 } from "../../src/types";
 import SiblingRepoNotice from "../../src/components/project-sync/SiblingRepoNotice";
 import BundleConnectionDialog from "../../src/components/project-sync/BundleConnectionDialog";
 
-const storage: StorageConfig = {
-  id: "storage-convergence",
+const storage: StorageSummary = {
+  storage_id: "storage-convergence",
   name: "Local storage 1",
-  kind: "local",
-  bucket: "",
-  access_key_id: "",
-  secret_access_key: "",
-  account_id: "",
-  s3_endpoint: "",
-  region: "",
-  local_dir: "/tmp/storage",
+  provider: "local",
+  config_version: 1,
+  provider_label: "Local folder",
+  icon: "drive",
+  available: true,
+  summary: [{ field_id: "directory", label: "Folder", value: "/tmp/storage", is_path: true }],
 };
 
 function summary(overrides: Partial<BundleSnapshotSummary>): BundleSnapshotSummary {
   return {
-    storage_id: storage.id,
+    storage_id: storage.storage_id,
     bundle_id: "19e9afda78c650335f05301a3c0d09e9",
     display_name: "HorrorGame",
     revision: 1,
@@ -99,17 +97,14 @@ test("refresh wires sibling detection and the workspace banner into the connect 
 
   const api = readFileSync("src/components/project-sync/api.ts", "utf8");
   assert.match(api, /get_sibling_bundle_status/);
-  assert.match(api, /list_pending_storage_bundle_snapshots/);
 });
 
 test("the setup repository choice is always explicit once a storage is chosen", () => {
   const setup = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
-  // The section renders for any chosen storage — including a pending one —
-  // never only when matches happen to exist.
+  // The section renders for any chosen storage, not only when matches exist.
   assert.match(setup, /const showRepositoryChoice = Boolean\(chosenStorageId\)/);
   // An empty storage gets the explicit creation statement instead of
   // silence, rendered as the section's own selected option card.
   assert.match(setup, /Creates “\$\{draft\.display_name\}” in/);
-  // Pending storages list their existing repos read-only from the draft.
-  assert.match(setup, /listPendingStorageBundleSnapshots\(pendingStorage as StorageConfig\)/);
+  assert.match(setup, /listRemoteBundleSnapshots\(chosenStorageId\)/);
 });

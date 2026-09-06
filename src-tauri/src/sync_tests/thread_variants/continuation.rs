@@ -2,7 +2,7 @@ use super::harness::{
     assert_manifest_consistent, chain, chain_at, codex, codex_scope, ThreadSpec, TranscriptBuilder,
     VariantWorld,
 };
-use super::recovery::install_scope;
+use super::scope::install_scope;
 use crate::project_sync::service::ThreadSyncState;
 use mallard_domain::{
     ConversationBlocker, ConversationMaterializationState, ConversationReviewAction,
@@ -388,22 +388,6 @@ fn a_cloud_b_continuation_preserves_each_active_branch() {
         LocalStateRepository::from_home_dir(world.repo_a.root().parent().unwrap()).unwrap();
     let reopened_b =
         LocalStateRepository::from_home_dir(world.repo_b.root().parent().unwrap()).unwrap();
-    assert!(
-        mallard_infrastructure::conversation_materialization::recover_conversation_materializations(
-            &reopened_a
-        )
-        .unwrap()
-        .completed
-        .is_empty()
-    );
-    assert!(
-        mallard_infrastructure::conversation_materialization::recover_conversation_materializations(
-            &reopened_b
-        )
-        .unwrap()
-        .completed
-        .is_empty()
-    );
     assert_local_branch_state(
         &reopened_a,
         &scope_a,
@@ -515,6 +499,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
         .repo_fresh
         .mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
+                path_origins_ref: None,
                 host_id: scope.host_id.clone(),
                 replica_id: scope.replica_id.clone(),
                 local_project_id: scope.project_id.clone(),
@@ -531,6 +516,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
                 updated_at: 20,
             });
             document.bindings.push(LocalConversationBinding {
+                path_origins_ref: None,
                 host_id: scope.host_id.clone(),
                 replica_id: scope.replica_id.clone(),
                 local_project_id: scope.project_id.clone(),
@@ -571,6 +557,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
     captured.files.insert(
         transcript_path.clone(),
         CapturedFile {
+            source_stamp: None,
             logical_path: transcript_path,
             resource_id,
             bytes: local_transcript.into(),
@@ -598,6 +585,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
     captured.files.insert(
         diverged_transcript_path.clone(),
         CapturedFile {
+            source_stamp: None,
             logical_path: diverged_transcript_path,
             resource_id: diverged_resource_id,
             bytes: diverged_transcript.into(),
@@ -727,23 +715,22 @@ fn digests(
 }
 
 use super::harness::{sha256, PublishedFixture};
-use super::recovery::InstalledScope;
+use super::scope::InstalledScope;
 use mallard_domain::{
-    compute_portable_conversation_tail, CloudThreadId, ConversationCloudAnchor,
-    ConversationFileRole, ConversationMaterializationOperation, ConversationOperationId,
-    ConversationPublicationOperation, ConversationSyncOperation, ConversationSyncOperationKind,
-    PlanId, PortableConversationTail, PullJournalPhase, PushJournalPhase, RootTailLayout,
-    TailPartitionKind, TargetExpectation, PORTABLE_TAIL_CODEC_V1,
+    compute_portable_conversation_tail, CloudThreadId, ConversationApplyKind,
+    ConversationApplyOperation, ConversationCloudAnchor, ConversationFileRole,
+    ConversationMaterializationApply, ConversationOperationId, ConversationPublicationApply,
+    PlanId, PortableConversationTail, RootTailLayout, TailPartitionKind, TargetExpectation,
+    PORTABLE_TAIL_CODEC_V1,
 };
 use mallard_infrastructure::codex_history_graph::resolve_codex_root;
 use mallard_infrastructure::codex_standalone_builder::{
-    build_standalone_codex_root, StandaloneBuildMode,
+    decode_standalone_codex_root, encode_standalone_codex_root,
 };
 use mallard_infrastructure::conversation_codec::CodecLineage;
 use mallard_infrastructure::conversation_materialization::{
     apply_conversation_cloud_publication, apply_conversation_materialization,
     ConversationCloudPublication, ConversationMaterializationRequest, ConversationTargetPayload,
-    NoConversationFailpoints,
 };
 use mallard_infrastructure::persistence::LocalStateRepository;
 use std::collections::BTreeMap;
@@ -759,7 +746,7 @@ fn whole_thread_layout() -> RootTailLayout {
 
 /// The wire-form tail of a fixture publication: harness worlds publish
 /// transcripts verbatim, so the folded state is form-identical and the wire
-/// codec label matches the manifest column the journaled operation joins.
+/// codec label matches the manifest column the Apply operation joins.
 fn transcript_tail(transcript: &[u8]) -> PortableConversationTail {
     let analysis = analyze_codex_transcript(transcript);
     match analysis.lineage {
@@ -796,6 +783,7 @@ fn install_active_branch(
     repository
         .mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
+                path_origins_ref: None,
                 host_id: scope.host_id.clone(),
                 replica_id: scope.replica_id.clone(),
                 local_project_id: scope.project_id.clone(),
@@ -867,7 +855,7 @@ fn publish_bound_thread(
     let config_before = repository.load_config().unwrap();
     let mut config_after = config_before.clone();
     config_after.revision = config_after.revision.saturating_add(1);
-    let operation = ConversationSyncOperation {
+    let operation = ConversationApplyOperation {
         operation_id: ConversationOperationId::parse(operation_id).unwrap(),
         plan_id: Some(PlanId::parse(format!("plan-{operation_id}")).unwrap()),
         plan_action_id: None,
@@ -885,21 +873,14 @@ fn publish_bound_thread(
         provider: codex(),
         thread_id: bound_thread_id.clone(),
         cloud_thread_id: cloud_thread_id.clone(),
-        operation: ConversationSyncOperationKind::CloudPublication(
-            ConversationPublicationOperation {
-                phase: PushJournalPhase::CandidateUploaded,
-                candidate_commit_id: current.head.commit_id,
-                candidate_manifest_sha256: current.head.manifest_sha256,
-                artifact_sha256: sha256(local_transcript),
-                tail_before,
-                tail_after,
-                planned_relation,
-                sync_config_before: config_before,
-                sync_config_after: config_after,
-                bindings_before: bindings.clone(),
-                bindings_after: bindings.clone(),
-            },
-        ),
+        operation: ConversationApplyKind::CloudPublication(ConversationPublicationApply {
+            candidate_commit_id: current.head.commit_id,
+            candidate_manifest_sha256: current.head.manifest_sha256,
+            artifact_sha256: sha256(local_transcript),
+            tail_before,
+            tail_after,
+            planned_relation,
+        }),
         provider_thread_id: Some(provider_thread_id.to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
         expected_host_identity_revision: scope.host_identity_revision,
@@ -911,28 +892,29 @@ fn publish_bound_thread(
         created_at: updated_at,
         updated_at,
     };
-    let mut no_failpoints = NoConversationFailpoints;
-    apply_conversation_cloud_publication(
-        repository,
-        operation,
-        || {
-            engine
-                .publish(request)
-                .map(|published| ConversationCloudPublication {
-                    revision: published.snapshot.head.revision,
-                    commit_id: published.snapshot.head.commit_id,
-                    manifest_sha256: published.snapshot.head.manifest_sha256,
-                })
-        },
-        || Ok(None),
-        &mut no_failpoints,
-    )
+    let mut bindings_after = bindings.clone();
+    bindings_after.revision = bindings_after.revision.saturating_add(1);
+    let state =
+        mallard_infrastructure::conversation_materialization::ConversationPublicationState {
+            sync_config_before: config_before,
+            sync_config_after: config_after,
+            bindings_before: bindings,
+            bindings_after,
+        };
+    apply_conversation_cloud_publication(repository, operation, state, || {
+        engine
+            .publish(request)
+            .map(|published| ConversationCloudPublication {
+                revision: published.snapshot.head.revision,
+                commit_id: published.snapshot.head.commit_id,
+                manifest_sha256: published.snapshot.head.manifest_sha256,
+            })
+    })
     .unwrap();
-    assert!(repository
-        .load_conversation_sync_journal()
-        .unwrap()
-        .operations
-        .is_empty());
+    assert!(!repository
+        .root()
+        .join("conversation_sync_journal.json")
+        .exists());
     engine.inspect(&world.bundle_id).unwrap()
 }
 
@@ -959,29 +941,28 @@ fn materialize_thread(
     fs::write(&source_path, source_transcript).unwrap();
     let no_bases = |_: &str| Ok(None);
     let resolved = resolve_codex_root(&source_path, &no_bases).unwrap();
-    let wire = build_standalone_codex_root(
+    let wire = encode_standalone_codex_root(
         &resolved,
-        &StandaloneBuildMode::Encode {
-            root: source_cwd.to_string(),
-            canonical_root: None,
-        },
+        &source_cwd,
         None,
+        None,
+        &mut mallard_infrastructure::credential_redaction::shared().begin_run(),
+        &mallard_infrastructure::session_path_origins::PathOrigins::default(),
     )
     .unwrap();
     let staged_path = directory.path().join("staged.jsonl");
     fs::write(&staged_path, &wire.root_bytes).unwrap();
     let staged = resolve_codex_root(&staged_path, &no_bases).unwrap();
-    let rewritten = build_standalone_codex_root(
+    let rewritten = decode_standalone_codex_root(
         &staged,
-        &StandaloneBuildMode::Decode {
-            root_provider_thread_id: destination_thread_id.to_string(),
-            target_root: scope.project_root.to_string_lossy().into_owned(),
-            canonical_target_root: None,
-        },
+        &destination_thread_id,
+        &scope.project_root.to_string_lossy().into_owned(),
+        None,
         None,
     )
     .unwrap()
-    .root_bytes;
+    .root_bytes
+    .to_vec();
     let analysis = analyze_codex_transcript(&rewritten);
     let (lineage_digest, semantic_digest, accepted_tail) = match analysis.lineage {
         CodecLineage::Complete {
@@ -1031,6 +1012,7 @@ fn materialize_thread(
             row.updated_at = updated_at;
         }
         None => bindings_after.bindings.push(LocalConversationBinding {
+            path_origins_ref: None,
             host_id: scope.host_id.clone(),
             replica_id: scope.replica_id.clone(),
             local_project_id: scope.project_id.clone(),
@@ -1053,7 +1035,7 @@ fn materialize_thread(
     let config_before = repository.load_config().unwrap();
     let mut config_after = config_before.clone();
     config_after.revision = config_after.revision.saturating_add(1);
-    let operation = ConversationSyncOperation {
+    let operation = ConversationApplyOperation {
         operation_id: ConversationOperationId::parse(operation_id).unwrap(),
         plan_id: Some(PlanId::parse(format!("plan-{operation_id}")).unwrap()),
         plan_action_id: None,
@@ -1071,17 +1053,15 @@ fn materialize_thread(
         provider: codex(),
         thread_id: thread_id.clone(),
         cloud_thread_id: cloud_thread_id.clone(),
-        operation: ConversationSyncOperationKind::ProviderMaterialization(
-            ConversationMaterializationOperation {
-                phase: PullJournalPhase::TargetStaged,
+        operation: ConversationApplyKind::ProviderMaterialization(
+            ConversationMaterializationApply {
                 planned_relation,
                 accepted_tail_after: accepted_tail,
                 pinned_lineage_digest: lineage_digest,
                 pinned_semantic_digest: semantic_digest,
                 keep_both: None,
-                sync_config_before: config_before,
+                expected_config_revision: config_before.revision,
                 sync_config_after: config_after,
-                bindings_before,
                 bindings_after,
             },
         ),
@@ -1097,25 +1077,42 @@ fn materialize_thread(
         updated_at,
     };
     let request = ConversationMaterializationRequest {
+        transcript: mallard_infrastructure::verified_transcript::VerifiedTranscript::analyze(
+            &mallard_infrastructure::providers::codex::CodexAdapter::new(),
+            rewritten.clone().into(),
+        )
+        .unwrap(),
         operation,
+        checked_transcript: match target_expectation(&transcript_path) {
+            TargetExpectation::Sha256(_) => Some(fs::read(&transcript_path).unwrap()),
+            TargetExpectation::Absent => None,
+        },
         targets: vec![
             ConversationTargetPayload {
                 target_path: transcript_path.clone(),
                 role: ConversationFileRole::Transcript,
                 expected: target_expectation(&transcript_path),
                 index_rows: vec![],
-                bytes: rewritten,
+                bytes: rewritten.into(),
             },
             ConversationTargetPayload {
                 target_path: index_path.clone(),
                 role: ConversationFileRole::ProviderIndexFragment,
                 expected: target_expectation(&index_path),
                 index_rows: vec![destination_thread_id.to_string()],
-                bytes: index,
+                bytes: index.into(),
             },
         ],
     };
-    apply_conversation_materialization(repository, request, &mut NoConversationFailpoints).unwrap();
+    let analysis_before = mallard_infrastructure::sync_metrics::analysis_work();
+    apply_conversation_materialization(repository, request).unwrap();
+    assert_eq!(
+        mallard_infrastructure::sync_metrics::analysis_work()
+            .delta_since(analysis_before)
+            .passes,
+        0,
+        "materialization must reuse the verified transcript analysis",
+    );
     transcript_path
 }
 

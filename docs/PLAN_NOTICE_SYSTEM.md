@@ -435,3 +435,39 @@ empty state in the app.
 changes only Mallard metadata" reassurance at `warning`, so the dialog
 printed "Warning ·" over a plain fact every time it opened — and pinned the
 box at `warning` so a real mismatch below could not raise it.
+
+## 12. Placement: under the bar, on every screen (2026-09-04)
+
+The shell zone rendered before the page, so on screens that draw their own
+path bar — project, catalog, storages, settings, the provider picker — it
+sat *above* the bar, while draft and setup screens, where the shell draws
+the titlebar itself, had it *below*. The bar is the window's title bar
+(Tauri overlay, traffic lights at y 35), so the right place is under it:
+Material puts a banner below the top app bar, Fluent's MessageBar sits
+below the command bar, Polaris and GOV.UK put a page banner under the page
+header. Only site-wide web announcements (the USWDS site alert, the
+Atlassian banner) go above a header, and there the header is page content,
+not window chrome.
+
+What landed:
+
+- `PathBarBelow` (SyncPathBar.tsx): a context the shell fills with the
+  rendered zone. The bar returns its `<header>` and then the slot, so DOM
+  order, tab order and paint order all read bar → zone → page. No page
+  changed.
+- ProjectSync builds `shellNoticeZone` once and draws it in exactly one of
+  two places: after its own titlebar when `showsPathBar` is false, or
+  through the provider when it is true.
+- `.sync-backend-banner` z-index 8 → 5. It now stands under the bar (6), so
+  it must stack under it too: the bar's menus live in the bar's stacking
+  context, and a higher banner painted over any menu dropped onto it.
+  Measured in a specimen built from the real components on the real
+  stylesheet: `elementFromPoint` in the overlap hits the menu; bar 8–60,
+  zone 68–112, page from 120.
+- Trade-off: the zone remounts with the bar when one path-bar screen
+  replaces another, so a standing `role="alert"` re-announces on that
+  navigation. Accepted over CSS `order`, which would have left the zone
+  before the bar in the tab sequence and the stacking unfixed.
+- Gate: `tests/frontend/shell-notice-placement.integration.test.tsx` —
+  static render order for the bar and two real pages, source order for the
+  shell's two branches, and a value-measured z-index comparison.

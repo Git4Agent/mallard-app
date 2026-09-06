@@ -1,12 +1,53 @@
 //! Tauri command adapters for project sync.
 
-use super::service::*;
+use super::service::{
+    agent_provider_descriptors, claim_history_scan_log_at,
+    commit_storage_setup_draft_with_repository, connect_project_to_remote_bundle_with_repository,
+    create_provider_profile_with_repository, create_storage_edit_draft_with_repository,
+    create_storage_setup_draft_with_repository, current_binding_for_restore_plan,
+    discard_setup_draft_with_repository, discard_storage_setup_draft_with_repository,
+    execute_project_session_action_with_repository, format_fetch_started_message, format_mb,
+    get_bundle_inventory_with_repository, get_host_identity_status_with_repository,
+    get_project_activity_with_repository, get_project_session_detail_with_repository,
+    get_project_session_event_detail_with_repository,
+    get_project_session_timeline_page_with_repository,
+    get_project_thread_sync_comparison_with_progress, get_project_with_repository,
+    get_push_destination_status_with_repository, get_restore_readiness_with_repository,
+    get_setup_draft_with_repository, get_storage_setup_draft_with_repository,
+    inspect_project_files_with_repository, launch_storage_setup_assistant_with_repository,
+    list_local_projects_with_repository, list_project_bindings_with_repository,
+    list_project_repository_kinds_with_repository, list_provider_profiles_with_repository,
+    list_remote_bundle_snapshots_with_repository, list_setup_drafts_with_repository,
+    list_storage_setup_drafts_with_repository, load_project_sync_config_with_repository,
+    probe_provider_profile_with_repository, project_open_commands, project_storage_log_context,
+    pull_action_resource_label, pull_plan_action_counts, pull_review_resource_labels,
+    read_project_markdown_image_with_repository, recover_startup_state_with_repository,
+    remove_local_project_with_repository, remove_project_link_with_repository,
+    remove_storage_with_repository, rename_local_project_with_repository,
+    rename_storage_with_repository, repository, reset_project_sync_metadata_with_repository,
+    resolve_project_markdown_path_with_repository, save_project_binding_with_repository,
+    save_project_link_with_repository, session_detail_error, should_log_history_scan,
+    sibling_bundle_status_with_repository, storage_log_label, storage_provider_descriptors,
+    storage_setup_assistant_instruction_with_repository, test_storage_setup_draft_with_repository,
+    update_storage_setup_draft_with_repository, BundleReadiness, BundleSnapshotSummary,
+    CommitStorageDraftResult, ConnectProjectBundleRequest, CreateSetupDraftResult,
+    HostIdentityStatus, ProjectActivity, ProjectContentInventory, ProjectDetail,
+    ProjectMarkdownImage, ProjectOperationResult, ProjectSessionTimelineRequest,
+    ProjectSyncConfigView, ProjectSyncMetadataResetResult, ProjectSyncService, ProviderDescriptor,
+    ProviderProfileProbe, ProviderProfileSummary, PushApproval, PushDestinationStatus,
+    PushReviewContext, ResourceInventory, RestoreResult, SaveProjectBindingRequest,
+    SaveProjectLinkRequest, SessionDetailError, SessionDetailErrorCode, SessionTimelineEventKind,
+    SessionToolCategory, SetupDraftInspection, SetupDraftList, SiblingBundleStatus,
+    StorageDataClearResult, StorageProviderDescriptor, StorageSetupDraftList,
+    StorageSetupDraftSummary, TestStorageDraftResult, ThreadSyncComparison,
+    UpdateStorageSetupDraftRequest, HISTORY_SCAN_LOGGED_AT,
+};
 use crate::activity_log::{emit_typed_log, ActivityLogScope};
 use mallard_domain::{
-    now_secs, ActionId, BundleId, BundleRecipe, LocalProjectId, LocalProjectRegistration, PlanId,
+    now_secs, ActionId, BundleId, BundleRecipe, LocalProjectId, LocalProjectRegistration,
     ProjectBinding, ProjectSetupDraft, ProjectStorageLink, ProviderKey, ProviderProfile,
-    ResourceId, RestorePlan, SetupDraftId, StorageConfig, StorageId, StorageSetupDraftId,
-    SyncConfig,
+    PullReview, ResourceId, RestorePlan, SetupDraftId, StorageId, StorageProviderKey,
+    StorageSetupDraftId,
 };
 use mallard_infrastructure::activity_log::ActivityLogType;
 use mallard_infrastructure::bundle_engine::FetchProgress;
@@ -152,59 +193,14 @@ impl FetchProgressEmitter {
 }
 
 #[tauri::command]
-pub async fn get_project_sync_config() -> Result<SyncConfig, String> {
+pub async fn get_project_sync_config() -> Result<ProjectSyncConfigView, String> {
     let repository = repository()?;
     run_blocking(move || load_project_sync_config_with_repository(&repository)).await
 }
 
 #[tauri::command]
-pub async fn upsert_r2_storage(
-    app: tauri::AppHandle,
-    request: UpsertR2StorageRequest,
-) -> Result<UpsertR2StorageResult, String> {
-    let repository = repository()?;
-    let runtime = tokio::runtime::Handle::current();
-    let existing_storage_id = request.storage_id.clone();
-    let storage_name = request.name.clone();
-    let result =
-        run_blocking(move || upsert_r2_storage_with_repository(&repository, runtime, request))
-            .await;
-
-    match &result {
-        Ok(outcome) => {
-            let (event, message) =
-                r2_upsert_success_summary(existing_storage_id.is_some(), &storage_name);
-            ActivityLogScope::new(ActivityLogType::Storage)
-                .storage(&outcome.storage_id, Some(&storage_name))
-                .emit(&app, "ok", event, &message);
-        }
-        Err(_) => {
-            let log = match existing_storage_id.as_ref() {
-                Some(storage_id) => ActivityLogScope::new(ActivityLogType::Storage)
-                    .storage(storage_id, Some(&storage_name)),
-                None => ActivityLogScope::new(ActivityLogType::Storage),
-            };
-            // Keep the activity record fixed and credential-free even if the
-            // worker itself failed rather than returning a typed setup error.
-            log.emit(
-                &app,
-                "error",
-                "storage.settings_update_failed",
-                "R2 storage settings could not be saved.",
-            );
-        }
-    }
-
-    result
-}
-
-#[tauri::command]
-pub async fn test_r2_storage(
-    request: UpsertR2StorageRequest,
-) -> Result<TestR2StorageResult, String> {
-    let repository = repository()?;
-    let runtime = tokio::runtime::Handle::current();
-    run_blocking(move || test_r2_storage_with_repository(&repository, runtime, request)).await
+pub fn list_storage_providers() -> Vec<StorageProviderDescriptor> {
+    storage_provider_descriptors()
 }
 
 #[tauri::command]
@@ -215,20 +211,24 @@ pub async fn list_storage_setup_drafts() -> Result<StorageSetupDraftList, String
 
 #[tauri::command]
 pub async fn create_storage_setup_draft(
-    storage: StorageSetupDraftPayload,
-) -> Result<StorageSetupDraftView, String> {
+    provider: StorageProviderKey,
+) -> Result<StorageSetupDraftSummary, String> {
     let repository = repository()?;
-    run_blocking(move || {
-        create_storage_setup_draft_with_repository(&repository, storage)
-            .map(redact_storage_setup_draft)
-    })
-    .await
+    run_blocking(move || create_storage_setup_draft_with_repository(&repository, &provider)).await
+}
+
+#[tauri::command]
+pub async fn create_storage_edit_draft(
+    storage_id: StorageId,
+) -> Result<StorageSetupDraftSummary, String> {
+    let repository = repository()?;
+    run_blocking(move || create_storage_edit_draft_with_repository(&repository, &storage_id)).await
 }
 
 #[tauri::command]
 pub async fn get_storage_setup_draft(
     draft_id: StorageSetupDraftId,
-) -> Result<Option<StorageSetupDraftView>, String> {
+) -> Result<Option<StorageSetupDraftSummary>, String> {
     let repository = repository()?;
     run_blocking(move || get_storage_setup_draft_with_repository(&repository, &draft_id)).await
 }
@@ -236,13 +236,9 @@ pub async fn get_storage_setup_draft(
 #[tauri::command]
 pub async fn update_storage_setup_draft(
     request: UpdateStorageSetupDraftRequest,
-) -> Result<StorageSetupDraftView, String> {
+) -> Result<StorageSetupDraftSummary, String> {
     let repository = repository()?;
-    run_blocking(move || {
-        update_storage_setup_draft_with_repository(&repository, request)
-            .map(redact_storage_setup_draft)
-    })
-    .await
+    run_blocking(move || update_storage_setup_draft_with_repository(&repository, request)).await
 }
 
 #[tauri::command]
@@ -252,58 +248,180 @@ pub async fn discard_storage_setup_draft(draft_id: StorageSetupDraftId) -> Resul
 }
 
 #[tauri::command]
-pub fn get_mallard_cli_path() -> Result<String, String> {
-    let current = std::env::current_exe()
-        .map_err(|_| "Mallard cannot resolve its packaged CLI location.".to_string())?;
-    packaged_cli_path(&current)?
-        .to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| "Mallard cannot represent its packaged CLI path.".to_string())
+pub async fn test_storage_setup_draft(
+    draft_id: StorageSetupDraftId,
+    expected_revision: u64,
+) -> Result<TestStorageDraftResult, String> {
+    let repository = repository()?;
+    let runtime = tokio::runtime::Handle::current();
+    run_blocking(move || {
+        test_storage_setup_draft_with_repository(&repository, runtime, &draft_id, expected_revision)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn launch_r2_agent_setup(provider: String, instruction: String) -> Result<(), String> {
-    let provider = ProviderKey::parse(provider)?;
-    let descriptor = provider_descriptor(&provider)?;
-    let launcher = descriptor
-        .cli_launcher
-        .ok_or_else(|| format!("{} has no launchable agent CLI.", descriptor.display_name))?;
-    let script = agent_launch_script(&launcher.program, &launcher.display_name, &instruction);
-    open_agent_launch_script_in_terminal(&script)
+pub async fn commit_storage_setup_draft(
+    app: tauri::AppHandle,
+    draft_id: StorageSetupDraftId,
+    expected_draft_revision: u64,
+) -> Result<CommitStorageDraftResult, String> {
+    let repository = repository()?;
+    let runtime = tokio::runtime::Handle::current();
+    let label_repository = repository.clone();
+    let label_draft_id = draft_id.clone();
+    let storage_name = run_blocking(move || {
+        Ok(
+            get_storage_setup_draft_with_repository(&label_repository, &label_draft_id)?
+                .map(|draft| draft.name)
+                .unwrap_or_default(),
+        )
+    })
+    .await?;
+    let result = run_blocking(move || {
+        commit_storage_setup_draft_with_repository(
+            &repository,
+            runtime,
+            &draft_id,
+            expected_draft_revision,
+        )
+    })
+    .await;
+    match &result {
+        Ok(outcome) => {
+            let (event, message) = if outcome.replaced {
+                (
+                    "storage.settings_updated",
+                    format!("Storage settings updated — {storage_name}"),
+                )
+            } else {
+                ("storage.added", format!("Storage added — {storage_name}"))
+            };
+            ActivityLogScope::new(ActivityLogType::Storage)
+                .storage(&outcome.storage_id, Some(&storage_name))
+                .emit(&app, "ok", event, &message);
+        }
+        Err(_) => {
+            // Keep the activity record fixed and credential-free even if the
+            // worker itself failed rather than returning a typed setup error.
+            ActivityLogScope::new(ActivityLogType::Storage).emit(
+                &app,
+                "error",
+                "storage.settings_update_failed",
+                "Storage settings could not be saved.",
+            );
+        }
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn rename_storage(
+    app: tauri::AppHandle,
+    storage_id: StorageId,
+    name: String,
+    expected_config_revision: u64,
+) -> Result<ProjectSyncConfigView, String> {
+    let repository = repository()?;
+    let log_storage_id = storage_id.clone();
+    let log_name = name.clone();
+    let result = run_blocking(move || {
+        rename_storage_with_repository(&repository, &storage_id, &name, expected_config_revision)
+    })
+    .await;
+    let log =
+        ActivityLogScope::new(ActivityLogType::Storage).storage(&log_storage_id, Some(&log_name));
+    match &result {
+        Ok(_) => log.emit(
+            &app,
+            "ok",
+            "storage.settings_updated",
+            &format!("Storage settings updated — {log_name}"),
+        ),
+        Err(error) => log.emit(
+            &app,
+            "error",
+            "storage.settings_update_failed",
+            &format!("Storage settings could not be saved: {error}"),
+        ),
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn remove_storage(
+    app: tauri::AppHandle,
+    storage_id: StorageId,
+    expected_config_revision: u64,
+) -> Result<ProjectSyncConfigView, String> {
+    let repository = repository()?;
+    let storage_name = storage_log_label(&repository, &storage_id);
+    let log_storage_id = storage_id.clone();
+    let result = run_blocking(move || {
+        remove_storage_with_repository(&repository, &storage_id, expected_config_revision)
+    })
+    .await;
+    let log = ActivityLogScope::new(ActivityLogType::Storage)
+        .storage(&log_storage_id, Some(&storage_name));
+    match &result {
+        Ok(_) => log.emit(
+            &app,
+            "ok",
+            "storage.removed",
+            &format!("Storage removed — {storage_name}"),
+        ),
+        Err(error) => log.emit(
+            &app,
+            "error",
+            "storage.settings_update_failed",
+            &format!("Storage could not be removed: {error}"),
+        ),
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn get_storage_setup_assistant_instruction(
+    storage_provider: StorageProviderKey,
+    draft_id: StorageSetupDraftId,
+    expected_revision: u64,
+) -> Result<String, String> {
+    let repository = repository()?;
+    run_blocking(move || {
+        storage_setup_assistant_instruction_with_repository(
+            &repository,
+            &storage_provider,
+            &draft_id,
+            expected_revision,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn launch_storage_setup_assistant(
+    storage_provider: StorageProviderKey,
+    agent_provider: ProviderKey,
+    draft_id: StorageSetupDraftId,
+    expected_revision: u64,
+) -> Result<(), String> {
+    let repository = repository()?;
+    run_blocking(move || {
+        launch_storage_setup_assistant_with_repository(
+            &repository,
+            &storage_provider,
+            &agent_provider,
+            &draft_id,
+            expected_revision,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn get_host_identity_status() -> Result<HostIdentityStatus, String> {
     let repository = repository()?;
     run_blocking(move || get_host_identity_status_with_repository(&repository)).await
-}
-
-#[tauri::command]
-pub async fn save_project_sync_config(
-    app: tauri::AppHandle,
-    config: SyncConfig,
-) -> Result<SyncConfig, String> {
-    let repository = repository()?;
-    let (storage_change, result) = run_blocking(move || {
-        let storage_change = project_sync_config_storage_change(&repository, &config);
-        let result = save_project_sync_config_with_repository(&repository, config);
-        Ok((storage_change, result))
-    })
-    .await?;
-    if let Some((event, message, storage_id, storage_name)) = storage_change {
-        let log = ActivityLogScope::new(ActivityLogType::Storage)
-            .storage(&storage_id, Some(&storage_name));
-        match &result {
-            Ok(_) => log.emit(&app, "ok", event, &message),
-            Err(error) => log.emit(
-                &app,
-                "error",
-                "storage.settings_update_failed",
-                &format!("Storage settings could not be saved: {error}"),
-            ),
-        }
-    }
-    result.map(redact_storage_secrets)
 }
 
 #[tauri::command]
@@ -315,29 +433,10 @@ pub async fn list_local_projects() -> Result<Vec<LocalProjectRegistration>, Stri
 #[tauri::command]
 pub async fn recover_startup_state(app: tauri::AppHandle) -> Result<(), String> {
     let repository = repository()?;
-    // Both passes are blocking filesystem work, so they belong on the blocking
-    // pool rather than a runtime worker.  Logging stays out here: `run_blocking`
-    // turns a panic in the worker into a command error, whereas panicking
-    // inline would leave the caller's promise unresolved forever.
-    let (warnings, recovery) =
+    let warnings =
         run_blocking(move || Ok(recover_startup_state_with_repository(&repository))).await?;
     for warning in warnings {
         emit_typed_log(&app, ActivityLogType::Configuration, "warning", &warning);
-    }
-    match recovery {
-        Ok(report) if !report.recovery_required.is_empty() => emit_typed_log(
-            &app,
-            ActivityLogType::Repair,
-            "warning",
-            "One or more conversation sync operations need manual recovery.",
-        ),
-        Ok(_) => {}
-        Err(error) => emit_typed_log(
-            &app,
-            ActivityLogType::Repair,
-            "warning",
-            &format!("Conversation recovery is unavailable: {error}"),
-        ),
     }
     Ok(())
 }
@@ -874,54 +973,43 @@ pub async fn list_project_bindings() -> Result<Vec<ProjectBinding>, String> {
 }
 
 #[tauri::command]
-pub async fn audit_codex_conversation_paths(
-    local_project_id: LocalProjectId,
-) -> Result<CodexConversationPathAudit, String> {
-    let repository = repository()?;
-    run_blocking(move || {
-        audit_codex_conversation_paths_with_repository(&repository, &local_project_id)
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn repair_codex_conversation_paths(
+pub async fn execute_provider_maintenance_action(
     app: tauri::AppHandle,
-    local_project_id: LocalProjectId,
-) -> Result<CodexConversationPathRepairResult, String> {
+    request: super::maintenance::MaintenanceActionRequest,
+) -> Result<super::maintenance::MaintenanceActionResult, String> {
     let repository = repository()?;
-    let log = ActivityLogScope::new(ActivityLogType::Repair).project(&local_project_id, None);
-    log.emit(
-        &app,
-        "info",
-        "repair.conversation_paths_started",
-        "Repairing Codex conversation paths…",
-    );
+    let label = format!("{} {}", request.provider, request.action_id);
+    let read_only = super::maintenance::MaintenanceRegistry::production()
+        .descriptor(&request.provider, &request.action_id)
+        .is_some_and(|descriptor| descriptor.read_only);
+    let log = ActivityLogScope::new(ActivityLogType::Pull);
+    if !read_only {
+        log.emit(
+            &app,
+            "info",
+            "maintenance.action_started",
+            &format!("Running {label}…"),
+        );
+    }
     let result = run_blocking(move || {
-        repair_codex_conversation_paths_with_repository(&repository, &local_project_id)
+        super::maintenance::MaintenanceRegistry::production().execute(&repository, &request)
     })
     .await;
-    match &result {
-        Ok(report) => log.emit(
-            &app,
-            "ok",
-            "repair.conversation_paths_completed",
-            &format!(
-                "Repaired {} conversation path{}",
-                report.repaired_thread_ids.len(),
-                if report.repaired_thread_ids.len() == 1 {
-                    ""
-                } else {
-                    "s"
-                }
+    if !read_only {
+        match &result {
+            Ok(report) => log.emit(
+                &app,
+                if report.ready { "ok" } else { "warning" },
+                "maintenance.action_completed",
+                &report.summary,
             ),
-        ),
-        Err(error) => log.emit(
-            &app,
-            "error",
-            "repair.conversation_paths_failed",
-            &format!("Conversation path repair failed: {error}"),
-        ),
+            Err(error) => log.emit(
+                &app,
+                "error",
+                "maintenance.action_failed",
+                &format!("{label} failed: {error}"),
+            ),
+        }
     }
     result
 }
@@ -964,7 +1052,6 @@ pub async fn list_remote_bundle_snapshots(
 }
 
 #[tauri::command]
-// The argument list is the frozen Tauri command contract.
 #[allow(clippy::too_many_arguments)]
 pub async fn push_bundle(
     app: tauri::AppHandle,
@@ -974,8 +1061,6 @@ pub async fn push_bundle(
     project_content_review_token: Option<String>,
     project_content_removal_ids: Option<Vec<ResourceId>>,
     acknowledged_warning_digests: Option<Vec<String>>,
-    conversation_push_plan_id: Option<PlanId>,
-    approved_conversation_action_ids: Option<Vec<ActionId>>,
 ) -> Result<ProjectOperationResult, String> {
     let repository = repository()?;
     let context_repository = repository.clone();
@@ -1030,9 +1115,6 @@ pub async fn push_bundle(
                 project_content_review_token,
                 project_content_removal_ids: project_content_removal_ids.unwrap_or_default(),
                 acknowledged_warning_digests: acknowledged_warning_digests.unwrap_or_default(),
-                conversation_push_plan_id,
-                approved_conversation_action_ids: approved_conversation_action_ids
-                    .unwrap_or_default(),
             },
             &mut |update| {
                 if let Some(emitter) = upload_progress.as_mut() {
@@ -1062,26 +1144,34 @@ pub async fn push_bundle(
     match &result {
         Ok(operation) => {
             for resource in &operation.results {
+                let (level, event) = match resource.state.as_str() {
+                    "synced" => ("ok", "push.resource_synced"),
+                    "failed" => ("error", "push.resource_failed"),
+                    "held" => ("warning", "push.resource_held"),
+                    _ => ("info", "push.resource_checked"),
+                };
+                let detail = resource
+                    .message
+                    .as_deref()
+                    .map(|message| format!(" — {message}"))
+                    .unwrap_or_default();
                 log.emit(
                     &app,
-                    if resource.state == "synced" {
-                        "ok"
-                    } else {
-                        "info"
-                    },
-                    if resource.state == "synced" {
-                        "push.resource_synced"
-                    } else {
-                        "push.resource_checked"
-                    },
-                    &format!("↑  {} ({})", resource.resource_id, resource.state),
+                    level,
+                    event,
+                    &format!("↑  {} ({}){}", resource.resource_id, resource.state, detail),
                 );
             }
+            let (level, glyph) = if operation.success {
+                ("ok", "✓")
+            } else {
+                ("warning", "⚠")
+            };
             log.emit(
                 &app,
-                "ok",
+                level,
                 "push.completed",
-                &format!("✓  Push complete — {}", operation.message),
+                &format!("{glyph}  Push complete — {}", operation.message),
             );
         }
         Err(error) => log.emit(
@@ -1100,7 +1190,7 @@ pub async fn plan_bundle_restore(
     storage_id: StorageId,
     bundle_id: BundleId,
     binding: ProjectBinding,
-) -> Result<RestorePlan, String> {
+) -> Result<PullReview, String> {
     let repository = repository()?;
     let context_repository = repository.clone();
     let context_project_id = binding.local_project_id.clone();
@@ -1177,9 +1267,9 @@ pub async fn plan_bundle_restore(
             log.emit(
                 &app,
                 "ok",
-                "pull.plan_ready",
+                "pull.review_ready",
                 &format!(
-                    "✓  Pull plan ready — revision {}, {} applicable actions ({} resources, {} conversations)",
+                    "✓  Pull review ready — revision {}, {} applicable actions ({} resources, {} conversations)",
                     plan.revision,
                     applicable_actions,
                     ordinary_actions,
@@ -1196,30 +1286,23 @@ pub async fn plan_bundle_restore(
         Err(error) => log.emit(
             &app,
             "error",
-            "pull.planning_failed",
-            &format!("✗  Pull planning failed: {}", error),
+            "pull.comparison_failed",
+            &format!("✗  Pull comparison failed: {}", error),
         ),
     }
-    result
+    result.and_then(PullReview::try_from)
 }
 
 #[tauri::command]
 pub async fn apply_bundle_restore(
     app: tauri::AppHandle,
-    plan_id: PlanId,
+    review: PullReview,
     approved_action_ids: Vec<ActionId>,
 ) -> Result<RestoreResult, String> {
+    let review = RestorePlan::from(review);
     let repository = repository()?;
-    let log_context_repository = repository.clone();
-    let log_plan_id = plan_id.clone();
-    let (plan_for_log, storage_for_log) = run_blocking(move || {
-        let plan = log_context_repository.load_restore_plan(&log_plan_id).ok();
-        let storage = plan
-            .as_ref()
-            .map(|plan| storage_log_label(&log_context_repository, &plan.storage_id));
-        Ok((plan, storage))
-    })
-    .await?;
+    let storage_for_log = storage_log_label(&repository, &review.storage_id);
+    let review_for_log = review.clone();
     let binding_repository = repository.clone();
     let log = ActivityLogScope::new(ActivityLogType::Pull);
     log.emit(
@@ -1231,25 +1314,21 @@ pub async fn apply_bundle_restore(
             approved_action_ids.len()
         ),
     );
-    let mut fetch_progress = plan_for_log.as_ref().map(|plan| {
-        let storage = storage_for_log
-            .clone()
-            .unwrap_or_else(|| plan.storage_id.to_string());
-        FetchProgressEmitter::new(
-            app.clone(),
-            log.clone().storage(&plan.storage_id, Some(&storage)),
-            "apply",
-            plan.storage_id.clone(),
-            storage,
-            plan.bundle_id.clone(),
-        )
-    });
+    let mut fetch_progress = Some(FetchProgressEmitter::new(
+        app.clone(),
+        log.clone()
+            .storage(&review.storage_id, Some(&storage_for_log)),
+        "apply",
+        review.storage_id.clone(),
+        storage_for_log,
+        review.bundle_id.clone(),
+    ));
     let phase_app = app.clone();
     let phase_log = log.clone();
     let total_started = Instant::now();
     let result = run_blocking(move || {
         ProjectSyncService::new(&repository).apply_bundle_restore_with_progress(
-            &plan_id,
+            &review,
             approved_action_ids,
             &mut |update| {
                 if let Some(emitter) = fetch_progress.as_mut() {
@@ -1282,9 +1361,7 @@ pub async fn apply_bundle_restore(
     match &result {
         Ok(operation) => {
             for action_id in &operation.applied_action_ids {
-                let resource = plan_for_log
-                    .as_ref()
-                    .and_then(|plan| pull_action_resource_label(plan, action_id))
+                let resource = pull_action_resource_label(&review_for_log, action_id)
                     .unwrap_or_else(|| action_id.to_string());
                 log.emit(
                     &app,
@@ -1316,12 +1393,9 @@ pub async fn apply_bundle_restore(
                 ),
             );
             if operation.success {
-                let plan_for_binding = plan_for_log.clone();
+                let review_for_binding = review_for_log.clone();
                 let binding = run_blocking(move || {
-                    let plan = plan_for_binding
-                        .as_ref()
-                        .ok_or_else(|| "restore plan is unavailable".to_string())?;
-                    current_binding_for_restore_plan(&binding_repository, plan)
+                    current_binding_for_restore_plan(&binding_repository, &review_for_binding)
                 })
                 .await;
                 match binding {
@@ -1338,18 +1412,6 @@ pub async fn apply_bundle_restore(
                                 "info",
                                 "pull.open_project_command",
                                 &format!("   {}: {}", label, command),
-                            );
-                        }
-                        // Resuming a thread in the app takes two sequenced deep
-                        // links, so it has no pasteable form; point at the
-                        // button that performs them instead.
-                        #[cfg(target_os = "macos")]
-                        if binding.homes.contains_key(&codex_key()) {
-                            log.emit(
-                                &app,
-                                "info",
-                                "pull.open_project_command",
-                                "   Codex app — resume: use Open in Codex (one deep link cannot carry both project and chat)",
                             );
                         }
                     }
@@ -1373,24 +1435,10 @@ pub async fn apply_bundle_restore(
 }
 
 #[tauri::command]
-pub async fn restart_codex_app_after_pull(
-    request: RestartCodexAppAfterPullRequest,
-) -> Result<CodexAppRestartResult, String> {
+pub async fn get_restore_readiness(review: PullReview) -> Result<BundleReadiness, String> {
+    let review = RestorePlan::from(review);
     let repository = repository()?;
-    run_blocking(move || restart_codex_app_after_pull_with_repository(&repository, request)).await
-}
-
-#[tauri::command]
-pub async fn get_restore_readiness(restore_plan_id: PlanId) -> Result<BundleReadiness, String> {
-    let repository = repository()?;
-    run_blocking(move || get_restore_readiness_with_repository(&repository, &restore_plan_id)).await
-}
-
-#[tauri::command]
-pub async fn list_pending_storage_bundle_snapshots(
-    storage: StorageConfig,
-) -> Result<Vec<BundleSnapshotSummary>, String> {
-    run_blocking(move || list_pending_storage_bundle_snapshots_with_config(&storage)).await
+    run_blocking(move || get_restore_readiness_with_repository(&repository, &review)).await
 }
 
 #[tauri::command]
@@ -1469,14 +1517,24 @@ pub async fn prepare_push_review(
                 .as_ref()
                 .map(|comparison| comparison.entries.len())
                 .unwrap_or(0);
+            let selectable = context
+                .thread_comparison
+                .as_ref()
+                .map(|comparison| {
+                    comparison
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.push_decision.selectable)
+                        .count()
+                })
+                .unwrap_or(0);
             log.emit(
                 &app,
                 "ok",
                 "push.review_ready",
                 &format!(
                     "✓  Push review ready — {} threads compared, {} pushable conversations",
-                    threads,
-                    context.conversation_action_ids.len()
+                    threads, selectable
                 ),
             );
             // A review that opens without its comparison is a review with

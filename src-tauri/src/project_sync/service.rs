@@ -5,71 +5,60 @@
 //! bundle publication and head-CAS protocol.
 
 use chrono::{TimeZone, Utc};
-use mallard_application::storage_setup::{
-    test_r2_storage as test_r2_storage_service, upsert_r2_storage as upsert_r2_storage_service,
-    validate_r2_storage_destinations, SecretString,
-    UpsertR2StorageRequest as ApplicationUpsertR2StorageRequest,
+use mallard_application::storage_setup::{self as storage_setup, storage_local_root};
+pub use mallard_application::storage_setup::{
+    CommitStorageDraftResult, StorageSetupDraftSummary, StorageSummary, TestStorageDraftResult,
 };
-pub use mallard_application::storage_setup::{TestR2StorageResult, UpsertR2StorageResult};
+use mallard_domain::portable::contracts;
+use mallard_domain::PortableContractResolver;
 use mallard_domain::{
     absent_bundle_head_pin, classify_remote_continuity, classify_scope_continuity,
     cloud_conversation_resource_id, cloud_conversation_transcript_path, compare_conversation_tail,
     compose_preserved_title, conversation_resource_id, fallback_origin_host_label,
-    generated_named_id, generated_uuid_v4, hex_lower as hex_digest, initial_conversation_thread_id,
+    generated_named_id, hex_lower as hex_digest, initial_conversation_thread_id,
     is_conversation_resource_id, now_secs, parse_conversation_resource_id,
     retained_conversation_thread_id, validate_absolute_clean_path, ActionId, ActionStatus,
-    ApplyPolicy, ApplyReceipt, BindingResolution, BindingState, BundleDirectoryEntry, BundleId,
+    ApplyReceipt, BindingResolution, BindingState, BundleDirectoryEntry, BundleFileEntry, BundleId,
     BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleSnapshot, CapturedWith,
-    ClassifiedThread, CloudThreadId, ConversationActionPins, ConversationBlocker,
-    ConversationCapabilities, ConversationCheckpoint, ConversationCloudAnchor,
-    ConversationContextPins, ConversationDecision, ConversationFileRef, ConversationFileRole,
-    ConversationLineageStatus, ConversationMaterializationOperation,
-    ConversationMaterializationState, ConversationOperationId, ConversationOperationState,
-    ConversationPlanAction, ConversationPlanActionType, ConversationPlanDirection,
-    ConversationPublicationOperation, ConversationPushPlan, ConversationReviewAction,
-    ConversationReviewRow, ConversationRevisionPins, ConversationSyncOperation,
-    ConversationSyncOperationKind, ConversationTailPins, ConversationTargetPins,
+    ClassifiedThread, CloudThreadId, ConversationActionPins, ConversationApplyKind,
+    ConversationApplyOperation, ConversationBlocker, ConversationCapabilities,
+    ConversationCheckpoint, ConversationCloudAnchor, ConversationContextPins, ConversationDecision,
+    ConversationFileRef, ConversationFileRole, ConversationLineageStatus,
+    ConversationMaterializationApply, ConversationMaterializationState, ConversationOperationId,
+    ConversationOperationState, ConversationPlanAction, ConversationPlanActionType,
+    ConversationPlanDirection, ConversationPublicationApply, ConversationReviewAction,
+    ConversationReviewRow, ConversationRevisionPins, ConversationTailPins, ConversationTargetPins,
     ConversationThread, DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection,
-    HostId, KeepBothJournal, LocalConversationBinding, LocalProjectId, LocalProjectRegistration,
+    HostId, KeepBothApply, LocalConversationBinding, LocalProjectId, LocalProjectRegistration,
     LocalProviderProfileId, LogicalPath, MachineProjectState, MaterializationId,
-    MaterializationRecord, MaterializationStatus, PhysicalMappingState, PlanId,
+    MaterializationRecord, MaterializationStatus, Materializations, PhysicalMappingState, PlanId,
     PortableConversationTail, PortableOrigin, PreservedProvenance, ProjectBinding,
     ProjectFileSyncEligibility, ProjectFileSyncEligibilityState, ProjectSetupDraft,
-    ProjectStorageLink, Provenance, ProviderKey, ProviderProfile, ProviderStateExpectation,
-    PullJournalPhase, PushJournalPhase, RawRangePin, RecipeEntry, RemoteContinuity, ReplicaId,
-    RepositoryBase, ResourceDescriptor, ResourceId, ResourceKind, RestoreActionKind,
-    RestoreActionType, RestorePlan, ReviewPurpose, RootTailLayout, ScopeBase, ScopeContinuity,
-    SetupDraftId, SetupTransaction, StorageConfig, StorageId, StorageKind, StorageSetupDraft,
-    StorageSetupDraftId, SyncConfig, SyncScopeKey, TailClassification, TailEvidenceBlocker,
-    TailPartitionKind, TailSideEvidence, TargetExpectation, ThreadId, TombstoneTarget,
-    VerifiedTailEvidence, PUSH_PLAN_SCHEMA, SETUP_DRAFT_SCHEMA, SETUP_TRANSACTION_SCHEMA,
-    STORAGE_SETUP_DRAFT_SCHEMA,
+    ProjectStorageLink, ProviderKey, ProviderProfile, ProviderStateExpectation, RawRangePin,
+    RecipeEntry, RemoteContinuity, ReplicaId, RepositoryBase, ResourceDescriptor, ResourceId,
+    ResourceKindPrimitive, RestoreActionKind, RestoreActionType, RestorePlan, ReviewPurpose,
+    RootTailLayout, ScopeBase, ScopeContinuity, SecretKey, SecretOperation, SetupDraftId,
+    SetupTransaction, StorageConfig, StorageId, StorageProviderKey, StorageSetupDraftId,
+    SyncConfig, SyncScopeKey, TailClassification, TailEvidenceBlocker, TailPartitionKind,
+    TailSideEvidence, TargetExpectation, ThreadId, TombstoneTargetPrimitive, VerifiedTailEvidence,
+    SETUP_DRAFT_SCHEMA, SETUP_TRANSACTION_SCHEMA,
 };
 use mallard_infrastructure::app_settings::conversation_file_limit_bytes;
 use mallard_infrastructure::bundle_engine::{
-    absent_scope_pin, write_immutable_backup, write_target_atomic, BundleBytes, BundleEngine,
-    CapturedBundleFile, FetchProgress, ObjectCache, PublishBundleRequest, PublishExpectation,
-    ScopePublishInput,
+    absent_scope_pin, BundleBytes, BundleEngine, CapturedBundleFile, FetchProgress, ObjectCache,
+    PublishBundleRequest, PublishExpectation, ScopePublishInput,
 };
 use mallard_infrastructure::claude_history_tail;
-pub use mallard_infrastructure::codex_app_refresh::CodexAppRestartResult;
-use mallard_infrastructure::codex_app_refresh::{
-    refresh_offer as codex_app_refresh_offer, restart_after_pull, CodexAppKind,
-    CodexAppRefreshOffer, CodexAppRefreshState,
-};
 use mallard_infrastructure::codex_history_graph;
 use mallard_infrastructure::codex_history_graph::CodexSeededRoot;
-use mallard_infrastructure::codex_rollout::analyze_codex_rollout_structure;
 use mallard_infrastructure::codex_standalone_builder::{
-    build_standalone_codex_root, StandaloneBuildMode, StandaloneConversationArtifact,
+    encode_captured_codex_root, encode_standalone_codex_root, StandaloneConversationArtifact,
 };
-use mallard_infrastructure::codex_thread_allocator;
 use mallard_infrastructure::conversation_codec::{analyze_codex_transcript, CodecLineage};
 use mallard_infrastructure::conversation_materialization::{
     apply_conversation_cloud_publications_locked, apply_conversation_materialization_locked,
-    recover_conversation_materializations, ConversationCloudPublication,
-    ConversationMaterializationRequest, ConversationRecoveryReport, ConversationTargetPayload,
-    NoConversationFailpoints,
+    ConversationCloudPublication, ConversationMaterializationRequest, ConversationPublicationState,
+    ConversationTargetPayload,
 };
 use mallard_infrastructure::conversation_sync::{
     build_conversation_plan_action, validate_conversation_action_pins, ConversationApplyContext,
@@ -80,20 +69,26 @@ use mallard_infrastructure::jsonl_tail_io;
 use mallard_infrastructure::payload::PayloadBytes;
 pub use mallard_infrastructure::persistence::ProjectSyncMetadataResetResult;
 use mallard_infrastructure::persistence::{
-    ConfigMutation, ConfigTransactionError, LocalStateRepository, StorageSyncMetadataResetResult,
+    ConfigMutation, ConfigTransactionError, LocalProjectActivityStateSnapshot,
+    LocalStateRepository, LockedConversationPull, StorageSyncMetadataResetResult,
 };
+use mallard_infrastructure::portable_resources::PortableResourceRegistry;
 pub use mallard_infrastructure::project_activity::ProjectActivity;
 use mallard_infrastructure::project_activity::{
     self, ProviderAccessState, ResolvedActivityProject,
 };
 use mallard_infrastructure::provider_capture::{
-    self, CaptureApplyPolicy, CaptureRequest, CaptureResourceKind, Discovery, LocalSessionView,
-    ResourceCandidate,
+    self, kind_primitive, CaptureRequest, Discovery, LocalSessionView, ResourceCandidate,
 };
 use mallard_infrastructure::providers::codex::first_codex_user_summary;
-use mallard_infrastructure::providers::ProviderRegistry;
+use mallard_infrastructure::providers::AgentProviderRegistry;
 pub use mallard_infrastructure::providers::{
-    ProviderDescriptor, SessionEventDetail, SessionTimelineEventKind, SessionToolCategory,
+    AfterPullActionOffer, ProviderDescriptor, SessionEventDetail, SessionTimelineEventKind,
+    SessionToolCategory,
+};
+use mallard_infrastructure::pull_transcript::{
+    prepare_pull_transcript, PreparedPullTranscript, PullTranscriptCheckpoint,
+    PullTranscriptRequest,
 };
 use mallard_infrastructure::session_detail;
 pub use mallard_infrastructure::session_detail::{
@@ -101,24 +96,22 @@ pub use mallard_infrastructure::session_detail::{
     ProjectSessionTimelineRequest, SessionDetailError, SessionDetailErrorCode,
 };
 use mallard_infrastructure::session_path_map::{validate_pathmap_root, SessionPathMapper};
+use mallard_infrastructure::session_path_origins::{PathOrigins, PathOriginsOwner};
 use mallard_infrastructure::storage_core::{
     clear_managed_storage_data, ConfiguredObjectStore, ManagedStorageClearResult, VerifiedBody,
 };
+pub use mallard_infrastructure::storage_providers::StorageProviderDescriptor;
+use mallard_infrastructure::storage_providers::StorageProviderRegistry;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::Instant;
 use tokio::time::Duration;
-use walkdir::WalkDir;
-use zeroize::Zeroize;
 
-const PLAN_LIFETIME_SECS: u64 = 24 * 60 * 60;
-const MAX_CODEX_GLOBAL_STATE_BYTES: u64 = 32 * 1024 * 1024;
-const MAX_CONVERSATION_REPAIR_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_CODEX_SESSION_FILES: usize = 20_000;
+const MAX_CONVERSATION_TARGET_BYTES: u64 = 512 * 1024 * 1024;
 const HISTORY_SCAN_LOG_THROTTLE_SECS: u64 = 5 * 60;
 pub(super) static HISTORY_SCAN_LOGGED_AT: std::sync::Mutex<BTreeMap<String, u64>> =
     std::sync::Mutex::new(BTreeMap::new());
@@ -132,36 +125,16 @@ pub struct PushApproval {
     pub project_content_review_token: Option<String>,
     pub project_content_removal_ids: Vec<ResourceId>,
     pub acknowledged_warning_digests: Vec<String>,
-    pub conversation_push_plan_id: Option<PlanId>,
-    pub approved_conversation_action_ids: Vec<ActionId>,
 }
 
 impl PushApproval {
     pub fn recommended(review: &PushReviewContext, storage_id: &StorageId) -> Self {
         let recipe = recommended_review_recipe(review, storage_id);
-        let selected_resources = recipe.entries.keys().cloned().collect::<BTreeSet<_>>();
-        let approved_conversation_action_ids = review
-            .thread_comparison
-            .as_ref()
-            .into_iter()
-            .flat_map(|comparison| comparison.entries.iter())
-            .filter(|entry| {
-                entry.push_decision.selectable && selected_resources.contains(&entry.resource_id)
-            })
-            .filter_map(|entry| {
-                review
-                    .conversation_action_ids
-                    .get(&entry.resource_id)
-                    .cloned()
-            })
-            .collect();
         Self {
             recipe,
             project_content_review_token: None,
             project_content_removal_ids: Vec::new(),
             acknowledged_warning_digests: Vec::new(),
-            conversation_push_plan_id: review.conversation_push_plan_id.clone(),
-            approved_conversation_action_ids,
         }
     }
 }
@@ -262,8 +235,6 @@ impl<'a> ProjectSyncService<'a> {
                     .into_iter()
                     .collect(),
             },
-            approval.conversation_push_plan_id,
-            approval.approved_conversation_action_ids,
             on_progress,
             on_phase,
         )
@@ -304,11 +275,11 @@ impl<'a> ProjectSyncService<'a> {
 
     pub fn apply_bundle_restore(
         &self,
-        plan_id: &PlanId,
+        review: &RestorePlan,
         approved_action_ids: Vec<ActionId>,
     ) -> Result<RestoreResult, String> {
         self.apply_bundle_restore_with_progress(
-            plan_id,
+            review,
             approved_action_ids,
             &mut |_| {},
             &mut |_, _| {},
@@ -317,14 +288,14 @@ impl<'a> ProjectSyncService<'a> {
 
     pub fn apply_bundle_restore_with_progress(
         &self,
-        plan_id: &PlanId,
+        review: &RestorePlan,
         approved_action_ids: Vec<ActionId>,
         on_progress: &mut dyn FnMut(FetchProgress),
         on_phase: &mut dyn FnMut(&str, Duration),
     ) -> Result<RestoreResult, String> {
         apply_bundle_restore_with_progress(
             self.repository,
-            plan_id,
+            review,
             approved_action_ids,
             on_progress,
             on_phase,
@@ -436,15 +407,8 @@ impl<'a> ProjectSyncService<'a> {
     }
 }
 
-/// The Codex provider key, used only by inherently Codex-specific
-/// maintenance flows (desktop-app refresh and path repair).
-/// Common setup/Activity/continuity/review code never names a provider.
-pub(super) fn codex_key() -> ProviderKey {
-    ProviderKey::parse("codex").expect("static provider key")
-}
-
-fn provider_registry() -> &'static ProviderRegistry {
-    ProviderRegistry::production()
+pub(super) fn provider_registry() -> &'static AgentProviderRegistry {
+    AgentProviderRegistry::production()
 }
 
 /// Whether a provider's sessions ride the checkpoint cursor (metadata-only
@@ -524,7 +488,6 @@ pub struct StorageDataClearResult {
     pub project_links_reset: u64,
     pub catalog_links_reset: u64,
     pub local_records_removed: u64,
-    pub unreadable_plan_files_retained: u64,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -546,58 +509,18 @@ pub struct ProjectDetail {
     pub materializations: Vec<MaterializationRecord>,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-pub struct CodexConversationPathIssue {
-    pub thread_id: String,
-    pub transcript_path: String,
-    pub recorded_cwd: String,
-    pub target_cwd: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct CodexConversationAssignmentConflict {
-    thread_id: String,
-    transcript_path: String,
-    authoritative_home: String,
-    reason: String,
-}
-
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-pub struct CodexConversationPathAudit {
-    pub local_project_id: LocalProjectId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile_path: Option<String>,
-    pub project_root: String,
-    pub assigned_thread_count: usize,
-    pub matching_thread_count: usize,
-    #[serde(default)]
-    pub issues: Vec<CodexConversationPathIssue>,
-    #[serde(default)]
-    pub blockers: Vec<String>,
-    #[serde(default)]
-    pub warnings: Vec<String>,
-    #[serde(skip)]
-    assignment_conflicts: Vec<CodexConversationAssignmentConflict>,
-    pub ready: bool,
-    pub can_repair: bool,
-}
-
-#[derive(Serialize, Clone, Debug)]
-pub struct CodexConversationPathRepairResult {
-    pub audit: CodexConversationPathAudit,
-    #[serde(default)]
-    pub repaired_thread_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backup_dir: Option<String>,
-}
-
 #[derive(Serialize, Clone, Debug)]
 pub struct InventoryResource {
     #[serde(flatten)]
     pub descriptor: ResourceDescriptor,
     pub category: String,
+    /// Safe presentation the registered contracts supply. The frontend
+    /// renders these; it never dispatches on a kind or policy key.
+    pub kind_label: String,
+    pub apply_policy_label: String,
+    /// The resource can be selected for sync in this build: its contracts
+    /// are registered and its policy is not `never`.
+    pub selectable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default)]
@@ -771,19 +694,14 @@ pub struct ThreadSyncEntry {
     pub pull_decision: ConversationDecision,
 }
 
-/// The push capture budget a review fitted its candidates against.
+/// The aggregate byte limit shown by a Push review.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CaptureBudget {
-    /// The per-push capture ceiling.
+    /// The per-Apply capture ceiling.
     pub limit_bytes: u64,
     /// Bytes the push always carries besides conversations: the selectable
     /// requirements (tools, provider state).
     pub reserved_bytes: u64,
-    /// What the conversations this push carries weigh together.
-    pub admitted_bytes: u64,
-    /// Conversations that did not fit this push.
-    pub held_count: u64,
-    pub held_bytes: u64,
 }
 
 #[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -817,10 +735,8 @@ pub struct ThreadSyncComparison {
     pub provider_errors: BTreeMap<ProviderKey, String>,
     #[serde(default)]
     pub warnings: Vec<String>,
-    /// The push capture budget this review was fitted against, when it built
-    /// a push plan: the limit, what the requirements reserve, what the
-    /// admitted rows weigh, and what waits for a later push. Nothing in it
-    /// predicts future pushes; every review recomputes it.
+    /// The Push Apply limit and the non-conversation bytes reserved within it.
+    /// Compare does not admit or reject sessions by age or list position.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture_budget: Option<CaptureBudget>,
     /// Advisory repository-level continuity between the recorded base and
@@ -896,27 +812,19 @@ pub struct FailedAction {
     pub message: String,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RestoreApplyStatus {
-    Complete,
-    RecoveryRequired,
-}
-
 /// The preserved side of one applied divergent keep-both.
 #[derive(Serialize, Clone, Debug)]
 pub struct PreservedThreadResult {
     pub action_id: ActionId,
     pub original_thread_id: ThreadId,
     pub preserved_thread_id: ThreadId,
-    /// The plan-minted marker title the preserved copy was renamed to.
+    /// The Apply-minted marker title the preserved copy was renamed to.
     pub preserved_display_title: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
 pub struct RestoreResult {
     pub success: bool,
-    pub status: RestoreApplyStatus,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<PlanId>,
@@ -931,15 +839,11 @@ pub struct RestoreResult {
     pub failed_actions: Vec<FailedAction>,
     #[serde(default)]
     pub preserved_threads: Vec<PreservedThreadResult>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub codex_app_refresh: Option<CodexAppRefreshOffer>,
-}
-
-#[derive(Deserialize, Clone, Debug)]
-pub struct RestartCodexAppAfterPullRequest {
-    pub operation_id: ConversationOperationId,
-    pub app_kind: CodexAppKind,
-    pub active_chats_complete: bool,
+    /// Provider-declared follow-ups a completed Pull offers (for example a
+    /// desktop app restart), executed through the generic maintenance
+    /// command. The frontend renders them; it never checks a provider key.
+    #[serde(default)]
+    pub after_pull_actions: Vec<AfterPullActionOffer>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -970,10 +874,39 @@ pub(super) fn repository() -> Result<LocalStateRepository, String> {
     LocalStateRepository::from_user_home()
 }
 
+/// The project-sync configuration as the webview sees it. Storages appear
+/// as redacted summaries built by their adapters: never a secret, never a
+/// full provider config.
+#[derive(Serialize, Clone, Debug)]
+pub struct ProjectSyncConfigView {
+    pub schema: u32,
+    pub revision: u64,
+    pub storages: Vec<StorageSummary>,
+    pub projects: Vec<LocalProjectRegistration>,
+    pub links: Vec<ProjectStorageLink>,
+}
+
+pub(crate) fn config_view(config: SyncConfig) -> Result<ProjectSyncConfigView, String> {
+    let registry = StorageProviderRegistry::production();
+    let storages = config
+        .storages
+        .iter()
+        .map(|storage| storage_setup::storage_summary(registry, storage))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(ProjectSyncConfigView {
+        schema: config.schema,
+        revision: config.revision,
+        storages,
+        projects: config.projects,
+        links: config.links,
+    })
+}
+
 pub(super) fn load_project_sync_config_with_repository(
     repository: &LocalStateRepository,
-) -> Result<SyncConfig, String> {
-    repository.load_config().map(redact_storage_secrets)
+) -> Result<ProjectSyncConfigView, String> {
+    config_view(repository.load_config()?)
 }
 
 pub(super) fn list_local_projects_with_repository(
@@ -982,7 +915,7 @@ pub(super) fn list_local_projects_with_repository(
     Ok(repository.load_config()?.projects)
 }
 
-pub(super) fn list_project_bindings_with_repository(
+pub(crate) fn list_project_bindings_with_repository(
     repository: &LocalStateRepository,
 ) -> Result<Vec<ProjectBinding>, String> {
     Ok(repository.load_bindings()?.bindings)
@@ -1058,101 +991,6 @@ pub(super) fn storage_log_label(
         .unwrap_or_else(|| storage_id.to_string())
 }
 
-fn storage_change_summary(
-    previous: &[StorageConfig],
-    next: &[StorageConfig],
-) -> Option<(&'static str, String, StorageId, String)> {
-    let added = next
-        .iter()
-        .filter(|storage| !previous.iter().any(|candidate| candidate.id == storage.id))
-        .collect::<Vec<_>>();
-    let updated = next
-        .iter()
-        .filter(|storage| {
-            previous
-                .iter()
-                .find(|candidate| candidate.id == storage.id)
-                .is_some_and(|candidate| candidate != *storage)
-        })
-        .collect::<Vec<_>>();
-    let removed = previous
-        .iter()
-        .filter(|storage| !next.iter().any(|candidate| candidate.id == storage.id))
-        .collect::<Vec<_>>();
-    let total = added.len() + updated.len() + removed.len();
-    if total == 0 {
-        return None;
-    }
-
-    let (event, message, primary) = if total == 1 && added.len() == 1 {
-        let storage = added[0];
-        (
-            "storage.added",
-            format!("Storage added — {}", storage.name),
-            storage,
-        )
-    } else if total == 1 && updated.len() == 1 {
-        let storage = updated[0];
-        (
-            "storage.settings_updated",
-            format!("Storage settings updated — {}", storage.name),
-            storage,
-        )
-    } else if total == 1 {
-        let storage = removed[0];
-        (
-            "storage.removed",
-            format!("Storage removed — {}", storage.name),
-            storage,
-        )
-    } else {
-        let primary = added
-            .first()
-            .or_else(|| updated.first())
-            .or_else(|| removed.first())?;
-        (
-            "storage.settings_updated",
-            format!(
-                "Storage settings updated — {} added, {} changed, {} removed",
-                added.len(),
-                updated.len(),
-                removed.len()
-            ),
-            *primary,
-        )
-    };
-    let name = if primary.name.trim().is_empty() {
-        primary.id.to_string()
-    } else {
-        primary.name.clone()
-    };
-    Some((event, message, primary.id.clone(), name))
-}
-
-pub(super) fn project_sync_config_storage_change(
-    repository: &LocalStateRepository,
-    config: &SyncConfig,
-) -> Option<(&'static str, String, StorageId, String)> {
-    let previous = repository.load_config().ok()?;
-    let mut normalized = config.clone();
-    restore_redacted_storage_secrets(&mut normalized, Some(&previous));
-    storage_change_summary(&previous.storages, &normalized.storages)
-}
-
-pub(super) fn r2_upsert_success_summary(
-    existing: bool,
-    storage_name: &str,
-) -> (&'static str, String) {
-    if existing {
-        (
-            "storage.settings_updated",
-            format!("Storage settings updated — {storage_name}"),
-        )
-    } else {
-        ("storage.added", format!("Storage added — {storage_name}"))
-    }
-}
-
 /// Process-wide verified-object cache shared by planning, apply, and thread
 /// comparison. Exact content-coordinate keys make entries immortal-correct;
 /// the cache bounds retained staging-disk use.
@@ -1163,30 +1001,27 @@ fn object_cache() -> Arc<ObjectCache> {
         .clone()
 }
 
-type CachedCodexTranscriptAnalysis =
-    Arc<mallard_infrastructure::conversation_codec::CodexTranscriptAnalysis>;
-type TranscriptAnalysisCache = Mutex<HashMap<(String, u64), CachedCodexTranscriptAnalysis>>;
+type TranscriptSubagentCache = Mutex<HashMap<(String, u64), bool>>;
 
-/// Codex transcript analyses keyed by the exact transcript size/hash
-/// coordinate. Analysis is pure on the bytes, so entries never go stale.
-/// Sole caller today: Pull planning's stored-subagent refusal, which opens
-/// only offerable transcripts.
-fn cached_transcript_analysis(
+/// Pull planning's stored-subagent flag, keyed by exact transcript size/hash.
+/// Retain only the flag; the worker performs its own required verification,
+/// and the full analysis includes a potentially large message chain.
+fn cached_transcript_is_internal_subagent(
     sha256: &str,
     expected_size: u64,
     bytes: &mut dyn BundleBytes,
     logical_path: &mallard_domain::LogicalPath,
-) -> Result<CachedCodexTranscriptAnalysis, String> {
+) -> Result<bool, String> {
     if expected_size > conversation_file_limit_bytes() {
         return Err("cloud conversation transcript exceeds its read limit".to_string());
     }
-    static ANALYSES: OnceLock<TranscriptAnalysisCache> = OnceLock::new();
-    let cache = ANALYSES.get_or_init(|| Mutex::new(HashMap::new()));
+    static FLAGS: OnceLock<TranscriptSubagentCache> = OnceLock::new();
+    let cache = FLAGS.get_or_init(|| Mutex::new(HashMap::new()));
     let cache_key = (sha256.to_string(), expected_size);
     if let Some(hit) = cache
         .lock()
         .ok()
-        .and_then(|entries| entries.get(&cache_key).cloned())
+        .and_then(|entries| entries.get(&cache_key).copied())
     {
         return Ok(hit);
     }
@@ -1195,358 +1030,107 @@ fn cached_transcript_analysis(
         conversation_file_limit_bytes(),
         "cloud conversation transcript",
     )?;
-    let analysis = Arc::new(analyze_codex_transcript(&transcript));
+    let is_internal_subagent = analyze_codex_transcript(&transcript).is_internal_subagent;
     if let Ok(mut entries) = cache.lock() {
         if entries.len() >= 4_096 {
             entries.clear();
         }
-        entries.insert(cache_key, analysis.clone());
+        entries.insert(cache_key, is_internal_subagent);
     }
-    Ok(analysis)
+    Ok(is_internal_subagent)
 }
 
-/// The webview never receives a stored storage secret. It is the one field in
-/// the config that grants bucket access on its own. The settings form may hold
-/// a replacement only while the user is actively typing it, but stored values
-/// never travel back into the webview: every bucket command takes a storage id
-/// and resolves credentials here, server-side. The browser CLI and focused R2
-/// upsert are the only verified writers for this field.
-pub(super) fn redact_storage_secrets(mut config: SyncConfig) -> SyncConfig {
-    for storage in &mut config.storages {
-        storage.secret_access_key.clear();
-    }
-    config
+/// Every compiled storage provider's safe descriptor, in display order.
+pub(super) fn storage_provider_descriptors() -> Vec<StorageProviderDescriptor> {
+    storage_setup::storage_provider_descriptors(StorageProviderRegistry::production())
 }
 
-/// A saved S3 storage always carries its secret. The frontend treats an
-/// already-saved storage as credential-complete precisely because of this rule,
-/// so state it here rather than leaving it as an unchecked assumption: without
-/// it, a storage that somehow reached this point blank would save cleanly and
-/// then fail every transfer with an authentication error instead.
-fn require_s3_storage_secrets(config: &SyncConfig) -> Result<(), String> {
-    for storage in &config.storages {
-        if storage.kind == StorageKind::S3 && storage.secret_access_key.is_empty() {
-            return Err(format!(
-                "storage '{}' needs a secret access key",
-                storage.name
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// The counterpart of [`redact_storage_secrets`]: a blank incoming secret on a
-/// storage that already exists means "keep the stored one", because the UI does
-/// not receive a value it can echo back. The verified-R2 guard below rejects
-/// connection replacements, so a generic config round trip cannot erase or
-/// change credentials without the focused capability probe.
-fn restore_redacted_storage_secrets(config: &mut SyncConfig, previous: Option<&SyncConfig>) {
-    let Some(previous) = previous else {
-        return;
-    };
-    for storage in &mut config.storages {
-        if !storage.secret_access_key.is_empty() {
-            continue;
-        }
-        if let Some(stored) = previous
-            .storages
-            .iter()
-            .find(|candidate| candidate.id == storage.id)
-        {
-            storage
-                .secret_access_key
-                .clone_from(&stored.secret_access_key);
-        }
-    }
-}
-
-const VERIFIED_R2_MESSAGE: &str =
-    "Cloudflare R2 connection changes must be verified before saving.";
-
-fn same_verified_r2_settings(previous: &StorageConfig, next: &StorageConfig) -> bool {
-    previous.kind == next.kind
-        && previous.bucket == next.bucket
-        && previous.access_key_id == next.access_key_id
-        && previous.secret_access_key == next.secret_access_key
-        && previous.account_id == next.account_id
-        && previous.s3_endpoint == next.s3_endpoint
-        && previous.region == next.region
-        && previous.local_dir == next.local_dir
-        && previous.supports_conditional_writes == next.supports_conditional_writes
-}
-
-/// R2 destinations and credentials enter the schema-1 config only through a
-/// focused operation that completes the exact capability probe. The generic
-/// config save may rename or remove R2, but it cannot create, replace, or
-/// convert an R2 connection and bypass verification.
-fn require_verified_r2_changes(
-    config: &SyncConfig,
-    previous: Option<&SyncConfig>,
-) -> Result<(), String> {
-    for storage in config
-        .storages
-        .iter()
-        .filter(|storage| storage.kind == StorageKind::S3)
-    {
-        let Some(stored) = previous.and_then(|previous| {
-            previous
-                .storages
-                .iter()
-                .find(|candidate| candidate.id == storage.id)
-        }) else {
-            return Err(VERIFIED_R2_MESSAGE.to_string());
-        };
-        if stored.kind != StorageKind::S3 || !same_verified_r2_settings(stored, storage) {
-            return Err(VERIFIED_R2_MESSAGE.to_string());
-        }
-    }
-
-    if let Some(previous) = previous {
-        for stored in previous
-            .storages
-            .iter()
-            .filter(|storage| storage.kind == StorageKind::S3)
-        {
-            if config
-                .storages
-                .iter()
-                .find(|candidate| candidate.id == stored.id)
-                .is_some_and(|candidate| candidate.kind != StorageKind::S3)
-            {
-                return Err(VERIFIED_R2_MESSAGE.to_string());
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Local webview adapter for manual R2 Create/Save. The secret is converted
-/// immediately into the application's zeroizing type and never appears in a
-/// response, log message, or config snapshot returned to JavaScript.
-#[derive(Deserialize)]
-pub struct UpsertR2StorageRequest {
-    #[serde(default)]
-    pub storage_id: Option<StorageId>,
-    /// Setup draft to resolve a blank secret from; a successful upsert also
-    /// discards it. The three draft fields are all-or-none and mutually
-    /// exclusive with `storage_id`.
-    #[serde(default)]
-    pub draft_id: Option<StorageSetupDraftId>,
-    #[serde(default)]
-    pub draft_revision: Option<u64>,
-    #[serde(default)]
-    pub draft_storage_id: Option<StorageId>,
-    pub name: String,
-    pub api_url: String,
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub expected_config_revision: u64,
-}
-
-fn application_r2_request(request: UpsertR2StorageRequest) -> ApplicationUpsertR2StorageRequest {
-    ApplicationUpsertR2StorageRequest {
-        storage_id: request.storage_id,
-        draft_id: request.draft_id,
-        draft_revision: request.draft_revision,
-        draft_storage_id: request.draft_storage_id,
-        name: request.name,
-        api_url: request.api_url,
-        access_key_id: request.access_key_id,
-        secret_access_key: if request.secret_access_key.is_empty() {
-            None
-        } else {
-            Some(SecretString::new(request.secret_access_key))
-        },
-        expected_config_revision: request.expected_config_revision,
-    }
-}
-
-pub(super) fn upsert_r2_storage_with_repository(
-    repository: &LocalStateRepository,
-    runtime: tokio::runtime::Handle,
-    request: UpsertR2StorageRequest,
-) -> Result<UpsertR2StorageResult, String> {
-    upsert_r2_storage_service(repository, runtime, application_r2_request(request))
-        .map_err(|error| error.to_string())
-}
-
-pub(super) fn test_r2_storage_with_repository(
-    repository: &LocalStateRepository,
-    runtime: tokio::runtime::Handle,
-    request: UpsertR2StorageRequest,
-) -> Result<TestR2StorageResult, String> {
-    test_r2_storage_service(repository, runtime, application_r2_request(request))
-        .map_err(|error| error.to_string())
-}
-
-/// Client-editable storage form fields — [`StorageConfig`] minus its id, so
-/// the webview never invents a storage identity. An empty secret means "no
-/// secret typed this session".
-#[derive(Deserialize)]
-pub struct StorageSetupDraftPayload {
-    #[serde(default)]
-    pub name: String,
-    pub kind: StorageKind,
-    #[serde(default)]
-    pub bucket: String,
-    #[serde(default)]
-    pub access_key_id: String,
-    #[serde(default)]
-    pub secret_access_key: String,
-    #[serde(default)]
-    pub account_id: String,
-    #[serde(default)]
-    pub s3_endpoint: String,
-    #[serde(default)]
-    pub region: String,
-    #[serde(default)]
-    pub local_dir: String,
-}
-
-#[derive(Deserialize)]
-pub struct UpdateStorageSetupDraftRequest {
-    pub draft_id: StorageSetupDraftId,
-    pub revision: u64,
-    pub storage: StorageSetupDraftPayload,
-}
-
-/// Storage-draft shape crossing IPC. List/create/update responses are
-/// redacted. The exact get command deliberately returns the secret-bearing
-/// form so the user can review the one draft they explicitly opened. This
-/// type has no `Debug` or `Clone` implementation to avoid accidental logging
-/// or duplication of that exact-get response.
-#[derive(Serialize)]
-pub struct StorageSetupDraftView {
-    pub draft_id: StorageSetupDraftId,
-    pub secret_present: bool,
-    pub storage: StorageConfig,
-    pub revision: u64,
-    pub created_at: u64,
-    pub updated_at: u64,
-}
-
-impl Drop for StorageSetupDraftView {
-    fn drop(&mut self) {
-        self.storage.secret_access_key.zeroize();
-    }
-}
-
-#[derive(Serialize)]
-pub struct StorageSetupDraftList {
-    pub drafts: Vec<StorageSetupDraftView>,
-    /// Fixed value-free sentences from the repository — a raw parse error
-    /// could echo file content, and every draft file may hold a secret.
-    pub warnings: Vec<String>,
-}
-
-pub(super) fn redact_storage_setup_draft(mut draft: StorageSetupDraft) -> StorageSetupDraftView {
-    let secret_present = !draft.storage.secret_access_key.is_empty();
-    draft.storage.secret_access_key.zeroize();
-    StorageSetupDraftView {
-        draft_id: draft.draft_id,
-        secret_present,
-        storage: draft.storage,
-        revision: draft.revision,
-        created_at: draft.created_at,
-        updated_at: draft.updated_at,
-    }
-}
-
-fn expose_exact_storage_setup_draft(draft: StorageSetupDraft) -> StorageSetupDraftView {
-    let secret_present = !draft.storage.secret_access_key.is_empty();
-    StorageSetupDraftView {
-        draft_id: draft.draft_id,
-        secret_present,
-        storage: draft.storage,
-        revision: draft.revision,
-        created_at: draft.created_at,
-        updated_at: draft.updated_at,
-    }
-}
-
-fn payload_storage(payload: StorageSetupDraftPayload, id: StorageId) -> StorageConfig {
-    StorageConfig {
-        id,
-        name: payload.name,
-        kind: payload.kind,
-        bucket: payload.bucket,
-        access_key_id: payload.access_key_id,
-        secret_access_key: payload.secret_access_key,
-        account_id: payload.account_id,
-        s3_endpoint: payload.s3_endpoint,
-        region: payload.region,
-        local_dir: payload.local_dir,
-        supports_conditional_writes: None,
-    }
+fn setup_error(error: storage_setup::StorageSetupError) -> String {
+    error.to_string()
 }
 
 pub(super) fn create_storage_setup_draft_with_repository(
     repository: &LocalStateRepository,
-    storage: StorageSetupDraftPayload,
-) -> Result<StorageSetupDraft, String> {
-    let draft_id = StorageSetupDraftId::parse(generated_named_id("storagedraft")?)?;
-    // The inert restore-only storage identity; committing a draft goes
-    // through the verified upsert, which mints the real one.
-    let storage_id = StorageId::parse(generated_named_id("storage")?)?;
-    let timestamp = now_secs();
-    repository.save_storage_setup_draft(StorageSetupDraft {
-        schema: STORAGE_SETUP_DRAFT_SCHEMA,
-        draft_id,
-        storage: payload_storage(storage, storage_id),
-        revision: 0,
-        created_at: timestamp,
-        updated_at: timestamp,
-    })
+    provider: &StorageProviderKey,
+) -> Result<StorageSetupDraftSummary, String> {
+    storage_setup::create_storage_setup_draft(
+        repository,
+        StorageProviderRegistry::production(),
+        provider,
+    )
+    .map_err(setup_error)
+}
+
+pub(super) fn create_storage_edit_draft_with_repository(
+    repository: &LocalStateRepository,
+    storage_id: &StorageId,
+) -> Result<StorageSetupDraftSummary, String> {
+    storage_setup::create_storage_edit_draft(
+        repository,
+        StorageProviderRegistry::production(),
+        storage_id,
+    )
+    .map_err(setup_error)
+}
+
+/// One focused draft edit from the webview: the name, the safe settings,
+/// and a presence operation per secret. A saved value never travels back.
+#[derive(Deserialize)]
+pub struct UpdateStorageSetupDraftRequest {
+    pub draft_id: StorageSetupDraftId,
+    pub revision: u64,
+    #[serde(default)]
+    pub name: String,
+    pub settings: mallard_domain::BoundedConfigObject,
+    #[serde(default)]
+    pub secrets: BTreeMap<SecretKey, SecretOperation>,
 }
 
 pub(super) fn update_storage_setup_draft_with_repository(
     repository: &LocalStateRepository,
     request: UpdateStorageSetupDraftRequest,
-) -> Result<StorageSetupDraft, String> {
-    let mut stored = repository
-        .load_storage_setup_draft(&request.draft_id)?
-        .ok_or_else(|| format!("storage draft '{}' does not exist", request.draft_id))?;
-    let storage_id = stored.storage.id.clone();
-    // A blank incoming secret keeps the drafted one. This is how pinned
-    // Test/Finish requests ask the backend to consume the exact saved draft
-    // instead of echoing its secret back through a second request. Move,
-    // don't clone: the stored draft is dropped right after and must not retain
-    // a second copy.
-    let mut drafted_secret = std::mem::take(&mut stored.storage.secret_access_key);
-    let mut next_storage = payload_storage(request.storage, storage_id);
-    if next_storage.secret_access_key.is_empty() {
-        next_storage.secret_access_key = drafted_secret;
-    } else {
-        drafted_secret.zeroize();
-    }
-    repository.save_storage_setup_draft(StorageSetupDraft {
-        schema: STORAGE_SETUP_DRAFT_SCHEMA,
-        draft_id: stored.draft_id,
-        storage: next_storage,
-        revision: request.revision,
-        created_at: stored.created_at,
-        updated_at: now_secs(),
-    })
+) -> Result<StorageSetupDraftSummary, String> {
+    storage_setup::update_storage_setup_draft(
+        repository,
+        StorageProviderRegistry::production(),
+        storage_setup::UpdateStorageSetupDraftRequest {
+            draft_id: request.draft_id,
+            revision: request.revision,
+            name: request.name,
+            settings: request.settings,
+            secrets: request.secrets,
+        },
+    )
+    .map_err(setup_error)
+}
+
+#[derive(Serialize)]
+pub struct StorageSetupDraftList {
+    pub drafts: Vec<StorageSetupDraftSummary>,
+    /// Fixed value-free sentences from the repository — a raw parse error
+    /// could echo file content, and every draft file may hold a secret.
+    pub warnings: Vec<String>,
 }
 
 pub(super) fn list_storage_setup_drafts_with_repository(
     repository: &LocalStateRepository,
 ) -> Result<StorageSetupDraftList, String> {
-    let (drafts, warnings) = repository.list_storage_setup_drafts()?;
-    Ok(StorageSetupDraftList {
-        drafts: drafts.into_iter().map(redact_storage_setup_draft).collect(),
-        warnings,
-    })
+    let (drafts, warnings) =
+        storage_setup::list_storage_setup_drafts(repository, StorageProviderRegistry::production())
+            .map_err(setup_error)?;
+    Ok(StorageSetupDraftList { drafts, warnings })
 }
 
 pub(super) fn get_storage_setup_draft_with_repository(
     repository: &LocalStateRepository,
     draft_id: &StorageSetupDraftId,
-) -> Result<Option<StorageSetupDraftView>, String> {
-    Ok(repository
-        .load_storage_setup_draft(draft_id)?
-        .map(expose_exact_storage_setup_draft))
+) -> Result<Option<StorageSetupDraftSummary>, String> {
+    storage_setup::get_storage_setup_draft(
+        repository,
+        StorageProviderRegistry::production(),
+        draft_id,
+    )
+    .map_err(setup_error)
 }
 
 pub(super) fn discard_storage_setup_draft_with_repository(
@@ -1554,6 +1138,124 @@ pub(super) fn discard_storage_setup_draft_with_repository(
     draft_id: &StorageSetupDraftId,
 ) -> Result<bool, String> {
     repository.delete_storage_setup_draft(draft_id)
+}
+
+pub(super) fn test_storage_setup_draft_with_repository(
+    repository: &LocalStateRepository,
+    runtime: tokio::runtime::Handle,
+    draft_id: &StorageSetupDraftId,
+    expected_revision: u64,
+) -> Result<TestStorageDraftResult, String> {
+    storage_setup::test_storage_setup_draft(
+        repository,
+        StorageProviderRegistry::production(),
+        &runtime,
+        draft_id,
+        expected_revision,
+    )
+    .map_err(setup_error)
+}
+
+/// Commit a reviewed draft. The application layer probes and transacts; the
+/// isolation check the domain cannot express (local storage roots against
+/// application data, project roots, and provider homes) runs inside the same
+/// transaction on the prospective document.
+pub(super) fn commit_storage_setup_draft_with_repository(
+    repository: &LocalStateRepository,
+    runtime: tokio::runtime::Handle,
+    draft_id: &StorageSetupDraftId,
+    expected_draft_revision: u64,
+) -> Result<CommitStorageDraftResult, String> {
+    let machine = repository.load_bindings()?;
+    storage_setup::commit_storage_setup_draft(
+        repository,
+        StorageProviderRegistry::production(),
+        &runtime,
+        draft_id,
+        expected_draft_revision,
+        |config| {
+            validate_config_storage_isolation(
+                repository,
+                config,
+                &machine.bindings,
+                &machine.profiles,
+            )
+        },
+    )
+    .map_err(setup_error)
+}
+
+pub(super) fn rename_storage_with_repository(
+    repository: &LocalStateRepository,
+    storage_id: &StorageId,
+    name: &str,
+    expected_config_revision: u64,
+) -> Result<ProjectSyncConfigView, String> {
+    storage_setup::rename_storage(repository, storage_id, name, expected_config_revision)
+        .map_err(setup_error)?;
+    load_project_sync_config_with_repository(repository)
+}
+
+/// Remove one storage record. Library references are checked before the
+/// transaction: the catalog state lock must never be taken inside the
+/// project-sync persistence lock.
+pub(super) fn remove_storage_with_repository(
+    repository: &LocalStateRepository,
+    storage_id: &StorageId,
+    expected_config_revision: u64,
+) -> Result<ProjectSyncConfigView, String> {
+    crate::storage_catalog::ensure_storage_removal_allowed(storage_id)?;
+    storage_setup::remove_storage(repository, storage_id, expected_config_revision, |_| Ok(()))
+        .map_err(setup_error)?;
+    load_project_sync_config_with_repository(repository)
+}
+
+/// The assistant instruction for one exact draft, rendered by the storage
+/// provider that declares the assistant.
+pub(super) fn storage_setup_assistant_instruction_with_repository(
+    repository: &LocalStateRepository,
+    storage_provider: &StorageProviderKey,
+    draft_id: &StorageSetupDraftId,
+    expected_revision: u64,
+) -> Result<String, String> {
+    let current = std::env::current_exe()
+        .map_err(|_| "Mallard cannot resolve its packaged CLI location.".to_string())?;
+    let cli_path = packaged_cli_path(&current)?
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "Mallard cannot represent its packaged CLI path.".to_string())?;
+    storage_setup::storage_setup_assistant_instruction(
+        repository,
+        StorageProviderRegistry::production(),
+        storage_provider,
+        draft_id,
+        expected_revision,
+        &cli_path,
+    )
+    .map_err(setup_error)
+}
+
+/// Open the agent provider's CLI with the storage provider's assistant
+/// instruction. Both providers resolve through their registries.
+pub(super) fn launch_storage_setup_assistant_with_repository(
+    repository: &LocalStateRepository,
+    storage_provider: &StorageProviderKey,
+    agent_provider: &ProviderKey,
+    draft_id: &StorageSetupDraftId,
+    expected_revision: u64,
+) -> Result<(), String> {
+    let instruction = storage_setup_assistant_instruction_with_repository(
+        repository,
+        storage_provider,
+        draft_id,
+        expected_revision,
+    )?;
+    let descriptor = provider_descriptor(agent_provider)?;
+    let launcher = descriptor
+        .cli_launcher
+        .ok_or_else(|| format!("{} has no launchable agent CLI.", descriptor.display_name))?;
+    let script = agent_launch_script(&launcher.program, &launcher.display_name, &instruction);
+    open_agent_launch_script_in_terminal(&script)
 }
 
 /// Resolve the CLI beside the running desktop executable.
@@ -1607,23 +1309,49 @@ pub(super) fn agent_launch_script(program: &str, display_name: &str, instruction
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn open_agent_launch_script_in_terminal(script: &str) -> Result<(), String> {
+fn write_agent_launch_script(directory: &Path, script: &str) -> Result<PathBuf, String> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let path = std::env::temp_dir().join("mallard-r2-agent-setup.command");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o700)
-        .open(&path)
-        .map_err(|error| format!("Mallard could not write the terminal launch script: {error}"))?;
-    file.write_all(script.as_bytes())
-        .map_err(|error| format!("Mallard could not write the terminal launch script: {error}"))?;
-    drop(file);
-    // A file surviving from an earlier launch keeps its old mode; re-assert it.
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|error| format!("Mallard could not write the terminal launch script: {error}"))?;
+    for _ in 0..16 {
+        let filename = format!("{}.command", generated_named_id("mallardagentsetup")?);
+        let path = directory.join(filename);
+        let opened = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path);
+        let mut file = match opened {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Mallard could not write the terminal launch script: {error}"
+                ));
+            }
+        };
+        if let Err(error) = file.write_all(script.as_bytes()) {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(format!(
+                "Mallard could not write the terminal launch script: {error}"
+            ));
+        }
+        if let Err(error) = file.set_permissions(std::fs::Permissions::from_mode(0o700)) {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(format!(
+                "Mallard could not secure the terminal launch script: {error}"
+            ));
+        }
+        return Ok(path);
+    }
+    Err("Mallard could not allocate a terminal launch script.".to_string())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn open_agent_launch_script_in_terminal(script: &str) -> Result<(), String> {
+    let path = write_agent_launch_script(&std::env::temp_dir(), script)?;
     let status = std::process::Command::new("/usr/bin/open")
         .args(["-b", "com.apple.Terminal"])
         .arg(&path)
@@ -1650,40 +1378,12 @@ fn host_identity_status(identity: mallard_domain::HostIdentity) -> HostIdentityS
     }
 }
 
-pub(super) fn save_project_sync_config_with_repository(
+/// Heal interrupted project setup finalizations. Sync applies are one-shot
+/// and have no restart recovery path.
+pub(crate) fn recover_startup_state_with_repository(
     repository: &LocalStateRepository,
-    mut config: SyncConfig,
-) -> Result<SyncConfig, String> {
-    let previous = repository.load_config().ok();
-    restore_redacted_storage_secrets(&mut config, previous.as_ref());
-    require_verified_r2_changes(&config, previous.as_ref())?;
-    require_s3_storage_secrets(&config)?;
-    if let Some(previous) = &previous {
-        for storage in &previous.storages {
-            if !config
-                .storages
-                .iter()
-                .any(|candidate| candidate.id == storage.id)
-            {
-                crate::storage_catalog::ensure_storage_removal_allowed(&storage.id)?;
-            }
-        }
-    }
-    validate_r2_storage_destinations(&config).map_err(|error| error.to_string())?;
-    let bindings = repository.load_bindings()?;
-    bindings.validate(&config)?;
-    validate_config_storage_isolation(repository, &config, &bindings.bindings, &bindings.profiles)?;
-    repository.save_config(config)
-}
-
-/// Heal interrupted setup finalizations and conversation materializations.
-pub(super) fn recover_startup_state_with_repository(
-    repository: &LocalStateRepository,
-) -> (Vec<String>, Result<ConversationRecoveryReport, String>) {
-    (
-        recover_setup_state(repository),
-        recover_conversation_materializations(repository),
-    )
+) -> Vec<String> {
+    recover_setup_state(repository)
 }
 
 pub(super) fn list_project_repository_kinds_with_repository(
@@ -1696,90 +1396,41 @@ pub(super) fn agent_provider_descriptors() -> Vec<ProviderDescriptor> {
     provider_registry().descriptors()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_activity_from_local_read(
     repository: &LocalStateRepository,
+    state: &LocalProjectActivityStateSnapshot,
     local: &ProjectLocalRead,
-    assignment_conflicts: &[CodexConversationAssignmentConflict],
     remote_snapshot: Option<&BundleSnapshot>,
     branch: Option<&str>,
     before_time: Option<u64>,
     window_days: Option<u64>,
     mut warnings: Vec<String>,
 ) -> Result<ProjectActivity, String> {
-    let mut activity_views = local.views.clone();
-    for conflict in assignment_conflicts {
-        let transcript_logical_path = format!(
-            "state/providers/codex/sessions/{}/transcript.jsonl",
-            conflict.thread_id
-        );
-        let metadata = fs::metadata(&conflict.transcript_path).ok();
-        activity_views.push(LocalSessionView {
-            descriptor: ResourceCandidate {
-                resource_id: format!("codex:session:{}", conflict.thread_id),
-                kind: CaptureResourceKind::Conversation,
-                provider: Some(codex_key()),
-                provider_resource_type: Some("session".to_string()),
-                display_name: conflict.thread_id.clone(),
-                apply_policy: CaptureApplyPolicy::SafeFile,
-                selected_by_default: false,
-                // This view exists only in the Activity projection. The real
-                // discovery remains unchanged, so capture can never select it.
-                blocked_reason: None,
-                logical_paths: vec![transcript_logical_path.clone()],
-                metadata: BTreeMap::new(),
-            },
-            provider: codex_key(),
-            provider_thread_id: conflict.thread_id.clone(),
-            transcript_logical_path,
-            source_path: PathBuf::from(&conflict.transcript_path),
-            source_mtime: metadata
-                .as_ref()
-                .and_then(|metadata| metadata.modified().ok())
-                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs())
-                .unwrap_or(0),
-            source_size: metadata
-                .as_ref()
-                .map(|metadata| metadata.len())
-                .unwrap_or(0),
-            capture_bytes: metadata.map(|metadata| metadata.len()).unwrap_or(0),
-        });
-    }
     let local_sessions = project_activity::scan_local_session_views(
         repository,
         provider_registry(),
         &local.activity_project,
-        &activity_views,
+        &local.views,
         &mut warnings,
     )?;
     let remote_sessions = remote_snapshot
         .map(project_activity::remote_sessions_from_snapshot)
         .unwrap_or_default();
-    let mut activity = project_activity::build_project_activity(
-        repository,
+    project_activity::build_project_activity(
         provider_registry(),
         &local.activity_project,
+        &state.conversation_bindings,
+        &state.materializations,
+        &state.config,
         local_sessions,
         remote_sessions,
         branch,
         before_time,
         window_days,
         warnings,
-    )?;
-    for conflict in assignment_conflicts {
-        if let Some(session) = activity.sessions.iter_mut().find(|session| {
-            session.provider == codex_key()
-                && session.provider_session_id.as_deref() == Some(conflict.thread_id.as_str())
-        }) {
-            session.sync_blocked_reason = Some(conflict.reason.clone());
-            session.working_directory = Some(conflict.authoritative_home.clone());
-        }
-    }
-    Ok(activity)
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn get_project_activity_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
@@ -1788,14 +1439,12 @@ pub(super) fn get_project_activity_with_repository(
     before_time: Option<u64>,
     window_days: Option<u64>,
 ) -> Result<ProjectActivity, String> {
-    let local = load_project_local_read(repository, local_project_id)?;
-    let assignment_conflicts =
-        audit_codex_conversation_paths_with_repository(repository, local_project_id)?
-            .assignment_conflicts;
+    let state = repository.load_project_activity_state_snapshot()?;
+    let local = load_project_local_read_from_state(repository.root(), &state, local_project_id)?;
     let mut warnings = Vec::new();
     let remote = match storage_id {
         Some(storage_id) => match project_activity::fetch_activity_snapshot(
-            repository,
+            &state.config,
             storage_id,
             &local.activity_project.bundle_id,
         ) {
@@ -1812,8 +1461,8 @@ pub(super) fn get_project_activity_with_repository(
     };
     build_activity_from_local_read(
         repository,
+        &state,
         &local,
-        &assignment_conflicts,
         remote.as_ref(),
         branch,
         before_time,
@@ -1877,13 +1526,25 @@ fn load_project_session_views(
             "The session resource ID is invalid.",
         )
     })?;
-    let activity_project = project_activity::resolve_activity_project(repository, local_project_id)
+    let state = repository
+        .load_project_activity_state_snapshot()
         .map_err(|_| {
             session_detail_error(
                 SessionDetailErrorCode::OwnershipChanged,
-                "The project or its provider profile changed; open Project Settings.",
+                "Mallard could not revalidate this session's local ownership.",
             )
         })?;
+    let activity_project = project_activity::resolve_activity_project_from_state(
+        &state.config,
+        &state.bindings,
+        local_project_id,
+    )
+    .map_err(|_| {
+        session_detail_error(
+            SessionDetailErrorCode::OwnershipChanged,
+            "The project or its provider profile changed; open Project Settings.",
+        )
+    })?;
     let home = activity_project.homes.get(&provider).ok_or_else(|| {
         session_detail_error(
             SessionDetailErrorCode::NotLocal,
@@ -1891,33 +1552,32 @@ fn load_project_session_views(
         )
     })?;
     let home_path = home.home.to_string_lossy().into_owned();
-    let bound_provider_session_id = repository
-        .load_conversation_bindings()
-        .map_err(|_| {
-            session_detail_error(
-                SessionDetailErrorCode::OwnershipChanged,
-                "Mallard could not revalidate this session's local ownership.",
-            )
-        })?
+    let bound_provider_session_id = state
+        .conversation_bindings
         .bindings
-        .into_iter()
+        .iter()
         .find(|binding| {
             binding.local_project_id == *local_project_id
                 && binding.thread_id == thread_id
                 && binding.provider_profile_id == home.profile_id
         })
-        .and_then(|binding| binding.provider_thread_id);
+        .and_then(|binding| binding.provider_thread_id.clone());
     let resolved = ResolvedBinding {
         binding: activity_project.binding.clone(),
         homes: [(provider, home_path)].into_iter().collect(),
     };
-    let capture_request =
-        capture_request_for_resolved_binding(repository, &resolved).map_err(|_| {
-            session_detail_error(
-                SessionDetailErrorCode::OwnershipChanged,
-                "Mallard could not revalidate this session's local ownership.",
-            )
-        })?;
+    let capture_request = capture_request_for_resolved_binding_from_state(
+        repository.root(),
+        &state.config,
+        &state.bindings,
+        &resolved,
+    )
+    .map_err(|_| {
+        session_detail_error(
+            SessionDetailErrorCode::OwnershipChanged,
+            "Mallard could not revalidate this session's local ownership.",
+        )
+    })?;
     let (_, views) = super::session_watch_service::session_watch_service()
         .discovery_for(provider_registry(), local_project_id, &capture_request)
         .map_err(|_| {
@@ -1931,8 +1591,8 @@ fn load_project_session_views(
         let identity_matches = match bound_provider_session_id.as_ref() {
             Some(expected) => expected == &view.provider_thread_id,
             None => {
-                project_activity::resolve_local_provider_alias_thread(
-                    repository,
+                project_activity::resolve_local_provider_alias_thread_from_state(
+                    &state,
                     &activity_project,
                     &view.provider,
                     &view.provider_thread_id,
@@ -2037,9 +1697,6 @@ fn storage_data_clear_result(
         .scope_bases_removed
         .saturating_add(local.conversation_acceptances_removed)
         .saturating_add(local.materializations_removed)
-        .saturating_add(local.journal_operations_removed)
-        .saturating_add(local.restore_plans_removed)
-        .saturating_add(local.push_plans_removed)
         .saturating_add(catalog.claims_removed)
         .saturating_add(catalog.preservation_witnesses_removed)
         .saturating_add(catalog.terminal_operations_removed);
@@ -2051,7 +1708,6 @@ fn storage_data_clear_result(
         project_links_reset: local.links_reset,
         catalog_links_reset: catalog.links_reset,
         local_records_removed,
-        unreadable_plan_files_retained: local.unreadable_plan_files_retained,
     }
 }
 
@@ -2258,13 +1914,10 @@ pub(super) fn probe_provider_profile_with_repository(
             canonical.display()
         ));
     }
-    let config = repository.load_config()?;
-    for storage in config
-        .storages
-        .iter()
-        .filter(|storage| storage.kind == StorageKind::Local)
-    {
-        let storage_root = prospective_canonical(Path::new(&storage.local_dir))?;
+    let snapshot = repository.load_project_state_snapshot()?;
+    let state = &snapshot.bindings;
+    for (storage, root) in configured_local_storage_roots(&snapshot.config)? {
+        let storage_root = prospective_canonical(&root)?;
         if paths_overlap(&canonical, &storage_root) {
             return Err(format!(
                 "{} profile '{}' overlaps local storage '{}'",
@@ -2276,7 +1929,6 @@ pub(super) fn probe_provider_profile_with_repository(
     }
     let readable = fs::read_dir(&canonical).is_ok();
     let writable = !metadata.permissions().readonly();
-    let state = repository.load_bindings()?;
     for binding in state
         .bindings
         .iter()
@@ -2312,7 +1964,7 @@ pub(super) fn probe_provider_profile_with_repository(
     })
 }
 
-pub(super) fn create_provider_profile_with_repository(
+pub(crate) fn create_provider_profile_with_repository(
     repository: &LocalStateRepository,
     provider: &ProviderKey,
     display_name: &str,
@@ -2345,6 +1997,7 @@ pub(super) fn create_provider_profile_with_repository(
         },
         path: probe.resolved_path,
         canonical_path: probe.canonical_path,
+        provider_config: mallard_domain::AgentProviderConfig::version_1(),
         revision: 0,
         created_at: now,
         updated_at: now,
@@ -2461,10 +2114,17 @@ fn resolve_profile_paths(
     repository: &LocalStateRepository,
     profile_ids: &BTreeMap<ProviderKey, LocalProviderProfileId>,
 ) -> Result<BTreeMap<ProviderKey, String>, String> {
+    let state = repository.load_bindings()?;
+    resolve_profile_paths_from_state(&state, profile_ids)
+}
+
+fn resolve_profile_paths_from_state(
+    state: &MachineProjectState,
+    profile_ids: &BTreeMap<ProviderKey, LocalProviderProfileId>,
+) -> Result<BTreeMap<ProviderKey, String>, String> {
     if profile_ids.is_empty() {
         return Err("choose at least one local provider profile".to_string());
     }
-    let state = repository.load_bindings()?;
     let mut resolved = BTreeMap::new();
     for (provider, profile_id) in profile_ids {
         let profile = state
@@ -2518,17 +2178,13 @@ fn validate_setup_paths(
         return Err("project root overlaps Mallard application data".to_string());
     }
     let config = repository.load_config()?;
-    for storage in config
-        .storages
-        .iter()
-        .filter(|storage| storage.kind == StorageKind::Local)
-    {
-        let storage_root = prospective_canonical(Path::new(&storage.local_dir))?;
+    for (storage, root) in configured_local_storage_roots(&config)? {
+        let storage_root = prospective_canonical(&root)?;
         if paths_overlap(&project_root, &storage_root) {
             return Err(format!(
                 "project root '{}' overlaps local storage '{}'",
                 project_root.display(),
-                storage.local_dir
+                storage.name
             ));
         }
     }
@@ -2576,14 +2232,15 @@ fn inspect_project_files_guarded(
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
 ) -> Result<ProjectContentInventory, String> {
-    let config = repository.load_config()?;
+    let state = repository.load_project_state_snapshot()?;
+    let config = &state.config;
     let project = config
         .project(local_project_id)
         .cloned()
         .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
     let link = require_project_link(&config, &project, storage_id)?;
-    let binding = repository
-        .load_bindings()?
+    let binding = state
+        .bindings
         .active_for(local_project_id)
         .cloned()
         .ok_or_else(|| {
@@ -2593,10 +2250,16 @@ fn inspect_project_files_guarded(
             )
         })?;
     let eligibility = project_file_sync_eligibility(&binding);
-    let (_, engine) = storage_engine(repository, storage_id)?;
+    let (_, engine) = storage_engine_from_state(repository, config, &state.bindings, storage_id)?;
     let remote = engine.inspect_optional(&project.bundle_id)?;
     let discovery = if eligibility.state == ProjectFileSyncEligibilityState::Eligible {
-        let mut request = capture_request_for_binding(repository, &binding)?;
+        let resolved = resolve_project_binding_from_state(&state.bindings, &binding)?;
+        let mut request = capture_request_for_resolved_binding_from_state(
+            repository.root(),
+            config,
+            &state.bindings,
+            &resolved,
+        )?;
         request.include_project_content = true;
         Some(provider_capture::discover_full(
             provider_registry(),
@@ -2679,80 +2342,84 @@ fn build_project_files_inventory(
         ignored_count = discovered.ignored_count;
         blocked_count = discovered.blocked_count;
         warnings.extend(discovered.warnings.clone());
-        let candidates = discovered.resources;
-        let local_inventory = inventory_from_candidates(
-            binding.project_root.clone(),
-            Some(project.bundle_id.clone()),
-            &candidates,
-            BundleRecipe::default(),
-            Vec::new(),
-        )?;
-        for item in local_inventory.resources {
-            let resource_id = item.descriptor.resource_id.clone();
-            let relative_path = item
-                .descriptor
-                .metadata
-                .get("_local_relative_path")
-                .cloned()
-                .or_else(|| match &item.descriptor.provenance {
-                    Provenance::ProjectLocal { relative_path } => Some(relative_path.clone()),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    format!("project-content resource '{}' lacks a path", resource_id)
-                })?;
-            if let Some(reason) = item.blocked_reason {
-                local_blockers.insert(resource_id.clone(), reason);
-                local_blocked_versions.insert(
-                    resource_id,
-                    ProjectContentVersion {
-                        logical_path: format!("project/{}", relative_path),
-                        relative_path,
-                        entry_type: ProjectContentEntryType::Blocked,
-                        size: None,
-                        mode: None,
-                        source_mtime: None,
-                        descriptor: item.descriptor,
-                        digest: String::new(),
-                    },
-                );
-                continue;
-            }
-            let entry_type = match item.descriptor.kind {
-                ResourceKind::ProjectContentFile => ProjectContentEntryType::File,
-                ResourceKind::ProjectContentDirectory => ProjectContentEntryType::Directory,
-                _ => continue,
-            };
-            let digest = item
-                .descriptor
-                .metadata
-                .get("_local_review_digest")
-                .cloned()
-                .ok_or_else(|| {
-                    format!(
-                        "project-content resource '{}' lacks a review digest",
-                        resource_id
-                    )
-                })?;
-            if let Some(warning) = item.descriptor.metadata.get("_local_warning_code") {
-                local_warnings.insert(resource_id.clone(), warning.clone());
-            }
-            local_versions.insert(
-                resource_id,
-                ProjectContentVersion {
-                    logical_path: format!("project/{}", relative_path),
+        for candidate in discovered.resources {
+            let descriptor = provider_capture::domain_resource_descriptor(&candidate, None)?;
+            let resource_id = descriptor.resource_id.clone();
+            let facts = candidate.project_content.ok_or_else(|| {
+                format!(
+                    "project-content resource '{}' lacks typed facts",
+                    resource_id
+                )
+            })?;
+            match facts {
+                provider_capture::ProjectContentCandidate::Blocked { relative_path } => {
+                    let reason = candidate.blocked_reason.ok_or_else(|| {
+                        format!(
+                            "blocked project-content resource '{}' lacks a reason",
+                            resource_id
+                        )
+                    })?;
+                    local_blockers.insert(resource_id.clone(), reason);
+                    local_blocked_versions.insert(
+                        resource_id,
+                        ProjectContentVersion {
+                            logical_path: format!("project/{}", relative_path),
+                            relative_path,
+                            entry_type: ProjectContentEntryType::Blocked,
+                            size: None,
+                            mode: None,
+                            source_mtime: None,
+                            descriptor,
+                            digest: String::new(),
+                        },
+                    );
+                }
+                provider_capture::ProjectContentCandidate::Directory {
                     relative_path,
-                    entry_type,
-                    size: parse_optional_metadata::<u64>(&item.descriptor, "_local_size")?,
-                    mode: parse_optional_metadata::<u32>(&item.descriptor, "_local_mode")?,
-                    source_mtime: parse_optional_metadata::<u64>(
-                        &item.descriptor,
-                        "_local_source_mtime",
-                    )?,
-                    descriptor: item.descriptor,
-                    digest,
-                },
-            );
+                    mode,
+                    source_mtime,
+                    review_digest,
+                } => {
+                    local_versions.insert(
+                        resource_id,
+                        ProjectContentVersion {
+                            logical_path: format!("project/{}", relative_path),
+                            relative_path,
+                            entry_type: ProjectContentEntryType::Directory,
+                            size: None,
+                            mode: Some(mode),
+                            source_mtime: Some(source_mtime),
+                            descriptor,
+                            digest: review_digest,
+                        },
+                    );
+                }
+                provider_capture::ProjectContentCandidate::File {
+                    relative_path,
+                    size,
+                    mode,
+                    source_mtime,
+                    review_digest,
+                    warning,
+                } => {
+                    if let Some(warning) = warning {
+                        local_warnings.insert(resource_id.clone(), warning.code().to_string());
+                    }
+                    local_versions.insert(
+                        resource_id,
+                        ProjectContentVersion {
+                            logical_path: format!("project/{}", relative_path),
+                            relative_path,
+                            entry_type: ProjectContentEntryType::File,
+                            size: Some(size),
+                            mode: Some(mode),
+                            source_mtime: Some(source_mtime),
+                            descriptor,
+                            digest: review_digest,
+                        },
+                    );
+                }
+            }
         }
     }
 
@@ -2882,28 +2549,6 @@ fn project_content_entry_rank(entry_type: ProjectContentEntryType) -> u8 {
     }
 }
 
-fn parse_optional_metadata<T>(
-    descriptor: &ResourceDescriptor,
-    key: &str,
-) -> Result<Option<T>, String>
-where
-    T: std::str::FromStr,
-    T::Err: std::fmt::Display,
-{
-    descriptor
-        .metadata
-        .get(key)
-        .map(|value| {
-            value.parse::<T>().map_err(|error| {
-                format!(
-                    "resource '{}' has invalid {}: {}",
-                    descriptor.resource_id, key, error
-                )
-            })
-        })
-        .transpose()
-}
-
 fn project_content_versions(
     manifest: &BundleManifest,
 ) -> Result<BTreeMap<ResourceId, ProjectContentVersion>, String> {
@@ -2915,7 +2560,7 @@ fn project_content_versions(
         let Some(descriptor) = project_scope.resources.get(&entry.resource_id) else {
             continue;
         };
-        if descriptor.kind != ResourceKind::ProjectContentFile {
+        if kind_primitive(&descriptor.kind) != Some(ResourceKindPrimitive::ProjectContentFile) {
             continue;
         }
         let relative_path = project_content_relative_path(logical_path)?;
@@ -2944,7 +2589,8 @@ fn project_content_versions(
         let Some(descriptor) = project_scope.resources.get(&entry.resource_id) else {
             continue;
         };
-        if descriptor.kind != ResourceKind::ProjectContentDirectory {
+        if kind_primitive(&descriptor.kind) != Some(ResourceKindPrimitive::ProjectContentDirectory)
+        {
             continue;
         }
         let relative_path = project_content_relative_path(logical_path)?;
@@ -3042,7 +2688,10 @@ fn project_content_base_content_digests(
             scope
                 .resources
                 .get(&entry.resource_id)
-                .is_some_and(|descriptor| descriptor.kind == ResourceKind::ProjectContentFile)
+                .is_some_and(|descriptor| {
+                    kind_primitive(&descriptor.kind)
+                        == Some(ResourceKindPrimitive::ProjectContentFile)
+                })
         })
         .map(|(logical_path, entry)| (logical_path.clone(), entry.sha256.clone()))
         .collect()
@@ -3193,20 +2842,26 @@ pub(super) fn get_bundle_inventory_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
 ) -> Result<ResourceInventory, String> {
-    let config = repository.load_config()?;
-    config
+    let state = repository.load_project_state_snapshot()?;
+    state
+        .config
         .project(local_project_id)
         .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
-    let bindings = repository.load_bindings()?;
-    let binding = bindings.active_for(local_project_id).ok_or_else(|| {
+    let binding = state.bindings.active_for(local_project_id).ok_or_else(|| {
         format!(
             "project '{}' is not mapped on this machine",
             local_project_id
         )
     })?;
-    let request = capture_request_for_binding(repository, binding)?;
+    let resolved = resolve_project_binding_from_state(&state.bindings, binding)?;
+    let request = capture_request_for_resolved_binding_from_state(
+        repository.root(),
+        &state.config,
+        &state.bindings,
+        &resolved,
+    )?;
     let discovery = provider_capture::discover_full(provider_registry(), &request)?;
-    build_resource_inventory(repository, local_project_id, binding, &discovery)
+    build_resource_inventory(&state.config, local_project_id, binding, &discovery)
 }
 
 /// Project/link recipes are machine-local selection state. A remote manifest's
@@ -3228,14 +2883,13 @@ fn machine_local_recipe_from_manifest(manifest: &BundleManifest) -> Result<Bundl
 /// Inventory section over a shared discovery. Inventory is read-only: a
 /// reviewed Push is the only flow that changes a destination recipe.
 fn build_resource_inventory(
-    repository: &LocalStateRepository,
+    config: &SyncConfig,
     local_project_id: &LocalProjectId,
     binding: &ProjectBinding,
     discovery: &provider_capture::Discovery,
 ) -> Result<ResourceInventory, String> {
     let discovered = discovery.project_inventory();
-    let project = repository
-        .load_config()?
+    let project = config
         .project(local_project_id)
         .cloned()
         .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
@@ -3262,18 +2916,23 @@ fn build_resource_inventory(
         if visible.contains(resource_id) {
             continue;
         }
+        let descriptor = ResourceDescriptor {
+            resource_id: resource_id.clone(),
+            kind: contracts::requirement(),
+            provider: None,
+            provider_resource_type: None,
+            display_name: resource_id.to_string(),
+            provenance: contracts::provenance_unknown(),
+            apply_policy: entry.apply_policy.clone(),
+            codec_version: 1,
+            attributes: mallard_domain::BoundedPortableObject::empty(),
+        };
+        let presentation = contract_presentation(&descriptor);
         inventory.resources.push(InventoryResource {
-            descriptor: ResourceDescriptor {
-                resource_id: resource_id.clone(),
-                kind: ResourceKind::Requirement,
-                provider: None,
-                provider_resource_type: None,
-                display_name: resource_id.to_string(),
-                provenance: Provenance::Unknown,
-                apply_policy: entry.apply_policy,
-                codec_version: 1,
-                metadata: BTreeMap::new(),
-            },
+            kind_label: presentation.kind_label,
+            apply_policy_label: presentation.apply_policy_label,
+            selectable: presentation.selectable,
+            descriptor,
             category: "tools".to_string(),
             // One sentence, not two. This carried a `description` as well —
             // "Selected resource is unavailable on this machine" — which the
@@ -3306,41 +2965,18 @@ fn inventory_from_candidates(
 ) -> Result<ResourceInventory, String> {
     let mut resources = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        let resource_id = ResourceId::parse(candidate.resource_id.clone())?;
-        let provider = candidate.provider.clone();
-        let kind = capture_resource_kind(&candidate.kind);
-        let provider_resource_type = candidate
-            .provider_resource_type
-            .as_deref()
-            .map(mallard_domain::ResourceTypeKey::parse)
-            .transpose()?;
-        let provenance = candidate
-            .logical_paths
-            .first()
-            .and_then(|path| path.strip_prefix("project/"))
-            .map(|relative_path| Provenance::ProjectLocal {
-                relative_path: relative_path.to_string(),
-            })
-            .unwrap_or(Provenance::Unknown);
-        let apply_policy = recipe
-            .entries
-            .get(&resource_id)
-            .map(|entry| entry.apply_policy)
-            .unwrap_or_else(|| capture_apply_policy(&candidate.apply_policy));
-        let descriptor = ResourceDescriptor {
-            resource_id,
-            kind,
-            provider,
-            provider_resource_type,
-            display_name: candidate.display_name.clone(),
-            provenance,
-            apply_policy,
-            codec_version: 1,
-            metadata: candidate.metadata.clone(),
-        };
+        let mut descriptor = provider_capture::domain_resource_descriptor(candidate, None)?;
+        if let Some(entry) = recipe.entries.get(&descriptor.resource_id) {
+            descriptor.apply_policy = entry.apply_policy.clone();
+        }
         descriptor.validate()?;
+        let category = resource_category(&descriptor.kind).to_string();
+        let presentation = contract_presentation(&descriptor);
         resources.push(InventoryResource {
-            category: resource_category(kind).to_string(),
+            category,
+            kind_label: presentation.kind_label,
+            apply_policy_label: presentation.apply_policy_label,
+            selectable: presentation.selectable,
             description: None,
             logical_paths: candidate.logical_paths.clone(),
             default_selected: candidate.selected_by_default,
@@ -3374,29 +3010,34 @@ fn remove_excluded_codex_subagents_from_recipe(
     recipe.entries.len() != previous_entry_count
 }
 
-fn capture_resource_kind(kind: &CaptureResourceKind) -> ResourceKind {
-    match kind {
-        CaptureResourceKind::ProjectContentFile => ResourceKind::ProjectContentFile,
-        CaptureResourceKind::ProjectContentDirectory => ResourceKind::ProjectContentDirectory,
-        CaptureResourceKind::Conversation => ResourceKind::Conversation,
-        CaptureResourceKind::ProviderState => ResourceKind::ProviderState,
+struct ContractPresentation {
+    kind_label: String,
+    apply_policy_label: String,
+    selectable: bool,
+}
+
+/// Safe labels and selectability from the registered contracts. Unknown
+/// coordinates render as their raw coordinate and are never selectable.
+fn contract_presentation(descriptor: &ResourceDescriptor) -> ContractPresentation {
+    let registry = PortableResourceRegistry::production();
+    let policy = registry.apply_policy(&descriptor.apply_policy);
+    ContractPresentation {
+        kind_label: registry.resource_kind_label(&descriptor.kind),
+        apply_policy_label: registry.apply_policy_label(&descriptor.apply_policy),
+        selectable: registry
+            .resolve_resource_kind(&descriptor.kind, &descriptor.attributes)
+            .is_ok_and(|kind| kind.is_some())
+            && policy.is_some_and(|policy| policy != mallard_domain::ApplyPolicyPrimitive::Never),
     }
 }
 
-fn capture_apply_policy(policy: &CaptureApplyPolicy) -> ApplyPolicy {
-    match policy {
-        CaptureApplyPolicy::SafeFile => ApplyPolicy::SafeFile,
-        CaptureApplyPolicy::Merge => ApplyPolicy::Merge,
-        CaptureApplyPolicy::Review => ApplyPolicy::ExplicitReview,
-    }
-}
-
-fn resource_category(kind: ResourceKind) -> &'static str {
-    match kind {
-        ResourceKind::Conversation | ResourceKind::ProviderState => "conversations",
-        ResourceKind::ProjectContentFile | ResourceKind::ProjectContentDirectory => "project_files",
-        ResourceKind::Requirement => "tools",
-    }
+/// The presentation category the registered resource-kind adapter declares.
+/// An unregistered kind lands in the tools group as an unavailable row.
+fn resource_category(kind: &mallard_domain::ResourceKindCoordinate) -> &'static str {
+    PortableResourceRegistry::production()
+        .resource_kind_adapter(kind)
+        .map(|adapter| adapter.category().as_str())
+        .unwrap_or("tools")
 }
 
 type StorageEngine = BundleEngine<ConfiguredObjectStore>;
@@ -3459,25 +3100,6 @@ fn list_bundle_snapshots_with_engine(
             .then_with(|| left.bundle_id.cmp(&right.bundle_id))
     });
     Ok(snapshots)
-}
-
-/// List repos from an unsaved draft storage configuration, so setup can
-/// offer existing repos before the storage is in the config — the re-add-a-
-/// populated-folder flow. Read-only by construction: a local folder that is
-/// not already a Mallard storage returns an empty listing without creating
-/// the storage namespace inside it.
-pub(super) fn list_pending_storage_bundle_snapshots_with_config(
-    storage: &StorageConfig,
-) -> Result<Vec<BundleSnapshotSummary>, String> {
-    if storage.kind == StorageKind::Local {
-        let marker = Path::new(&storage.local_dir)
-            .join(mallard_infrastructure::storage_core::STORAGE_MARKER_KEY);
-        if !marker.is_file() {
-            return Ok(Vec::new());
-        }
-    }
-    let engine = engine_for_storage_config(storage)?;
-    list_bundle_snapshots_with_engine(&engine)
 }
 
 /// Publish the registration claim that makes a just-linked bundle discoverable
@@ -3746,7 +3368,7 @@ fn bounded_file_expectation(path: &Path) -> Result<TargetExpectation, String> {
             path.display()
         ));
     }
-    if metadata.len() > MAX_CONVERSATION_REPAIR_BYTES {
+    if metadata.len() > MAX_CONVERSATION_TARGET_BYTES {
         return Err(format!(
             "provider target '{}' exceeds the conversation limit",
             path.display()
@@ -3754,13 +3376,15 @@ fn bounded_file_expectation(path: &Path) -> Result<TargetExpectation, String> {
     }
     let content = fs::read(path)
         .map_err(|error| format!("read provider target '{}': {error}", path.display()))?;
+    mallard_infrastructure::sync_metrics::record_transcript_bytes_read(path, content.len() as u64);
+    mallard_infrastructure::sync_metrics::record_bytes_hashed(path, content.len() as u64);
     Ok(TargetExpectation::Sha256(hex_digest(
         Sha256::digest(&content).as_slice(),
     )))
 }
 
 /// The machine-local transcript source pinned by capture. Every provider
-/// records it during discovery, so reviewed plans never re-derive machine
+/// records it during discovery, so Apply never re-derives machine
 /// paths from portable ones.
 fn captured_transcript_source(
     conversation: &provider_capture::CapturedConversation,
@@ -3769,17 +3393,6 @@ fn captured_transcript_source(
         .source_physical_path
         .clone()
         .ok_or_else(|| "captured conversation has no machine-local transcript source".to_string())
-}
-
-fn codec_digests(lineage: &CodecLineage) -> (Option<String>, Option<String>) {
-    match lineage {
-        CodecLineage::Complete {
-            lineage_digest,
-            semantic_digest,
-            ..
-        } => (Some(lineage_digest.clone()), Some(semantic_digest.clone())),
-        CodecLineage::Unknown { .. } => (None, None),
-    }
 }
 
 /// Review every conversation of every bound provider, isolating provider
@@ -3798,6 +3411,7 @@ fn thread_review(
     created_at: u64,
     expires_at: u64,
     purpose: ReviewPurpose,
+    resource_filter: Option<&BTreeSet<ResourceId>>,
 ) -> Result<ThreadReview, String> {
     let mut merged = ThreadReview {
         entries: Vec::new(),
@@ -3831,6 +3445,7 @@ fn thread_review(
                 created_at,
                 expires_at,
                 purpose,
+                resource_filter,
             ),
             None => Err(format!(
                 "provider '{}' profile is unavailable on this machine",
@@ -3884,7 +3499,7 @@ fn provider_scope_pin(snapshot: Option<&BundleSnapshot>, provider: &ProviderKey)
 /// Locate one Codex rollout by thread id under the profile's canonical
 /// session roots. Codex embeds the thread UUID in the rollout file name, so
 /// the walk matches on the suffix without opening unrelated files.
-fn codex_rollout_lookup(
+pub(super) fn codex_rollout_lookup(
     provider_home: &Path,
 ) -> impl Fn(&str) -> Result<Option<PathBuf>, String> + '_ {
     move |thread_id: &str| {
@@ -3933,13 +3548,13 @@ fn codex_rollout_lookup(
 /// imported logical IDs as well as deterministic first-contact IDs, and it
 /// naturally supports repeated moves without adding schema state.
 fn applied_provider_alias_owners(
-    repository: &LocalStateRepository,
+    materializations: &Materializations,
     binding: &ProjectBinding,
     provider: &ProviderKey,
     profile_id: &LocalProviderProfileId,
-) -> Result<BTreeMap<String, BTreeSet<ThreadId>>, String> {
+) -> BTreeMap<String, BTreeSet<ThreadId>> {
     let mut owners = BTreeMap::<String, BTreeSet<ThreadId>>::new();
-    for record in repository.load_materializations()?.records {
+    for record in &materializations.records {
         if record.host_id != binding.host_id
             || record.replica_id != binding.replica_id
             || record.local_project_id != binding.local_project_id
@@ -3949,10 +3564,10 @@ fn applied_provider_alias_owners(
         }
         for receipt in record
             .receipts
-            .into_iter()
+            .iter()
             .filter(|receipt| receipt.status == ActionStatus::Applied)
         {
-            let Some(conversation) = receipt.conversation else {
+            let Some(conversation) = &receipt.conversation else {
                 continue;
             };
             if conversation.host_id != binding.host_id
@@ -3970,15 +3585,15 @@ fn applied_provider_alias_owners(
             if &receipt_provider != provider || receipt_thread_id != conversation.thread_id {
                 continue;
             }
-            if let Some(provider_thread_id) = conversation.provider_thread_id {
+            if let Some(provider_thread_id) = &conversation.provider_thread_id {
                 owners
-                    .entry(provider_thread_id)
+                    .entry(provider_thread_id.clone())
                     .or_default()
-                    .insert(conversation.thread_id);
+                    .insert(conversation.thread_id.clone());
             }
         }
     }
-    Ok(owners)
+    owners
 }
 
 fn displaced_provider_alias_owners(
@@ -4065,6 +3680,36 @@ pub(crate) struct LocalTailObservation {
     verified_acceptance: Option<VerifiedAdoption>,
 }
 
+/// Load only the physical sources this thread consumes. A null reference
+/// means a native transcript that has not yet been encoded or restored.
+/// A referenced file must verify; missing or damaged files never rescan.
+fn load_source_path_origins<'a>(
+    repository: &LocalStateRepository,
+    document: &mallard_domain::ConversationBindings,
+    project: &ProjectBinding,
+    profile_id: &LocalProviderProfileId,
+    sources: impl Iterator<Item = &'a str>,
+) -> Result<PathOrigins, String> {
+    let mut origins = PathOrigins::default();
+    for source in sources {
+        if origins.sources.contains_key(source) {
+            continue;
+        }
+        if let Some(row) = document.bindings.iter().find(|row| {
+            row.host_id == project.host_id
+                && row.replica_id == project.replica_id
+                && row.local_project_id == project.local_project_id
+                && &row.provider_profile_id == profile_id
+                && row.provider_thread_id.as_deref() == Some(source)
+        }) {
+            if row.path_origins_ref.is_some() {
+                origins.merge(&repository.load_path_origins(row)?)?;
+            }
+        }
+    }
+    Ok(origins)
+}
+
 /// The §6.4 encode-compare adoption outcome: dual pins for this review only;
 /// the durable pins are written by the Push or Pull the adoption enables.
 #[derive(Serialize, Deserialize, Clone)]
@@ -4086,6 +3731,7 @@ fn adopt_codex_acceptance(
     layout: Option<&RootTailLayout>,
     project_root: &str,
     canonical_project_root: &str,
+    origins: &PathOrigins,
 ) -> Option<VerifiedAdoption> {
     if probe.codec != mallard_domain::PORTABLE_TAIL_CODEC_WIRE_V1
         || probe.partition_kind != effective_kind
@@ -4095,14 +3741,13 @@ fn adopt_codex_acceptance(
     {
         return None;
     }
-    let artifact = build_standalone_codex_root(
+    let artifact = encode_standalone_codex_root(
         resolved,
-        &StandaloneBuildMode::Encode {
-            root: project_root.to_string(),
-            canonical_root: (canonical_project_root != project_root)
-                .then(|| canonical_project_root.to_string()),
-        },
+        project_root,
+        (canonical_project_root != project_root).then_some(canonical_project_root),
         layout,
+        &mut credential_redaction::shared().begin_run(),
+        origins,
     )
     .ok()?;
     let wire_state_at_probe_end =
@@ -4155,8 +3800,8 @@ fn adopt_codex_acceptance(
 /// the cloud pin at its recorded end: equality proves the cloud version is a
 /// prefix of local and re-establishes the dual acceptance pins
 /// (first-contact adoption, e.g. after a removed project is re-registered);
-/// anything else leaves the pair unproven and blocked. Encoding is a pure
-/// function of (bytes, binding root) — there is no table to infer.
+/// anything else leaves the pair unproven and blocked. Retained records use their
+/// verified origin edits; native records use the source binding matcher.
 #[allow(clippy::too_many_arguments)]
 fn observe_codex_local(
     local: Option<&LocalThreadReview>,
@@ -4164,9 +3809,12 @@ fn observe_codex_local(
     layout: Option<&RootTailLayout>,
     provider_home: &Path,
     adoption_probe: Option<&PortableConversationTail>,
-    project_root: &str,
-    canonical_project_root: &str,
+    repository: &LocalStateRepository,
+    project: &ProjectBinding,
+    profile_id: &LocalProviderProfileId,
 ) -> Result<ProviderLocalObservation, String> {
+    let project_root = project.project_root.as_str();
+    let canonical_project_root = project.canonical_project_root.as_str();
     let Some(local) = local else {
         return Ok(ProviderLocalObservation {
             observation: LocalTailObservation {
@@ -4356,8 +4004,22 @@ fn observe_codex_local(
     // binding root and compare the wire fold at the cloud pin's recorded
     // end. Equality proves the cloud version is a prefix of local and
     // re-establishes the dual pins; any failure — including a root the
-    // encoder refuses (non-POSIX, reserved-token collision) — leaves the
-    // pair unproven and blocked.
+    // encoder refuses (non-POSIX or path-map control namespace collision)
+    // — leaves the pair unproven and blocked.
+    let origins = if adoption_probe.is_some() {
+        load_source_path_origins(
+            repository,
+            &repository.load_conversation_bindings()?,
+            project,
+            profile_id,
+            resolved
+                .segments
+                .iter()
+                .map(|segment| segment.provider_thread_id.as_str()),
+        )?
+    } else {
+        PathOrigins::default()
+    };
     let verified_acceptance = adoption_probe.and_then(|probe| {
         adopt_codex_acceptance(
             &resolved,
@@ -4367,6 +4029,7 @@ fn observe_codex_local(
             layout,
             project_root,
             canonical_project_root,
+            &origins,
         )
     });
     let leaf_bytes = jsonl_tail_io::read_bounded(&source)?;
@@ -4484,9 +4147,12 @@ fn observe_claude_local(
     checkpoint: Option<&ConversationCheckpoint>,
     layout: Option<&RootTailLayout>,
     adoption_probe: Option<&PortableConversationTail>,
-    project_root: &str,
-    canonical_project_root: &str,
+    repository: &LocalStateRepository,
+    project: &ProjectBinding,
+    profile_id: &LocalProviderProfileId,
 ) -> Result<ProviderLocalObservation, String> {
+    let project_root = project.project_root.as_str();
+    let canonical_project_root = project.canonical_project_root.as_str();
     let invalid = || ProviderLocalObservation {
         observation: LocalTailObservation {
             evidence: TailSideEvidence::Invalid,
@@ -4641,6 +4307,17 @@ fn observe_claude_local(
     }) {
         return Ok(invalid());
     }
+    let origins = if adoption_probe.is_some() {
+        load_source_path_origins(
+            repository,
+            &repository.load_conversation_bindings()?,
+            project,
+            profile_id,
+            std::iter::once(local.provider_thread_id.as_str()),
+        )?
+    } else {
+        PathOrigins::default()
+    };
     let verified_acceptance = adoption_probe.and_then(|probe| {
         // The probe folds the published wire form — `redact(pathenc(x))` —
         // so the analyzed local slice runs the same pure composition the
@@ -4655,6 +4332,7 @@ fn observe_claude_local(
         .ok()?;
         let text = std::str::from_utf8(&bytes[..consumed]).ok()?;
         let mut encoded = String::with_capacity(text.len());
+        let mut ordinal = 0;
         for (index, line) in text.split('\n').enumerate() {
             if index > 0 {
                 encoded.push('\n');
@@ -4663,8 +4341,19 @@ fn observe_claude_local(
                 encoded.push_str(line);
                 continue;
             }
-            encoded.push_str(&mapper.encode_jsonl_line_gated(line).ok()?);
+            let record = serde_json::from_str(line).ok()?;
+            let mapped = mapper
+                .encode_record_with_origins(
+                    &record,
+                    origins.record(&local.provider_thread_id, ordinal),
+                )
+                .ok()?;
+            encoded.push_str(&serde_json::to_string(&mapped.wire).ok()?);
+            ordinal += 1;
         }
+        origins
+            .verify_source_length(&local.provider_thread_id, ordinal, false)
+            .ok()?;
         let (redacted, _changed_lines) = credential_redaction::shared()
             .redact_jsonl_text(&encoded)
             .ok()?;
@@ -4733,6 +4422,7 @@ fn provider_thread_review(
     created_at: u64,
     expires_at: u64,
     purpose: ReviewPurpose,
+    resource_filter: Option<&BTreeSet<ResourceId>>,
 ) -> Result<ThreadReview, String> {
     let binding = &resolved.binding;
     let adapter = provider_registry().require(provider)?;
@@ -4746,48 +4436,33 @@ fn provider_thread_review(
             provider_label, provider_label
         )
     })?;
-    let is_codex = provider.as_str() == "codex";
+    let reconstructs_graph = adapter.reconstructs_rollout_graph();
     let supports_cursor = adapter.supports_tail_cursor();
-    let historical_alias_owners = if is_codex {
-        applied_provider_alias_owners(repository, binding, provider, &profile_id)?
-    } else {
-        BTreeMap::new()
-    };
-    let identity_config = repository.load_config()?;
     let (pinned_scope_revision, pinned_scope_sha256) = provider_scope_pin(snapshot, provider);
     let domain_resources = provider_capture::domain_resources(captured)?;
     let provider_scope = snapshot.and_then(|snapshot| snapshot.manifest.provider_scope(provider));
 
-    // Threads owned by a journaled sync operation are review-blocked in both
-    // directions until that operation reaches a terminal phase. The block is
-    // typed per identity space: pending local ids only ever match a unit's
-    // local id, pending cloud ids only its cloud id, so a string coincidence
-    // across spaces can never cross-block (and is unconstructible anyway —
-    // the namespaces are prefix-disjoint). The cloud set is deliberately not
-    // provider-qualified: cloud ids are bundle-global, and a pending
-    // CreateLocal must keep blocking the cloud-only row a fresh review would
-    // re-offer.
-    let journal_operations = repository.load_conversation_sync_journal()?.operations;
-    let pending_local_threads = journal_operations
-        .iter()
-        .filter(|operation| {
-            operation.local_project_id == binding.local_project_id
-                && &operation.provider == provider
-        })
-        .map(|operation| operation.thread_id.clone())
-        .collect::<BTreeSet<_>>();
-    let pending_cloud_threads = journal_operations
-        .iter()
-        .filter(|operation| operation.local_project_id == binding.local_project_id)
-        .map(|operation| operation.cloud_thread_id.clone())
-        .collect::<BTreeSet<_>>();
-    drop(journal_operations);
-
-    let build_local_threads = |document: &mallard_domain::ConversationBindings| -> Result<
+    let build_local_threads = |state: &LocalProjectActivityStateSnapshot| -> Result<
         (BTreeMap<ThreadId, LocalThreadReview>, BTreeSet<String>),
         String,
     > {
-        let scoped = document
+        if state.bindings.active_for(&binding.local_project_id) != Some(binding)
+            || state.host_identity.host_id != binding.host_id
+            || !state.bindings.profiles.iter().any(|profile| {
+                profile.profile_id == profile_id
+                    && &profile.provider == provider
+                    && Path::new(&profile.canonical_path) == provider_home
+            })
+        {
+            return Err("project binding changed; refresh before continuing".to_string());
+        }
+        let historical_alias_owners = if reconstructs_graph {
+            applied_provider_alias_owners(&state.materializations, binding, provider, &profile_id)
+        } else {
+            BTreeMap::new()
+        };
+        let scoped = state
+            .conversation_bindings
             .bindings
             .iter()
             .filter(|conversation| {
@@ -4815,6 +4490,13 @@ fn provider_thread_review(
         // reading) and from the bounded head scan otherwise.
         for view in views {
             if &view.provider != provider || view.descriptor.blocked_reason.is_some() {
+                continue;
+            }
+            if resource_filter.is_some_and(|selected| {
+                ResourceId::parse(view.descriptor.resource_id.clone())
+                    .map(|resource_id| !selected.contains(&resource_id))
+                    .unwrap_or(true)
+            }) {
                 continue;
             }
             let resource_id_text = view.descriptor.resource_id.as_str();
@@ -4882,7 +4564,7 @@ fn provider_thread_review(
                                     .iter()
                                     .map(|binding| binding.thread_id.clone())
                                     .collect(),
-                                &identity_config,
+                                &state.config,
                             )?;
                         if unchanged {
                             suppressed_provider_ids.insert(provider_thread_id);
@@ -4941,9 +4623,9 @@ fn provider_thread_review(
     // binding and the first checkpoint lands on the destination link.
     // Observation-class work: nothing here builds artifacts or touches
     // cloud state.
-    if supports_cursor {
-        let document = repository.load_conversation_bindings()?;
-        let (local_threads, _) = build_local_threads(&document)?;
+    if supports_cursor && purpose != ReviewPurpose::Observe {
+        let state = repository.load_project_activity_state_snapshot()?;
+        let (local_threads, _) = build_local_threads(&state)?;
         let mut seed_candidates: Vec<(ThreadId, ConversationCheckpoint)> = Vec::new();
         for (thread_id, local) in &local_threads {
             let Some(local_binding) = &local.binding else {
@@ -4953,7 +4635,7 @@ fn provider_thread_review(
                 continue;
             }
             let source = local.source_path.clone();
-            let (seeded, raw_range_pin) = if is_codex {
+            let (seeded, raw_range_pin) = if reconstructs_graph {
                 let lookup = codex_rollout_lookup(provider_home);
                 let Ok(resolved_root) = codex_history_graph::resolve_codex_root(&source, &lookup)
                 else {
@@ -5082,17 +4764,18 @@ fn provider_thread_review(
         }
     }
 
-    // Phase B: pure reads. Every revision pinned below is the post-seeding
-    // value, so plan preconditions stay coherent with what review persisted.
-    let machine = repository.load_bindings()?;
+    // Phase B reads one snapshot after seeding. Helpers and plan pins use
+    // the same validated documents.
+    let state = repository.load_project_activity_state_snapshot()?;
+    let machine = &state.bindings;
+    let document = &state.conversation_bindings;
+    let host_identity = &state.host_identity;
+    let config = &state.config;
     let profile = machine
         .profiles
         .iter()
         .find(|profile| profile.profile_id == profile_id)
         .ok_or_else(|| format!("mapped {} profile disappeared", provider_label))?;
-    let document = repository.load_conversation_bindings()?;
-    let host_identity = repository.load_or_create_host_identity()?;
-    let config = repository.load_config()?;
     let checkpoints: BTreeMap<ThreadId, ConversationCheckpoint> = storage_id
         .and_then(|storage_id| {
             config
@@ -5109,7 +4792,7 @@ fn provider_thread_review(
                 })
         })
         .unwrap_or_default();
-    let (local_threads, suppressed_provider_ids) = build_local_threads(&document)?;
+    let (local_threads, suppressed_provider_ids) = build_local_threads(&state)?;
     let bindings_by_thread = document
         .bindings
         .iter()
@@ -5126,7 +4809,7 @@ fn provider_thread_review(
     // mapping. Equality across local and cloud ID spaces does not prove
     // identity. Unbound local sessions never match cloud rows, and unclaimed
     // cloud rows use their own cloud IDs as cloud-only review units.
-    let local_unit_ids = bindings_by_thread
+    let all_local_unit_ids = bindings_by_thread
         .keys()
         .cloned()
         .chain(local_threads.keys().cloned())
@@ -5144,7 +4827,7 @@ fn provider_thread_review(
             }
         }
     }
-    let units = local_unit_ids
+    let units = all_local_unit_ids
         .iter()
         .map(|thread_id| {
             (
@@ -5161,7 +4844,25 @@ fn provider_thread_review(
                 .filter(|cloud_thread_id| !claimed.contains(*cloud_thread_id))
                 .map(|cloud_thread_id| (None, Some(cloud_thread_id.clone()))),
         )
+        .filter(|(local_thread_id, cloud_thread_id)| {
+            resource_filter.is_none_or(|selected| {
+                local_thread_id
+                    .as_ref()
+                    .and_then(|thread_id| local_threads.get(thread_id))
+                    .is_some_and(|local| selected.contains(&local.resource_id))
+                    || cloud_thread_id
+                        .as_ref()
+                        .and_then(|thread_id| {
+                            provider_scope.and_then(|scope| scope.conversations.get(thread_id))
+                        })
+                        .is_some_and(|thread| selected.contains(&thread.resource_id))
+            })
+        })
         .collect::<Vec<(Option<ThreadId>, Option<CloudThreadId>)>>();
+    let local_unit_ids = units
+        .iter()
+        .filter_map(|(thread_id, _)| thread_id.clone())
+        .collect::<BTreeSet<_>>();
 
     // The only payload reads planning performs: Pull opens the transcripts
     // of threads it could offer to materialize locally in one batched
@@ -5172,6 +4873,9 @@ fn provider_thread_review(
             .into_iter()
             .flat_map(|scope| scope.conversations.iter())
             .filter(|(thread_id, _)| !claimed.contains(*thread_id))
+            .filter(|(_, thread)| {
+                resource_filter.is_none_or(|selected| selected.contains(&thread.resource_id))
+            })
         {
             let Some(entry) = thread
                 .files
@@ -5220,13 +4924,13 @@ fn provider_thread_review(
     // worker pool; everything consuming the results below (evidence
     // upgrades, classification, decisions, plan pins) stays serial and
     // looks the observations up by thread ID, so worker count never changes
-    // the review's output. Tasks are dispatched in thread-ID order: an
-    // error at task k proves every earlier task was already dispatched and
-    // completes, so the earliest failing thread's error is reported at
-    // every worker count.
+    // the review's output. A thread whose observation fails keeps its own
+    // error: its row is blocked with that message below, and neither the
+    // other threads nor the provider as a whole are affected.
     let mut cursor_observations: BTreeMap<ThreadId, LocalTailObservation> = BTreeMap::new();
     let mut cursor_refreshed: BTreeMap<ThreadId, CodexSeededRoot> = BTreeMap::new();
     let mut cursor_deps: BTreeMap<ThreadId, Vec<PathBuf>> = BTreeMap::new();
+    let mut observation_failures: BTreeMap<ThreadId, String> = BTreeMap::new();
     if supports_cursor {
         let observation_tasks: Vec<_> = local_unit_ids
             .iter()
@@ -5268,12 +4972,11 @@ fn provider_thread_review(
                 ))
             })
             .collect();
-        // Cache-eligible tasks (a local source, no adoption probe) consult
-        // the watch service first: a served thread performs no filesystem
-        // work at all. Misses and ineligible tasks run the bounded worker
-        // pool exactly as before, in thread-ID order.
+        // Comparison can reuse watcher-clean observations. Executable plans
+        // read local state because watcher events can arrive after capture.
+        // Cache misses and plan tasks use the same bounded worker pool.
         let cached: BTreeMap<ThreadId, LocalTailObservation> = match storage_id {
-            Some(storage_id) => {
+            Some(storage_id) if purpose == ReviewPurpose::Observe => {
                 let queries: Vec<_> = observation_tasks
                     .iter()
                     .filter(|(_, local, _, _, probe, _)| local.is_some() && probe.is_none())
@@ -5295,7 +4998,7 @@ fn provider_thread_review(
                     &queries,
                 )
             }
-            None => BTreeMap::new(),
+            _ => BTreeMap::new(),
         };
         let observation_tasks: Vec<_> = observation_tasks
             .into_iter()
@@ -5309,29 +5012,26 @@ fn provider_thread_review(
         if !observation_tasks.is_empty() {
             let workers = provider_capture::bounded_refresh_workers(observation_tasks.len());
             let cursor = std::sync::atomic::AtomicUsize::new(0);
-            let failed = std::sync::atomic::AtomicBool::new(false);
             let tasks = &observation_tasks;
             let task_slots = &slots;
             std::thread::scope(|scope| {
                 for _ in 0..workers {
                     scope.spawn(|| loop {
-                        if failed.load(std::sync::atomic::Ordering::Relaxed) {
-                            break;
-                        }
                         let index = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some((_, local, checkpoint, layout, probe, _)) = tasks.get(index)
                         else {
                             break;
                         };
-                        let outcome = if is_codex {
+                        let outcome = if reconstructs_graph {
                             observe_codex_local(
                                 *local,
                                 *checkpoint,
                                 *layout,
                                 provider_home,
                                 *probe,
-                                &binding.project_root,
-                                &binding.canonical_project_root,
+                                repository,
+                                binding,
+                                &profile_id,
                             )
                         } else {
                             observe_claude_local(
@@ -5339,33 +5039,38 @@ fn provider_thread_review(
                                 *checkpoint,
                                 *layout,
                                 *probe,
-                                &binding.project_root,
-                                &binding.canonical_project_root,
+                                repository,
+                                binding,
+                                &profile_id,
                             )
                         };
-                        if outcome.is_err() {
-                            failed.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
                         let _ = task_slots[index].set(outcome);
                     });
                 }
             });
         }
-        // Ordered merge preserves the earliest real observation error. An
+        // Ordered merge. A thread whose observation failed keeps its error
+        // and blocks its own row below; it never fails the provider. An
         // unexpectedly unset slot is a controlled stage error, never a panic.
         for ((thread_id, ..), slot) in observation_tasks.iter().zip(slots.iter_mut()) {
-            let ProviderLocalObservation {
-                observation,
-                seeded,
-                depends_on,
-            } = take_observation_outcome(thread_id, slot)?;
-            if let Some(seeded) = seeded {
-                cursor_refreshed.insert((*thread_id).clone(), seeded);
+            match take_observation_outcome(thread_id, slot) {
+                Ok(ProviderLocalObservation {
+                    observation,
+                    seeded,
+                    depends_on,
+                }) => {
+                    if let Some(seeded) = seeded {
+                        cursor_refreshed.insert((*thread_id).clone(), seeded);
+                    }
+                    if !depends_on.is_empty() {
+                        cursor_deps.insert((*thread_id).clone(), depends_on);
+                    }
+                    cursor_observations.insert((*thread_id).clone(), observation);
+                }
+                Err(message) => {
+                    observation_failures.insert((*thread_id).clone(), message);
+                }
             }
-            if !depends_on.is_empty() {
-                cursor_deps.insert((*thread_id).clone(), depends_on);
-            }
-            cursor_observations.insert((*thread_id).clone(), observation);
         }
     }
 
@@ -5378,102 +5083,108 @@ fn provider_thread_review(
     // Detached mapping is never reattached by observation, byte-identical
     // replacements are skipped, and `accepted` never changes here.
     let mut maintained: BTreeMap<ThreadId, u64> = BTreeMap::new();
-    if let Some(storage_id) = storage_id {
-        let mut candidates: Vec<(ThreadId, Option<u64>, ConversationCheckpoint)> = Vec::new();
-        for (thread_id, seeded) in &cursor_refreshed {
-            let Some(pin) = cursor_observations
-                .get(thread_id)
-                .and_then(|observation| observation.raw_range_pin.clone())
-            else {
-                continue;
-            };
-            let Some(local_binding) = local_threads
-                .get(thread_id)
-                .and_then(|local| local.binding.as_ref())
-                .or_else(|| bindings_by_thread.get(thread_id))
-            else {
-                continue;
-            };
-            let stored = checkpoints.get(thread_id);
-            if matches!(
-                stored.map(|checkpoint| &checkpoint.physical),
-                Some(PhysicalMappingState::Detached { .. })
-            ) {
-                continue;
+    if purpose != ReviewPurpose::Observe {
+        if let Some(storage_id) = storage_id {
+            let mut candidates: Vec<(ThreadId, Option<u64>, ConversationCheckpoint)> = Vec::new();
+            for (thread_id, seeded) in &cursor_refreshed {
+                let Some(pin) = cursor_observations
+                    .get(thread_id)
+                    .and_then(|observation| observation.raw_range_pin.clone())
+                else {
+                    continue;
+                };
+                let Some(local_binding) = local_threads
+                    .get(thread_id)
+                    .and_then(|local| local.binding.as_ref())
+                    .or_else(|| bindings_by_thread.get(thread_id))
+                else {
+                    continue;
+                };
+                let stored = checkpoints.get(thread_id);
+                if matches!(
+                    stored.map(|checkpoint| &checkpoint.physical),
+                    Some(PhysicalMappingState::Detached { .. })
+                ) {
+                    continue;
+                }
+                let replacement = ConversationCheckpoint {
+                    generation: stored
+                        .map(|checkpoint| checkpoint.generation.saturating_add(1))
+                        .unwrap_or(0),
+                    accepted: stored.and_then(|checkpoint| checkpoint.accepted.clone()),
+                    accepted_local_tail: stored
+                        .and_then(|checkpoint| checkpoint.accepted_local_tail.clone()),
+                    observed_tail: seeded.observed_tail.clone(),
+                    physical: PhysicalMappingState::Ready {
+                        root_mapping: seeded.mapping.clone(),
+                        raw_range_pin: pin,
+                    },
+                    prefix_witness: seeded.prefix_witness.clone(),
+                    binding_revision: local_binding.revision,
+                };
+                if stored.is_some_and(|checkpoint| {
+                    checkpoint.observed_tail == replacement.observed_tail
+                        && checkpoint.physical == replacement.physical
+                        && checkpoint.prefix_witness == replacement.prefix_witness
+                        && checkpoint.binding_revision == replacement.binding_revision
+                }) {
+                    continue;
+                }
+                let expected_generation = stored.map(|checkpoint| checkpoint.generation);
+                candidates.push((thread_id.clone(), expected_generation, replacement));
             }
-            let replacement = ConversationCheckpoint {
-                generation: stored
-                    .map(|checkpoint| checkpoint.generation.saturating_add(1))
-                    .unwrap_or(0),
-                accepted: stored.and_then(|checkpoint| checkpoint.accepted.clone()),
-                accepted_local_tail: stored
-                    .and_then(|checkpoint| checkpoint.accepted_local_tail.clone()),
-                observed_tail: seeded.observed_tail.clone(),
-                physical: PhysicalMappingState::Ready {
-                    root_mapping: seeded.mapping.clone(),
-                    raw_range_pin: pin,
-                },
-                prefix_witness: seeded.prefix_witness.clone(),
-                binding_revision: local_binding.revision,
-            };
-            if stored.is_some_and(|checkpoint| {
-                checkpoint.observed_tail == replacement.observed_tail
-                    && checkpoint.physical == replacement.physical
-                    && checkpoint.prefix_witness == replacement.prefix_witness
-                    && checkpoint.binding_revision == replacement.binding_revision
-            }) {
-                continue;
-            }
-            let expected_generation = stored.map(|checkpoint| checkpoint.generation);
-            candidates.push((thread_id.clone(), expected_generation, replacement));
-        }
-        if !candidates.is_empty() {
-            let scope = SyncScopeKey::Provider(provider.clone());
-            let (applied, _) = repository
-                .transact_config(|config| {
-                    let mut applied: BTreeMap<ThreadId, u64> = BTreeMap::new();
-                    let Some(link) = config.links.iter_mut().find(|link| {
-                        link.local_project_id == binding.local_project_id
-                            && &link.storage_id == storage_id
-                    }) else {
-                        return Ok::<_, String>(ConfigMutation::Unchanged(applied));
-                    };
-                    let threads = link
-                        .conversation_checkpoints
-                        .entry(scope.clone())
-                        .or_default();
-                    for (thread_id, expected_generation, replacement) in &candidates {
-                        match (threads.get(thread_id), expected_generation) {
-                            (Some(stored), Some(expected)) if stored.generation == *expected => {
-                                if matches!(stored.physical, PhysicalMappingState::Detached { .. })
+            if !candidates.is_empty() {
+                let scope = SyncScopeKey::Provider(provider.clone());
+                let (applied, _) = repository
+                    .transact_config(|config| {
+                        let mut applied: BTreeMap<ThreadId, u64> = BTreeMap::new();
+                        let Some(link) = config.links.iter_mut().find(|link| {
+                            link.local_project_id == binding.local_project_id
+                                && &link.storage_id == storage_id
+                        }) else {
+                            return Ok::<_, String>(ConfigMutation::Unchanged(applied));
+                        };
+                        let threads = link
+                            .conversation_checkpoints
+                            .entry(scope.clone())
+                            .or_default();
+                        for (thread_id, expected_generation, replacement) in &candidates {
+                            match (threads.get(thread_id), expected_generation) {
+                                (Some(stored), Some(expected))
+                                    if stored.generation == *expected =>
                                 {
-                                    continue;
+                                    if matches!(
+                                        stored.physical,
+                                        PhysicalMappingState::Detached { .. }
+                                    ) {
+                                        continue;
+                                    }
+                                    if stored.observed_tail == replacement.observed_tail
+                                        && stored.physical == replacement.physical
+                                        && stored.prefix_witness == replacement.prefix_witness
+                                        && stored.binding_revision == replacement.binding_revision
+                                    {
+                                        continue;
+                                    }
+                                    threads.insert(thread_id.clone(), replacement.clone());
+                                    applied.insert(thread_id.clone(), replacement.generation);
                                 }
-                                if stored.observed_tail == replacement.observed_tail
-                                    && stored.physical == replacement.physical
-                                    && stored.prefix_witness == replacement.prefix_witness
-                                    && stored.binding_revision == replacement.binding_revision
-                                {
-                                    continue;
+                                (None, None) => {
+                                    threads.insert(thread_id.clone(), replacement.clone());
+                                    applied.insert(thread_id.clone(), replacement.generation);
                                 }
-                                threads.insert(thread_id.clone(), replacement.clone());
-                                applied.insert(thread_id.clone(), replacement.generation);
+                                _ => {}
                             }
-                            (None, None) => {
-                                threads.insert(thread_id.clone(), replacement.clone());
-                                applied.insert(thread_id.clone(), replacement.generation);
-                            }
-                            _ => {}
                         }
-                    }
-                    if applied.is_empty() {
-                        Ok(ConfigMutation::Unchanged(applied))
-                    } else {
-                        Ok(ConfigMutation::Changed(applied))
-                    }
-                })
-                .map_err(config_transaction_error)?;
-            maintained = applied;
+                        if applied.is_empty() {
+                            Ok(ConfigMutation::Unchanged(applied))
+                        } else {
+                            Ok(ConfigMutation::Changed(applied))
+                        }
+                    })
+                    .map_err(config_transaction_error)?;
+                maintained = applied;
+            }
         }
     }
 
@@ -5540,6 +5251,9 @@ fn provider_thread_review(
     }
 
     for (unit_local_id, unit_cloud_id) in units {
+        let observation_failure = unit_local_id
+            .as_ref()
+            .and_then(|thread_id| observation_failures.get(thread_id));
         // Everything cloud-sided resolves through the unit's cloud id (the
         // mapping, or the cloud-only row key); everything local-sided stays
         // on the local id. There is no cross-space lookup left to miss.
@@ -5608,10 +5322,20 @@ fn provider_thread_review(
                 verified_acceptance: None,
             }
         } else if supports_cursor {
-            unit_local_id
+            match unit_local_id
                 .as_ref()
                 .and_then(|thread_id| cursor_observations.remove(thread_id))
-                .ok_or_else(|| "local observation missing for reviewed thread".to_string())?
+            {
+                Some(observation) => observation,
+                // A failed observation proves nothing about the local side;
+                // the row is blocked with its read error below.
+                None if observation_failure.is_some() => LocalTailObservation {
+                    evidence: TailSideEvidence::Invalid,
+                    raw_range_pin: None,
+                    verified_acceptance: None,
+                },
+                None => return Err("local observation missing for reviewed thread".to_string()),
+            }
         } else {
             // Providers without a cursor codec prove their tail from
             // captured bytes; a local row without them cannot happen in a
@@ -5690,7 +5414,9 @@ fn provider_thread_review(
         // messages live in history_base. The observation functions validate
         // that complete chain (or a trusted checkpoint continuation) before
         // returning Present evidence.
-        let local_capturable = if supports_cursor {
+        let local_capturable = if purpose == ReviewPurpose::Observe && !supports_cursor {
+            local.is_some()
+        } else if supports_cursor {
             local.is_some() && matches!(&local_observation.evidence, TailSideEvidence::Present(_))
         } else {
             local.is_some_and(|local| {
@@ -5711,17 +5437,10 @@ fn provider_thread_review(
                     .map(|local| local.binding_resolution)
                     .unwrap_or(BindingResolution::Missing)
             },
-            local_safely_capturable: local_capturable && local_observation.raw_range_pin.is_some(),
+            local_safely_capturable: local_capturable
+                && (purpose == ReviewPurpose::Observe || local_observation.raw_range_pin.is_some()),
             cloud_materializable: cloud_readable,
-            operation_state: if unit_local_id
-                .as_ref()
-                .is_some_and(|thread_id| pending_local_threads.contains(thread_id))
-                || unit_cloud_id
-                    .as_ref()
-                    .is_some_and(|cloud_thread_id| pending_cloud_threads.contains(cloud_thread_id))
-            {
-                ConversationOperationState::Pending
-            } else if physical_detached {
+            operation_state: if physical_detached {
                 ConversationOperationState::Detached
             } else {
                 ConversationOperationState::Ready
@@ -5769,15 +5488,34 @@ fn provider_thread_review(
             _ => (push, pull),
         };
 
+        // Observation gate: a local session that could not be read or
+        // parsed blocks both directions with its own error. The row stays
+        // visible, the message names the cause, and no other thread is
+        // affected.
+        let observation_detail = observation_failure.map(|message| {
+            format!(
+                "This conversation's local session could not be read for review: {}",
+                message
+            )
+        });
+        let (push, pull) = match &observation_detail {
+            Some(detail) => {
+                let mut blocked = mallard_domain::blocked_conversation_decision(
+                    ConversationBlocker::ObservationFailed,
+                );
+                blocked.blocked_reason = Some(detail.clone());
+                (blocked.clone(), blocked)
+            }
+            None => (push, pull),
+        };
+
         // Stored internal-subagent rollouts are never offered by Pull.
         if purpose.builds_pull_plan() && pull.action == ConversationReviewAction::CreateLocal {
             if let Some((logical_path, sha256, size)) = unit_cloud_id
                 .as_ref()
                 .and_then(|cloud_thread_id| offerable_cloud_transcripts.get(cloud_thread_id))
             {
-                if cached_transcript_analysis(sha256, *size, bytes, logical_path)?
-                    .is_internal_subagent
-                {
+                if cached_transcript_is_internal_subagent(sha256, *size, bytes, logical_path)? {
                     continue;
                 }
             }
@@ -5848,6 +5586,7 @@ fn provider_thread_review(
                             .to_string()
                     })
                 })
+                .or_else(|| observation_detail.clone())
                 .or_else(|| {
                     evidence_blocker
                         .is_some()
@@ -6018,7 +5757,7 @@ fn provider_thread_review(
                     // retain the ordinary in-place recipe under the row's
                     // existing provider id, which is identity-independent
                     // and stays pinned here.
-                    if !is_codex {
+                    if !reconstructs_graph {
                         let sidecars = thread
                             .map(|thread| conversation_sidecar_refs(provider, thread))
                             .transpose()?
@@ -6038,7 +5777,11 @@ fn provider_thread_review(
                         for planned in &targets {
                             expected_provider_state.push(ProviderStateExpectation {
                                 target_path: planned.target_path.to_string_lossy().into_owned(),
-                                expectation: bounded_file_expectation(&planned.target_path)?,
+                                expectation: if planned.role == ConversationFileRole::Transcript {
+                                    expected_local_target.clone()
+                                } else {
+                                    bounded_file_expectation(&planned.target_path)?
+                                },
                             });
                         }
                     }
@@ -6062,7 +5805,7 @@ fn provider_thread_review(
                     let target = local.source_path.clone();
                     expected_provider_state.push(ProviderStateExpectation {
                         target_path: target.to_string_lossy().into_owned(),
-                        expectation: bounded_file_expectation(&target)?,
+                        expectation: expected_local_target.clone(),
                     });
                     if let Some(index_path) = &index_path {
                         expected_provider_state.push(ProviderStateExpectation {
@@ -6175,29 +5918,17 @@ fn provider_thread_review(
 }
 
 /// Mint one provider thread ID for a new local copy (CreateLocal or the
-/// remote branch of KeepBoth): the CLI-first UUIDv7 allocator for Codex and
-/// the adapter's UUID convention for other providers. Minted IDs join the
-/// occupied set so one review never proposes the same identity twice.
+/// remote branch of KeepBoth) through the provider adapter's own allocator.
+/// Minted IDs join the occupied set so one review never proposes the same
+/// identity twice.
 fn mint_provider_thread_id(
-    is_codex: bool,
+    adapter: &dyn mallard_infrastructure::providers::SessionAdapter,
     occupied: &mut BTreeSet<String>,
 ) -> Result<String, String> {
-    if is_codex {
-        let taken = |candidate: &str| occupied.contains(candidate);
-        let minted = codex_thread_allocator::allocate_codex_thread_ids(1, &taken)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| "Codex thread allocation returned no id".to_string())?;
-        occupied.insert(minted.clone());
-        Ok(minted)
-    } else {
-        loop {
-            let candidate = generated_uuid_v4()?;
-            if occupied.insert(candidate.clone()) {
-                return Ok(candidate);
-            }
-        }
-    }
+    let taken = |candidate: &str| occupied.contains(candidate);
+    let minted = adapter.mint_provider_thread_id(&taken)?;
+    occupied.insert(minted.clone());
+    Ok(minted)
 }
 
 /// The sidecar references (`(kind, kind-relative path)`) carried by one
@@ -6283,19 +6014,19 @@ pub(crate) fn thread_entries(
                     .map(|file| file.bytes.len() as u64)
                     .unwrap_or(0),
                 descriptor: provider_capture::ResourceCandidate {
-                    metadata: BTreeMap::new(),
                     resource_id: resource_id.clone(),
-                    kind: CaptureResourceKind::Conversation,
+                    kind: contracts::conversation(),
                     provider: Some(conversation.provider.clone()),
                     provider_resource_type: Some("session".to_string()),
                     display_name: conversation
                         .source_thread_id
                         .clone()
                         .unwrap_or_else(|| resource_id.clone()),
-                    apply_policy: provider_capture::CaptureApplyPolicy::SafeFile,
+                    apply_policy: contracts::safe_file(),
                     selected_by_default: true,
                     blocked_reason: None,
                     logical_paths: vec![conversation.transcript_logical_path.clone()],
+                    project_content: None,
                 },
             },
         )
@@ -6310,8 +6041,9 @@ pub(crate) fn thread_entries(
         &resolved,
         Some(&snapshot.storage_id),
         created_at,
-        created_at.saturating_add(PLAN_LIFETIME_SECS),
+        created_at.saturating_add(24 * 60 * 60),
         ReviewPurpose::Observe,
+        None,
     )?;
     if let Some((provider, error)) = review.provider_errors.into_iter().next() {
         return Err(format!("{}: {}", provider, error));
@@ -6336,7 +6068,6 @@ fn get_project_thread_sync_comparison_with_repository(
 struct ProjectLocalRead {
     activity_project: ResolvedActivityProject,
     resolved: ResolvedBinding,
-    capture_request: CaptureRequest,
     discovery: Discovery,
     views: Vec<LocalSessionView>,
 }
@@ -6345,8 +6076,20 @@ fn load_project_local_read(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
 ) -> Result<ProjectLocalRead, String> {
-    let activity_project =
-        project_activity::resolve_activity_project(repository, local_project_id)?;
+    let state = repository.load_project_activity_state_snapshot()?;
+    load_project_local_read_from_state(repository.root(), &state, local_project_id)
+}
+
+fn load_project_local_read_from_state(
+    repository_root: &Path,
+    state: &LocalProjectActivityStateSnapshot,
+    local_project_id: &LocalProjectId,
+) -> Result<ProjectLocalRead, String> {
+    let activity_project = project_activity::resolve_activity_project_from_state(
+        &state.config,
+        &state.bindings,
+        local_project_id,
+    )?;
     let resolved = ResolvedBinding {
         binding: activity_project.binding.clone(),
         homes: activity_project
@@ -6355,7 +6098,26 @@ fn load_project_local_read(
             .map(|(provider, home)| (provider.clone(), home.home.to_string_lossy().into_owned()))
             .collect(),
     };
-    let capture_request = capture_request_for_resolved_binding(repository, &resolved)?;
+    let capture_request = capture_request_for_resolved_binding_from_state(
+        repository_root,
+        &state.config,
+        &state.bindings,
+        &resolved,
+    )?;
+    discover_project_local_read(
+        local_project_id,
+        activity_project,
+        resolved,
+        capture_request,
+    )
+}
+
+fn discover_project_local_read(
+    local_project_id: &LocalProjectId,
+    activity_project: ResolvedActivityProject,
+    resolved: ResolvedBinding,
+    capture_request: CaptureRequest,
+) -> Result<ProjectLocalRead, String> {
     let (discovery, views) = super::session_watch_service::session_watch_service().discovery_for(
         provider_registry(),
         local_project_id,
@@ -6364,7 +6126,6 @@ fn load_project_local_read(
     Ok(ProjectLocalRead {
         activity_project,
         resolved,
-        capture_request,
         discovery,
         views,
     })
@@ -6383,7 +6144,8 @@ fn load_project_remote_read(
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
 ) -> Result<ProjectRemoteRead, String> {
-    let config = repository.load_config()?;
+    let state = repository.load_project_state_snapshot()?;
+    let config = &state.config;
     let project = config
         .project(local_project_id)
         .cloned()
@@ -6395,7 +6157,7 @@ fn load_project_remote_read(
         .find(|storage| storage.id == *storage_id)
         .map(|storage| storage.name.clone())
         .ok_or_else(|| format!("unknown storage '{}'", storage_id))?;
-    let (_, engine) = storage_engine(repository, storage_id)?;
+    let (_, engine) = storage_engine_from_state(repository, config, &state.bindings, storage_id)?;
     let current = engine.inspect_optional(&project.bundle_id)?;
     let remote_continuity = classify_remote_continuity(
         current.as_ref().map(|snapshot| &snapshot.head),
@@ -6419,24 +6181,20 @@ fn build_comparison_from_reads(
     remote: &ProjectRemoteRead,
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<ThreadSyncComparison, String> {
-    let comparison = build_thread_sync_comparison(
+    build_thread_sync_comparison(
         repository,
         local_project_id,
         storage_id,
         remote.storage_name.clone(),
         &remote.link,
         &local.resolved,
-        &local.capture_request,
         &local.discovery,
         &local.views,
         &remote.engine,
         remote.current.as_ref(),
-        false,
         remote.remote_continuity.clone(),
         on_phase,
-    )?
-    .comparison;
-    Ok(comparison)
+    )
 }
 
 pub(super) fn get_project_thread_sync_comparison_with_progress(
@@ -6467,291 +6225,8 @@ pub(super) fn get_project_thread_sync_comparison_with_progress(
     Ok(comparison)
 }
 
-struct ThreadComparisonBuild {
-    comparison: ThreadSyncComparison,
-    push_actions: Vec<ConversationPlanAction>,
-}
-
-/// Split reviewed candidates into watcher-served byte pins and the set that
-/// still needs authoritative capture. Candidates of cursor-less providers
-/// always capture.
-/// A review's capture plan against the per-push budget.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct CaptureFit {
-    /// The base selection plus the newest candidates that fit: one
-    /// contiguous run of time, no older row before a newer one.
-    kept: BTreeSet<String>,
-    /// Candidates from the first one that did not fit on down. They wait
-    /// for a later push; nothing is remembered about them between pushes.
-    held: BTreeSet<String>,
-    /// Candidates larger than the whole budget on their own. No push can
-    /// carry them, so they are blocked as unsyncable rather than held.
-    oversized: BTreeSet<String>,
-}
-
-impl CaptureFit {
-    fn blocks(&self, resource_id: &ResourceId) -> Option<ConversationBlocker> {
-        let key = resource_id.to_string();
-        if self.held.contains(&key) {
-            Some(ConversationBlocker::CaptureBudget)
-        } else if self.oversized.contains(&key) {
-            Some(ConversationBlocker::TooLarge)
-        } else {
-            None
-        }
-    }
-}
-
-/// Fit a review's candidate capture inside the per-push budget. The base
-/// selection is always kept — it is the classification floor for providers
-/// without a tail cursor — and the remaining candidates are walked newest
-/// first; the walk stops at the first one that does not fit, so a push is a
-/// block of time and a smaller older row never slips in past a newer one
-/// that waits. A candidate too large for an empty budget is set aside as
-/// oversized and the walk continues past it.
-fn fit_capture_budget(
-    views: &[provider_capture::LocalSessionView],
-    base_selection: &BTreeSet<String>,
-    selection: BTreeSet<String>,
-    budget: u64,
-) -> CaptureFit {
-    let mut metadata_by_resource_id = HashMap::with_capacity(views.len());
-    for view in views {
-        metadata_by_resource_id
-            .entry(view.descriptor.resource_id.as_str())
-            .or_insert((view.capture_bytes, view.source_mtime));
-    }
-    let lookup = |resource_id: &str| -> (u64, u64) {
-        metadata_by_resource_id
-            .get(resource_id)
-            .copied()
-            .unwrap_or((0, 0))
-    };
-    fit_capture_budget_with(&lookup, base_selection, selection, budget)
-}
-
-/// The budget fit over a `(capture bytes, mtime)` lookup, so the policy is
-/// testable without building discovery views.
-fn fit_capture_budget_with(
-    lookup: &dyn Fn(&str) -> (u64, u64),
-    base_selection: &BTreeSet<String>,
-    selection: BTreeSet<String>,
-    budget: u64,
-) -> CaptureFit {
-    let mut fit = CaptureFit {
-        kept: base_selection.clone(),
-        ..CaptureFit::default()
-    };
-    let mut spent: u64 = base_selection
-        .iter()
-        .map(|resource_id| lookup(resource_id).0)
-        .fold(0u64, |total, size| total.saturating_add(size));
-    let mut candidates: Vec<(String, u64, u64)> = selection
-        .into_iter()
-        .filter(|resource_id| !base_selection.contains(resource_id))
-        .map(|resource_id| {
-            let (size, mtime) = lookup(&resource_id);
-            (resource_id, size, mtime)
-        })
-        .collect();
-    candidates.sort_by(|(a_id, _, a_mtime), (b_id, _, b_mtime)| {
-        b_mtime.cmp(a_mtime).then_with(|| a_id.cmp(b_id))
-    });
-    let mut full = false;
-    for (resource_id, size, _) in candidates {
-        if size > budget {
-            fit.oversized.insert(resource_id);
-        } else if !full && spent.saturating_add(size) <= budget {
-            spent = spent.saturating_add(size);
-            fit.kept.insert(resource_id);
-        } else {
-            full = true;
-            fit.held.insert(resource_id);
-        }
-    }
-    fit
-}
-
-/// Decide what a review captures. The fit runs over the WHOLE selection
-/// first; only rows it kept may then be served from the watcher's pin cache.
-/// A served pin saves the review-time read and nothing else — it is charged
-/// to the budget like any other row, so a quiet reopen can never admit more
-/// than one push carries.
-fn plan_candidate_capture<F>(
-    views: &[provider_capture::LocalSessionView],
-    base_selection: &BTreeSet<String>,
-    selection: BTreeSet<String>,
-    budget: u64,
-    serve_pins: F,
-) -> (
-    CaptureFit,
-    BTreeSet<String>,
-    BTreeMap<String, TargetExpectation>,
-)
-where
-    F: FnOnce(BTreeSet<String>) -> (BTreeSet<String>, BTreeMap<String, TargetExpectation>),
-{
-    let fit = fit_capture_budget(views, base_selection, selection, budget);
-    let (to_capture, served) = serve_pins(fit.kept.clone());
-    (fit, to_capture, served)
-}
-
-/// What the kept or held rows of a fit weigh together.
-fn capture_bytes_of(
-    views: &[provider_capture::LocalSessionView],
-    resource_ids: &BTreeSet<String>,
-) -> u64 {
-    views
-        .iter()
-        .filter(|view| resource_ids.contains(&view.descriptor.resource_id))
-        .map(|view| view.capture_bytes)
-        .fold(0u64, u64::saturating_add)
-}
-
-/// Bytes a push always carries besides conversations: every selectable
-/// non-conversation resource of the inventory (tools, provider state). An
-/// upper bound, and a small one.
-fn reserved_capture_bytes(
-    discovery: &provider_capture::Discovery,
-    discovered: &provider_capture::ProjectInventory,
-) -> u64 {
-    discovered
-        .resources
-        .iter()
-        .filter(|candidate| {
-            candidate.kind != CaptureResourceKind::Conversation
-                && candidate.blocked_reason.is_none()
-        })
-        .map(|candidate| discovery.capture_bytes_of(&candidate.resource_id))
-        .fold(0u64, u64::saturating_add)
-}
-
-/// Rows the review did not capture keep their place in the list but hold a
-/// blocked decision, and any action planned for them from an Absent pin is
-/// dropped — a plan must never carry an action its review did not prove.
-fn hold_over_budget_candidates(review: &mut ThreadReview, fit: &CaptureFit) {
-    for entry in review.entries.iter_mut() {
-        if let Some(blocker) = fit.blocks(&entry.resource_id) {
-            entry.push_decision = mallard_domain::blocked_conversation_decision(blocker);
-        }
-    }
-    review.push_actions.retain(|action| {
-        action
-            .source_resource_id
-            .as_ref()
-            .is_none_or(|resource_id| fit.blocks(resource_id).is_none())
-    });
-}
-
-/// The Pull twin: rows whose local bytes the review could not capture keep
-/// their row but lose their action.
-fn hold_over_budget_pull_candidates(review: &mut ThreadReview, fit: &CaptureFit) {
-    for row in review.pull_review.iter_mut() {
-        if let Some(blocker) = fit.blocks(&row.resource_id) {
-            let decision = mallard_domain::blocked_conversation_decision(blocker);
-            row.action = decision.action;
-            row.blocker = decision.blocker;
-            row.blocked_reason = decision.blocked_reason;
-            row.action_id = None;
-        }
-    }
-    review.pull_actions.retain(|action| {
-        action
-            .source_resource_id
-            .as_ref()
-            .is_none_or(|resource_id| fit.blocks(resource_id).is_none())
-    });
-}
-
-fn reuse_candidate_pins(
-    capture_request: &CaptureRequest,
-    local_project_id: &LocalProjectId,
-    views: &[provider_capture::LocalSessionView],
-    base_selection: &BTreeSet<String>,
-    selection: BTreeSet<String>,
-) -> (BTreeSet<String>, BTreeMap<String, TargetExpectation>) {
-    let mut served: BTreeMap<String, TargetExpectation> = BTreeMap::new();
-    for (provider, home) in cursor_provider_homes(capture_request) {
-        let candidates: BTreeSet<String> = selection
-            .iter()
-            .filter(|resource_id| !base_selection.contains(*resource_id))
-            .filter(|resource_id| {
-                views.iter().any(|view| {
-                    view.descriptor.resource_id == **resource_id && view.provider == provider
-                })
-            })
-            .cloned()
-            .collect();
-        served.extend(
-            super::session_watch_service::session_watch_service().take_reusable_candidate_pins(
-                &provider,
-                &home,
-                local_project_id,
-                &candidates,
-            ),
-        );
-    }
-    let remaining = selection
-        .into_iter()
-        .filter(|resource_id| !served.contains_key(resource_id))
-        .collect();
-    (remaining, served)
-}
-
-/// Freeze the byte pins of every freshly captured cursor-provider candidate
-/// for the next quiet review.
-fn store_candidate_pins_from_capture(
-    capture_request: &CaptureRequest,
-    local_project_id: &LocalProjectId,
-    views: &[provider_capture::LocalSessionView],
-    base_selection: &BTreeSet<String>,
-    captured: &provider_capture::CapturedResources,
-) {
-    for (provider, home) in cursor_provider_homes(capture_request) {
-        let stored: Vec<_> = captured
-            .conversations
-            .iter()
-            .filter(|(resource_id, conversation)| {
-                conversation.provider == provider && !base_selection.contains(*resource_id)
-            })
-            .filter_map(|(resource_id, conversation)| {
-                let transcript = captured.files.get(&conversation.transcript_logical_path)?;
-                let source_path = views
-                    .iter()
-                    .find(|view| view.descriptor.resource_id == *resource_id)
-                    .map(|view| view.source_path.clone())?;
-                Some(super::session_watch_service::StoredCandidatePin {
-                    resource_id: resource_id.clone(),
-                    depends_on: vec![source_path],
-                    expected_local_target: TargetExpectation::Sha256(
-                        transcript.bytes.sha256().to_string(),
-                    ),
-                })
-            })
-            .collect();
-        if !stored.is_empty() {
-            super::session_watch_service::session_watch_service().store_candidate_pins(
-                &home,
-                local_project_id,
-                stored,
-            );
-        }
-    }
-}
-
-/// The bound homes of every cursor-capable provider in a capture request.
-fn cursor_provider_homes(capture_request: &CaptureRequest) -> Vec<(ProviderKey, PathBuf)> {
-    capture_request
-        .provider_homes
-        .iter()
-        .filter(|(provider, _)| provider_supports_tail_cursor(provider))
-        .map(|(provider, home)| (provider.clone(), home.clone()))
-        .collect()
-}
-
-/// Thread-comparison section over a shared Discovery and one already-read
-/// remote snapshot. The Codex transcripts are read and hashed here, from the
-/// same walk the other sections use.
+/// Thread-comparison section over discovery metadata and one already-read
+/// remote snapshot. Full local transcripts are not captured here.
 #[allow(clippy::too_many_arguments)]
 fn build_thread_sync_comparison(
     repository: &LocalStateRepository,
@@ -6760,162 +6235,58 @@ fn build_thread_sync_comparison(
     storage_name: String,
     link: &ProjectStorageLink,
     resolved: &ResolvedBinding,
-    capture_request: &CaptureRequest,
     discovery: &provider_capture::Discovery,
     views: &[provider_capture::LocalSessionView],
     engine: &StorageEngine,
     current: Option<&BundleSnapshot>,
-    build_push_actions: bool,
     remote_continuity: RemoteContinuity,
     on_phase: &mut dyn FnMut(&str, Duration),
-) -> Result<ThreadComparisonBuild, String> {
+) -> Result<ThreadSyncComparison, String> {
     let phase_started = Instant::now();
     let discovered = discovery.project_inventory();
     let mut warnings = discovered.warnings.clone();
-    // Every bound provider's conversations enter the typed pipeline; no
-    // provider filter and no generic fallback. Cursor-provider rows classify
-    // from bounded metadata plus checkpoint observation, so a plain
-    // comparison reads no transcript for them; providers without a cursor
-    // codec always prove their tail from captured bytes, and action-building
-    // reviews capture everything their byte pins require.
-    let base_selection = discovered
-        .resources
-        .iter()
-        .filter(|candidate| candidate.kind == CaptureResourceKind::Conversation)
-        .filter(|candidate| {
-            candidate
-                .provider
-                .as_ref()
-                .is_none_or(|provider| !provider_supports_tail_cursor(provider))
-        })
-        .map(|candidate| candidate.resource_id.clone())
-        .collect::<BTreeSet<_>>();
+    // Compare uses discovery metadata, stored checkpoints, and bounded tail
+    // observations only. It never captures full payloads or builds actions.
     let created_at = now_secs();
-    let run_review = |captured: &provider_capture::CapturedResources,
-                      candidate_pins: &BTreeMap<String, TargetExpectation>,
-                      push_actions: bool|
-     -> Result<ThreadReview, String> {
-        match current {
-            Some(snapshot) => {
-                let mut bytes = engine.byte_source(snapshot, Some(object_cache()), None);
-                thread_review(
-                    repository,
-                    Some(snapshot),
-                    &mut bytes,
-                    views,
-                    captured,
-                    candidate_pins,
-                    resolved,
-                    Some(storage_id),
-                    created_at,
-                    created_at.saturating_add(PLAN_LIFETIME_SECS),
-                    if push_actions {
-                        ReviewPurpose::PushPlan
-                    } else {
-                        ReviewPurpose::Observe
-                    },
-                )
-            }
-            None => {
-                let mut bytes = EmptyBundleBytes;
-                thread_review(
-                    repository,
-                    None,
-                    &mut bytes,
-                    views,
-                    captured,
-                    candidate_pins,
-                    resolved,
-                    Some(storage_id),
-                    created_at,
-                    created_at.saturating_add(PLAN_LIFETIME_SECS),
-                    if push_actions {
-                        ReviewPurpose::PushPlan
-                    } else {
-                        ReviewPurpose::Observe
-                    },
-                )
-            }
-        }
-    };
-    let captured = provider_capture::capture_from_discovery(
-        provider_registry(),
-        capture_request,
-        discovery,
-        &base_selection,
-    )?;
+    let captured = provider_capture::CapturedResources::default();
     let no_pins = BTreeMap::new();
-    let (captured, mut review, capture_budget) = if build_push_actions {
-        // Candidate selection is a conservative work scheduler, never a
-        // second policy engine: one classification pass (served from the
-        // caches when quiet) picks every selectable push row; the budget fit
-        // decides which of them this push carries; candidates the watcher
-        // proves unchanged reuse their frozen byte pin, the rest are
-        // captured authoritatively, and the final decisions come from the
-        // same shared decision path.
-        let preliminary = run_review(&captured, &no_pins, false)?;
-        let mut selection = base_selection.clone();
-        for entry in preliminary
-            .entries
-            .iter()
-            .filter(|entry| entry.push_decision.selectable && entry.local_present)
-        {
-            selection.insert(entry.resource_id.to_string());
-        }
-        // The capture budget is a per-push ceiling, and a project with years
-        // of sessions can hold more candidate bytes than one push may carry.
-        // The review fits the whole selection first — newest first, stopping
-        // at the first row that does not fit — and only then lets the watcher
-        // serve pins for the rows it kept, so a cached pin is charged like
-        // any other row. Rows that did not fit stay listed, blocked, and say
-        // so; the push still enforces the same ceiling on whatever the user
-        // finally selects.
-        let reserved_bytes = reserved_capture_bytes(discovery, &discovered);
-        let budget = provider_capture::MAX_CAPTURE_BYTES.saturating_sub(reserved_bytes);
-        let (fit, selection, candidate_pins) =
-            plan_candidate_capture(views, &base_selection, selection, budget, |kept| {
-                reuse_candidate_pins(
-                    capture_request,
-                    local_project_id,
-                    views,
-                    &base_selection,
-                    kept,
-                )
-            });
-        let captured = if selection == base_selection {
-            captured
-        } else {
-            provider_capture::capture_from_discovery(
-                provider_registry(),
-                capture_request,
-                discovery,
-                &selection,
+    let mut review = match current {
+        Some(snapshot) => {
+            let mut bytes = engine.byte_source(snapshot, Some(object_cache()), None);
+            thread_review(
+                repository,
+                Some(snapshot),
+                &mut bytes,
+                views,
+                &captured,
+                &no_pins,
+                resolved,
+                Some(storage_id),
+                created_at,
+                created_at,
+                ReviewPurpose::Observe,
+                None,
             )?
-        };
-        store_candidate_pins_from_capture(
-            capture_request,
-            local_project_id,
-            views,
-            &base_selection,
-            &captured,
-        );
-        let mut review = run_review(&captured, &candidate_pins, true)?;
-        hold_over_budget_candidates(&mut review, &fit);
-        let admitted: BTreeSet<String> = fit.kept.difference(&base_selection).cloned().collect();
-        let capture_budget = CaptureBudget {
-            limit_bytes: provider_capture::MAX_CAPTURE_BYTES,
-            reserved_bytes,
-            admitted_bytes: capture_bytes_of(views, &admitted),
-            held_count: fit.held.len() as u64,
-            held_bytes: capture_bytes_of(views, &fit.held),
-        };
-        (captured, review, Some(capture_budget))
-    } else {
-        let review = run_review(&captured, &no_pins, false)?;
-        (captured, review, None)
+        }
+        None => {
+            let mut bytes = EmptyBundleBytes;
+            thread_review(
+                repository,
+                None,
+                &mut bytes,
+                views,
+                &captured,
+                &no_pins,
+                resolved,
+                Some(storage_id),
+                created_at,
+                created_at,
+                ReviewPurpose::Observe,
+                None,
+            )?
+        }
     };
-    warnings.extend(captured.warnings.clone());
-    on_phase("capture local conversations", phase_started.elapsed());
+    on_phase("compare conversations", phase_started.elapsed());
     let phase_started = Instant::now();
 
     // Locally discovered but uncapturable sessions of any bound provider
@@ -6930,40 +6301,46 @@ fn build_thread_sync_comparison(
                 .map(|provider_id| (entry.provider.clone(), provider_id))
         })
         .collect::<BTreeSet<_>>();
-    let conversation_bindings = repository.load_conversation_bindings()?;
-    let fallback_config = repository.load_config()?;
-    let codex_fallback_state = resolved
-        .binding
-        .profile_ids
-        .get(&codex_key())
-        .map(|profile_id| {
-            let scoped = conversation_bindings
-                .bindings
-                .iter()
-                .filter(|binding| {
-                    binding.host_id == resolved.binding.host_id
-                        && binding.replica_id == resolved.binding.replica_id
-                        && binding.local_project_id == resolved.binding.local_project_id
-                        && binding.provider_profile_id == *profile_id
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            Ok::<_, String>((
+    let state = repository.load_project_activity_state_snapshot()?;
+    let conversation_bindings = &state.conversation_bindings;
+    let fallback_config = &state.config;
+    // Providers whose adapter reconstructs a rollout graph keep alias owners
+    // and scoped bindings for standalone-thread fallback identity.
+    let mut graph_fallback_state = BTreeMap::new();
+    for (provider, profile_id) in &resolved.binding.profile_ids {
+        if !provider_registry()
+            .get(provider)
+            .is_some_and(|adapter| adapter.reconstructs_rollout_graph())
+        {
+            continue;
+        }
+        let scoped = conversation_bindings
+            .bindings
+            .iter()
+            .filter(|binding| {
+                binding.host_id == resolved.binding.host_id
+                    && binding.replica_id == resolved.binding.replica_id
+                    && binding.local_project_id == resolved.binding.local_project_id
+                    && binding.provider_profile_id == *profile_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        graph_fallback_state.insert(
+            provider.clone(),
+            (
                 applied_provider_alias_owners(
-                    repository,
+                    &state.materializations,
                     &resolved.binding,
-                    &codex_key(),
+                    provider,
                     profile_id,
-                )?,
+                ),
                 scoped,
-            ))
-        })
-        .transpose()?;
-    for candidate in discovered
-        .resources
-        .iter()
-        .filter(|candidate| candidate.kind == CaptureResourceKind::Conversation)
-    {
+            ),
+        );
+    }
+    for candidate in discovered.resources.iter().filter(|candidate| {
+        kind_primitive(&candidate.kind) == Some(ResourceKindPrimitive::Conversation)
+    }) {
         let Some(provider) = candidate.provider.clone() else {
             continue;
         };
@@ -7000,9 +6377,8 @@ fn build_thread_sync_comparison(
             .map(|binding| binding.thread_id.clone());
         let thread_id = if let Some(thread_id) = bound_thread_id {
             thread_id
-        } else if let (true, Some((owners, scoped)), Some(view)) = (
-            provider == codex_key(),
-            codex_fallback_state.as_ref(),
+        } else if let (Some((owners, scoped)), Some(view)) = (
+            graph_fallback_state.get(&provider),
             views.iter().find(|view| {
                 view.provider == provider && view.provider_thread_id == provider_thread_id
             }),
@@ -7164,29 +6540,35 @@ fn build_thread_sync_comparison(
     }
     warnings.sort();
     warnings.dedup();
-    on_phase(
-        "classify threads and build actions",
-        phase_started.elapsed(),
-    );
+    on_phase("classify threads and build review", phase_started.elapsed());
 
     let scopes = scope_sync_rows(link, resolved, current);
-    Ok(ThreadComparisonBuild {
-        comparison: ThreadSyncComparison {
-            project_id: local_project_id.clone(),
-            storage_id: storage_id.clone(),
-            storage_name,
-            revision: current.map(|snapshot| snapshot.head.revision),
-            base_revision: repository_base_from_link(link).map(|base| base.revision),
-            compared_at: created_at,
-            entries: review.entries,
-            counts,
-            scopes,
-            provider_errors: review.provider_errors,
-            warnings,
-            capture_budget,
-            remote_continuity,
-        },
-        push_actions: review.push_actions,
+    let reserved_bytes = discovered
+        .resources
+        .iter()
+        .filter(|candidate| {
+            kind_primitive(&candidate.kind) != Some(ResourceKindPrimitive::Conversation)
+                && candidate.blocked_reason.is_none()
+        })
+        .map(|candidate| discovery.capture_bytes_of(&candidate.resource_id))
+        .fold(0_u64, u64::saturating_add);
+    Ok(ThreadSyncComparison {
+        project_id: local_project_id.clone(),
+        storage_id: storage_id.clone(),
+        storage_name,
+        revision: current.map(|snapshot| snapshot.head.revision),
+        base_revision: repository_base_from_link(link).map(|base| base.revision),
+        compared_at: created_at,
+        entries: review.entries,
+        counts,
+        scopes,
+        provider_errors: review.provider_errors,
+        warnings,
+        capture_budget: Some(CaptureBudget {
+            limit_bytes: provider_capture::MAX_CAPTURE_BYTES,
+            reserved_bytes,
+        }),
+        remote_continuity,
     })
 }
 
@@ -7507,10 +6889,6 @@ pub struct PushReviewContext {
     pub thread_comparison_error: Option<String>,
     pub project_files: Option<ProjectContentInventory>,
     pub project_files_error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conversation_push_plan_id: Option<PlanId>,
-    #[serde(default)]
-    pub conversation_action_ids: BTreeMap<ResourceId, ActionId>,
     pub prepared_at: u64,
 }
 
@@ -7533,7 +6911,8 @@ pub(super) fn prepare_push_review_with_progress(
     // The review token minted here is what a later push validates, so mint it
     // while pushes, pulls, and repairs are excluded.
     let _host_operation = repository.acquire_host_operation()?;
-    let config = repository.load_config()?;
+    let state = repository.load_project_state_snapshot()?;
+    let config = &state.config;
     let project = config
         .project(local_project_id)
         .cloned()
@@ -7545,7 +6924,7 @@ pub(super) fn prepare_push_review_with_progress(
         .find(|storage| storage.id == *storage_id)
         .map(|storage| storage.name.clone())
         .ok_or_else(|| format!("unknown storage '{}'", storage_id))?;
-    let machine = repository.load_bindings()?;
+    let machine = &state.bindings;
     let binding = machine
         .active_for(local_project_id)
         .cloned()
@@ -7555,7 +6934,7 @@ pub(super) fn prepare_push_review_with_progress(
                 local_project_id
             )
         })?;
-    let resolved = resolve_project_binding(repository, &binding)?;
+    let resolved = resolve_project_binding_from_state(machine, &binding)?;
 
     on_phase("load config and binding", phase_started.elapsed());
     let phase_started = Instant::now();
@@ -7564,7 +6943,12 @@ pub(super) fn prepare_push_review_with_progress(
     // projects defer it to the explicit Scan, and Git-managed projects get a
     // storage-side inventory below without any local content walk.
     let eligibility = project_file_sync_eligibility(&binding);
-    let capture_request = capture_request_for_binding(repository, &binding)?;
+    let capture_request = capture_request_for_resolved_binding_from_state(
+        repository.root(),
+        config,
+        machine,
+        &resolved,
+    )?;
     let (discovery, views) = super::session_watch_service::session_watch_service().discovery_for(
         provider_registry(),
         local_project_id,
@@ -7573,15 +6957,17 @@ pub(super) fn prepare_push_review_with_progress(
     on_phase("discover local state", phase_started.elapsed());
     let phase_started = Instant::now();
 
-    let inventory = build_resource_inventory(repository, local_project_id, &binding, &discovery)?;
+    let inventory = build_resource_inventory(config, local_project_id, &binding, &discovery)?;
 
     on_phase("build resource inventory", phase_started.elapsed());
     let phase_started = Instant::now();
 
-    let remote = storage_engine(repository, storage_id).and_then(|(_, engine)| {
-        let current = engine.inspect_optional(&project.bundle_id)?;
-        Ok((engine, current))
-    });
+    let remote = storage_engine_from_state(repository, config, machine, storage_id).and_then(
+        |(_, engine)| {
+            let current = engine.inspect_optional(&project.bundle_id)?;
+            Ok((engine, current))
+        },
+    );
     // Continuity is classified once per operation — at most one probe read —
     // then the destination status maps it push-side and the thread
     // comparison carries it verbatim.
@@ -7620,8 +7006,6 @@ pub(super) fn prepare_push_review_with_progress(
     let mut thread_comparison_error = None;
     let mut project_files = None;
     let mut project_files_error = None;
-    let mut conversation_push_plan_id = None;
-    let mut conversation_action_ids = BTreeMap::new();
     match &remote {
         Ok((engine, current)) => {
             if wants_thread_comparison {
@@ -7633,67 +7017,19 @@ pub(super) fn prepare_push_review_with_progress(
                     storage_name.clone(),
                     &link,
                     &resolved,
-                    &capture_request,
                     &discovery,
                     &views,
                     engine,
                     current.as_ref(),
-                    true,
                     remote_continuity
                         .clone()
                         .expect("continuity is classified whenever the storage engine opened"),
                     &mut *on_phase,
                 ) {
-                    Ok(build) => {
-                        let compared_at = build.comparison.compared_at;
-                        let identity = repository.load_or_create_host_identity()?;
-                        let bindings_document = repository.load_conversation_bindings()?;
-                        let (revision, commit_id, manifest_sha256) = current
-                            .as_ref()
-                            .map(|snapshot| {
-                                (
-                                    snapshot.head.revision,
-                                    snapshot.head.commit_id.clone(),
-                                    snapshot.head.manifest_sha256.clone(),
-                                )
-                            })
-                            .unwrap_or_else(absent_bundle_head_pin);
-                        let plan_id = PlanId::parse(generated_named_id("plan")?)?;
-                        let plan = ConversationPushPlan {
-                            schema_version: PUSH_PLAN_SCHEMA,
-                            plan_id: plan_id.clone(),
-                            storage_id: storage_id.clone(),
-                            bundle_id: project.bundle_id.clone(),
-                            host_id: binding.host_id.clone(),
-                            replica_id: binding.replica_id.clone(),
-                            local_project_id: binding.local_project_id.clone(),
-                            expected_host_identity_revision: identity.revision,
-                            expected_project_binding_revision: binding.revision,
-                            expected_bindings_document_revision: bindings_document.revision,
-                            revision,
-                            commit_id,
-                            manifest_sha256,
-                            created_at: compared_at,
-                            expires_at: compared_at.saturating_add(PLAN_LIFETIME_SECS),
-                            actions: build.push_actions,
-                        };
-                        plan.validate()?;
-                        conversation_action_ids = plan
-                            .actions
-                            .iter()
-                            .filter_map(|action| {
-                                action.source_resource_id.as_ref().map(|resource_id| {
-                                    (resource_id.clone(), action.action_id.clone())
-                                })
-                            })
-                            .collect();
-                        repository.save_conversation_push_plan(&plan)?;
-                        conversation_push_plan_id = Some(plan_id);
-                        thread_comparison = Some(build.comparison);
-                    }
+                    Ok(comparison) => thread_comparison = Some(comparison),
                     Err(error) => thread_comparison_error = Some(error),
                 }
-                on_phase("thread comparison and push plan", phase_started.elapsed());
+                on_phase("thread comparison", phase_started.elapsed());
             }
             if wants_project_files {
                 let phase_started = Instant::now();
@@ -7737,8 +7073,6 @@ pub(super) fn prepare_push_review_with_progress(
         thread_comparison_error,
         project_files,
         project_files_error,
-        conversation_push_plan_id,
-        conversation_action_ids,
         prepared_at: now_secs(),
     })
 }
@@ -7749,14 +7083,15 @@ pub(super) fn get_push_destination_status_with_repository(
     storage_id: &StorageId,
 ) -> Result<PushDestinationStatus, String> {
     let _host_operation = repository.acquire_host_operation()?;
-    let config = repository.load_config()?;
+    let state = repository.load_project_state_snapshot()?;
+    let config = &state.config;
     let project = config
         .project(local_project_id)
         .cloned()
         .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
     let link = require_project_link(&config, &project, storage_id)?;
-    let binding = repository
-        .load_bindings()?
+    let binding = state
+        .bindings
         .active_for(local_project_id)
         .cloned()
         .ok_or_else(|| {
@@ -7765,7 +7100,7 @@ pub(super) fn get_push_destination_status_with_repository(
                 local_project_id
             )
         })?;
-    let (_, engine) = storage_engine(repository, storage_id)?;
+    let (_, engine) = storage_engine_from_state(repository, config, &state.bindings, storage_id)?;
     let current = engine.inspect_optional(&project.bundle_id)?;
     let status = classify_push_destination(
         current.as_ref(),
@@ -7819,7 +7154,7 @@ pub(super) fn recommended_review_recipe(
             entry.resource_id.clone(),
             RecipeEntry {
                 resource_id: entry.resource_id.clone(),
-                apply_policy: resource.descriptor.apply_policy,
+                apply_policy: resource.descriptor.apply_policy.clone(),
                 required: false,
             },
         );
@@ -7839,7 +7174,7 @@ pub(super) fn recommended_review_recipe(
                 resource.descriptor.resource_id.clone(),
                 RecipeEntry {
                     resource_id: resource.descriptor.resource_id.clone(),
-                    apply_policy: resource.descriptor.apply_policy,
+                    apply_policy: resource.descriptor.apply_policy.clone(),
                     required: false,
                 },
             );
@@ -7848,107 +7183,25 @@ pub(super) fn recommended_review_recipe(
     recipe
 }
 
-/// A divergent or blocked thread holds back only itself: its row is not
-/// selectable, and its cloud version is retained untouched by the publish.
-/// Every other approved thread still pushes. Approving a held row
-/// explicitly is the only hard error.
-fn selected_conversation_actions(
-    plan: &ConversationPushPlan,
-    approved_action_ids: &[ActionId],
-) -> Result<Vec<ConversationPlanAction>, String> {
-    let mut approved = BTreeSet::new();
-    for action_id in approved_action_ids {
-        if !approved.insert(action_id.clone()) {
-            return Err(format!(
-                "conversation Push action '{}' was approved more than once",
-                action_id
-            ));
-        }
-    }
-    let known = plan
-        .actions
-        .iter()
-        .map(|action| action.action_id.clone())
-        .collect::<BTreeSet<_>>();
-    if let Some(unknown) = approved
-        .iter()
-        .find(|action_id| !known.contains(*action_id))
-    {
-        return Err(format!(
-            "conversation Push action '{}' is not in the reviewed plan",
-            unknown
-        ));
-    }
-    let selected = plan
-        .actions
-        .iter()
-        .filter(|action| approved.contains(&action.action_id))
-        .cloned()
-        .collect::<Vec<_>>();
-    if let Some(action) = selected.iter().find(|action| {
-        !matches!(
-            action.action,
-            ConversationPlanActionType::Publish | ConversationPlanActionType::CreateCloud
-        )
-    }) {
-        return Err(format!(
-            "conversation Push action '{}' is not pushable",
-            action.action_id
-        ));
-    }
-    Ok(selected)
-}
-
-fn captured_conversation_for_action<'a>(
-    captured: &'a provider_capture::CapturedResources,
-    action: &ConversationPlanAction,
-) -> Result<
-    (
-        &'a provider_capture::CapturedConversation,
-        &'a provider_capture::CapturedFile,
-    ),
-    String,
-> {
-    let resource_id = action
-        .source_resource_id
-        .as_ref()
-        .ok_or_else(|| "conversation Push action lacks a captured source".to_string())?;
-    let conversation = captured
-        .conversations
-        .get(resource_id.as_str())
-        .ok_or_else(|| {
-            format!(
-                "reviewed conversation source '{}' is no longer capturable",
-                resource_id
-            )
-        })?;
-    let transcript = captured
-        .files
-        .get(&conversation.transcript_logical_path)
-        .ok_or_else(|| {
-            format!(
-                "reviewed conversation source '{}' lost its transcript",
-                resource_id
-            )
-        })?;
-    Ok((conversation, transcript))
-}
+type CapturedPublicationSource = (
+    provider_capture::CapturedConversation,
+    provider_capture::CapturedFile,
+    BTreeMap<String, provider_capture::CapturedFile>,
+);
 
 fn take_captured_conversation_for_action(
     captured: &mut provider_capture::CapturedResources,
     action: &ConversationPlanAction,
-) -> Result<
-    (
-        provider_capture::CapturedConversation,
-        provider_capture::CapturedFile,
-        BTreeMap<String, provider_capture::CapturedFile>,
-    ),
-    String,
-> {
+) -> Result<CapturedPublicationSource, String> {
     let resource_id = action
         .source_resource_id
         .as_ref()
         .ok_or_else(|| "conversation Push action lacks a captured source".to_string())?;
+    // A capture failure is the thread's own: the message names what went
+    // wrong reading or scrubbing its source.
+    if let Some(message) = captured.failed_conversations.get(resource_id.as_str()) {
+        return Err(format!("capture failed: {message}"));
+    }
     let conversation = captured
         .conversations
         .remove(resource_id.as_str())
@@ -8004,7 +7257,7 @@ fn conversation_thread_from_capture(
     local_binding: Option<&LocalConversationBinding>,
     descriptor: &ResourceDescriptor,
     conversation: &provider_capture::CapturedConversation,
-    artifact: Option<&StandaloneConversationArtifact>,
+    artifact: Option<&StandaloneConversationArtifact<credential_redaction::RedactedWireBytes>>,
     claude_wire: Option<&ClaudeWirePublication>,
     published_bytes: &PayloadBytes,
     published_by: &PortableOrigin,
@@ -8022,7 +7275,11 @@ fn conversation_thread_from_capture(
         match (artifact, claude_wire) {
             (Some(artifact), _) => (
                 ConversationLineageStatus::Complete,
-                None,
+                artifact
+                    .last_canonical_message_id
+                    .as_deref()
+                    .map(mallard_domain::MessageId::parse)
+                    .transpose()?,
                 artifact.message_count,
                 artifact.lineage_digest.clone(),
                 artifact.semantic_digest.clone(),
@@ -8041,21 +7298,6 @@ fn conversation_thread_from_capture(
                 ));
             }
         };
-    let head_message_id = match (artifact, head_message_id) {
-        (Some(_), _) => {
-            // The artifact's head is the last canonical message of the
-            // flattened chain; re-derive it from the analyzed output rather
-            // than the leaf capture.
-            let analysis = analyze_codex_transcript(published_bytes.as_bytes());
-            match analysis.lineage {
-                CodecLineage::Complete { chain, .. } => {
-                    chain.last().map(|message| message.message_id.clone())
-                }
-                CodecLineage::Unknown { .. } => None,
-            }
-        }
-        (None, head) => head,
-    };
     let forked_from = match action.action {
         ConversationPlanActionType::CreateCloud => {
             local_binding.and_then(|binding| binding.forked_from.clone())
@@ -8156,13 +7398,13 @@ fn conversation_thread_from_capture(
     };
     let mut portable_descriptor = descriptor.clone();
     portable_descriptor.resource_id = resource_id;
-    portable_descriptor.kind = ResourceKind::Conversation;
+    portable_descriptor.kind = contracts::conversation();
     portable_descriptor.provider = Some(action.provider.clone());
-    portable_descriptor.apply_policy = ApplyPolicy::SafeFile;
-    portable_descriptor.metadata.insert(
-        "content_sha256".to_string(),
-        published_bytes.sha256().to_string(),
-    );
+    portable_descriptor.apply_policy = contracts::safe_file();
+    portable_descriptor.set_attribute(
+        "content_sha256",
+        serde_json::Value::String(published_bytes.sha256().to_string()),
+    )?;
     Ok((thread, portable_descriptor, logical_path))
 }
 
@@ -8249,6 +7491,778 @@ fn captured_with_for_provider(provider: &ProviderKey) -> CapturedWith {
 /// binding's writable scopes appear; every other scope — unbound providers
 /// and unknown future providers alike — is carried verbatim by the engine's
 /// mutation firewall.
+/// Shared, read-only inputs for building one conversation's publication.
+#[derive(Clone, Copy)]
+struct ConversationPublicationContext<'a> {
+    repository: &'a LocalStateRepository,
+    plan_id: &'a PlanId,
+    storage_id: &'a StorageId,
+    project: &'a LocalProjectRegistration,
+    binding: &'a ProjectBinding,
+    homes: &'a BTreeMap<ProviderKey, String>,
+    previous_manifest: Option<&'a BundleManifest>,
+    domain_captured: &'a BTreeMap<ResourceId, ResourceDescriptor>,
+    document: &'a mallard_domain::ConversationBindings,
+    reviewed_config: &'a SyncConfig,
+    published_by: &'a PortableOrigin,
+    updated_at: u64,
+}
+
+/// The published transcript's placement in its scope: byte-identical to the
+/// reviewed manifest entry, or a fresh capture.
+enum PublishedTranscript {
+    Retained(BundleFileEntry),
+    Captured(CapturedBundleFile),
+}
+
+/// One built conversation publication: everything the scope commit writes,
+/// produced without touching the scope. A builder failure therefore leaves
+/// the scope exactly as the previous manifest had it.
+struct ConversationPublication {
+    path_origins: PathOrigins,
+    cloud_thread_id: CloudThreadId,
+    thread: ConversationThread,
+    descriptor: ResourceDescriptor,
+    logical_path: LogicalPath,
+    transcript: PublishedTranscript,
+    sidecars: Vec<(LogicalPath, CapturedBundleFile)>,
+    checkpoint: ConversationCheckpoint,
+    operation: ConversationApplyOperation,
+}
+
+/// One selected conversation the Push could not build. The batch continues
+/// without it; the result reports it under the review's resource id.
+#[derive(Clone, Debug)]
+struct PushThreadFailure {
+    resource_id: ResourceId,
+    message: String,
+}
+
+/// Build one reviewed conversation action's publication: resolve its cloud
+/// identity, re-verify the reviewed pins against the captured bytes, encode
+/// and certify the wire form, and plan its checkpoint and apply operation.
+/// Reads the scope for the previous row only; writes nothing, so a failure
+/// anywhere in here is the thread's alone.
+#[allow(clippy::too_many_lines)]
+fn build_conversation_publication(
+    context: ConversationPublicationContext<'_>,
+    action: &ConversationPlanAction,
+    previous_thread: Option<ConversationThread>,
+    captured: CapturedPublicationSource,
+    redaction_run: &mut credential_redaction::RedactionRun<'_>,
+) -> Result<ConversationPublication, String> {
+    let ConversationPublicationContext {
+        repository,
+        plan_id,
+        storage_id,
+        project,
+        binding,
+        homes,
+        previous_manifest,
+        domain_captured,
+        document,
+        reviewed_config,
+        published_by,
+        updated_at,
+    } = context;
+    let scope_key = SyncScopeKey::Provider(action.provider.clone());
+    let (conversation, transcript, mut sidecar_files) = captured;
+    // Push actions always name a registered local thread (D5).
+    let local_thread_id = action.thread_id.clone().ok_or_else(|| {
+        format!(
+            "conversation Push action '{}' lacks its local thread id",
+            action.action_id
+        )
+    })?;
+    let local_binding = document.bindings.iter().find(|candidate| {
+        candidate.host_id == binding.host_id
+            && candidate.replica_id == binding.replica_id
+            && candidate.local_project_id == binding.local_project_id
+            && candidate.provider_profile_id == action.pins.context.provider_profile_id
+            && candidate.thread_id == local_thread_id
+    });
+    let mut source_origins = PathOrigins::default();
+    let mut claude_path_origins = PathOrigins::default();
+    // Resolve the cloud identity first. A mapped action publishes under
+    // its existing cloud id after cross-checking the live row — any
+    // mismatch in either direction is a hard error, never a silent
+    // adoption. An unmapped CreateCloud mints here, at apply: a single
+    // attempt, fail-closed against the previous manifest's ids and every
+    // binding row's claim; the caller rejects an id resolved twice in one
+    // batch. The head CAS makes the previous-manifest check sound — if the
+    // head moved after observation, the publish itself fails.
+    let live_mapping = local_binding.and_then(|row| row.cloud_thread_id.clone());
+    let result_thread_id = match &action.cloud_thread_id {
+        Some(reviewed) => {
+            if live_mapping.as_ref() != Some(reviewed) {
+                return Err(format!(
+                    "conversation '{}' cloud mapping changed after review; \
+                     refresh and push again",
+                    local_thread_id
+                ));
+            }
+            reviewed.clone()
+        }
+        None => {
+            if action.action != ConversationPlanActionType::CreateCloud {
+                return Err(format!(
+                    "conversation Push action '{}' lacks its reviewed cloud thread id",
+                    action.action_id
+                ));
+            }
+            if let Some(live) = &live_mapping {
+                return Err(format!(
+                    "conversation '{}' is already mapped to cloud thread '{}'; \
+                     refresh and push again",
+                    local_thread_id, live
+                ));
+            }
+            let minted = CloudThreadId::generate()?;
+            let manifest_collision = previous_manifest.is_some_and(|manifest| {
+                manifest
+                    .all_conversations()
+                    .any(|(_, thread_id, _)| thread_id == &minted)
+            });
+            let binding_collision = document
+                .bindings
+                .iter()
+                .any(|row| row.cloud_thread_id.as_ref() == Some(&minted));
+            if manifest_collision || binding_collision {
+                return Err(format!(
+                    "minted cloud thread id '{}' collides with existing state",
+                    minted
+                ));
+            }
+            minted
+        }
+    };
+    let descriptor = action
+        .source_resource_id
+        .as_ref()
+        .and_then(|resource_id| domain_captured.get(resource_id))
+        .ok_or_else(|| {
+            format!(
+                "conversation Push action '{}' lost its descriptor",
+                action.action_id
+            )
+        })?;
+    // Publishing apply is the single reconstruction point: the complete
+    // logical graph becomes one verified standalone artifact whose
+    // cumulative tail must equal the planned local value.
+    let reconstructs_graph = provider_registry()
+        .require(&action.provider)?
+        .reconstructs_rollout_graph();
+    let supports_cursor = provider_supports_tail_cursor(&action.provider);
+    // The stale check for cursor providers is pin-vs-checkpoint
+    // equality: any checkpoint advance between review and apply is a
+    // typed stale error, so nothing below trusts state the review did
+    // not pin.
+    let stored_checkpoint = reviewed_config
+        .links
+        .iter()
+        .find(|link| {
+            link.local_project_id == project.local_project_id && &link.storage_id == storage_id
+        })
+        .and_then(|link| link.conversation_checkpoints.get(&scope_key))
+        .and_then(|threads| threads.get(&local_thread_id));
+    if supports_cursor
+        && stored_checkpoint.map(|checkpoint| checkpoint.generation)
+            != action.pins.tail.checkpoint_generation
+    {
+        return Err(format!(
+            "conversation '{}' checkpoint advanced after review; refresh and push again",
+            result_thread_id
+        ));
+    }
+    // Push stamp check: an existing cloud row must have been produced
+    // by this binary's ruleset — re-encoding the accepted prefix under
+    // different rules would rewrite pinned history.
+    if let Some(stamp) = previous_thread
+        .as_ref()
+        .and_then(|thread| thread.wire_redaction.as_ref())
+    {
+        let ruleset = credential_redaction::shared();
+        if stamp.codec != credential_redaction::REDACTION_CODEC_V1
+            || stamp.fingerprint != ruleset.fingerprint()
+        {
+            return Err(format!(
+                "redaction_ruleset_mismatch: conversation '{}' was published under \
+                 redaction ruleset '{}'; this app carries '{}'. Align app versions \
+                 before pushing.",
+                result_thread_id,
+                stamp.codec,
+                credential_redaction::REDACTION_CODEC_V1
+            ));
+        }
+    }
+    // The Claude wire re-encodes the accepted prefix on every push, so
+    // the stored row's path-map codec must be the one this binary
+    // carries — a foreign codec can never be silently re-encoded.
+    if let Some(stamp) = previous_thread
+        .as_ref()
+        .and_then(|thread| thread.wire_path_map.as_ref())
+    {
+        if stamp.codec != mallard_infrastructure::session_path_map::PATH_MAP_CODEC_V1 {
+            return Err(format!(
+                "path_map_codec_mismatch: conversation '{}' was published under \
+                 path-map codec '{}'; this app carries '{}'. Align app versions \
+                 before pushing.",
+                result_thread_id,
+                stamp.codec,
+                mallard_infrastructure::session_path_map::PATH_MAP_CODEC_V1
+            ));
+        }
+    }
+    let (artifact, seeded, claude_wire) = if reconstructs_graph {
+        // Operation-level Windows gate: the path-map root grammar is
+        // checked before any rollout bytes are parsed.
+        validate_pathmap_root("project root", &binding.project_root)?;
+        let provider_home = homes.get(&action.provider).ok_or_else(|| {
+            format!(
+                "conversation Push action '{}' has no provider home",
+                action.action_id
+            )
+        })?;
+        let source = captured_transcript_source(&conversation)?;
+        let lookup = codex_rollout_lookup(Path::new(provider_home));
+        let stamp = transcript
+            .source_stamp
+            .clone()
+            .ok_or("captured Codex transcript lacks its source stamp")?;
+        let (resolved_root, sources) = codex_history_graph::resolve_captured_codex_root(
+            &source,
+            transcript.bytes.clone(),
+            stamp,
+            &lookup,
+        )?;
+        source_origins.merge(&load_source_path_origins(
+            repository,
+            document,
+            binding,
+            &action.pins.context.provider_profile_id,
+            resolved_root
+                .segments
+                .iter()
+                .map(|segment| segment.provider_thread_id.as_str()),
+        )?)?;
+        let stored_layout = local_binding.and_then(|binding| binding.root_tail_layout.as_ref());
+        let seeded =
+            codex_history_graph::seed_codex_root(&resolved_root, &transcript.bytes, stored_layout)?;
+        if Some(&seeded.observed_tail) != action.pins.tail.local.as_ref() {
+            return Err(format!(
+                "conversation '{}' changed after review; refresh and push again",
+                result_thread_id
+            ));
+        }
+        // The prefix witness is the append-only trust anchor for the
+        // fixed partition: the reviewed checkpoint's local-form witness
+        // must survive this full local reconstruction bit for bit, or
+        // content before the accepted start was mutated in place —
+        // invisible to cursor-riding review, and never publishable.
+        let stored_witness =
+            stored_checkpoint.and_then(|checkpoint| checkpoint.prefix_witness.clone());
+        if let Some(stored) = stored_witness {
+            if seeded.prefix_witness.as_ref() != Some(&stored) {
+                return Err(format!(
+                    "conversation '{}' content before its fixed start changed; \
+                     the prefix witness no longer matches",
+                    result_thread_id
+                ));
+            }
+        }
+        let artifact = encode_captured_codex_root(
+            &resolved_root,
+            &sources,
+            &binding.project_root,
+            (binding.canonical_project_root != binding.project_root)
+                .then_some(binding.canonical_project_root.as_str()),
+            stored_layout,
+            redaction_run,
+            &source_origins,
+        )?;
+        (Some(artifact), Some(seeded), None)
+    } else if supports_cursor {
+        if let Some(row) = local_binding.filter(|row| row.path_origins_ref.is_some()) {
+            source_origins = repository.load_path_origins(row)?;
+        }
+
+        // Claude: the local fold (review check, `accepted_local_tail`)
+        // seeds from the original bytes; the wire fold seeds from the
+        // path-encoded, redacted transcript — two genuinely different
+        // folds, since the wire form carries token paths and redacted
+        // content. Apply re-derives the observed tail from the exact
+        // installed bytes on pull.
+        //
+        // Operation-level Windows gate: the path-map root grammar is
+        // checked before any transcript bytes are parsed.
+        validate_pathmap_root("project root", &binding.project_root)?;
+        let source = captured_transcript_source(&conversation)?;
+        let analysis = mallard_infrastructure::providers::SessionAnalysis {
+            source_provider_session_id: conversation.source_thread_id.clone(),
+            source_cwd: conversation.source_cwd.clone(),
+            is_internal_subagent: false,
+            record_count: conversation.record_count,
+            lineage: conversation.lineage.clone(),
+        };
+        let seeded = claude_history_tail::seed_claude_root(&source, &transcript.bytes, &analysis)?
+            .ok_or_else(|| {
+                format!(
+                    "conversation '{}' does not end at a record boundary; \
+                         refresh and push again",
+                    result_thread_id
+                )
+            })?;
+        if Some(&seeded.observed_tail) != action.pins.tail.local.as_ref() {
+            return Err(format!(
+                "conversation '{}' changed after review; refresh and push again",
+                result_thread_id
+            ));
+        }
+        // The wire transform is `redact(pathenc(x))` — the Codex
+        // composition order, over lines instead of builder records. The
+        // retained records use verified origin edits. New records use
+        // the binding-root matcher, preserving the accepted wire prefix.
+        let mapper = SessionPathMapper::new(
+            &binding.project_root,
+            (binding.canonical_project_root != binding.project_root)
+                .then_some(binding.canonical_project_root.as_str()),
+            std::env::var("HOME").ok().as_deref(),
+        )?;
+        let transcript_text = std::str::from_utf8(&transcript.bytes).map_err(|_| {
+            format!(
+                "conversation '{}' transcript is not valid UTF-8",
+                result_thread_id
+            )
+        })?;
+        let source_id = conversation
+            .source_thread_id
+            .as_deref()
+            .ok_or("conversation lacks a physical source ID")?;
+        let mut source_ordinal = 0;
+        let mut encoded_text = String::with_capacity(transcript_text.len());
+        for (index, line) in transcript_text.split('\n').enumerate() {
+            if index > 0 {
+                encoded_text.push('\n');
+            }
+            if line.trim().is_empty() {
+                encoded_text.push_str(line);
+                continue;
+            }
+            let record =
+                serde_json::from_str(line).map_err(|_| "source transcript record is not JSON")?;
+            let encoded = mapper
+                .encode_record_with_origins(
+                    &record,
+                    source_origins.record(source_id, source_ordinal),
+                )
+                .map_err(|error| {
+                    format!(
+                        "conversation '{}' record {}: {error}",
+                        result_thread_id,
+                        index + 1
+                    )
+                })?;
+            source_ordinal += 1;
+            claude_path_origins.push(source_id, encoded.origins);
+            encoded_text.push_str(
+                &serde_json::to_string(&encoded.wire)
+                    .map_err(|_| "serialize path encoded record")?,
+            );
+        }
+        source_origins.verify_source_length(source_id, source_ordinal, false)?;
+        if encoded_text.len() as u64 > conversation_file_limit_bytes() {
+            return Err(format!(
+                "conversation '{}' exceeds the bounded transcript limit after path \
+                 encoding",
+                result_thread_id
+            ));
+        }
+        let (redacted_text, _changed_lines) = redaction_run
+            .redact_jsonl_text(&encoded_text)
+            .map_err(|error| format!("conversation '{}': {error}", result_thread_id))?;
+        // Wire self-check over the complete emitted body: every line
+        // must sit in a declared wire form (`replay(decode(w)) == w`),
+        // which also certifies that redaction placeholders neither
+        // minted nor destroyed token spellings.
+        for (index, line) in redacted_text.split('\n').enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record: serde_json::Value = serde_json::from_str(line).map_err(|_| {
+                format!(
+                    "conversation '{}' record {} is not valid JSON on the wire",
+                    result_thread_id,
+                    index + 1
+                )
+            })?;
+            mapper.verify_wire_record(&record).map_err(|error| {
+                format!(
+                    "conversation '{}' record {}: {error}",
+                    result_thread_id,
+                    index + 1
+                )
+            })?;
+        }
+        let redacted = redaction_run
+            .certify_wire_document(redacted_text.into_bytes())
+            .map_err(|error| format!("conversation '{}': {error}", result_thread_id))?;
+        let wire_analysis = mallard_infrastructure::providers::claude::analyze_claude_transcript(
+            redacted.as_bytes(),
+        );
+        let wire_seeded =
+            claude_history_tail::seed_claude_root(&source, redacted.as_bytes(), &wire_analysis)?
+                .ok_or_else(|| {
+                    format!(
+                        "redaction_gate_failed: conversation '{}' redacted transcript lost \
+                 its record boundary",
+                        result_thread_id
+                    )
+                })?;
+        // Cross-form layout equality is a frozen encoder requirement:
+        // redaction is per-record and content-only, so the wire fold
+        // must partition exactly like the local fold.
+        if wire_seeded.observed_tail.partition_kind != seeded.observed_tail.partition_kind
+            || wire_seeded.observed_tail.start_record_count
+                != seeded.observed_tail.start_record_count
+            || wire_seeded.observed_tail.accepted_end_record_count
+                != seeded.observed_tail.accepted_end_record_count
+        {
+            return Err(format!(
+                "redaction_gate_failed: conversation '{}' redaction changed the \
+                 record layout",
+                result_thread_id
+            ));
+        }
+        let CodecLineage::Complete {
+            chain,
+            lineage_digest,
+            semantic_digest,
+        } = &wire_analysis.lineage
+        else {
+            return Err(format!(
+                "redaction_gate_failed: conversation '{}' redacted transcript failed \
+                 its re-analysis",
+                result_thread_id
+            ));
+        };
+        let claude_wire = ClaudeWirePublication {
+            wire_tail: PortableConversationTail {
+                codec: mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1.to_string(),
+                partition_kind: wire_seeded.observed_tail.partition_kind,
+                start_record_count: wire_seeded.observed_tail.start_record_count,
+                accepted_end_record_count: wire_seeded.observed_tail.accepted_end_record_count,
+                accepted_tail_state: wire_seeded.observed_tail.accepted_tail_state.clone(),
+            },
+            head_message_id: chain.last().map(|message| message.message_id.clone()),
+            message_count: chain.len() as u64,
+            lineage_digest: lineage_digest.clone(),
+            semantic_digest: semantic_digest.clone(),
+            bytes: redacted,
+        };
+        (
+            None,
+            Some(CodexSeededRoot {
+                layout: seeded.layout,
+                observed_tail: seeded.observed_tail,
+                prefix_witness: None,
+                mapping: seeded.mapping,
+                lineage_digest: seeded.lineage_digest,
+                semantic_digest: seeded.semantic_digest,
+            }),
+            Some(claude_wire),
+        )
+    } else {
+        // Publish leak gate: only a conversation wire builder produces
+        // `RedactedWireBytes`, so a provider without one cannot push
+        // conversations.
+        return Err(format!(
+            "conversation Push action '{}' targets provider '{}', which has no \
+             conversation wire builder",
+            action.action_id, action.provider
+        ));
+    };
+    // Both builders return certified immutable wire bytes. The Codex
+    // certificate covers source and inserted records before serialization.
+    let published_wire: credential_redaction::RedactedWireBytes = match (&artifact, &claude_wire) {
+        (Some(artifact), _) => artifact.root_bytes.clone(),
+        (None, Some(wire)) => wire.bytes.clone(),
+        (None, None) => {
+            return Err(format!(
+                "conversation Push action '{}' produced no wire bytes",
+                action.action_id
+            ))
+        }
+    };
+    let published_bytes = published_wire.into_bytes();
+    let (thread, descriptor, logical_path) = conversation_thread_from_capture(
+        previous_thread.as_ref(),
+        action,
+        &result_thread_id,
+        local_binding,
+        descriptor,
+        &conversation,
+        artifact.as_ref(),
+        claude_wire.as_ref(),
+        &published_bytes,
+        published_by,
+        updated_at,
+    )?;
+    let resource_id = descriptor.resource_id.clone();
+    let published_digest = published_bytes.sha256().to_string();
+    let artifact_sha256 = artifact
+        .as_ref()
+        .map(|artifact| artifact.artifact_sha256.clone())
+        .unwrap_or_else(|| published_digest.clone());
+    let retained_entry = previous_manifest
+        .and_then(|manifest| manifest.scope(&scope_key))
+        .and_then(|previous_scope| previous_scope.files.get(&logical_path));
+    let transcript_placement = match retained_entry {
+        Some(entry)
+            if entry.resource_id == resource_id
+                && entry.sha256 == published_digest
+                && entry.size == published_bytes.len() as u64 =>
+        {
+            PublishedTranscript::Retained(entry.clone())
+        }
+        _ => PublishedTranscript::Captured(CapturedBundleFile {
+            resource_id: resource_id.clone(),
+            bytes: published_bytes,
+            source_mtime: transcript.source_mtime,
+            mode: Some(transcript.mode),
+        }),
+    };
+    // Sidecars travel with the conversation resource. They were scrubbed at
+    // capture; the certificate here is the fail-closed publish gate over
+    // what actually ships.
+    let mut sidecars = Vec::with_capacity(conversation.sidecar_files.len());
+    for sidecar in &conversation.sidecar_files {
+        let sidecar_file = sidecar_files.remove(&sidecar.logical_path).ok_or_else(|| {
+            format!(
+                "captured conversation '{}' lost sidecar '{}'",
+                resource_id, sidecar.logical_path
+            )
+        })?;
+        let sidecar_logical = mallard_domain::cloud_conversation_sidecar_path(
+            &action.provider,
+            &result_thread_id,
+            &sidecar.sidecar_kind,
+            &sidecar.relative_path,
+        )?;
+        let sidecar_bytes = redaction_run
+            .certify_wire_document(sidecar_file.bytes)
+            .map_err(|error| {
+                format!(
+                    "conversation '{}' sidecar '{}': {error}",
+                    resource_id, sidecar.logical_path
+                )
+            })?;
+        sidecars.push((
+            sidecar_logical,
+            CapturedBundleFile {
+                resource_id: resource_id.clone(),
+                bytes: sidecar_bytes.into_bytes(),
+                source_mtime: sidecar_file.source_mtime,
+                mode: Some(sidecar_file.mode),
+            },
+        ));
+    }
+    let provider_thread_id = conversation
+        .source_thread_id
+        .clone()
+        .ok_or_else(|| "captured conversation lacks a provider session id".to_string())?;
+    // The after-state this publication commits: the wire column accepts
+    // the artifact's wire tail, the local column pins the reconstructed
+    // local value the review verified. For providers without a
+    // standalone artifact the two columns carry one shared value.
+    // Candidate and accepted-at identifiers are placeholders until the
+    // engine patches them at HeadAdvanced from the fused publish result.
+    let published_tail = artifact
+        .as_ref()
+        .map(|artifact| artifact.portable_tail.clone())
+        .or_else(|| claude_wire.as_ref().map(|wire| wire.wire_tail.clone()))
+        .ok_or_else(|| {
+            format!(
+                "conversation Push action '{}' has no publishable tail",
+                action.action_id
+            )
+        })?;
+    let accepted_local_tail = seeded
+        .as_ref()
+        .map(|seeded| seeded.observed_tail.clone())
+        .ok_or_else(|| {
+            format!(
+                "conversation Push action '{}' has no local accepted tail",
+                action.action_id
+            )
+        })?;
+    let operation_id = ConversationOperationId::parse(generated_named_id("operation")?)?;
+    let checkpoint = ConversationCheckpoint {
+        generation: 0,
+        accepted: Some(mallard_domain::AcceptedConversationVersion {
+            artifact_sha256: artifact_sha256.clone(),
+            accepted_at_commit_id: action.pins.revision.commit_id.clone(),
+            accepted_at_manifest_sha256: action.pins.revision.manifest_sha256.clone(),
+            portable_tail: published_tail.clone(),
+        }),
+        accepted_local_tail: Some(accepted_local_tail.clone()),
+        observed_tail: accepted_local_tail.clone(),
+        physical: match &seeded {
+            Some(seeded) => PhysicalMappingState::Ready {
+                root_mapping: seeded.mapping.clone(),
+                raw_range_pin: RawRangePin {
+                    start_byte_offset: seeded.mapping.consumed_byte_offset,
+                    end_byte_offset: seeded.mapping.consumed_byte_offset,
+                    range_sha256: hex_digest(Sha256::digest([]).as_slice()),
+                },
+            },
+            None => {
+                let source = captured_transcript_source(&conversation)?;
+                let consumed = transcript.bytes.len() as u64;
+                let window = consumed.min(4_096);
+                PhysicalMappingState::Ready {
+                    root_mapping: mallard_domain::RootPhysicalMapping {
+                        provider_thread_id: provider_thread_id.clone(),
+                        root_path: source.to_string_lossy().into_owned(),
+                        source_file_size: consumed,
+                        consumed_byte_offset: consumed,
+                        consumed_record_ordinal: transcript
+                            .bytes
+                            .iter()
+                            .filter(|byte| **byte == b'\n')
+                            .count() as u64,
+                        probe_window_len: window,
+                        probe_window_sha256: hex_digest(
+                            Sha256::digest(&transcript.bytes[(consumed - window) as usize..])
+                                .as_slice(),
+                        ),
+                        last_canonical_message_id: None,
+                        last_synthetic_turn_id: None,
+                        next_synthetic_turn_ordinal: 0,
+                    },
+                    raw_range_pin: RawRangePin {
+                        start_byte_offset: consumed,
+                        end_byte_offset: consumed,
+                        range_sha256: hex_digest(Sha256::digest([]).as_slice()),
+                    },
+                }
+            }
+        },
+        prefix_witness: seeded
+            .as_ref()
+            .and_then(|seeded| seeded.prefix_witness.clone()),
+        binding_revision: action.pins.context.binding_revision.unwrap_or(0),
+    };
+    let operation = ConversationApplyOperation {
+        operation_id,
+        plan_id: Some(plan_id.clone()),
+        plan_action_id: Some(action.action_id.clone()),
+        cloud: ConversationCloudAnchor {
+            storage_id: storage_id.clone(),
+            bundle_id: project.bundle_id.clone(),
+            revision: action.pins.revision.bundle_revision,
+            commit_id: action.pins.revision.commit_id.clone(),
+            manifest_sha256: action.pins.revision.manifest_sha256.clone(),
+        },
+        host_id: binding.host_id.clone(),
+        replica_id: binding.replica_id.clone(),
+        local_project_id: binding.local_project_id.clone(),
+        provider_profile_id: action.pins.context.provider_profile_id.clone(),
+        provider: action.provider.clone(),
+        thread_id: local_thread_id,
+        // Minted or mapped during this Apply attempt.
+        cloud_thread_id: result_thread_id.clone(),
+        operation: ConversationApplyKind::CloudPublication(ConversationPublicationApply {
+            candidate_commit_id: action.pins.revision.commit_id.clone(),
+            candidate_manifest_sha256: action.pins.revision.manifest_sha256.clone(),
+            artifact_sha256,
+            tail_before: action.pins.tail.accepted.clone(),
+            tail_after: published_tail,
+            planned_relation: action.pins.tail.classification()?,
+        }),
+        provider_thread_id: Some(provider_thread_id),
+        materialization_state: ConversationMaterializationState::Resumable,
+        expected_host_identity_revision: action.pins.context.host_identity_revision,
+        expected_bindings_document_revision: action.pins.context.bindings_document_revision,
+        expected_binding_revision: action.pins.context.binding_revision,
+        expected_profile_revision: action.pins.context.profile_revision,
+        expected_project_binding_revision: action.pins.context.project_binding_revision,
+        targets: Vec::new(),
+        created_at: updated_at,
+        updated_at,
+    };
+    let path_origins = artifact
+        .map(|artifact| artifact.path_origins)
+        .unwrap_or(claude_path_origins);
+    Ok(ConversationPublication {
+        path_origins,
+        cloud_thread_id: result_thread_id,
+        thread,
+        descriptor,
+        logical_path,
+        transcript: transcript_placement,
+        sidecars,
+        checkpoint,
+        operation,
+    })
+}
+
+/// Commit one built publication into its scope. Infallible by construction:
+/// every check ran in the builder, so a committed thread can no longer fail
+/// the batch.
+fn commit_conversation_publication(
+    scope: &mut ScopePublishInput,
+    publication: ConversationPublication,
+) -> (ConversationCheckpoint, ConversationApplyOperation) {
+    let ConversationPublication {
+        path_origins: _,
+        cloud_thread_id,
+        thread,
+        descriptor,
+        logical_path,
+        transcript,
+        sidecars,
+        checkpoint,
+        operation,
+    } = publication;
+    if let Some(old_thread) = scope.conversations.insert(cloud_thread_id.clone(), thread) {
+        for file in old_thread.files {
+            scope.retained_files.remove(&file.logical_path);
+            scope.captured_files.remove(&file.logical_path);
+        }
+        scope.resources.remove(&old_thread.resource_id);
+    }
+    let resource_id = descriptor.resource_id.clone();
+    scope.resources.insert(resource_id.clone(), descriptor);
+    match transcript {
+        PublishedTranscript::Retained(entry) => {
+            scope.retained_files.insert(logical_path, entry);
+        }
+        PublishedTranscript::Captured(file) => {
+            scope.retained_files.remove(&logical_path);
+            scope.captured_files.insert(logical_path, file);
+        }
+    }
+    for (sidecar_path, file) in sidecars {
+        scope.captured_files.insert(sidecar_path, file);
+    }
+    scope.tombstones.retain(|_, tombstone| {
+        !matches!(
+            PortableResourceRegistry::production().tombstone_target(&tombstone.target),
+            Ok(Some(TombstoneTargetPrimitive::ConversationThread { thread_id }))
+                if thread_id == cloud_thread_id
+        )
+    });
+    scope.recipe.entries.insert(
+        resource_id.clone(),
+        RecipeEntry {
+            resource_id,
+            apply_policy: contracts::safe_file(),
+            required: false,
+        },
+    );
+    (checkpoint, operation)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_publish_request(
     repository: &LocalStateRepository,
@@ -8263,7 +8277,15 @@ fn build_publish_request(
     expected_head: PublishExpectation,
     actions: &[ConversationPlanAction],
     updated_at: u64,
-) -> Result<(PublishBundleRequest, Vec<ConversationSyncOperation>), String> {
+) -> Result<
+    (
+        PublishBundleRequest,
+        Vec<ConversationApplyOperation>,
+        ConversationPublicationState,
+        Vec<PushThreadFailure>,
+    ),
+    String,
+> {
     let (origin_host_token, origin_replica_token) =
         repository.derive_origin_tokens(&project.bundle_id, &binding.replica_id)?;
     let published_by = PortableOrigin {
@@ -8339,8 +8361,14 @@ fn build_publish_request(
             .filter(|(resource_id, _)| scope_recipe.entries.contains_key(*resource_id))
             .map(|(resource_id, descriptor)| (resource_id.clone(), descriptor.clone()))
             .collect::<BTreeMap<_, _>>();
+        mallard_infrastructure::bundle_engine::align_recipe_policies(
+            &mut scope_recipe,
+            &scope_descriptors,
+        );
         let (mut resources, mut retained_files, mut directories, mut tombstones) =
             mallard_infrastructure::bundle_engine::reconcile_scope_content(
+                PortableResourceRegistry::production(),
+                &scope_key,
                 &scope_recipe,
                 &scope_descriptors,
                 &captured,
@@ -8439,7 +8467,10 @@ fn build_publish_request(
                 }
             }
             for (key, tombstone) in &previous_scope.tombstones {
-                if matches!(tombstone.target, TombstoneTarget::ConversationThread { .. }) {
+                if matches!(
+                    PortableResourceRegistry::production().tombstone_target(&tombstone.target),
+                    Ok(Some(TombstoneTargetPrimitive::ConversationThread { .. }))
+                ) {
                     tombstones.insert(key.clone(), tombstone.clone());
                 }
             }
@@ -8460,676 +8491,140 @@ fn build_publish_request(
     }
 
     // Apply the reviewed conversation actions inside their provider scopes.
+    // Each thread builds in isolation and commits into its scope only after
+    // its last fallible step: a thread that fails leaves its scope exactly
+    // as the previous manifest had it and joins `failures` with its message,
+    // while every other thread publishes.
     let reviewed_config = repository.load_config()?;
     let mut operations = Vec::new();
+    let mut failures = Vec::new();
+    let mut planned_origins = BTreeMap::new();
     let mut planned_checkpoints: BTreeMap<ConversationOperationId, ConversationCheckpoint> =
         BTreeMap::new();
     let mut resolved_cloud_ids: BTreeSet<CloudThreadId> = BTreeSet::new();
+    let context = ConversationPublicationContext {
+        repository,
+        plan_id,
+        storage_id,
+        project,
+        binding,
+        homes,
+        previous_manifest,
+        domain_captured,
+        document: &document,
+        reviewed_config: &reviewed_config,
+        published_by: &published_by,
+        updated_at,
+    };
+    let mut jobs = Vec::with_capacity(actions.len());
     for action in actions {
         let scope_key = SyncScopeKey::Provider(action.provider.clone());
-        let scope = writable_scopes.get_mut(&scope_key).ok_or_else(|| {
+        let scope = writable_scopes.get(&scope_key).ok_or_else(|| {
             format!(
                 "conversation Push action '{}' targets unbound provider '{}'",
-                action.action_id, action.provider
+                action.action_id, action.provider,
             )
         })?;
-        let (conversation, transcript, mut sidecar_files) =
-            take_captured_conversation_for_action(&mut captured, action)?;
-        // Push actions always name a registered local thread (D5).
-        let local_thread_id = action.thread_id.clone().ok_or_else(|| {
+        conversation_action_row_key(action).ok_or_else(|| {
             format!(
-                "conversation Push action '{}' lacks its local thread id",
-                action.action_id
+                "conversation Push action '{}' names no reportable resource",
+                action.action_id,
             )
         })?;
-        let local_binding = document.bindings.iter().find(|candidate| {
-            candidate.host_id == binding.host_id
-                && candidate.replica_id == binding.replica_id
-                && candidate.local_project_id == binding.local_project_id
-                && candidate.provider_profile_id == action.pins.context.provider_profile_id
-                && candidate.thread_id == local_thread_id
-        });
-        // Resolve the cloud identity first. A mapped action publishes under
-        // its existing cloud id after cross-checking the live row — any
-        // mismatch in either direction is a hard error, never a silent
-        // adoption. An unmapped CreateCloud mints here, at apply: a single
-        // attempt, fail-closed against the previous manifest's ids, every
-        // binding row's claim, and ids already resolved in this batch. The
-        // head CAS makes the previous-manifest check sound — if the head
-        // moved after observation, the publish itself fails.
-        let live_mapping = local_binding.and_then(|row| row.cloud_thread_id.clone());
-        let result_thread_id = match &action.cloud_thread_id {
-            Some(reviewed) => {
-                if live_mapping.as_ref() != Some(reviewed) {
-                    return Err(format!(
-                        "conversation '{}' cloud mapping changed after review; \
-                         refresh and push again",
-                        local_thread_id
-                    ));
-                }
-                reviewed.clone()
-            }
-            None => {
-                if action.action != ConversationPlanActionType::CreateCloud {
-                    return Err(format!(
-                        "conversation Push action '{}' lacks its reviewed cloud thread id",
-                        action.action_id
-                    ));
-                }
-                if let Some(live) = &live_mapping {
-                    return Err(format!(
-                        "conversation '{}' is already mapped to cloud thread '{}'; \
-                         refresh and push again",
-                        local_thread_id, live
-                    ));
-                }
-                let minted = CloudThreadId::generate()?;
-                let manifest_collision = previous_manifest.is_some_and(|manifest| {
-                    manifest
-                        .all_conversations()
-                        .any(|(_, thread_id, _)| thread_id == &minted)
-                });
-                let binding_collision = document
-                    .bindings
-                    .iter()
-                    .any(|row| row.cloud_thread_id.as_ref() == Some(&minted));
-                if manifest_collision || binding_collision {
-                    return Err(format!(
-                        "minted cloud thread id '{}' collides with existing state; \
-                         nothing was published",
-                        minted
-                    ));
-                }
-                minted
-            }
-        };
-        if !resolved_cloud_ids.insert(result_thread_id.clone()) {
-            return Err(format!(
-                "conversation Push batch resolves cloud thread '{}' twice; \
-                 nothing was published",
-                result_thread_id
-            ));
-        }
-        let previous_thread = scope.conversations.get(&result_thread_id).cloned();
-        let descriptor = action
-            .source_resource_id
+        let previous = action
+            .cloud_thread_id
             .as_ref()
-            .and_then(|resource_id| domain_captured.get(resource_id))
-            .ok_or_else(|| {
-                format!(
-                    "conversation Push action '{}' lost its descriptor",
-                    action.action_id
-                )
-            })?;
-        // Publishing apply is the single reconstruction point: the complete
-        // logical graph becomes one verified standalone artifact whose
-        // cumulative tail must equal the planned local value.
-        let is_codex = action.provider.as_str() == "codex";
-        let supports_cursor = provider_supports_tail_cursor(&action.provider);
-        // The stale check for cursor providers is pin-vs-checkpoint
-        // equality: any checkpoint advance between review and apply is a
-        // typed stale error, so nothing below trusts state the review did
-        // not pin.
-        let stored_checkpoint = reviewed_config
-            .links
-            .iter()
-            .find(|link| {
-                link.local_project_id == project.local_project_id && &link.storage_id == storage_id
-            })
-            .and_then(|link| link.conversation_checkpoints.get(&scope_key))
-            .and_then(|threads| threads.get(&local_thread_id));
-        if supports_cursor
-            && stored_checkpoint.map(|checkpoint| checkpoint.generation)
-                != action.pins.tail.checkpoint_generation
-        {
-            return Err(format!(
-                "conversation '{}' checkpoint advanced after review; refresh and push again",
-                result_thread_id
-            ));
-        }
-        // Push stamp check: an existing cloud row must have been produced
-        // by this binary's ruleset — re-encoding the accepted prefix under
-        // different rules would rewrite pinned history.
-        if let Some(stamp) = previous_thread
-            .as_ref()
-            .and_then(|thread| thread.wire_redaction.as_ref())
-        {
-            let ruleset = credential_redaction::shared();
-            if stamp.codec != credential_redaction::REDACTION_CODEC_V1
-                || stamp.fingerprint != ruleset.fingerprint()
-            {
-                return Err(format!(
-                    "redaction_ruleset_mismatch: conversation '{}' was published under \
-                     redaction ruleset '{}'; this app carries '{}'. Align app versions \
-                     before pushing.",
-                    result_thread_id,
-                    stamp.codec,
-                    credential_redaction::REDACTION_CODEC_V1
-                ));
-            }
-        }
-        // The Claude wire re-encodes the accepted prefix on every push, so
-        // the stored row's path-map codec must be the one this binary
-        // carries — a foreign codec can never be silently re-encoded.
-        if let Some(stamp) = previous_thread
-            .as_ref()
-            .and_then(|thread| thread.wire_path_map.as_ref())
-        {
-            if stamp.codec != mallard_infrastructure::session_path_map::PATH_MAP_CODEC_V1 {
-                return Err(format!(
-                    "path_map_codec_mismatch: conversation '{}' was published under \
-                     path-map codec '{}'; this app carries '{}'. Align app versions \
-                     before pushing.",
-                    result_thread_id,
-                    stamp.codec,
-                    mallard_infrastructure::session_path_map::PATH_MAP_CODEC_V1
-                ));
-            }
-        }
-        let (mut artifact, seeded, claude_wire) = if is_codex {
-            // Operation-level Windows gate: the path-map root grammar is
-            // checked before any rollout bytes are parsed.
-            validate_pathmap_root("project root", &binding.project_root)?;
-            let provider_home = homes.get(&action.provider).ok_or_else(|| {
-                format!(
-                    "conversation Push action '{}' has no provider home",
-                    action.action_id
-                )
-            })?;
-            let source = captured_transcript_source(&conversation)?;
-            let lookup = codex_rollout_lookup(Path::new(provider_home));
-            let resolved_root = codex_history_graph::resolve_codex_root(&source, &lookup)?;
-            let leaf_bytes = jsonl_tail_io::read_bounded(&source)?;
-            let stored_layout = local_binding.and_then(|binding| binding.root_tail_layout.as_ref());
-            let seeded =
-                codex_history_graph::seed_codex_root(&resolved_root, &leaf_bytes, stored_layout)?;
-            if Some(&seeded.observed_tail) != action.pins.tail.local.as_ref() {
-                return Err(format!(
-                    "conversation '{}' changed after review; refresh and push again",
-                    result_thread_id
-                ));
-            }
-            // The prefix witness is the append-only trust anchor for the
-            // fixed partition: the reviewed checkpoint's local-form witness
-            // must survive this full local reconstruction bit for bit, or
-            // content before the accepted start was mutated in place —
-            // invisible to cursor-riding review, and never publishable.
-            let stored_witness =
-                stored_checkpoint.and_then(|checkpoint| checkpoint.prefix_witness.clone());
-            if let Some(stored) = stored_witness {
-                if seeded.prefix_witness.as_ref() != Some(&stored) {
-                    return Err(format!(
-                        "conversation '{}' content before its fixed start changed; \
-                         the prefix witness no longer matches",
-                        result_thread_id
-                    ));
-                }
-            }
-            let artifact = build_standalone_codex_root(
-                &resolved_root,
-                &StandaloneBuildMode::Encode {
-                    root: binding.project_root.clone(),
-                    canonical_root: (binding.canonical_project_root != binding.project_root)
-                        .then(|| binding.canonical_project_root.clone()),
-                },
-                stored_layout,
-            )?;
-            (Some(artifact), Some(seeded), None)
-        } else if supports_cursor {
-            // Claude: the local fold (review check, `accepted_local_tail`)
-            // seeds from the original bytes; the wire fold seeds from the
-            // path-encoded, redacted transcript — two genuinely different
-            // folds, since the wire form carries token paths and redacted
-            // content. Apply re-derives the observed tail from the exact
-            // installed bytes on pull.
-            //
-            // Operation-level Windows gate: the path-map root grammar is
-            // checked before any transcript bytes are parsed.
-            validate_pathmap_root("project root", &binding.project_root)?;
-            let source = captured_transcript_source(&conversation)?;
-            let analysis = mallard_infrastructure::providers::SessionAnalysis {
-                source_provider_session_id: conversation.source_thread_id.clone(),
-                source_cwd: conversation.source_cwd.clone(),
-                is_internal_subagent: false,
-                record_count: conversation.record_count,
-                lineage: conversation.lineage.clone(),
-            };
-            let seeded =
-                claude_history_tail::seed_claude_root(&source, &transcript.bytes, &analysis)?
-                    .ok_or_else(|| {
-                        format!(
-                            "conversation '{}' does not end at a record boundary; \
-                             refresh and push again",
-                            result_thread_id
-                        )
-                    })?;
-            if Some(&seeded.observed_tail) != action.pins.tail.local.as_ref() {
-                return Err(format!(
-                    "conversation '{}' changed after review; refresh and push again",
-                    result_thread_id
-                ));
-            }
-            // The wire transform is `redact(pathenc(x))` — the Codex
-            // composition order, over lines instead of builder records. The
-            // mapper's patterns are a pure function of the binding root, so
-            // re-encoding old lines always reproduces the accepted wire
-            // prefix states.
-            let mapper = SessionPathMapper::new(
-                &binding.project_root,
-                (binding.canonical_project_root != binding.project_root)
-                    .then_some(binding.canonical_project_root.as_str()),
-                std::env::var("HOME").ok().as_deref(),
-            )?;
-            let transcript_text = std::str::from_utf8(&transcript.bytes).map_err(|_| {
-                format!(
-                    "conversation '{}' transcript is not valid UTF-8",
-                    result_thread_id
-                )
-            })?;
-            let mut encoded_text = String::with_capacity(transcript_text.len());
-            for (index, line) in transcript_text.split('\n').enumerate() {
-                if index > 0 {
-                    encoded_text.push('\n');
-                }
-                if line.trim().is_empty() {
-                    encoded_text.push_str(line);
-                    continue;
-                }
-                let encoded = mapper.encode_jsonl_line_gated(line).map_err(|error| {
-                    format!(
-                        "conversation '{}' record {}: {error}",
-                        result_thread_id,
-                        index + 1
-                    )
-                })?;
-                encoded_text.push_str(&encoded);
-            }
-            if encoded_text.len() as u64 > conversation_file_limit_bytes() {
-                return Err(format!(
-                    "conversation '{}' exceeds the bounded transcript limit after path \
-                     encoding",
-                    result_thread_id
-                ));
-            }
-            let redactor = credential_redaction::shared();
-            let (redacted_text, _changed_lines) = redactor
-                .redact_jsonl_text(&encoded_text)
-                .map_err(|error| format!("conversation '{}': {error}", result_thread_id))?;
-            // Wire self-check over the complete emitted body: every line
-            // must sit in a declared wire form (`encode(decode(w)) == w`),
-            // which also certifies that redaction placeholders neither
-            // minted nor destroyed token spellings.
-            for (index, line) in redacted_text.split('\n').enumerate() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let record: serde_json::Value = serde_json::from_str(line).map_err(|_| {
-                    format!(
-                        "conversation '{}' record {} is not valid JSON on the wire",
-                        result_thread_id,
-                        index + 1
-                    )
-                })?;
-                mapper.verify_wire_record(&record).map_err(|error| {
-                    format!(
-                        "conversation '{}' record {}: {error}",
-                        result_thread_id,
-                        index + 1
-                    )
-                })?;
-            }
-            let redacted = redactor
-                .certify_wire_document(redacted_text.into_bytes())
-                .map_err(|error| format!("conversation '{}': {error}", result_thread_id))?;
-            let wire_analysis =
-                mallard_infrastructure::providers::claude::analyze_claude_transcript(
-                    redacted.as_bytes(),
-                );
-            let wire_seeded = claude_history_tail::seed_claude_root(
-                &source,
-                redacted.as_bytes(),
-                &wire_analysis,
-            )?
-            .ok_or_else(|| {
-                format!(
-                    "redaction_gate_failed: conversation '{}' redacted transcript lost \
-                     its record boundary",
-                    result_thread_id
-                )
-            })?;
-            // Cross-form layout equality is a frozen encoder requirement:
-            // redaction is per-record and content-only, so the wire fold
-            // must partition exactly like the local fold.
-            if wire_seeded.observed_tail.partition_kind != seeded.observed_tail.partition_kind
-                || wire_seeded.observed_tail.start_record_count
-                    != seeded.observed_tail.start_record_count
-                || wire_seeded.observed_tail.accepted_end_record_count
-                    != seeded.observed_tail.accepted_end_record_count
-            {
-                return Err(format!(
-                    "redaction_gate_failed: conversation '{}' redaction changed the \
-                     record layout",
-                    result_thread_id
-                ));
-            }
-            let CodecLineage::Complete {
-                chain,
-                lineage_digest,
-                semantic_digest,
-            } = &wire_analysis.lineage
-            else {
-                return Err(format!(
-                    "redaction_gate_failed: conversation '{}' redacted transcript failed \
-                     its re-analysis",
-                    result_thread_id
-                ));
-            };
-            let claude_wire = ClaudeWirePublication {
-                wire_tail: PortableConversationTail {
-                    codec: mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1.to_string(),
-                    partition_kind: wire_seeded.observed_tail.partition_kind,
-                    start_record_count: wire_seeded.observed_tail.start_record_count,
-                    accepted_end_record_count: wire_seeded.observed_tail.accepted_end_record_count,
-                    accepted_tail_state: wire_seeded.observed_tail.accepted_tail_state.clone(),
-                },
-                head_message_id: chain.last().map(|message| message.message_id.clone()),
-                message_count: chain.len() as u64,
-                lineage_digest: lineage_digest.clone(),
-                semantic_digest: semantic_digest.clone(),
-                bytes: redacted,
-            };
-            (
-                None,
-                Some(CodexSeededRoot {
-                    layout: seeded.layout,
-                    observed_tail: seeded.observed_tail,
-                    prefix_witness: None,
-                    mapping: seeded.mapping,
-                    lineage_digest: seeded.lineage_digest,
-                    semantic_digest: seeded.semantic_digest,
-                }),
-                Some(claude_wire),
-            )
-        } else {
-            // Publish leak gate: only a conversation wire builder produces
-            // `RedactedWireBytes`, so a provider without one cannot push
-            // conversations.
-            return Err(format!(
-                "conversation Push action '{}' targets provider '{}', which has no \
-                 conversation wire builder",
-                action.action_id, action.provider
-            ));
-        };
-        // Publish leak gate (choke point): the bytes entering the bundle
-        // are certified `redact(w) == w`. The Codex artifact re-certifies
-        // its complete emitted body here; Claude bytes carry their
-        // certificate from the redaction step above.
-        let published_wire: credential_redaction::RedactedWireBytes =
-            match (&mut artifact, &claude_wire) {
-                (Some(artifact), _) => credential_redaction::shared()
-                    .certify_wire_document(std::mem::take(&mut artifact.root_bytes))
-                    .map_err(|error| format!("conversation '{}': {error}", result_thread_id))?,
-                (None, Some(wire)) => wire.bytes.clone(),
-                (None, None) => {
-                    return Err(format!(
-                        "conversation Push action '{}' produced no wire bytes",
-                        action.action_id
-                    ))
-                }
-            };
-        let published_bytes = published_wire.into_bytes();
-        let (thread, descriptor, logical_path) = conversation_thread_from_capture(
-            previous_thread.as_ref(),
+            .and_then(|id| scope.conversations.get(id))
+            .cloned();
+        jobs.push((
             action,
-            &result_thread_id,
-            local_binding,
-            descriptor,
-            &conversation,
-            artifact.as_ref(),
-            claude_wire.as_ref(),
-            &published_bytes,
-            &published_by,
-            updated_at,
-        )?;
-        if let Some(old_thread) = scope.conversations.insert(result_thread_id.clone(), thread) {
-            for file in old_thread.files {
-                scope.retained_files.remove(&file.logical_path);
-                scope.captured_files.remove(&file.logical_path);
-            }
-            scope.resources.remove(&old_thread.resource_id);
-        }
-        let resource_id = descriptor.resource_id.clone();
-        scope.resources.insert(resource_id.clone(), descriptor);
-        let digest = published_bytes.sha256().to_string();
-        let retained_entry = previous_manifest
-            .and_then(|manifest| manifest.scope(&scope_key))
-            .and_then(|previous_scope| previous_scope.files.get(&logical_path));
-        let can_retain = retained_entry.is_some_and(|entry| {
-            entry.resource_id == resource_id
-                && entry.sha256 == digest
-                && entry.size == published_bytes.len() as u64
-        });
-        if can_retain {
-            scope
-                .retained_files
-                .insert(logical_path.clone(), retained_entry.unwrap().clone());
-        } else {
-            scope.retained_files.remove(&logical_path);
-            scope.captured_files.insert(
-                logical_path.clone(),
-                CapturedBundleFile {
-                    resource_id: resource_id.clone(),
-                    bytes: published_bytes.clone(),
-                    source_mtime: transcript.source_mtime,
-                    mode: Some(transcript.mode),
-                },
-            );
-        }
-        // Sidecars travel with the conversation resource.
-        for sidecar in &conversation.sidecar_files {
-            let sidecar_file = sidecar_files.remove(&sidecar.logical_path).ok_or_else(|| {
-                format!(
-                    "captured conversation '{}' lost sidecar '{}'",
-                    resource_id, sidecar.logical_path
-                )
-            })?;
-            let sidecar_logical = mallard_domain::cloud_conversation_sidecar_path(
-                &action.provider,
-                &result_thread_id,
-                &sidecar.sidecar_kind,
-                &sidecar.relative_path,
-            )?;
-            // Sidecars were scrubbed at capture; the certificate here is
-            // the fail-closed publish gate over what actually ships.
-            let sidecar_bytes = credential_redaction::shared()
-                .certify_wire_document(sidecar_file.bytes)
-                .map_err(|error| {
-                    format!(
-                        "conversation '{}' sidecar '{}': {error}",
-                        resource_id, sidecar.logical_path
-                    )
-                })?;
-            scope.captured_files.insert(
-                sidecar_logical,
-                CapturedBundleFile {
-                    resource_id: resource_id.clone(),
-                    bytes: sidecar_bytes.into_bytes(),
-                    source_mtime: sidecar_file.source_mtime,
-                    mode: Some(sidecar_file.mode),
-                },
-            );
-        }
-        scope.tombstones.retain(|_, tombstone| {
-            !matches!(
-                &tombstone.target,
-                TombstoneTarget::ConversationThread { thread_id }
-                    if thread_id == &result_thread_id
-            )
-        });
-        scope.recipe.entries.insert(
-            resource_id.clone(),
-            RecipeEntry {
-                resource_id: resource_id.clone(),
-                apply_policy: ApplyPolicy::SafeFile,
-                required: false,
-            },
-        );
-        let provider_thread_id = conversation
-            .source_thread_id
-            .clone()
-            .ok_or_else(|| "captured conversation lacks a provider session id".to_string())?;
-        // The after-state this publication commits: the wire column accepts
-        // the artifact's wire tail, the local column pins the reconstructed
-        // local value the review verified. For providers without a
-        // standalone artifact the two columns carry one shared value.
-        // Candidate and accepted-at identifiers are placeholders until the
-        // engine patches them at HeadAdvanced from the fused publish result.
-        let published_tail = artifact
-            .as_ref()
-            .map(|artifact| artifact.portable_tail.clone())
-            .or_else(|| claude_wire.as_ref().map(|wire| wire.wire_tail.clone()))
-            .ok_or_else(|| {
-                format!(
-                    "conversation Push action '{}' has no publishable tail",
-                    action.action_id
-                )
-            })?;
-        let accepted_local_tail = seeded
-            .as_ref()
-            .map(|seeded| seeded.observed_tail.clone())
-            .ok_or_else(|| {
-                format!(
-                    "conversation Push action '{}' has no local accepted tail",
-                    action.action_id
-                )
-            })?;
-        let artifact_sha256 = artifact
-            .as_ref()
-            .map(|artifact| artifact.artifact_sha256.clone())
-            .unwrap_or_else(|| published_bytes.sha256().to_string());
-        let operation_id = ConversationOperationId::parse(generated_named_id("operation")?)?;
-        let checkpoint = ConversationCheckpoint {
-            generation: 0,
-            accepted: Some(mallard_domain::AcceptedConversationVersion {
-                artifact_sha256,
-                accepted_at_commit_id: action.pins.revision.commit_id.clone(),
-                accepted_at_manifest_sha256: action.pins.revision.manifest_sha256.clone(),
-                portable_tail: published_tail.clone(),
-            }),
-            accepted_local_tail: Some(accepted_local_tail.clone()),
-            observed_tail: accepted_local_tail.clone(),
-            physical: match &seeded {
-                Some(seeded) => PhysicalMappingState::Ready {
-                    root_mapping: seeded.mapping.clone(),
-                    raw_range_pin: RawRangePin {
-                        start_byte_offset: seeded.mapping.consumed_byte_offset,
-                        end_byte_offset: seeded.mapping.consumed_byte_offset,
-                        range_sha256: hex_digest(Sha256::digest([]).as_slice()),
-                    },
-                },
-                None => {
-                    let source = captured_transcript_source(&conversation)?;
-                    let consumed = transcript.bytes.len() as u64;
-                    let window = consumed.min(4_096);
-                    PhysicalMappingState::Ready {
-                        root_mapping: mallard_domain::RootPhysicalMapping {
-                            provider_thread_id: provider_thread_id.clone(),
-                            root_path: source.to_string_lossy().into_owned(),
-                            source_file_size: consumed,
-                            consumed_byte_offset: consumed,
-                            consumed_record_ordinal: transcript
-                                .bytes
-                                .iter()
-                                .filter(|byte| **byte == b'\n')
-                                .count()
-                                as u64,
-                            probe_window_len: window,
-                            probe_window_sha256: hex_digest(
-                                Sha256::digest(&transcript.bytes[(consumed - window) as usize..])
-                                    .as_slice(),
-                            ),
-                            last_canonical_message_id: None,
-                            last_synthetic_turn_id: None,
-                            next_synthetic_turn_ordinal: 0,
-                        },
-                        raw_range_pin: RawRangePin {
-                            start_byte_offset: consumed,
-                            end_byte_offset: consumed,
-                            range_sha256: hex_digest(Sha256::digest([]).as_slice()),
-                        },
-                    }
-                }
-            },
-            prefix_witness: seeded
-                .as_ref()
-                .and_then(|seeded| seeded.prefix_witness.clone()),
-            binding_revision: action.pins.context.binding_revision.unwrap_or(0),
-        };
-        planned_checkpoints.insert(operation_id.clone(), checkpoint);
-        operations.push(ConversationSyncOperation {
-            operation_id,
-            plan_id: Some(plan_id.clone()),
-            plan_action_id: Some(action.action_id.clone()),
-            cloud: ConversationCloudAnchor {
-                storage_id: storage_id.clone(),
-                bundle_id: project.bundle_id.clone(),
-                revision: action.pins.revision.bundle_revision,
-                commit_id: action.pins.revision.commit_id.clone(),
-                manifest_sha256: action.pins.revision.manifest_sha256.clone(),
-            },
-            host_id: binding.host_id.clone(),
-            replica_id: binding.replica_id.clone(),
-            local_project_id: binding.local_project_id.clone(),
-            provider_profile_id: action.pins.context.provider_profile_id.clone(),
-            provider: action.provider.clone(),
-            thread_id: local_thread_id.clone(),
-            // Minted (or mapped) before journaling: recovery installs the
-            // journaled documents verbatim and never re-mints.
-            cloud_thread_id: result_thread_id.clone(),
-            operation: ConversationSyncOperationKind::CloudPublication(
-                ConversationPublicationOperation {
-                    phase: PushJournalPhase::CandidateUploaded,
-                    candidate_commit_id: action.pins.revision.commit_id.clone(),
-                    candidate_manifest_sha256: action.pins.revision.manifest_sha256.clone(),
-                    artifact_sha256: artifact
-                        .as_ref()
-                        .map(|artifact| artifact.artifact_sha256.clone())
-                        .unwrap_or_else(|| published_bytes.sha256().to_string()),
-                    tail_before: action.pins.tail.accepted.clone(),
-                    tail_after: published_tail,
-                    planned_relation: action.pins.tail.classification()?,
-                    // Chained after the loop in operation-id order.
-                    sync_config_before: SyncConfig::default(),
-                    sync_config_after: SyncConfig::default(),
-                    bindings_before: document.clone(),
-                    bindings_after: document.clone(),
-                },
-            ),
-            provider_thread_id: Some(provider_thread_id),
-            materialization_state: ConversationMaterializationState::Resumable,
-            expected_host_identity_revision: action.pins.context.host_identity_revision,
-            expected_bindings_document_revision: action.pins.context.bindings_document_revision,
-            expected_binding_revision: action.pins.context.binding_revision,
-            expected_profile_revision: action.pins.context.profile_revision,
-            expected_project_binding_revision: action.pins.context.project_binding_revision,
-            targets: Vec::new(),
-            created_at: updated_at,
-            updated_at,
-        });
+            previous,
+            take_captured_conversation_for_action(&mut captured, action),
+        ));
     }
-    // Chain the whole-document snapshots in the exact order the engine
-    // installs them (sorted operation id): each operation's before-state is
-    // its predecessor's after-state, so sequential installation is exact.
+    let workers = provider_capture::bounded_refresh_workers(jobs.len());
+    let mut batch_error = None;
+    // Reserve captured transcript and sidecar bytes until ordered consumption.
+    // Ancestor reads retain their per-file/depth limits; the worker cap also
+    // bounds concurrent graph reconstruction and redaction caches.
+    mallard_infrastructure::ordered_preparation::for_each_prepared(
+        jobs,
+        workers,
+        64 * 1024 * 1024,
+        |(_, _, source)| {
+            source
+                .as_ref()
+                .map(|(_, transcript, sidecars)| {
+                    sidecars
+                        .values()
+                        .fold(transcript.bytes.len() as u64, |size, file| {
+                            size.saturating_add(file.bytes.len() as u64)
+                        })
+                })
+                .unwrap_or(0)
+        },
+        |(action, previous, source)| {
+            build_conversation_publication(
+                context,
+                action,
+                previous,
+                source?,
+                &mut credential_redaction::shared().begin_run(),
+            )
+        },
+        |index, outcome| {
+            if batch_error.is_some() {
+                return;
+            }
+            let action = &actions[index];
+            let outcome = outcome.and_then(|publication| {
+                if !resolved_cloud_ids.insert(publication.cloud_thread_id.clone()) {
+                    batch_error = Some(format!(
+                        "conversation Push batch resolves cloud thread '{}' twice; nothing was published",
+                        publication.cloud_thread_id,
+                    ));
+                    return Ok(());
+                }
+                let owner = PathOriginsOwner::for_project(
+                    binding, &action.pins.context.provider_profile_id,
+                    publication.operation.provider_thread_id.as_deref()
+                        .ok_or("publication has no provider ID")?,
+                );
+                let path_origins_ref = repository.store_path_origins(owner, &publication.path_origins)?;
+                let scope = writable_scopes.get_mut(&SyncScopeKey::Provider(action.provider.clone()))
+                    .expect("the scope was checked before preparation");
+                let (checkpoint, operation) = commit_conversation_publication(scope, publication);
+                planned_origins.insert(operation.operation_id.clone(), path_origins_ref);
+                planned_checkpoints.insert(operation.operation_id.clone(), checkpoint);
+                operations.push(operation);
+                Ok(())
+            });
+            if let Err(message) = outcome {
+                failures.push(PushThreadFailure {
+                    resource_id: conversation_action_row_key(action)
+                        .expect("the resource was checked before preparation"),
+                    message,
+                });
+            }
+        },
+    );
+    if let Some(error) = batch_error {
+        return Err(error);
+    }
+    // Build one final state for all sessions that will publish.
     operations.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
-    let mut running = reviewed_config;
-    let mut running_bindings = repository.load_conversation_bindings()?;
-    for operation in &mut operations {
+    let mut running = reviewed_config.clone();
+    let mut running_bindings = document.clone();
+    for operation in &operations {
         let checkpoint = planned_checkpoints
             .get(&operation.operation_id)
             .cloned()
             .ok_or_else(|| "planned conversation checkpoint disappeared".to_string())?;
-        let before = running.clone();
-        let bindings_before = running_bindings.clone();
+        let path_origins_ref = planned_origins
+            .get(&operation.operation_id)
+            .ok_or("planned path origins disappeared")?
+            .clone();
+
         let layout = RootTailLayout {
             codec: checkpoint.observed_tail.codec.clone(),
             partition_kind: checkpoint.observed_tail.partition_kind,
@@ -9143,6 +8638,7 @@ fn build_publish_request(
                 && row.thread_id == operation.thread_id
         }) {
             Some(row) => {
+                row.path_origins_ref = Some(path_origins_ref.clone());
                 row.provider_thread_id = operation.provider_thread_id.clone();
                 row.materialization_state = ConversationMaterializationState::Resumable;
                 // A first CreateCloud commits the freshly minted mapping; a
@@ -9155,6 +8651,7 @@ fn build_publish_request(
                 row.updated_at = updated_at;
             }
             None => running_bindings.bindings.push(LocalConversationBinding {
+                path_origins_ref: Some(path_origins_ref),
                 host_id: operation.host_id.clone(),
                 replica_id: operation.replica_id.clone(),
                 local_project_id: operation.local_project_id.clone(),
@@ -9171,7 +8668,6 @@ fn build_publish_request(
                 updated_at,
             }),
         }
-        running_bindings.revision = running_bindings.revision.saturating_add(1);
         let scope = SyncScopeKey::Provider(operation.provider.clone());
         let link = running
             .links
@@ -9189,16 +8685,15 @@ fn build_publish_request(
         let mut checkpoint = checkpoint;
         checkpoint.generation = generation;
         threads.insert(operation.thread_id.clone(), checkpoint);
-        running.revision = running.revision.saturating_add(1);
-        let ConversationSyncOperationKind::CloudPublication(payload) = &mut operation.operation
-        else {
-            return Err("conversation Push built a non-publication operation".to_string());
-        };
-        payload.sync_config_before = before;
-        payload.sync_config_after = running.clone();
-        payload.bindings_before = bindings_before;
-        payload.bindings_after = running_bindings.clone();
     }
+    running.revision = running.revision.saturating_add(1);
+    running_bindings.revision = running_bindings.revision.saturating_add(1);
+    let publication_state = ConversationPublicationState {
+        sync_config_before: reviewed_config,
+        sync_config_after: running,
+        bindings_before: document,
+        bindings_after: running_bindings,
+    };
     // Every carried conversation stays selected in its scope's recipe.
     for scope in writable_scopes.values_mut() {
         for thread in scope.conversations.values() {
@@ -9206,7 +8701,7 @@ fn build_publish_request(
                 thread.resource_id.clone(),
                 RecipeEntry {
                     resource_id: thread.resource_id.clone(),
-                    apply_policy: ApplyPolicy::SafeFile,
+                    apply_policy: contracts::safe_file(),
                     required: false,
                 },
             );
@@ -9227,6 +8722,8 @@ fn build_publish_request(
             updated_at,
         },
         operations,
+        publication_state,
+        failures,
     ))
 }
 
@@ -9238,37 +8735,13 @@ fn cloud_publication_from_snapshot(snapshot: &BundleSnapshot) -> ConversationClo
     }
 }
 
-/// The push-recovery content witness: identify a published candidate by
-/// comparing each operation's journaled `tail_after` (the artifact's wire
-/// tail) against the manifest thread's wire tail — wire against wire, never
-/// a local value against the manifest.
-fn snapshot_contains_publications(
-    snapshot: &BundleSnapshot,
-    expected: &[(CloudThreadId, PortableConversationTail)],
-) -> bool {
-    expected.iter().all(|(thread_id, tail_after)| {
-        snapshot
-            .manifest
-            .find_conversation(thread_id)
-            .is_some_and(|(_, thread)| match &thread.portable_tail {
-                Some(tail) => tail == tail_after,
-                // Providers without the portable codec are witnessed by the
-                // synthesized whole-thread equivalence.
-                None => {
-                    thread.message_count == tail_after.accepted_end_record_count
-                        && thread.semantic_digest == tail_after.accepted_tail_state
-                }
-            })
-    })
-}
-
 /// Prove every provider thread can be committed to its reviewed binding
 /// before immutable publication and the remote head CAS.  The binding
 /// document's global uniqueness check remains the final invariant, but it is
 /// too late to discover an ownership conflict after the cloud commit.
 fn validate_cloud_publication_binding_owners(
     bindings: &[LocalConversationBinding],
-    operations: &[ConversationSyncOperation],
+    operations: &[ConversationApplyOperation],
 ) -> Result<(), String> {
     let mut owners = BTreeMap::new();
     for binding in bindings {
@@ -9319,9 +8792,9 @@ fn validate_cloud_publication_binding_owners(
 struct ReviewedPublishOutcome {
     published: bool,
     snapshot: BundleSnapshot,
-    /// Reviewed actions whose apply-time re-proof failed; each kept its
-    /// previous cloud state and reports its own reason.
-    stale_conversations: Vec<(ConversationPlanAction, String)>,
+    /// Selected conversations the request could not build; nothing of
+    /// theirs was published.
+    failures: Vec<PushThreadFailure>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9337,8 +8810,7 @@ fn publish_reviewed(
         BundleSnapshot,
         mallard_infrastructure::bundle_engine::HeadToken,
     )>,
-    conversation_push_plan_id: Option<&PlanId>,
-    approved_conversation_action_ids: &[ActionId],
+    selected_actions: Vec<ConversationPlanAction>,
     updated_at: u64,
     on_progress: &mut dyn FnMut(FetchProgress),
     on_phase: &mut dyn FnMut(&str, Duration),
@@ -9349,190 +8821,11 @@ fn publish_reviewed(
         .as_ref()
         .map(|(_, token)| PublishExpectation::Match(token.clone()))
         .unwrap_or(PublishExpectation::Absent);
-    let (revision, commit_id, manifest_sha256) = previous
-        .map(|snapshot| {
-            (
-                snapshot.head.revision,
-                snapshot.head.commit_id.clone(),
-                snapshot.head.manifest_sha256.clone(),
-            )
-        })
-        .unwrap_or_else(absent_bundle_head_pin);
-    let selected_actions = match conversation_push_plan_id {
-        Some(plan_id) => {
-            let plan = repository.load_conversation_push_plan(plan_id)?;
-            plan.validate()?;
-            if plan.storage_id != *storage_id
-                || plan.bundle_id != project.bundle_id
-                || plan.host_id != binding.host_id
-                || plan.replica_id != binding.replica_id
-                || plan.local_project_id != binding.local_project_id
-                || plan.revision != revision
-                || plan.commit_id != commit_id
-                || plan.manifest_sha256 != manifest_sha256
-                || updated_at < plan.created_at
-                || updated_at > plan.expires_at
-            {
-                return Err("conversation Push plan is stale; refresh the Push review".to_string());
-            }
-            selected_conversation_actions(&plan, approved_conversation_action_ids)?
-        }
-        None if approved_conversation_action_ids.is_empty() => Vec::new(),
-        None => {
-            return Err("selected conversation Push actions lack their reviewed plan".to_string())
-        }
-    };
-    let plan_id = conversation_push_plan_id
-        .cloned()
-        .unwrap_or(PlanId::parse(generated_named_id("plan")?)?);
-    on_phase("load reviewed conversation plan", phase_started.elapsed());
-    let phase_started = Instant::now();
-    let document = repository.load_conversation_bindings()?;
-    let machine = repository.load_bindings()?;
-    let identity = repository.load_or_create_host_identity()?;
-    // Apply-time re-proof, one item at a time: an action whose local
-    // conversation or shared state moved after review fails closed by
-    // itself; the other reviewed actions still publish, and every skipped
-    // thread keeps its previous cloud state in the manifest.
-    let revalidate = |action: &ConversationPlanAction| -> Result<(), String> {
-        let (conversation, transcript) = captured_conversation_for_action(&captured, action)?;
-        if action
-            .source_resource_id
-            .as_ref()
-            .is_some_and(|resource_id| !recipe.entries.contains_key(resource_id))
-        {
-            return Err(format!(
-                "conversation Push action '{}' is no longer selected",
-                action.action_id
-            ));
-        }
-        let local_binding = document.bindings.iter().find(|candidate| {
-            candidate.host_id == binding.host_id
-                && candidate.replica_id == binding.replica_id
-                && candidate.local_project_id == binding.local_project_id
-                && candidate.provider_profile_id == action.pins.context.provider_profile_id
-                && Some(&candidate.thread_id) == action.thread_id.as_ref()
-        });
-        let profile = machine
-            .profiles
-            .iter()
-            .find(|profile| profile.profile_id == action.pins.context.provider_profile_id)
-            .ok_or_else(|| "reviewed provider profile disappeared".to_string())?;
-        let _ = codec_digests(&conversation.lineage);
-        let (scope_revision, scope_sha256) = previous
-            .and_then(|snapshot| snapshot.manifest.provider_scope(&action.provider))
-            .map(|scope| (scope.revision, scope.content_sha256.clone()))
-            .unwrap_or_else(absent_scope_pin);
-        // Re-prove the raw unaccepted interval byte-for-byte; the canonical
-        // re-proof happens in build_publish_request's reconstruction.
-        let raw_range = match &action.pins.tail.raw_range {
-            Some(pin) => {
-                let source = captured_transcript_source(conversation)?;
-                let live_bytes = jsonl_tail_io::read_bounded(&source).ok();
-                let bytes = live_bytes
-                    .as_deref()
-                    .unwrap_or_else(|| transcript.bytes.as_bytes());
-                if pin.end_byte_offset > bytes.len() as u64 {
-                    None
-                } else {
-                    Some(RawRangePin {
-                        start_byte_offset: pin.start_byte_offset,
-                        end_byte_offset: pin.end_byte_offset,
-                        range_sha256: hex_digest(
-                            Sha256::digest(
-                                &bytes
-                                    [pin.start_byte_offset as usize..pin.end_byte_offset as usize],
-                            )
-                            .as_slice(),
-                        ),
-                    })
-                }
-            }
-            None => None,
-        };
-        // The live checkpoint generation is the honest staleness read here;
-        // the tail fields mirror the action's own pins because the byte-level
-        // re-proofs (raw range here, full reconstruction in the build) carry
-        // the real content verification.
-        let live_checkpoint_generation = repository.load_config().ok().and_then(|config| {
-            config
-                .links
-                .iter()
-                .find(|link| {
-                    link.local_project_id == binding.local_project_id
-                        && &link.storage_id == storage_id
-                })
-                .and_then(|link| {
-                    link.conversation_checkpoints
-                        .get(&SyncScopeKey::Provider(action.provider.clone()))
-                })
-                .and_then(|threads| {
-                    action
-                        .thread_id
-                        .as_ref()
-                        .and_then(|thread_id| threads.get(thread_id))
-                })
-                .map(|checkpoint| checkpoint.generation)
-        });
-        let context = ConversationApplyContext {
-            now: updated_at,
-            pins: ConversationActionPins {
-                context: ConversationContextPins {
-                    host_id: binding.host_id.clone(),
-                    replica_id: binding.replica_id.clone(),
-                    local_project_id: binding.local_project_id.clone(),
-                    provider_profile_id: action.pins.context.provider_profile_id.clone(),
-                    host_identity_revision: identity.revision,
-                    profile_revision: profile.revision,
-                    project_binding_revision: binding.revision,
-                    bindings_document_revision: document.revision,
-                    binding_revision: local_binding.map(|binding| binding.revision),
-                },
-                revision: ConversationRevisionPins {
-                    bundle_revision: revision,
-                    commit_id: commit_id.clone(),
-                    manifest_sha256: manifest_sha256.clone(),
-                    scope_revision,
-                    scope_sha256,
-                },
-                tail: ConversationTailPins {
-                    accepted: action.pins.tail.accepted.clone(),
-                    accepted_local: action.pins.tail.accepted_local.clone(),
-                    local: action.pins.tail.local.clone(),
-                    cloud: action.pins.tail.cloud.clone(),
-                    checkpoint_generation: live_checkpoint_generation,
-                    lineage_digest: action.pins.tail.lineage_digest.clone(),
-                    semantic_digest: action.pins.tail.semantic_digest.clone(),
-                    raw_range,
-                },
-                target: ConversationTargetPins {
-                    local: TargetExpectation::Sha256(transcript.bytes.sha256().to_string()),
-                    provider_state: Vec::new(),
-                },
-                codec: conversation.lineage_codec.clone(),
-                expires_at: action.pins.expires_at,
-            },
-        };
-        validate_conversation_action_pins(action, &context).map_err(|pin| {
-            format!(
-                "conversation Push action '{}' is stale at {:?}",
-                action.action_id, pin
-            )
-        })
-    };
-    let mut stale_conversations: Vec<(ConversationPlanAction, String)> = Vec::new();
-    let mut validated_actions = Vec::with_capacity(selected_actions.len());
-    for action in selected_actions {
-        match revalidate(&action) {
-            Ok(()) => validated_actions.push(action),
-            Err(message) => stale_conversations.push((action, message)),
-        }
-    }
-    let selected_actions = validated_actions;
-    on_phase("revalidate reviewed conversations", phase_started.elapsed());
+    let plan_id = PlanId::parse(generated_named_id("apply")?)?;
+    on_phase("build conversation actions", phase_started.elapsed());
     let phase_started = Instant::now();
     let resolved_binding = resolve_project_binding(repository, binding)?;
-    let (request, operations) = build_publish_request(
+    let (request, operations, publication_state, failures) = build_publish_request(
         repository,
         &plan_id,
         storage_id,
@@ -9546,73 +8839,43 @@ fn publish_reviewed(
         &selected_actions,
         updated_at,
     )?;
-    validate_cloud_publication_binding_owners(&document.bindings, &operations)?;
-    let published_expectations: Vec<(CloudThreadId, PortableConversationTail)> = operations
-        .iter()
-        .filter_map(|operation| match &operation.operation {
-            ConversationSyncOperationKind::CloudPublication(payload) => Some((
-                operation.cloud_thread_id.clone(),
-                payload.tail_after.clone(),
-            )),
-            _ => None,
-        })
-        .collect();
+    validate_cloud_publication_binding_owners(
+        &publication_state.bindings_before.bindings,
+        &operations,
+    )?;
     on_phase("build publish request", phase_started.elapsed());
     let phase_started = Instant::now();
     if operations.is_empty() {
         let outcome = engine.publish_with_progress(request, on_progress, on_phase)?;
-        if let Some(plan_id) = conversation_push_plan_id {
-            let _ = repository.discard_conversation_push_plan(plan_id);
-        }
         return Ok(ReviewedPublishOutcome {
             published: outcome.published,
             snapshot: outcome.snapshot,
-            stale_conversations,
+            failures,
         });
     }
-    let published = std::cell::Cell::new(false);
-    let mut failpoints = NoConversationFailpoints;
+    let publish_outcome = std::cell::RefCell::new(None);
     apply_conversation_cloud_publications_locked(
         repository,
         operations,
+        publication_state,
         || {
             let outcome = engine.publish_with_progress(request, on_progress, &mut *on_phase)?;
-            published.set(outcome.published);
-            Ok(cloud_publication_from_snapshot(&outcome.snapshot))
+            let publication = cloud_publication_from_snapshot(&outcome.snapshot);
+            *publish_outcome.borrow_mut() = Some(outcome);
+            Ok(publication)
         },
-        || {
-            let snapshot = engine.inspect(&project.bundle_id)?;
-            Ok(
-                snapshot_contains_publications(&snapshot, &published_expectations).then(|| {
-                    published.set(previous.is_none_or(|previous| {
-                        snapshot.head.revision != previous.head.revision
-                            || snapshot.head.commit_id != previous.head.commit_id
-                    }));
-                    cloud_publication_from_snapshot(&snapshot)
-                }),
-            )
-        },
-        &mut failpoints,
     )?;
     on_phase(
-        "publish and journal conversation receipts",
+        "publish conversations and receipts",
         phase_started.elapsed(),
     );
-    let phase_started = Instant::now();
-    let snapshot = engine.inspect(&project.bundle_id)?;
-    if !snapshot_contains_publications(&snapshot, &published_expectations) {
-        return Err(
-            "published bundle head does not contain the reviewed conversations".to_string(),
-        );
-    }
-    if let Some(plan_id) = conversation_push_plan_id {
-        let _ = repository.discard_conversation_push_plan(plan_id);
-    }
-    on_phase("confirm published head", phase_started.elapsed());
+    let outcome = publish_outcome
+        .into_inner()
+        .ok_or_else(|| "conversation publication produced no bundle result".to_string())?;
     Ok(ReviewedPublishOutcome {
-        published: published.get(),
-        snapshot,
-        stale_conversations,
+        published: outcome.published,
+        snapshot: outcome.snapshot,
+        failures,
     })
 }
 
@@ -9624,8 +8887,6 @@ fn push_bundle_reviewed_with_repository(
     storage_id: &StorageId,
     requested_recipe: BundleRecipe,
     project_content_review: ProjectContentPushReview,
-    conversation_push_plan_id: Option<PlanId>,
-    approved_conversation_action_ids: Vec<ActionId>,
     on_progress: &mut dyn FnMut(FetchProgress),
 ) -> Result<ProjectOperationResult, String> {
     push_bundle_reviewed_with_progress(
@@ -9634,11 +8895,78 @@ fn push_bundle_reviewed_with_repository(
         storage_id,
         requested_recipe,
         project_content_review,
-        conversation_push_plan_id,
-        approved_conversation_action_ids,
         on_progress,
         &mut |_, _| {},
     )
+}
+
+/// Result-row state for a selected conversation the Push could not publish.
+const PUSH_RESULT_FAILED: &str = "failed";
+/// Result-row state for a selected conversation a Pull has to resolve first.
+const PUSH_RESULT_HELD: &str = "held";
+
+/// One result row per selected conversation the Push did not publish, keyed
+/// by the review's resource id: a thread that failed to build carries its
+/// build error; a thread the apply-time review withheld carries the review's
+/// reason, as `held` when a Pull resolves it and as `failed` otherwise.
+/// Up-to-date threads and rows the review never produced (suppressed
+/// aliases, discovery-blocked sources) were never pushable and add nothing.
+fn conversation_push_results(
+    selected: &BTreeSet<ResourceId>,
+    actioned: &BTreeSet<ResourceId>,
+    entries: &[ThreadSyncEntry],
+    failures: Vec<PushThreadFailure>,
+) -> Vec<OperationResourceResult> {
+    let mut results = failures
+        .into_iter()
+        .map(|failure| OperationResourceResult {
+            resource_id: failure.resource_id,
+            state: PUSH_RESULT_FAILED.to_string(),
+            message: Some(failure.message),
+        })
+        .collect::<Vec<_>>();
+    for resource_id in selected {
+        if actioned.contains(resource_id) {
+            continue;
+        }
+        let Some(entry) = entries
+            .iter()
+            .find(|entry| &entry.resource_id == resource_id)
+        else {
+            continue;
+        };
+        let decision = &entry.push_decision;
+        if decision.action == ConversationReviewAction::NoChanges {
+            continue;
+        }
+        let held = matches!(
+            decision.action,
+            ConversationReviewAction::RequirePull | ConversationReviewAction::RequirePullMetadata
+        ) || decision.blocker == Some(ConversationBlocker::DetachedRequiresPull);
+        let message = decision
+            .blocked_reason
+            .clone()
+            .or_else(|| entry.status_detail.clone())
+            .unwrap_or_else(|| {
+                if held {
+                    "Storage has changes this Push did not include. Pull first, then push again."
+                        .to_string()
+                } else {
+                    "This conversation was not pushable when the Push ran.".to_string()
+                }
+            });
+        results.push(OperationResourceResult {
+            resource_id: resource_id.clone(),
+            state: if held {
+                PUSH_RESULT_HELD
+            } else {
+                PUSH_RESULT_FAILED
+            }
+            .to_string(),
+            message: Some(message),
+        });
+    }
+    results
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9648,15 +8976,14 @@ pub(super) fn push_bundle_reviewed_with_progress(
     storage_id: &StorageId,
     requested_recipe: BundleRecipe,
     project_content_review: ProjectContentPushReview,
-    conversation_push_plan_id: Option<PlanId>,
-    approved_conversation_action_ids: Vec<ActionId>,
     on_progress: &mut dyn FnMut(FetchProgress),
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<ProjectOperationResult, String> {
     requested_recipe.validate_machine_local()?;
     let phase_started = Instant::now();
     let _host_operation = repository.acquire_host_operation()?;
-    let config = repository.load_config()?;
+    let state = repository.load_project_state_snapshot()?;
+    let config = &state.config;
     let project = config
         .project(local_project_id)
         .cloned()
@@ -9664,8 +8991,8 @@ pub(super) fn push_bundle_reviewed_with_progress(
     let link = require_project_link(&config, &project, storage_id)?.clone();
     let stored_destination_recipe = link.recipe.clone();
     let expected_preference_revision = link.project_content_preferences.revision;
-    let binding = repository
-        .load_bindings()?
+    let binding = state
+        .bindings
         .active_for(local_project_id)
         .cloned()
         .ok_or_else(|| {
@@ -9674,7 +9001,6 @@ pub(super) fn push_bundle_reviewed_with_progress(
                 local_project_id
             )
         })?;
-    require_codex_conversation_paths_ready(repository, &binding.local_project_id)?;
     on_phase("load config and binding", phase_started.elapsed());
     let phase_started = Instant::now();
     // One provider walk feeds the review-token freshness check and byte
@@ -9684,49 +9010,25 @@ pub(super) fn push_bundle_reviewed_with_progress(
     if wants_project_content && eligibility.state != ProjectFileSyncEligibilityState::Eligible {
         return Err(eligibility.reason);
     }
-    let mut capture_request = capture_request_for_binding(repository, &binding)?;
+    let resolved = resolve_project_binding_from_state(&state.bindings, &binding)?;
+    let mut capture_request = capture_request_for_resolved_binding_from_state(
+        repository.root(),
+        config,
+        &state.bindings,
+        &resolved,
+    )?;
     capture_request.include_project_content = wants_project_content;
     let discovery = provider_capture::discover_full(provider_registry(), &capture_request)?;
     let discovered = discovery.project_inventory();
-    let local_conversations = discovered
-        .resources
-        .iter()
-        .filter(|candidate| candidate.kind == CaptureResourceKind::Conversation)
-        .collect::<Vec<_>>();
-    if let Some(candidate) = local_conversations
-        .iter()
-        .find(|candidate| candidate.blocked_reason.is_some())
-    {
-        return Err(format!(
-            "conversation Push is blocked because '{}' cannot be reviewed safely; resolve the local capture problem before pushing",
-            candidate.display_name
-        ));
-    }
     on_phase("discover local state", phase_started.elapsed());
     let phase_started = Instant::now();
-    let (_, engine) = storage_engine(repository, storage_id)?;
+    let (_, engine) = storage_engine_from_state(repository, config, &state.bindings, storage_id)?;
     let observed = engine.inspect_optional_with_token(&project.bundle_id)?;
     let remote_project_content = observed
         .as_ref()
         .map(|(snapshot, _)| project_content_versions(&snapshot.manifest))
         .transpose()?
         .unwrap_or_default();
-    let has_stored_bound_conversation = observed.as_ref().is_some_and(|(snapshot, _)| {
-        snapshot
-            .manifest
-            .provider_scopes()
-            .any(|(provider, scope)| {
-                binding.profile_ids.contains_key(provider) && !scope.conversations.is_empty()
-            })
-    });
-    if conversation_push_plan_id.is_none()
-        && (!local_conversations.is_empty() || has_stored_bound_conversation)
-    {
-        return Err(
-            "conversation Push requires a current Push review; refresh and review before pushing"
-                .to_string(),
-        );
-    }
     on_phase("inspect remote head", phase_started.elapsed());
     let phase_started = Instant::now();
     let mut push_recipe = requested_recipe;
@@ -9861,7 +9163,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
                         .entry(required_id.clone())
                         .or_insert(RecipeEntry {
                             resource_id: required_id,
-                            apply_policy: ApplyPolicy::ExplicitReview,
+                            apply_policy: contracts::explicit_review(),
                             required: true,
                         });
                 }
@@ -9919,6 +9221,73 @@ pub(super) fn push_bundle_reviewed_with_progress(
         return Err(error);
     }
     let pushed_at = now_secs();
+    let selected_conversations = discovered
+        .resources
+        .iter()
+        .filter(|candidate| {
+            kind_primitive(&candidate.kind) == Some(ResourceKindPrimitive::Conversation)
+                && push_recipe.entries.contains_key(
+                    &ResourceId::parse(candidate.resource_id.clone()).unwrap_or_else(|_| {
+                        unreachable!("discovery produced an invalid resource id")
+                    }),
+                )
+        })
+        .map(|candidate| ResourceId::parse(candidate.resource_id.clone()))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let views = provider_capture::local_session_views(&discovery);
+    let no_pins = BTreeMap::new();
+    let review = match observed.as_ref().map(|(snapshot, _)| snapshot) {
+        Some(snapshot) => {
+            let mut bytes = engine.byte_source(snapshot, Some(object_cache()), None);
+            thread_review(
+                repository,
+                Some(snapshot),
+                &mut bytes,
+                &views,
+                &capture,
+                &no_pins,
+                &resolved,
+                Some(storage_id),
+                pushed_at,
+                pushed_at,
+                ReviewPurpose::PushPlan,
+                Some(&selected_conversations),
+            )?
+        }
+        None => {
+            let mut bytes = EmptyBundleBytes;
+            thread_review(
+                repository,
+                None,
+                &mut bytes,
+                &views,
+                &capture,
+                &no_pins,
+                &resolved,
+                Some(storage_id),
+                pushed_at,
+                pushed_at,
+                ReviewPurpose::PushPlan,
+                Some(&selected_conversations),
+            )?
+        }
+    };
+    let ThreadReview {
+        entries: reviewed_entries,
+        push_actions: selected_actions,
+        provider_errors,
+        ..
+    } = review;
+    if let Some((provider, message)) = provider_errors.into_iter().next() {
+        return Err(format!(
+            "{} conversation apply failed: {}",
+            provider, message
+        ));
+    }
+    let actioned_resources = selected_actions
+        .iter()
+        .filter_map(|action| action.source_resource_id.clone())
+        .collect::<BTreeSet<_>>();
     let publish_outcome = publish_reviewed(
         repository,
         &engine,
@@ -9928,14 +9297,19 @@ pub(super) fn push_bundle_reviewed_with_progress(
         &push_recipe,
         capture,
         observed,
-        conversation_push_plan_id.as_ref(),
-        &approved_conversation_action_ids,
+        selected_actions,
         pushed_at,
         on_progress,
         &mut *on_phase,
     )?;
     let was_published = publish_outcome.published;
     let published_snapshot = publish_outcome.snapshot;
+    let thread_results = conversation_push_results(
+        &selected_conversations,
+        &actioned_resources,
+        &reviewed_entries,
+        publish_outcome.failures,
+    );
     let phase_started = Instant::now();
     let revision = published_snapshot.head.revision;
     let commit_id = published_snapshot.head.commit_id.clone();
@@ -10068,37 +9442,28 @@ pub(super) fn push_bundle_reviewed_with_progress(
         })
         .collect::<Vec<_>>();
     let resources_changed = Some(if was_published { results.len() } else { 0 });
-    for (action, message) in &publish_outcome.stale_conversations {
-        results.push(OperationResourceResult {
-            resource_id: conversation_action_row_key(action).ok_or_else(|| {
-                format!(
-                    "conversation Push action '{}' names no reportable resource",
-                    action.action_id
-                )
-            })?,
-            state: "failed".to_string(),
-            message: Some(message.clone()),
-        });
-    }
-    let skipped = publish_outcome.stale_conversations.len();
-    let skipped_note = match skipped {
-        0 => String::new(),
-        1 => "; 1 reviewed conversation changed during review, kept its stored state, and needs \
-              a fresh Push review"
-            .to_string(),
-        _ => format!(
-            "; {} reviewed conversations changed during review, kept their stored state, and \
-             need a fresh Push review",
-            skipped
+    let failed = thread_results
+        .iter()
+        .filter(|result| result.state == PUSH_RESULT_FAILED)
+        .count();
+    results.extend(thread_results);
+    let sessions = |count: usize| if count == 1 { "session" } else { "sessions" };
+    let message = match (was_published, failed) {
+        (true, 0) => format!("Published revision {}", revision),
+        (true, failed) => format!(
+            "Published revision {} — {} {} not pushed",
+            revision,
+            failed,
+            sessions(failed)
         ),
+        (false, 0) => format!("Already up to date — revision {}", revision),
+        (false, failed) => format!("Nothing published — {} {} failed", failed, sessions(failed)),
     };
     Ok(ProjectOperationResult {
-        success: true,
-        message: if was_published {
-            format!("Published revision {}{}", revision, skipped_note)
-        } else {
-            format!("Already up to date — revision {}{}", revision, skipped_note)
-        },
+        // A Push succeeds when every selected thread it could act on was
+        // published; a failed thread is reported, never hidden.
+        success: failed == 0,
+        message,
         operation_id: Some(commit_id),
         resources_changed,
         revision: Some(revision),
@@ -10111,19 +9476,20 @@ pub(super) fn plan_bundle_restore_with_progress(
     storage_id: &StorageId,
     bundle_id: &BundleId,
     binding: &ProjectBinding,
-    on_progress: &mut dyn FnMut(FetchProgress),
+    _on_progress: &mut dyn FnMut(FetchProgress),
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<RestorePlan, String> {
     let phase_started = Instant::now();
     let _host_operation = repository.acquire_host_operation()?;
-    let resolved = require_current_binding(repository, binding)?;
+    let state = repository.load_project_state_snapshot()?;
+    let resolved = require_current_binding_from_state(&state.bindings, binding)?;
     let binding = resolved.binding.clone();
     if &binding.bundle_id != bundle_id {
         return Err("binding and requested bundle IDs differ".to_string());
     }
-    require_codex_conversation_paths_ready(repository, &binding.local_project_id)?;
-    let (engine, snapshot) = inspect_from_storage(repository, storage_id, bundle_id)?;
-    let config = repository.load_config()?;
+    let config = &state.config;
+    let (_, engine) = storage_engine_from_state(repository, config, &state.bindings, storage_id)?;
+    let snapshot = engine.inspect(bundle_id)?;
     if config.project(&binding.local_project_id).is_none() {
         return Err(format!(
             "unknown local project '{}'",
@@ -10141,7 +9507,7 @@ pub(super) fn plan_bundle_restore_with_progress(
     );
     on_phase("inspect remote head and manifest", phase_started.elapsed());
     let phase_started = Instant::now();
-    let identity = repository.load_or_create_host_identity()?;
+    let identity = &state.host_identity;
     if identity.host_id != binding.host_id {
         return Err("host identity changed while preparing the Pull review".to_string());
     }
@@ -10170,146 +9536,217 @@ pub(super) fn plan_bundle_restore_with_progress(
             || !resolved.homes.is_empty();
     if has_bound_provider_conversations {
         let phase_started = Instant::now();
-        let mut byte_source =
-            engine.byte_source(&snapshot, Some(object_cache()), Some(on_progress));
-        let capture_request = capture_request_for_binding(repository, &binding)?;
-        let (discovery, views) = super::session_watch_service::session_watch_service()
+        let mut byte_source = engine.byte_source(&snapshot, Some(object_cache()), None);
+        let capture_request = capture_request_for_resolved_binding_from_state(
+            repository.root(),
+            config,
+            &state.bindings,
+            &resolved,
+        )?;
+        let (_discovery, views) = super::session_watch_service::session_watch_service()
             .discovery_for(
                 provider_registry(),
                 &binding.local_project_id,
                 &capture_request,
             )?;
-        // Providers without a cursor codec capture up front; cursor-provider
-        // rows are captured only when one classification pass (cache-served
-        // when quiet) marks them byte-pinning Pull candidates. Adopting cloud
-        // metadata pins no local bytes and CreateLocal has none, so
-        // storage-only, synced, and unrelated sessions read nothing.
-        let base_selection = discovery
-            .project_inventory()
-            .resources
-            .into_iter()
-            .filter(|candidate| candidate.kind == CaptureResourceKind::Conversation)
-            .filter(|candidate| {
-                candidate
-                    .provider
-                    .as_ref()
-                    .is_none_or(|provider| !provider_supports_tail_cursor(provider))
-            })
-            .map(|candidate| candidate.resource_id)
-            .collect::<BTreeSet<_>>();
-        let captured = provider_capture::capture_from_discovery(
-            provider_registry(),
-            &capture_request,
-            &discovery,
-            &base_selection,
-        )?;
-        let preliminary = thread_review(
+        let review = thread_review(
             repository,
             Some(&snapshot),
             &mut byte_source,
             &views,
-            &captured,
+            &provider_capture::CapturedResources::default(),
             &BTreeMap::new(),
             &resolved,
             Some(&plan.storage_id),
             plan.created_at,
-            plan.expires_at,
+            plan.created_at,
             ReviewPurpose::Observe,
+            None,
         )?;
-        let mut selection = base_selection.clone();
-        for entry in preliminary.entries.iter().filter(|entry| {
-            entry.pull_decision.selectable
-                && entry.local_present
-                && entry.pull_decision.action != ConversationReviewAction::AdoptCloudMetadata
-        }) {
-            selection.insert(entry.resource_id.to_string());
-        }
-        // The same per-capture ceiling as Push, fitted the same way: the
-        // newest local candidates that fit are captured for their byte pins,
-        // the rest keep their row without an action, and a cached pin is
-        // charged before it is served.
-        let (fit, selection, candidate_pins) = plan_candidate_capture(
-            &views,
-            &base_selection,
-            selection,
-            provider_capture::MAX_CAPTURE_BYTES,
-            |kept| {
-                reuse_candidate_pins(
-                    &capture_request,
-                    &binding.local_project_id,
-                    &views,
-                    &base_selection,
-                    kept,
-                )
-            },
-        );
-        let captured = if selection == base_selection {
-            captured
-        } else {
-            provider_capture::capture_from_discovery(
-                provider_registry(),
-                &capture_request,
-                &discovery,
-                &selection,
-            )?
-        };
-        store_candidate_pins_from_capture(
-            &capture_request,
+        plan.conversation_actions.clear();
+        plan.conversation_review = review
+            .entries
+            .into_iter()
+            .filter(|entry| entry.pull_decision.action != ConversationReviewAction::NoChanges)
+            .map(|entry| {
+                let local_thread_id = entry
+                    .local_present
+                    .then(|| {
+                        parse_conversation_resource_id(entry.conversation_resource_id.as_str())
+                    })
+                    .transpose()?
+                    .map(|(_, thread_id)| thread_id);
+                let action_id = entry
+                    .pull_decision
+                    .action
+                    .planned_action()
+                    .map(|_| ActionId::parse(generated_named_id("selection")?))
+                    .transpose()?;
+                Ok(ConversationReviewRow {
+                    provider: entry.provider,
+                    thread_id: local_thread_id,
+                    cloud_thread_id: entry.cloud_thread_id,
+                    resource_id: entry.resource_id,
+                    action: entry.pull_decision.action,
+                    blocker: entry.pull_decision.blocker,
+                    blocked_reason: entry.pull_decision.blocked_reason,
+                    action_id,
+                    display_title: (entry.display_name != entry.thread_id)
+                        .then_some(entry.display_name),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        on_phase("compare conversations", phase_started.elapsed());
+    }
+    let phase_started = Instant::now();
+    plan.project_content_eligibility = Some(project_file_sync_eligibility(&binding));
+    plan.validate_review()?;
+    on_phase("finalize review", phase_started.elapsed());
+    Ok(plan)
+}
+
+struct RestoreApplyBuild {
+    plan: RestorePlan,
+    session_views: Vec<provider_capture::LocalSessionView>,
+    captured: provider_capture::CapturedResources,
+}
+
+/// Build fresh executable pins after the user starts Apply. The comparison
+/// object is only an approval anchor and is never executed or persisted.
+fn build_restore_plan_for_apply(
+    repository: &LocalStateRepository,
+    review: &RestorePlan,
+    resolved: &ResolvedBinding,
+    engine: &StorageEngine,
+    snapshot: &BundleSnapshot,
+    selected_conversations: &BTreeSet<ResourceId>,
+    byte_source: &mut dyn BundleBytes,
+    on_phase: &mut dyn FnMut(&str, Duration),
+) -> Result<RestoreApplyBuild, String> {
+    let binding = &resolved.binding;
+    let state = repository.load_project_state_snapshot()?;
+    let config = &state.config;
+    let link = project_link(&config, &binding.local_project_id, &review.storage_id)
+        .cloned()
+        .ok_or_else(|| "project is not linked to this storage".to_string())?;
+    let identity = &state.host_identity;
+    if identity.host_id != binding.host_id {
+        return Err("host identity changed before Pull apply".to_string());
+    }
+
+    let phase_started = Instant::now();
+    let project_content_bases =
+        project_content_base_content_digests(engine, &review.bundle_id, &link);
+    let mut plan = engine.build_restore_plan_from_snapshot(
+        provider_registry(),
+        snapshot,
+        binding,
+        &resolved.homes,
+        &project_content_bases,
+        now_secs(),
+        identity.revision,
+    )?;
+    plan.remote_continuity = review.remote_continuity.clone();
+    plan.project_content_eligibility = Some(project_file_sync_eligibility(binding));
+    on_phase("build apply plan", phase_started.elapsed());
+
+    let phase_started = Instant::now();
+    let capture_request = capture_request_for_resolved_binding_from_state(
+        repository.root(),
+        config,
+        &state.bindings,
+        resolved,
+    )?;
+    let (discovery, session_views) = super::session_watch_service::session_watch_service()
+        .discovery_for(
+            provider_registry(),
             &binding.local_project_id,
-            &views,
-            &base_selection,
-            &captured,
-        );
-        on_phase(
-            "discover and capture local conversations",
-            phase_started.elapsed(),
-        );
+            &capture_request,
+        )?;
+    let local_selection = discovery
+        .project_inventory()
+        .resources
+        .into_iter()
+        .filter_map(|candidate| {
+            ResourceId::parse(candidate.resource_id.clone())
+                .ok()
+                .filter(|resource_id| selected_conversations.contains(resource_id))
+                .map(|_| candidate.resource_id)
+        })
+        .collect::<BTreeSet<_>>();
+    let captured = provider_capture::capture_from_discovery(
+        provider_registry(),
+        &capture_request,
+        &discovery,
+        &local_selection,
+    )?;
+    on_phase("capture selected conversations", phase_started.elapsed());
+
+    if !selected_conversations.is_empty() {
         let phase_started = Instant::now();
-        let mut review = thread_review(
+        let review_actions = thread_review(
             repository,
-            Some(&snapshot),
-            &mut byte_source,
-            &views,
+            Some(snapshot),
+            byte_source,
+            &session_views,
             &captured,
-            &candidate_pins,
-            &resolved,
+            &BTreeMap::new(),
+            resolved,
             Some(&plan.storage_id),
             plan.created_at,
             plan.expires_at,
             ReviewPurpose::PullPlan,
+            Some(selected_conversations),
         )?;
-        hold_over_budget_pull_candidates(&mut review, &fit);
-        plan.conversation_actions = review.pull_actions;
-        plan.conversation_review = review.pull_review;
-        on_phase("classify and build pull actions", phase_started.elapsed());
+        if let Some((provider, message)) = review_actions.provider_errors.into_iter().next() {
+            return Err(format!(
+                "{} conversation apply failed: {}",
+                provider, message
+            ));
+        }
+        plan.conversation_actions = review_actions.pull_actions;
+        plan.conversation_review = review_actions.pull_review;
+        on_phase("build conversation actions", phase_started.elapsed());
     }
-    let phase_started = Instant::now();
-    plan.project_content_eligibility = Some(project_file_sync_eligibility(&binding));
     plan.validate()?;
-    repository.save_restore_plan(&plan)?;
-    on_phase("finalize and save review", phase_started.elapsed());
-    Ok(plan)
+    Ok(RestoreApplyBuild {
+        plan,
+        session_views,
+        captured,
+    })
 }
 
+#[derive(Clone)]
 struct PreparedPullConversation {
     action: ConversationPlanAction,
-    cloud_transcript: Vec<u8>,
+    cloud_transcript: VerifiedBody,
     cloud_file_sha256: String,
-    cloud_provider_thread_id: String,
-    cloud_cwd: String,
     cloud_forked_from: Option<CloudThreadId>,
     cloud_preserved: Option<PreservedProvenance>,
     cloud_display_title: Option<String>,
     cloud_wire_redaction: Option<mallard_domain::ConversationWireRedaction>,
     cloud_wire_path_map: Option<mallard_domain::ConversationWirePathMap>,
     cloud_updated_at: u64,
-    /// Sidecar references of the cloud row, for apply-time target
-    /// computation under the minted destination identity.
-    cloud_sidecars: Vec<(String, String)>,
+    /// The cloud row's sidecars, fetched and manifest-verified at prepare;
+    /// apply plans their targets under the destination identity and
+    /// installs them beside the transcript.
+    cloud_sidecars: Vec<PreparedPullSidecar>,
     /// The bound local session's discovery display name, when one exists —
     /// the keep-both marker's base-title input, captured at prepare because
     /// apply runs no discovery of its own.
     local_display_name: Option<String>,
+    /// The source selected at capture, never a path derived from cloud data.
+    local_source_path: Option<PathBuf>,
+}
+
+/// One sidecar of a cloud conversation row: its kind and kind-relative
+/// path (the adapter derives the destination name from these) and the
+/// verified object body, a temp file until apply reads it.
+#[derive(Clone)]
+struct PreparedPullSidecar {
+    sidecar_kind: String,
+    relative_path: String,
+    body: VerifiedBody,
 }
 
 #[derive(Clone, Debug)]
@@ -10317,45 +9754,17 @@ struct SelectedPullConversation {
     action: ConversationPlanAction,
 }
 
-fn capture_all_local_conversations(
-    repository: &LocalStateRepository,
-    resolved: &ResolvedBinding,
-) -> Result<
-    (
-        Vec<provider_capture::LocalSessionView>,
-        provider_capture::CapturedResources,
-    ),
-    String,
-> {
-    let capture_request = capture_request_for_binding(repository, &resolved.binding)?;
-    let discovery = provider_capture::discover_full(provider_registry(), &capture_request)?;
-    let selected = discovery
-        .project_inventory()
-        .resources
-        .into_iter()
-        .filter(|candidate| candidate.kind == CaptureResourceKind::Conversation)
-        .map(|candidate| candidate.resource_id)
-        .collect::<BTreeSet<_>>();
-    let captured = provider_capture::capture_from_discovery(
-        provider_registry(),
-        &capture_request,
-        &discovery,
-        &selected,
-    )?;
-    Ok((provider_capture::local_session_views(&discovery), captured))
-}
-
-fn local_target_expectation_for_action(
+fn captured_local_conversation_for_action<'a>(
     action: &ConversationPlanAction,
     binding: &ProjectBinding,
     document: &mallard_domain::ConversationBindings,
-    captured: &provider_capture::CapturedResources,
-) -> TargetExpectation {
+    captured: &'a provider_capture::CapturedResources,
+) -> Option<&'a provider_capture::CapturedConversation> {
     // Metadata-only actions neither read nor write the local transcript:
     // their stale-pin guard covers everything except the local file, so
     // review never captures them and apply derives no local digest.
     if action.action == ConversationPlanActionType::AdoptCloudMetadata {
-        return TargetExpectation::Absent;
+        return None;
     }
     let provider_thread_id = document
         .bindings
@@ -10368,16 +9777,12 @@ fn local_target_expectation_for_action(
                 && Some(&candidate.thread_id) == action.thread_id.as_ref()
         })
         .and_then(|candidate| candidate.provider_thread_id.as_deref());
-    provider_thread_id
-        .and_then(|provider_thread_id| {
-            captured.conversations.values().find(|conversation| {
-                conversation.provider == action.provider
-                    && conversation.source_thread_id.as_deref() == Some(provider_thread_id)
-            })
+    provider_thread_id.and_then(|provider_thread_id| {
+        captured.conversations.values().find(|conversation| {
+            conversation.provider == action.provider
+                && conversation.source_thread_id.as_deref() == Some(provider_thread_id)
         })
-        .and_then(|conversation| captured.files.get(&conversation.transcript_logical_path))
-        .map(|file| TargetExpectation::Sha256(file.bytes.sha256().to_string()))
-        .unwrap_or(TargetExpectation::Absent)
+    })
 }
 
 struct PreparedPullConversationFailure {
@@ -10396,6 +9801,8 @@ fn prepare_pull_conversation_actions(
     snapshot: &BundleSnapshot,
     bytes: &mut dyn BundleBytes,
     actions: &[SelectedPullConversation],
+    session_views: &[provider_capture::LocalSessionView],
+    captured: &provider_capture::CapturedResources,
     storage_id: &StorageId,
     now: u64,
 ) -> Result<
@@ -10409,18 +9816,16 @@ fn prepare_pull_conversation_actions(
     if actions.is_empty() {
         return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
-    // The session views feed two apply-side needs: the minted-identity
-    // occupied set and the keep-both base-title inputs.
-    let (session_views, captured) = capture_all_local_conversations(repository, resolved)?;
     let binding = &resolved.binding;
-    let document = repository.load_conversation_bindings()?;
-    let machine = repository.load_bindings()?;
-    let identity = repository.load_or_create_host_identity()?;
-    // One batched prefetch covers every approved in-policy transcript; the
-    // per-action bounded read below is then a verified cache hit. Best-effort:
-    // a failed batch falls back to per-action reads, which fail one item, not
-    // the pass. Oversized transcripts are rejected before transfer.
-    let transcript_paths = actions
+    let state = repository.load_project_activity_state_snapshot()?;
+    let document = &state.conversation_bindings;
+    let machine = &state.bindings;
+    let identity = &state.host_identity;
+    // One batched prefetch covers every approved in-policy transcript and
+    // sidecar; the per-action bounded reads below are then verified cache
+    // hits. A transfer failure ends this Apply attempt. Oversized files are
+    // rejected before transfer.
+    let payload_paths = actions
         .iter()
         .filter_map(|selected| {
             selected
@@ -10428,11 +9833,16 @@ fn prepare_pull_conversation_actions(
                 .cloud_thread_id
                 .as_ref()
                 .and_then(|cloud_thread_id| snapshot.manifest.find_conversation(cloud_thread_id))
-                .and_then(|(_, thread)| {
-                    thread
-                        .files
-                        .iter()
-                        .find(|file| file.role == ConversationFileRole::Transcript)
+        })
+        .flat_map(|(_, thread)| {
+            thread
+                .files
+                .iter()
+                .filter(|file| {
+                    matches!(
+                        file.role,
+                        ConversationFileRole::Transcript | ConversationFileRole::Sidecar { .. }
+                    )
                 })
                 .map(|file| file.logical_path.clone())
         })
@@ -10443,13 +9853,22 @@ fn prepare_pull_conversation_actions(
                 .is_some_and(|(_, entry)| entry.size <= conversation_file_limit_bytes())
         })
         .collect::<Vec<_>>();
-    let _ = bytes.prefetch(&transcript_paths);
+    bytes.prefetch(&payload_paths)?;
     let mut prepared = Vec::with_capacity(actions.len());
     let mut failures = Vec::new();
     let prepare_one = |selected: &SelectedPullConversation,
                        bytes: &mut dyn BundleBytes|
      -> Result<PreparedPullConversation, String> {
         let action = &selected.action;
+        // A local counterpart whose capture failed cannot pin a target: the
+        // thread fails with the capture's own error.
+        if let Some(message) = action
+            .source_resource_id
+            .as_ref()
+            .and_then(|resource_id| captured.failed_conversations.get(resource_id.as_str()))
+        {
+            return Err(format!("local capture failed: {message}"));
+        }
         let cloud_thread_id = action.cloud_thread_id.as_ref().ok_or_else(|| {
             "conversation Pull action lacks its reviewed cloud thread id".to_string()
         })?;
@@ -10484,22 +9903,13 @@ fn prepare_pull_conversation_actions(
             .1
             .sha256
             .clone();
-        let cloud_transcript = bytes.read_bounded(
-            &transcript_ref.logical_path,
-            conversation_file_limit_bytes(),
-            "cloud conversation transcript",
-        )?;
-        let adapter = provider_registry().require(&action.provider)?;
-        let analysis = adapter.analyze(&cloud_transcript);
-        let cloud_provider_thread_id = analysis
-            .source_provider_session_id
-            .clone()
-            .ok_or_else(|| "cloud transcript lacks an active provider session id".to_string())?;
-        let cloud_cwd = analysis
-            .source_cwd
-            .clone()
-            .ok_or_else(|| "cloud transcript lacks a structural cwd".to_string())?;
-        let (lineage_digest, semantic_digest) = codec_digests(&analysis.lineage);
+        let cloud_transcript = bytes.body(&transcript_ref.logical_path)?;
+        if cloud_transcript.size() > conversation_file_limit_bytes() {
+            return Err("cloud conversation transcript exceeds its read limit".to_string());
+        }
+        // Wire content is verified once in the bounded preparation worker.
+        let lineage_digest = Some(thread.lineage_digest.clone());
+        let semantic_digest = Some(thread.semantic_digest.clone());
         let local_binding = document.bindings.iter().find(|candidate| {
             candidate.host_id == binding.host_id
                 && candidate.replica_id == binding.replica_id
@@ -10512,13 +9922,35 @@ fn prepare_pull_conversation_actions(
             .iter()
             .find(|profile| profile.profile_id == action.pins.context.provider_profile_id)
             .ok_or_else(|| "reviewed provider profile disappeared".to_string())?;
+        let local_view = local_binding
+            .and_then(|row| row.provider_thread_id.as_deref())
+            .and_then(|provider_thread_id| {
+                session_views.iter().find(|view| {
+                    view.provider == action.provider
+                        && view.provider_thread_id == provider_thread_id
+                })
+            });
+        let local_capture =
+            captured_local_conversation_for_action(action, binding, document, captured);
+        let local_source_path = local_capture.map(captured_transcript_source).transpose()?;
+        let local_target = local_capture
+            .and_then(|conversation| captured.files.get(&conversation.transcript_logical_path))
+            .map(|file| TargetExpectation::Sha256(file.bytes.sha256().to_string()))
+            .unwrap_or(TargetExpectation::Absent);
         let provider_state = action
             .pins
             .target
             .provider_state
             .iter()
             .map(|target| {
-                let current = bounded_file_expectation(Path::new(&target.target_path))?;
+                // Transcript pins come from capture. The one live source
+                // check runs inside the per-thread apply below.
+                let current =
+                    if local_source_path.as_deref() == Some(Path::new(&target.target_path)) {
+                        local_target.clone()
+                    } else {
+                        bounded_file_expectation(Path::new(&target.target_path))?
+                    };
                 Ok(ProviderStateExpectation {
                     target_path: target.target_path.clone(),
                     expectation: current,
@@ -10526,26 +9958,24 @@ fn prepare_pull_conversation_actions(
             })
             .collect::<Result<Vec<_>, String>>()?;
         let (scope_revision, scope_sha256) = provider_scope_pin(Some(snapshot), &action.provider);
-        let live_checkpoint_generation = repository.load_config().ok().and_then(|config| {
-            config
-                .links
-                .iter()
-                .find(|link| {
-                    link.local_project_id == binding.local_project_id
-                        && &link.storage_id == storage_id
-                })
-                .and_then(|link| {
-                    link.conversation_checkpoints
-                        .get(&SyncScopeKey::Provider(action.provider.clone()))
-                })
-                .and_then(|threads| {
-                    action
-                        .thread_id
-                        .as_ref()
-                        .and_then(|thread_id| threads.get(thread_id))
-                })
-                .map(|checkpoint| checkpoint.generation)
-        });
+        let live_checkpoint_generation = state
+            .config
+            .links
+            .iter()
+            .find(|link| {
+                link.local_project_id == binding.local_project_id && &link.storage_id == storage_id
+            })
+            .and_then(|link| {
+                link.conversation_checkpoints
+                    .get(&SyncScopeKey::Provider(action.provider.clone()))
+            })
+            .and_then(|threads| {
+                action
+                    .thread_id
+                    .as_ref()
+                    .and_then(|thread_id| threads.get(thread_id))
+            })
+            .map(|checkpoint| checkpoint.generation);
         let context = ConversationApplyContext {
             now,
             pins: ConversationActionPins {
@@ -10573,16 +10003,14 @@ fn prepare_pull_conversation_actions(
                     local: action.pins.tail.local.clone(),
                     cloud: action.pins.tail.cloud.clone(),
                     checkpoint_generation: live_checkpoint_generation,
-                    // The downloaded transcript's own analysis digests: pin equality
-                    // here is the transcript-versus-manifest content verification.
+                    // Match the executable action to the manifest here. The
+                    // preparation worker verifies the bytes against these pins.
                     lineage_digest,
                     semantic_digest,
                     raw_range: action.pins.tail.raw_range.clone(),
                 },
                 target: ConversationTargetPins {
-                    local: local_target_expectation_for_action(
-                        action, binding, &document, &captured,
-                    ),
+                    local: local_target,
                     provider_state,
                 },
                 codec: thread.lineage_codec.clone(),
@@ -10595,29 +10023,45 @@ fn prepare_pull_conversation_actions(
                 action.action_id, pin
             )
         })?;
-        let local_display_name = local_binding
-            .and_then(|row| row.provider_thread_id.as_deref())
-            .and_then(|provider_thread_id| {
-                session_views.iter().find(|view| {
-                    view.provider == action.provider
-                        && view.provider_thread_id == provider_thread_id
-                })
-            })
-            .map(|view| view.descriptor.display_name.clone());
+        // Sidecars are wire-form at capture and carry no path map: the
+        // manifest digest verified on fetch is their whole integrity check,
+        // and the row's redaction stamp (verified with the transcript at
+        // prepare) covers them.
+        let mut cloud_sidecars = Vec::new();
+        for (sidecar_kind, relative_path) in conversation_sidecar_refs(&action.provider, thread)? {
+            let logical_path = mallard_domain::cloud_conversation_sidecar_path(
+                &action.provider,
+                cloud_thread_id,
+                &sidecar_kind,
+                &relative_path,
+            )?;
+            let body = bytes.body(&logical_path)?;
+            if body.size() > conversation_file_limit_bytes() {
+                return Err(format!(
+                    "cloud conversation sidecar '{}' exceeds its read limit",
+                    relative_path
+                ));
+            }
+            cloud_sidecars.push(PreparedPullSidecar {
+                sidecar_kind,
+                relative_path,
+                body,
+            });
+        }
+        let local_display_name = local_view.map(|view| view.descriptor.display_name.clone());
         Ok(PreparedPullConversation {
             action: action.clone(),
             cloud_transcript,
             cloud_file_sha256,
-            cloud_provider_thread_id,
-            cloud_cwd,
             cloud_forked_from: thread.forked_from.clone(),
             cloud_preserved: thread.preserved.clone(),
             cloud_display_title: thread.display_title.clone(),
             cloud_wire_redaction: thread.wire_redaction.clone(),
             cloud_wire_path_map: thread.wire_path_map.clone(),
             cloud_updated_at: thread.updated_at,
-            cloud_sidecars: conversation_sidecar_refs(&action.provider, thread)?,
+            cloud_sidecars,
             local_display_name,
+            local_source_path,
         })
     };
     for selected in actions {
@@ -10629,26 +10073,43 @@ fn prepare_pull_conversation_actions(
             }),
         }
     }
-    Ok((prepared, failures, session_views))
+    Ok((prepared, failures, session_views.to_vec()))
 }
 
-/// A per-thread conversation failure keeps its receipt so the rest of the
-/// Pull pass stays applied and retryable action-by-action.
+/// A per-thread conversation failure keeps its receipt so successful sibling
+/// actions stay applied and the result reports every failed action.
 fn failed_conversation_receipt(
     action: &ConversationPlanAction,
     message: String,
     applied_at: u64,
 ) -> Result<ApplyReceipt, String> {
-    Ok(ApplyReceipt {
-        action_id: action.action_id.clone(),
-        // Cloud-only failures that predate minting carry the cloud resource
-        // id review always records as `source_resource_id` for cloud rows.
-        resource_id: conversation_action_row_key(action).ok_or_else(|| {
-            format!(
-                "conversation action '{}' names no reportable resource",
-                action.action_id
-            )
-        })?,
+    // Cloud-only failures that predate minting carry the cloud resource
+    // id review always records as `source_resource_id` for cloud rows.
+    let resource_id = conversation_action_row_key(action).ok_or_else(|| {
+        format!(
+            "conversation action '{}' names no reportable resource",
+            action.action_id
+        )
+    })?;
+    Ok(failed_conversation_receipt_for(
+        &action.action_id,
+        resource_id,
+        message,
+        applied_at,
+    ))
+}
+
+/// The failure receipt for a reviewed selection that never became an
+/// apply-time action, keyed by the review's own ids.
+fn failed_conversation_receipt_for(
+    action_id: &ActionId,
+    resource_id: ResourceId,
+    message: String,
+    applied_at: u64,
+) -> ApplyReceipt {
+    ApplyReceipt {
+        action_id: action_id.clone(),
+        resource_id,
         action_type: RestoreActionType::MaterializeConversation,
         logical_path: None,
         source_sha256: None,
@@ -10658,7 +10119,7 @@ fn failed_conversation_receipt(
         applied_at,
         error: Some(message),
         conversation: None,
-    })
+    }
 }
 
 /// One reviewed Codex session-index row rewrite. `replace_existing` marks an
@@ -10677,28 +10138,6 @@ struct CodexIndexRowSpec {
 /// round-trip gate also rejects a cloud title that already contains the
 /// destination root: accepting that collision would capture unrelated text
 /// into the reserved wire namespace on the next Push.
-fn decode_codex_portable_display_title(
-    title: &str,
-    target_root: &str,
-    canonical_target_root: &str,
-) -> Result<String, String> {
-    validate_pathmap_root("project root", target_root)?;
-    let home = std::env::var("HOME").ok();
-    let mapper = SessionPathMapper::new(
-        target_root,
-        (canonical_target_root != target_root).then_some(canonical_target_root),
-        home.as_deref(),
-    )?;
-    let wire = serde_json::Value::String(title.to_string());
-    mapper
-        .verify_wire_record(&wire)
-        .map_err(|error| format!("portable Codex display title: {error}"))?;
-    match mapper.decode_record(&wire)? {
-        serde_json::Value::String(decoded) => Ok(decoded),
-        _ => Err("portable Codex display title did not decode to text".to_string()),
-    }
-}
-
 /// Read the local Codex session index and build its reviewed replacement,
 /// rewriting one row per spec. Returns no payload for an empty spec list: a
 /// titleless task leaves provider presentation metadata untouched.
@@ -10762,27 +10201,50 @@ fn codex_index_payload(
     Ok((expectation, Some(output)))
 }
 
+/// Check the captured source once. A change fails this action; an external
+/// write after this read is allowed to go undetected. Never retry the read.
+fn read_pull_conversation_source(
+    path: &Path,
+    expected: &TargetExpectation,
+    on_phase: &mut dyn FnMut(&str, Duration),
+) -> Result<Vec<u8>, String> {
+    let started = Instant::now();
+    let result = jsonl_tail_io::read_bounded(path).and_then(|bytes| {
+        mallard_infrastructure::sync_metrics::record_bytes_hashed(path, bytes.len() as u64);
+        let actual = TargetExpectation::Sha256(hex_digest(Sha256::digest(&bytes).as_slice()));
+        if &actual != expected {
+            return Err("conversation source bytes changed after review".to_string());
+        }
+        Ok(bytes)
+    });
+    on_phase("check local conversation", started.elapsed());
+    result
+}
+
 // The receipt dwarfs the checkpoint by design; boxing it would ripple
 // through every caller for no behavioral gain.
-/// Apply one prepared materializing Pull action through the journaled
-/// engine: reconstruct the verified cloud graph exactly once under fresh
-/// identities, journal the exact whole-document after-states, and install
-/// no-clobber. Metadata-only actions never reach this function.
+/// Apply one prepared materializing Pull action. Reconstruct the verified
+/// cloud graph once and check the captured local source once before
+/// installation. Metadata-only actions never reach this function.
 #[allow(clippy::too_many_arguments)]
 fn apply_prepared_pull_conversation(
-    repository: &LocalStateRepository,
+    state: &mut LockedConversationPull<'_>,
     plan: &RestorePlan,
     resolved: &ResolvedBinding,
     snapshot: &BundleSnapshot,
     prepared: PreparedPullConversation,
-    occupied_provider_ids: &mut BTreeSet<String>,
+    transcript: PreparedPullTranscript,
+    destination_provider_thread_id: String,
     expected_bindings_document_revision: u64,
     applied_at: u64,
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<ApplyReceipt, String> {
     let binding = &resolved.binding;
+    let cloud_provider_thread_id = transcript.cloud_provider_thread_id.clone();
     let action = prepared.action;
-    let document_before = repository.load_conversation_bindings()?;
+    let current = state.current()?;
+    let document_before = &current.conversation_bindings;
+    let config_before = &current.config;
     if document_before.revision != expected_bindings_document_revision {
         return Err("conversation bindings changed during Pull apply".to_string());
     }
@@ -10812,33 +10274,6 @@ fn apply_prepared_pull_conversation(
             );
         }
     }
-    // Journal pre-check before any minting or staging: a pending operation
-    // already naming this cloud thread — or this exact plan action — is an
-    // interrupted first attempt of the same work. Fail fast here so no
-    // second identity is minted; the insertion-time guard under the journal
-    // mutation stays authoritative.
-    {
-        let journal = repository.load_conversation_sync_journal()?;
-        if journal.operations.iter().any(|operation| {
-            operation.local_project_id == binding.local_project_id
-                && operation.cloud_thread_id == cloud_thread_id
-        }) {
-            return Err(format!(
-                "cloud thread '{}' already has a pending sync operation; \
-                 resolve or retry it before syncing this conversation again",
-                cloud_thread_id
-            ));
-        }
-        if journal.operations.iter().any(|operation| {
-            operation.plan_id.as_ref() == Some(&plan.plan_id)
-                && operation.plan_action_id.as_ref() == Some(&action.action_id)
-        }) {
-            return Err(format!(
-                "conversation plan action '{}' already has a journaled operation",
-                action.action_id
-            ));
-        }
-    }
     let live_provider_thread_id =
         live_binding.and_then(|binding| binding.provider_thread_id.as_deref());
     if action.action == ConversationPlanActionType::MaterializeCloud
@@ -10849,9 +10284,7 @@ fn apply_prepared_pull_conversation(
         );
     }
     let adapter = provider_registry().require(&action.provider)?;
-    let is_codex = action.provider.as_str() == "codex";
-    let phase_started = Instant::now();
-
+    let reconstructs_graph = adapter.reconstructs_rollout_graph();
     let cloud_tail = action
         .pins
         .tail
@@ -10864,18 +10297,14 @@ fn apply_prepared_pull_conversation(
     // providers replace in place under the row's existing provider id.
     // CreateLocal and KeepBoth's remote branch always mint.
     let materialize_in_place =
-        action.action == ConversationPlanActionType::MaterializeCloud && !is_codex;
+        action.action == ConversationPlanActionType::MaterializeCloud && !reconstructs_graph;
     let materialize_relocated =
-        action.action == ConversationPlanActionType::MaterializeCloud && is_codex;
-    let destination_provider_thread_id = if materialize_in_place {
-        live_provider_thread_id
-            .ok_or_else(|| {
-                "conversation cloud update lost its provider identity after review".to_string()
-            })?
-            .to_string()
-    } else {
-        mint_provider_thread_id(is_codex, occupied_provider_ids)?
-    };
+        action.action == ConversationPlanActionType::MaterializeCloud && reconstructs_graph;
+    if materialize_in_place
+        && live_provider_thread_id != Some(destination_provider_thread_id.as_str())
+    {
+        return Err("conversation destination identity changed during preparation".to_string());
+    }
     // Resolve the local thread identity: CreateLocal derives it from the
     // freshly minted provider id (one uniform rule — the first identity is
     // the derivation of the first provider alias); every other action
@@ -10936,7 +10365,7 @@ fn apply_prepared_pull_conversation(
             .max()
             .unwrap_or(0)
             .saturating_add(1);
-        let identity = repository.load_or_create_host_identity()?;
+        let identity = &current.host_identity;
         let device_label = match identity
             .local_display_name
             .as_deref()
@@ -10946,7 +10375,7 @@ fn apply_prepared_pull_conversation(
             Some(label) => label.to_string(),
             None => {
                 let (origin_host_token, _) =
-                    repository.derive_origin_tokens(&binding.bundle_id, &binding.replica_id)?;
+                    state.derive_origin_tokens(&binding.bundle_id, &binding.replica_id)?;
                 fallback_origin_host_label(&origin_host_token)
             }
         };
@@ -10958,11 +10387,10 @@ fn apply_prepared_pull_conversation(
             })
             .or_else(|| {
                 prepared.cloud_display_title.clone().filter(|title| {
-                    !title.trim().is_empty()
-                        && title.as_str() != prepared.cloud_provider_thread_id.as_str()
+                    !title.trim().is_empty() && title.as_str() != cloud_provider_thread_id.as_str()
                 })
             });
-        Some(KeepBothJournal {
+        Some(KeepBothApply {
             preserved_thread_id: ThreadId::parse(generated_named_id("thread")?)?,
             remote_provider_thread_id: destination_provider_thread_id.clone(),
             preserved: PreservedProvenance {
@@ -10979,294 +10407,32 @@ fn apply_prepared_pull_conversation(
         None
     };
 
-    // Reconstruct and reidentify exactly once, verifying typed invariants
-    // before any journal or visible mutation. Codex order per §6.2: staged
-    // wire bytes resolve as a normal rollout → the wire chain refolds to the
-    // accepted cloud pin → the Decode build runs the §4.4 paths gate on the
-    // staged body **before** its identity stage assigns the reviewed provider
-    // id, folds the head, and strips the path-map marker. Everything the
-    // checkpoint and journal persist from this pull is sourced from the
-    // correct form: the wire pin from the manifest, and the local twin,
-    // prefix witness, and materialization digest pins from the decode
-    // build's re-analysis of the final materialized local bytes.
-    // Pull gate: the cloud row's redaction stamp must name this binary's
-    // ruleset before any staged bytes are trusted or materialized.
-    let ruleset = credential_redaction::shared();
-    match &prepared.cloud_wire_redaction {
-        Some(stamp)
-            if stamp.codec == credential_redaction::REDACTION_CODEC_V1
-                && stamp.fingerprint == ruleset.fingerprint() => {}
-        Some(stamp) => {
-            return Err(format!(
-                "redaction_ruleset_mismatch: conversation '{}' was published under \
-                 redaction ruleset '{}'; align app versions before pulling",
-                cloud_thread_id, stamp.codec
-            ));
-        }
-        None => {
-            return Err(format!(
-                "redaction_ruleset_mismatch: conversation '{}' carries no redaction \
-                 stamp and cannot be materialized",
-                cloud_thread_id
-            ));
-        }
-    }
-    // Claude wire objects decode under the declared path-map codec; the
-    // out-of-band stamp is the declaration (Codex validates its in-band
-    // marker inside the standalone decode).
-    if !is_codex {
-        match &prepared.cloud_wire_path_map {
-            Some(stamp)
-                if stamp.codec == mallard_infrastructure::session_path_map::PATH_MAP_CODEC_V1 => {}
-            Some(stamp) => {
-                return Err(format!(
-                    "path_map_codec_mismatch: conversation '{}' was published under \
-                     path-map codec '{}'; align app versions before pulling",
-                    cloud_thread_id, stamp.codec
-                ));
-            }
-            None => {
-                return Err(format!(
-                    "path_map_codec_mismatch: conversation '{}' carries no path-map \
-                     stamp and cannot be materialized",
-                    cloud_thread_id
-                ));
-            }
-        }
-    }
-    let (installed_bytes, imported_layout, checkpoint_seed) = if is_codex {
-        // Operation-level Windows gate: the path-map root grammar is
-        // checked before any rollout bytes are parsed.
-        validate_pathmap_root("project root", &binding.project_root)?;
-        let staging_dir = repository.root().join("staging").join("pull-conversations");
-        fs::create_dir_all(&staging_dir)
-            .map_err(|error| format!("create pull staging directory: {error}"))?;
-        let staged_source = staging_dir.join(format!("{}.jsonl", action.action_id));
-        fs::write(&staged_source, &prepared.cloud_transcript)
-            .map_err(|error| format!("stage cloud transcript: {error}"))?;
-        let no_bases = |_: &str| Ok(None);
-        let resolved_root = codex_history_graph::resolve_codex_root(&staged_source, &no_bases)?;
-        // The imported layout is the binding's local-form partition: the
-        // coordinates come from the verified cloud value, the codec is the
-        // local fold's.
-        let imported_layout = RootTailLayout {
-            codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
-            partition_kind: cloud_tail.partition_kind,
-            start_record_count: cloud_tail.start_record_count,
-        };
-        if cloud_tail.start_record_count > resolved_root.chain.len() as u64 {
-            return Err("cloud tail start is outside the reconstructed conversation".to_string());
-        }
-        // Wire-form verification ends here: the staged wire chain must
-        // refold to the pinned cloud tail.
-        let refolded = mallard_domain::compute_conversation_tail_state(
-            cloud_tail.partition_kind,
-            cloud_tail.start_record_count,
-            cloud_tail.accepted_end_record_count,
-            &resolved_root.chain,
-        )?;
-        if refolded != cloud_tail.accepted_tail_state
-            || cloud_tail.accepted_end_record_count != resolved_root.chain.len() as u64
-        {
-            return Err(
-                "reconstructed conversation does not refold to the accepted cloud tail".to_string(),
-            );
-        }
-        let artifact = build_standalone_codex_root(
-            &resolved_root,
-            &StandaloneBuildMode::Decode {
-                root_provider_thread_id: destination_provider_thread_id.clone(),
-                target_root: binding.project_root.clone(),
-                canonical_target_root: (binding.canonical_project_root != binding.project_root)
-                    .then(|| binding.canonical_project_root.clone()),
-            },
-            Some(&imported_layout),
-        )?;
-        let _ = fs::remove_file(&staged_source);
-        if artifact.portable_tail.partition_kind != cloud_tail.partition_kind
-            || artifact.portable_tail.start_record_count != cloud_tail.start_record_count
-            || artifact.portable_tail.accepted_end_record_count
-                != cloud_tail.accepted_end_record_count
-        {
-            return Err(
-                "decoded conversation disagrees with the accepted cloud coordinates".to_string(),
-            );
-        }
-        (
-            artifact.root_bytes.clone(),
-            imported_layout,
-            (
-                artifact.prefix_witness.clone(),
-                artifact.artifact_sha256.clone(),
-                artifact.portable_tail.clone(),
-                artifact.lineage_digest.clone(),
-                artifact.semantic_digest.clone(),
-                artifact.last_canonical_message_id.clone(),
-                artifact.last_synthetic_turn_id.clone(),
-                artifact.next_synthetic_turn_ordinal,
-            ),
-        )
-    } else {
-        // Claude: wire-form verification ends before any decode. The
-        // downloaded wire object must be a redaction fixpoint (the
-        // pull-side leak/tamper certificate) and must refold to the
-        // accepted cloud pin; only then is it decoded per line — wire
-        // self-check, token paths to the destination root, leaf
-        // `sessionId` restamped — and the installed bytes are re-analyzed
-        // as the genuine local form, whose fold becomes
-        // `accepted_local_tail`. Local and wire folds are distinct.
-        validate_pathmap_root("project root", &binding.project_root)?;
-        credential_redaction::shared()
-            .certify_wire_document(prepared.cloud_transcript.clone())
-            .map_err(|error| format!("conversation '{}': {error}", cloud_thread_id))?;
-        if cloud_tail.codec != mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1
-            || cloud_tail.partition_kind != TailPartitionKind::WholeThread
-            || cloud_tail.start_record_count != 0
-        {
-            return Err("accepted cloud tail is not a Claude wire value".to_string());
-        }
-        let wire_analysis = mallard_infrastructure::providers::claude::analyze_claude_transcript(
-            &prepared.cloud_transcript,
-        );
-        let CodecLineage::Complete {
-            chain: wire_chain, ..
-        } = &wire_analysis.lineage
-        else {
-            return Err("cloud conversation failed its Claude wire analysis".to_string());
-        };
-        if wire_analysis.source_provider_session_id.as_deref()
-            != Some(prepared.cloud_provider_thread_id.as_str())
-            || wire_analysis.source_cwd.as_deref() != Some(prepared.cloud_cwd.as_str())
-        {
-            return Err("cloud conversation does not match its reviewed wire identity".to_string());
-        }
-        let refolded = mallard_domain::compute_conversation_tail_state(
-            TailPartitionKind::WholeThread,
-            0,
-            cloud_tail.accepted_end_record_count,
-            wire_chain,
-        )?;
-        if refolded != cloud_tail.accepted_tail_state
-            || cloud_tail.accepted_end_record_count != wire_chain.len() as u64
-        {
-            return Err(
-                "cloud conversation does not refold to the accepted cloud tail".to_string(),
-            );
-        }
-        // Decode pass: per line, the wire self-check under this binding's
-        // future-push pattern set (destination-root text already present in
-        // out-of-root wire content fails closed — the documented collision
-        // residual), then token → destination root. The structural `cwd`
-        // needs no dedicated rewrite: a bound session's cwd is the binding
-        // root, so its token decodes to this machine's root (the engine's
-        // staged-payload gate holds that line); foreign spellings ship
-        // verbatim. Only `sessionId` occurrences equal to the leaf identity
-        // are restamped; resume-copied history keeps its ids as provenance.
-        let mapper = SessionPathMapper::new(
-            &binding.project_root,
-            (binding.canonical_project_root != binding.project_root)
-                .then_some(binding.canonical_project_root.as_str()),
-            std::env::var("HOME").ok().as_deref(),
-        )?;
-        let wire_text = std::str::from_utf8(&prepared.cloud_transcript)
-            .map_err(|_| format!("conversation '{}' wire is not valid UTF-8", cloud_thread_id))?;
-        let mut decoded_text = String::with_capacity(wire_text.len());
-        for (index, line) in wire_text.split('\n').enumerate() {
-            if index > 0 {
-                decoded_text.push('\n');
-            }
-            if line.trim().is_empty() {
-                decoded_text.push_str(line);
-                continue;
-            }
-            let mut value = mapper.decode_jsonl_line_verified(line).map_err(|error| {
-                format!(
-                    "conversation '{}' record {}: {error}",
-                    cloud_thread_id,
-                    index + 1
-                )
-            })?;
-            if let Some(session_id) = value.get_mut("sessionId") {
-                if session_id.as_str() == Some(prepared.cloud_provider_thread_id.as_str()) {
-                    *session_id = serde_json::Value::String(destination_provider_thread_id.clone());
-                }
-            }
-            let serialized = serde_json::to_string(&value)
-                .map_err(|error| format!("serialize decoded conversation record: {error}"))?;
-            decoded_text.push_str(&serialized);
-        }
-        let rewritten = decoded_text.into_bytes();
-        let staged =
-            mallard_infrastructure::providers::claude::analyze_claude_transcript(&rewritten);
-        let CodecLineage::Complete {
-            chain,
-            lineage_digest,
-            semantic_digest,
-        } = &staged.lineage
-        else {
-            return Err("decoded conversation failed its Claude re-analysis".to_string());
-        };
-        if staged.source_provider_session_id.as_deref()
-            != Some(destination_provider_thread_id.as_str())
-            || chain.len() != wire_chain.len()
-        {
-            return Err(
-                "decoded conversation lost its destination identity or record layout".to_string(),
-            );
-        }
-        let layout = RootTailLayout {
-            codec: mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_V1.to_string(),
-            partition_kind: TailPartitionKind::WholeThread,
-            start_record_count: 0,
-        };
-        // The genuine local fold of the installed bytes: the twin pin the
-        // form ledger requires, never a relabel of the wire state.
-        let accepted_local_state = mallard_domain::compute_conversation_tail_state(
-            TailPartitionKind::WholeThread,
-            0,
-            cloud_tail.accepted_end_record_count,
-            chain,
-        )?;
-        let accepted_local_tail = PortableConversationTail {
-            codec: mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_V1.to_string(),
-            partition_kind: TailPartitionKind::WholeThread,
-            start_record_count: 0,
-            accepted_end_record_count: cloud_tail.accepted_end_record_count,
-            accepted_tail_state: accepted_local_state,
-        };
-        let sha = hex_digest(Sha256::digest(&rewritten).as_slice());
-        let leaf = chain
-            .last()
-            .map(|message| message.message_id.as_str().to_string());
-        (
-            rewritten,
-            layout,
-            (
-                None,
-                sha,
-                accepted_local_tail,
-                lineage_digest.clone(),
-                semantic_digest.clone(),
-                leaf,
-                None,
-                0,
-            ),
-        )
-    };
-    let (
+    let PreparedPullTranscript {
+        transcript: verified_transcript,
+        path_origins,
+        layout: imported_layout,
+        checkpoint,
+        ..
+    } = transcript;
+    let path_origins_ref = state.store_path_origins(
+        PathOriginsOwner::for_project(
+            binding,
+            &action.pins.context.provider_profile_id,
+            &destination_provider_thread_id,
+        ),
+        &path_origins,
+    )?;
+    let installed_bytes = verified_transcript.bytes().clone();
+    let PullTranscriptCheckpoint {
         prefix_witness,
         artifact_sha256,
         accepted_local_tail,
-        staged_lineage_digest,
-        staged_semantic_digest,
+        lineage_digest: staged_lineage_digest,
+        semantic_digest: staged_semantic_digest,
         last_canonical_message_id,
         last_synthetic_turn_id,
         next_synthetic_turn_ordinal,
-    ) = checkpoint_seed;
-    on_phase(
-        "reconstruct and verify cloud graph",
-        phase_started.elapsed(),
-    );
+    } = checkpoint;
     let phase_started = Instant::now();
 
     // Role assignment for the reviewed targets comes from the adapter's
@@ -11286,56 +10452,121 @@ fn apply_prepared_pull_conversation(
             .is_some_and(|path| Path::new(&target.target_path) == path.as_path())
     };
     let replace_existing = materialize_in_place;
-    // The in-place transcript target consumes its reviewed pin; a minted
-    // identity's destinations are computed here under the resolved id, and
-    // every one must be Absent — an occupied path fails this action only
-    // (the engine's no-clobber commit is the last-line guard).
-    let transcript_target = if materialize_in_place {
-        action
-            .pins
-            .target
-            .provider_state
-            .iter()
-            .find(|target| !is_index_target(target))
-            .cloned()
-            .ok_or_else(|| "conversation Pull action lacks a transcript target".to_string())?
-    } else {
-        let provider_home = resolved.home(&action.provider)?;
-        let planned = adapter.materialization_targets(
-            &mallard_infrastructure::providers::MaterializationTargetRequest {
-                provider_home: Path::new(provider_home),
-                project_root: &binding.project_root,
-                provider_session_id: &destination_provider_thread_id,
-                source_provider_session_id: Some(prepared.cloud_provider_thread_id.as_str()),
-                existing_transcript_path: None,
-                sidecars: &prepared.cloud_sidecars,
-                planned_at: applied_at,
-            },
-        )?;
-        let mut transcript_target = None;
-        for target in &planned {
-            if bounded_file_expectation(&target.target_path)? != TargetExpectation::Absent {
-                return Err(format!(
-                    "conversation destination '{}' is already occupied",
-                    target.target_path.display()
-                ));
-            }
-            if target.role == ConversationFileRole::Transcript && transcript_target.is_none() {
+    // Every provider file of this materialization — the transcript and each
+    // sidecar the cloud row carries — is planned through the adapter under
+    // the destination identity. An in-place update keeps its reviewed
+    // transcript pin as the existing path and takes every target's
+    // expectation from the reviewed pins; a minted identity's destinations
+    // must all be Absent — an occupied path fails this action only (the
+    // engine's no-clobber commit is the last-line guard).
+    let reviewed_transcript_target = materialize_in_place
+        .then(|| {
+            action
+                .pins
+                .target
+                .provider_state
+                .iter()
+                .find(|target| !is_index_target(target))
+                .cloned()
+                .ok_or_else(|| "conversation Pull action lacks a transcript target".to_string())
+        })
+        .transpose()?;
+    let sidecar_refs = prepared
+        .cloud_sidecars
+        .iter()
+        .map(|sidecar| (sidecar.sidecar_kind.clone(), sidecar.relative_path.clone()))
+        .collect::<Vec<_>>();
+    let provider_home = resolved.home(&action.provider)?;
+    let planned = adapter.materialization_targets(
+        &mallard_infrastructure::providers::MaterializationTargetRequest {
+            provider_home: Path::new(provider_home),
+            project_root: &binding.project_root,
+            provider_session_id: &destination_provider_thread_id,
+            source_provider_session_id: Some(cloud_provider_thread_id.as_str()),
+            existing_transcript_path: reviewed_transcript_target
+                .as_ref()
+                .map(|target| Path::new(&target.target_path)),
+            sidecars: &sidecar_refs,
+            planned_at: applied_at,
+        },
+    )?;
+    let expectation_for = |target: &mallard_infrastructure::providers::PlannedProviderTarget|
+     -> Result<TargetExpectation, String> {
+        if materialize_in_place {
+            let target_path = target.target_path.to_string_lossy();
+            action
+                .pins
+                .target
+                .provider_state
+                .iter()
+                .find(|pin| pin.target_path == target_path.as_ref())
+                .map(|pin| pin.expectation.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "conversation target '{}' was not reviewed",
+                        target.target_path.display()
+                    )
+                })
+        } else if bounded_file_expectation(&target.target_path)? != TargetExpectation::Absent {
+            Err(format!(
+                "conversation destination '{}' is already occupied",
+                target.target_path.display()
+            ))
+        } else {
+            Ok(TargetExpectation::Absent)
+        }
+    };
+    // Payload order is commit order: sidecars first, the transcript last,
+    // so a failure mid-commit leaves inert extra attachments rather than a
+    // resumable transcript without them.
+    let mut targets = Vec::with_capacity(planned.len() + 1);
+    let mut transcript_target = None;
+    let mut sidecar_bodies = prepared.cloud_sidecars.iter();
+    for target in &planned {
+        let expected = expectation_for(target)?;
+        match &target.role {
+            ConversationFileRole::Transcript => {
+                if transcript_target.is_some() {
+                    return Err("provider planned more than one transcript destination".to_string());
+                }
                 transcript_target = Some(ProviderStateExpectation {
                     target_path: target.target_path.to_string_lossy().into_owned(),
-                    expectation: TargetExpectation::Absent,
+                    expectation: expected,
                 });
             }
+            ConversationFileRole::Sidecar { .. } => {
+                let sidecar = sidecar_bodies.next().ok_or_else(|| {
+                    "provider planned more sidecars than the cloud row carries".to_string()
+                })?;
+                let bytes = sidecar.body.read_bounded(
+                    conversation_file_limit_bytes(),
+                    "cloud conversation sidecar",
+                )?;
+                targets.push(ConversationTargetPayload {
+                    target_path: target.target_path.clone(),
+                    role: target.role.clone(),
+                    expected,
+                    index_rows: vec![],
+                    bytes: bytes.into(),
+                });
+            }
+            ConversationFileRole::ProviderIndexFragment => {
+                return Err("provider planned an index fragment as a session file".to_string());
+            }
         }
-        transcript_target.ok_or_else(|| "provider planned no transcript destination".to_string())?
-    };
-    let mut targets = vec![ConversationTargetPayload {
+    }
+    if sidecar_bodies.next().is_some() {
+        return Err("provider planned fewer sidecars than the cloud row carries".to_string());
+    }
+    let transcript_target = transcript_target
+        .ok_or_else(|| "provider planned no transcript destination".to_string())?;
+    targets.push(ConversationTargetPayload {
         target_path: PathBuf::from(&transcript_target.target_path),
         role: ConversationFileRole::Transcript,
         expected: transcript_target.expectation.clone(),
         index_rows: vec![],
         bytes: installed_bytes.clone(),
-    }];
+    });
     if let Some(index_target) = action
         .pins
         .target
@@ -11377,22 +10608,16 @@ fn apply_prepared_pull_conversation(
             .cloud_display_title
             .as_deref()
             .map(str::trim)
-            .filter(|title| {
-                !title.is_empty() && *title != prepared.cloud_provider_thread_id.as_str()
-            });
-        let cloud_title = if is_codex {
-            cloud_title
-                .map(|title| {
-                    decode_codex_portable_display_title(
-                        title,
-                        &binding.project_root,
-                        &binding.canonical_project_root,
-                    )
-                })
-                .transpose()?
-        } else {
-            cloud_title.map(str::to_string)
-        };
+            .filter(|title| !title.is_empty() && *title != cloud_provider_thread_id.as_str());
+        let cloud_title = cloud_title
+            .map(|title| {
+                adapter.decode_portable_display_title(
+                    title,
+                    &binding.project_root,
+                    &binding.canonical_project_root,
+                )
+            })
+            .transpose()?;
         if let Some(cloud_title) = cloud_title {
             index_specs.push(CodexIndexRowSpec {
                 provider_thread_id: destination_provider_thread_id.clone(),
@@ -11412,16 +10637,36 @@ fn apply_prepared_pull_conversation(
                 role: ConversationFileRole::ProviderIndexFragment,
                 expected,
                 index_rows,
-                bytes,
+                bytes: bytes.into(),
             });
         }
     }
 
     // The exact whole-document after-states this operation commits.
     let mut document_after = document_before.clone();
-    let config_before = repository.load_config()?;
     let mut config_after = config_before.clone();
     let scope = SyncScopeKey::Provider(action.provider.clone());
+    let checked_source = if matches!(
+        action.action,
+        ConversationPlanActionType::MaterializeCloud | ConversationPlanActionType::KeepBoth
+    ) {
+        let source_path = prepared
+            .local_source_path
+            .as_deref()
+            .ok_or_else(|| "conversation Pull lacks its captured local source".to_string())?;
+        if materialize_in_place && source_path != Path::new(&transcript_target.target_path) {
+            return Err(
+                "conversation replacement target differs from its captured source".to_string(),
+            );
+        }
+        Some(read_pull_conversation_source(
+            source_path,
+            &action.pins.target.local,
+            on_phase,
+        )?)
+    } else {
+        None
+    };
     let retained_source_checkpoint = if materialize_relocated {
         let old_provider_thread_id = live_provider_thread_id
             .ok_or_else(|| "conversation relocation lost its source provider id".to_string())?;
@@ -11468,12 +10713,12 @@ fn apply_prepared_pull_conversation(
                 "conversation relocation source checkpoint names another provider id".to_string(),
             );
         }
-        let source_path = Path::new(&root_mapping.root_path);
-        let source_bytes = jsonl_tail_io::read_bounded(source_path)?;
-        let source_sha256 = hex_digest(Sha256::digest(&source_bytes).as_slice());
-        if action.pins.target.local != TargetExpectation::Sha256(source_sha256.clone()) {
-            return Err("conversation relocation source bytes changed after review".to_string());
+        if prepared.local_source_path.as_deref() != Some(Path::new(&root_mapping.root_path)) {
+            return Err("conversation source checkpoint names another path".to_string());
         }
+        let source_bytes = checked_source
+            .as_deref()
+            .expect("relocated transcript passed the source check");
         if root_mapping.source_file_size != source_bytes.len() as u64
             || root_mapping.consumed_byte_offset > source_bytes.len() as u64
         {
@@ -11494,6 +10739,10 @@ fn apply_prepared_pull_conversation(
     } else {
         None
     };
+    // Only an in-place replacement needs these bytes for its backup. A
+    // relocated source has already supplied its checkpoint; KeepBoth leaves
+    // its source in place. Drop both of those buffers here.
+    let checked_transcript = checked_source.filter(|_| materialize_in_place);
     let installed_mapping = |bytes: &[u8]| -> mallard_domain::RootPhysicalMapping {
         let consumed = bytes.len() as u64;
         let window = consumed.min(4_096);
@@ -11567,6 +10816,7 @@ fn apply_prepared_pull_conversation(
                 // provenance: an origin that is itself a preserved copy
                 // keeps its marker on every device.
                 document_after.bindings.push(LocalConversationBinding {
+                    path_origins_ref: Some(path_origins_ref.clone()),
                     host_id: binding.host_id.clone(),
                     replica_id: binding.replica_id.clone(),
                     local_project_id: binding.local_project_id.clone(),
@@ -11588,6 +10838,7 @@ fn apply_prepared_pull_conversation(
                     "conversation materialization requires an existing binding".to_string()
                 })?;
                 let row = &mut document_after.bindings[index];
+                row.path_origins_ref = Some(path_origins_ref.clone());
                 row.provider_thread_id = Some(destination_provider_thread_id.clone());
                 row.root_tail_layout = Some(imported_layout.clone());
                 row.materialization_state = ConversationMaterializationState::Resumable;
@@ -11596,6 +10847,7 @@ fn apply_prepared_pull_conversation(
             }
             (ConversationPlanActionType::CreateLocal, None) => {
                 document_after.bindings.push(LocalConversationBinding {
+                    path_origins_ref: Some(path_origins_ref.clone()),
                     host_id: binding.host_id.clone(),
                     replica_id: binding.replica_id.clone(),
                     local_project_id: binding.local_project_id.clone(),
@@ -11671,9 +10923,9 @@ fn apply_prepared_pull_conversation(
         });
     }
     config_after.revision = config_after.revision.saturating_add(1);
-    on_phase("journal document after-states", phase_started.elapsed());
+    on_phase("build local after-states", phase_started.elapsed());
 
-    let operation = ConversationSyncOperation {
+    let operation = ConversationApplyOperation {
         operation_id: ConversationOperationId::parse(generated_named_id("operation")?)?,
         plan_id: Some(plan.plan_id.clone()),
         plan_action_id: Some(action.action_id.clone()),
@@ -11689,14 +10941,11 @@ fn apply_prepared_pull_conversation(
         local_project_id: binding.local_project_id.clone(),
         provider_profile_id: action.pins.context.provider_profile_id.clone(),
         provider: action.provider.clone(),
-        // Every identity below was minted (or resolved) above, before this
-        // journal record exists: recovery installs the journaled documents
-        // verbatim and never re-mints.
+        // Every identity below was minted or resolved in this Apply attempt.
         thread_id: local_thread_id.clone(),
         cloud_thread_id: cloud_thread_id.clone(),
-        operation: ConversationSyncOperationKind::ProviderMaterialization(
-            ConversationMaterializationOperation {
-                phase: PullJournalPhase::TargetStaged,
+        operation: ConversationApplyKind::ProviderMaterialization(
+            ConversationMaterializationApply {
                 planned_relation: action.pins.tail.classification()?,
                 accepted_tail_after: cloud_tail,
                 // The engine's verify_provider_payload hashes the staged
@@ -11706,19 +10955,16 @@ fn apply_prepared_pull_conversation(
                 pinned_lineage_digest: staged_lineage_digest,
                 pinned_semantic_digest: staged_semantic_digest,
                 keep_both: keep_both_minted,
-                sync_config_before: config_before,
+                expected_config_revision: config_before.revision,
                 sync_config_after: config_after,
-                bindings_before: document_before,
                 bindings_after: document_after,
             },
         ),
         provider_thread_id: Some(destination_provider_thread_id),
         materialization_state: ConversationMaterializationState::Resumable,
         expected_host_identity_revision: action.pins.context.host_identity_revision,
-        // Every action was validated against the reviewed document before
-        // the batch began. Earlier approved actions in this same Pull may
-        // have advanced that shared document, so journal this action against
-        // the exact rolling revision it is about to replace.
+        // Earlier approved actions in this Pull can advance the shared
+        // document. Match the exact rolling revision this action replaces.
         expected_bindings_document_revision,
         expected_binding_revision: action.pins.context.binding_revision,
         expected_profile_revision: action.pins.context.profile_revision,
@@ -11727,12 +10973,17 @@ fn apply_prepared_pull_conversation(
         created_at: applied_at,
         updated_at: applied_at,
     };
-    let mut failpoints = NoConversationFailpoints;
+    let install_started = Instant::now();
     let receipt = apply_conversation_materialization_locked(
-        repository,
-        ConversationMaterializationRequest { operation, targets },
-        &mut failpoints,
+        state,
+        ConversationMaterializationRequest {
+            operation,
+            targets,
+            transcript: verified_transcript,
+            checked_transcript,
+        },
     )?;
+    on_phase("stage and commit conversation", install_started.elapsed());
     Ok(ApplyReceipt {
         action_id: action.action_id.clone(),
         // Receipts stay in the local id space: the operation's resolved
@@ -11750,53 +11001,198 @@ fn apply_prepared_pull_conversation(
     })
 }
 
+fn approved_pull_conversation_resources(
+    review: &RestorePlan,
+    approved: &BTreeSet<ActionId>,
+) -> BTreeSet<ResourceId> {
+    review
+        .conversation_review
+        .iter()
+        .filter(|row| {
+            row.action_id
+                .as_ref()
+                .is_some_and(|action_id| approved.contains(action_id))
+        })
+        .map(|row| row.resource_id.clone())
+        .collect()
+}
+
+/// An approved conversation row the apply-time review no longer offers as
+/// the reviewed action. It fails on its own receipt while every other
+/// approved row applies.
+struct UnalignedPullSelection {
+    action_id: ActionId,
+    resource_id: ResourceId,
+    message: String,
+}
+
+/// Transfer review selection IDs to the fresh apply-time actions. Matching is
+/// by resource and typed action, never by an old path or digest pin. Returns
+/// the approved conversation rows that no longer align.
+fn align_pull_apply_selections(
+    review: &RestorePlan,
+    approved_action_ids: &[ActionId],
+    plan: &mut RestorePlan,
+) -> Result<Vec<UnalignedPullSelection>, String> {
+    let mut approved = BTreeSet::new();
+    for action_id in approved_action_ids {
+        if !approved.insert(action_id.clone()) {
+            return Err(format!(
+                "restore selection '{}' was approved more than once",
+                action_id
+            ));
+        }
+    }
+    let known = review
+        .actions
+        .iter()
+        .map(|action| action.action_id.clone())
+        .chain(
+            review
+                .conversation_review
+                .iter()
+                .filter_map(|row| row.action_id.clone()),
+        )
+        .collect::<BTreeSet<_>>();
+    if let Some(unknown) = approved
+        .iter()
+        .find(|action_id| !known.contains(*action_id))
+    {
+        return Err(format!(
+            "restore selection '{}' is not in the comparison",
+            unknown
+        ));
+    }
+
+    for reviewed in review
+        .actions
+        .iter()
+        .filter(|action| approved.contains(&action.action_id))
+    {
+        let candidate = plan.actions.iter_mut().find(|candidate| {
+            candidate.resource_id == reviewed.resource_id
+                && candidate.kind.action_type() == reviewed.kind.action_type()
+        });
+        let candidate = candidate.ok_or_else(|| {
+            format!(
+                "resource '{}' changed after comparison",
+                reviewed.resource_id
+            )
+        })?;
+        candidate.action_id = reviewed.action_id.clone();
+    }
+
+    let mut unaligned = Vec::new();
+    for reviewed in review.conversation_review.iter().filter(|row| {
+        row.action_id
+            .as_ref()
+            .is_some_and(|action_id| approved.contains(action_id))
+    }) {
+        let expected_action = reviewed
+            .action
+            .planned_action()
+            .ok_or_else(|| format!("conversation '{}' is not selectable", reviewed.resource_id))?;
+        let candidate = plan.conversation_actions.iter_mut().find(|candidate| {
+            conversation_action_row_key(candidate).as_ref() == Some(&reviewed.resource_id)
+                && candidate.action == expected_action
+        });
+        let Some(candidate) = candidate else {
+            // The thread moved between Compare and Apply: the apply-time
+            // review offers a different action, or none. The apply-time
+            // row's own reason wins when it has one.
+            let message = plan
+                .conversation_review
+                .iter()
+                .find(|row| row.resource_id == reviewed.resource_id)
+                .and_then(|row| row.blocked_reason.clone())
+                .unwrap_or_else(|| {
+                    "This conversation changed after the comparison. Compare again.".to_string()
+                });
+            unaligned.push(UnalignedPullSelection {
+                action_id: reviewed
+                    .action_id
+                    .clone()
+                    .expect("selected conversation row has an id"),
+                resource_id: reviewed.resource_id.clone(),
+                message,
+            });
+            continue;
+        };
+        candidate.action_id = reviewed
+            .action_id
+            .clone()
+            .expect("selected conversation row has an id");
+        if let Some(row) = plan
+            .conversation_review
+            .iter_mut()
+            .find(|row| row.resource_id == reviewed.resource_id && row.action == reviewed.action)
+        {
+            row.action_id = reviewed.action_id.clone();
+        }
+    }
+    plan.validate()?;
+    Ok(unaligned)
+}
+
 pub(super) fn apply_bundle_restore_with_progress(
     repository: &LocalStateRepository,
-    plan_id: &PlanId,
+    review: &RestorePlan,
     approved_action_ids: Vec<ActionId>,
     on_progress: &mut dyn FnMut(FetchProgress),
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<RestoreResult, String> {
     let phase_started = Instant::now();
     let _host_operation = repository.acquire_host_operation()?;
-    let plan = repository.load_restore_plan(plan_id)?;
-    let resolved = current_binding_for_restore_plan(repository, &plan)?;
+    review.validate_review()?;
+    let resolved = current_binding_for_restore_plan(repository, review)?;
     let binding = resolved.binding.clone();
-    let (mut approved, mut approved_conversation_actions) =
-        split_approved_restore_actions(&approved_action_ids, &plan)?;
-    let existing_materialization = repository
-        .load_materializations()?
-        .records
-        .into_iter()
-        .find(|record| record.plan_id == plan.plan_id);
-    if let Some(record) = &existing_materialization {
-        if record.host_id != binding.host_id
-            || record.replica_id != binding.replica_id
-            || record.local_project_id != binding.local_project_id
-            || record.storage_id != plan.storage_id
-            || record.bundle_id != plan.bundle_id
-            || record.revision != plan.revision
-            || record.commit_id != plan.commit_id
-            || record.manifest_sha256 != plan.manifest_sha256
-            || record.binding_revision != plan.binding_revision
-        {
-            return Err("existing restore receipts disagree with the reviewed plan".to_string());
+    let mut approved_set = BTreeSet::new();
+    for action_id in &approved_action_ids {
+        if !approved_set.insert(action_id.clone()) {
+            return Err(format!(
+                "restore selection '{}' was approved more than once",
+                action_id
+            ));
         }
-        let completed = record
-            .receipts
-            .iter()
-            .filter(|receipt| {
-                matches!(
-                    receipt.status,
-                    ActionStatus::Applied | ActionStatus::Skipped
-                )
-            })
-            .map(|receipt| receipt.action_id.clone())
-            .collect::<BTreeSet<_>>();
-        approved.retain(|action_id| !completed.contains(action_id));
-        approved_conversation_actions
-            .retain(|selected| !completed.contains(&selected.action.action_id));
     }
+    let selected_conversations = approved_pull_conversation_resources(review, &approved_set);
+    let (engine, snapshot) =
+        inspect_from_storage(repository, &review.storage_id, &review.bundle_id)?;
+    if snapshot.head.revision != review.revision
+        || snapshot.head.commit_id != review.commit_id
+        || snapshot.head.manifest_sha256 != review.manifest_sha256
+    {
+        return Err("bundle head changed after comparison; compare again".to_string());
+    }
+    // Keep verified payloads alive across planning, preparation, and file apply,
+    // even when the selected content exceeds the shared cache capacity.
+    let mut byte_source = engine.byte_source(&snapshot, Some(object_cache()), Some(on_progress));
+    let RestoreApplyBuild {
+        mut plan,
+        session_views,
+        captured,
+    } = build_restore_plan_for_apply(
+        repository,
+        review,
+        &resolved,
+        &engine,
+        &snapshot,
+        &selected_conversations,
+        &mut byte_source,
+        on_phase,
+    )?;
+    let unaligned = align_pull_apply_selections(review, &approved_action_ids, &mut plan)?;
+    let unaligned_ids = unaligned
+        .iter()
+        .map(|selection| selection.action_id.clone())
+        .collect::<BTreeSet<_>>();
+    let aligned_action_ids = approved_action_ids
+        .iter()
+        .filter(|action_id| !unaligned_ids.contains(*action_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let (approved, approved_conversation_actions) =
+        split_approved_restore_actions(&aligned_action_ids, &plan)?;
     let approves_project_content = plan.actions.iter().any(|action| {
         approved.contains(&action.action_id)
             && matches!(
@@ -11813,19 +11209,25 @@ pub(super) fn apply_bundle_restore_with_progress(
             return Err(eligibility.reason);
         }
     }
-    let (engine, snapshot) = inspect_from_storage(repository, &plan.storage_id, &plan.bundle_id)?;
     let applied_at = now_secs();
-    on_phase("validate reviewed plan", phase_started.elapsed());
+    on_phase("prepare apply", phase_started.elapsed());
     let phase_started = Instant::now();
-    let mut byte_source = engine.byte_source(&snapshot, Some(object_cache()), Some(on_progress));
-    // Metadata-only adoptions never download or journal: the whole batch is
-    // one revisioned config transaction.
+    // Metadata-only adoptions never download payloads. The whole batch is one
+    // revisioned config transaction.
     let (metadata_actions, materializing_actions): (Vec<_>, Vec<_>) = approved_conversation_actions
         .into_iter()
         .partition(|selected| {
             selected.action.action == ConversationPlanActionType::AdoptCloudMetadata
         });
     let mut conversation_receipts = Vec::new();
+    for selection in unaligned {
+        conversation_receipts.push(failed_conversation_receipt_for(
+            &selection.action_id,
+            selection.resource_id,
+            selection.message,
+            applied_at,
+        ));
+    }
     let metadata_plan_actions = metadata_actions
         .iter()
         .map(|selected| selected.action.clone())
@@ -11852,6 +11254,8 @@ pub(super) fn apply_bundle_restore_with_progress(
             &snapshot,
             &mut byte_source,
             &materializing_actions,
+            &session_views,
+            &captured,
             &plan.storage_id,
             applied_at,
         )?;
@@ -11867,12 +11271,17 @@ pub(super) fn apply_bundle_restore_with_progress(
     // prepare capture's session views, every binding row's provider id, and
     // (inside the mint) ids minted earlier in this batch. Allocation
     // exhaustion fails the action, never retries silently.
+    // Keep only the expected revisions across CPU preparation. Settings and
+    // state readers must be able to acquire the persistence lock while the
+    // bounded workers run or wait for their next ordered result.
+    let initial_state = repository.load_project_activity_state_snapshot()?;
+    let initial_bindings = &initial_state.conversation_bindings;
+    let mut expected_config_revision = initial_state.config.revision;
     let mut occupied_provider_ids = session_views
         .iter()
         .map(|view| view.provider_thread_id.clone())
         .chain(
-            repository
-                .load_conversation_bindings()?
+            initial_bindings
                 .bindings
                 .iter()
                 .filter_map(|row| row.provider_thread_id.clone()),
@@ -11884,38 +11293,176 @@ pub(super) fn apply_bundle_restore_with_progress(
     let mut expected_bindings_document_revision = prepared_conversations
         .first()
         .map(|prepared| prepared.action.pins.context.bindings_document_revision);
-    for prepared in prepared_conversations {
-        let action = prepared.action.clone();
-        let resource = conversation_action_row_key(&action)
-            .map(|resource_id| resource_id.to_string())
-            .unwrap_or_else(|| action.action_id.to_string());
-        let phase_label = format!("apply conversation {resource}");
-        let phase_started = Instant::now();
-        let expected_revision = expected_bindings_document_revision
-            .unwrap_or(action.pins.context.bindings_document_revision);
-        match apply_prepared_pull_conversation(
-            repository,
-            &plan,
-            &resolved,
-            &snapshot,
-            prepared,
-            &mut occupied_provider_ids,
-            expected_revision,
-            applied_at,
-            on_phase,
-        ) {
-            Ok(receipt) => {
-                conversation_receipts.push(receipt);
-                expected_bindings_document_revision =
-                    Some(repository.load_conversation_bindings()?.revision);
+    let jobs = prepared_conversations
+        .iter()
+        .map(|prepared| {
+            let action = &prepared.action;
+            let destination = provider_registry()
+                .require(&action.provider)
+                .and_then(|adapter| {
+                    if action.action == ConversationPlanActionType::MaterializeCloud
+                        && !adapter.reconstructs_rollout_graph()
+                    {
+                        initial_bindings
+                            .bindings
+                            .iter()
+                            .find(|row| {
+                                row.host_id == binding.host_id
+                                    && row.replica_id == binding.replica_id
+                                    && row.local_project_id == binding.local_project_id
+                                    && row.provider_profile_id
+                                        == action.pins.context.provider_profile_id
+                                    && Some(&row.thread_id) == action.thread_id.as_ref()
+                            })
+                            .and_then(|row| row.provider_thread_id.clone())
+                            .ok_or_else(|| {
+                                "conversation cloud update lost its provider identity".to_string()
+                            })
+                    } else {
+                        mint_provider_thread_id(adapter, &mut occupied_provider_ids)
+                    }
+                });
+            (prepared.clone(), destination)
+        })
+        .collect::<Vec<_>>();
+    drop(initial_state);
+    let workers = provider_capture::bounded_refresh_workers(jobs.len());
+    let mut selected = prepared_conversations
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<_>>();
+    let preparation_started = Instant::now();
+    let bounds = mallard_infrastructure::ordered_preparation::for_each_prepared(
+        jobs,
+        workers,
+        64 * 1024 * 1024,
+        |(prepared, _)| prepared.cloud_transcript.size(),
+        |(prepared, destination)| {
+            let destination = destination?;
+            let cloud_bytes = prepared.cloud_transcript.read_bounded(
+                conversation_file_limit_bytes(),
+                "cloud conversation transcript",
+            )?;
+            let action = &prepared.action;
+            let cloud_tail = action
+                .pins
+                .tail
+                .cloud
+                .as_ref()
+                .ok_or("conversation Pull action lacks its pinned cloud tail")?;
+            let transcript = prepare_pull_transcript(
+                provider_registry().require(&action.provider)?,
+                &cloud_bytes,
+                &PullTranscriptRequest {
+                    cloud_thread_id: action
+                        .cloud_thread_id
+                        .as_ref()
+                        .ok_or("conversation Pull lacks its cloud id")?
+                        .as_str(),
+                    cloud_tail,
+                    cloud_wire_redaction: prepared.cloud_wire_redaction.as_ref(),
+                    cloud_wire_path_map: prepared.cloud_wire_path_map.as_ref(),
+                    lineage_digest: action.pins.tail.lineage_digest.as_deref(),
+                    semantic_digest: action.pins.tail.semantic_digest.as_deref(),
+                    destination_provider_thread_id: &destination,
+                    project_root: &binding.project_root,
+                    canonical_project_root: &binding.canonical_project_root,
+                },
+            )?;
+            Ok((transcript, destination))
+        },
+        |index, result| {
+            let prepared = selected[index]
+                .take()
+                .expect("prepared action consumed once");
+            let action = prepared.action.clone();
+            let resource = conversation_action_row_key(&action)
+                .map(|resource_id| resource_id.to_string())
+                .unwrap_or_else(|| action.action_id.to_string());
+            let phase_started = Instant::now();
+            let expected_revision = expected_bindings_document_revision
+                .unwrap_or(action.pins.context.bindings_document_revision);
+            let outcome = result.and_then(|(transcript, destination)| {
+                on_phase(
+                    &format!("verify cloud transcript {resource}"),
+                    transcript.wire_verification_elapsed,
+                );
+                on_phase(
+                    &format!("reconstruct transcript {resource}"),
+                    transcript.reconstruction_elapsed,
+                );
+                on_phase(
+                    &format!("verify output transcript {resource}"),
+                    transcript.output_verification_elapsed,
+                );
+                on_phase(
+                    &format!(
+                        "prepare transcript {resource} ({} source bytes, {} output bytes, {} semantic analyses)",
+                        transcript.input_bytes,
+                        transcript.transcript.bytes().len(),
+                        transcript.analysis_work.passes,
+                    ),
+                    transcript.elapsed,
+                );
+                // Reload under the lock only when a prepared result is ready
+                // to install. Never accept an intervening config write as the
+                // next before-state of this already-approved batch.
+                let mut pull_state = repository.lock_conversation_pull()?;
+                if pull_state.current()?.config.revision != expected_config_revision {
+                    return Err("sync config changed during Pull apply".to_string());
+                }
+                let outcome = apply_prepared_pull_conversation(
+                    &mut pull_state,
+                    &plan,
+                    &resolved,
+                    &snapshot,
+                    prepared,
+                    transcript,
+                    destination,
+                    expected_revision,
+                    applied_at,
+                    on_phase,
+                );
+                // A write error may follow a successful file replacement.
+                // Reload and validate the durable documents under this same
+                // lock, then let other sessions use the resulting revisions.
+                let state_write_failed = pull_state.current().is_err();
+                if state_write_failed {
+                    if let Err(error) = pull_state.reload_after_failed_commit() {
+                        return Err(format!("{}; reload Pull state: {error}",
+                            outcome.as_ref().unwrap_err()));
+                    }
+                }
+                if outcome.is_ok() || state_write_failed {
+                    let current = pull_state.current()?;
+                    expected_config_revision = current.config.revision;
+                    expected_bindings_document_revision =
+                        Some(current.conversation_bindings.revision);
+                }
+                outcome
+            });
+            match outcome {
+                Ok(receipt) => {
+                    conversation_receipts.push(receipt);
+                }
+                Err(message) => conversation_receipts.push(
+                    failed_conversation_receipt(&action, message, applied_at)
+                        .expect("validated action has a receipt identity"),
+                ),
             }
-            Err(message) => {
-                conversation_receipts
-                    .push(failed_conversation_receipt(&action, message, applied_at)?);
-            }
-        }
-        on_phase(&phase_label, phase_started.elapsed());
-    }
+            on_phase(
+                &format!("apply conversation {resource}"),
+                phase_started.elapsed(),
+            );
+        },
+    );
+    on_phase(
+        &format!(
+            "prepare and install conversations (peak {} jobs, {} source bytes)",
+            bounds.peak_jobs, bounds.peak_source_bytes
+        ),
+        preparation_started.elapsed(),
+    );
     let phase_started = Instant::now();
     let mut applied = engine.apply_restore_plan_lazy(
         &snapshot,
@@ -11986,7 +11533,7 @@ pub(super) fn apply_bundle_restore_with_progress(
                 || current.manifest_sha256 != record.manifest_sha256
                 || current.binding_revision != record.binding_revision
             {
-                return Err("restore receipts disagree on their reviewed plan scope".to_string());
+                return Err("restore receipts disagree on their reviewed Apply scope".to_string());
             }
             let existing_action_ids = current
                 .receipts
@@ -12110,8 +11657,8 @@ pub(super) fn apply_bundle_restore_with_progress(
         .filter_map(|receipt| {
             receipt.conversation.as_ref().and_then(|conversation| {
                 conversation.preserved_thread_id.as_ref().map(|preserved| {
-                    // The marker title is minted at apply and journaled; it
-                    // reaches the UI through the receipt, never a plan.
+                    // The marker title is minted at Apply and reaches the UI
+                    // through the receipt, never through Compare.
                     let preserved_display_title = conversation
                         .preserved_display_title
                         .clone()
@@ -12146,36 +11693,33 @@ pub(super) fn apply_bundle_restore_with_progress(
             failed_actions.len()
         )
     };
-    let blocked_operations = repository
-        .load_conversation_sync_journal()?
-        .operations
-        .iter()
-        .any(|operation| operation.is_blocked());
     let result = RestoreResult {
         success,
-        status: if blocked_operations {
-            RestoreApplyStatus::RecoveryRequired
-        } else {
-            RestoreApplyStatus::Complete
-        },
         message,
         plan_id: Some(plan.plan_id),
         reviewed_base_advanced: Some(files_complete),
         applied_action_ids,
         failed_actions,
         preserved_threads,
-        // Every committed conversation materialization leaves a running
-        // Codex app unaware of the thread until its next thread/list rescan.
-        codex_app_refresh: applied
+        // Every committed conversation materialization may leave a running
+        // provider app unaware of the thread until its next rescan; each
+        // bound provider's adapter decides whether to offer a follow-up.
+        after_pull_actions: applied
             .receipts
             .iter()
             .find_map(|receipt| receipt.conversation.as_ref())
-            .and_then(|receipt| {
-                codex_app_refresh_offer(
-                    receipt.journal_operation_id.clone(),
-                    resolved.homes.get(&codex_key()).map(Path::new),
-                )
-            }),
+            .map(|receipt| {
+                resolved
+                    .homes
+                    .iter()
+                    .filter_map(|(provider, home)| {
+                        provider_registry().get(provider).and_then(|adapter| {
+                            adapter.after_pull_offer(&receipt.operation_id, Some(Path::new(home)))
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
     if provider_home_changed {
         // These writes were performed by Mallard itself, so do not depend on
@@ -12342,18 +11886,10 @@ fn adopt_cloud_metadata_actions(
         .collect()
 }
 
-fn committed_conversation_receipt(
+pub(super) fn committed_conversation_receipt(
     repository: &LocalStateRepository,
     operation_id: &ConversationOperationId,
 ) -> Result<mallard_domain::ConversationApplyReceipt, String> {
-    if repository
-        .load_conversation_sync_journal()?
-        .operations
-        .iter()
-        .any(|operation| &operation.operation_id == operation_id)
-    {
-        return Err("conversation sync has not finished LocalCommitted cleanup".to_string());
-    }
     let materializations = repository.load_materializations()?;
     materializations
         .records
@@ -12364,48 +11900,9 @@ fn committed_conversation_receipt(
             receipt
                 .conversation
                 .clone()
-                .filter(|conversation| &conversation.journal_operation_id == operation_id)
+                .filter(|conversation| &conversation.operation_id == operation_id)
         })
         .ok_or_else(|| "committed conversation receipt was not found".to_string())
-}
-
-/// The exact Codex home the pulled profile reads. An app restart must
-/// target this home, never whatever the GUI session environment happens to
-/// select.
-fn codex_home_for_profile(
-    repository: &LocalStateRepository,
-    profile_id: &LocalProviderProfileId,
-) -> Result<PathBuf, String> {
-    let machine = repository.load_bindings()?;
-    let profile = machine
-        .profiles
-        .iter()
-        .find(|profile| &profile.profile_id == profile_id)
-        .ok_or_else(|| "the pulled Codex profile is no longer registered".to_string())?;
-    Ok(PathBuf::from(&profile.canonical_path))
-}
-
-pub(super) fn restart_codex_app_after_pull_with_repository(
-    repository: &LocalStateRepository,
-    request: RestartCodexAppAfterPullRequest,
-) -> Result<CodexAppRestartResult, String> {
-    if !request.active_chats_complete {
-        return Err("confirm that active Codex chats are complete before restarting".to_string());
-    }
-    let receipt = committed_conversation_receipt(repository, &request.operation_id)?;
-    let codex_home = codex_home_for_profile(repository, &receipt.provider_profile_id)?;
-    let offer = codex_app_refresh_offer(request.operation_id, Some(&codex_home))
-        .ok_or_else(|| "Codex App no longer needs or supports an automatic restart".to_string())?;
-    if offer.state != CodexAppRefreshState::RestartAvailable || offer.app_kind != request.app_kind {
-        return Err("Codex App restart capability changed after Pull".to_string());
-    }
-    Ok(match restart_after_pull(request.app_kind, &codex_home) {
-        Ok(result) => result,
-        Err(message) => CodexAppRestartResult {
-            success: false,
-            message,
-        },
-    })
 }
 
 fn successful_pull_timestamp(
@@ -12416,7 +11913,7 @@ fn successful_pull_timestamp(
     overall_success.then_some(applied_at).or(previous)
 }
 
-/// Load the exact storage snapshot approved by a RestorePlan. Dependency and
+/// Load the exact storage snapshot approved by a Pull review. Dependency and
 /// readiness support must never discover a different linked storage on their
 /// own, because each storage advances its bundle revisions independently.
 /// Load the plan's binding and re-inspect the bundle head it pins. This is
@@ -12462,12 +11959,13 @@ fn reviewed_files_complete(
 
 fn restore_support_context(
     repository: &LocalStateRepository,
-    restore_plan_id: &PlanId,
+    review: &RestorePlan,
 ) -> Result<(RestorePlan, ResolvedBinding, BundleSnapshot), String> {
-    let plan = repository.load_restore_plan(restore_plan_id)?;
+    review.validate_review()?;
+    let plan = review.clone();
     let now = now_secs();
     if now < plan.created_at || now > plan.expires_at {
-        return Err("restore plan has expired or is not active yet".to_string());
+        return Err("Pull review has expired or is not active yet".to_string());
     }
     let resolved = current_binding_for_restore_plan(repository, &plan)?;
     let (_, snapshot) = inspect_from_storage(repository, &plan.storage_id, &plan.bundle_id)?;
@@ -12482,18 +11980,16 @@ fn restore_support_context(
         || plan.manifest_sha256 != head.manifest_sha256
         || plan.binding_revision != binding.revision
     {
-        return Err(
-            "bundle head changed after restore planning; refresh the Pull review".to_string(),
-        );
+        return Err("bundle head changed after comparison; refresh the Pull review".to_string());
     }
     Ok((plan, resolved, snapshot))
 }
 
 pub(super) fn get_restore_readiness_with_repository(
     repository: &LocalStateRepository,
-    restore_plan_id: &PlanId,
+    review: &RestorePlan,
 ) -> Result<BundleReadiness, String> {
-    let (_, resolved, snapshot) = restore_support_context(repository, restore_plan_id)?;
+    let (_, resolved, snapshot) = restore_support_context(repository, review)?;
     bundle_readiness_for_snapshot(repository, &resolved, &snapshot)
 }
 
@@ -12587,7 +12083,9 @@ fn add_partial_materialization_issues(
             snapshot
                 .manifest
                 .find_resource(&receipt.resource_id)
-                .is_some_and(|(_, resource)| resource.kind == ResourceKind::Conversation)
+                .is_some_and(|(_, resource)| {
+                    kind_primitive(&resource.kind) == Some(ResourceKindPrimitive::Conversation)
+                })
         })
         .map(|receipt| receipt.resource_id.clone())
         .collect::<BTreeSet<_>>();
@@ -12716,32 +12214,48 @@ fn project_link<'a>(
         .find(|link| &link.local_project_id == local_project_id && &link.storage_id == storage_id)
 }
 
+#[cfg(test)]
 fn require_current_binding(
     repository: &LocalStateRepository,
+    supplied: &ProjectBinding,
+) -> Result<ResolvedBinding, String> {
+    let bindings = repository.load_bindings()?;
+    require_current_binding_from_state(&bindings, supplied)
+}
+
+fn require_current_binding_from_state(
+    bindings: &MachineProjectState,
     supplied: &ProjectBinding,
 ) -> Result<ResolvedBinding, String> {
     if supplied.state != BindingState::Active {
         return Err("project binding is not active".to_string());
     }
-    let bindings = repository.load_bindings()?;
     let current = bindings
         .bindings
-        .into_iter()
+        .iter()
         .find(|binding| {
             binding.host_id == supplied.host_id && binding.replica_id == supplied.replica_id
         })
         .ok_or_else(|| "project binding is not registered on this machine".to_string())?;
-    if &current != supplied {
+    if current != supplied {
         return Err("project binding changed; refresh before continuing".to_string());
     }
-    resolve_project_binding(repository, &current)
+    resolve_project_binding_from_state(bindings, current)
 }
 
-fn resolve_project_binding(
+pub(super) fn resolve_project_binding(
     repository: &LocalStateRepository,
     binding: &ProjectBinding,
 ) -> Result<ResolvedBinding, String> {
-    let homes = resolve_profile_paths(repository, &binding.profile_ids)?;
+    let state = repository.load_bindings()?;
+    resolve_project_binding_from_state(&state, binding)
+}
+
+fn resolve_project_binding_from_state(
+    state: &MachineProjectState,
+    binding: &ProjectBinding,
+) -> Result<ResolvedBinding, String> {
+    let homes = resolve_profile_paths_from_state(state, &binding.profile_ids)?;
     let resolved = ResolvedBinding {
         binding: binding.clone(),
         homes,
@@ -12775,15 +12289,16 @@ pub(super) fn current_binding_for_restore_plan(
     repository: &LocalStateRepository,
     plan: &RestorePlan,
 ) -> Result<ResolvedBinding, String> {
-    let identity = repository.load_or_create_host_identity()?;
+    let state = repository.load_project_state_snapshot()?;
+    let identity = &state.host_identity;
     if identity.host_id != plan.host_id || identity.revision != plan.expected_host_identity_revision
     {
         return Err("restore plan's host identity changed after planning".to_string());
     }
-    let binding = repository
-        .load_bindings()?
+    let binding = state
         .bindings
-        .into_iter()
+        .bindings
+        .iter()
         .find(|binding| {
             binding.host_id == plan.host_id
                 && binding.replica_id == plan.replica_id
@@ -12793,53 +12308,28 @@ pub(super) fn current_binding_for_restore_plan(
     if binding.revision != plan.binding_revision || binding.bundle_id != plan.bundle_id {
         return Err("restore plan's project binding changed after planning".to_string());
     }
-    resolve_project_binding(repository, &binding)
+    resolve_project_binding_from_state(&state.bindings, binding)
 }
 
-pub(super) fn project_open_commands(resolved: &ResolvedBinding) -> Vec<(&'static str, String)> {
-    let project_root = shell_quote(&resolved.binding.project_root);
+/// Every bound provider's declared ways to open the pulled project, in
+/// provider display order.
+pub(super) fn project_open_commands(resolved: &ResolvedBinding) -> Vec<(String, String)> {
     let mut commands = Vec::new();
-    if let Some(codex_home) = resolved.homes.get(&codex_key()) {
-        let environment = format!("CODEX_HOME={}", shell_quote(codex_home));
-        commands.push((
-            "Codex — new",
-            format!("{} codex -C {}", environment, project_root),
-        ));
-        commands.push((
-            "Codex — resume",
-            format!("{} codex resume -C {}", environment, project_root),
-        ));
-        // The desktop app is launched through a deep link, not the CLI, so it
-        // needs its own line rather than a variation on the two above.
-        #[cfg(target_os = "macos")]
-        if let Some(command) =
-            mallard_infrastructure::providers::codex::codex_app_project_open_command(
-                Path::new(codex_home),
-                Path::new(&resolved.binding.project_root),
-            )
-        {
-            commands.push(("Codex app — new", command));
-        }
-    }
-    if let Some(claude_home) = resolved
-        .homes
-        .get(&ProviderKey::parse("claude").expect("static provider key"))
-    {
-        let environment = format!("CLAUDE_CONFIG_DIR={}", shell_quote(claude_home));
-        commands.push((
-            "Claude — new",
-            format!("cd {} && {} claude", project_root, environment),
-        ));
-        commands.push((
-            "Claude — resume",
-            format!("cd {} && {} claude --resume", project_root, environment),
-        ));
+    for descriptor in provider_registry().descriptors() {
+        let Some(home) = resolved.homes.get(&descriptor.key) else {
+            continue;
+        };
+        let Some(adapter) = provider_registry().get(&descriptor.key) else {
+            continue;
+        };
+        commands.extend(
+            adapter
+                .project_open_commands(Path::new(home), &resolved.binding.project_root)
+                .into_iter()
+                .map(|command| (command.label, command.command)),
+        );
     }
     commands
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn split_approved_restore_actions(
@@ -12870,7 +12360,7 @@ fn split_approved_restore_actions(
         .find(|action_id| !plan_action_ids.contains(*action_id))
     {
         return Err(format!(
-            "restore action '{}' is not in the reviewed plan",
+            "restore action '{}' is not in the Pull review",
             unknown
         ));
     }
@@ -12929,15 +12419,34 @@ fn capture_request_for_binding(
     repository: &LocalStateRepository,
     binding: &ProjectBinding,
 ) -> Result<CaptureRequest, String> {
-    let resolved = resolve_project_binding(repository, binding)?;
-    capture_request_for_resolved_binding(repository, &resolved)
+    let state = repository.load_project_state_snapshot()?;
+    let resolved = resolve_project_binding_from_state(&state.bindings, binding)?;
+    capture_request_for_resolved_binding_from_state(
+        repository.root(),
+        &state.config,
+        &state.bindings,
+        &resolved,
+    )
 }
 
-fn capture_request_for_resolved_binding(
-    repository: &LocalStateRepository,
+fn capture_request_for_resolved_binding_from_state(
+    repository_root: &Path,
+    config: &SyncConfig,
+    bindings: &MachineProjectState,
     resolved: &ResolvedBinding,
 ) -> Result<CaptureRequest, String> {
     let binding = &resolved.binding;
+    if bindings.active_for(&binding.local_project_id) != Some(binding)
+        || resolved.homes.iter().any(|(provider, home)| {
+            !bindings.profiles.iter().any(|profile| {
+                binding.profile_ids.get(provider) == Some(&profile.profile_id)
+                    && &profile.provider == provider
+                    && &profile.canonical_path == home
+            })
+        })
+    {
+        return Err("project binding changed; refresh before continuing".to_string());
+    }
     let resolved_project = fs_canonicalize(Path::new(&binding.project_root))?;
     if resolved_project != binding.canonical_project_root {
         return Err("project binding resolves to a different checkout".to_string());
@@ -12945,14 +12454,13 @@ fn capture_request_for_resolved_binding(
     // Nested bound projects are separate directory projects. Exact-home
     // ownership keeps their sessions out with no exclusion list, but their
     // trees must still stay out of this project's content capture.
-    let nested_binding_roots: Vec<PathBuf> = repository
-        .load_bindings()?
+    let nested_binding_roots: Vec<PathBuf> = bindings
         .bindings
-        .into_iter()
+        .iter()
         .filter(|other| {
             other.state == BindingState::Active && other.replica_id != binding.replica_id
         })
-        .map(|other| PathBuf::from(other.canonical_project_root))
+        .map(|other| PathBuf::from(&other.canonical_project_root))
         .filter(|root| root.starts_with(&resolved_project) && root != &resolved_project)
         .collect();
     let mut request = CaptureRequest {
@@ -12965,16 +12473,13 @@ fn capture_request_for_resolved_binding(
         include_project_content: false,
         excluded_content_roots: nested_binding_roots,
     };
-    let config = repository.load_config()?;
     request
         .excluded_content_roots
-        .push(repository.root().to_path_buf());
+        .push(repository_root.to_path_buf());
     request.excluded_content_roots.extend(
-        config
-            .storages
-            .iter()
-            .filter(|storage| storage.kind == StorageKind::Local)
-            .map(|storage| PathBuf::from(&storage.local_dir)),
+        configured_local_storage_roots(config)?
+            .into_iter()
+            .map(|(_, root)| root),
     );
     for home in resolved.homes.values() {
         request.excluded_content_roots.push(PathBuf::from(home));
@@ -13057,26 +12562,49 @@ pub(super) fn storage_engine(
     repository: &LocalStateRepository,
     storage_id: &StorageId,
 ) -> Result<(StorageConfig, StorageEngine), String> {
-    let config = repository.load_config()?;
+    let state = repository.load_project_state_snapshot()?;
+    storage_engine_from_state(repository, &state.config, &state.bindings, storage_id)
+}
+
+fn storage_engine_from_state(
+    repository: &LocalStateRepository,
+    config: &SyncConfig,
+    machine: &MachineProjectState,
+    storage_id: &StorageId,
+) -> Result<(StorageConfig, StorageEngine), String> {
     let storage = config
         .storages
         .iter()
         .find(|storage| &storage.id == storage_id)
         .cloned()
         .ok_or_else(|| format!("unknown storage '{}'", storage_id))?;
-    let machine = repository.load_bindings()?;
-    validate_config_storage_isolation(repository, &config, &machine.bindings, &machine.profiles)?;
+    validate_config_storage_isolation(repository, config, &machine.bindings, &machine.profiles)?;
     let engine = engine_for_storage_config(&storage)?;
     Ok((storage, engine))
 }
 
-/// Build an engine directly from a storage configuration.  Setup drafts use
-/// this for pending storage that is not part of the saved config yet.
+/// Build an engine from one validated storage configuration.
 fn engine_for_storage_config(storage: &StorageConfig) -> Result<StorageEngine, String> {
     BundleEngine::open(
         ConfiguredObjectStore::from_config(storage)?,
         storage.id.clone(),
     )
+}
+
+/// Every configured storage that occupies a machine-local directory, with
+/// that directory, resolved through its adapter. A storage whose provider is
+/// unavailable in this build claims no local root.
+fn configured_local_storage_roots(
+    config: &SyncConfig,
+) -> Result<Vec<(&StorageConfig, PathBuf)>, String> {
+    let registry = StorageProviderRegistry::production();
+    let mut roots = Vec::new();
+    for storage in &config.storages {
+        if let Some(root) = storage_local_root(registry, storage)? {
+            roots.push((storage, root));
+        }
+    }
+    Ok(roots)
 }
 
 fn validate_config_storage_isolation(
@@ -13087,12 +12615,8 @@ fn validate_config_storage_isolation(
 ) -> Result<(), String> {
     let repository_root = prospective_canonical(repository.root())?;
     let mut local_roots = Vec::<(&StorageConfig, PathBuf)>::new();
-    for storage in config
-        .storages
-        .iter()
-        .filter(|storage| storage.kind == StorageKind::Local)
-    {
-        let root = prospective_canonical(Path::new(&storage.local_dir))?;
+    for (storage, configured_root) in configured_local_storage_roots(config)? {
+        let root = prospective_canonical(&configured_root)?;
         if paths_overlap(&root, &repository_root) {
             return Err(format!(
                 "local storage '{}' overlaps Mallard application data",
@@ -13429,22 +12953,9 @@ fn connect_project_to_remote_bundle_guarded(
             },
         )?;
     }
-    let removed_bindings = machine
-        .bindings
-        .iter()
-        .filter(|binding| binding.local_project_id == request.local_project_id)
-        .cloned()
-        .collect::<Vec<_>>();
-    repository.mutate_bindings(|_, bindings| {
-        bindings
-            .bindings
-            .retain(|binding| binding.local_project_id != request.local_project_id);
-        Ok(())
-    })?;
-
     let remote_recipe = machine_local_recipe_from_manifest(&remote.manifest)?;
     let new_bundle_id = request.bundle_id.clone();
-    let config_result = repository.mutate_config(|config| {
+    repository.mutate_project_bundle(&request.local_project_id, config.revision, |config| {
         let project = config
             .projects
             .iter_mut()
@@ -13488,32 +12999,7 @@ fn connect_project_to_remote_bundle_guarded(
             });
         }
         Ok(())
-    });
-    if let Err(error) = config_result {
-        let rollback = repository.mutate_bindings(|_, bindings| {
-            bindings.bindings.extend(removed_bindings.clone());
-            Ok(())
-        });
-        return Err(match rollback {
-            Ok(()) => error,
-            Err(rollback_error) => format!(
-                "{}; restoring the previous project binding also failed: {}",
-                error, rollback_error
-            ),
-        });
-    }
-
-    if let Some(binding) = active_binding {
-        save_project_binding_guarded(
-            repository,
-            SaveProjectBindingRequest {
-                local_project_id: request.local_project_id.clone(),
-                project_root: binding.project_root,
-                profile_ids: binding.profile_ids,
-                expected_revision: None,
-            },
-        )?;
-    }
+    })?;
     get_project_with_repository(repository, &request.local_project_id)?
         .ok_or_else(|| "project disappeared after connecting remote storage".to_string())
 }
@@ -13715,13 +13201,10 @@ fn validate_binding_request(
         ));
     }
     let config = repository.load_config()?;
-    let local_stores = config
-        .storages
-        .iter()
-        .filter(|storage| storage.kind == mallard_domain::StorageKind::Local)
-        .map(|storage| {
-            prospective_canonical(Path::new(&storage.local_dir))
-                .map(|path| (storage.name.as_str(), path))
+    let local_stores = configured_local_storage_roots(&config)?
+        .into_iter()
+        .map(|(storage, root)| {
+            prospective_canonical(&root).map(|path| (storage.name.as_str(), path))
         })
         .collect::<Result<Vec<_>, _>>()?;
     for (storage_name, storage_path) in &local_stores {
@@ -13980,7 +13463,7 @@ fn draft_references_are_present(
         DraftProfileSelection::Pending { .. } => true,
     });
     let storage_present = match &draft.storage {
-        Some(DraftStorageSelection::Existing { storage_id }) => config
+        Some(DraftStorageSelection { storage_id }) => config
             .storages
             .iter()
             .any(|storage| &storage.id == storage_id),
@@ -14057,7 +13540,7 @@ pub(super) fn create_setup_draft_with_repository(
         }
     }
     let storage = if config.storages.len() == 1 {
-        Some(DraftStorageSelection::Existing {
+        Some(DraftStorageSelection {
             storage_id: config.storages[0].id.clone(),
         })
     } else {
@@ -14223,6 +13706,7 @@ fn resolve_draft_profiles(
                     },
                     path: probe.resolved_path.clone(),
                     canonical_path: probe.canonical_path,
+                    provider_config: mallard_domain::AgentProviderConfig::version_1(),
                     revision: 0,
                     created_at: now,
                     updated_at: now,
@@ -14239,19 +13723,13 @@ fn resolve_draft_profiles(
     Ok(resolved)
 }
 
-/// The storage a draft finalization will link, if any.
-struct ResolvedDraftStorage {
-    storage: StorageConfig,
-    pending: bool,
-}
-
 fn resolve_draft_storage(
     repository: &LocalStateRepository,
     draft: &ProjectSetupDraft,
-) -> Result<Option<ResolvedDraftStorage>, String> {
+) -> Result<Option<StorageConfig>, String> {
     match &draft.storage {
         None => Ok(None),
-        Some(DraftStorageSelection::Existing { storage_id }) => {
+        Some(DraftStorageSelection { storage_id }) => {
             let config = repository.load_config()?;
             let storage = config
                 .storages
@@ -14259,36 +13737,7 @@ fn resolve_draft_storage(
                 .find(|storage| &storage.id == storage_id)
                 .cloned()
                 .ok_or_else(|| format!("unknown storage '{}'", storage_id))?;
-            Ok(Some(ResolvedDraftStorage {
-                storage,
-                pending: false,
-            }))
-        }
-        Some(DraftStorageSelection::Pending { storage }) => {
-            storage.validate()?;
-            let config = repository.load_config()?;
-            if config
-                .storages
-                .iter()
-                .any(|existing| existing.id == storage.id)
-            {
-                // The preallocated ID landed in an earlier finalize attempt;
-                // treat it as existing so retries stay idempotent.
-                return Ok(Some(ResolvedDraftStorage {
-                    storage: storage.clone(),
-                    pending: false,
-                }));
-            }
-            if storage.kind == StorageKind::Local && !Path::new(&storage.local_dir).is_dir() {
-                return Err(format!(
-                    "local storage folder '{}' does not exist",
-                    storage.local_dir
-                ));
-            }
-            Ok(Some(ResolvedDraftStorage {
-                storage: storage.clone(),
-                pending: true,
-            }))
+            Ok(Some(storage))
         }
     }
 }
@@ -14408,11 +13857,10 @@ pub(super) fn inspect_setup_draft_with_repository(
             mismatch_acknowledged,
             ..
         } => {
-            let selected_storage_id = match &draft.storage {
-                Some(DraftStorageSelection::Existing { storage_id }) => Some(storage_id.clone()),
-                Some(DraftStorageSelection::Pending { storage }) => Some(storage.id.clone()),
-                None => None,
-            };
+            let selected_storage_id = draft
+                .storage
+                .as_ref()
+                .map(|selection| selection.storage_id.clone());
             if selected_storage_id.as_ref() != Some(storage_id) {
                 SetupSectionStatus {
                     section: "repository".to_string(),
@@ -14507,12 +13955,12 @@ fn build_setup_transaction(
         } => {
             let storage = resolved_storage
                 .as_ref()
-                .filter(|resolved| &resolved.storage.id == storage_id)
+                .filter(|resolved| &resolved.id == storage_id)
                 .ok_or_else(|| {
                     "the chosen remote repo lives in a different storage than the one selected"
                         .to_string()
                 })?;
-            let engine = engine_for_storage_config(&storage.storage)?;
+            let engine = engine_for_storage_config(storage)?;
             let snapshot = engine.inspect(bundle_id)?;
             let machine_local_recipe = machine_local_recipe_from_manifest(&snapshot.manifest)?;
             let remote_fingerprint = snapshot.manifest.bundle.repository_fingerprint.clone();
@@ -14566,7 +14014,7 @@ fn build_setup_transaction(
         .as_ref()
         .map(|resolved| ProjectStorageLink {
             local_project_id: local_project_id.clone(),
-            storage_id: resolved.storage.id.clone(),
+            storage_id: resolved.id.clone(),
             bundle_id: bundle_id.clone(),
             recipe: None,
             scope_bases: BTreeMap::new(),
@@ -14614,9 +14062,6 @@ fn build_setup_transaction(
         host_id,
         replica_id: binding.replica_id.clone(),
         profiles: resolved_profiles.pending_records,
-        storage: resolved_storage
-            .filter(|resolved| resolved.pending)
-            .map(|resolved| resolved.storage),
         project,
         links,
         binding,
@@ -14625,10 +14070,7 @@ fn build_setup_transaction(
 
     // Prove prospective isolation before anything is written: the new records
     // must not overlap application data, local storages, or each other.
-    let mut prospective_config = repository.load_config()?;
-    if let Some(storage) = &transaction.storage {
-        prospective_config.storages.push(storage.clone());
-    }
+    let prospective_config = repository.load_config()?;
     let machine = repository.load_bindings()?;
     let mut prospective_profiles = machine.profiles.clone();
     prospective_profiles.extend(transaction.profiles.iter().cloned());
@@ -14689,17 +14131,8 @@ fn apply_setup_transaction(
         Ok(map)
     })?;
 
-    // 2. Storage, project, and links (one atomic config mutation).
+    // 2. Project and links (one atomic config mutation).
     repository.mutate_config(|config| {
-        if let Some(storage) = &transaction.storage {
-            if !config
-                .storages
-                .iter()
-                .any(|existing| existing.id == storage.id)
-            {
-                config.storages.push(storage.clone());
-            }
-        }
         if config
             .project(&transaction.project.local_project_id)
             .is_none()
@@ -14792,15 +14225,6 @@ fn setup_transaction_partially_applied(
         .is_some()
     {
         return Ok(true);
-    }
-    if let Some(storage) = &transaction.storage {
-        if config
-            .storages
-            .iter()
-            .any(|existing| existing.id == storage.id)
-        {
-            return Ok(true);
-        }
     }
     let machine = repository.load_bindings()?;
     if machine
@@ -14946,16 +14370,13 @@ pub(super) fn finalize_project_setup_with_repository(
         // that cannot be written fails Finish with nothing to recover, and
         // an adopted existing repo already has a head so the claim no-ops.
         if let Some(link) = transaction.links.first() {
-            let storage = match &transaction.storage {
-                Some(storage) => storage.clone(),
-                None => repository
-                    .load_config()?
-                    .storages
-                    .iter()
-                    .find(|storage| storage.id == link.storage_id)
-                    .cloned()
-                    .ok_or_else(|| format!("unknown storage '{}'", link.storage_id))?,
-            };
+            let storage = repository
+                .load_config()?
+                .storages
+                .iter()
+                .find(|storage| storage.id == link.storage_id)
+                .cloned()
+                .ok_or_else(|| format!("unknown storage '{}'", link.storage_id))?;
             publish_registration_claim(
                 repository,
                 &storage,
@@ -15008,1217 +14429,17 @@ fn fs_profile_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
     Ok(metadata)
 }
 
-fn fs_canonicalize(path: &Path) -> Result<PathBuf, String> {
+pub(super) fn fs_canonicalize(path: &Path) -> Result<PathBuf, String> {
     std::fs::canonicalize(path).map_err(|error| format!("resolve '{}': {}", path.display(), error))
-}
-
-pub(super) fn audit_codex_conversation_paths_with_repository(
-    repository: &LocalStateRepository,
-    local_project_id: &LocalProjectId,
-) -> Result<CodexConversationPathAudit, String> {
-    let stored_binding = repository
-        .load_bindings()?
-        .active_for(local_project_id)
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "project '{}' is not mapped on this machine",
-                local_project_id
-            )
-        })?;
-    let resolved = resolve_project_binding(repository, &stored_binding)?;
-    let binding = resolved.binding.clone();
-    let profile_id = binding
-        .profile_ids
-        .get(&codex_key())
-        .map(ToString::to_string);
-    let mut audit = CodexConversationPathAudit {
-        local_project_id: local_project_id.clone(),
-        profile_id,
-        profile_path: resolved.homes.get(&codex_key()).cloned(),
-        project_root: binding.project_root.clone(),
-        assigned_thread_count: 0,
-        matching_thread_count: 0,
-        issues: Vec::new(),
-        blockers: Vec::new(),
-        warnings: Vec::new(),
-        assignment_conflicts: Vec::new(),
-        ready: true,
-        can_repair: false,
-    };
-    let Some(codex_home_text) = resolved.homes.get(&codex_key()).map(String::as_str) else {
-        return Ok(audit);
-    };
-    let codex_home = match fs_canonicalize(Path::new(codex_home_text)) {
-        Ok(path) => path,
-        Err(error) => {
-            audit.blockers.push(error);
-            return Ok(finalize_conversation_path_audit(audit));
-        }
-    };
-    let canonical_project_root = PathBuf::from(&binding.canonical_project_root);
-    let state_path = codex_home.join(".codex-global-state.json");
-    if !state_path.exists() {
-        audit.warnings.push(format!(
-            "Codex Desktop project assignments were not found in '{}'",
-            state_path.display()
-        ));
-        return Ok(finalize_conversation_path_audit(audit));
-    }
-    let state_metadata = match fs::symlink_metadata(&state_path) {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            audit.blockers.push(format!(
-                "inspect Codex Desktop project assignments '{}': {}",
-                state_path.display(),
-                error
-            ));
-            return Ok(finalize_conversation_path_audit(audit));
-        }
-    };
-    if !state_metadata.is_file() || state_metadata.file_type().is_symlink() {
-        audit.blockers.push(format!(
-            "Codex Desktop project assignments '{}' must be a regular file",
-            state_path.display()
-        ));
-        return Ok(finalize_conversation_path_audit(audit));
-    }
-    if state_metadata.len() > MAX_CODEX_GLOBAL_STATE_BYTES {
-        audit.blockers.push(format!(
-            "Codex Desktop project assignments '{}' exceed the {} byte safety limit",
-            state_path.display(),
-            MAX_CODEX_GLOBAL_STATE_BYTES
-        ));
-        return Ok(finalize_conversation_path_audit(audit));
-    }
-    let state_bytes = match fs::read(&state_path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            audit.blockers.push(format!(
-                "read Codex Desktop project assignments '{}': {}",
-                state_path.display(),
-                error
-            ));
-            return Ok(finalize_conversation_path_audit(audit));
-        }
-    };
-    let state: serde_json::Value = match serde_json::from_slice(&state_bytes) {
-        Ok(state) => state,
-        Err(error) => {
-            audit.blockers.push(format!(
-                "parse Codex Desktop project assignments '{}': {}",
-                state_path.display(),
-                error
-            ));
-            return Ok(finalize_conversation_path_audit(audit));
-        }
-    };
-
-    // Desktop evidence only NOMINATES threads; the rollout's authoritative
-    // home classifies them. Matching is
-    // exact canonical equality everywhere — a subdirectory root is a
-    // different project. Explicit project assignments may lead to a repair;
-    // auxiliary evidence (writable roots, workspace hints naming this root
-    // itself) can only prove a thread matching or surface a warning.
-    let mut desktop_project_ids = BTreeSet::new();
-    let mut live_desktop_project_roots = BTreeSet::new();
-    for projects in state_object_maps(&state, "local-projects") {
-        for (project_key, project) in projects {
-            let roots = json_path_values(project, &["rootPaths", "root_paths"]);
-            for root in roots.iter().copied() {
-                if validate_absolute_clean_path("Codex project path", root).is_err() {
-                    continue;
-                }
-                if let Ok(canonical_root) = fs::canonicalize(root) {
-                    if canonical_root.is_dir() {
-                        live_desktop_project_roots.insert(canonical_root);
-                    }
-                }
-            }
-            let owns_root = roots
-                .into_iter()
-                .any(|root| path_is_project_root(Path::new(root), &canonical_project_root));
-            if !owns_root {
-                continue;
-            }
-            desktop_project_ids.insert(project_key.clone());
-            if let Some(project_id) = project.get("id").and_then(serde_json::Value::as_str) {
-                desktop_project_ids.insert(project_id.to_string());
-            }
-        }
-    }
-
-    let mut assigned_thread_ids = BTreeSet::new();
-    for assignments in state_object_maps(&state, "thread-project-assignments") {
-        for (thread_id, assignment) in assignments {
-            let local_assignment = assignment
-                .get("projectKind")
-                .or_else(|| assignment.get("project_kind"))
-                .and_then(serde_json::Value::as_str)
-                .map(|kind| kind == "local")
-                .unwrap_or(true);
-            let assigned_project = assignment
-                .get("projectId")
-                .or_else(|| assignment.get("project_id"))
-                .and_then(serde_json::Value::as_str);
-            if local_assignment
-                && assigned_project
-                    .map(|project_id| desktop_project_ids.contains(project_id))
-                    .unwrap_or(false)
-            {
-                insert_safe_assigned_thread(
-                    thread_id,
-                    &mut assigned_thread_ids,
-                    &mut audit.blockers,
-                );
-            }
-        }
-    }
-    let mut aux_thread_ids = BTreeSet::new();
-    for writable_roots in state_object_maps(&state, "thread-writable-roots") {
-        for (thread_id, roots) in writable_roots {
-            if json_path_values(roots, &["roots", "rootPaths", "root_paths"])
-                .into_iter()
-                .chain(json_direct_path_values(roots))
-                .any(|root| path_is_project_root(Path::new(root), &canonical_project_root))
-            {
-                insert_safe_assigned_thread(thread_id, &mut aux_thread_ids, &mut audit.blockers);
-            }
-        }
-    }
-    for root_hints in state_object_maps(&state, "thread-workspace-root-hints") {
-        for (thread_id, hint) in root_hints {
-            if json_direct_path_values(hint)
-                .any(|root| path_is_project_root(Path::new(root), &canonical_project_root))
-            {
-                insert_safe_assigned_thread(thread_id, &mut aux_thread_ids, &mut audit.blockers);
-            }
-        }
-    }
-    aux_thread_ids.retain(|thread_id| !assigned_thread_ids.contains(thread_id));
-    let nominated_thread_ids: BTreeSet<String> = assigned_thread_ids
-        .union(&aux_thread_ids)
-        .cloned()
-        .collect();
-    audit.assigned_thread_count = nominated_thread_ids.len();
-    if nominated_thread_ids.is_empty() {
-        return Ok(finalize_conversation_path_audit(audit));
-    }
-
-    let mut transcript_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
-    let mut oversized_thread_ids = BTreeSet::new();
-    let mut visited_files = 0_usize;
-    let mut limit_reached = false;
-    for directory in ["sessions", "archived_sessions"] {
-        let session_root = codex_home.join(directory);
-        if !session_root.exists() {
-            continue;
-        }
-        let root_metadata = match fs::symlink_metadata(&session_root) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                audit.blockers.push(format!(
-                    "inspect Codex {} directory '{}': {}",
-                    directory,
-                    session_root.display(),
-                    error
-                ));
-                continue;
-            }
-        };
-        if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
-            audit.blockers.push(format!(
-                "Codex {} directory '{}' must be a real directory",
-                directory,
-                session_root.display()
-            ));
-            continue;
-        }
-        for entry in WalkDir::new(&session_root).follow_links(false).max_depth(8) {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(error) => {
-                    audit
-                        .blockers
-                        .push(format!("walk Codex {} sessions: {}", directory, error));
-                    continue;
-                }
-            };
-            if !entry.file_type().is_file()
-                || entry.path().extension().and_then(|value| value.to_str()) != Some("jsonl")
-            {
-                continue;
-            }
-            visited_files = visited_files.saturating_add(1);
-            if visited_files > MAX_CODEX_SESSION_FILES {
-                audit.blockers.push(format!(
-                    "Codex profile contains more than {} session files; repair requires manual review",
-                    MAX_CODEX_SESSION_FILES
-                ));
-                limit_reached = true;
-                break;
-            }
-            let filename = entry.file_name().to_string_lossy();
-            let filename_matches_assignment = assigned_thread_ids
-                .iter()
-                .any(|thread_id| filename.contains(thread_id));
-            let file_size = match entry.metadata() {
-                Ok(metadata) => metadata.len(),
-                Err(error) => {
-                    if filename_matches_assignment {
-                        audit.blockers.push(format!(
-                            "inspect assigned Codex conversation '{}': {}",
-                            entry.path().display(),
-                            error
-                        ));
-                    }
-                    continue;
-                }
-            };
-            if file_size > conversation_file_limit_bytes() {
-                oversized_thread_ids.extend(
-                    nominated_thread_ids
-                        .iter()
-                        .filter(|thread_id| filename.contains(thread_id.as_str()))
-                        .cloned(),
-                );
-                continue;
-            }
-            let metadata = match provider_registry()
-                .require(&codex_key())?
-                .scan_metadata(entry.path())
-            {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    if filename_matches_assignment {
-                        audit.blockers.push(format!(
-                            "inspect assigned Codex conversation '{}': {}",
-                            entry.path().display(),
-                            error
-                        ));
-                    }
-                    continue;
-                }
-            };
-            if !nominated_thread_ids.contains(&metadata.session_id) {
-                continue;
-            }
-            let canonical_path = match fs_canonicalize(entry.path()) {
-                Ok(path) => path,
-                Err(error) => {
-                    audit.blockers.push(error);
-                    continue;
-                }
-            };
-            if !canonical_path.starts_with(&codex_home) {
-                audit.blockers.push(format!(
-                    "assigned Codex conversation '{}' resolves outside its profile",
-                    entry.path().display()
-                ));
-                continue;
-            }
-            transcript_paths
-                .entry(metadata.session_id)
-                .or_default()
-                .push(canonical_path);
-        }
-        if limit_reached {
-            break;
-        }
-    }
-
-    // One rule per nominated thread, decided by its authoritative home:
-    // equal to the root ⇒ matching; equal to another live Desktop project ⇒
-    // excluded from this project; strictly under the root ⇒ a separate
-    // directory project (warned, never flattened); anywhere else ⇒ a repair
-    // for explicitly assigned threads, silence for auxiliary nominations.
-    // Auxiliary threads never block the audit either — a foreign thread
-    // holding a writable grant into this project must not gate its repair.
-    let resolved_project_root = fs::canonicalize(&canonical_project_root)
-        .unwrap_or_else(|_| canonical_project_root.clone());
-    for thread_id in &nominated_thread_ids {
-        let is_assigned = assigned_thread_ids.contains(thread_id);
-        if oversized_thread_ids.contains(thread_id) {
-            if is_assigned {
-                audit.warnings.push(format!(
-                    "Codex thread '{}' was not audited because its session file exceeds the {} MiB per-file sync limit; the conversation remains unavailable for sync",
-                    thread_id,
-                    conversation_file_limit_bytes() / (1024 * 1024)
-                ));
-            }
-            continue;
-        }
-        let Some(paths) = transcript_paths.get(thread_id) else {
-            if is_assigned {
-                audit.warnings.push(format!(
-                    "Codex Desktop assigns thread '{}' to this project, but its rollout file was not found",
-                    thread_id
-                ));
-            }
-            continue;
-        };
-        if paths.len() != 1 {
-            if is_assigned {
-                audit.blockers.push(format!(
-                    "Codex thread '{}' has {} rollout files; repair requires manual review",
-                    thread_id,
-                    paths.len()
-                ));
-            }
-            continue;
-        }
-        let path = &paths[0];
-        let transcript_metadata = match fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                if is_assigned {
-                    audit.blockers.push(format!(
-                        "inspect assigned Codex conversation '{}': {}",
-                        path.display(),
-                        error
-                    ));
-                }
-                continue;
-            }
-        };
-        if transcript_metadata.len() > conversation_file_limit_bytes() {
-            if is_assigned {
-                audit.warnings.push(format!(
-                    "Codex thread '{}' was not audited because its session file exceeds the {} MiB per-file sync limit; the conversation remains unavailable for sync",
-                    thread_id,
-                    conversation_file_limit_bytes() / (1024 * 1024)
-                ));
-            }
-            continue;
-        }
-        let source = match read_bounded_conversation(path) {
-            Ok(source) => source,
-            Err(error) => {
-                if is_assigned {
-                    audit.blockers.push(error);
-                }
-                continue;
-            }
-        };
-        let home = match codex_authoritative_home(&source, thread_id) {
-            Ok(home) => home,
-            Err(error) => {
-                if is_assigned {
-                    audit.blockers.push(format!(
-                        "inspect assigned Codex conversation '{}': {}",
-                        path.display(),
-                        error
-                    ));
-                }
-                continue;
-            }
-        };
-        if validate_absolute_clean_path("Codex thread home", &home).is_err() {
-            if is_assigned {
-                audit.blockers.push(format!(
-                    "Codex thread '{}' records an unsafe home; repair requires manual review",
-                    thread_id
-                ));
-            }
-            continue;
-        }
-        let canonical_home = fs::canonicalize(Path::new(&home)).ok();
-        let resolved_home = canonical_home
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(&home));
-        if resolved_home == resolved_project_root {
-            audit.matching_thread_count = audit.matching_thread_count.saturating_add(1);
-            continue;
-        }
-        if is_assigned
-            && canonical_home
-                .as_ref()
-                .is_some_and(|root| live_desktop_project_roots.contains(root))
-        {
-            let Some(transcript_path) = path.to_str() else {
-                audit.blockers.push(format!(
-                    "assigned Codex conversation path '{}' is not valid UTF-8",
-                    path.display()
-                ));
-                continue;
-            };
-            let reason = "Codex Desktop assigns this thread here, but its authoritative home belongs to another live Codex Desktop project.".to_string();
-            audit
-                .assignment_conflicts
-                .push(CodexConversationAssignmentConflict {
-                    thread_id: thread_id.clone(),
-                    transcript_path: transcript_path.to_string(),
-                    authoritative_home: home.clone(),
-                    reason,
-                });
-            audit.warnings.push(format!(
-                "Codex Desktop assigns thread '{}' to this project, but its authoritative home '{}' is another live Codex Desktop project; the thread remains visible but is unavailable for sync",
-                thread_id, home
-            ));
-            continue;
-        }
-        if resolved_home.starts_with(&resolved_project_root) {
-            audit.warnings.push(format!(
-                "Codex thread '{}' lives in '{}', a subdirectory of this project; bind that directory as its own project to manage it",
-                thread_id, home
-            ));
-            continue;
-        }
-        if !is_assigned {
-            continue;
-        }
-        let Some(transcript_path) = path.to_str() else {
-            audit.blockers.push(format!(
-                "assigned Codex conversation path '{}' is not valid UTF-8",
-                path.display()
-            ));
-            continue;
-        };
-        audit.issues.push(CodexConversationPathIssue {
-            thread_id: thread_id.clone(),
-            transcript_path: transcript_path.to_string(),
-            recorded_cwd: home,
-            target_cwd: binding.project_root.clone(),
-        });
-    }
-
-    Ok(finalize_conversation_path_audit(audit))
-}
-
-pub(super) fn repair_codex_conversation_paths_with_repository(
-    repository: &LocalStateRepository,
-    local_project_id: &LocalProjectId,
-) -> Result<CodexConversationPathRepairResult, String> {
-    let _host_operation = repository.acquire_host_operation()?;
-    let audit = audit_codex_conversation_paths_with_repository(repository, local_project_id)?;
-    if !audit.blockers.is_empty() {
-        return Err(format!(
-            "conversation paths cannot be repaired safely: {}",
-            audit.blockers.join("; ")
-        ));
-    }
-    if audit.issues.is_empty() {
-        return Ok(CodexConversationPathRepairResult {
-            audit,
-            repaired_thread_ids: Vec::new(),
-            backup_dir: None,
-        });
-    }
-
-    let stored_binding = repository
-        .load_bindings()?
-        .active_for(local_project_id)
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "project '{}' is not mapped on this machine",
-                local_project_id
-            )
-        })?;
-    let resolved = resolve_project_binding(repository, &stored_binding)?;
-    let binding = resolved.binding.clone();
-    let codex_home = resolved
-        .homes
-        .get(&codex_key())
-        .map(String::as_str)
-        .ok_or_else(|| "this project has no Codex profile to repair".to_string())?;
-    let canonical_codex_home = fs_canonicalize(Path::new(codex_home))?;
-    let sessions_root = canonical_codex_home.join("sessions");
-    let archived_root = canonical_codex_home.join("archived_sessions");
-
-    struct PendingRepair {
-        thread_id: String,
-        path: PathBuf,
-        original: Vec<u8>,
-        repaired: Vec<u8>,
-        mode: u32,
-    }
-
-    // Repair transforms values and keys, including sandbox/permission entries
-    // and content mentions. The binding root must satisfy the path-map grammar
-    // before any file is touched.
-    validate_pathmap_root("project root", &binding.project_root)?;
-    let repair_home = std::env::var("HOME").ok();
-    let mapper_new = SessionPathMapper::new(
-        &binding.project_root,
-        (binding.canonical_project_root != binding.project_root)
-            .then_some(binding.canonical_project_root.as_str()),
-        repair_home.as_deref(),
-    )?;
-
-    // Which repaired threads are pinned (accepted on any storage link):
-    // pinned repairs must preserve the published wire form byte-exactly and
-    // rebase their checkpoints; unpinned repairs run the explicit new-root
-    // collision pre-scan instead.
-    let codex_profile_id = stored_binding.profile_ids.get(&codex_key()).cloned();
-    let bindings_document = repository.load_conversation_bindings()?;
-    let logical_by_provider: BTreeMap<String, (ThreadId, Option<RootTailLayout>)> =
-        bindings_document
-            .bindings
-            .iter()
-            .filter(|row| {
-                row.host_id == binding.host_id
-                    && row.replica_id == binding.replica_id
-                    && row.local_project_id == binding.local_project_id
-                    && Some(&row.provider_profile_id) == codex_profile_id.as_ref()
-            })
-            .filter_map(|row| {
-                row.provider_thread_id.as_ref().map(|provider_id| {
-                    (
-                        provider_id.clone(),
-                        (row.thread_id.clone(), row.root_tail_layout.clone()),
-                    )
-                })
-            })
-            .collect();
-    let repair_config = repository.load_config()?;
-    let codex_scope = SyncScopeKey::Provider(codex_key());
-    let thread_is_pinned = |provider_thread_id: &str| -> bool {
-        let Some((logical, _)) = logical_by_provider.get(provider_thread_id) else {
-            return false;
-        };
-        repair_config
-            .links
-            .iter()
-            .filter(|link| link.local_project_id == binding.local_project_id)
-            .filter_map(|link| link.conversation_checkpoints.get(&codex_scope))
-            .filter_map(|threads| threads.get(logical))
-            .any(|checkpoint| checkpoint.accepted.is_some())
-    };
-
-    let mut pending = Vec::with_capacity(audit.issues.len());
-    let mut staged_source_bytes = 0_u64;
-    for issue in &audit.issues {
-        let path = PathBuf::from(&issue.transcript_path);
-        let canonical_path = fs_canonicalize(&path)?;
-        if !canonical_path.starts_with(&sessions_root)
-            && !canonical_path.starts_with(&archived_root)
-        {
-            return Err(format!(
-                "refusing to repair '{}' outside the bound Codex profile",
-                path.display()
-            ));
-        }
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|error| format!("inspect '{}': {}", path.display(), error))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(format!(
-                "refusing to repair non-regular conversation file '{}'",
-                path.display()
-            ));
-        }
-        let original = read_bounded_conversation(&path)?;
-        staged_source_bytes = staged_source_bytes.saturating_add(original.len() as u64);
-        if staged_source_bytes > MAX_CONVERSATION_REPAIR_BYTES {
-            return Err(format!(
-                "assigned Codex conversations exceed the {} byte aggregate repair limit",
-                MAX_CONVERSATION_REPAIR_BYTES
-            ));
-        }
-        let home = codex_authoritative_home(&original, &issue.thread_id)?;
-        if home != issue.recorded_cwd {
-            return Err(format!(
-                "Codex conversation '{}' changed after the audit; refresh and try again",
-                issue.thread_id
-            ));
-        }
-        // §6.5: repair ≡ decode_new(encode_old(x)) — the pull pipeline
-        // applied locally. The old root is the recorded stale cwd; a value
-        // the path-map grammar rejects cannot be repaired mechanically.
-        validate_pathmap_root("stale Codex conversation root", &issue.recorded_cwd)
-            .map_err(|error| format!("Codex conversation '{}': {}", issue.thread_id, error))?;
-        let mapper_old = SessionPathMapper::new(
-            &issue.recorded_cwd,
-            derive_canonical_alias(&issue.recorded_cwd).as_deref(),
-            repair_home.as_deref(),
-        )?;
-        let pinned = thread_is_pinned(&issue.thread_id);
-        if !pinned {
-            // Unpinned threads have no wire to gate against: run the
-            // explicit collision pre-scan so foreign content mentioning the
-            // new root can never be silently captured into remap scope.
-            let mut collision = None;
-            for raw in original.split(|byte| *byte == b'\n') {
-                let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-                if raw.is_empty() {
-                    continue;
-                }
-                let value: serde_json::Value = serde_json::from_slice(raw)
-                    .map_err(|_| "Codex conversation contains malformed JSON".to_string())?;
-                if let Some(found) = mapper_new.find_source_match(&value) {
-                    collision = Some(found);
-                    break;
-                }
-            }
-            if let Some(found) = collision {
-                return Err(format!(
-                    "Codex conversation '{}' already mentions the current project root \
-                     ('{}'); repair would capture pre-existing content into remap scope \
-                     and requires manual review",
-                    issue.thread_id, found
-                ));
-            }
-        }
-        let repaired = remap_codex_conversation_paths(
-            &original,
-            &issue.thread_id,
-            &mapper_old,
-            &mapper_new,
-            pinned,
-        )
-        .map_err(|error| format!("Codex conversation '{}': {}", issue.thread_id, error))?;
-        #[cfg(unix)]
-        let mode = {
-            use std::os::unix::fs::PermissionsExt;
-            metadata.permissions().mode() & 0o777
-        };
-        #[cfg(not(unix))]
-        let mode = 0o600;
-        pending.push(PendingRepair {
-            thread_id: issue.thread_id.clone(),
-            path,
-            original,
-            repaired,
-            mode,
-        });
-    }
-
-    let backup_root = repository.backups_dir()?;
-    let backup_dir = backup_root.join(generated_named_id("pathrepair")?);
-    fs::create_dir(&backup_dir).map_err(|error| {
-        format!(
-            "create conversation path backup '{}': {}",
-            backup_dir.display(),
-            error
-        )
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&backup_dir, fs::Permissions::from_mode(0o700)).map_err(|error| {
-            format!(
-                "secure conversation path backup '{}': {}",
-                backup_dir.display(),
-                error
-            )
-        })?;
-    }
-    for (index, repair) in pending.iter().enumerate() {
-        let backup_path = backup_dir.join(format!("{:04}-{}.jsonl", index + 1, repair.thread_id));
-        write_immutable_backup(&backup_path, &repair.original)?;
-    }
-    for repair in &pending {
-        let current = read_bounded_conversation(&repair.path)?;
-        if current != repair.original {
-            return Err(format!(
-                "Codex conversation '{}' changed while its backup was being prepared; no files were modified",
-                repair.thread_id
-            ));
-        }
-    }
-
-    let rollback = |count: usize| {
-        pending[..count]
-            .iter()
-            .filter_map(|completed| {
-                write_target_atomic(&completed.path, &completed.original, completed.mode)
-                    .err()
-                    .map(|error| format!("{}: {}", completed.thread_id, error))
-            })
-            .collect::<Vec<_>>()
-    };
-    let mut applied = 0_usize;
-    for repair in &pending {
-        let current = match read_bounded_conversation(&repair.path) {
-            Ok(current) => current,
-            Err(error) => {
-                let rollback_errors = rollback(applied);
-                return Err(if rollback_errors.is_empty() {
-                    format!(
-                        "repair stopped before '{}': {}; earlier changes were rolled back",
-                        repair.thread_id, error
-                    )
-                } else {
-                    format!(
-                        "repair stopped before '{}': {}; rollback also failed for {}",
-                        repair.thread_id,
-                        error,
-                        rollback_errors.join("; ")
-                    )
-                });
-            }
-        };
-        if current != repair.original {
-            let rollback_errors = rollback(applied);
-            return Err(if rollback_errors.is_empty() {
-                format!(
-                    "Codex conversation '{}' changed during repair; earlier changes were rolled back",
-                    repair.thread_id
-                )
-            } else {
-                format!(
-                    "Codex conversation '{}' changed during repair and rollback failed for {}",
-                    repair.thread_id,
-                    rollback_errors.join("; ")
-                )
-            });
-        }
-        if let Err(error) = write_target_atomic(&repair.path, &repair.repaired, repair.mode) {
-            let rollback_errors = rollback(applied);
-            return Err(if rollback_errors.is_empty() {
-                format!(
-                    "repair failed for '{}': {}; earlier changes were rolled back",
-                    repair.thread_id, error
-                )
-            } else {
-                format!(
-                    "repair failed for '{}': {}; rollback also failed for {}",
-                    repair.thread_id,
-                    error,
-                    rollback_errors.join("; ")
-                )
-            });
-        }
-        applied = applied.saturating_add(1);
-    }
-
-    // §6.5 checkpoint rebase, atomic across every storage link: the wire
-    // pin (`accepted`) is untouched — the gate proved the wire form is
-    // identical — while the local column (accepted-local twin, observed
-    // fold, prefix witness, physical mapping, raw-range pin) re-derives
-    // from the repaired bytes. With no unpushed suffix the thread lands in
-    // Sync with nothing to republish; a genuine local suffix rides through
-    // as LocalOutstanding. Unpinned checkpoints re-baseline the observed
-    // column the same way.
-    struct RebasedThread {
-        seeded: CodexSeededRoot,
-        chain: Vec<mallard_domain::CanonicalConversationMessage>,
-        consumed_prefix_sha256: String,
-    }
-    let mut rebased: BTreeMap<ThreadId, RebasedThread> = BTreeMap::new();
-    for repair in &pending {
-        let Some((logical, layout)) = logical_by_provider.get(&repair.thread_id) else {
-            continue;
-        };
-        let has_checkpoint = repair_config
-            .links
-            .iter()
-            .filter(|link| link.local_project_id == binding.local_project_id)
-            .filter_map(|link| link.conversation_checkpoints.get(&codex_scope))
-            .any(|threads| threads.contains_key(logical));
-        if !has_checkpoint {
-            continue;
-        }
-        let lookup = codex_rollout_lookup(&canonical_codex_home);
-        let derived = codex_history_graph::resolve_codex_root(&repair.path, &lookup).and_then(
-            |resolved_root| {
-                let leaf_bytes = jsonl_tail_io::read_bounded(&repair.path)?;
-                let seeded = codex_history_graph::seed_codex_root(
-                    &resolved_root,
-                    &leaf_bytes,
-                    layout.as_ref(),
-                )?;
-                let consumed = seeded.mapping.consumed_byte_offset as usize;
-                Ok(RebasedThread {
-                    consumed_prefix_sha256: hex_digest(
-                        Sha256::digest(&leaf_bytes[..consumed]).as_slice(),
-                    ),
-                    chain: resolved_root.chain,
-                    seeded,
-                })
-            },
-        );
-        match derived {
-            Ok(thread) => {
-                rebased.insert(logical.clone(), thread);
-            }
-            Err(error) => {
-                let rollback_errors = rollback(pending.len());
-                return Err(if rollback_errors.is_empty() {
-                    format!(
-                        "repaired Codex conversation '{}' failed re-observation: {}; changes \
-                         were rolled back",
-                        repair.thread_id, error
-                    )
-                } else {
-                    format!(
-                        "repaired Codex conversation '{}' failed re-observation: {} and \
-                         rollback failed for {}",
-                        repair.thread_id,
-                        error,
-                        rollback_errors.join("; ")
-                    )
-                });
-            }
-        }
-    }
-    if !rebased.is_empty() {
-        let rebase_outcome = repository.mutate_config(|config| {
-            for link in config
-                .links
-                .iter_mut()
-                .filter(|link| link.local_project_id == binding.local_project_id)
-            {
-                let Some(threads) = link.conversation_checkpoints.get_mut(&codex_scope) else {
-                    continue;
-                };
-                for (logical, thread) in &rebased {
-                    let Some(checkpoint) = threads.get_mut(logical) else {
-                        continue;
-                    };
-                    checkpoint.accepted_local_tail = match &checkpoint.accepted {
-                        Some(accepted) => {
-                            // The local twin refolds at this link's accepted
-                            // end over the repaired chain; positions are
-                            // form-independent.
-                            let end = accepted.portable_tail.accepted_end_record_count;
-                            if end > thread.chain.len() as u64 {
-                                return Err(
-                                    "repaired conversation is shorter than its accepted end"
-                                        .to_string(),
-                                );
-                            }
-                            let state = mallard_domain::compute_conversation_tail_state(
-                                thread.seeded.layout.partition_kind,
-                                thread.seeded.layout.start_record_count,
-                                end,
-                                &thread.chain,
-                            )?;
-                            let local_twin = PortableConversationTail {
-                                codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
-                                partition_kind: thread.seeded.layout.partition_kind,
-                                start_record_count: thread.seeded.layout.start_record_count,
-                                accepted_end_record_count: end,
-                                accepted_tail_state: state,
-                            };
-                            local_twin.validate()?;
-                            Some(local_twin)
-                        }
-                        None => None,
-                    };
-                    checkpoint.observed_tail = thread.seeded.observed_tail.clone();
-                    checkpoint.physical = PhysicalMappingState::Ready {
-                        root_mapping: thread.seeded.mapping.clone(),
-                        raw_range_pin: RawRangePin {
-                            start_byte_offset: 0,
-                            end_byte_offset: thread.seeded.mapping.consumed_byte_offset,
-                            range_sha256: thread.consumed_prefix_sha256.clone(),
-                        },
-                    };
-                    checkpoint.prefix_witness = thread.seeded.prefix_witness.clone();
-                    checkpoint.generation = checkpoint.generation.saturating_add(1);
-                }
-            }
-            Ok(())
-        });
-        if let Err(error) = rebase_outcome {
-            let rollback_errors = rollback(pending.len());
-            return Err(if rollback_errors.is_empty() {
-                format!(
-                    "conversation checkpoint rebase failed: {}; changes were rolled back",
-                    error
-                )
-            } else {
-                format!(
-                    "conversation checkpoint rebase failed: {} and rollback failed for {}",
-                    error,
-                    rollback_errors.join("; ")
-                )
-            });
-        }
-    }
-
-    let repaired_thread_ids = pending
-        .iter()
-        .map(|repair| repair.thread_id.clone())
-        .collect::<Vec<_>>();
-    let final_audit =
-        match audit_codex_conversation_paths_with_repository(repository, local_project_id) {
-            Ok(audit) => audit,
-            Err(error) => {
-                let rollback_errors = rollback(pending.len());
-                return Err(if rollback_errors.is_empty() {
-                    format!(
-                        "conversation path verification failed: {}; changes were rolled back",
-                        error
-                    )
-                } else {
-                    format!(
-                        "conversation path verification failed: {}; rollback also failed for {}",
-                        error,
-                        rollback_errors.join("; ")
-                    )
-                });
-            }
-        };
-    if !final_audit.ready {
-        let rollback_errors = rollback(pending.len());
-        return Err(if rollback_errors.is_empty() {
-            "conversation paths did not pass verification; changes were rolled back".to_string()
-        } else {
-            format!(
-                "conversation paths did not pass verification and rollback failed for {}",
-                rollback_errors.join("; ")
-            )
-        });
-    }
-    Ok(CodexConversationPathRepairResult {
-        audit: final_audit,
-        repaired_thread_ids,
-        backup_dir: backup_dir.to_str().map(ToString::to_string),
-    })
-}
-
-fn require_codex_conversation_paths_ready(
-    repository: &LocalStateRepository,
-    local_project_id: &LocalProjectId,
-) -> Result<(), String> {
-    let audit = audit_codex_conversation_paths_with_repository(repository, local_project_id)?;
-    if audit.ready {
-        return Ok(());
-    }
-    if !audit.blockers.is_empty() {
-        return Err(format!(
-            "Push and Pull are paused because Codex conversation ownership could not be verified: {}",
-            audit.blockers.join("; ")
-        ));
-    }
-    Err(format!(
-        "{} Codex conversation path{} must be repaired before Push or Pull",
-        audit.issues.len(),
-        if audit.issues.len() == 1 { "" } else { "s" }
-    ))
-}
-
-fn finalize_conversation_path_audit(
-    mut audit: CodexConversationPathAudit,
-) -> CodexConversationPathAudit {
-    audit
-        .issues
-        .sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
-    audit
-        .assignment_conflicts
-        .sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
-    audit
-        .assignment_conflicts
-        .dedup_by(|left, right| left.thread_id == right.thread_id);
-    audit.blockers.sort();
-    audit.blockers.dedup();
-    audit.warnings.sort();
-    audit.warnings.dedup();
-    audit.ready = audit.issues.is_empty() && audit.blockers.is_empty();
-    audit.can_repair = !audit.issues.is_empty() && audit.blockers.is_empty();
-    audit
-}
-
-fn state_object_maps<'a>(
-    state: &'a serde_json::Value,
-    key: &str,
-) -> Vec<&'a serde_json::Map<String, serde_json::Value>> {
-    let mut maps = Vec::new();
-    if let Some(map) = state.get(key).and_then(serde_json::Value::as_object) {
-        maps.push(map);
-    }
-    if let Some(map) = state
-        .get("electron-persisted-atom-state")
-        .and_then(|persisted| persisted.get(key))
-        .and_then(serde_json::Value::as_object)
-    {
-        maps.push(map);
-    }
-    maps
-}
-
-fn json_path_values<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Vec<&'a str> {
-    let Some(object) = value.as_object() else {
-        return Vec::new();
-    };
-    keys.iter()
-        .filter_map(|key| object.get(*key))
-        .flat_map(json_direct_path_values)
-        .collect()
-}
-
-fn json_direct_path_values(value: &serde_json::Value) -> impl Iterator<Item = &str> {
-    let direct = value.as_str().into_iter();
-    let array = value
-        .as_array()
-        .into_iter()
-        .flat_map(|values| values.iter().filter_map(serde_json::Value::as_str));
-    direct.chain(array)
-}
-
-/// Exact canonical equality with the project root. Containment never matches:
-/// a subdirectory is a different project.
-fn path_is_project_root(candidate: &Path, project_root: &Path) -> bool {
-    let Some(candidate_text) = candidate.to_str() else {
-        return false;
-    };
-    if validate_absolute_clean_path("Codex project path", candidate_text).is_err() {
-        return false;
-    }
-    let candidate = fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
-    let project_root =
-        fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
-    candidate == project_root
-}
-
-fn insert_safe_assigned_thread(
-    thread_id: &str,
-    assigned: &mut BTreeSet<String>,
-    blockers: &mut Vec<String>,
-) {
-    if thread_id.is_empty()
-        || thread_id.len() > 128
-        || !thread_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        blockers.push("Codex Desktop contains an unsafe assigned thread ID".to_string());
-        return;
-    }
-    assigned.insert(thread_id.to_string());
-}
-
-fn read_bounded_conversation(path: &Path) -> Result<Vec<u8>, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("inspect '{}': {}", path.display(), error))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(format!("'{}' is not a regular file", path.display()));
-    }
-    if metadata.len() > MAX_CONVERSATION_REPAIR_BYTES {
-        return Err(format!(
-            "Codex conversation '{}' exceeds the {} byte repair limit",
-            path.display(),
-            MAX_CONVERSATION_REPAIR_BYTES
-        ));
-    }
-    fs::read(path).map_err(|error| format!("read '{}': {}", path.display(), error))
-}
-
-/// The active thread's authoritative home: the cwd of its first
-/// `session_meta` record. Turn-level cwds and copied ancestor metadata are
-/// content, never identity.
-fn codex_authoritative_home(source: &[u8], expected_thread_id: &str) -> Result<String, String> {
-    let structure = analyze_codex_rollout_structure(source, Some(expected_thread_id))
-        .map_err(|error| error.to_string())?;
-    Ok(structure.current.cwd)
-}
-
-/// Repair applies `decode_new(encode_old(x))` per record through the shared
-/// pull path codec, covering string values and object keys.
-/// For pinned threads `gate_wire_equality` proves
-/// `encode_new(repaired) == encode_old(original)` per record: the published
-/// wire form is unchanged byte-exactly, and the gate doubles as the
-/// collision detector for content that would newly tokenize under the
-/// current root. Untouched records keep their original line bytes.
-///
-/// Repair composes **path codecs only** — credential redaction is
-/// deliberately absent from this pipeline. Repair rewrites *local* bytes;
-/// running `redact` here would scrub the user's local transcript as a side
-/// effect of moving a project directory. The wire-form scrub exists solely
-/// at the push/pull boundary.
-fn remap_codex_conversation_paths(
-    source: &[u8],
-    expected_thread_id: &str,
-    mapper_old: &SessionPathMapper,
-    mapper_new: &SessionPathMapper,
-    gate_wire_equality: bool,
-) -> Result<Vec<u8>, String> {
-    let before = analyze_codex_rollout_structure(source, Some(expected_thread_id))
-        .map_err(|error| error.to_string())?;
-    let mut output = Vec::with_capacity(source.len());
-    let mut changed = 0_usize;
-    let mut record_number = 0_usize;
-    for line in source.split_inclusive(|byte| *byte == b'\n') {
-        let (json, ending): (&[u8], &[u8]) = if let Some(json) = line.strip_suffix(b"\r\n") {
-            (json, b"\r\n")
-        } else if let Some(json) = line.strip_suffix(b"\n") {
-            (json, b"\n")
-        } else {
-            (line, b"")
-        };
-        if json.is_empty() {
-            output.extend_from_slice(line);
-            continue;
-        }
-        record_number += 1;
-        let value: serde_json::Value = serde_json::from_slice(json)
-            .map_err(|_| "Codex conversation contains malformed JSON".to_string())?;
-        let encoded_old = mapper_old
-            .encode_record(&value)
-            .map_err(|error| format!("record {record_number}: {error}"))?;
-        let repaired = mapper_new.decode_record(&encoded_old.wire)?;
-        if gate_wire_equality {
-            let re_encoded = mapper_new.encode_record(&repaired).map_err(|error| {
-                format!("record {record_number} collides with the current project root: {error}")
-            })?;
-            if re_encoded.wire != encoded_old.wire {
-                return Err(format!(
-                    "record {record_number} contains content that collides with the current \
-                     project root; repair cannot preserve the published wire form and \
-                     requires manual review"
-                ));
-            }
-        }
-        if repaired == value {
-            output.extend_from_slice(line);
-            continue;
-        }
-        changed = changed.saturating_add(1);
-        output.extend_from_slice(
-            &serde_json::to_vec(&repaired)
-                .map_err(|error| format!("serialize repaired Codex session row: {}", error))?,
-        );
-        output.extend_from_slice(ending);
-    }
-    if changed == 0 {
-        return Err("conversation no longer contains a stale project path".to_string());
-    }
-    let after = analyze_codex_rollout_structure(&output, Some(expected_thread_id))
-        .map_err(|error| error.to_string())?;
-    let expected_cwds: BTreeSet<String> = before
-        .structural_cwds
-        .iter()
-        .map(|cwd| {
-            let encoded = mapper_old.encode_record(&serde_json::Value::String(cwd.clone()))?;
-            match mapper_new.decode_record(&encoded.wire)? {
-                serde_json::Value::String(decoded) => Ok(decoded),
-                _ => Err("structural cwd decode changed its type".to_string()),
-            }
-        })
-        .collect::<Result<_, String>>()?;
-    if before.current.id != after.current.id
-        || before.fork_ancestry != after.fork_ancestry
-        || before.accepted_metadata_ids != after.accepted_metadata_ids
-        || after.structural_cwds != expected_cwds
-    {
-        return Err("repaired Codex conversation changed structural identity".to_string());
-    }
-    Ok(output)
-}
-
-/// The macOS textual firmlink aliases the binding's canonical-root handling
-/// models, derivable without touching the filesystem (the old root may no
-/// longer exist): `/var`, `/tmp`, and `/etc` each alias `/private/...`.
-fn derive_canonical_alias(root: &str) -> Option<String> {
-    for prefix in ["/var/", "/tmp/", "/etc/"] {
-        if root.starts_with(prefix) {
-            return Some(format!("/private{root}"));
-        }
-    }
-    root.strip_prefix("/private")
-        .filter(|rest| {
-            ["/var/", "/tmp/", "/etc/"]
-                .iter()
-                .any(|prefix| rest.starts_with(prefix))
-        })
-        .map(str::to_string)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mallard_infrastructure::providers::codex::provider_key as codex_key;
+    use mallard_infrastructure::storage_providers::local::{
+        local_storage_config, provider_key as local_provider_key,
+    };
 
     type ContinuityProbe = Box<dyn FnMut(&RepositoryBase) -> Result<bool, String>>;
 
@@ -16228,7 +14449,7 @@ mod tests {
     };
     use mallard_domain::{
         BundleHead, BundleScope, OriginHostToken, OriginReplicaToken, ProjectContentPreferences,
-        RestoreActionKind, StorageConfig, StorageKind, TombstoneTarget,
+        RestoreActionKind,
     };
     use mallard_infrastructure::storage_core::{
         library_object_key, repository_object_key, LocalObjectStore, ObjectStore,
@@ -16252,7 +14473,7 @@ mod tests {
         let generic_resource_id = ResourceId::parse("codex:memory").unwrap();
         let generic_entry = RecipeEntry {
             resource_id: generic_resource_id.clone(),
-            apply_policy: ApplyPolicy::SafeFile,
+            apply_policy: contracts::safe_file(),
             required: false,
         };
         let conversation_resource_id = conversation_resource_id(
@@ -16262,7 +14483,7 @@ mod tests {
         .unwrap();
         let conversation_entry = RecipeEntry {
             resource_id: conversation_resource_id.clone(),
-            apply_policy: ApplyPolicy::Merge,
+            apply_policy: contracts::merge(),
             required: false,
         };
 
@@ -16289,7 +14510,7 @@ mod tests {
             generic_resource_id.clone(),
             RecipeEntry {
                 resource_id: generic_resource_id,
-                apply_policy: ApplyPolicy::ExplicitReview,
+                apply_policy: contracts::explicit_review(),
                 required: false,
             },
         );
@@ -16383,6 +14604,29 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn agent_launch_scripts_use_distinct_private_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let first = write_agent_launch_script(temp.path(), "first").unwrap();
+        let second = write_agent_launch_script(temp.path(), "second").unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), Some(temp.path()));
+        assert!(first
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("mallardagentsetup-"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"first");
+        assert_eq!(
+            std::fs::metadata(&first).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
     #[test]
     fn every_registered_cli_launcher_is_terminal_safe() {
         // Both shipped agents launch; anything registered stays a bare
@@ -16417,25 +14661,35 @@ mod tests {
     }
 
     #[test]
-    fn codex_portable_display_title_decodes_tokens_and_rejects_collisions() {
+    fn codex_portable_display_title_decodes_tokens_and_preserves_literals() {
+        use mallard_infrastructure::providers::SessionAdapter as _;
+        let adapter = mallard_infrastructure::providers::codex::CodexAdapter::new();
         let root = "/tmp/mallard-target-project";
-        let title = "Open /__mallard_root__/src/main.rs; keep /tmp/project1_external/outside.txt";
+        let title =
+            "Open /__mallard_root__/b;/src/main.rs; keep /tmp/project1_external/outside.txt";
         assert_eq!(
-            decode_codex_portable_display_title(title, root, root).unwrap(),
+            adapter
+                .decode_portable_display_title(title, root, root)
+                .unwrap(),
             "Open /tmp/mallard-target-project/src/main.rs; keep /tmp/project1_external/outside.txt"
         );
-        assert!(decode_codex_portable_display_title(
-            "Keep /__mallard_root___external/outside.txt",
-            root,
-            root,
-        )
-        .is_err());
-        assert!(decode_codex_portable_display_title(
-            "Already mentions /tmp/mallard-target-project/src/main.rs",
-            root,
-            root,
-        )
-        .is_err());
+        assert!(adapter
+            .decode_portable_display_title(
+                "Keep /__mallard_root___external/outside.txt",
+                root,
+                root
+            )
+            .is_err());
+        assert_eq!(
+            adapter
+                .decode_portable_display_title(
+                    "Already mentions /tmp/mallard-target-project/src/main.rs",
+                    root,
+                    root
+                )
+                .unwrap(),
+            "Already mentions /tmp/mallard-target-project/src/main.rs"
+        );
     }
 
     #[test]
@@ -16516,12 +14770,6 @@ mod tests {
         assert!(save_project_binding_with_repository(&repo, request)
             .unwrap_err()
             .contains("host-sensitive operation"));
-        assert!(repair_codex_conversation_paths_with_repository(
-            &repo,
-            &LocalProjectId::parse("project-a").unwrap()
-        )
-        .unwrap_err()
-        .contains("host-sensitive operation"));
         assert!(inspect_project_files_with_repository(
             &repo,
             &LocalProjectId::parse("project-a").unwrap(),
@@ -17151,19 +15399,11 @@ mod tests {
     fn add_local_storage(repo: &LocalStateRepository, storage_id: &StorageId, storage_root: &Path) {
         std::fs::create_dir_all(storage_root).unwrap();
         let mut config = repo.load_config().unwrap();
-        config.storages.push(StorageConfig {
-            id: storage_id.clone(),
-            name: "Project content store".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: storage_root.to_string_lossy().into_owned(),
-            supports_conditional_writes: None,
-        });
+        config.storages.push(local_storage_config(
+            storage_id.clone(),
+            "Project content store",
+            storage_root,
+        ));
         repo.save_config(config).unwrap();
     }
 
@@ -17292,9 +15532,7 @@ mod tests {
             ConversationReviewAction::CreateCloud
         );
         assert!(session.push_decision.selectable);
-        assert!(review
-            .conversation_action_ids
-            .contains_key(&session.resource_id));
+        assert!(!repo.root().join("conversation_push_plans").exists());
     }
 
     #[test]
@@ -17704,6 +15942,7 @@ mod tests {
         let profile_id = binding.profile_ids[&codex_key()].clone();
         repo.mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
+                path_origins_ref: None,
                 host_id: binding.host_id.clone(),
                 replica_id: binding.replica_id.clone(),
                 local_project_id: binding.local_project_id.clone(),
@@ -17927,12 +16166,6 @@ mod tests {
             ConversationReviewAction::Publish
         );
         assert!(pushable.push_decision.selectable);
-        assert!(!review
-            .conversation_action_ids
-            .contains_key(&divergent.resource_id));
-        assert!(review
-            .conversation_action_ids
-            .contains_key(&pushable.resource_id));
 
         assert!(review.inventory.resources.iter().all(|resource| {
             !is_conversation_resource_id(resource.descriptor.resource_id.as_str())
@@ -17941,7 +16174,7 @@ mod tests {
             .inventory
             .resources
             .iter()
-            .all(|resource| { resource.descriptor.kind != ResourceKind::Requirement }));
+            .all(|resource| { resource.descriptor.kind != contracts::requirement() }));
         review.inventory.recipe.validate_machine_local().unwrap();
     }
 
@@ -18038,32 +16271,13 @@ mod tests {
             ConversationReviewAction::CreateCloud
         );
         assert!(fresh.push_decision.selectable);
-        let plan_id = review.conversation_push_plan_id.clone().unwrap();
-        let fresh_action_id = review.conversation_action_ids[&fresh.resource_id].clone();
-        let plan = repo.load_conversation_push_plan(&plan_id).unwrap();
         assert!(
-            !review
-                .conversation_action_ids
+            !recommended_review_recipe(&review, &storage_id)
+                .entries
                 .contains_key(&tip.resource_id),
-            "blocked review rows must not enter executable plan state"
+            "blocked review rows must not enter the selected recipe"
         );
-        assert_eq!(plan.actions.len(), 1);
-
-        let omitted_plan = push_bundle_reviewed_with_repository(
-            &repo,
-            &project.local_project_id,
-            &storage_id,
-            recommended_review_recipe(&review, &storage_id),
-            empty_project_content_review(),
-            None,
-            Vec::new(),
-            &mut |_| {},
-        )
-        .unwrap_err();
-        assert!(
-            omitted_plan.contains("requires a current Push review"),
-            "{omitted_plan}"
-        );
+        assert!(!repo.root().join("conversation_push_plans").exists());
 
         // The rest of the project pushes while the divergent tip is held.
         let pushed = push_bundle_reviewed_with_repository(
@@ -18072,8 +16286,6 @@ mod tests {
             &storage_id,
             recommended_review_recipe(&review, &storage_id),
             empty_project_content_review(),
-            Some(plan_id),
-            vec![fresh_action_id],
             &mut |_| {},
         )
         .unwrap();
@@ -18134,7 +16346,7 @@ mod tests {
                     resource_id.clone(),
                     RecipeEntry {
                         resource_id,
-                        apply_policy: ApplyPolicy::ExplicitReview,
+                        apply_policy: contracts::explicit_review(),
                         required: entry.entry_type == ProjectContentEntryType::Directory,
                     },
                 );
@@ -18367,8 +16579,6 @@ mod tests {
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
-            None,
-            Vec::new(),
             &mut |_| {},
         )
         .unwrap();
@@ -18480,7 +16690,7 @@ mod tests {
         assert!(git.status.success());
         let error = ProjectSyncService::new(&repo)
             .apply_bundle_restore(
-                &git_race_plan.plan_id,
+                &git_race_plan,
                 git_race_plan
                     .actions
                     .iter()
@@ -18532,7 +16742,7 @@ mod tests {
             .map(|action| action.action_id.clone())
             .collect();
         let applied = ProjectSyncService::new(&repo)
-            .apply_bundle_restore(&restore.plan_id, approved)
+            .apply_bundle_restore(&restore, approved)
             .unwrap();
         assert!(applied.success, "{}", applied.message);
         assert_eq!(
@@ -18581,8 +16791,6 @@ mod tests {
                 removal_ids: selected_ids.clone(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
-            None,
-            Vec::new(),
             &mut |_| {},
         )
         .unwrap();
@@ -18594,10 +16802,9 @@ mod tests {
             deletion_snapshot
                 .manifest
                 .all_tombstones()
-                .filter(|(_, _, tombstone)| matches!(
-                    tombstone.target,
-                    TombstoneTarget::ProjectContentFile { .. }
-                ))
+                .filter(|(_, _, tombstone)| {
+                    tombstone.target.kind.as_str() == contracts::PROJECT_CONTENT_FILE
+                })
                 .count(),
             2
         );
@@ -18605,10 +16812,9 @@ mod tests {
             deletion_snapshot
                 .manifest
                 .all_tombstones()
-                .filter(|(_, _, tombstone)| matches!(
-                    tombstone.target,
-                    TombstoneTarget::ProjectContentDirectory { .. }
-                ))
+                .filter(|(_, _, tombstone)| {
+                    tombstone.target.kind.as_str() == contracts::PROJECT_CONTENT_DIRECTORY
+                })
                 .count(),
             3
         );
@@ -18642,7 +16848,7 @@ mod tests {
             .collect();
         std::fs::write(target_root.join("docs/file_b.md"), b"locally changed b\n").unwrap();
         let deleted = ProjectSyncService::new(&repo)
-            .apply_bundle_restore(&deletion_plan.plan_id, approved)
+            .apply_bundle_restore(&deletion_plan, approved)
             .unwrap();
         assert!(
             !deleted.success,
@@ -18680,7 +16886,7 @@ mod tests {
             .map(|action| action.action_id.clone())
             .collect();
         let retried = ProjectSyncService::new(&repo)
-            .apply_bundle_restore(&retry.plan_id, retry_approved)
+            .apply_bundle_restore(&retry, retry_approved)
             .unwrap();
         assert!(retried.success, "{}", retried.message);
         assert!(!target_root.join("docs").exists());
@@ -18726,8 +16932,6 @@ mod tests {
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
-            None,
-            Vec::new(),
             &mut |_| {},
         )
         .unwrap_err();
@@ -18772,8 +16976,6 @@ mod tests {
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
-            None,
-            Vec::new(),
             &mut |_| {},
         )
         .unwrap_err();
@@ -18790,8 +16992,6 @@ mod tests {
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::from([first_warning.clone()]),
             },
-            None,
-            Vec::new(),
             &mut |_| {},
         )
         .unwrap_err();
@@ -18812,8 +17012,6 @@ mod tests {
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::from([refreshed_warning]),
             },
-            None,
-            Vec::new(),
             &mut |_| {},
         )
         .unwrap();
@@ -18857,8 +17055,6 @@ mod tests {
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
-            None,
-            Vec::new(),
             &mut |_| {},
         )
         .unwrap();
@@ -18879,7 +17075,7 @@ mod tests {
             .unwrap();
         let applied = ProjectSyncService::new(&repo)
             .apply_bundle_restore(
-                &first.plan_id,
+                &first,
                 first
                     .actions
                     .iter()
@@ -18909,8 +17105,6 @@ mod tests {
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
-            None,
-            Vec::new(),
             &mut |_| {},
         )
         .unwrap();
@@ -18943,7 +17137,7 @@ mod tests {
         }
         let applied = ProjectSyncService::new(&repo)
             .apply_bundle_restore(
-                &second.plan_id,
+                &second,
                 second
                     .actions
                     .iter()
@@ -19029,11 +17223,17 @@ mod tests {
         // The deep link carries the path percent-encoded, so the quoting rules
         // differ from the CLI lines above.
         #[cfg(target_os = "macos")]
-        expected.push((
-            "Codex app — new",
-            "'/usr/bin/open' -n -a '/Applications/ChatGPT.app' --env 'CODEX_HOME=/tmp/custom codex/.codex' 'codex://threads/new?path=%2Ftmp%2Fclient%27s%20project'"
-                .to_string(),
-        ));
+        expected.extend([
+            (
+                "Codex app — new",
+                "'/usr/bin/open' -n -a '/Applications/ChatGPT.app' --env 'CODEX_HOME=/tmp/custom codex/.codex' 'codex://threads/new?path=%2Ftmp%2Fclient%27s%20project'"
+                    .to_string(),
+            ),
+            (
+                "Codex app — resume",
+                "use Open in Codex (one deep link cannot carry both project and chat)".to_string(),
+            ),
+        ]);
         expected.extend([
             (
                 "Claude — new",
@@ -19046,11 +17246,18 @@ mod tests {
                     .to_string(),
             ),
         ]);
-        assert_eq!(project_open_commands(&resolved), expected);
+        assert_eq!(
+            project_open_commands(&resolved),
+            expected
+                .into_iter()
+                .map(|(label, command)| (label.to_string(), command))
+                .collect::<Vec<_>>(),
+            "adapters list their open commands in provider display order"
+        );
     }
 
     #[test]
-    fn live_registered_foreign_home_is_visible_but_not_syncable() {
+    fn desktop_assignment_never_overrides_rollout_authoritative_home() {
         let temp = tempfile::tempdir().unwrap();
         let repo =
             LocalStateRepository::from_home_dir(temp.path().join("agent-sync-home")).unwrap();
@@ -19080,14 +17287,11 @@ mod tests {
         let foreign_path = sessions.join(format!("rollout-{}.jsonl", foreign_thread));
         let project_root_json = serde_json::to_string(project_root.to_str().unwrap()).unwrap();
         let foreign_root_json = serde_json::to_string(foreign_root.to_str().unwrap()).unwrap();
-        std::fs::write(
-            &matching_path,
-            format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n",
-                matching_thread, project_root_json
-            ),
-        )
-        .unwrap();
+        let matching_source = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n",
+            matching_thread, project_root_json
+        );
+        std::fs::write(&matching_path, matching_source.as_bytes()).unwrap();
         let foreign_source = format!(
             "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":{}}}}}\n",
             foreign_thread, foreign_root_json, project_root_json
@@ -19110,7 +17314,7 @@ mod tests {
                 },
                 "thread-project-assignments": {
                     (matching_thread): {
-                        "projectId": "local-current",
+                        "projectId": "local-foreign",
                         "projectKind": "local"
                     },
                     (foreign_thread): {
@@ -19125,24 +17329,6 @@ mod tests {
         )
         .unwrap();
 
-        let audit =
-            audit_codex_conversation_paths_with_repository(&repo, &project.local_project_id)
-                .unwrap();
-        assert_eq!(audit.assigned_thread_count, 2);
-        assert_eq!(audit.matching_thread_count, 1);
-        assert!(audit.issues.is_empty(), "{:?}", audit.issues);
-        assert!(audit.blockers.is_empty(), "{:?}", audit.blockers);
-        assert!(audit.ready);
-        assert!(!audit.can_repair);
-        assert_eq!(audit.warnings.len(), 1);
-        assert_eq!(audit.assignment_conflicts.len(), 1);
-        assert!(
-            audit.warnings[0].contains(foreign_thread)
-                && audit.warnings[0].contains("another live Codex Desktop project")
-                && audit.warnings[0].contains("unavailable for sync"),
-            "{:?}",
-            audit.warnings
-        );
         let local = load_project_local_read(&repo, &project.local_project_id).unwrap();
         assert!(local
             .views
@@ -19163,587 +17349,27 @@ mod tests {
             Some(90),
         )
         .unwrap();
-        assert_eq!(activity.sessions.len(), 2, "{:?}", activity.sessions);
+        assert_eq!(activity.sessions.len(), 1, "{:?}", activity.sessions);
         let matching = activity
             .sessions
             .iter()
             .find(|session| session.provider_session_id.as_deref() == Some(matching_thread))
             .unwrap();
         assert!(matching.sync_blocked_reason.is_none());
-        let foreign = activity
+        assert!(activity
             .sessions
             .iter()
-            .find(|session| session.provider_session_id.as_deref() == Some(foreign_thread))
-            .unwrap();
+            .all(|session| { session.provider_session_id.as_deref() != Some(foreign_thread) }));
         assert_eq!(
-            foreign.sync_blocked_reason.as_deref(),
-            Some(
-                "Codex Desktop assigns this thread here, but its authoritative home belongs to another live Codex Desktop project."
-            )
+            std::fs::read(&matching_path).unwrap(),
+            matching_source.as_bytes(),
+            "Desktop reassignment must not rewrite the rollout"
         );
-        assert_eq!(foreign.working_directory.as_deref(), foreign_root.to_str());
         assert_eq!(
             std::fs::read(&foreign_path).unwrap(),
             foreign_source.as_bytes(),
-            "ownership audit must never rewrite the excluded rollout"
+            "project assignment must not transfer or rewrite rollout ownership"
         );
-        require_codex_conversation_paths_ready(&repo, &project.local_project_id).unwrap();
-    }
-
-    #[test]
-    fn conversation_path_repair_only_rewrites_desktop_assigned_threads() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo =
-            LocalStateRepository::from_home_dir(temp.path().join("agent-sync-home")).unwrap();
-        let project = register(&repo);
-        let project_root = temp.path().join("healthGame");
-        let stale_root = temp.path().join("game3");
-        let codex_home = temp.path().join(".codex");
-        let sessions = codex_home.join("sessions/2026/07/19");
-        std::fs::create_dir_all(&project_root).unwrap();
-        std::fs::create_dir_all(&stale_root).unwrap();
-        std::fs::create_dir_all(&sessions).unwrap();
-        let profile_id = add_profile(&repo, &codex_key(), &codex_home);
-        let binding = save_project_binding_with_repository(
-            &repo,
-            SaveProjectBindingRequest {
-                local_project_id: project.local_project_id.clone(),
-                project_root: project_root.to_string_lossy().into_owned(),
-                profile_ids: BTreeMap::from([(codex_key(), profile_id)]),
-                expected_revision: None,
-            },
-        )
-        .unwrap();
-
-        let subdir_root = project_root.join("frontend");
-        std::fs::create_dir_all(&subdir_root).unwrap();
-        let stale_thread = "019f7500-0000-7000-8000-000000000001";
-        let matching_thread = "019f7500-0000-7000-8000-000000000002";
-        let unrelated_thread = "019f7500-0000-7000-8000-000000000003";
-        let aux_foreign_thread = "019f7500-0000-7000-8000-000000000004";
-        let subdir_thread = "019f7500-0000-7000-8000-000000000005";
-        let stale_path = sessions.join(format!("rollout-{}.jsonl", stale_thread));
-        let matching_path = sessions.join(format!("rollout-{}.jsonl", matching_thread));
-        let unrelated_path = sessions.join(format!("rollout-{}.jsonl", unrelated_thread));
-        let aux_foreign_path = sessions.join(format!("rollout-{}.jsonl", aux_foreign_thread));
-        let subdir_path = sessions.join(format!("rollout-{}.jsonl", subdir_thread));
-        let stale_root_json = serde_json::to_string(stale_root.to_str().unwrap()).unwrap();
-        let project_root_json = serde_json::to_string(project_root.to_str().unwrap()).unwrap();
-        let subdir_root_json = serde_json::to_string(subdir_root.to_str().unwrap()).unwrap();
-        let message_line = format!(
-            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"id\":\"m-repair\",\"content\":\"keep the literal {} unchanged\"}}}}\n",
-            stale_root.display()
-        );
-        let stale_source = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n{}{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":{}}}}}\n",
-            stale_thread, stale_root_json, message_line, stale_root_json
-        );
-        std::fs::write(&stale_path, stale_source.as_bytes()).unwrap();
-        // A thread whose home IS the root once wandered into a foreign
-        // directory for one turn: turn-level cwds are content, never roots,
-        // so it stays matching and gets no repair offer.
-        std::fs::write(
-            &matching_path,
-            format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":{}}}}}\n",
-                matching_thread, project_root_json, stale_root_json
-            ),
-        )
-        .unwrap();
-        let unrelated_source = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n",
-            unrelated_thread, stale_root_json
-        );
-        std::fs::write(&unrelated_path, unrelated_source.as_bytes()).unwrap();
-        // Auxiliary evidence (a writable grant into this root) nominates a
-        // thread homed elsewhere: skipped silently, never claimed or
-        // repaired, and never a blocker.
-        std::fs::write(
-            &aux_foreign_path,
-            format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n",
-                aux_foreign_thread, stale_root_json
-            ),
-        )
-        .unwrap();
-        // An explicitly assigned thread homed in a subdirectory is a
-        // separate directory project: warned, never flattened into the root.
-        std::fs::write(
-            &subdir_path,
-            format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n",
-                subdir_thread, subdir_root_json
-            ),
-        )
-        .unwrap();
-        std::fs::write(
-            codex_home.join(".codex-global-state.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "local-projects": {
-                    "local-health": {
-                        "id": "local-health",
-                        "name": "healthGame",
-                        "rootPaths": [project_root.to_str().unwrap()]
-                    }
-                },
-                "thread-project-assignments": {
-                    (stale_thread): {"projectId": "local-health", "projectKind": "local"},
-                    (subdir_thread): {"projectId": "local-health", "projectKind": "local"}
-                },
-                "thread-writable-roots": {
-                    (matching_thread): [project_root.to_str().unwrap()],
-                    (aux_foreign_thread): [project_root.to_str().unwrap()],
-                    (unrelated_thread): [stale_root.to_str().unwrap()]
-                },
-                "thread-workspace-root-hints": {}
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        // Pin the stale thread on a storage link so repair must preserve the
-        // published wire form and rebase the checkpoint's local column.
-        let storage_id = StorageId::parse("repair-store").unwrap();
-        add_local_storage(&repo, &storage_id, &temp.path().join("repair-store"));
-        let logical_thread = ThreadId::parse("thread-stale-logical").unwrap();
-        let profile_for_binding = binding.profile_ids.get(&codex_key()).cloned().unwrap();
-        repo.mutate_conversation_bindings(|document| {
-            document.bindings.push(LocalConversationBinding {
-                host_id: binding.host_id.clone(),
-                replica_id: binding.replica_id.clone(),
-                local_project_id: binding.local_project_id.clone(),
-                provider_profile_id: profile_for_binding.clone(),
-                thread_id: logical_thread.clone(),
-                cloud_thread_id: None,
-                forked_from: None,
-                preserved: None,
-                root_tail_layout: Some(RootTailLayout {
-                    codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
-                    partition_kind: TailPartitionKind::WholeThread,
-                    start_record_count: 0,
-                }),
-                provider_thread_id: Some(stale_thread.to_string()),
-                materialization_state: ConversationMaterializationState::Resumable,
-                revision: 0,
-                created_at: 1,
-                updated_at: 1,
-            });
-            Ok(())
-        })
-        .unwrap();
-        let no_bases = |_: &str| Ok(None);
-        let resolved_stale =
-            codex_history_graph::resolve_codex_root(&stale_path, &no_bases).unwrap();
-        let stale_leaf_bytes = jsonl_tail_io::read_bounded(&stale_path).unwrap();
-        let seeded_stale =
-            codex_history_graph::seed_codex_root(&resolved_stale, &stale_leaf_bytes, None).unwrap();
-        let published = build_standalone_codex_root(
-            &resolved_stale,
-            &StandaloneBuildMode::Encode {
-                root: stale_root.to_str().unwrap().to_string(),
-                canonical_root: None,
-            },
-            None,
-        )
-        .unwrap();
-        let published_wire_tail = published.portable_tail.clone();
-        repo.mutate_config(|config| {
-            let link_checkpoint = ConversationCheckpoint {
-                generation: 3,
-                accepted: Some(mallard_domain::AcceptedConversationVersion {
-                    artifact_sha256: published.artifact_sha256.clone(),
-                    accepted_at_commit_id: "commit-repair".to_string(),
-                    accepted_at_manifest_sha256: "d".repeat(64),
-                    portable_tail: published_wire_tail.clone(),
-                }),
-                accepted_local_tail: Some(seeded_stale.observed_tail.clone()),
-                observed_tail: seeded_stale.observed_tail.clone(),
-                physical: PhysicalMappingState::Ready {
-                    root_mapping: seeded_stale.mapping.clone(),
-                    raw_range_pin: RawRangePin {
-                        start_byte_offset: 0,
-                        end_byte_offset: seeded_stale.mapping.consumed_byte_offset,
-                        range_sha256: hex_digest(
-                            Sha256::digest(
-                                &stale_leaf_bytes
-                                    [..seeded_stale.mapping.consumed_byte_offset as usize],
-                            )
-                            .as_slice(),
-                        ),
-                    },
-                },
-                prefix_witness: None,
-                binding_revision: 0,
-            };
-            config.links.push(ProjectStorageLink {
-                local_project_id: binding.local_project_id.clone(),
-                storage_id: storage_id.clone(),
-                bundle_id: project.bundle_id.clone(),
-                recipe: None,
-                scope_bases: BTreeMap::new(),
-                project_content_preferences: Default::default(),
-                conversation_checkpoints: BTreeMap::from([(
-                    SyncScopeKey::Provider(codex_key()),
-                    BTreeMap::from([(logical_thread.clone(), link_checkpoint)]),
-                )]),
-                pinned: false,
-                created_at: 1,
-            });
-            Ok(())
-        })
-        .unwrap();
-
-        let audit =
-            audit_codex_conversation_paths_with_repository(&repo, &project.local_project_id)
-                .unwrap();
-        assert_eq!(audit.assigned_thread_count, 4);
-        assert_eq!(audit.matching_thread_count, 1);
-        assert_eq!(audit.issues.len(), 1);
-        assert_eq!(audit.issues[0].thread_id, stale_thread);
-        assert_eq!(audit.issues[0].recorded_cwd, stale_root.to_str().unwrap());
-        assert!(audit.blockers.is_empty(), "{:?}", audit.blockers);
-        assert!(
-            audit
-                .warnings
-                .iter()
-                .any(|warning| warning.contains(subdir_thread) && warning.contains("subdirectory")),
-            "subdir-home assigned thread must be warned, not repaired: {:?}",
-            audit.warnings
-        );
-        assert!(audit.can_repair);
-        assert!(require_codex_conversation_paths_ready(&repo, &project.local_project_id).is_err());
-
-        let repaired =
-            repair_codex_conversation_paths_with_repository(&repo, &project.local_project_id)
-                .unwrap();
-        assert_eq!(repaired.repaired_thread_ids, vec![stale_thread]);
-        assert!(repaired.audit.ready);
-        assert_eq!(repaired.audit.matching_thread_count, 2);
-        let repaired_source = std::fs::read_to_string(&stale_path).unwrap();
-        // Structural root fields remap. An exact-root prose mention followed
-        // by whitespace remains byte-identical because POSIX permits spaces
-        // in an outside sibling's component; only end-of-value or `/` proves
-        // an exact root or descendant for portable remapping.
-        assert!(repaired_source.contains(&format!(
-            "keep the literal {} unchanged",
-            stale_root.display()
-        )));
-        for line in repaired_source.lines() {
-            let value: serde_json::Value = serde_json::from_str(line).unwrap();
-            if matches!(
-                value.get("type").and_then(serde_json::Value::as_str),
-                Some("session_meta" | "turn_context")
-            ) {
-                assert_eq!(
-                    value["payload"]["cwd"].as_str(),
-                    Some(binding.project_root.as_str())
-                );
-            }
-        }
-        assert_eq!(
-            std::fs::read(&unrelated_path).unwrap(),
-            unrelated_source.as_bytes()
-        );
-        // Aux-nominated foreign threads and subdirectory projects are never
-        // rewritten by this project's repair.
-        assert!(std::fs::read_to_string(&aux_foreign_path)
-            .unwrap()
-            .contains(stale_root.to_str().unwrap()));
-        assert!(std::fs::read_to_string(&subdir_path)
-            .unwrap()
-            .contains(subdir_root.to_str().unwrap()));
-
-        // §6.5 rebase: the wire pin is untouched, the local column is
-        // recomputed from the repaired bytes, the generation advanced, and
-        // with no unpushed suffix the thread sits in Sync — nothing to
-        // republish. Structural cwd records are outside the semantic fold, so
-        // preserving the ambiguous prose literal leaves the fold unchanged.
-        let rebased = repo
-            .load_config()
-            .unwrap()
-            .links
-            .iter()
-            .find(|link| link.storage_id == storage_id)
-            .and_then(|link| {
-                link.conversation_checkpoints
-                    .get(&SyncScopeKey::Provider(codex_key()))
-            })
-            .and_then(|threads| threads.get(&logical_thread))
-            .cloned()
-            .unwrap();
-        assert_eq!(rebased.generation, 4);
-        assert_eq!(
-            rebased.accepted.as_ref().unwrap().portable_tail,
-            published_wire_tail
-        );
-        let repaired_resolved =
-            codex_history_graph::resolve_codex_root(&stale_path, &no_bases).unwrap();
-        let repaired_local_tail = mallard_domain::compute_portable_conversation_tail(
-            TailPartitionKind::WholeThread,
-            0,
-            &repaired_resolved.chain,
-        )
-        .unwrap();
-        assert_eq!(
-            rebased.accepted_local_tail,
-            Some(repaired_local_tail.clone())
-        );
-        assert_eq!(rebased.observed_tail, repaired_local_tail);
-        assert_eq!(
-            rebased.observed_tail.accepted_tail_state,
-            seeded_stale.observed_tail.accepted_tail_state,
-            "structural-only remap must preserve the local fold"
-        );
-        rebased.validate().unwrap();
-        // Wire invariance end-to-end: re-encoding the repaired bytes under
-        // the *new* root reproduces the accepted wire tail exactly.
-        let republished = build_standalone_codex_root(
-            &repaired_resolved,
-            &StandaloneBuildMode::Encode {
-                root: binding.project_root.clone(),
-                canonical_root: (binding.canonical_project_root != binding.project_root)
-                    .then(|| binding.canonical_project_root.clone()),
-            },
-            None,
-        )
-        .unwrap();
-        assert_eq!(republished.portable_tail, published_wire_tail);
-        let backup_dir = PathBuf::from(repaired.backup_dir.unwrap());
-        let backups = std::fs::read_dir(backup_dir)
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(backups.len(), 1);
-        assert_eq!(
-            std::fs::read(backups[0].path()).unwrap(),
-            stale_source.as_bytes()
-        );
-        require_codex_conversation_paths_ready(&repo, &project.local_project_id).unwrap();
-    }
-
-    #[test]
-    fn oversized_conversation_is_scoped_to_the_conversation_instead_of_blocking_the_project() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo =
-            LocalStateRepository::from_home_dir(temp.path().join("agent-sync-home")).unwrap();
-        let project = register(&repo);
-        let project_root = temp.path().join("project");
-        let codex_home = temp.path().join(".codex");
-        let sessions = codex_home.join("sessions/2026/07/28");
-        std::fs::create_dir_all(&project_root).unwrap();
-        std::fs::create_dir_all(&sessions).unwrap();
-        let profile_id = add_profile(&repo, &codex_key(), &codex_home);
-        save_project_binding_with_repository(
-            &repo,
-            SaveProjectBindingRequest {
-                local_project_id: project.local_project_id.clone(),
-                project_root: project_root.to_string_lossy().into_owned(),
-                profile_ids: BTreeMap::from([(codex_key(), profile_id)]),
-                expected_revision: None,
-            },
-        )
-        .unwrap();
-
-        let thread_id = "019f7500-0000-7000-8000-000000000099";
-        let transcript = sessions.join(format!("rollout-{}.jsonl", thread_id));
-        let mut transcript_header = serde_json::to_vec(&serde_json::json!({
-            "type": "session_meta",
-            "payload": {
-                "id": thread_id,
-                "cwd": project_root.to_str().unwrap(),
-            },
-        }))
-        .unwrap();
-        transcript_header.push(b'\n');
-        std::fs::write(&transcript, transcript_header).unwrap();
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&transcript)
-            .unwrap()
-            .set_len(conversation_file_limit_bytes() + 1)
-            .unwrap();
-        std::fs::write(
-            codex_home.join(".codex-global-state.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "local-projects": {
-                    "local-big": {
-                        "id": "local-big",
-                        "rootPaths": [project_root.to_str().unwrap()]
-                    }
-                },
-                "thread-project-assignments": {
-                    (thread_id): {"projectId": "local-big", "projectKind": "local"}
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let audit =
-            audit_codex_conversation_paths_with_repository(&repo, &project.local_project_id)
-                .unwrap();
-        assert_eq!(audit.assigned_thread_count, 1);
-        assert_eq!(audit.matching_thread_count, 0);
-        assert!(audit.issues.is_empty());
-        assert!(audit.blockers.is_empty());
-        assert!(audit.ready);
-        assert!(!audit.can_repair);
-        assert_eq!(audit.warnings.len(), 1);
-        assert!(audit.warnings[0].contains("unavailable for sync"));
-        require_codex_conversation_paths_ready(&repo, &project.local_project_id).unwrap();
-    }
-
-    /// Repair composes path codecs only: a credential in the local rollout
-    /// survives `decode_new(encode_old(x))` byte-exactly. Scrubbing local
-    /// bytes as a side effect of moving a project directory would be a
-    /// bug — the redaction transform exists solely at the push/pull
-    /// boundary.
-    #[test]
-    fn repair_never_scrubs_local_secrets() {
-        let active = "019f7500-0000-7000-8000-000000000112";
-        let old_root = "/tmp/old-project";
-        let secret = "sk-ant-api03-aaaabbbbccccddddeeee";
-        let source = [
-            serde_json::json!({"type":"session_meta","payload":{"id":active,"cwd":old_root}}),
-            serde_json::json!({"type":"response_item","payload":{"type":"message","id":"m-a","role":"user",
-                "content":[{"type":"input_text","text":format!("key {secret} in /tmp/old-project/x")}]}}),
-        ]
-        .into_iter()
-        .map(|record| serde_json::to_string(&record).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .into_bytes();
-        let mapper_old = SessionPathMapper::new(old_root, None, None).unwrap();
-        let mapper_new = SessionPathMapper::new("/tmp/new-project", None, None).unwrap();
-        let repaired =
-            remap_codex_conversation_paths(&source, active, &mapper_old, &mapper_new, false)
-                .unwrap();
-        let text = String::from_utf8(repaired).unwrap();
-        assert!(text.contains(secret), "local secret must survive repair");
-        assert!(text.contains("/tmp/new-project/x"));
-        assert!(!text.contains("<anthropic-api-key>"));
-    }
-
-    #[test]
-    fn nested_fork_path_repair_remaps_matcher_scope_under_one_old_root() {
-        let active = "019f7500-0000-7000-8000-000000000111";
-        let parent = "019f7500-0000-7000-8000-000000000011";
-        let old_root = "/tmp/old-project";
-        // A realistic moved project: every segment recorded the same old
-        // root; sandbox entries and content mentions carry it too, and
-        // out-of-root paths must survive byte-identical.
-        let source = [
-            serde_json::json!({"type":"session_meta","payload":{"id":active,"forked_from_id":parent,"cwd":old_root}}),
-            serde_json::json!({"type":"session_meta","payload":{"id":parent,"cwd":old_root}}),
-            serde_json::json!({"type":"turn_context","payload":{
-                "cwd":"/tmp/old-project/frontend",
-                "sandbox_policy": {"writable_roots": [old_root, "/tmp"]},
-            }}),
-            serde_json::json!({"type":"response_item","payload":{"type":"message","id":"m-a","role":"user","content":[{"type":"input_text","text":"edit /tmp/old-project/src/main.rs and keep /tmp/other/x"}]}}),
-        ]
-        .into_iter()
-        .map(|record| serde_json::to_string(&record).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .into_bytes();
-
-        // The audit derives the one repair root from the authoritative
-        // session_meta; the nested frontend turn cwd is content, not a root.
-        assert_eq!(codex_authoritative_home(&source, active).unwrap(), old_root);
-        let mapper_old = SessionPathMapper::new(old_root, None, None).unwrap();
-        let mapper_new = SessionPathMapper::new("/tmp/new-project", None, None).unwrap();
-        let repaired =
-            remap_codex_conversation_paths(&source, active, &mapper_old, &mapper_new, false)
-                .unwrap();
-        let structure = analyze_codex_rollout_structure(&repaired, Some(active)).unwrap();
-        assert_eq!(structure.fork_ancestry, vec![parent.to_string()]);
-        assert_eq!(
-            structure.structural_cwds,
-            BTreeSet::from([
-                "/tmp/new-project".to_string(),
-                "/tmp/new-project/frontend".to_string()
-            ])
-        );
-        let text = String::from_utf8(repaired.clone()).unwrap();
-        assert!(text.contains("edit /tmp/new-project/src/main.rs"));
-        assert!(text.contains("keep /tmp/other/x"));
-        assert!(
-            text.contains("\"/tmp/new-project\",\"/tmp\"")
-                || text.contains("\"writable_roots\":[\"/tmp/new-project\",\"/tmp\"]")
-        );
-
-        // Pinned-thread gate: the repair transform preserves the wire form
-        // byte-exactly, so the gated variant succeeds on the same input …
-        remap_codex_conversation_paths(&source, active, &mapper_old, &mapper_new, true).unwrap();
-        // … and blocks when content already names the new root (collision).
-        let mut colliding = source.clone();
-        colliding.push(b'\n');
-        colliding.extend_from_slice(
-            serde_json::to_string(&serde_json::json!({
-                "type":"response_item",
-                "payload":{"type":"message","id":"m-b","role":"user",
-                            "content":[{"type":"input_text","text":"see /tmp/new-project/readme"}]}
-            }))
-            .unwrap()
-            .as_bytes(),
-        );
-        let error =
-            remap_codex_conversation_paths(&colliding, active, &mapper_old, &mapper_new, true)
-                .unwrap_err();
-        assert!(
-            error.contains("collides with the current project root"),
-            "{error}"
-        );
-
-        // A fork whose ancestor lived in a different directory is plainly
-        // repairable: the active thread's home is the one repair root, and
-        // the foreign ancestor home is out-of-root content preserved
-        // byte-identically.
-        let cross_directory_fork = [
-            serde_json::json!({"type":"session_meta","payload":{"id":active,"forked_from_id":parent,"cwd":"/tmp/old-active"}}),
-            serde_json::json!({"type":"session_meta","payload":{"id":parent,"cwd":"/tmp/old-parent"}}),
-        ]
-        .into_iter()
-        .map(|record| serde_json::to_string(&record).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .into_bytes();
-        assert_eq!(
-            codex_authoritative_home(&cross_directory_fork, active).unwrap(),
-            "/tmp/old-active"
-        );
-        let mapper_old = SessionPathMapper::new("/tmp/old-active", None, None).unwrap();
-        let repaired = remap_codex_conversation_paths(
-            &cross_directory_fork,
-            active,
-            &mapper_old,
-            &mapper_new,
-            false,
-        )
-        .unwrap();
-        let structure = analyze_codex_rollout_structure(&repaired, Some(active)).unwrap();
-        assert_eq!(
-            structure.structural_cwds,
-            BTreeSet::from([
-                "/tmp/new-project".to_string(),
-                "/tmp/old-parent".to_string()
-            ])
-        );
-    }
-
-    #[test]
-    fn nested_fork_path_audit_rejects_unrelated_metadata() {
-        let source = [
-            serde_json::json!({"type":"session_meta","payload":{"id":"child","forked_from_id":"parent","cwd":"/tmp/project"}}),
-            serde_json::json!({"type":"session_meta","payload":{"id":"unrelated","cwd":"/tmp/project"}}),
-        ]
-        .into_iter()
-        .map(|record| serde_json::to_string(&record).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .into_bytes();
-        let error = codex_authoritative_home(&source, "child").unwrap_err();
-        assert!(error.contains("unrelated"));
     }
 
     #[test]
@@ -19752,19 +17378,11 @@ mod tests {
         let repo = LocalStateRepository::from_home_dir(temp.path().join("home")).unwrap();
         let storage_id = StorageId::parse("shared").unwrap();
         let mut config = repo.load_config().unwrap();
-        config.storages.push(StorageConfig {
-            id: storage_id.clone(),
-            name: "Shared".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: temp.path().join("store").to_string_lossy().into_owned(),
-            supports_conditional_writes: None,
-        });
+        config.storages.push(local_storage_config(
+            storage_id.clone(),
+            "Shared",
+            &temp.path().join("store"),
+        ));
         repo.save_config(config).unwrap();
 
         let project = register(&repo);
@@ -19907,7 +17525,6 @@ mod tests {
         // A later reviewed selection belongs only to this destination.
         let mut empty_approval = PushApproval::recommended(&clean_review, &storage_id);
         empty_approval.recipe = BundleRecipe::default();
-        empty_approval.approved_conversation_action_ids.clear();
         let pushed_empty = ProjectSyncService::new(&repo)
             .push_reviewed(&project.local_project_id, &storage_id, empty_approval)
             .unwrap();
@@ -20119,7 +17736,7 @@ mod tests {
             portable_id.clone(),
             RecipeEntry {
                 resource_id: portable_id.clone(),
-                apply_policy: ApplyPolicy::SafeFile,
+                apply_policy: contracts::safe_file(),
                 required: false,
             },
         );
@@ -20131,8 +17748,6 @@ mod tests {
             &storage_id,
             invalid,
             empty_project_content_review(),
-            None,
-            Vec::new(),
             &mut |_| {},
         )
         .unwrap_err();
@@ -20147,238 +17762,44 @@ mod tests {
         assert!(snapshot.manifest.is_registration_only());
     }
 
-    fn r2_storage(secret: &str) -> StorageConfig {
-        StorageConfig {
-            id: StorageId::parse("cloud").unwrap(),
-            name: "Cloud".to_string(),
-            kind: StorageKind::S3,
-            bucket: "bucket".to_string(),
-            access_key_id: "AKIA".to_string(),
-            secret_access_key: secret.to_string(),
-            account_id: "acct".to_string(),
-            s3_endpoint: "https://acct.r2.cloudflarestorage.com".to_string(),
-            region: "auto".to_string(),
-            local_dir: String::new(),
-            supports_conditional_writes: None,
-        }
-    }
-
-    #[test]
-    fn reading_the_config_never_hands_the_webview_a_storage_secret() {
-        let mut config = SyncConfig::default();
-        config.storages.push(r2_storage("super-secret"));
-
-        let redacted = redact_storage_secrets(config);
-
-        assert_eq!(redacted.storages[0].secret_access_key, "");
-        // Everything else the settings form renders survives redaction.
-        assert_eq!(redacted.storages[0].access_key_id, "AKIA");
-        assert_eq!(redacted.storages[0].bucket, "bucket");
-    }
-
-    #[test]
-    fn saving_a_redacted_storage_preserves_the_stored_secret() {
-        let mut stored = SyncConfig::default();
-        stored.storages.push(r2_storage("super-secret"));
-        // What the webview holds, and therefore what it sends back untouched.
-        let mut incoming = redact_storage_secrets(stored.clone());
-        incoming.storages[0].name = "Renamed".to_string();
-
-        restore_redacted_storage_secrets(&mut incoming, Some(&stored));
-
-        assert_eq!(incoming.storages[0].secret_access_key, "super-secret");
-        assert_eq!(incoming.storages[0].name, "Renamed");
-        require_s3_storage_secrets(&incoming).unwrap();
-    }
-
-    #[test]
-    fn focused_r2_upserts_keep_the_existing_storage_activity_vocabulary() {
-        assert_eq!(
-            r2_upsert_success_summary(false, "Cloud"),
-            ("storage.added", "Storage added — Cloud".to_string()),
-        );
-        assert_eq!(
-            r2_upsert_success_summary(true, "Cloud"),
-            (
-                "storage.settings_updated",
-                "Storage settings updated — Cloud".to_string(),
-            ),
-        );
-    }
-
-    #[test]
-    fn generic_config_save_cannot_bypass_verified_r2_connection_changes() {
-        let mut stored = SyncConfig::default();
-        stored.storages.push(r2_storage("stored-secret"));
-
-        let mut renamed = stored.clone();
-        renamed.storages[0].name = "Renamed".to_string();
-        require_verified_r2_changes(&renamed, Some(&stored)).unwrap();
-
-        let mut removed = stored.clone();
-        removed.storages.clear();
-        require_verified_r2_changes(&removed, Some(&stored)).unwrap();
-
-        let mut changed_destination = stored.clone();
-        changed_destination.storages[0].bucket = "other-bucket".to_string();
-        assert_eq!(
-            require_verified_r2_changes(&changed_destination, Some(&stored)).unwrap_err(),
-            VERIFIED_R2_MESSAGE,
-        );
-
-        let mut changed_credentials = stored.clone();
-        changed_credentials.storages[0].secret_access_key = "replacement-secret".to_string();
-        assert_eq!(
-            require_verified_r2_changes(&changed_credentials, Some(&stored)).unwrap_err(),
-            VERIFIED_R2_MESSAGE,
-        );
-
-        let mut converted = stored.clone();
-        converted.storages[0].kind = StorageKind::Local;
-        converted.storages[0].local_dir = "/tmp/storage".to_string();
-        assert_eq!(
-            require_verified_r2_changes(&converted, Some(&stored)).unwrap_err(),
-            VERIFIED_R2_MESSAGE,
-        );
-    }
-
-    fn r2_draft_payload(secret: &str) -> StorageSetupDraftPayload {
-        StorageSetupDraftPayload {
-            name: "Half-typed R2".to_string(),
-            kind: StorageKind::S3,
-            bucket: "drafted-bucket".to_string(),
-            access_key_id: "drafted-access".to_string(),
-            secret_access_key: secret.to_string(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: "auto".to_string(),
-            local_dir: String::new(),
-        }
-    }
-
-    #[test]
-    fn storage_setup_drafts_cross_ipc_redacted_with_secret_present() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-        let with_secret =
-            create_storage_setup_draft_with_repository(&repo, r2_draft_payload("draft-canary"))
-                .unwrap();
-
-        let view = redact_storage_setup_draft(with_secret);
-        assert!(view.secret_present);
-        assert_eq!(view.storage.secret_access_key, "");
-        let serialized = serde_json::to_string(&view).unwrap();
-        assert!(!serialized.contains("draft-canary"));
-        // Everything else the settings form renders survives redaction.
-        assert_eq!(view.storage.access_key_id, "drafted-access");
-        assert_eq!(view.storage.bucket, "drafted-bucket");
-
-        let secretless =
-            create_storage_setup_draft_with_repository(&repo, r2_draft_payload("")).unwrap();
-        assert!(!redact_storage_setup_draft(secretless).secret_present);
-    }
-
-    #[test]
-    fn only_exact_storage_setup_draft_get_exposes_its_secret_for_review() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-        let created =
-            create_storage_setup_draft_with_repository(&repo, r2_draft_payload("draft-canary"))
-                .unwrap();
-
-        let exact = get_storage_setup_draft_with_repository(&repo, &created.draft_id)
-            .unwrap()
-            .unwrap();
-        assert!(exact.secret_present);
-        assert_eq!(exact.storage.secret_access_key, "draft-canary");
-        assert!(serde_json::to_string(&exact)
-            .unwrap()
-            .contains("draft-canary"));
-
-        let listed = list_storage_setup_drafts_with_repository(&repo).unwrap();
-        assert_eq!(listed.drafts.len(), 1);
-        assert_eq!(listed.drafts[0].storage.secret_access_key, "");
-        assert!(!serde_json::to_string(&listed)
-            .unwrap()
-            .contains("draft-canary"));
-    }
-
-    #[test]
-    fn updating_a_draft_with_a_blank_secret_preserves_the_persisted_secret() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-        let created =
-            create_storage_setup_draft_with_repository(&repo, r2_draft_payload("draft-canary"))
-                .unwrap();
-
-        // A redacted summary client may autosave its own edits with a blank
-        // secret. That blank must preserve the persisted value.
-        let mut resumed = r2_draft_payload("");
-        resumed.name = "Renamed while resumed".to_string();
-        let updated = update_storage_setup_draft_with_repository(
-            &repo,
-            UpdateStorageSetupDraftRequest {
-                draft_id: created.draft_id.clone(),
-                revision: created.revision,
-                storage: resumed,
-            },
-        )
-        .unwrap();
-        assert_eq!(updated.storage.secret_access_key, "draft-canary");
-        assert_eq!(updated.storage.name, "Renamed while resumed");
-
-        // A typed replacement wins.
-        let replaced = update_storage_setup_draft_with_repository(
-            &repo,
-            UpdateStorageSetupDraftRequest {
-                draft_id: created.draft_id.clone(),
-                revision: updated.revision,
-                storage: r2_draft_payload("replacement-secret"),
-            },
-        )
-        .unwrap();
-        assert_eq!(replaced.storage.secret_access_key, "replacement-secret");
-    }
-
     #[test]
     fn draft_updates_are_revision_guarded_and_keep_server_owned_identity() {
         let temp = tempfile::tempdir().unwrap();
         let repo = LocalStateRepository::from_home_dir(temp.path()).unwrap();
         let created =
-            create_storage_setup_draft_with_repository(&repo, r2_draft_payload("")).unwrap();
-
-        let stale = update_storage_setup_draft_with_repository(
-            &repo,
-            UpdateStorageSetupDraftRequest {
-                draft_id: created.draft_id.clone(),
-                revision: created.revision + 7,
-                storage: r2_draft_payload(""),
-            },
-        )
-        .unwrap_err();
-        assert!(stale.contains("storage draft changed"), "{stale}");
-
-        let updated = update_storage_setup_draft_with_repository(
-            &repo,
-            UpdateStorageSetupDraftRequest {
-                draft_id: created.draft_id.clone(),
-                revision: created.revision,
-                storage: r2_draft_payload(""),
-            },
-        )
+            create_storage_setup_draft_with_repository(&repo, &local_provider_key()).unwrap();
+        let settings = mallard_domain::BoundedConfigObject::from_json(&serde_json::json!({
+            "directory": temp.path().join("store").to_string_lossy(),
+        }))
         .unwrap();
+        let request = |revision: u64| UpdateStorageSetupDraftRequest {
+            draft_id: created.draft_id.clone(),
+            revision,
+            name: "Half-typed local".to_string(),
+            settings: settings.clone(),
+            secrets: BTreeMap::new(),
+        };
+
+        let stale =
+            update_storage_setup_draft_with_repository(&repo, request(created.revision + 7))
+                .unwrap_err();
+        assert!(stale.contains("draft changed"), "{stale}");
+
+        let updated =
+            update_storage_setup_draft_with_repository(&repo, request(created.revision)).unwrap();
         assert_eq!(updated.draft_id, created.draft_id);
         assert_eq!(updated.created_at, created.created_at);
-        assert_eq!(updated.storage.id, created.storage.id);
+        assert_eq!(updated.storage_id, created.storage_id);
         assert_eq!(updated.revision, created.revision + 1);
+        assert_eq!(updated.settings, settings);
+        assert!(updated.secrets.is_empty());
 
         let missing = update_storage_setup_draft_with_repository(
             &repo,
             UpdateStorageSetupDraftRequest {
                 draft_id: StorageSetupDraftId::parse(generated_named_id("storagedraft").unwrap())
                     .unwrap(),
-                revision: 1,
-                storage: r2_draft_payload(""),
+                ..request(1)
             },
         )
         .unwrap_err();
@@ -20386,68 +17807,71 @@ mod tests {
     }
 
     #[test]
-    fn list_storage_setup_drafts_returns_redacted_views() {
+    fn the_config_view_and_draft_views_never_carry_a_secret() {
         let temp = tempfile::tempdir().unwrap();
         let repo = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-        create_storage_setup_draft_with_repository(&repo, r2_draft_payload("list-canary")).unwrap();
-        create_storage_setup_draft_with_repository(&repo, r2_draft_payload("")).unwrap();
+        let secret_canary = "super-secret-canary";
+        repo.mutate_config(|config| {
+            use mallard_infrastructure::storage_providers::r2::{
+                parse_r2_api_url, provider_key, r2_settings_v1, secret_access_key,
+                R2_CONFIG_VERSION,
+            };
 
-        let list = list_storage_setup_drafts_with_repository(&repo).unwrap();
-        assert_eq!(list.drafts.len(), 2);
-        assert!(list.warnings.is_empty());
-        let serialized = serde_json::to_string(&list).unwrap();
-        assert!(!serialized.contains("list-canary"));
-        assert!(list
-            .drafts
+            let destination = parse_r2_api_url(
+                "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/team",
+            )
+            .unwrap();
+            let settings = mallard_domain::BoundedConfigObject::encode(&r2_settings_v1(
+                &destination,
+                "access-canary",
+            ))
+            .unwrap();
+            let mut secrets = mallard_domain::SecretMap::empty();
+            secrets
+                .insert(
+                    secret_access_key(),
+                    mallard_domain::SecretValue::parse(secret_canary).unwrap(),
+                )
+                .unwrap();
+            config.storages.push(StorageConfig {
+                id: StorageId::parse("cloudish").unwrap(),
+                name: "Cloudish".to_string(),
+                provider: provider_key(),
+                provider_config: mallard_domain::StorageProviderConfig::new(
+                    R2_CONFIG_VERSION,
+                    settings,
+                    secrets,
+                ),
+            });
+            Ok(())
+        })
+        .unwrap();
+        let view = load_project_sync_config_with_repository(&repo).unwrap();
+        let rendered = serde_json::to_string(&view).unwrap();
+        assert!(!rendered.contains(secret_canary));
+        assert!(!rendered.contains("provider_config"));
+        assert_eq!(view.storages[0].provider_label, "Cloudflare R2");
+        assert!(view.storages[0].available);
+
+        let draft = create_storage_edit_draft_with_repository(
+            &repo,
+            &StorageId::parse("cloudish").unwrap(),
+        )
+        .unwrap();
+        assert!(draft.edits_existing);
+        let listed = list_storage_setup_drafts_with_repository(&repo).unwrap();
+        let rendered = serde_json::to_string(&listed).unwrap();
+        assert!(!rendered.contains(secret_canary));
+        assert!(listed.drafts[0]
+            .secrets
             .iter()
-            .all(|draft| draft.storage.secret_access_key.is_empty()));
-    }
-
-    #[test]
-    fn generic_config_save_rejects_new_r2_but_allows_new_local_storage() {
-        let stored = SyncConfig::default();
-        let mut incoming = SyncConfig::default();
-        incoming.storages.push(r2_storage("stored-secret"));
-
-        assert_eq!(
-            require_verified_r2_changes(&incoming, Some(&stored)).unwrap_err(),
-            VERIFIED_R2_MESSAGE,
-        );
-
-        incoming.storages[0] = StorageConfig {
-            id: StorageId::parse("disk").unwrap(),
-            name: "Disk".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: "/tmp/storage".to_string(),
-            supports_conditional_writes: None,
-        };
-        require_verified_r2_changes(&incoming, Some(&stored)).unwrap();
-    }
-
-    #[test]
-    fn a_local_storage_needs_no_secret() {
-        let mut config = SyncConfig::default();
-        config.storages.push(StorageConfig {
-            id: StorageId::parse("disk").unwrap(),
-            name: "Disk".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: "/tmp/store".to_string(),
-            supports_conditional_writes: None,
-        });
-
-        require_s3_storage_secrets(&config).unwrap();
+            .any(|state| state.secret_id.as_str() == "secret_access_key" && state.present));
+        let exact = get_storage_setup_draft_with_repository(&repo, &draft.draft_id)
+            .unwrap()
+            .unwrap();
+        assert!(!serde_json::to_string(&exact)
+            .unwrap()
+            .contains(secret_canary));
     }
 
     #[test]
@@ -20456,19 +17880,11 @@ mod tests {
         let repo = repository(&temp);
         let project = register(&repo);
         let mut config = repo.load_config().unwrap();
-        config.storages.push(StorageConfig {
-            id: StorageId::parse("backup").unwrap(),
-            name: "Backup".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: temp.path().join("store").to_string_lossy().into_owned(),
-            supports_conditional_writes: None,
-        });
+        config.storages.push(local_storage_config(
+            StorageId::parse("backup").unwrap(),
+            "Backup",
+            &temp.path().join("store"),
+        ));
         repo.save_config(config).unwrap();
         let link = save_project_link_with_repository(
             &repo,
@@ -20608,19 +18024,11 @@ mod tests {
         std::fs::write(&marker, b"keep").unwrap();
 
         let mut config = repo.load_config().unwrap();
-        config.storages.push(StorageConfig {
-            id: storage_id.clone(),
-            name: "Backup".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: storage_root.to_string_lossy().into_owned(),
-            supports_conditional_writes: None,
-        });
+        config.storages.push(local_storage_config(
+            storage_id.clone(),
+            "Backup",
+            &storage_root,
+        ));
         repo.save_config(config).unwrap();
         save_project_link_with_repository(
             &repo,
@@ -20693,19 +18101,11 @@ mod tests {
         let storage_root = temp.path().join("storage");
         std::fs::create_dir_all(&storage_root).unwrap();
         let mut config = repo.load_config().unwrap();
-        config.storages.push(StorageConfig {
-            id: storage_id.clone(),
-            name: "Clear me".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: storage_root.to_string_lossy().into_owned(),
-            supports_conditional_writes: None,
-        });
+        config.storages.push(local_storage_config(
+            storage_id.clone(),
+            "Clear me",
+            &storage_root,
+        ));
         let saved = repo.save_config(config).unwrap();
         let store = LocalObjectStore::open(&storage_root).unwrap();
         let repository_key = repository_object_key(
@@ -20718,6 +18118,13 @@ mod tests {
         store.put_immutable(&repository_key, b"repository").unwrap();
         store.put_immutable(&library_key, b"library").unwrap();
         std::fs::write(storage_root.join("keep.txt"), b"user data").unwrap();
+
+        let stale =
+            clear_storage_data_with_repositories(&repo, &catalog, &storage_id, saved.revision + 1)
+                .unwrap_err();
+        assert!(stale.contains("storage configuration changed"));
+        assert!(store.get_metadata(&repository_key, 64).unwrap().is_some());
+        assert!(store.get_metadata(&library_key, 64).unwrap().is_some());
 
         let result =
             clear_storage_data_with_repositories(&repo, &catalog, &storage_id, saved.revision)
@@ -20746,19 +18153,11 @@ mod tests {
         let repo = LocalStateRepository::from_home_dir(temp.path().join("home")).unwrap();
         let storage_id = StorageId::parse("shared").unwrap();
         let mut config = repo.load_config().unwrap();
-        config.storages.push(StorageConfig {
-            id: storage_id.clone(),
-            name: "Shared".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: temp.path().join("store").to_string_lossy().into_owned(),
-            supports_conditional_writes: None,
-        });
+        config.storages.push(local_storage_config(
+            storage_id.clone(),
+            "Shared",
+            &temp.path().join("store"),
+        ));
         repo.save_config(config).unwrap();
 
         let fingerprint = "a".repeat(64);
@@ -20952,7 +18351,7 @@ mod tests {
             get_bundle_inventory_with_repository(&repo, &replica.local_project_id).unwrap();
         assert!(inventory.resources.iter().all(|resource| {
             resource.descriptor.resource_id != portable_conversation_id
-                || resource.descriptor.kind != ResourceKind::Requirement
+                || resource.descriptor.kind != contracts::requirement()
         }));
         let comparison = get_project_thread_sync_comparison_with_repository(
             &repo,
@@ -21030,47 +18429,23 @@ mod tests {
     }
 
     #[test]
-    fn pull_support_uses_the_restore_plans_storage_when_linked_revisions_differ() {
+    fn pull_support_uses_the_review_storage_when_linked_revisions_differ() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let first_storage_id = StorageId::parse("first-linked-store").unwrap();
         let selected_storage_id = StorageId::parse("selected-pull-store").unwrap();
         let mut config = repo.load_config().unwrap();
         config.storages.extend([
-            StorageConfig {
-                id: first_storage_id.clone(),
-                name: "First linked store".to_string(),
-                kind: StorageKind::Local,
-                bucket: String::new(),
-                access_key_id: String::new(),
-                secret_access_key: String::new(),
-                account_id: String::new(),
-                s3_endpoint: String::new(),
-                region: String::new(),
-                local_dir: temp
-                    .path()
-                    .join("first-store")
-                    .to_string_lossy()
-                    .into_owned(),
-                supports_conditional_writes: None,
-            },
-            StorageConfig {
-                id: selected_storage_id.clone(),
-                name: "Selected Pull store".to_string(),
-                kind: StorageKind::Local,
-                bucket: String::new(),
-                access_key_id: String::new(),
-                secret_access_key: String::new(),
-                account_id: String::new(),
-                s3_endpoint: String::new(),
-                region: String::new(),
-                local_dir: temp
-                    .path()
-                    .join("selected-store")
-                    .to_string_lossy()
-                    .into_owned(),
-                supports_conditional_writes: None,
-            },
+            local_storage_config(
+                first_storage_id.clone(),
+                "First linked store",
+                &temp.path().join("first-store"),
+            ),
+            local_storage_config(
+                selected_storage_id.clone(),
+                "Selected Pull store",
+                &temp.path().join("selected-store"),
+            ),
         ]);
         repo.save_config(config).unwrap();
 
@@ -21160,7 +18535,7 @@ mod tests {
         assert_eq!(restore.storage_id, selected_storage_id);
         assert_eq!(restore.revision, 4);
         assert_eq!(
-            get_restore_readiness_with_repository(&repo, &restore.plan_id)
+            get_restore_readiness_with_repository(&repo, &restore)
                 .unwrap()
                 .bundle_id,
             restore.bundle_id
@@ -21169,11 +18544,9 @@ mod tests {
         advance_local_content();
         push_bundle_with_repository(&repo, &project.local_project_id, &selected_storage_id)
             .unwrap();
-        assert!(
-            get_restore_readiness_with_repository(&repo, &restore.plan_id)
-                .unwrap_err()
-                .contains("bundle head changed after restore planning")
-        );
+        assert!(get_restore_readiness_with_repository(&repo, &restore)
+            .unwrap_err()
+            .contains("bundle head changed after comparison"));
     }
 
     #[test]
@@ -21465,7 +18838,7 @@ mod tests {
         );
         ProjectSyncService::new(&repo)
             .apply_bundle_restore(
-                &plan.plan_id,
+                &plan,
                 plan.actions
                     .iter()
                     .map(|action| action.action_id.clone())
@@ -21837,6 +19210,242 @@ mod tests {
     }
 
     #[test]
+    fn git_checkout_does_not_change_activity_sessions_or_push_pull_planning() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("branch-neutral-planning-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        let run_git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&project_root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {:?}: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run_git(&["init", "--initial-branch=main"]);
+        run_git(&["config", "user.email", "mallard@example.test"]);
+        run_git(&["config", "user.name", "Mallard Test"]);
+        std::fs::write(project_root.join("tracked.txt"), "tracked\n").unwrap();
+        run_git(&["add", "tracked.txt"]);
+        let commit = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&project_root)
+            .args(["commit", "-m", "Initial"])
+            .env("GIT_AUTHOR_DATE", "2026-07-23T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-07-23T00:00:00Z")
+            .output()
+            .unwrap();
+        assert!(
+            commit.status.success(),
+            "git commit: {}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        run_git(&["branch", "test"]);
+
+        let codex_home = temp.path().join("codex-home");
+        let claude_home = temp.path().join("claude-home");
+        let codex_profile = add_profile(&repo, &codex_key(), &codex_home);
+        let claude = ProviderKey::parse("claude").unwrap();
+        let claude_profile = add_profile(&repo, &claude, &claude_home);
+        let binding = save_project_binding_with_repository(
+            &repo,
+            SaveProjectBindingRequest {
+                local_project_id: project.local_project_id.clone(),
+                project_root: project_root.to_string_lossy().into_owned(),
+                profile_ids: BTreeMap::from([
+                    (codex_key(), codex_profile),
+                    (claude.clone(), claude_profile),
+                ]),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        save_project_link_with_repository(
+            &repo,
+            SaveProjectLinkRequest {
+                local_project_id: project.local_project_id.clone(),
+                storage_id: storage_id.clone(),
+                pinned: true,
+            },
+        )
+        .unwrap();
+
+        let codex_session_id = "019f7500-0000-7000-8000-0000000000bd";
+        let mut codex_transcript = Vec::new();
+        for raw in command_test_transcript(
+            codex_session_id,
+            &project_root,
+            &[("codex-message", "user", "Codex on main")],
+        )
+        .split(|byte| *byte == b'\n')
+        .filter(|raw| !raw.is_empty())
+        {
+            let mut record: serde_json::Value = serde_json::from_slice(raw).unwrap();
+            if record["type"] == "session_meta" {
+                record["payload"]["git"] = serde_json::json!({ "branch": "main" });
+            }
+            serde_json::to_writer(&mut codex_transcript, &record).unwrap();
+            codex_transcript.push(b'\n');
+        }
+        let codex_sessions = codex_home.join("sessions/2026/07/22");
+        std::fs::create_dir_all(&codex_sessions).unwrap();
+        std::fs::write(
+            codex_sessions.join(format!("rollout-{codex_session_id}.jsonl")),
+            codex_transcript,
+        )
+        .unwrap();
+
+        let claude_session_id = "claude-branch-neutral";
+        let mut claude_transcript = Vec::new();
+        for (index, raw) in claude_test_transcript(
+            claude_session_id,
+            &project_root,
+            &[
+                ("claude-user", None, "user", "Claude on test"),
+                ("claude-agent", Some("claude-user"), "assistant", "Done"),
+            ],
+        )
+        .split(|byte| *byte == b'\n')
+        .filter(|raw| !raw.is_empty())
+        .enumerate()
+        {
+            let mut record: serde_json::Value = serde_json::from_slice(raw).unwrap();
+            record["gitBranch"] = serde_json::json!("test");
+            record["timestamp"] = serde_json::json!(format!("2026-07-22T00:00:0{index}Z"));
+            serde_json::to_writer(&mut claude_transcript, &record).unwrap();
+            claude_transcript.push(b'\n');
+        }
+        let claude_bucket = mallard_infrastructure::providers::claude::encode_claude_project_path(
+            &project_root.to_string_lossy(),
+        );
+        let claude_sessions = claude_home.join("projects").join(claude_bucket);
+        std::fs::create_dir_all(&claude_sessions).unwrap();
+        std::fs::write(
+            claude_sessions.join(format!("{claude_session_id}.jsonl")),
+            claude_transcript,
+        )
+        .unwrap();
+
+        let activity_for = |branch: &str| {
+            get_project_activity_with_repository(
+                &repo,
+                &project.local_project_id,
+                Some(&storage_id),
+                Some(branch),
+                Some(1_790_000_000),
+                Some(90),
+            )
+            .unwrap()
+        };
+        let represented_sessions = |activity: &ProjectActivity| {
+            activity
+                .git
+                .iter()
+                .flat_map(|git| git.commits.iter())
+                .flat_map(|commit| commit.session_refs.iter())
+                .map(|reference| reference.resource_id.clone())
+                .chain(
+                    activity
+                        .unmapped
+                        .iter()
+                        .map(|reference| reference.resource_id.clone()),
+                )
+                .collect::<BTreeSet<_>>()
+        };
+        let main_activity = activity_for("main");
+        let test_activity = activity_for("test");
+        let main_ids = main_activity
+            .sessions
+            .iter()
+            .map(|session| session.resource_id.clone())
+            .collect::<BTreeSet<_>>();
+        let test_ids = test_activity
+            .sessions
+            .iter()
+            .map(|session| session.resource_id.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(main_ids, test_ids);
+        assert_eq!(main_ids.len(), 2);
+        assert_eq!(represented_sessions(&main_activity), main_ids);
+        assert_eq!(represented_sessions(&test_activity), test_ids);
+        assert_eq!(
+            main_activity
+                .sessions
+                .iter()
+                .map(|session| session.provider.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["claude", "codex"]),
+        );
+
+        let main_push =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap()
+                .thread_comparison
+                .unwrap();
+        run_git(&["switch", "test"]);
+        let test_push =
+            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap()
+                .thread_comparison
+                .unwrap();
+        assert_eq!(
+            strip_volatile(serde_json::to_value(&main_push).unwrap()),
+            strip_volatile(serde_json::to_value(&test_push).unwrap()),
+        );
+        assert_eq!(
+            main_push
+                .entries
+                .iter()
+                .map(|entry| entry.provider.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["claude", "codex"]),
+        );
+
+        let summarize_pull = |plan: RestorePlan| {
+            plan.conversation_review
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.provider,
+                        row.resource_id,
+                        row.action,
+                        row.blocker,
+                        row.blocked_reason,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let test_pull = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &project.bundle_id, &binding)
+            .unwrap();
+        run_git(&["switch", "main"]);
+        let main_pull = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &project.bundle_id, &binding)
+            .unwrap();
+        let test_pull = summarize_pull(test_pull);
+        let main_pull = summarize_pull(main_pull);
+        assert_eq!(main_pull, test_pull);
+        assert_eq!(
+            main_pull
+                .iter()
+                .map(|(provider, _, _, _, _)| provider.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["claude", "codex"]),
+        );
+    }
+
+    #[test]
     fn activity_message_counts_exclude_codex_intermediate_steps() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
@@ -21889,126 +19498,6 @@ mod tests {
         );
     }
 
-    fn id_set<const N: usize>(ids: [&str; N]) -> BTreeSet<String> {
-        ids.into_iter().map(str::to_string).collect()
-    }
-
-    fn budget_view(id: &str, capture_bytes: u64, mtime: u64) -> provider_capture::LocalSessionView {
-        provider_capture::LocalSessionView {
-            descriptor: provider_capture::ResourceCandidate {
-                metadata: BTreeMap::new(),
-                resource_id: id.to_string(),
-                kind: CaptureResourceKind::Conversation,
-                provider: Some(codex_key()),
-                provider_resource_type: Some("session".to_string()),
-                display_name: id.to_string(),
-                apply_policy: CaptureApplyPolicy::SafeFile,
-                selected_by_default: true,
-                blocked_reason: None,
-                logical_paths: Vec::new(),
-            },
-            provider: codex_key(),
-            provider_thread_id: id.to_string(),
-            transcript_logical_path: format!(
-                "state/providers/codex/sessions/{id}/transcript.jsonl"
-            ),
-            source_path: PathBuf::from(format!("/tmp/{id}.jsonl")),
-            source_mtime: mtime,
-            source_size: capture_bytes,
-            capture_bytes,
-        }
-    }
-
-    #[test]
-    fn fit_capture_budget_is_a_time_ordered_prefix() {
-        // (capture bytes, mtime) per candidate: the base row is always
-        // captured, the rest are walked newest first, and the walk stops at
-        // the first row that does not fit — a smaller older row never slips
-        // in past it. A row too large for the whole budget is set aside as
-        // oversized and the walk continues past it.
-        let lookup = |id: &str| -> (u64, u64) {
-            match id {
-                "base" => (100, 1),
-                "newest" => (300, 900),
-                "huge" => (2_000, 700),
-                "middle" => (300, 500),
-                "oldest" => (300, 100),
-                "tiny-old" => (50, 50),
-                _ => (0, 0),
-            }
-        };
-        let base = id_set(["base"]);
-        let selection = id_set(["base", "newest", "huge", "middle", "oldest", "tiny-old"]);
-        let fit = fit_capture_budget_with(&lookup, &base, selection.clone(), 750);
-        // 100 (base) + 300 (newest) + 300 (middle) = 700. oldest does not
-        // fit, so it and everything older wait — tiny-old (50) included,
-        // although it would have fit: the cut is a line in time.
-        assert_eq!(fit.kept, id_set(["base", "newest", "middle"]));
-        assert_eq!(fit.held, id_set(["oldest", "tiny-old"]));
-        assert_eq!(fit.oversized, id_set(["huge"]));
-        // A budget that cannot even hold the base keeps it anyway: the base
-        // is the classification floor, never a candidate. Every candidate is
-        // then larger than the whole budget, so none is merely held.
-        let fit = fit_capture_budget_with(&lookup, &base, selection, 10);
-        assert_eq!(fit.kept, base);
-        assert!(fit.held.is_empty());
-        assert_eq!(fit.oversized.len(), 5);
-    }
-
-    #[test]
-    fn cached_pins_are_charged_to_the_budget_before_they_are_served() {
-        // Two candidates worth 300 each against a budget of 400: only the
-        // newest fits. A watcher that would happily serve pins for both must
-        // be asked about the kept row alone — a served pin saves the read and
-        // nothing else, so a quiet reopen can never admit a second full push
-        // on top of what an earlier review already pinned.
-        let views = vec![
-            budget_view("newest", 300, 900),
-            budget_view("older", 300, 100),
-        ];
-        let base = BTreeSet::new();
-        let asked = std::cell::RefCell::new(BTreeSet::new());
-        let (fit, to_capture, served) =
-            plan_candidate_capture(&views, &base, id_set(["newest", "older"]), 400, |kept| {
-                asked.borrow_mut().extend(kept.iter().cloned());
-                let served: BTreeMap<String, TargetExpectation> = kept
-                    .iter()
-                    .map(|id| (id.clone(), TargetExpectation::Absent))
-                    .collect();
-                (BTreeSet::new(), served)
-            });
-        assert_eq!(fit.kept, id_set(["newest"]));
-        assert_eq!(fit.held, id_set(["older"]));
-        assert_eq!(&*asked.borrow(), &id_set(["newest"]));
-        assert_eq!(
-            served.keys().cloned().collect::<BTreeSet<_>>(),
-            id_set(["newest"])
-        );
-        assert!(to_capture.is_empty());
-        assert!(capture_bytes_of(&views, &fit.kept) <= 400);
-        assert_eq!(capture_bytes_of(&views, &fit.held), 300);
-    }
-
-    #[test]
-    fn fit_charges_transcript_and_sidecars_together() {
-        // The view's capture bytes are transcript plus sidecars; the fit reads
-        // them, not the transcript-only source size. After the newest row
-        // spends 200 of a 400 budget, a session whose transcript is 100 but
-        // whose sidecars bring it to 260 no longer fits, and is held.
-        let mut with_sidecar = budget_view("with-sidecar", 260, 500);
-        with_sidecar.source_size = 100;
-        let views = vec![budget_view("newest", 200, 900), with_sidecar];
-        let fit = fit_capture_budget(
-            &views,
-            &BTreeSet::new(),
-            id_set(["newest", "with-sidecar"]),
-            400,
-        );
-        assert_eq!(fit.kept, id_set(["newest"]));
-        assert_eq!(fit.held, id_set(["with-sidecar"]));
-        assert!(fit.oversized.is_empty());
-    }
-
     #[test]
     fn prepare_push_review_matches_standalone_commands() {
         let temp = tempfile::tempdir().unwrap();
@@ -22040,19 +19529,18 @@ mod tests {
             strip_volatile(serde_json::to_value(&context.inventory).unwrap()),
             strip_volatile(serde_json::to_value(&standalone_inventory).unwrap()),
         );
-        // The push review fits its candidates against the capture budget; a
-        // standalone comparison only observes, so the budget is the one field
-        // that legitimately differs between the two.
-        let mut reviewed_threads = serde_json::to_value(&context.thread_comparison).unwrap();
-        let budget = reviewed_threads
-            .as_object_mut()
-            .and_then(|comparison| comparison.remove("capture_budget"))
-            .expect("a push review carries its capture budget");
-        assert_eq!(
-            budget["limit_bytes"],
-            serde_json::json!(provider_capture::MAX_CAPTURE_BYTES)
-        );
-        assert_eq!(budget["held_count"], serde_json::json!(0));
+        // Both commands are comparison-only. Neither captures payloads or
+        // applies an age-ordered admission policy. The DTO carries only the
+        // aggregate Apply limit and its non-conversation reserve.
+        let reviewed_threads = serde_json::to_value(&context.thread_comparison).unwrap();
+        let budget = context
+            .thread_comparison
+            .as_ref()
+            .unwrap()
+            .capture_budget
+            .as_ref()
+            .unwrap();
+        assert_eq!(budget.limit_bytes, provider_capture::MAX_CAPTURE_BYTES);
         assert_eq!(
             strip_volatile(reviewed_threads),
             strip_volatile(serde_json::to_value(Some(standalone_threads)).unwrap()),
@@ -22120,7 +19608,7 @@ mod tests {
                 child_resource.clone(),
                 RecipeEntry {
                     resource_id: child_resource.clone(),
-                    apply_policy: ApplyPolicy::SafeFile,
+                    apply_policy: contracts::safe_file(),
                     required: false,
                 },
             );
@@ -22248,12 +19736,10 @@ mod tests {
         );
     }
 
-    /// Push review captures exactly its byte-pinning candidates. Pull
-    /// review captures none for synced/local-only rows (adopting cloud
-    /// metadata pins no local bytes), and a quiet second review does no
-    /// observation or discovery filesystem work at all.
+    /// Push and Pull Compare capture no payloads. A quiet repeated Compare
+    /// reuses discovery and tail observations.
     #[test]
-    fn reviews_capture_only_byte_pinning_candidates() {
+    fn comparisons_capture_no_payloads() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("lazy-candidate-store").unwrap();
@@ -22273,23 +19759,19 @@ mod tests {
         let review =
             prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
                 .unwrap();
-        let entry_id = review
+        assert!(review
             .thread_comparison
             .as_ref()
             .unwrap()
             .entries
             .iter()
-            .find(|entry| entry.provider_thread_id.as_deref() == Some(synced_id))
-            .map(|entry| review.conversation_action_ids[&entry.resource_id].clone())
-            .unwrap();
+            .any(|entry| entry.provider_thread_id.as_deref() == Some(synced_id)));
         push_bundle_reviewed_with_repository(
             &repo,
             &project.local_project_id,
             &storage_id,
             recommended_review_recipe(&review, &storage_id),
             empty_project_content_review(),
-            review.conversation_push_plan_id.clone(),
-            vec![entry_id],
             &mut |_| {},
         )
         .unwrap();
@@ -22313,19 +19795,17 @@ mod tests {
         assert_eq!(comparison.entries.len(), 2);
         let counted = metrics.snapshot();
         assert_eq!(
-            counted.selected_captures, 1,
-            "only the CreateCloud candidate is captured"
+            counted.selected_captures, 0,
+            "Push Compare captures nothing"
         );
 
-        // Quiet second review: inventory, observations, and the candidate's
-        // frozen byte pin all come from the caches — the review does no
-        // local filesystem work at all.
+        // Quiet second review uses cached inventory and observations.
         let before = metrics.snapshot();
         service
             .prepare_push_review(&project.local_project_id, &storage_id)
             .unwrap();
         let delta = metrics.snapshot().delta_since(&before);
-        assert_eq!(delta.selected_captures, 0, "candidate pin reused");
+        assert_eq!(delta.selected_captures, 0);
         assert_eq!(delta.files_head_read, 0, "inventory reused");
         assert_eq!(delta.probe_bytes_read, 0, "observations reused");
         assert_eq!(delta.full_graph_resolves, 0);
@@ -22345,13 +19825,57 @@ mod tests {
         let delta = metrics.snapshot().delta_since(&before);
         assert_eq!(delta.selected_captures, 0, "pull review captures nothing");
         assert_eq!(delta.transcript_bytes_read, 0);
+
+        // Push captures the selected session and retains the stored session
+        // from the previous manifest, without adding it to the capture recipe.
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let previous = engine.inspect(&project.bundle_id).unwrap();
+        let previous_scope = previous.manifest.provider_scope(&codex_key()).unwrap();
+        let mut recipe = recommended_review_recipe(&review, &storage_id);
+        recipe.entries.retain(|resource_id, _| {
+            comparison
+                .entries
+                .iter()
+                .any(|entry| entry.resource_id == *resource_id && entry.push_decision.selectable)
+        });
+        assert_eq!(recipe.entries.len(), 1);
+        let before = metrics.snapshot();
+        push_bundle_reviewed_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+            recipe,
+            empty_project_content_review(),
+            &mut |_| {},
+        )
+        .unwrap();
+        let delta = metrics.snapshot().delta_since(&before);
+        assert_eq!(
+            delta.selected_captures, 1,
+            "only the selected session is captured"
+        );
+        let published = engine.inspect(&project.bundle_id).unwrap();
+        let published_scope = published.manifest.provider_scope(&codex_key()).unwrap();
+        assert_eq!(published_scope.conversations.len(), 2);
+        for (thread_id, thread) in &previous_scope.conversations {
+            assert_eq!(published_scope.conversations.get(thread_id), Some(thread));
+            assert!(published_scope
+                .recipe
+                .entries
+                .contains_key(&thread.resource_id));
+            for file in &thread.files {
+                assert_eq!(
+                    published_scope.files.get(&file.logical_path),
+                    previous_scope.files.get(&file.logical_path),
+                );
+            }
+        }
     }
 
-    /// Refresh persists the advanced observed checkpoint under a generation
-    /// bump, preserves `accepted` byte-for-byte, skips no-op replacements,
-    /// and never reattaches a Detached mapping.
+    /// Compare never persists an observed checkpoint. Apply-owned accepted
+    /// evidence and detached mappings stay unchanged.
     #[test]
-    fn refresh_persists_the_advanced_observed_checkpoint_and_never_touches_accepted() {
+    fn comparison_does_not_persist_observed_checkpoint_state() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("observe-maintenance-store").unwrap();
@@ -22373,20 +19897,17 @@ mod tests {
             prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
                 .unwrap();
         let comparison = review.thread_comparison.as_ref().unwrap();
-        let entry = comparison
+        let _entry = comparison
             .entries
             .iter()
             .find(|entry| entry.provider_thread_id.as_deref() == Some(provider_id))
             .unwrap();
-        let action_id = review.conversation_action_ids[&entry.resource_id].clone();
         push_bundle_reviewed_with_repository(
             &repo,
             &project.local_project_id,
             &storage_id,
             recommended_review_recipe(&review, &storage_id),
             empty_project_content_review(),
-            review.conversation_push_plan_id.clone(),
-            vec![action_id],
             &mut |_| {},
         )
         .unwrap();
@@ -22423,8 +19944,7 @@ mod tests {
         .unwrap();
         assert_eq!(checkpoint_of(&repo), after_push);
 
-        // One appended record: refresh persists the advanced cursor under
-        // the next generation while preserving accepted exactly.
+        // One appended record changes the comparison but not persisted state.
         let extended = command_test_transcript(
             provider_id,
             &project_root,
@@ -22439,23 +19959,10 @@ mod tests {
         )
         .unwrap();
         let after_append = checkpoint_of(&repo);
-        assert_eq!(after_append.generation, after_push.generation + 1);
+        assert_eq!(after_append, after_push);
         assert_eq!(after_append.accepted, Some(accepted));
-        assert!(
-            after_append.observed_tail.accepted_end_record_count
-                > after_push.observed_tail.accepted_end_record_count
-        );
-        let PhysicalMappingState::Ready {
-            root_mapping,
-            raw_range_pin,
-        } = &after_append.physical
-        else {
-            panic!("advanced checkpoint keeps a ready mapping");
-        };
-        assert_eq!(root_mapping.consumed_byte_offset, extended.len() as u64);
-        assert_eq!(raw_range_pin.end_byte_offset, extended.len() as u64);
 
-        // The next refresh rides the persisted cursor: no further churn.
+        // The next comparison still performs no persistence write.
         get_project_thread_sync_comparison_with_repository(
             &repo,
             &project.local_project_id,
@@ -22526,20 +20033,17 @@ mod tests {
             prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
                 .unwrap();
         let comparison = review.thread_comparison.as_ref().unwrap();
-        let entry = comparison
+        let _entry = comparison
             .entries
             .iter()
             .find(|entry| entry.provider_thread_id.as_deref() == Some(provider_id))
             .unwrap();
-        let action_id = review.conversation_action_ids[&entry.resource_id].clone();
         push_bundle_reviewed_with_repository(
             &repo,
             &project.local_project_id,
             &storage_id,
             recommended_review_recipe(&review, &storage_id),
             empty_project_content_review(),
-            review.conversation_push_plan_id.clone(),
-            vec![action_id],
             &mut |_| {},
         )
         .unwrap();
@@ -22637,11 +20141,9 @@ mod tests {
         assert_eq!(delta.inventory_reuse_hits, 1);
         assert_eq!(delta.observation_reuse_hits, 1);
 
-        // A forced rebaseline (the reliability-signal path) rediscovers the
-        // inventory through the bounded pipeline and produces identical
-        // rows. The observation may still serve from the persisted layer:
-        // its validity is a fresh stat of every dependency plus the
-        // checkpoint and binding pins, none of which ride watcher history.
+        // A forced rebaseline invalidates both memory and disk observations.
+        // The next comparison rediscovers the inventory and reads one bounded
+        // probe, but it still performs no complete transcript capture.
         let canonical = std::fs::canonicalize(&codex_home).unwrap();
         super::super::session_watch_service::session_watch_service().force_rebaseline(&canonical);
         let before_cold = metrics.snapshot();
@@ -22653,8 +20155,9 @@ mod tests {
         .unwrap();
         let delta = metrics.snapshot().delta_since(&before_cold);
         assert_eq!(delta.inventory_reuse_hits, 0);
-        assert_eq!(delta.observation_reuse_hits, 1, "stat-proven disk serve");
-        assert_eq!(delta.probe_bytes_read, 0, "no local content re-read");
+        assert_eq!(delta.observation_reuse_hits, 0, "disk cache invalidated");
+        assert!(delta.probe_bytes_read > 0, "bounded probe rebuilt");
+        assert_eq!(delta.transcript_bytes_read, 0, "no complete capture");
         assert!(delta.files_head_read > 0, "rebaseline rediscovers");
         assert_eq!(
             serde_json::to_value(&quiet.entries).unwrap(),
@@ -22718,6 +20221,1060 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    fn jsonl_files_under(root: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                jsonl_files_under(&path, out);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+                && path
+                    .file_name()
+                    .is_none_or(|name| name != "session_index.jsonl")
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn push_isolates_a_thread_that_fails_to_build() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("push-isolation-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let claude_home = temp.path().join("claude-home");
+        bind_and_link_claude_replica(&repo, &project, &storage_id, &project_root, &claude_home);
+        let sessions = claude_home.join("projects/source");
+        let good_path = sessions.join("claude-good.jsonl");
+        let torn_path = sessions.join("claude-torn.jsonl");
+        std::fs::write(
+            &good_path,
+            claude_test_transcript(
+                "claude-good",
+                &project_root,
+                &[("u-1", None, "user", "good thread")],
+            ),
+        )
+        .unwrap();
+        // The torn thread ends inside a record: its agent is still writing.
+        let torn_record = |parent: &str| {
+            format!(
+                "{{\"type\":\"assistant\",\"uuid\":\"a-torn\",\"parentUuid\":\"{parent}\",\
+                 \"sessionId\":\"claude-torn\""
+            )
+        };
+        let mut torn = claude_test_transcript(
+            "claude-torn",
+            &project_root,
+            &[("u-1", None, "user", "torn thread")],
+        );
+        torn.extend_from_slice(torn_record("u-1").as_bytes());
+        std::fs::write(&torn_path, &torn).unwrap();
+
+        let push = |repo: &LocalStateRepository| {
+            let review =
+                prepare_push_review_with_repository(repo, &project.local_project_id, &storage_id)
+                    .unwrap();
+            let recipe = recommended_review_recipe(&review, &storage_id);
+            push_bundle_reviewed_with_repository(
+                repo,
+                &project.local_project_id,
+                &storage_id,
+                recipe,
+                empty_project_content_review(),
+                &mut |_| {},
+            )
+            .unwrap()
+        };
+        let comparison = |repo: &LocalStateRepository| {
+            get_project_thread_sync_comparison_with_repository(
+                repo,
+                &project.local_project_id,
+                &storage_id,
+            )
+            .unwrap()
+        };
+        let entry_of = |comparison: &ThreadSyncComparison, session: &str| {
+            comparison
+                .entries
+                .iter()
+                .find(|entry| entry.provider_thread_id.as_deref() == Some(session))
+                .cloned()
+                .unwrap_or_else(|| panic!("{session} is missing from the comparison"))
+        };
+
+        // Push 1: the torn thread fails on its own; the good thread publishes.
+        let first = push(&repo);
+        assert!(!first.success, "{}", first.message);
+        assert!(
+            first.message.starts_with("Published revision"),
+            "{}",
+            first.message
+        );
+        assert!(
+            first.message.ends_with("1 session not pushed"),
+            "{}",
+            first.message
+        );
+        let failed = first
+            .results
+            .iter()
+            .filter(|row| row.state == "failed")
+            .collect::<Vec<_>>();
+        assert_eq!(failed.len(), 1, "{:?}", first.results);
+        assert!(failed[0]
+            .message
+            .as_deref()
+            .is_some_and(|message| !message.is_empty()));
+        let compared = comparison(&repo);
+        assert!(
+            compared.provider_errors.is_empty(),
+            "{:?}",
+            compared.provider_errors
+        );
+        assert_eq!(
+            entry_of(&compared, "claude-good").state,
+            ThreadSyncState::Synced
+        );
+        let torn_entry = entry_of(&compared, "claude-torn");
+        assert_ne!(torn_entry.state, ThreadSyncState::Synced);
+        assert_eq!(failed[0].resource_id, torn_entry.resource_id);
+
+        // Push 2: once the record completes, the next Push publishes it.
+        std::fs::write(
+            &torn_path,
+            claude_test_transcript(
+                "claude-torn",
+                &project_root,
+                &[
+                    ("u-1", None, "user", "torn thread"),
+                    ("a-torn", Some("u-1"), "assistant", "finished"),
+                ],
+            ),
+        )
+        .unwrap();
+        let second = push(&repo);
+        assert!(second.success, "{} {:?}", second.message, second.results);
+        assert!(second.results.iter().all(|row| row.state != "failed"));
+        let compared = comparison(&repo);
+        assert_eq!(
+            entry_of(&compared, "claude-good").state,
+            ThreadSyncState::Synced
+        );
+        assert_eq!(
+            entry_of(&compared, "claude-torn").state,
+            ThreadSyncState::Synced
+        );
+
+        // Push 3: one new complete record plus a torn one. The only change
+        // is unpublishable, so nothing publishes and the head stays put.
+        let mut torn_again = std::fs::read(&torn_path).unwrap();
+        torn_again.extend(claude_test_transcript(
+            "claude-torn",
+            &project_root,
+            &[("u-2", Some("a-torn"), "user", "one more")],
+        ));
+        torn_again.extend_from_slice(torn_record("u-2").as_bytes());
+        std::fs::write(&torn_path, &torn_again).unwrap();
+        let third = push(&repo);
+        assert!(!third.success, "{}", third.message);
+        assert!(
+            third.message.starts_with("Nothing published"),
+            "{}",
+            third.message
+        );
+        assert_eq!(third.revision, second.revision);
+        assert_eq!(
+            third
+                .results
+                .iter()
+                .filter(|row| row.state == "failed")
+                .count(),
+            1,
+            "{:?}",
+            third.results
+        );
+    }
+
+    #[test]
+    fn pull_batch_commits_successful_sessions_around_a_failed_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("pull-batch-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let bundle_id = BundleId::parse("6d1c0f7e2a9b4c8d9e0f1a2b3c4d5e6f").unwrap();
+        let register_replica = |name: &str| {
+            let project = register_local_project_with_repository(
+                &repo,
+                RegisterLocalProjectRequest {
+                    display_name: name.to_string(),
+                    repository_fingerprint: Some("d".repeat(64)),
+                    bundle_id: Some(bundle_id.clone()),
+                },
+            )
+            .unwrap();
+            let root = temp.path().join(name);
+            let home = temp.path().join(format!("claude-{name}"));
+            bind_and_link_claude_replica(&repo, &project, &storage_id, &root, &home);
+            (project, root, home)
+        };
+        let (source, source_root, source_home) = register_replica("batch-source");
+        let write_source = |continued: bool| {
+            for name in ["one", "two", "three"] {
+                let mut messages = vec![("u-1", None, "user", name)];
+                if continued {
+                    messages.push(("a-1", Some("u-1"), "assistant", "cloud continued"));
+                }
+                std::fs::write(
+                    source_home.join(format!("projects/source/{name}.jsonl")),
+                    claude_test_transcript(name, &source_root, &messages),
+                )
+                .unwrap();
+            }
+            let review =
+                prepare_push_review_with_repository(&repo, &source.local_project_id, &storage_id)
+                    .unwrap();
+            let result = push_bundle_reviewed_with_repository(
+                &repo,
+                &source.local_project_id,
+                &storage_id,
+                recommended_review_recipe(&review, &storage_id),
+                empty_project_content_review(),
+                &mut |_| {},
+            )
+            .unwrap();
+            assert!(result.success, "{result:?}");
+            let state = repo.load_project_activity_state_snapshot().unwrap();
+            let record = state
+                .materializations
+                .records
+                .iter()
+                .find(|record| {
+                    record.local_project_id == source.local_project_id
+                        && Some(record.revision) == result.revision
+                        && record.receipts.iter().any(|receipt| {
+                            receipt.action_type == RestoreActionType::PublishConversation
+                        })
+                })
+                .expect("Push batch receipt");
+            assert_eq!(record.receipts.len(), 3);
+            let link = state
+                .config
+                .links
+                .iter()
+                .find(|link| {
+                    link.local_project_id == source.local_project_id
+                        && link.storage_id == storage_id
+                })
+                .unwrap();
+            let checkpoints = &link.conversation_checkpoints
+                [&SyncScopeKey::Provider(ProviderKey::parse("claude").unwrap())];
+            assert_eq!(checkpoints.len(), 3);
+            for receipt in &record.receipts {
+                let receipt = receipt.conversation.as_ref().unwrap();
+                let accepted = checkpoints[&receipt.thread_id].accepted.as_ref().unwrap();
+                assert_eq!(accepted.accepted_at_commit_id, record.commit_id);
+                assert_eq!(accepted.accepted_at_manifest_sha256, record.manifest_sha256);
+                assert_eq!(receipt.cloud_commit_id, record.commit_id);
+                assert_eq!(receipt.cloud_manifest_sha256, record.manifest_sha256);
+            }
+        };
+        write_source(false);
+        let (target, _, _) = register_replica("batch-target");
+        let binding = repo
+            .load_bindings()
+            .unwrap()
+            .active_for(&target.local_project_id)
+            .cloned()
+            .unwrap();
+        let service = ProjectSyncService::new(&repo);
+        let initial = service
+            .plan_bundle_restore(&storage_id, &bundle_id, &binding)
+            .unwrap();
+        let approvals = |plan: &RestorePlan| {
+            plan.conversation_review
+                .iter()
+                .filter_map(|row| row.action_id.clone())
+                .collect::<Vec<_>>()
+        };
+        let initial_result = service
+            .apply_bundle_restore(&initial, approvals(&initial))
+            .unwrap();
+        assert!(initial_result.success, "{initial_result:?}");
+        assert_eq!(initial_result.applied_action_ids.len(), 3);
+
+        write_source(true);
+        let review = service
+            .plan_bundle_restore(&storage_id, &bundle_id, &binding)
+            .unwrap();
+        assert_eq!(review.conversation_review.len(), 3);
+        assert!(review
+            .conversation_review
+            .iter()
+            .all(|row| row.action == ConversationReviewAction::MaterializeCloud));
+        let config = repo.load_config().unwrap();
+        let claude = ProviderKey::parse("claude").unwrap();
+        let checkpoints = &config
+            .links
+            .iter()
+            .find(|link| {
+                link.local_project_id == target.local_project_id && link.storage_id == storage_id
+            })
+            .unwrap()
+            .conversation_checkpoints[&SyncScopeKey::provider(claude)];
+        let sources = checkpoints
+            .values()
+            .map(|checkpoint| {
+                let PhysicalMappingState::Ready { root_mapping, .. } = &checkpoint.physical else {
+                    panic!("initial Pull has no source mapping");
+                };
+                (
+                    root_mapping.provider_thread_id.clone(),
+                    PathBuf::from(&root_mapping.root_path),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut resource = String::new();
+        let mut checked = 0;
+        let mut committed = Vec::new();
+        let mut base_revisions = None;
+        let mut failed_source = None;
+        let mut state_reads = Vec::new();
+        let mut readers = Vec::new();
+        let result = service
+            .apply_bundle_restore_with_progress(
+                &review,
+                approvals(&review),
+                &mut |_| {},
+                &mut |phase, _| {
+                    if let Some(value) = phase.strip_prefix("verify cloud transcript ") {
+                        resource = value.to_string();
+                        // Preparation has finished for this result, but its
+                        // installation has not started. A state reader must
+                        // complete without waiting for the Pull batch to end.
+                        let reader_repo = repo.clone();
+                        let (send, receive) = std::sync::mpsc::channel();
+                        readers.push(std::thread::spawn(move || {
+                            let state = reader_repo.load_project_activity_state_snapshot();
+                            let _ = send.send(state.map(|_| ()));
+                        }));
+                        state_reads.push(matches!(
+                            receive.recv_timeout(Duration::from_secs(5)),
+                            Ok(Ok(()))
+                        ));
+                    }
+                    if phase == "prepare conversations" {
+                        let config = repo.load_config().unwrap();
+                        let bindings = repo.load_conversation_bindings().unwrap();
+                        base_revisions = Some((config.revision, bindings.revision));
+                    }
+                    if phase == "check local conversation" {
+                        checked += 1;
+                        if checked == 2 {
+                            let provider_id = provider_session_id_from_resource(&resource).unwrap();
+                            let path = sources[provider_id].clone();
+                            let bytes = std::fs::read(&path).unwrap();
+                            std::fs::remove_file(&path).unwrap();
+                            std::fs::create_dir(&path).unwrap();
+                            failed_source = Some((path, bytes));
+                        }
+                    }
+                    if phase == "stage and commit conversation" {
+                        committed.push(checked);
+                        // Read the durable files directly; repository readers
+                        // must wait until this installation releases its lock.
+                        let config: SyncConfig =
+                            serde_json::from_slice(&std::fs::read(repo.config_path()).unwrap())
+                                .unwrap();
+                        let bindings: mallard_domain::ConversationBindings =
+                            serde_json::from_slice(
+                                &std::fs::read(repo.conversation_bindings_path()).unwrap(),
+                            )
+                            .unwrap();
+                        let records: mallard_domain::Materializations = serde_json::from_slice(
+                            &std::fs::read(repo.materializations_path()).unwrap(),
+                        )
+                        .unwrap();
+                        let (config_revision, bindings_revision) = base_revisions.unwrap();
+                        assert_eq!(config.revision, config_revision + committed.len() as u64);
+                        assert_eq!(
+                            bindings.revision,
+                            bindings_revision + committed.len() as u64
+                        );
+                        let receipts = &records
+                            .records
+                            .iter()
+                            .rev()
+                            .find(|record| record.local_project_id == target.local_project_id)
+                            .unwrap()
+                            .receipts;
+                        assert_eq!(receipts.len(), committed.len());
+                    }
+                    if phase.starts_with("apply conversation ") {
+                        if let Some((path, bytes)) = failed_source.take() {
+                            std::fs::remove_dir(&path).unwrap();
+                            std::fs::write(path, bytes).unwrap();
+                        }
+                    }
+                },
+            )
+            .unwrap();
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        assert_eq!(state_reads, vec![true; 3]);
+        assert_eq!(committed, vec![1, 3]);
+        assert!(!result.success);
+        assert_eq!(result.applied_action_ids.len(), 2);
+        assert_eq!(result.failed_actions.len(), 1);
+        assert!(
+            result.failed_actions[0].message.contains("not a regular"),
+            "{result:?}"
+        );
+        let bindings = repo.load_conversation_bindings().unwrap();
+        assert_eq!(bindings.revision, base_revisions.unwrap().1 + 2);
+    }
+
+    fn three_session_pull_fixture(
+        temp: &tempfile::TempDir,
+    ) -> (
+        LocalStateRepository,
+        LocalProjectRegistration,
+        PathBuf,
+        RestorePlan,
+    ) {
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("pull-revision-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let bundle_id = BundleId::parse("7d1c0f7e2a9b4c8d9e0f1a2b3c4d5e6f").unwrap();
+        let register_replica = |name: &str| {
+            let project = register_local_project_with_repository(
+                &repo,
+                RegisterLocalProjectRequest {
+                    display_name: name.to_string(),
+                    repository_fingerprint: Some("e".repeat(64)),
+                    bundle_id: Some(bundle_id.clone()),
+                },
+            )
+            .unwrap();
+            let root = temp.path().join(name);
+            let home = temp.path().join(format!("claude-{name}"));
+            bind_and_link_claude_replica(&repo, &project, &storage_id, &root, &home);
+            (project, root, home)
+        };
+        let (source, source_root, source_home) = register_replica("revision-source");
+        for name in ["one", "two", "three"] {
+            std::fs::write(
+                source_home.join(format!("projects/source/{name}.jsonl")),
+                claude_test_transcript(name, &source_root, &[("u-1", None, "user", name)]),
+            )
+            .unwrap();
+        }
+        let push_review =
+            prepare_push_review_with_repository(&repo, &source.local_project_id, &storage_id)
+                .unwrap();
+        let pushed = push_bundle_reviewed_with_repository(
+            &repo,
+            &source.local_project_id,
+            &storage_id,
+            recommended_review_recipe(&push_review, &storage_id),
+            empty_project_content_review(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(pushed.success, "{pushed:?}");
+        let (target, _, target_home) = register_replica("revision-target");
+        let binding = repo
+            .load_bindings()
+            .unwrap()
+            .active_for(&target.local_project_id)
+            .cloned()
+            .unwrap();
+        let service = ProjectSyncService::new(&repo);
+        let review = service
+            .plan_bundle_restore(&storage_id, &bundle_id, &binding)
+            .unwrap();
+        (repo, target, target_home, review)
+    }
+
+    #[test]
+    fn pull_continues_after_a_session_state_write_fails() {
+        for document in ["bindings", "config", "receipts"] {
+            for after_replacement in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let (repo, target, _, review) = three_session_pull_fixture(&temp);
+                let service = ProjectSyncService::new(&repo);
+                let approvals = review
+                    .conversation_review
+                    .iter()
+                    .filter_map(|row| row.action_id.clone())
+                    .collect();
+                let path = match document {
+                    "bindings" => repo.conversation_bindings_path(),
+                    "config" => repo.config_path(),
+                    _ => repo.materializations_path(),
+                };
+                let mut prepared = 0;
+                let result = service.apply_bundle_restore_with_progress(
+                    &review,
+                    approvals,
+                    &mut |_| {},
+                    &mut |phase, _| {
+                        if phase.starts_with("prepare transcript ") {
+                            prepared += 1;
+                            if prepared == 2 {
+                                mallard_infrastructure::persistence::test_support::fail_next_json_write(
+                                    &path, after_replacement,
+                                );
+                            }
+                        }
+                    },
+                ).unwrap();
+                assert_eq!(prepared, 3);
+                assert!(
+                    !result.success,
+                    "{document}, after={after_replacement}: {result:?}"
+                );
+                assert_eq!(
+                    result.applied_action_ids.len(),
+                    2,
+                    "{document}, after={after_replacement}: {result:?}"
+                );
+                assert_eq!(result.failed_actions.len(), 1, "{result:?}");
+                assert!(
+                    result.failed_actions[0]
+                        .message
+                        .contains("injected state write failure"),
+                    "{result:?}"
+                );
+                let state = repo.load_project_activity_state_snapshot().unwrap();
+                for action_id in &result.applied_action_ids {
+                    assert!(state
+                        .materializations
+                        .records
+                        .iter()
+                        .filter(|record| record.local_project_id == target.local_project_id)
+                        .flat_map(|record| &record.receipts)
+                        .any(|receipt| &receipt.action_id == action_id
+                            && receipt.status == ActionStatus::Applied));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pull_rechecks_state_between_prepared_installations() {
+        for changed_document in ["config", "bindings"] {
+            let temp = tempfile::tempdir().unwrap();
+            let (repo, target, target_home, review) = three_session_pull_fixture(&temp);
+            let service = ProjectSyncService::new(&repo);
+            let approvals = review
+                .conversation_review
+                .iter()
+                .filter_map(|row| row.action_id.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(approvals.len(), 3);
+            let mut prepared = 0;
+            let mut writer = None;
+            let mut writer_completed = false;
+            let result = service
+                .apply_bundle_restore_with_progress(
+                    &review,
+                    approvals,
+                    &mut |_| {},
+                    &mut |phase, _| {
+                        if !phase.starts_with("prepare transcript ") {
+                            return;
+                        }
+                        prepared += 1;
+                        if prepared != 2 {
+                            return;
+                        }
+                        let writer_repo = repo.clone();
+                        let project_id = target.local_project_id.clone();
+                        let (send, receive) = std::sync::mpsc::channel();
+                        writer = Some(std::thread::spawn(move || {
+                            let changed = if changed_document == "config" {
+                                writer_repo.mutate_config(|config| {
+                                    config
+                                        .projects
+                                        .iter_mut()
+                                        .find(|project| project.local_project_id == project_id)
+                                        .unwrap()
+                                        .display_name = "Changed during preparation".into();
+                                    Ok(())
+                                })
+                            } else {
+                                writer_repo.mutate_conversation_bindings(|_| Ok(()))
+                            };
+                            let _ = send.send(changed);
+                        }));
+                        writer_completed =
+                            matches!(receive.recv_timeout(Duration::from_secs(5)), Ok(Ok(())));
+                    },
+                )
+                .unwrap();
+            writer.unwrap().join().unwrap();
+            assert!(writer_completed, "state writer waited for the Pull batch");
+            assert_eq!(prepared, 3);
+            assert!(!result.success, "{changed_document}: {result:?}");
+            assert_eq!(result.applied_action_ids.len(), 1, "{result:?}");
+            assert_eq!(result.failed_actions.len(), 2, "{result:?}");
+            let expected_error = if changed_document == "config" {
+                "sync config changed during Pull apply"
+            } else {
+                "conversation bindings changed during Pull apply"
+            };
+            assert!(
+                result
+                    .failed_actions
+                    .iter()
+                    .all(|failure| failure.message == expected_error),
+                "{result:?}"
+            );
+            let mut files = Vec::new();
+            jsonl_files_under(&target_home.join("projects"), &mut files);
+            assert_eq!(files.len(), 1, "stale actions wrote provider transcripts");
+            if changed_document == "config" {
+                assert_eq!(
+                    repo.load_config()
+                        .unwrap()
+                        .project(&target.local_project_id)
+                        .unwrap()
+                        .display_name,
+                    "Changed during preparation"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pull_reports_an_approved_row_the_apply_time_review_no_longer_offers() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("pull-isolation-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let bundle_id = BundleId::parse("5d1c0f7e2a9b4c8d9e0f1a2b3c4d5e6f").unwrap();
+        let machine_a = register_local_project_with_repository(
+            &repo,
+            RegisterLocalProjectRequest {
+                display_name: "isolateA".to_string(),
+                repository_fingerprint: Some("c".repeat(64)),
+                bundle_id: Some(bundle_id.clone()),
+            },
+        )
+        .unwrap();
+        let a_root = temp.path().join("proj-a");
+        let a_claude = temp.path().join("claude-a");
+        bind_and_link_claude_replica(&repo, &machine_a, &storage_id, &a_root, &a_claude);
+        let a_sessions = a_claude.join("projects/source");
+        let write_a = |session: &str, messages: &[(&str, Option<&str>, &str, &str)]| {
+            std::fs::write(
+                a_sessions.join(format!("{session}.jsonl")),
+                claude_test_transcript(session, &a_root, messages),
+            )
+            .unwrap();
+        };
+        write_a("thread-one", &[("u-1", None, "user", "thread one")]);
+        write_a("thread-two", &[("u-1", None, "user", "thread two")]);
+        let push_a = |repo: &LocalStateRepository| {
+            let review =
+                prepare_push_review_with_repository(repo, &machine_a.local_project_id, &storage_id)
+                    .unwrap();
+            let recipe = recommended_review_recipe(&review, &storage_id);
+            let result = push_bundle_reviewed_with_repository(
+                repo,
+                &machine_a.local_project_id,
+                &storage_id,
+                recipe,
+                empty_project_content_review(),
+                &mut |_| {},
+            )
+            .unwrap();
+            assert!(result.success, "{} {:?}", result.message, result.results);
+        };
+        push_a(&repo);
+
+        // Machine B materializes both threads.
+        let machine_b = register_local_project_with_repository(
+            &repo,
+            RegisterLocalProjectRequest {
+                display_name: "isolateB".to_string(),
+                repository_fingerprint: Some("c".repeat(64)),
+                bundle_id: Some(bundle_id.clone()),
+            },
+        )
+        .unwrap();
+        let b_root = temp.path().join("proj-b");
+        let b_claude = temp.path().join("claude-b");
+        bind_and_link_claude_replica(&repo, &machine_b, &storage_id, &b_root, &b_claude);
+        let b_binding = || {
+            repo.load_bindings()
+                .unwrap()
+                .active_for(&machine_b.local_project_id)
+                .cloned()
+                .unwrap()
+        };
+        let restore = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &b_binding())
+            .unwrap();
+        let approvals = restore
+            .conversation_review
+            .iter()
+            .filter(|row| row.action == ConversationReviewAction::CreateLocal)
+            .map(|row| row.action_id.clone().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(approvals.len(), 2, "{:?}", restore.conversation_review);
+        let applied = ProjectSyncService::new(&repo)
+            .apply_bundle_restore(&restore, approvals)
+            .unwrap();
+        assert!(
+            applied.success,
+            "{} {:?}",
+            applied.message, applied.failed_actions
+        );
+
+        // A continues both threads and pushes again.
+        write_a(
+            "thread-one",
+            &[
+                ("u-1", None, "user", "thread one"),
+                ("a-1", Some("u-1"), "assistant", "one continued on A"),
+            ],
+        );
+        write_a(
+            "thread-two",
+            &[
+                ("u-1", None, "user", "thread two"),
+                ("a-1", Some("u-1"), "assistant", "two continued on A"),
+            ],
+        );
+        push_a(&repo);
+
+        // B compares: both rows offer the storage update.
+        let restore = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &b_binding())
+            .unwrap();
+        let updates = restore
+            .conversation_review
+            .iter()
+            .filter(|row| row.action == ConversationReviewAction::MaterializeCloud)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(updates.len(), 2, "{:?}", restore.conversation_review);
+
+        // Before B applies, its user continues thread one locally.
+        let mut b_files = Vec::new();
+        jsonl_files_under(&b_claude.join("projects"), &mut b_files);
+        let local_named = |needle: &str| {
+            b_files
+                .iter()
+                .find(|path| std::fs::read_to_string(path).unwrap().contains(needle))
+                .cloned()
+                .unwrap_or_else(|| panic!("no local transcript mentions {needle}"))
+        };
+        let one_local = local_named("thread one");
+        let two_local = local_named("thread two");
+        let one_text = std::fs::read_to_string(&one_local).unwrap();
+        let first: serde_json::Value =
+            serde_json::from_str(one_text.lines().next().unwrap()).unwrap();
+        let minted = first["sessionId"].as_str().unwrap().to_string();
+        let mut appended = one_text.into_bytes();
+        appended.extend(claude_test_transcript(
+            &minted,
+            &b_root,
+            &[("u-b1", Some("u-1"), "user", "one continued on B")],
+        ));
+        std::fs::write(&one_local, appended).unwrap();
+
+        let two_source_bytes = std::fs::read(&two_local).unwrap();
+        let two_first: serde_json::Value = serde_json::from_slice(
+            two_source_bytes
+                .split(|byte| *byte == b'\n')
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let two_session = two_first["sessionId"].as_str().unwrap();
+        let source_metrics = mallard_infrastructure::sync_metrics::register_root(
+            &std::fs::canonicalize(&two_local).unwrap(),
+        );
+        let mut prepared_metrics = source_metrics.snapshot();
+        let mut prepared_at = Instant::now();
+        let mut source_checks = 0;
+        let applied = ProjectSyncService::new(&repo)
+            .apply_bundle_restore_with_progress(
+                &restore,
+                updates
+                    .iter()
+                    .map(|row| row.action_id.clone().unwrap())
+                    .collect(),
+                &mut |_| {},
+                &mut |phase, _| {
+                    if phase == "prepare conversations" {
+                        prepared_metrics = source_metrics.snapshot();
+                        prepared_at = Instant::now();
+                    }
+                    if phase == "check local conversation" {
+                        source_checks += 1;
+                        // An update after the only check can be overwritten.
+                        // The backup must retain the checked bytes, not this append.
+                        let mut bytes = two_source_bytes.clone();
+                        bytes.extend(claude_test_transcript(
+                            two_session,
+                            &b_root,
+                            &[("u-late", Some("u-1"), "user", "two changed after its check")],
+                        ));
+                        std::fs::write(&two_local, bytes).unwrap();
+                    }
+                },
+            )
+            .unwrap();
+        let source_work = source_metrics.snapshot().delta_since(&prepared_metrics);
+        assert_eq!(source_checks, 1);
+        assert_eq!(
+            source_work.transcript_bytes_read,
+            two_source_bytes.len() as u64
+        );
+        assert_eq!(source_work.bytes_hashed, two_source_bytes.len() as u64);
+        eprintln!(
+            "in-place Pull after preparation: source={} bytes, read={} bytes, hashed={} bytes, {:.3}ms",
+            two_source_bytes.len(),
+            source_work.transcript_bytes_read,
+            source_work.bytes_hashed,
+            prepared_at.elapsed().as_secs_f64() * 1_000.0,
+        );
+        // Thread one's row no longer aligns and fails on its own receipt;
+        // thread two's update lands.
+        assert!(!applied.success, "{}", applied.message);
+        assert_eq!(
+            applied.failed_actions.len(),
+            1,
+            "{:?}",
+            applied.failed_actions
+        );
+        assert_eq!(applied.applied_action_ids.len(), 1, "{:?}", applied);
+        assert!(updates
+            .iter()
+            .any(|row| row.action_id.as_ref() == Some(&applied.failed_actions[0].action_id)));
+        assert!(!applied.failed_actions[0].message.is_empty());
+        let two_after = std::fs::read_to_string(&two_local).unwrap();
+        assert!(two_after.contains("two continued on A"), "{two_after}");
+        assert!(
+            !two_after.contains("two changed after its check"),
+            "{two_after}"
+        );
+        let materializations = repo.load_materializations().unwrap();
+        let receipt = materializations
+            .records
+            .iter()
+            .flat_map(|record| &record.receipts)
+            .find(|receipt| receipt.action_id == applied.applied_action_ids[0])
+            .and_then(|receipt| receipt.conversation.as_ref())
+            .unwrap();
+        let backup = repo
+            .root()
+            .join("backups/conversations")
+            .join(receipt.operation_id.as_str())
+            .join("0.bak");
+        assert_eq!(std::fs::read(backup).unwrap(), two_source_bytes);
+        let one_after = std::fs::read_to_string(&one_local).unwrap();
+        assert!(one_after.contains("one continued on B"), "{one_after}");
+        assert!(!one_after.contains("one continued on A"), "{one_after}");
+
+        // A user retry approves KeepBoth. An append after capture fails
+        // that action without an automatic retry or a binding move.
+        let retry = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &b_binding())
+            .unwrap();
+        let keep_both = retry
+            .conversation_review
+            .iter()
+            .filter(|row| row.action == ConversationReviewAction::KeepBoth)
+            .collect::<Vec<_>>();
+        assert_eq!(keep_both.len(), 1);
+        let action_id = keep_both[0].action_id.clone().unwrap();
+        let bindings_before = repo.load_conversation_bindings().unwrap();
+        let mut checks = 0;
+        let mut captures = 0;
+        let failed = ProjectSyncService::new(&repo)
+            .apply_bundle_restore_with_progress(
+                &retry,
+                vec![action_id.clone()],
+                &mut |_| {},
+                &mut |phase, _| {
+                    if phase == "prepare conversations" {
+                        captures += 1;
+                        let mut bytes = std::fs::read(&one_local).unwrap();
+                        bytes.extend(claude_test_transcript(
+                            &minted,
+                            &b_root,
+                            &[("u-b2", Some("u-b1"), "user", "B changed after capture")],
+                        ));
+                        std::fs::write(&one_local, bytes).unwrap();
+                    }
+                    if phase == "check local conversation" {
+                        checks += 1;
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!((captures, checks), (1, 1));
+        assert!(!failed.success, "{failed:?}");
+        assert!(failed.applied_action_ids.is_empty());
+        assert!(failed.preserved_threads.is_empty());
+        assert_eq!(failed.failed_actions.len(), 1);
+        assert_eq!(failed.failed_actions[0].action_id, action_id);
+        assert!(failed.failed_actions[0]
+            .message
+            .contains("changed after review"));
+        assert_eq!(repo.load_conversation_bindings().unwrap(), bindings_before);
+
+        // The next user retry checks once. A later append is outside that
+        // check: KeepBoth still completes and preserves all local bytes.
+        let retry = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &b_binding())
+            .unwrap();
+        let action_id = retry
+            .conversation_review
+            .iter()
+            .find(|row| row.action == ConversationReviewAction::KeepBoth)
+            .unwrap()
+            .action_id
+            .clone()
+            .unwrap();
+        let mut checks = 0;
+        let mut expected_local = Vec::new();
+        let applied = ProjectSyncService::new(&repo)
+            .apply_bundle_restore_with_progress(
+                &retry,
+                vec![action_id.clone()],
+                &mut |_| {},
+                &mut |phase, _| {
+                    if phase == "check local conversation" {
+                        checks += 1;
+                        expected_local = std::fs::read(&one_local).unwrap();
+                        expected_local.extend(claude_test_transcript(
+                            &minted,
+                            &b_root,
+                            &[("u-b3", Some("u-b2"), "user", "B changed after the check")],
+                        ));
+                        std::fs::write(&one_local, &expected_local).unwrap();
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(checks, 1);
+        assert!(applied.success, "{applied:?}");
+        assert!(applied.failed_actions.is_empty());
+        assert_eq!(applied.applied_action_ids, vec![action_id]);
+        assert_eq!(applied.preserved_threads.len(), 1);
+        assert_eq!(std::fs::read(&one_local).unwrap(), expected_local);
+    }
+
+    #[test]
+    fn pull_source_check_fails_once_for_a_changed_missing_or_invalid_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("source.jsonl");
+        let expected = TargetExpectation::Sha256(mallard_domain::sha256_hex(b"captured\n"));
+        for state in ["changed", "missing", "directory", "oversized"] {
+            match state {
+                "changed" => std::fs::write(&path, b"changed\n").unwrap(),
+                "missing" => std::fs::remove_file(&path).unwrap(),
+                "directory" => std::fs::create_dir(&path).unwrap(),
+                "oversized" => {
+                    std::fs::remove_dir(&path).unwrap();
+                    std::fs::File::create(&path)
+                        .unwrap()
+                        .set_len(conversation_file_limit_bytes() + 1)
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let mut checks = 0;
+            let result = read_pull_conversation_source(&path, &expected, &mut |phase, _| {
+                assert_eq!(phase, "check local conversation");
+                checks += 1;
+            });
+            assert!(result.is_err(), "{state}");
+            assert_eq!(checks, 1, "{state}");
+        }
+    }
+
+    #[test]
+    fn compare_blocks_only_the_thread_whose_rollout_cannot_be_resolved() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("observation-isolation-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let healthy_id = "019f7500-0000-7000-8000-00000000aa01";
+        let orphan_id = "019f7500-0000-7000-8000-00000000aa02";
+        write_codex_session(&codex_home, healthy_id, &project_root);
+        write_codex_session(&codex_home, orphan_id, &project_root);
+        // The orphan is a paginated leaf whose history base no longer
+        // exists: discovery lists it, the observation cannot resolve it.
+        let orphan_path = codex_home
+            .join("sessions/2026/07/22")
+            .join(format!("rollout-{orphan_id}.jsonl"));
+        let text = std::fs::read_to_string(&orphan_path).unwrap();
+        let mut lines = text.lines().map(str::to_string).collect::<Vec<_>>();
+        let mut meta: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        meta["payload"]["history_base"] = serde_json::json!({
+            "thread_id": "019f7500-0000-7000-8000-00000000dead",
+            "end_ordinal_exclusive": 4,
+            "end_byte_offset": 128,
+        });
+        lines[0] = meta.to_string();
+        std::fs::write(&orphan_path, format!("{}\n", lines.join("\n"))).unwrap();
+
+        // The observation pool records each thread's outcome on its own row:
+        // the orphan blocks, the healthy thread stays selectable, and the
+        // provider never reports an error.
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert!(
+            comparison.provider_errors.is_empty(),
+            "{:?}",
+            comparison.provider_errors
+        );
+        let entry_of = |session: &str| {
+            comparison
+                .entries
+                .iter()
+                .find(|entry| entry.provider_thread_id.as_deref() == Some(session))
+                .unwrap_or_else(|| panic!("{session} is missing: {:?}", comparison.entries))
+        };
+        let orphan = entry_of(orphan_id);
+        assert_eq!(
+            orphan.push_decision.action,
+            ConversationReviewAction::Blocked
+        );
+        assert!(orphan.push_decision.blocker.is_some());
+        assert!(!orphan.push_decision.selectable);
+        assert_eq!(
+            orphan.pull_decision.action,
+            ConversationReviewAction::Blocked
+        );
+        let healthy = entry_of(healthy_id);
+        assert!(
+            healthy.push_decision.selectable,
+            "{:?}",
+            healthy.push_decision
+        );
     }
 
     #[test]
@@ -22931,20 +21488,17 @@ mod tests {
             prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
                 .unwrap();
         let comparison = review.thread_comparison.as_ref().unwrap();
-        let entry = comparison
+        let _entry = comparison
             .entries
             .iter()
             .find(|entry| entry.provider_thread_id.as_deref() == Some(session_id))
             .unwrap();
-        let action_id = review.conversation_action_ids[&entry.resource_id].clone();
         push_bundle_reviewed_with_repository(
             &repo,
             &project.local_project_id,
             &storage_id,
             recommended_review_recipe(&review, &storage_id),
             empty_project_content_review(),
-            review.conversation_push_plan_id.clone(),
-            vec![action_id],
             &mut |_| {},
         )
         .unwrap();
@@ -23005,9 +21559,8 @@ mod tests {
         assert!(counted.probe_bytes_read > 0);
         assert_eq!(counted.append_bytes_read, 0);
 
-        // One appended record: the refresh reads the probe plus exactly the
-        // appended bytes and nothing else, and maintenance persists the
-        // advanced cursor.
+        // One appended record: Compare reads the probe plus exactly the
+        // appended bytes and does not persist its observation.
         let extended = claude_test_transcript(
             session_id,
             &project_root,
@@ -23056,9 +21609,9 @@ mod tests {
         };
         assert_eq!(
             root_mapping.last_canonical_message_id.as_deref(),
-            Some("m-3")
+            Some("m-2")
         );
-        assert_eq!(root_mapping.consumed_byte_offset, extended.len() as u64);
+        assert_eq!(root_mapping.consumed_byte_offset, base.len() as u64);
         assert_eq!(
             advanced_checkpoint.accepted, applied_checkpoint.accepted,
             "observation maintenance never touches accepted evidence"
@@ -23094,31 +21647,28 @@ mod tests {
         assert_eq!(delta.inventory_reuse_hits, 1);
         assert_eq!(delta.observation_reuse_hits, 1);
 
-        // The append invalidated the frozen candidate pin, so the next push
-        // review re-captures the candidate authoritatively exactly once —
-        // and the review after that, still quiet, serves the refrozen pin
-        // with no capture and no transcript read.
+        // Push comparison is metadata-only. It never captures the changed
+        // candidate; Apply owns the authoritative capture.
         let before_review = metrics.snapshot();
         let second_review =
             prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
                 .unwrap();
         let delta = metrics.snapshot().delta_since(&before_review);
         assert!(second_review.thread_comparison.is_some());
-        assert_eq!(delta.selected_captures, 1, "changed candidate re-captures");
+        assert_eq!(delta.selected_captures, 0);
+        assert_eq!(delta.transcript_bytes_read, 0);
         let before_review = metrics.snapshot();
         let third_review =
             prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
                 .unwrap();
         let delta = metrics.snapshot().delta_since(&before_review);
         assert!(third_review.thread_comparison.is_some());
-        assert_eq!(delta.selected_captures, 0, "candidate pin served frozen");
+        assert_eq!(delta.selected_captures, 0);
         assert_eq!(delta.transcript_bytes_read, 0);
 
-        // A forced rebaseline (the reliability-signal path) rediscovers the
-        // inventory through the bounded pipeline and produces identical
-        // rows. The observation may still serve from the persisted layer:
-        // its validity is a fresh stat of every dependency plus the
-        // checkpoint and binding pins, none of which ride watcher history.
+        // A forced rebaseline invalidates both memory and disk observations.
+        // Claude's whole-thread comparison codec can reread this bounded
+        // transcript, but it still creates no captured payload.
         super::super::session_watch_service::session_watch_service()
             .force_rebaseline(&canonical_home);
         let before_cold = metrics.snapshot();
@@ -23130,8 +21680,9 @@ mod tests {
         .unwrap();
         let delta = metrics.snapshot().delta_since(&before_cold);
         assert_eq!(delta.inventory_reuse_hits, 0);
-        assert_eq!(delta.observation_reuse_hits, 1, "stat-proven disk serve");
-        assert_eq!(delta.probe_bytes_read, 0, "no local content re-read");
+        assert_eq!(delta.observation_reuse_hits, 0, "disk cache invalidated");
+        assert!(delta.probe_bytes_read > 0, "bounded probe rebuilt");
+        assert_eq!(delta.selected_captures, 0, "no captured payload");
         assert!(delta.files_head_read > 0, "rebaseline rediscovers");
         assert_eq!(
             serde_json::to_value(&quiet.entries).unwrap(),
@@ -23170,7 +21721,7 @@ mod tests {
         let review =
             prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
                 .unwrap();
-        let entry_id = review
+        let _entry_id = review
             .thread_comparison
             .as_ref()
             .unwrap()
@@ -23179,15 +21730,12 @@ mod tests {
             .find(|entry| entry.provider_thread_id.as_deref() == Some(session_id))
             .map(|entry| entry.resource_id.clone())
             .unwrap();
-        let action_id = review.conversation_action_ids[&entry_id].clone();
         push_bundle_reviewed_with_repository(
             &repo,
             &project.local_project_id,
             &storage_id,
             recommended_review_recipe(&review, &storage_id),
             empty_project_content_review(),
-            review.conversation_push_plan_id.clone(),
-            vec![action_id],
             &mut |_| {},
         )
         .unwrap();
@@ -23340,7 +21888,7 @@ mod tests {
         let review =
             prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
                 .unwrap();
-        let entry_id = review
+        let _entry_id = review
             .thread_comparison
             .as_ref()
             .unwrap()
@@ -23349,15 +21897,12 @@ mod tests {
             .find(|entry| entry.provider_thread_id.as_deref() == Some(session_id))
             .map(|entry| entry.resource_id.clone())
             .unwrap();
-        let action_id = review.conversation_action_ids[&entry_id].clone();
         push_bundle_reviewed_with_repository(
             &repo,
             &project.local_project_id,
             &storage_id,
             recommended_review_recipe(&review, &storage_id),
             empty_project_content_review(),
-            review.conversation_push_plan_id.clone(),
-            vec![action_id],
             &mut |_| {},
         )
         .unwrap();
@@ -23403,8 +21948,8 @@ mod tests {
         assert_eq!(delta.transcript_bytes_read, 0);
         assert_eq!(delta.full_graph_resolves, 0);
 
-        // An append to the imported file rides the cursor: the refresh reads
-        // exactly the appended bytes and the row turns honestly LocalAhead.
+        // Compare did not persist the import observation. A later append
+        // therefore performs one bounded full read and still classifies it.
         let mut appended = imported.clone();
         appended.extend_from_slice(&claude_thinking_transcript(
             session_id,
@@ -23425,12 +21970,9 @@ mod tests {
         )
         .unwrap();
         let delta = metrics.snapshot().delta_since(&before_append);
-        assert_eq!(delta.full_graph_resolves, 0, "the cursor rides the append");
-        assert_eq!(delta.transcript_bytes_read, 0);
-        assert_eq!(
-            delta.append_bytes_read,
-            (appended.len() - imported.len()) as u64
-        );
+        assert_eq!(delta.full_graph_resolves, 1);
+        assert_eq!(delta.transcript_bytes_read, appended.len() as u64);
+        assert_eq!(delta.append_bytes_read, 0);
         assert_eq!(after_append.entries[0].state, ThreadSyncState::LocalAhead);
         let scope = SyncScopeKey::Provider(ProviderKey::parse("claude").unwrap());
         let checkpoint = repo
@@ -23443,13 +21985,13 @@ mod tests {
             .and_then(|threads| threads.into_values().next())
             .unwrap();
         let PhysicalMappingState::Ready { root_mapping, .. } = &checkpoint.physical else {
-            panic!("the maintained checkpoint stays Ready across the import");
+            panic!("the Apply checkpoint stays Ready across Compare");
         };
         assert_eq!(
             root_mapping.last_canonical_message_id.as_deref(),
-            Some("u-3")
+            Some("u-2")
         );
-        assert_eq!(root_mapping.consumed_byte_offset, appended.len() as u64);
+        assert_eq!(root_mapping.consumed_byte_offset, base.len() as u64);
     }
 
     /// The import-before-first-push variant, on the rewind-onto-thinking
@@ -23516,7 +22058,7 @@ mod tests {
         let review =
             prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
                 .unwrap();
-        let entry_id = review
+        let _entry_id = review
             .thread_comparison
             .as_ref()
             .unwrap()
@@ -23525,15 +22067,12 @@ mod tests {
             .find(|entry| entry.provider_thread_id.as_deref() == Some(session_id))
             .map(|entry| entry.resource_id.clone())
             .unwrap();
-        let action_id = review.conversation_action_ids[&entry_id].clone();
         push_bundle_reviewed_with_repository(
             &repo,
             &project.local_project_id,
             &storage_id,
             recommended_review_recipe(&review, &storage_id),
             empty_project_content_review(),
-            review.conversation_push_plan_id.clone(),
-            vec![action_id],
             &mut |_| {},
         )
         .unwrap();
@@ -23610,6 +22149,11 @@ mod tests {
         // stays out of the first *user* message deliberately — the title
         // fallback is a documented path-remap non-goal.
         let a_root_text = a_root.to_string_lossy().into_owned();
+        let literal_text = format!(
+            "literal {} /__mallard_root__/bt; /__mallard_escape__/e 🦆 e\u{301}\u{0}\n\t\"\\",
+            temp.path().join("proj-b").display()
+        );
+
         let mut transcript = claude_test_transcript(
             session_id,
             &a_root,
@@ -23631,6 +22175,7 @@ mod tests {
                 "message": {"role": "assistant", "content": [
                     {"type": "text",
                      "text": format!("editing {a_root_text}/readme per your ask")},
+                    {"type":"text", "text":literal_text},
                     {"type": "tool_use", "id": "toolu-1", "name": "Write",
                      "input": {"file_path": format!("{a_root_text}/readme"),
                                "content": "hello"}}
@@ -23686,34 +22231,30 @@ mod tests {
             .inventory
             .resources
             .iter()
-            .find(|resource| resource.descriptor.kind == ResourceKind::ProviderState)
+            .find(|resource| resource.descriptor.kind == contracts::provider_state())
             .map(|resource| resource.descriptor.resource_id.clone())
             .expect("memory resource discovered");
         recipe.entries.insert(
             memory_resource.clone(),
             RecipeEntry {
                 resource_id: memory_resource,
-                apply_policy: ApplyPolicy::Merge,
+                apply_policy: contracts::merge(),
                 required: false,
             },
         );
-        let action_id = review
+        assert!(review
             .thread_comparison
             .as_ref()
             .unwrap()
             .entries
             .iter()
-            .find(|entry| entry.provider_thread_id.as_deref() == Some(session_id))
-            .map(|entry| review.conversation_action_ids[&entry.resource_id].clone())
-            .unwrap();
+            .any(|entry| entry.provider_thread_id.as_deref() == Some(session_id)));
         push_bundle_reviewed_with_repository(
             &repo,
             &machine_a.local_project_id,
             &storage_id,
             recipe,
             empty_project_content_review(),
-            review.conversation_push_plan_id.clone(),
-            vec![action_id],
             &mut |_| {},
         )
         .unwrap();
@@ -23727,7 +22268,7 @@ mod tests {
         assert!(store_contains(&store_root, "<anthropic-api-key>"));
         assert!(store_contains(&store_root, "DB_PASSWORD=<password>"));
         assert!(!store_contains(&store_root, &a_root_text));
-        assert!(store_contains(&store_root, "/__mallard_root__/readme"));
+        assert!(store_contains(&store_root, "/__mallard_root__/b;/readme"));
         assert!(
             store_contains(&store_root, "APP=demo"),
             "file-history sidecar must ship"
@@ -23785,21 +22326,21 @@ mod tests {
             .plan_bundle_restore(&storage_id, &bundle_id, &b_binding)
             .unwrap();
         let create_local = restore
-            .conversation_actions
+            .conversation_review
             .iter()
-            .find(|action| action.action == ConversationPlanActionType::CreateLocal)
+            .find(|action| action.action == ConversationReviewAction::CreateLocal)
             .cloned()
             .expect("stored thread offers CreateLocal");
         // B adopts the whole bundle — the conversation plus the generic
         // provider-state memory — so its own later push reviews clean.
         let applied = ProjectSyncService::new(&repo)
             .apply_bundle_restore(
-                &restore.plan_id,
+                &restore,
                 restore
                     .actions
                     .iter()
                     .map(|action| action.action_id.clone())
-                    .chain(std::iter::once(create_local.action_id.clone()))
+                    .chain(std::iter::once(create_local.action_id.clone().unwrap()))
                     .collect(),
             )
             .unwrap();
@@ -23872,6 +22413,34 @@ mod tests {
         assert!(!serde_json::to_string(&index)
             .unwrap()
             .contains(&a_root_text));
+        // The session's attachments arrive with it, renamed under B's
+        // minted id and exactly as they shipped: the file-history snapshot
+        // as raw bytes, the todos list as JSON, both scrubbed. Nothing under
+        // B's home carries the source session id.
+        let b_history_text = std::fs::read_to_string(
+            b_claude
+                .join("file-history")
+                .join(&minted_session_id)
+                .join("env@v1"),
+        )
+        .unwrap();
+        assert!(b_history_text.contains("APP=demo"));
+        assert!(b_history_text.contains("DB_PASSWORD=<password>"));
+        assert!(!b_history_text.contains(SECRET_A_PASSWORD));
+        let b_todos_text = std::fs::read_to_string(
+            b_claude
+                .join("todos")
+                .join(format!("{minted_session_id}-agent-main.json")),
+        )
+        .unwrap();
+        serde_json::from_str::<serde_json::Value>(&b_todos_text).unwrap();
+        assert!(b_todos_text.contains("rotate <anthropic-api-key>"));
+        assert!(!b_todos_text.contains(SECRET_A));
+        assert!(!b_claude.join("file-history").join(session_id).exists());
+        assert!(!b_claude
+            .join("todos")
+            .join(format!("{session_id}-agent-main.json"))
+            .exists());
 
         // B extends the thread with its own secret and an in-root path,
         // then pushes: the re-encoded prefix reproduces the accepted wire
@@ -23899,8 +22468,11 @@ mod tests {
         push_bundle_with_repository(&repo, &machine_b.local_project_id, &storage_id).unwrap();
         assert!(!store_contains(&store_root, SECRET_B));
         assert!(store_contains(&store_root, "<openai-api-key>"));
-        assert!(!store_contains(&store_root, &b_root_text));
-        assert!(store_contains(&store_root, "/__mallard_root__/readme2"));
+        assert!(
+            store_contains(&store_root, &b_root_text),
+            "the pre-existing destination path is literal"
+        );
+        assert!(store_contains(&store_root, "/__mallard_root__/b;/readme2"));
         let comparison = get_project_thread_sync_comparison_with_repository(
             &repo,
             &machine_b.local_project_id,
@@ -23924,18 +22496,44 @@ mod tests {
             .plan_bundle_restore(&storage_id, &bundle_id, &a_binding)
             .unwrap();
         let materialize = restore
-            .conversation_actions
+            .conversation_review
             .iter()
-            .find(|action| action.action == ConversationPlanActionType::MaterializeCloud)
+            .find(|row| row.action == ConversationReviewAction::MaterializeCloud)
             .cloned()
             .expect("cloud-ahead thread offers MaterializeCloud");
+        // A's attachments are reviewed targets of the in-place update. An
+        // edit after Compare is not a conflict: Apply builds its own
+        // review, pins the bytes it finds, replaces them, and backs them up.
+        let a_todos = a_claude
+            .join("todos")
+            .join(format!("{session_id}-agent-main.json"));
+        std::fs::write(
+            &a_todos,
+            "[{\"content\":\"edited after review\",\"status\":\"pending\",\"itemId\":\"t-2\"}]",
+        )
+        .unwrap();
         let applied = ProjectSyncService::new(&repo)
-            .apply_bundle_restore(&restore.plan_id, vec![materialize.action_id.clone()])
+            .apply_bundle_restore(&restore, vec![materialize.action_id.unwrap()])
             .unwrap();
         assert!(
             applied.success,
             "{} — failed: {:?}",
             applied.message, applied.failed_actions
+        );
+        let a_todos_after = std::fs::read_to_string(&a_todos).unwrap();
+        assert!(a_todos_after.contains("rotate <anthropic-api-key>"));
+        assert!(!a_todos_after.contains("edited after review"));
+        let a_history_after = std::fs::read_to_string(history_dir.join("env@v1")).unwrap();
+        assert!(a_history_after.contains("DB_PASSWORD=<password>"));
+        assert!(!a_history_after.contains(SECRET_A_PASSWORD));
+        let backups = repo.root().join("backups").join("conversations");
+        assert!(
+            store_contains(&backups, "edited after review"),
+            "the overwritten todos list is backed up"
+        );
+        assert!(
+            store_contains(&backups, SECRET_A_PASSWORD),
+            "the overwritten file-history snapshot is backed up"
         );
         let a_after = std::fs::read_to_string(&a_session_path).unwrap();
         assert!(!a_after.contains(SECRET_A));
@@ -23947,7 +22545,12 @@ mod tests {
         assert!(a_after.contains(session_id));
         // A's own path decodes home again, and B's contribution arrives
         // respelled under A's root — no B spelling survives the lifecycle.
-        assert!(!a_after.contains(&b_root_text));
+        let assistant = a_after
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|record| record["uuid"] == "a-1")
+            .unwrap();
+        assert_eq!(assistant["message"]["content"][1]["text"], literal_text);
         assert!(a_after.contains(&format!("editing {a_root_text}/readme per your ask")));
         assert!(a_after.contains(&format!("update {a_root_text}/readme2")));
         let comparison = get_project_thread_sync_comparison_with_repository(
@@ -24048,19 +22651,22 @@ mod tests {
             .cloned()
             .unwrap();
         assert!(
-            !prepare_push_review_with_repository(&repo, &machine_a.local_project_id, &storage_id)
+            prepare_push_review_with_repository(&repo, &machine_a.local_project_id, &storage_id)
                 .unwrap()
-                .conversation_action_ids
-                .is_empty(),
+                .thread_comparison
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| entry.push_decision.selectable),
             "control: the extended rollout publishes while the stamps agree"
         );
         assert!(
             ProjectSyncService::new(&repo)
                 .plan_bundle_restore(&storage_id, &bundle_id, &b_binding)
                 .unwrap()
-                .conversation_actions
+                .conversation_review
                 .iter()
-                .any(|action| action.action == ConversationPlanActionType::CreateLocal),
+                .any(|action| action.action == ConversationReviewAction::CreateLocal),
             "control: the fresh replica adopts while the stamps agree"
         );
 
@@ -24168,9 +22774,10 @@ mod tests {
             .plan_bundle_restore(&storage_id, &bundle_id, &binding)
             .unwrap();
         assert!(
-            restore.conversation_actions.is_empty(),
-            "blocked rows are never planned: {:?}",
-            restore.conversation_actions
+            restore.conversation_review.iter().all(|row| {
+                row.action == ConversationReviewAction::Blocked && row.action_id.is_none()
+            }),
+            "blocked rows are not selectable"
         );
 
         // Push planning: the same push-eligible rollout the control just
@@ -24180,9 +22787,14 @@ mod tests {
             prepare_push_review_with_repository(&repo, &machine_a.local_project_id, &storage_id)
                 .unwrap();
         assert!(
-            push_review.conversation_action_ids.is_empty(),
-            "blocked rows mint no push action: {:?}",
-            push_review.conversation_action_ids
+            push_review
+                .thread_comparison
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .all(|entry| !entry.push_decision.selectable),
+            "blocked rows are not selectable"
         );
 
         // Pull planning: likewise for the replica the control just adopted.
@@ -24190,9 +22802,10 @@ mod tests {
             .plan_bundle_restore(&storage_id, &bundle_id, &b_binding)
             .unwrap();
         assert!(
-            b_restore.conversation_actions.is_empty(),
-            "a blocked row is never offered to a fresh replica: {:?}",
-            b_restore.conversation_actions
+            b_restore.conversation_review.iter().all(|row| {
+                row.action == ConversationReviewAction::Blocked && row.action_id.is_none()
+            }),
+            "a blocked row is not offered to a fresh replica"
         );
     }
 
@@ -24349,6 +22962,8 @@ mod tests {
         std::fs::create_dir_all(&project_dir).unwrap();
         std::fs::create_dir_all(claude_home.join("projects/source")).unwrap();
         std::fs::create_dir_all(&storage_dir).unwrap();
+        let storage_id = StorageId::parse("storage-adoption-test").unwrap();
+        add_local_storage(&repo, &storage_id, &storage_dir);
 
         let created =
             create_setup_draft_with_repository(&repo, &project_dir.to_string_lossy()).unwrap();
@@ -24360,20 +22975,8 @@ mod tests {
                 display_name: String::new(),
             },
         )]);
-        draft.storage = Some(DraftStorageSelection::Pending {
-            storage: StorageConfig {
-                id: StorageId::parse("storage-adoption-test").unwrap(),
-                name: "Local test storage".to_string(),
-                kind: StorageKind::Local,
-                bucket: String::new(),
-                access_key_id: String::new(),
-                secret_access_key: String::new(),
-                account_id: String::new(),
-                s3_endpoint: String::new(),
-                region: String::new(),
-                local_dir: storage_dir.to_string_lossy().into_owned(),
-                supports_conditional_writes: None,
-            },
+        draft.storage = Some(DraftStorageSelection {
+            storage_id: storage_id.clone(),
         });
         draft.repository = DraftRepositoryChoice::New;
         let draft = update_setup_draft_with_repository(&repo, draft).unwrap();
@@ -24425,7 +23028,7 @@ mod tests {
                 profile_id: profile_id.clone(),
             },
         )]);
-        reregister.storage = Some(DraftStorageSelection::Existing {
+        reregister.storage = Some(DraftStorageSelection {
             storage_id: storage_id.clone(),
         });
         reregister.repository = DraftRepositoryChoice::Existing {
@@ -24727,6 +23330,144 @@ mod tests {
     /// stored session — while a content-bearing bundle refuses to be
     /// abandoned.
     #[test]
+    fn connect_with_local_conversation_preserves_replica_then_pulls_and_pushes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("connect-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let fingerprint = "e".repeat(64);
+        let content_bundle = BundleId::parse("00000000000000000000000000000002").unwrap();
+        let claim_bundle = BundleId::parse("ffffffffffffffffffffffffffffff02").unwrap();
+        let project_a = register_local_project_with_repository(
+            &repo,
+            RegisterLocalProjectRequest {
+                display_name: "Origin".to_string(),
+                repository_fingerprint: Some(fingerprint.clone()),
+                bundle_id: Some(content_bundle.clone()),
+            },
+        )
+        .unwrap();
+        let project_b = register_local_project_with_repository(
+            &repo,
+            RegisterLocalProjectRequest {
+                display_name: "Receiver".to_string(),
+                repository_fingerprint: Some(fingerprint.clone()),
+                bundle_id: Some(claim_bundle.clone()),
+            },
+        )
+        .unwrap();
+        let root_a = temp.path().join("root-a");
+        let root_b = temp.path().join("root-b");
+        let home_a = temp.path().join("home-a");
+        let home_b = temp.path().join("home-b");
+        bind_and_link_claude_replica(&repo, &project_a, &storage_id, &root_a, &home_a);
+        bind_and_link_claude_replica(&repo, &project_b, &storage_id, &root_b, &home_b);
+        let binding = repo
+            .load_bindings()
+            .unwrap()
+            .active_for(&project_b.local_project_id)
+            .unwrap()
+            .clone();
+        let local_session_id = "local-before-connect";
+        let local_path = home_b.join("projects/source/local-before-connect.jsonl");
+        let local_bytes = claude_test_transcript(
+            local_session_id,
+            &root_b,
+            &[("local-1", None, "user", "local conversation")],
+        );
+        std::fs::write(&local_path, &local_bytes).unwrap();
+        repo.mutate_conversation_bindings(|document| {
+            document.bindings.push(LocalConversationBinding {
+                path_origins_ref: None,
+                host_id: binding.host_id.clone(),
+                replica_id: binding.replica_id.clone(),
+                local_project_id: project_b.local_project_id.clone(),
+                provider_profile_id: binding.profile_ids[&ProviderKey::parse("claude").unwrap()]
+                    .clone(),
+                thread_id: initial_conversation_thread_id(
+                    &claim_bundle,
+                    &ProviderKey::parse("claude").unwrap(),
+                    local_session_id,
+                )?,
+                cloud_thread_id: None,
+                forked_from: None,
+                preserved: None,
+                root_tail_layout: Some(RootTailLayout {
+                    codec: mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_V1.to_string(),
+                    partition_kind: TailPartitionKind::WholeThread,
+                    start_record_count: 0,
+                }),
+                provider_thread_id: Some(local_session_id.to_string()),
+                materialization_state: ConversationMaterializationState::Resumable,
+                revision: 0,
+                created_at: 1,
+                updated_at: 1,
+            });
+            Ok(())
+        })
+        .unwrap();
+        let conversations = repo.load_conversation_bindings().unwrap();
+
+        // Both remote registrations are empty, as in the reported failure.
+        let connected = connect_project_to_remote_bundle_with_repository(
+            &repo,
+            ConnectProjectBundleRequest {
+                local_project_id: project_b.local_project_id.clone(),
+                storage_id: storage_id.clone(),
+                bundle_id: content_bundle.clone(),
+                expected_bundle_id: claim_bundle,
+                pinned: true,
+                allow_repository_mismatch: false,
+            },
+        )
+        .unwrap();
+        let connected_binding = connected.binding.unwrap();
+        assert_eq!(connected_binding.replica_id, binding.replica_id);
+        assert_eq!(connected_binding.revision, binding.revision + 1);
+        assert_eq!(connected_binding.bundle_id, content_bundle);
+        assert_eq!(repo.load_conversation_bindings().unwrap(), conversations);
+        assert_eq!(std::fs::read(&local_path).unwrap(), local_bytes);
+
+        // A publishes; B reviews and applies Pull, then publishes its local thread.
+        std::fs::write(
+            home_a.join("projects/source/remote-session.jsonl"),
+            claude_test_transcript(
+                "remote-session",
+                &root_a,
+                &[("remote-1", None, "user", "remote conversation")],
+            ),
+        )
+        .unwrap();
+        push_bundle_with_repository(&repo, &project_a.local_project_id, &storage_id).unwrap();
+        let service = ProjectSyncService::new(&repo);
+        let restore = service
+            .plan_bundle_restore(&storage_id, &content_bundle, &connected_binding)
+            .unwrap();
+        let approved = restore
+            .conversation_review
+            .iter()
+            .filter_map(|row| row.action_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(approved.len(), 1);
+        let pulled = service.apply_bundle_restore(&restore, approved).unwrap();
+        assert!(pulled.success, "{}", pulled.message);
+        let pushed =
+            push_bundle_with_repository(&repo, &project_b.local_project_id, &storage_id).unwrap();
+        assert!(pushed.success, "{pushed:?}");
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        assert_eq!(
+            engine
+                .inspect(&content_bundle)
+                .unwrap()
+                .manifest
+                .all_conversations()
+                .count(),
+            2
+        );
+        assert_eq!(std::fs::read(&local_path).unwrap(), local_bytes);
+    }
+
+    #[test]
     fn connect_abandons_registrations_and_refuses_content() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
@@ -24847,7 +23588,10 @@ mod tests {
         let storage_dir = temp.path().join("bucket");
         std::fs::create_dir_all(&storage_dir).unwrap();
 
-        // Machine A: setup with a pending storage and no push.
+        let storage_id = StorageId::parse("storage-convergence").unwrap();
+        add_local_storage(&repo, &storage_id, &storage_dir);
+
+        // Machine A: setup without pushing.
         let project_dir_a = temp.path().join("work-a");
         let claude_home_a = temp.path().join("claude-a");
         std::fs::create_dir_all(&project_dir_a).unwrap();
@@ -24863,20 +23607,8 @@ mod tests {
                 display_name: String::new(),
             },
         )]);
-        draft_a.storage = Some(DraftStorageSelection::Pending {
-            storage: StorageConfig {
-                id: StorageId::parse("storage-convergence").unwrap(),
-                name: "Convergence storage".to_string(),
-                kind: StorageKind::Local,
-                bucket: String::new(),
-                access_key_id: String::new(),
-                secret_access_key: String::new(),
-                account_id: String::new(),
-                s3_endpoint: String::new(),
-                region: String::new(),
-                local_dir: storage_dir.to_string_lossy().into_owned(),
-                supports_conditional_writes: None,
-            },
+        draft_a.storage = Some(DraftStorageSelection {
+            storage_id: storage_id.clone(),
         });
         draft_a.repository = DraftRepositoryChoice::New;
         let draft_a = update_setup_draft_with_repository(&repo, draft_a).unwrap();
@@ -24918,7 +23650,7 @@ mod tests {
                 display_name: String::new(),
             },
         )]);
-        draft_b.storage = Some(DraftStorageSelection::Existing {
+        draft_b.storage = Some(DraftStorageSelection {
             storage_id: storage_id.clone(),
         });
         draft_b.repository = DraftRepositoryChoice::Existing {
@@ -25052,15 +23784,23 @@ mod tests {
             .plan_bundle_restore(&storage_id, &project.bundle_id, &binding)
             .unwrap();
         assert!(restore.actions.is_empty());
-        assert_eq!(restore.conversation_actions.len(), 1);
-        // CreateLocal carries no local identity at plan time; the reviewed
-        // cloud row is the action's only id.
-        assert_eq!(restore.conversation_actions[0].thread_id, None);
+        assert!(restore.conversation_actions.is_empty());
+        assert_eq!(restore.conversation_review.len(), 2);
+        // Compare does not read stored payloads, so it cannot classify the
+        // internal subagent yet. Apply performs that check.
+        let parent = restore
+            .conversation_review
+            .iter()
+            .find(|row| {
+                row.cloud_thread_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str() == "cloudthread-stored-parent")
+            })
+            .unwrap();
+        assert_eq!(parent.thread_id, None);
+        assert_eq!(parent.action, ConversationReviewAction::CreateLocal);
         assert_eq!(
-            restore.conversation_actions[0]
-                .cloud_thread_id
-                .as_ref()
-                .map(CloudThreadId::as_str),
+            parent.cloud_thread_id.as_ref().map(CloudThreadId::as_str),
             Some("cloudthread-stored-parent")
         );
     }
@@ -25095,6 +23835,162 @@ mod tests {
             self.prefetches.push(paths.to_vec());
             self.inner.prefetch(paths)
         }
+    }
+
+    #[test]
+    fn thread_review_pins_snapshot_state_and_rejects_changed_provider_homes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("snapshot-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let provider_home = temp.path().join("codex-home");
+        let binding =
+            bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &provider_home);
+        let provider = codex_key();
+        let profile_id = binding.profile_ids[&provider].clone();
+        let provider_thread_id = "019f7600-0000-7000-8000-0000000000d0";
+        write_codex_session(&provider_home, provider_thread_id, &project_root);
+        let thread_id =
+            initial_conversation_thread_id(&project.bundle_id, &provider, provider_thread_id)
+                .unwrap();
+        repo.mutate_conversation_bindings(|document| {
+            document.bindings.push(LocalConversationBinding {
+                path_origins_ref: None,
+                host_id: binding.host_id.clone(),
+                replica_id: binding.replica_id.clone(),
+                local_project_id: project.local_project_id.clone(),
+                provider_profile_id: profile_id.clone(),
+                thread_id: thread_id.clone(),
+                cloud_thread_id: None,
+                forked_from: None,
+                preserved: None,
+                root_tail_layout: Some(RootTailLayout {
+                    codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
+                    partition_kind: TailPartitionKind::WholeThread,
+                    start_record_count: 0,
+                }),
+                provider_thread_id: Some(provider_thread_id.to_string()),
+                materialization_state: ConversationMaterializationState::Resumable,
+                revision: 0,
+                created_at: 1,
+                updated_at: 1,
+            });
+            Ok(())
+        })
+        .unwrap();
+        let before = repo.load_project_activity_state_snapshot().unwrap();
+        let local =
+            load_project_local_read_from_state(repo.root(), &before, &project.local_project_id)
+                .unwrap();
+        let capture_request = capture_request_for_resolved_binding_from_state(
+            repo.root(),
+            &before.config,
+            &before.bindings,
+            &local.resolved,
+        )
+        .unwrap();
+        let selected = local
+            .views
+            .iter()
+            .map(|view| view.descriptor.resource_id.clone())
+            .collect();
+        let captured = provider_capture::capture_from_discovery(
+            provider_registry(),
+            &capture_request,
+            &local.discovery,
+            &selected,
+        )
+        .unwrap();
+        let now = now_secs();
+        let review = |purpose| {
+            provider_thread_review(
+                &repo,
+                None,
+                &mut EmptyBundleBytes,
+                &local.views,
+                &captured,
+                &BTreeMap::new(),
+                &local.resolved,
+                &provider,
+                Path::new(local.resolved.home(&provider).unwrap()),
+                Some(&storage_id),
+                now,
+                now.saturating_add(3600),
+                purpose,
+                None,
+            )
+        };
+
+        review(ReviewPurpose::Observe).unwrap();
+        assert_eq!(
+            repo.load_conversation_bindings().unwrap(),
+            before.conversation_bindings
+        );
+        let planned = review(ReviewPurpose::PushPlan).unwrap();
+        assert_eq!(planned.push_actions.len(), 1);
+        let after = repo.load_project_activity_state_snapshot().unwrap();
+        assert_eq!(after.conversation_bindings, before.conversation_bindings);
+        let seeded = after
+            .conversation_bindings
+            .bindings
+            .iter()
+            .find(|row| row.thread_id == thread_id)
+            .unwrap();
+        assert!(seeded.root_tail_layout.is_some());
+        let pins = &planned.push_actions[0].pins;
+        assert_eq!(
+            pins.context.host_identity_revision,
+            after.host_identity.revision
+        );
+        assert_eq!(pins.context.project_binding_revision, binding.revision);
+        assert_eq!(
+            pins.context.bindings_document_revision,
+            after.conversation_bindings.revision
+        );
+        assert_eq!(pins.context.binding_revision, Some(seeded.revision));
+        let profile = after
+            .bindings
+            .profiles
+            .iter()
+            .find(|profile| profile.profile_id == profile_id)
+            .unwrap();
+        assert_eq!(pins.context.profile_revision, profile.revision);
+        let checkpoint_generation =
+            project_link(&after.config, &project.local_project_id, &storage_id)
+                .and_then(|link| {
+                    link.conversation_checkpoints
+                        .get(&SyncScopeKey::Provider(provider.clone()))
+                })
+                .and_then(|checkpoints| checkpoints.get(&thread_id))
+                .map(|checkpoint| checkpoint.generation);
+        assert_eq!(pins.tail.checkpoint_generation, checkpoint_generation);
+
+        let replacement_home = temp.path().join("replacement-home");
+        std::fs::create_dir_all(&replacement_home).unwrap();
+        let replacement_home = fs_canonicalize(&replacement_home).unwrap();
+        repo.mutate_bindings(|_, machine| {
+            let profile = machine
+                .profiles
+                .iter_mut()
+                .find(|profile| profile.profile_id == profile_id)
+                .unwrap();
+            profile.path = replacement_home.to_string_lossy().into_owned();
+            profile.canonical_path = profile.path.clone();
+            profile.revision += 1;
+            Ok(())
+        })
+        .unwrap();
+
+        let frozen =
+            load_project_local_read_from_state(repo.root(), &after, &project.local_project_id)
+                .unwrap();
+        assert_eq!(frozen.resolved.homes, local.resolved.homes);
+        let error = review(ReviewPurpose::Observe)
+            .err()
+            .expect("changed home must reject review");
+        assert!(error.contains("project binding changed"), "{error}");
     }
 
     #[test]
@@ -25159,7 +24055,25 @@ mod tests {
 
         let snapshot = engine.inspect(&project.bundle_id).unwrap();
         let resolved = resolve_project_binding(&repo, &binding).unwrap();
-        let (views, captured) = capture_all_local_conversations(&repo, &resolved).unwrap();
+        let capture_request = capture_request_for_binding(&repo, &binding).unwrap();
+        let (discovery, views) = super::super::session_watch_service::session_watch_service()
+            .discovery_for(
+                provider_registry(),
+                &project.local_project_id,
+                &capture_request,
+            )
+            .unwrap();
+        let selected = views
+            .iter()
+            .map(|view| view.descriptor.resource_id.clone())
+            .collect::<BTreeSet<_>>();
+        let captured = provider_capture::capture_from_discovery(
+            provider_registry(),
+            &capture_request,
+            &discovery,
+            &selected,
+        )
+        .unwrap();
         let now = now_secs();
         let offerable = snapshot
             .manifest
@@ -25187,8 +24101,9 @@ mod tests {
                 &resolved,
                 Some(&snapshot.storage_id),
                 now,
-                now.saturating_add(PLAN_LIFETIME_SECS),
+                now.saturating_add(24 * 60 * 60),
                 purpose,
+                None,
             )
             .unwrap();
             assert!(
@@ -25216,8 +24131,9 @@ mod tests {
             &resolved,
             Some(&snapshot.storage_id),
             now,
-            now.saturating_add(PLAN_LIFETIME_SECS),
+            now.saturating_add(24 * 60 * 60),
             ReviewPurpose::PullPlan,
+            None,
         )
         .unwrap();
         assert_eq!(review.pull_actions.len(), 2);
@@ -25250,6 +24166,68 @@ mod tests {
             bytes.gets,
         );
 
+        // Apply planning and preparation share verified bodies even with no
+        // process cache. Cache eviction therefore cannot cause a second fetch.
+        let comparison = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &project.bundle_id, &binding)
+            .unwrap();
+        let approved = comparison
+            .conversation_review
+            .iter()
+            .filter_map(|row| row.action_id.clone())
+            .collect::<Vec<_>>();
+        let selected =
+            approved_pull_conversation_resources(&comparison, &approved.iter().cloned().collect());
+        assert_eq!(selected.len(), 2);
+        let fetches = std::cell::Cell::new(0);
+        let mut on_progress = |_: FetchProgress| fetches.set(fetches.get() + 1);
+        let mut apply_bytes = engine.byte_source(&snapshot, None, Some(&mut on_progress));
+        let RestoreApplyBuild {
+            mut plan,
+            session_views,
+            captured,
+        } = build_restore_plan_for_apply(
+            &repo,
+            &comparison,
+            &resolved,
+            &engine,
+            &snapshot,
+            &selected,
+            &mut apply_bytes,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            fetches.get(),
+            2,
+            "planning fetches each selected transcript"
+        );
+        assert!(
+            align_pull_apply_selections(&comparison, &approved, &mut plan)
+                .unwrap()
+                .is_empty()
+        );
+        let (_, actions) = split_approved_restore_actions(&approved, &plan).unwrap();
+        let (prepared, failures, _) = prepare_pull_conversation_actions(
+            &repo,
+            &resolved,
+            &snapshot,
+            &mut apply_bytes,
+            &actions,
+            &session_views,
+            &captured,
+            &storage_id,
+            now_secs(),
+        )
+        .unwrap();
+        assert!(failures.is_empty());
+        assert_eq!(prepared.len(), 2);
+        assert_eq!(
+            fetches.get(),
+            2,
+            "preparation reuses the verified transcripts"
+        );
+
         let oversized_path = offerable.iter().next().unwrap().clone();
         let mut oversized_snapshot = snapshot.clone();
         oversized_snapshot
@@ -25280,8 +24258,9 @@ mod tests {
             &resolved,
             Some(&snapshot.storage_id),
             now,
-            now.saturating_add(PLAN_LIFETIME_SECS),
+            now.saturating_add(24 * 60 * 60),
             ReviewPurpose::PullPlan,
+            None,
         )
         .unwrap();
         let error = review
@@ -25300,12 +24279,12 @@ mod tests {
         );
     }
 
-    /// The apply-time re-proof is per item: a conversation that changes
-    /// while the review dialog is open fails closed by itself and keeps its
-    /// stored state, while the other reviewed conversations publish. Pinned
-    /// by docs/DESIGN_PUSH_PULL_FLOW.md (Push step 5).
+    /// Apply captures changes made after comparison even when watcher events
+    /// have not invalidated the old observation.
     #[test]
-    fn push_publishes_surviving_items_when_one_changes_after_review() {
+    fn push_apply_captures_a_session_that_changed_after_compare() {
+        use super::super::session_watch_service::{ObservationQuery, StoredObservation};
+
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("review-gap-store").unwrap();
@@ -25322,20 +24301,50 @@ mod tests {
         let review =
             prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
                 .unwrap();
-        let plan_id = review.conversation_push_plan_id.clone().unwrap();
-        let approved = review
-            .conversation_action_ids
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        assert_eq!(approved.len(), 2);
+        assert_eq!(
+            review
+                .thread_comparison
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .filter(|entry| entry.push_decision.selectable)
+                .count(),
+            2
+        );
+
+        let provider = codex_key();
+        let thread_id =
+            initial_conversation_thread_id(&project.bundle_id, &provider, drifting_id).unwrap();
+        let queries = [ObservationQuery {
+            thread_id: thread_id.clone(),
+            checkpoint_generation: None,
+            binding_revision: None,
+        }];
+        let watcher = super::super::session_watch_service::session_watch_service();
+        let old_observation = watcher
+            .take_reusable_observations(
+                &provider,
+                &codex_home,
+                repo.root(),
+                &project.local_project_id,
+                &storage_id,
+                &queries,
+            )
+            .remove(&thread_id)
+            .expect("comparison cached the original conversation");
+        let source_path = std::fs::canonicalize(
+            codex_home
+                .join("sessions/2026/07/22")
+                .join(format!("rollout-{}.jsonl", drifting_id)),
+        )
+        .unwrap();
+        let old_metadata = std::fs::metadata(&source_path).unwrap();
 
         // The user keeps chatting in one thread while the review dialog is
         // open: the rollout stays valid but its bytes and chain move.
         std::fs::write(
-            codex_home
-                .join("sessions/2026/07/22")
-                .join(format!("rollout-{}.jsonl", drifting_id)),
+            &source_path,
             command_test_transcript(
                 drifting_id,
                 &project_root,
@@ -25347,48 +24356,94 @@ mod tests {
         )
         .unwrap();
 
+        // Drain the synchronous test scanner, then restore the old observation
+        // to model delayed event delivery without timing-dependent sleeps.
+        assert!(watcher
+            .take_reusable_observations(
+                &provider,
+                &codex_home,
+                repo.root(),
+                &project.local_project_id,
+                &storage_id,
+                &queries,
+            )
+            .is_empty());
+        watcher.store_observations(
+            &codex_home,
+            repo.root(),
+            &project.local_project_id,
+            &storage_id,
+            vec![StoredObservation {
+                thread_id: thread_id.clone(),
+                source_path: source_path.clone(),
+                depends_on: vec![source_path],
+                checkpoint_generation: None,
+                binding_revision: None,
+                observation: old_observation,
+                source_mtime_secs: old_metadata
+                    .modified()
+                    .unwrap()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                source_size: old_metadata.len(),
+            }],
+        );
+        let stale = watcher.take_reusable_observations(
+            &provider,
+            &codex_home,
+            repo.root(),
+            &project.local_project_id,
+            &storage_id,
+            &queries,
+        );
+        assert!(matches!(
+            &stale.get(&thread_id).expect("stale cache is available").evidence,
+            TailSideEvidence::Present(tail) if tail.accepted_end_record_count == 1
+        ));
+
         let pushed = push_bundle_reviewed_with_repository(
             &repo,
             &project.local_project_id,
             &storage_id,
             recommended_review_recipe(&review, &storage_id),
             empty_project_content_review(),
-            Some(plan_id),
-            approved,
             &mut |_| {},
         )
         .unwrap();
         assert!(pushed.success, "{}", pushed.message);
-        assert!(
-            pushed.message.contains("changed during review"),
-            "{}",
-            pushed.message
-        );
-        let failed = pushed
-            .results
-            .iter()
-            .filter(|result| result.state == "failed")
-            .collect::<Vec<_>>();
-        assert_eq!(failed.len(), 1, "exactly the drifted item fails closed");
-        assert!(
-            failed[0]
-                .message
-                .as_deref()
-                .unwrap_or_default()
-                .contains("is stale at"),
-            "{:?}",
-            failed[0].message
-        );
+        assert!(pushed.results.iter().all(|result| result.state != "failed"));
 
         let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
         let published = engine.inspect(&project.bundle_id).unwrap();
         assert_eq!(
             published.manifest.all_conversations().count(),
-            1,
-            "the drifted thread kept its (absent) stored state"
+            2,
+            "Apply must publish both selected sessions"
         );
-        let (_, _, stored) = published.manifest.all_conversations().next().unwrap();
-        assert_eq!(stored.source_thread_id.as_deref(), Some(stable_id));
+        let stored = published
+            .manifest
+            .all_conversations()
+            .find(|(_, _, stored)| stored.source_thread_id.as_deref() == Some(drifting_id))
+            .map(|(_, _, stored)| stored)
+            .unwrap();
+        assert_eq!(
+            stored.message_count, 2,
+            "the appended message was published"
+        );
+        let transcript_path = &stored
+            .files
+            .iter()
+            .find(|file| file.role == ConversationFileRole::Transcript)
+            .unwrap()
+            .logical_path;
+        let transcript = engine
+            .byte_source(&published, None, None)
+            .read_bounded(transcript_path, 16 * 1024, "test transcript")
+            .unwrap();
+        assert!(std::str::from_utf8(&transcript)
+            .unwrap()
+            .contains("kept chatting"));
     }
 
     #[test]
@@ -25479,6 +24534,7 @@ mod tests {
         let profile_id = binding.profile_ids[&codex_key()].clone();
         repo.mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
+                path_origins_ref: None,
                 host_id: binding.host_id.clone(),
                 replica_id: binding.replica_id.clone(),
                 local_project_id: binding.local_project_id.clone(),
@@ -25545,19 +24601,11 @@ mod tests {
         let storage_id = StorageId::parse("pull-store").unwrap();
         let bundle_id = BundleId::parse("df29babc833808e68ad0efa4d01d7d6d").unwrap();
         let mut config = repo.load_config().unwrap();
-        config.storages.push(StorageConfig {
-            id: storage_id.clone(),
-            name: "Pull store".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: temp.path().join("store").to_string_lossy().into_owned(),
-            supports_conditional_writes: None,
-        });
+        config.storages.push(local_storage_config(
+            storage_id.clone(),
+            "Pull store",
+            &temp.path().join("store"),
+        ));
         repo.save_config(config).unwrap();
 
         let source = register_local_project_with_repository(
@@ -25575,6 +24623,9 @@ mod tests {
         std::fs::create_dir_all(&source_codex).unwrap();
         let session_id = "019f0fb9-b140-7af3-8b7c-5d75c974b230";
         let second_session_id = "019f0fb9-b140-7af3-8b7c-5d75c974b231";
+        // Provider titles can contain control characters. Keep them through
+        // inventory, Push, Pull, and the preserved titles from Keep both.
+        let title = "Change glb color to yellow\u{0002}\u{0013}";
         let session_relative = format!(
             "sessions/2026/07/18/rollout-2026-07-18T00-00-00-{}.jsonl",
             session_id
@@ -25601,13 +24652,23 @@ mod tests {
         std::fs::write(
             source_codex.join("session_index.jsonl"),
             format!(
-                "{{\"id\":\"{}\",\"thread_name\":\"Change glb color to yellow\"}}\n\
-                 {{\"id\":\"{}\",\"thread_name\":\"Change camera angle\"}}\n",
-                session_id, second_session_id
+                "{}\n{}\n",
+                serde_json::json!({"id": session_id, "thread_name": title}),
+                serde_json::json!({
+                    "id": second_session_id,
+                    "thread_name": "Change camera angle",
+                }),
             ),
         )
         .unwrap();
         bind_and_link_test_replica(&repo, &source, &storage_id, &source_root, &source_codex);
+        let inventory =
+            get_bundle_inventory_with_repository(&repo, &source.local_project_id).unwrap();
+        assert_eq!(inventory.resources.len(), 2);
+        assert!(inventory
+            .resources
+            .iter()
+            .any(|resource| resource.descriptor.display_name == title));
         push_bundle_with_repository(&repo, &source.local_project_id, &storage_id).unwrap();
 
         let target = register_local_project_with_repository(
@@ -25642,7 +24703,8 @@ mod tests {
             stored_thread.resource_id,
             cloud_conversation_resource_id(&codex_key(), &cloud_thread_id).unwrap()
         );
-        assert_eq!(stored_thread.display_name, "Change glb color to yellow");
+        assert!(comparison.provider_errors.is_empty());
+        assert_eq!(stored_thread.display_name, title);
         assert!(
             !target_codex.join(&session_relative).exists(),
             "title lookup must not materialize the stored transcript"
@@ -25659,17 +24721,19 @@ mod tests {
             restore.actions.is_empty(),
             "typed conversations do not use generic file actions"
         );
-        assert_eq!(restore.conversation_actions.len(), 2);
+        assert!(restore.conversation_actions.is_empty());
+        assert_eq!(restore.conversation_review.len(), 2);
         let conversation_action = restore
-            .conversation_actions
+            .conversation_review
             .iter()
             .find(|action| action.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
             .cloned()
             .unwrap();
         assert_eq!(
             conversation_action.action,
-            ConversationPlanActionType::CreateLocal
+            ConversationReviewAction::CreateLocal
         );
+        assert_eq!(conversation_action.display_title.as_deref(), Some(title));
         // Plans are pure intent: CreateLocal names no local identity.
         assert_eq!(conversation_action.thread_id, None);
         let before = readiness_for_binding(&repo, &storage_id, &bundle_id, &target_binding);
@@ -25677,11 +24741,11 @@ mod tests {
 
         let applied = ProjectSyncService::new(&repo)
             .apply_bundle_restore(
-                &restore.plan_id,
+                &restore,
                 restore
-                    .conversation_actions
+                    .conversation_review
                     .iter()
-                    .map(|action| action.action_id.clone())
+                    .filter_map(|action| action.action_id.clone())
                     .collect(),
             )
             .unwrap();
@@ -25693,7 +24757,7 @@ mod tests {
         assert_eq!(applied.applied_action_ids.len(), 2);
         assert!(applied
             .applied_action_ids
-            .contains(&conversation_action.action_id));
+            .contains(conversation_action.action_id.as_ref().unwrap()));
 
         // Apply minted the provider id and derived the local thread id; the
         // binding records the pairing and the checkpoint records the
@@ -25751,10 +24815,7 @@ mod tests {
             .iter()
             .find(|row| row["id"] == rows[0]["payload"]["id"])
             .unwrap();
-        assert_eq!(
-            restored_index_row["thread_name"],
-            "Change glb color to yellow"
-        );
+        assert_eq!(restored_index_row["thread_name"], title);
         assert_eq!(
             restored_index_row["id"], rows[0]["payload"]["id"],
             "the index row must name the rewritten provider thread"
@@ -25880,17 +24941,18 @@ mod tests {
             .plan_bundle_restore(&storage_id, &bundle_id, &source_binding)
             .unwrap();
         let update = source_pull
-            .conversation_actions
+            .conversation_review
             .iter()
-            .find(|action| action.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
+            .find(|row| row.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
+            .cloned()
             .unwrap();
-        assert_eq!(update.action, ConversationPlanActionType::MaterializeCloud);
+        assert_eq!(update.action, ConversationReviewAction::MaterializeCloud);
         // Plans carry intent only: the fresh provider identity and its
         // destination exist only at apply, which asserts the destination
         // Absent itself.
         let source_bytes_before_update = std::fs::read(&source_session).unwrap();
         let source_applied = ProjectSyncService::new(&repo)
-            .apply_bundle_restore(&source_pull.plan_id, vec![update.action_id.clone()])
+            .apply_bundle_restore(&source_pull, vec![update.action_id.unwrap()])
             .unwrap();
         assert!(
             source_applied.success,
@@ -26007,7 +25069,7 @@ mod tests {
 
         // The keep-both marker names this device; the preserved identity,
         // provenance, and marker title are minted at apply and surface
-        // through the journal-sourced receipt — the plan carries none.
+        // through the apply receipt. The comparison carries none.
         let device_label = fallback_origin_host_label(
             &repo
                 .derive_origin_tokens(&bundle_id, &source_binding.replica_id)
@@ -26018,20 +25080,15 @@ mod tests {
             .plan_bundle_restore(&storage_id, &bundle_id, &source_binding)
             .unwrap();
         let divergent_action = divergent_pull
-            .conversation_actions
+            .conversation_review
             .iter()
-            .find(|action| action.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
+            .find(|row| row.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
+            .cloned()
             .unwrap();
-        assert_eq!(
-            divergent_action.action,
-            ConversationPlanActionType::KeepBoth
-        );
-        let marker_title = format!("Change glb color to yellow (Preserved 1 · {device_label})");
+        assert_eq!(divergent_action.action, ConversationReviewAction::KeepBoth);
+        let marker_title = format!("{title} (Preserved 1 · {device_label})");
         let divergent_result = ProjectSyncService::new(&repo)
-            .apply_bundle_restore(
-                &divergent_pull.plan_id,
-                vec![divergent_action.action_id.clone()],
-            )
+            .apply_bundle_restore(&divergent_pull, vec![divergent_action.action_id.unwrap()])
             .unwrap();
         assert!(
             divergent_result.success,
@@ -26102,10 +25159,7 @@ mod tests {
             .filter(|row| row["id"] == remote_provider_thread_id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(destination_rows.len(), 1);
-        assert_eq!(
-            destination_rows[0]["thread_name"],
-            "Change glb color to yellow"
-        );
+        assert_eq!(destination_rows[0]["thread_name"], title);
 
         // Session Detail leads with the index title, so the marker shows.
         let preserved_resource_id =
@@ -26183,19 +25237,17 @@ mod tests {
             .plan_bundle_restore(&storage_id, &bundle_id, &target_binding)
             .unwrap();
         let preserved_action = target_pull
-            .conversation_actions
+            .conversation_review
             .iter()
-            .find(|action| action.cloud_thread_id.as_ref() == Some(&preserved_cloud_id))
+            .find(|row| row.cloud_thread_id.as_ref() == Some(&preserved_cloud_id))
+            .cloned()
             .unwrap();
         assert_eq!(
             preserved_action.action,
-            ConversationPlanActionType::CreateLocal
+            ConversationReviewAction::CreateLocal
         );
         let target_applied = ProjectSyncService::new(&repo)
-            .apply_bundle_restore(
-                &target_pull.plan_id,
-                vec![preserved_action.action_id.clone()],
-            )
+            .apply_bundle_restore(&target_pull, vec![preserved_action.action_id.unwrap()])
             .unwrap();
         assert!(
             target_applied.success,
@@ -26298,24 +25350,22 @@ mod tests {
             .plan_bundle_restore(&storage_id, &bundle_id, &source_binding)
             .unwrap();
         let second_action = second_divergent
-            .conversation_actions
+            .conversation_review
             .iter()
-            .find(|action| action.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
+            .find(|row| row.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
+            .cloned()
             .unwrap();
-        assert_eq!(second_action.action, ConversationPlanActionType::KeepBoth);
+        assert_eq!(second_action.action, ConversationReviewAction::KeepBoth);
         // Ordinal and marker compose at apply: max+1 over cloud and binding
         // provenance in the cloud id space, never a count of copies.
         let second_result = ProjectSyncService::new(&repo)
-            .apply_bundle_restore(
-                &second_divergent.plan_id,
-                vec![second_action.action_id.clone()],
-            )
+            .apply_bundle_restore(&second_divergent, vec![second_action.action_id.unwrap()])
             .unwrap();
         assert!(second_result.success, "{:?}", second_result.failed_actions);
         assert_eq!(second_result.preserved_threads.len(), 1);
         assert_eq!(
             second_result.preserved_threads[0].preserved_display_title,
-            format!("Change glb color to yellow (Preserved 6 · {device_label})")
+            format!("{title} (Preserved 6 · {device_label})")
         );
         let second_preserved_row = repo
             .load_conversation_bindings()
@@ -26587,19 +25637,11 @@ mod tests {
         let project = register(&repo);
         let profile_id = add_profile(&repo, &codex_key(), &temp.path().join("codex-home"));
         let mut config = repo.load_config().unwrap();
-        config.storages.push(StorageConfig {
-            id: StorageId::parse("inside").unwrap(),
-            name: "Inside".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: project_root.join("store").to_string_lossy().into_owned(),
-            supports_conditional_writes: None,
-        });
+        config.storages.push(local_storage_config(
+            StorageId::parse("inside").unwrap(),
+            "Inside",
+            &project_root.join("store"),
+        ));
         repo.save_config(config).unwrap();
         let error = save_project_binding_with_repository(
             &repo,
@@ -26715,7 +25757,7 @@ mod tests {
     }
 
     #[test]
-    fn config_save_rejects_store_added_over_an_existing_binding() {
+    fn storage_commit_rejects_store_added_over_an_existing_binding() {
         let temp = tempfile::tempdir().unwrap();
         let project_root = temp.path().join("project");
         let codex_home = temp.path().join("codex-home");
@@ -26749,25 +25791,39 @@ mod tests {
         )
         .unwrap();
 
-        let mut config = repo.load_config().unwrap();
-        config.storages.push(StorageConfig {
-            id: StorageId::parse("overlap").unwrap(),
-            name: "Overlap".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: project_root
-                .join("bundle-store")
-                .to_string_lossy()
-                .into_owned(),
-            supports_conditional_writes: None,
-        });
-        let error = save_project_sync_config_with_repository(&repo, config).unwrap_err();
-        assert!(error.contains("overlaps project root"));
+        // A storage folder inside a bound project root is refused at commit,
+        // inside the same transaction that would have added it.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let draft =
+            create_storage_setup_draft_with_repository(&repo, &local_provider_key()).unwrap();
+        let overlap = project_root.join("bundle-store");
+        std::fs::create_dir_all(&overlap).unwrap();
+        let draft = update_storage_setup_draft_with_repository(
+            &repo,
+            UpdateStorageSetupDraftRequest {
+                draft_id: draft.draft_id.clone(),
+                revision: draft.revision,
+                name: "Overlap".to_string(),
+                settings: mallard_domain::BoundedConfigObject::from_json(&serde_json::json!({
+                    "directory": overlap.to_string_lossy(),
+                }))
+                .unwrap(),
+                secrets: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let error = commit_storage_setup_draft_with_repository(
+            &repo,
+            runtime.handle().clone(),
+            &draft.draft_id,
+            draft.revision,
+        )
+        .unwrap_err();
+        assert!(error.contains("overlaps project root"), "{error}");
+        assert!(repo.load_config().unwrap().storages.is_empty());
     }
 
     // ------------------------------------------------------------------
@@ -26779,7 +25835,6 @@ mod tests {
         repo: LocalStateRepository,
         project_dir: PathBuf,
         codex_home: PathBuf,
-        storage_dir: PathBuf,
     }
 
     fn setup_fixture() -> SetupFixture {
@@ -26791,33 +25846,20 @@ mod tests {
         std::fs::create_dir_all(&project_dir).unwrap();
         std::fs::create_dir_all(&codex_home).unwrap();
         std::fs::create_dir_all(&storage_dir).unwrap();
+        add_local_storage(
+            &repo,
+            &StorageId::parse("storage-setup-test").unwrap(),
+            &storage_dir,
+        );
         SetupFixture {
             _temp: temp,
             repo,
             project_dir,
             codex_home,
-            storage_dir,
         }
     }
 
-    fn local_storage(fixture: &SetupFixture, id: &str) -> StorageConfig {
-        StorageConfig {
-            id: StorageId::parse(id).unwrap(),
-            name: "Local test storage".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: fixture.storage_dir.to_string_lossy().into_owned(),
-            supports_conditional_writes: None,
-        }
-    }
-
-    /// Create a draft and point it at the fixture's pending Codex profile and
-    /// pending local storage, ignoring host-dependent default preselection.
+    /// Create a draft and point it at the fixture's Codex profile and storage.
     fn draft_ready_to_finalize(fixture: &SetupFixture) -> ProjectSetupDraft {
         let created = create_setup_draft_with_repository(
             &fixture.repo,
@@ -26833,8 +25875,8 @@ mod tests {
                 display_name: String::new(),
             },
         )]);
-        draft.storage = Some(DraftStorageSelection::Pending {
-            storage: local_storage(fixture, "storage-setup-test"),
+        draft.storage = Some(DraftStorageSelection {
+            storage_id: StorageId::parse("storage-setup-test").unwrap(),
         });
         draft.repository = DraftRepositoryChoice::New;
         update_setup_draft_with_repository(&fixture.repo, draft).unwrap()
@@ -27106,7 +26148,7 @@ mod tests {
                 profile_id: profile_id.clone(),
             },
         )]);
-        reregister.storage = Some(DraftStorageSelection::Existing {
+        reregister.storage = Some(DraftStorageSelection {
             storage_id: storage_id.clone(),
         });
         reregister.repository = DraftRepositoryChoice::Existing {
@@ -27171,12 +26213,11 @@ mod tests {
         assert_eq!(next_push.revision, Some(3));
         let committed = fixture.repo.load_conversation_bindings().unwrap();
         assert_eq!(committed.bindings.len(), 1);
-        assert!(fixture
+        assert!(!fixture
             .repo
-            .load_conversation_sync_journal()
-            .unwrap()
-            .operations
-            .is_empty());
+            .root()
+            .join("conversation_sync_journal.json")
+            .exists());
     }
 
     #[test]
@@ -27297,6 +26338,10 @@ mod tests {
         assert_eq!(tail.start_record_count, 2);
         assert_eq!(tail.accepted_end_record_count, tail.start_record_count);
         assert_eq!(leaf.display_title.as_deref(), Some("inherited question"));
+        assert_eq!(
+            leaf.head_message_id.as_ref().map(|id| id.as_str()),
+            Some("base-2")
+        );
     }
 
     #[test]
@@ -27390,11 +26435,11 @@ mod tests {
         std::fs::write(&base_rollout, &base_before).unwrap();
         fixture
             .repo
-            .install_journaled_config_snapshot(config_at_first)
+            .install_config_snapshot(&config_at_first)
             .unwrap();
         fixture
             .repo
-            .install_conversation_bindings_snapshot(bindings_at_first)
+            .install_conversation_bindings_snapshot(&bindings_at_first)
             .unwrap();
 
         let binding = fixture
@@ -27408,14 +26453,14 @@ mod tests {
             .plan_bundle_restore(&storage_id, &bundle_id, &binding)
             .unwrap();
         let action = pull
-            .conversation_actions
+            .conversation_review
             .iter()
             .find(|action| action.thread_id.as_ref() == Some(&base_thread_id))
             .expect("cloud-advanced base is materializable");
-        assert_eq!(action.action, ConversationPlanActionType::MaterializeCloud);
+        assert_eq!(action.action, ConversationReviewAction::MaterializeCloud);
 
         let applied = ProjectSyncService::new(&fixture.repo)
-            .apply_bundle_restore(&pull.plan_id, vec![action.action_id.clone()])
+            .apply_bundle_restore(&pull, vec![action.action_id.clone().unwrap()])
             .unwrap();
         assert!(applied.success, "{:?}", applied.failed_actions);
         assert_eq!(std::fs::read(&base_rollout).unwrap(), base_before);
@@ -27638,11 +26683,11 @@ mod tests {
         std::fs::write(&base_rollout, &retained_after).unwrap();
         fixture
             .repo
-            .install_journaled_config_snapshot(config_at_retained_push)
+            .install_config_snapshot(&config_at_retained_push)
             .unwrap();
         fixture
             .repo
-            .install_conversation_bindings_snapshot(bindings_at_retained_push)
+            .install_conversation_bindings_snapshot(&bindings_at_retained_push)
             .unwrap();
 
         let current_binding = fixture
@@ -27656,17 +26701,17 @@ mod tests {
             .plan_bundle_restore(&storage_id, &bundle_id, &current_binding)
             .unwrap();
         let retained_action = second_pull
-            .conversation_actions
+            .conversation_review
             .iter()
-            .find(|action| action.thread_id.as_ref() == Some(&retained_thread_id))
+            .find(|row| row.thread_id.as_ref() == Some(&retained_thread_id))
             .expect("cloud-advanced retained branch is materializable")
             .clone();
         assert_eq!(
             retained_action.action,
-            ConversationPlanActionType::MaterializeCloud
+            ConversationReviewAction::MaterializeCloud
         );
         let second_applied = ProjectSyncService::new(&fixture.repo)
-            .apply_bundle_restore(&second_pull.plan_id, vec![retained_action.action_id])
+            .apply_bundle_restore(&second_pull, vec![retained_action.action_id.unwrap()])
             .unwrap();
         assert!(
             second_applied.success,
@@ -27793,11 +26838,11 @@ mod tests {
         std::fs::write(&base_rollout, &base_before).unwrap();
         fixture
             .repo
-            .install_journaled_config_snapshot(config_at_first)
+            .install_config_snapshot(&config_at_first)
             .unwrap();
         fixture
             .repo
-            .install_conversation_bindings_snapshot(bindings_at_first)
+            .install_conversation_bindings_snapshot(&bindings_at_first)
             .unwrap();
 
         let binding = fixture
@@ -27811,12 +26856,12 @@ mod tests {
             .plan_bundle_restore(&storage_id, &bundle_id, &binding)
             .unwrap();
         let action = pull
-            .conversation_actions
+            .conversation_review
             .iter()
             .find(|action| action.thread_id.as_ref() == Some(&base_thread_id))
             .expect("cloud-advanced base is materializable")
             .clone();
-        assert_eq!(action.action, ConversationPlanActionType::MaterializeCloud);
+        assert_eq!(action.action, ConversationReviewAction::MaterializeCloud);
 
         // A native fork is created after the reviewed target and binding
         // pins were captured. Copy-on-write never targets the ancestor, so
@@ -27862,7 +26907,7 @@ mod tests {
         .unwrap();
 
         let applied = ProjectSyncService::new(&fixture.repo)
-            .apply_bundle_restore(&pull.plan_id, vec![action.action_id.clone()])
+            .apply_bundle_restore(&pull, vec![action.action_id.clone().unwrap()])
             .unwrap();
         assert!(applied.success, "{:?}", applied.failed_actions);
         assert_eq!(std::fs::read(&base_rollout).unwrap(), base_before);
@@ -28005,11 +27050,26 @@ mod tests {
         assert_eq!(mutated.len(), base_bytes.len());
         std::fs::write(&base_rollout, &mutated).unwrap();
 
-        let error =
-            push_bundle_with_repository(&fixture.repo, &project_id, &storage_id).unwrap_err();
+        // The witness failure is the thread's own: the Push reports it and
+        // publishes nothing of the thread, so the head stays where it was.
+        // The mutated base is reported too — its own bytes changed under
+        // its cursor, so the apply-time review cannot prove it either.
+        let blocked = push_bundle_with_repository(&fixture.repo, &project_id, &storage_id).unwrap();
+        assert!(!blocked.success, "{}", blocked.message);
+        assert_eq!(blocked.revision, Some(2));
+        let failed = blocked
+            .results
+            .iter()
+            .filter(|row| row.state == "failed")
+            .collect::<Vec<_>>();
+        assert_eq!(failed.len(), 2, "{:?}", blocked.results);
         assert!(
-            error.contains("prefix witness no longer matches"),
-            "{error}"
+            failed.iter().any(|row| {
+                row.message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("prefix witness no longer matches"))
+            }),
+            "{failed:?}"
         );
 
         // Restoring the original prefix bytes publishes the advance cleanly.
@@ -28024,7 +27084,7 @@ mod tests {
         let profile_id = LocalProviderProfileId::parse("profile-owner-check").unwrap();
         let provider_thread_id = "provider-owner-check";
         let thread_id = ThreadId::parse("thread-owner-check").unwrap();
-        let operation = ConversationSyncOperation {
+        let operation = ConversationApplyOperation {
             operation_id: ConversationOperationId::parse("operation-owner-check").unwrap(),
             plan_id: None,
             plan_action_id: None,
@@ -28042,27 +27102,20 @@ mod tests {
             provider: codex_key(),
             thread_id: thread_id.clone(),
             cloud_thread_id: CloudThreadId::parse("cloudthread-owner-check").unwrap(),
-            operation: ConversationSyncOperationKind::CloudPublication(
-                ConversationPublicationOperation {
-                    phase: PushJournalPhase::CandidateUploaded,
-                    candidate_commit_id: "commit-owner-check".to_string(),
-                    candidate_manifest_sha256: "0".repeat(64),
-                    artifact_sha256: "a".repeat(64),
-                    tail_before: None,
-                    tail_after: PortableConversationTail {
-                        codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
-                        partition_kind: mallard_domain::TailPartitionKind::WholeThread,
-                        start_record_count: 0,
-                        accepted_end_record_count: 1,
-                        accepted_tail_state: "e".repeat(64),
-                    },
-                    planned_relation: TailClassification::MissingCloud,
-                    sync_config_before: SyncConfig::default(),
-                    sync_config_after: SyncConfig::default(),
-                    bindings_before: mallard_domain::ConversationBindings::empty(host_id.clone()),
-                    bindings_after: mallard_domain::ConversationBindings::empty(host_id.clone()),
+            operation: ConversationApplyKind::CloudPublication(ConversationPublicationApply {
+                candidate_commit_id: "commit-owner-check".to_string(),
+                candidate_manifest_sha256: "0".repeat(64),
+                artifact_sha256: "a".repeat(64),
+                tail_before: None,
+                tail_after: PortableConversationTail {
+                    codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
+                    partition_kind: mallard_domain::TailPartitionKind::WholeThread,
+                    start_record_count: 0,
+                    accepted_end_record_count: 1,
+                    accepted_tail_state: "e".repeat(64),
                 },
-            ),
+                planned_relation: TailClassification::MissingCloud,
+            }),
             provider_thread_id: Some(provider_thread_id.to_string()),
             materialization_state: ConversationMaterializationState::Resumable,
             expected_host_identity_revision: 0,
@@ -28075,6 +27128,7 @@ mod tests {
             updated_at: 1,
         };
         let mut owner = LocalConversationBinding {
+            path_origins_ref: None,
             host_id,
             replica_id: ReplicaId::parse("replica-old-owner").unwrap(),
             local_project_id: LocalProjectId::parse("project-old-owner").unwrap(),
@@ -28149,7 +27203,7 @@ mod tests {
                 display_name: String::new(),
             },
         )]);
-        colliding.storage = Some(DraftStorageSelection::Existing {
+        colliding.storage = Some(DraftStorageSelection {
             storage_id: StorageId::parse("storage-setup-test").unwrap(),
         });
         let colliding = update_setup_draft_with_repository(&fixture.repo, colliding).unwrap();
@@ -28212,7 +27266,6 @@ mod tests {
         fixture
             .repo
             .mutate_config(|config| {
-                config.storages.push(transaction.storage.clone().unwrap());
                 config.projects.push(transaction.project.clone());
                 config.links.extend(transaction.links.iter().cloned());
                 Ok(())
@@ -28268,6 +27321,7 @@ mod tests {
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),
+            provider_config: mallard_domain::AgentProviderConfig::version_1(),
             revision: 0,
             created_at: now,
             updated_at: now,

@@ -16,61 +16,103 @@ use walkdir::{DirEntry, WalkDir};
 
 use crate::conversation_codec::CodecLineage;
 use crate::payload::PayloadBytes;
-use mallard_domain::{self as domain, hex_lower, sha256_hex};
+use crate::portable_resources::PortableResourceRegistry;
+use mallard_domain::portable::contracts;
+use mallard_domain::{
+    self as domain, hex_lower, sha256_hex, ApplyPolicyCoordinate, ResourceKindCoordinate,
+    ResourceKindPrimitive,
+};
 
 const MAX_DISCOVERED_FILES: usize = 20_000;
 pub(crate) const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
-/// The most bytes one capture may retain. A push enforces it on the reviewed
-/// selection; a push review plans its candidate capture to fit inside it.
+/// The most bytes one capture may retain. Push Compare reports this limit and
+/// byte estimates; Push Apply enforces it on the selected resources.
 pub const MAX_CAPTURE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_METADATA_LINES: usize = 128;
 const MAX_TREE_DEPTH: usize = 32;
 
-fn capture_file_limit(kind: &CaptureResourceKind) -> u64 {
-    if matches!(kind, CaptureResourceKind::Conversation) {
+/// The engine primitive one registered resource-kind coordinate resolves to
+/// under the production registry. Common capture code dispatches on this,
+/// never on the key.
+pub fn kind_primitive(kind: &ResourceKindCoordinate) -> Option<ResourceKindPrimitive> {
+    PortableResourceRegistry::production()
+        .resource_kind_adapter(kind)
+        .map(|adapter| adapter.primitive())
+}
+
+fn capture_file_limit(kind: &ResourceKindCoordinate) -> u64 {
+    if kind_primitive(kind) == Some(ResourceKindPrimitive::Conversation) {
         crate::app_settings::conversation_file_limit_bytes()
     } else {
         MAX_FILE_BYTES
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum CaptureResourceKind {
-    ProjectContentFile,
-    ProjectContentDirectory,
-    Conversation,
-    ProviderState,
+fn is_project_content_kind(kind: &ResourceKindCoordinate) -> bool {
+    matches!(
+        kind_primitive(kind),
+        Some(ResourceKindPrimitive::ProjectContentFile)
+            | Some(ResourceKindPrimitive::ProjectContentDirectory)
+    )
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CaptureApplyPolicy {
-    SafeFile,
-    Merge,
-    Review,
-}
-
+/// One discovered resource as a provider adapter or the project-content
+/// walker describes it: registered portable coordinates, never a
+/// capture-local enum that a later match would have to convert.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ResourceCandidate {
     pub resource_id: String,
-    pub kind: CaptureResourceKind,
+    pub kind: ResourceKindCoordinate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<domain::ProviderKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_resource_type: Option<String>,
     pub display_name: String,
-    pub apply_policy: CaptureApplyPolicy,
+    pub apply_policy: ApplyPolicyCoordinate,
     pub selected_by_default: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
     #[serde(default)]
     pub logical_paths: Vec<String>,
-    /// Kind-specific descriptor facts (provenance and naming evidence).
-    /// Copied verbatim into the bundle descriptor metadata.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(skip)]
+    pub project_content: Option<ProjectContentCandidate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProjectContentCandidate {
+    File {
+        relative_path: String,
+        size: u64,
+        mode: u32,
+        source_mtime: u64,
+        review_digest: String,
+        warning: Option<ProjectContentWarning>,
+    },
+    Directory {
+        relative_path: String,
+        mode: u32,
+        source_mtime: u64,
+        review_digest: String,
+    },
+    Blocked {
+        relative_path: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectContentWarning {
+    PossibleSecret,
+    Executable,
+}
+
+impl ProjectContentWarning {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::PossibleSecret => "possible_secret",
+            Self::Executable => "executable",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -89,6 +131,7 @@ pub struct CapturedFile {
     pub logical_path: String,
     pub resource_id: String,
     pub bytes: PayloadBytes,
+    pub source_stamp: Option<crate::jsonl_tail_io::SourceStamp>,
     pub source_mtime: u64,
     /// Portable permission bits. Set-id and other non-permission bits are
     /// always stripped; Windows capture uses 0o600.
@@ -123,6 +166,11 @@ pub struct CapturedResources {
     /// Provider-native session ids excluded as internal subagents, keyed by
     /// provider.
     pub excluded_subagent_session_ids: BTreeMap<domain::ProviderKey, BTreeSet<String>>,
+    /// Selected conversations whose capture failed, keyed by resource id
+    /// with the read or scrub error. A conversation's failure is its own:
+    /// every other resource captured normally, and the failure surfaces per
+    /// thread at Push build or Pull prepare.
+    pub failed_conversations: BTreeMap<String, String>,
 }
 
 /// A sidecar file consolidated under its conversation resource.
@@ -339,13 +387,7 @@ impl Discovery {
             resources: self
                 .resources
                 .values()
-                .filter(|candidate| {
-                    matches!(
-                        candidate.descriptor.kind,
-                        CaptureResourceKind::ProjectContentFile
-                            | CaptureResourceKind::ProjectContentDirectory
-                    )
-                })
+                .filter(|candidate| is_project_content_kind(&candidate.descriptor.kind))
                 .map(|candidate| candidate.descriptor.clone())
                 .collect(),
             warnings: self.project_content_diagnostics.warnings.clone(),
@@ -363,7 +405,7 @@ impl Discovery {
 /// kept only inside this module and never become resource identity.
 #[cfg(any(test, feature = "test-support"))]
 pub fn discover_project(
-    registry: &crate::providers::ProviderRegistry,
+    registry: &crate::providers::AgentProviderRegistry,
     request: &CaptureRequest,
 ) -> Result<ProjectInventory, String> {
     Ok(discover_full(registry, request)?.project_inventory())
@@ -374,7 +416,7 @@ pub fn discover_project(
 /// turned into deselections or tombstones.
 #[cfg(any(test, feature = "test-support"))]
 pub fn capture_selected(
-    registry: &crate::providers::ProviderRegistry,
+    registry: &crate::providers::AgentProviderRegistry,
     request: &CaptureRequest,
     selected_resource_ids: &BTreeSet<String>,
 ) -> Result<CapturedResources, String> {
@@ -386,7 +428,7 @@ pub fn capture_selected(
 /// derived candidates are shared: file bytes and metadata are re-read at
 /// call time, so captured content is always current.
 pub fn capture_from_discovery(
-    registry: &crate::providers::ProviderRegistry,
+    registry: &crate::providers::AgentProviderRegistry,
     request: &CaptureRequest,
     discovery: &Discovery,
     selected_resource_ids: &BTreeSet<String>,
@@ -415,14 +457,14 @@ pub fn bounded_refresh_workers(items: usize) -> usize {
 }
 
 /// One selected resource's read-free preflight output: the shared walk data
-/// plus single-stat file metadata, with every cross-resource check already
+/// plus validated file metadata, with every cross-resource check already
 /// settled so the parallel worker touches no shared state.
 struct CapturePlanItem<'a> {
     resource_id: &'a str,
     discovered: &'a DiscoveredResource,
     directory: Option<&'a SourceDirectory>,
     /// `(source_mtime, mode)` per source file, in file order, from the
-    /// preflight's single stat.
+    /// preflight's no-follow file inspection.
     file_meta: Vec<(u64, u32)>,
     directory_meta: Option<(u64, u32)>,
 }
@@ -434,6 +476,14 @@ struct CapturedUnit {
     conversation: Option<CapturedConversation>,
     resource: CapturedResource,
     warnings: Vec<String>,
+}
+
+/// Whether a resource's capture failure stays with that resource. A
+/// conversation's transcript and sidecars belong to one thread, so its
+/// failure is reported per thread and the capture continues. Every other
+/// kind is a bundle requirement whose failure ends the capture.
+fn captures_in_isolation(item: &CapturePlanItem<'_>) -> bool {
+    kind_primitive(&item.discovered.descriptor.kind) == Some(ResourceKindPrimitive::Conversation)
 }
 
 fn take_capture_outcome(
@@ -453,7 +503,7 @@ fn take_capture_outcome(
 /// presentation are both derived from the retained byte snapshot; the
 /// mutable provider path is never reopened after capture.
 fn capture_resource(
-    registry: &crate::providers::ProviderRegistry,
+    registry: &crate::providers::AgentProviderRegistry,
     item: &CapturePlanItem<'_>,
 ) -> Result<CapturedUnit, String> {
     let resource_id = item.resource_id;
@@ -468,28 +518,33 @@ fn capture_resource(
         .iter()
         .zip(item.file_meta.iter().copied())
     {
-        let bytes = fs::read(&source.physical_path)
-            .map_err(|e| format!("read '{}': {}", source.physical_path.display(), e))?;
-        crate::sync_metrics::record_transcript_bytes_read(
-            &source.physical_path,
-            bytes.len() as u64,
-        );
+        let is_transcript = item
+            .discovered
+            .conversation
+            .as_ref()
+            .is_some_and(|meta| meta.transcript_logical_path == source.logical_path);
+        let (bytes, source_stamp) = if is_transcript {
+            let (bytes, stamp) = crate::jsonl_tail_io::read_snapshot(&source.physical_path)?;
+            (bytes, Some(stamp))
+        } else {
+            let bytes = fs::read(&source.physical_path)
+                .map_err(|e| format!("read '{}': {}", source.physical_path.display(), e))?;
+            crate::sync_metrics::record_transcript_bytes_read(
+                &source.physical_path,
+                bytes.len() as u64,
+            );
+            (bytes, None)
+        };
         // Sidecar and provider-state bytes are captured in wire form: the
         // credential scrub runs here, once, so review diffing, retention
         // dedup, and publish all see one consistent redacted byte stream.
         // Conversation transcripts stay local-form — review seeding and the
         // pull-time local target expectations read them — and are redacted
         // by their own wire builders at publish instead.
-        let is_transcript = item
-            .discovered
-            .conversation
-            .as_ref()
-            .is_some_and(|meta| meta.transcript_logical_path == source.logical_path);
-        let scrub = match item.discovered.descriptor.kind {
-            CaptureResourceKind::ProviderState => true,
-            CaptureResourceKind::Conversation => !is_transcript,
-            CaptureResourceKind::ProjectContentFile
-            | CaptureResourceKind::ProjectContentDirectory => false,
+        let scrub = match kind_primitive(&item.discovered.descriptor.kind) {
+            Some(ResourceKindPrimitive::ProviderState) => true,
+            Some(ResourceKindPrimitive::Conversation) => !is_transcript,
+            _ => false,
         };
         let bytes = if scrub {
             crate::credential_redaction::shared()
@@ -524,6 +579,7 @@ fn capture_resource(
             source_mtime,
             mode,
             bytes,
+            source_stamp,
         });
     }
     let directory = item.directory.map(|source| {
@@ -563,8 +619,8 @@ fn capture_resource(
                     resource_id
                 )
             })?;
-        let analysis = adapter.analyze(&transcript.bytes);
-        let presentation = match adapter.summarize_bytes(&transcript.bytes) {
+        let (analysis, summary) = adapter.analyze_and_summarize(&transcript.bytes);
+        let presentation = match summary {
             Ok(file_summary) => session_presentation(&file_summary),
             Err(_) => domain::SessionPresentation::default(),
         };
@@ -599,13 +655,20 @@ fn capture_resource(
 /// is the serial degenerate of the same phases. Tests pin worker-count
 /// invariance through this entry.
 fn capture_from_discovery_with_workers(
-    registry: &crate::providers::ProviderRegistry,
+    registry: &crate::providers::AgentProviderRegistry,
     request: &CaptureRequest,
     discovery: &Discovery,
     selected_resource_ids: &BTreeSet<String>,
     workers: usize,
 ) -> Result<CapturedResources, String> {
     let canonical_project = canonical_existing_dir(&request.project_root, "project root")?;
+    let mut approved_roots = Vec::new();
+    if request.include_project_content {
+        approved_roots.push(canonical_project.clone());
+    }
+    for (provider, home) in &request.provider_homes {
+        approved_roots.push(canonical_existing_dir(home, &format!("{} home", provider))?);
+    }
     let mut result = CapturedResources {
         warnings: discovery.warnings.clone(),
         excluded_subagent_session_ids: discovery.excluded_subagent_session_ids.clone(),
@@ -614,7 +677,7 @@ fn capture_from_discovery_with_workers(
 
     // Phase 1 — serial, read-free preflight. Every cross-resource check
     // (case-fold collisions, logical-path ownership, per-file and aggregate
-    // size gates) settles here from one stat per file, before any worker
+    // size gates) settles here from validated metadata, before any worker
     // reads a byte.
     let mut total_bytes = 0_u64;
     let mut casefold_paths = BTreeMap::<String, String>::new();
@@ -643,24 +706,13 @@ fn capture_from_discovery_with_workers(
                     ));
                 }
             }
-            validate_source_file(
+            let meta = validate_source_file(
                 &source.physical_path,
-                &canonical_project,
-                request,
+                &approved_roots,
                 resource_id,
                 file_limit,
             )?;
-            let meta = fs::metadata(&source.physical_path)
-                .map_err(|e| format!("inspect '{}': {}", source.physical_path.display(), e))?;
             let content_len = meta.len();
-            if content_len > file_limit {
-                return Err(format!(
-                    "resource '{}' file '{}' exceeds {} bytes",
-                    resource_id,
-                    source.physical_path.display(),
-                    file_limit
-                ));
-            }
             total_bytes = total_bytes
                 .checked_add(content_len)
                 .ok_or_else(|| "capture size overflow".to_string())?;
@@ -719,10 +771,11 @@ fn capture_from_discovery_with_workers(
     }
 
     // Phase 2 — bounded parallel per-resource capture. Items are dispatched
-    // in resource-ID order: an error at item k proves every earlier item was
-    // already dispatched and will complete, so the merge's earliest-failure
-    // rule stays deterministic at every worker count even with fast-fail
-    // cancellation.
+    // in resource-ID order: a fatal error at item k proves every earlier
+    // item was already dispatched and will complete, so the merge's
+    // earliest-failure rule stays deterministic at every worker count even
+    // with fast-fail cancellation. A conversation's failure never cancels
+    // the pool: it is recorded against that conversation alone.
     let mut slots: Vec<std::sync::OnceLock<Result<CapturedUnit, String>>> =
         items.iter().map(|_| std::sync::OnceLock::new()).collect();
     if !items.is_empty() {
@@ -741,7 +794,7 @@ fn capture_from_discovery_with_workers(
                         break;
                     };
                     let outcome = capture_resource(registry, item);
-                    if outcome.is_err() {
+                    if outcome.is_err() && !captures_in_isolation(item) {
                         failed.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                     let _ = item_slots[index].set(outcome);
@@ -754,7 +807,16 @@ fn capture_from_discovery_with_workers(
     // the earliest failing resource's error, regardless of completion order.
     // An unexpectedly unset slot is a controlled stage error, never a panic.
     for (item, slot) in items.iter().zip(slots.iter_mut()) {
-        let unit = take_capture_outcome(item.resource_id, slot)?;
+        let unit = match take_capture_outcome(item.resource_id, slot) {
+            Ok(unit) => unit,
+            Err(message) if captures_in_isolation(item) => {
+                result
+                    .failed_conversations
+                    .insert(item.resource_id.to_string(), message);
+                continue;
+            }
+            Err(message) => return Err(message),
+        };
         result
             .resources
             .insert(item.resource_id.to_string(), unit.resource);
@@ -815,7 +877,7 @@ fn session_presentation(
 
 #[cfg(test)]
 pub(crate) fn capture_recipe(
-    registry: &crate::providers::ProviderRegistry,
+    registry: &crate::providers::AgentProviderRegistry,
     request: &CaptureRequest,
     recipe: &domain::BundleRecipe,
 ) -> Result<CapturedResources, String> {
@@ -826,7 +888,7 @@ pub(crate) fn capture_recipe(
 /// Capture a recipe from an existing Discovery, sharing one walk between
 /// selection persistence, freshness checks, and byte capture.
 pub fn capture_recipe_from_discovery(
-    registry: &crate::providers::ProviderRegistry,
+    registry: &crate::providers::AgentProviderRegistry,
     request: &CaptureRequest,
     discovery: &Discovery,
     recipe: &domain::BundleRecipe,
@@ -856,34 +918,34 @@ pub fn domain_resources(
 }
 
 /// The typed domain descriptor for one discovered candidate. A captured
-/// resource carries its content digest; a metadata-only view has none and
-/// omits the `content_sha256` metadata key.
+/// resource carries its content digest; an inventory view has none and
+/// omits the `content_sha256` attribute.
 pub fn domain_resource_descriptor(
     candidate: &ResourceCandidate,
     content_sha256: Option<&str>,
 ) -> Result<domain::ResourceDescriptor, String> {
     let resource_id = domain::ResourceId::parse(candidate.resource_id.clone())?;
-    let kind = domain_kind(&candidate.kind);
-    let provenance = match candidate.kind {
-        CaptureResourceKind::ProjectContentFile | CaptureResourceKind::ProjectContentDirectory => {
-            let relative_path = candidate
-                .logical_paths
-                .first()
-                .and_then(|path| path.strip_prefix("project/"))
-                .unwrap_or(&candidate.display_name)
-                .to_string();
-            domain::Provenance::ProjectLocal { relative_path }
-        }
-        _ => domain::Provenance::Unknown,
+    let provenance = if is_project_content_kind(&candidate.kind) {
+        let relative_path = candidate
+            .logical_paths
+            .first()
+            .and_then(|path| path.strip_prefix("project/"))
+            .unwrap_or(&candidate.display_name)
+            .to_string();
+        contracts::provenance_project_local(&relative_path)?
+    } else {
+        contracts::provenance_unknown()
     };
-    let mut metadata = candidate.metadata.clone();
-    metadata.retain(|key, _| !key.starts_with("_local_"));
+    let mut attributes = serde_json::Map::new();
     if let Some(content_sha256) = content_sha256 {
-        metadata.insert("content_sha256".to_string(), content_sha256.to_string());
+        attributes.insert(
+            "content_sha256".to_string(),
+            serde_json::Value::String(content_sha256.to_string()),
+        );
     }
     let descriptor = domain::ResourceDescriptor {
         resource_id,
-        kind,
+        kind: candidate.kind.clone(),
         provider: candidate.provider.clone(),
         provider_resource_type: candidate
             .provider_resource_type
@@ -892,9 +954,11 @@ pub fn domain_resource_descriptor(
             .transpose()?,
         display_name: candidate.display_name.clone(),
         provenance,
-        apply_policy: domain_apply_policy(&candidate.apply_policy),
+        apply_policy: candidate.apply_policy.clone(),
         codec_version: 1,
-        metadata,
+        attributes: domain::BoundedPortableObject::from_json(&serde_json::Value::Object(
+            attributes,
+        ))?,
     };
     descriptor.validate()?;
     Ok(descriptor)
@@ -918,42 +982,37 @@ pub struct LocalSessionView {
     pub capture_bytes: u64,
 }
 
-/// Re-run only the session-index title enrichment over a cached discovery:
-/// a replaced `session_index.jsonl` invalidates display titles, never tail
-/// evidence or membership.
-pub fn refresh_codex_session_titles(
-    discovery: &mut Discovery,
-    canonical_home: &Path,
-) -> Result<(), String> {
-    let codex = domain::ProviderKey::parse("codex")?;
-    let ids = discovery
-        .resources
-        .values()
-        .filter_map(|resource| resource.conversation.as_ref())
-        .filter(|conversation| conversation.provider == codex)
-        .map(|conversation| conversation.provider_session_id.clone())
-        .collect::<BTreeSet<_>>();
-    let index = canonical_home.join("session_index.jsonl");
-    let titles = if !ids.is_empty() && index.is_file() {
-        crate::providers::codex::history::parse_session_index_titles(
-            &filter_codex_session_index_by_ids(&index, &ids)?,
-        )
-    } else {
-        BTreeMap::new()
-    };
-    for resource in discovery.resources.values_mut() {
-        let Some(conversation) = &resource.conversation else {
-            continue;
-        };
-        if conversation.provider != codex {
-            continue;
+impl Discovery {
+    /// Re-run title enrichment for one provider's conversations over a
+    /// cached discovery: `titles_for` maps the discovered provider session
+    /// ids to display titles. Membership and tail evidence never change.
+    pub fn refresh_conversation_titles(
+        &mut self,
+        provider: &domain::ProviderKey,
+        titles_for: impl FnOnce(&BTreeSet<String>) -> Result<BTreeMap<String, String>, String>,
+    ) -> Result<(), String> {
+        let ids = self
+            .resources
+            .values()
+            .filter_map(|resource| resource.conversation.as_ref())
+            .filter(|conversation| conversation.provider == *provider)
+            .map(|conversation| conversation.provider_session_id.clone())
+            .collect::<BTreeSet<_>>();
+        let titles = titles_for(&ids)?;
+        for resource in self.resources.values_mut() {
+            let Some(conversation) = &resource.conversation else {
+                continue;
+            };
+            if conversation.provider != *provider {
+                continue;
+            }
+            resource.descriptor.display_name = titles
+                .get(&conversation.provider_session_id)
+                .cloned()
+                .unwrap_or_else(|| conversation.provider_session_id.clone());
         }
-        resource.descriptor.display_name = titles
-            .get(&conversation.provider_session_id)
-            .cloned()
-            .unwrap_or_else(|| conversation.provider_session_id.clone());
+        Ok(())
     }
-    Ok(())
 }
 
 /// Project the discovery's conversation candidates into metadata-only
@@ -997,28 +1056,9 @@ pub fn local_session_views(discovery: &Discovery) -> Vec<LocalSessionView> {
     views
 }
 
-fn domain_kind(kind: &CaptureResourceKind) -> domain::ResourceKind {
-    match kind {
-        CaptureResourceKind::ProjectContentFile => domain::ResourceKind::ProjectContentFile,
-        CaptureResourceKind::ProjectContentDirectory => {
-            domain::ResourceKind::ProjectContentDirectory
-        }
-        CaptureResourceKind::Conversation => domain::ResourceKind::Conversation,
-        CaptureResourceKind::ProviderState => domain::ResourceKind::ProviderState,
-    }
-}
-
-fn domain_apply_policy(policy: &CaptureApplyPolicy) -> domain::ApplyPolicy {
-    match policy {
-        CaptureApplyPolicy::SafeFile => domain::ApplyPolicy::SafeFile,
-        CaptureApplyPolicy::Merge => domain::ApplyPolicy::Merge,
-        CaptureApplyPolicy::Review => domain::ApplyPolicy::ExplicitReview,
-    }
-}
-
 /// The one full provider walk behind every inventory and capture view.
 pub fn discover_full(
-    registry: &crate::providers::ProviderRegistry,
+    registry: &crate::providers::AgentProviderRegistry,
     request: &CaptureRequest,
 ) -> Result<Discovery, String> {
     let canonical_project = canonical_existing_dir(&request.project_root, "project root")?;
@@ -1132,20 +1172,30 @@ fn install_provider_discovery(
         if blocked_reason.is_none() && capture_bytes > MAX_CAPTURE_BYTES {
             blocked_reason = Some(oversized_capture_reason(capture_bytes));
         }
+        // Pull installs every file of a conversation in one bounded
+        // provider operation, so a session with more files than that can
+        // never sync either; block it here like an oversized one.
+        if blocked_reason.is_none() && files.len() > domain::MAX_CONVERSATION_FILES {
+            blocked_reason = Some(format!(
+                "session carries {} attachments; Mallard syncs at most {}",
+                files.len().saturating_sub(1),
+                domain::MAX_CONVERSATION_FILES - 1
+            ));
+        }
         insert_resource(
             discovery,
             DiscoveredResource {
                 descriptor: ResourceCandidate {
-                    metadata: BTreeMap::new(),
                     resource_id,
-                    kind: CaptureResourceKind::Conversation,
+                    kind: contracts::conversation(),
                     provider: Some(provider.clone()),
                     provider_resource_type: Some("session".to_string()),
                     display_name: session.display_name,
-                    apply_policy: CaptureApplyPolicy::SafeFile,
+                    apply_policy: contracts::safe_file(),
                     selected_by_default: true,
                     blocked_reason,
                     logical_paths,
+                    project_content: None,
                 },
                 files,
                 conversation: Some(DiscoveredConversationMeta {
@@ -1185,20 +1235,20 @@ fn install_provider_discovery(
             discovery,
             DiscoveredResource {
                 descriptor: ResourceCandidate {
-                    metadata: BTreeMap::new(),
                     resource_id,
-                    kind: CaptureResourceKind::ProviderState,
+                    kind: contracts::provider_state(),
                     provider: Some(provider.clone()),
                     provider_resource_type: Some(state.resource_type),
                     display_name: state.display_name,
                     apply_policy: if state.merge_apply {
-                        CaptureApplyPolicy::Merge
+                        contracts::merge()
                     } else {
-                        CaptureApplyPolicy::SafeFile
+                        contracts::safe_file()
                     },
                     selected_by_default: true,
                     blocked_reason: state.blocked_reason,
                     logical_paths,
+                    project_content: None,
                 },
                 files,
                 conversation: None,
@@ -1375,29 +1425,26 @@ fn add_project_content_directory(
     let resource_id = project_content_resource_id("dir", relative);
     let mode = safe_mode(meta);
     let source_mtime = modified_secs(meta);
-    let mut metadata = BTreeMap::new();
-    metadata.insert("entry_type".to_string(), "directory".to_string());
-    metadata.insert("_local_relative_path".to_string(), relative.to_string());
-    metadata.insert("_local_mode".to_string(), mode.to_string());
-    metadata.insert("_local_source_mtime".to_string(), source_mtime.to_string());
-    metadata.insert(
-        "_local_review_digest".to_string(),
-        project_content_review_digest("dir", relative, "", mode),
-    );
+    let review_digest = project_content_review_digest("dir", relative, "", mode);
     insert_resource(
         discovery,
         DiscoveredResource {
             descriptor: ResourceCandidate {
                 resource_id: resource_id.clone(),
-                kind: CaptureResourceKind::ProjectContentDirectory,
+                kind: contracts::project_content_directory(),
                 provider: None,
                 provider_resource_type: None,
                 display_name: relative.to_string(),
-                apply_policy: CaptureApplyPolicy::Review,
+                apply_policy: contracts::explicit_review(),
                 selected_by_default: true,
                 blocked_reason: None,
                 logical_paths: vec![logical_path.clone()],
-                metadata,
+                project_content: Some(ProjectContentCandidate::Directory {
+                    relative_path: relative.to_string(),
+                    mode,
+                    source_mtime,
+                    review_digest,
+                }),
             },
             files: Vec::new(),
             conversation: None,
@@ -1449,37 +1496,31 @@ fn add_project_content_file(
     let mode = safe_mode(&after);
     let source_mtime = modified_secs(&after);
     let content_sha256 = sha256_hex(&bytes);
-    let warning_code = detected_secret
-        .map(|_| "possible_secret")
-        .or_else(|| is_executable_path(path).then_some("executable"));
-    let mut metadata = BTreeMap::new();
-    metadata.insert("entry_type".to_string(), "file".to_string());
-    metadata.insert("_local_relative_path".to_string(), relative.to_string());
-    metadata.insert("_local_size".to_string(), bytes.len().to_string());
-    metadata.insert("_local_mode".to_string(), mode.to_string());
-    metadata.insert("_local_source_mtime".to_string(), source_mtime.to_string());
-    metadata.insert("_local_content_sha256".to_string(), content_sha256.clone());
-    metadata.insert(
-        "_local_review_digest".to_string(),
-        project_content_review_digest("file", relative, &content_sha256, mode),
-    );
-    if let Some(warning_code) = warning_code {
-        metadata.insert("_local_warning_code".to_string(), warning_code.to_string());
-    }
+    let warning = detected_secret
+        .map(|_| ProjectContentWarning::PossibleSecret)
+        .or_else(|| is_executable_path(path).then_some(ProjectContentWarning::Executable));
+    let review_digest = project_content_review_digest("file", relative, &content_sha256, mode);
     insert_resource(
         discovery,
         DiscoveredResource {
             descriptor: ResourceCandidate {
                 resource_id,
-                kind: CaptureResourceKind::ProjectContentFile,
+                kind: contracts::project_content_file(),
                 provider: None,
                 provider_resource_type: None,
                 display_name: relative.to_string(),
-                apply_policy: CaptureApplyPolicy::Review,
+                apply_policy: contracts::explicit_review(),
                 selected_by_default: true,
                 blocked_reason: None,
                 logical_paths: vec![logical_path.clone()],
-                metadata,
+                project_content: Some(ProjectContentCandidate::File {
+                    relative_path: relative.to_string(),
+                    size: bytes.len() as u64,
+                    mode,
+                    source_mtime,
+                    review_digest,
+                    warning,
+                }),
             },
             files: vec![SourceFile {
                 physical_path: path.to_path_buf(),
@@ -1499,23 +1540,22 @@ fn add_blocked_project_content_candidate(
     validate_logical_project_relative(relative)?;
     discovery.blocked_count = discovery.blocked_count.saturating_add(1);
     let resource_id = project_content_resource_id("file", relative);
-    let mut metadata = BTreeMap::new();
-    metadata.insert("entry_type".to_string(), "blocked".to_string());
-    metadata.insert("_local_relative_path".to_string(), relative.to_string());
     insert_resource(
         discovery,
         DiscoveredResource {
             descriptor: ResourceCandidate {
                 resource_id,
-                kind: CaptureResourceKind::ProjectContentFile,
+                kind: contracts::project_content_file(),
                 provider: None,
                 provider_resource_type: None,
                 display_name: relative.to_string(),
-                apply_policy: CaptureApplyPolicy::Review,
+                apply_policy: contracts::explicit_review(),
                 selected_by_default: false,
                 blocked_reason: Some(reason.to_string()),
                 logical_paths: vec![format!("project/{}", relative)],
-                metadata,
+                project_content: Some(ProjectContentCandidate::Blocked {
+                    relative_path: relative.to_string(),
+                }),
             },
             files: Vec::new(),
             conversation: None,
@@ -1791,42 +1831,6 @@ pub(crate) fn session_home_is_project_root(
         == Some(project_root)
 }
 
-#[derive(Deserialize)]
-struct CodexSessionIndexIdentity {
-    id: String,
-}
-
-pub(crate) fn filter_codex_session_index_by_ids(
-    path: &Path,
-    ids: &BTreeSet<String>,
-) -> Result<Vec<u8>, String> {
-    let meta = fs::metadata(path).map_err(|e| format!("inspect '{}': {}", path.display(), e))?;
-    if meta.len() > MAX_FILE_BYTES {
-        return Err(format!(
-            "'{}' exceeds {} bytes",
-            path.display(),
-            MAX_FILE_BYTES
-        ));
-    }
-    let file = fs::File::open(path).map_err(|e| format!("open '{}': {}", path.display(), e))?;
-    let mut output = Vec::new();
-    for line in BufReader::new(file).split(b'\n') {
-        let line = line.map_err(|e| format!("read '{}': {}", path.display(), e))?;
-        if line.len() > 1024 * 1024 {
-            continue;
-        }
-        let row: CodexSessionIndexIdentity = match serde_json::from_slice(&line) {
-            Ok(row) => row,
-            Err(_) => continue,
-        };
-        if ids.contains(&row.id) {
-            output.extend_from_slice(&line);
-            output.push(b'\n');
-        }
-    }
-    Ok(output)
-}
-
 fn insert_resource(discovery: &mut Discovery, resource: DiscoveredResource) -> Result<(), String> {
     let id = resource.descriptor.resource_id.clone();
     if id.is_empty() || id.len() > 1024 || id.chars().any(char::is_control) {
@@ -1901,70 +1905,79 @@ pub(crate) fn inspect_candidate_files_with_limit(
         return Err(format!("resource exceeds {} files", MAX_DISCOVERED_FILES));
     }
     for file in files {
-        reject_unsafe_ancestors(file, canonical_approved_root)?;
-        let meta = fs::symlink_metadata(file)
-            .map_err(|e| format!("inspect '{}': {}", file.display(), e))?;
-        if meta.file_type().is_symlink() || !meta.is_file() {
-            return Err(format!(
-                "'{}' is not a regular no-follow file",
-                file.display()
-            ));
-        }
-        if meta.len() > max_file_bytes {
-            return Err(format!(
-                "'{}' exceeds {} bytes",
-                file.display(),
-                max_file_bytes
-            ));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if meta.nlink() > 1 {
-                return Err(format!(
-                    "hard-linked file '{}' is not portable",
-                    file.display()
-                ));
-            }
-        }
-        let relative = file
-            .strip_prefix(canonical_approved_root)
-            .map_err(|_| format!("'{}' escapes approved root", file.display()))?;
-        for component in relative.components() {
-            if let Component::Normal(name) = component {
-                let name = name
-                    .to_str()
-                    .ok_or_else(|| format!("non-UTF-8 path '{}'", file.display()))?;
-                if denied_file_name(name) {
-                    return Err(format!(
-                        "credential/cache file '{}' is structurally excluded",
-                        file.display()
-                    ));
-                }
-            }
-        }
+        let canonical_path =
+            fs::canonicalize(file).map_err(|e| format!("resolve '{}': {}", file.display(), e))?;
+        inspect_candidate_file_with_limit(
+            canonical_approved_root,
+            file,
+            &canonical_path,
+            max_file_bytes,
+        )?;
     }
     Ok(())
 }
 
+fn inspect_candidate_file_with_limit(
+    canonical_approved_root: &Path,
+    file: &Path,
+    canonical_path: &Path,
+    max_file_bytes: u64,
+) -> Result<fs::Metadata, String> {
+    reject_unsafe_canonical_ancestors(file, canonical_path, canonical_approved_root)?;
+    let meta =
+        fs::symlink_metadata(file).map_err(|e| format!("inspect '{}': {}", file.display(), e))?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(format!(
+            "'{}' is not a regular no-follow file",
+            file.display()
+        ));
+    }
+    if meta.len() > max_file_bytes {
+        return Err(format!(
+            "'{}' exceeds {} bytes",
+            file.display(),
+            max_file_bytes
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() > 1 {
+            return Err(format!(
+                "hard-linked file '{}' is not portable",
+                file.display()
+            ));
+        }
+    }
+    let relative = file
+        .strip_prefix(canonical_approved_root)
+        .map_err(|_| format!("'{}' escapes approved root", file.display()))?;
+    for component in relative.components() {
+        if let Component::Normal(name) = component {
+            let name = name
+                .to_str()
+                .ok_or_else(|| format!("non-UTF-8 path '{}'", file.display()))?;
+            if denied_file_name(name) {
+                return Err(format!(
+                    "credential/cache file '{}' is structurally excluded",
+                    file.display()
+                ));
+            }
+        }
+    }
+    Ok(meta)
+}
+
 fn validate_source_file(
     path: &Path,
-    canonical_project: &Path,
-    request: &CaptureRequest,
+    approved_roots: &[PathBuf],
     resource_id: &str,
     max_file_bytes: u64,
-) -> Result<(), String> {
+) -> Result<fs::Metadata, String> {
     let canonical_path = fs::canonicalize(path)
         .map_err(|e| format!("resolve source '{}': {}", path.display(), e))?;
-    let mut approved_roots = Vec::new();
-    if request.include_project_content {
-        approved_roots.push(canonical_project.to_path_buf());
-    }
-    for (provider, home) in &request.provider_homes {
-        approved_roots.push(canonical_existing_dir(home, &format!("{} home", provider))?);
-    }
     let Some(approved_root) = approved_roots
-        .into_iter()
+        .iter()
         .filter(|root| canonical_path.starts_with(root))
         .max_by_key(|root| root.components().count())
     else {
@@ -1974,7 +1987,7 @@ fn validate_source_file(
             path.display()
         ));
     };
-    inspect_candidate_files_with_limit(&approved_root, &[path.to_path_buf()], max_file_bytes)
+    inspect_candidate_file_with_limit(approved_root, path, &canonical_path, max_file_bytes)
 }
 
 fn validate_source_directory(
@@ -2118,6 +2131,15 @@ fn preflight_resource_tree(tree: &Path) -> Result<(), String> {
 fn reject_unsafe_ancestors(path: &Path, root: &Path) -> Result<(), String> {
     let canonical_path =
         fs::canonicalize(path).map_err(|e| format!("resolve '{}': {}", path.display(), e))?;
+    reject_unsafe_canonical_ancestors(path, &canonical_path, root)
+}
+
+/// Reuse the caller's canonical path, but inspect its components each time.
+fn reject_unsafe_canonical_ancestors(
+    path: &Path,
+    canonical_path: &Path,
+    root: &Path,
+) -> Result<(), String> {
     if !canonical_path.starts_with(root) {
         return Err(format!(
             "'{}' resolves outside '{}'",
@@ -2387,7 +2409,8 @@ fn is_executable_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::ProviderRegistry;
+    use crate::providers::codex::filter_codex_session_index_by_ids;
+    use crate::providers::AgentProviderRegistry;
     use std::io::Write;
 
     #[test]
@@ -2441,8 +2464,8 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
-    fn registry() -> &'static ProviderRegistry {
-        ProviderRegistry::production()
+    fn registry() -> &'static AgentProviderRegistry {
+        AgentProviderRegistry::production()
     }
 
     fn codex_key() -> domain::ProviderKey {
@@ -2608,10 +2631,10 @@ mod tests {
             .any(|warning| warning.contains("ignored Claude session")));
 
         let project_content = discovery.project_content_inventory();
-        assert!(project_content.resources.iter().all(|resource| matches!(
-            resource.kind,
-            CaptureResourceKind::ProjectContentFile | CaptureResourceKind::ProjectContentDirectory
-        )));
+        assert!(project_content
+            .resources
+            .iter()
+            .all(|resource| is_project_content_kind(&resource.kind)));
         assert!(project_content
             .resources
             .iter()
@@ -2785,7 +2808,7 @@ mod tests {
         let sessions = inventory
             .resources
             .iter()
-            .filter(|resource| resource.kind == CaptureResourceKind::Conversation)
+            .filter(|resource| resource.kind == contracts::conversation())
             .map(|resource| resource.resource_id.as_str())
             .collect::<BTreeSet<_>>();
 
@@ -2893,7 +2916,7 @@ mod tests {
         let conversation_ids = inventory
             .resources
             .iter()
-            .filter(|resource| resource.kind == CaptureResourceKind::Conversation)
+            .filter(|resource| resource.kind == contracts::conversation())
             .map(|resource| resource.resource_id.as_str())
             .collect::<BTreeSet<_>>();
 
@@ -3012,13 +3035,7 @@ mod tests {
             let by_path = inventory
                 .resources
                 .iter()
-                .filter(|resource| {
-                    matches!(
-                        resource.kind,
-                        CaptureResourceKind::ProjectContentFile
-                            | CaptureResourceKind::ProjectContentDirectory
-                    )
-                })
+                .filter(|resource| is_project_content_kind(&resource.kind))
                 .map(|resource| {
                     (
                         resource.logical_paths[0].clone(),
@@ -3077,13 +3094,7 @@ mod tests {
         let generic = inventory
             .resources
             .iter()
-            .filter(|resource| {
-                matches!(
-                    resource.kind,
-                    CaptureResourceKind::ProjectContentFile
-                        | CaptureResourceKind::ProjectContentDirectory
-                )
-            })
+            .filter(|resource| is_project_content_kind(&resource.kind))
             .collect::<Vec<_>>();
         let paths = generic
             .iter()
@@ -3210,18 +3221,18 @@ mod tests {
                         DiscoveredResource {
                             descriptor: ResourceCandidate {
                                 resource_id: id.to_string(),
-                                kind: CaptureResourceKind::ProviderState,
+                                kind: contracts::provider_state(),
                                 provider: None,
                                 provider_resource_type: None,
                                 display_name: id.to_string(),
-                                apply_policy: CaptureApplyPolicy::SafeFile,
+                                apply_policy: contracts::safe_file(),
                                 selected_by_default: true,
                                 blocked_reason: None,
                                 logical_paths: files
                                     .iter()
                                     .map(|file| file.logical_path.clone())
                                     .collect(),
-                                metadata: BTreeMap::new(),
+                                project_content: None,
                             },
                             files,
                             conversation: None,
@@ -3263,6 +3274,191 @@ mod tests {
     }
 
     #[test]
+    fn conversation_capture_failure_is_isolated_per_resource() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("repo");
+        let codex = temp.path().join("codex");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&codex).unwrap();
+        let cwd = serde_json::to_string(project.to_str().unwrap()).unwrap();
+        for thread in ["thread-alpha", "thread-beta"] {
+            write(
+                &codex.join(format!("sessions/2026/07/17/rollout-{thread}.jsonl")),
+                format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{thread}\",\"cwd\":{cwd}}}}}\n")
+                    .as_bytes(),
+            );
+        }
+        write(&project.join("notes.md"), b"project notes");
+        let request = CaptureRequest {
+            project_root: project.clone(),
+            provider_homes: BTreeMap::from([(codex_key(), codex.clone())]),
+            include_project_content: true,
+            excluded_content_roots: Vec::new(),
+        };
+        let discovery = discover_full(registry(), &request).unwrap();
+        let resource_id_of = |session: &str| {
+            discovery
+                .resources
+                .values()
+                .find(|resource| {
+                    resource
+                        .conversation
+                        .as_ref()
+                        .is_some_and(|conversation| conversation.provider_session_id == session)
+                })
+                .map(|resource| resource.descriptor.resource_id.clone())
+                .unwrap_or_else(|| panic!("{session} was not discovered"))
+        };
+        let alpha = resource_id_of("thread-alpha");
+        let beta = resource_id_of("thread-beta");
+        let all_ids: BTreeSet<String> = discovery
+            .project_inventory()
+            .resources
+            .iter()
+            .map(|resource| resource.resource_id.clone())
+            .collect();
+        let unreadable = |path: &Path| {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+        };
+        let readable = |path: &Path| {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+        };
+
+        // Beta's rollout becomes unreadable after discovery listed it: its
+        // failure is recorded against beta alone.
+        let beta_path = codex.join("sessions/2026/07/17/rollout-thread-beta.jsonl");
+        unreadable(&beta_path);
+        let captured = capture_from_discovery(registry(), &request, &discovery, &all_ids);
+        readable(&beta_path);
+        let captured = captured.unwrap();
+        assert!(captured.conversations.contains_key(&alpha));
+        assert!(!captured.conversations.contains_key(&beta));
+        assert_eq!(captured.failed_conversations.len(), 1);
+        let message = &captured.failed_conversations[&beta];
+        assert!(message.contains("read"), "{message}");
+        assert!(captured.files.values().all(|file| file.resource_id != beta));
+
+        // A bundle requirement that cannot be read still fails the capture.
+        let notes_path = project.join("notes.md");
+        unreadable(&notes_path);
+        let error = capture_from_discovery(registry(), &request, &discovery, &all_ids);
+        readable(&notes_path);
+        let error = error.unwrap_err();
+        assert!(error.contains("read"), "{error}");
+    }
+
+    #[test]
+    fn capture_preflight_enforces_project_content_opt_in() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut request, home) = pipeline_fixture(temp.path());
+        let discovery = synthetic_discovery(vec![(
+            "r0",
+            vec![
+                source_file(&home, "provider.txt", b"provider", false),
+                source_file(&request.project_root, "notes.txt", b"notes", true),
+            ],
+        )]);
+        let selected = BTreeSet::from(["r0".to_string()]);
+        let error =
+            capture_from_discovery(registry(), &request, &discovery, &selected).unwrap_err();
+        assert!(error.contains("outside approved roots"), "{error}");
+
+        request.include_project_content = true;
+        let captured = capture_from_discovery(registry(), &request, &discovery, &selected).unwrap();
+        assert_eq!(captured.files.len(), 2);
+        let source_meta = fs::symlink_metadata(request.project_root.join("notes.txt")).unwrap();
+        let notes = &captured.files["state/codex/notes.txt"];
+        assert_eq!(notes.bytes.as_bytes(), b"notes");
+        assert_eq!(notes.source_mtime, modified_secs(&source_meta));
+        assert_eq!(notes.mode, safe_mode(&source_meta));
+    }
+
+    #[test]
+    fn source_file_validation_preserves_limits_and_root_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let (request, home) = pipeline_fixture(temp.path());
+        let roots = vec![home.clone()];
+        let file = home.join("notes.txt");
+        write(&file, b"notes");
+        assert_eq!(
+            validate_source_file(&file, &roots, "r0", 5).unwrap().len(),
+            5
+        );
+        let error = validate_source_file(&file, &roots, "r0", 4).unwrap_err();
+        assert!(error.contains("exceeds 4 bytes"), "{error}");
+
+        let outside = request.project_root.join("outside.txt");
+        write(&outside, b"outside");
+        let credential = home.join("auth.json");
+        write(&credential, b"{}");
+        for (path, reason) in [
+            (&outside, "outside approved roots"),
+            (&home, "not a regular no-follow file"),
+            (&credential, "structurally excluded"),
+        ] {
+            let error = validate_source_file(path, &roots, "r0", MAX_FILE_BYTES).unwrap_err();
+            assert!(error.contains(reason), "{error}");
+        }
+
+        let nested_root = home.join("cache");
+        let nested_file = nested_root.join("notes.txt");
+        write(&nested_file, b"nested");
+        let error = validate_source_file(&nested_file, &roots, "r0", 6).unwrap_err();
+        assert!(error.contains("structurally excluded"), "{error}");
+        let roots = vec![home, nested_root];
+        assert_eq!(
+            validate_source_file(&nested_file, &roots, "r0", 6)
+                .unwrap()
+                .len(),
+            6
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_file_validation_rejects_links_after_root_resolution() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let (request, home) = pipeline_fixture(temp.path());
+        let roots = vec![home.clone()];
+        let target = home.join("target.txt");
+        write(&target, b"target");
+        let leaf_link = home.join("leaf-link.txt");
+        symlink(&target, &leaf_link).unwrap();
+        let error = validate_source_file(&leaf_link, &roots, "r0", MAX_FILE_BYTES).unwrap_err();
+        assert!(error.contains("not a regular no-follow file"), "{error}");
+
+        write(&request.project_root.join("outside.txt"), b"outside");
+        let outside_link = home.join("outside");
+        symlink(&request.project_root, &outside_link).unwrap();
+        let error = validate_source_file(
+            &outside_link.join("outside.txt"),
+            &roots,
+            "r0",
+            MAX_FILE_BYTES,
+        )
+        .unwrap_err();
+        assert!(error.contains("outside approved roots"), "{error}");
+
+        let hard_link = home.join("hard-link.txt");
+        fs::hard_link(&target, &hard_link).unwrap();
+        let error = validate_source_file(&hard_link, &roots, "r0", MAX_FILE_BYTES).unwrap_err();
+        assert!(error.contains("hard-linked file"), "{error}");
+
+        let nested_file = home.join("nested/notes.txt");
+        write(&nested_file, b"notes");
+        let canonical_file = fs::canonicalize(&nested_file).unwrap();
+        fs::rename(home.join("nested"), home.join("moved")).unwrap();
+        symlink(home.join("moved"), home.join("nested")).unwrap();
+        let error =
+            inspect_candidate_file_with_limit(&home, &nested_file, &canonical_file, MAX_FILE_BYTES)
+                .unwrap_err();
+        assert!(error.contains("symlink traversal"), "{error}");
+    }
+
+    #[test]
     fn capture_worker_outcome_preserves_errors_and_rejects_missing_slots() {
         let mut failed = std::sync::OnceLock::new();
         assert!(failed
@@ -3282,6 +3478,37 @@ mod tests {
                 .as_deref(),
             Some("resource capture worker produced no outcome for resource 'resource-b'")
         );
+    }
+
+    #[test]
+    fn combined_capture_facts_match_separate_analysis_and_summary() {
+        let samples = [
+            ("codex", concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread\",\"cwd\":\"/tmp/project\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Explain the code\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"m1\",\"content\":\"hello\"}}\n",
+            )),
+            ("claude", concat!(
+                "{\"type\":\"user\",\"sessionId\":\"thread\",\"cwd\":\"/tmp/project\",\"uuid\":\"m1\",\"parentUuid\":null,\"message\":{\"role\":\"user\",\"content\":\"Explain the code\"}}\n",
+                "{\"type\":\"custom-title\",\"customTitle\":\"Custom title\"}\n",
+            )),
+        ];
+        for (provider, source) in samples {
+            let adapter = registry()
+                .require(&domain::ProviderKey::parse(provider).unwrap())
+                .unwrap();
+            for bytes in [
+                source.as_bytes().to_vec(),
+                format!("broken\n{source}").into_bytes(),
+                format!("{source}broken\n{source}").into_bytes(),
+                source.replace('\n', "\r\n").into_bytes(),
+                Vec::new(),
+            ] {
+                let (analysis, summary) = adapter.analyze_and_summarize(&bytes);
+                assert_eq!(analysis, adapter.analyze(&bytes), "{provider}");
+                assert_eq!(summary, adapter.summarize_bytes(&bytes), "{provider}");
+            }
+        }
     }
 
     #[test]

@@ -4,49 +4,145 @@ import { errorMessage } from "../../storageError";
 import type { ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 import { isPullReviewStatus } from "../sync-review/pullReviewStatus";
 import type {
+  CatalogCapabilityDescriptor,
+  CatalogCoordinate,
+  CatalogProfile,
   CatalogPullAction,
-  CatalogProviderKey,
-  CatalogResourceKind,
-  CatalogScope,
+  CatalogScopeDto,
   CatalogScopePullItem,
   CatalogScopeRow,
-  LocalCatalogProfile,
+  CatalogScopeView,
+  CatalogStorageRepository,
+  CatalogStorageRepositoryView,
 } from "./types";
 
-export function providerLabel(provider: CatalogProviderKey): string {
-  return provider === "codex" ? "Codex" : "Claude";
-}
-
-/** The four addable resource kinds. Pet v1 and v2 are distinct rows because
- * the portable format is the discriminator; there is no conversion — so they
- * share one glyph and are told apart by their label.
- *
- * Each kind uses a semantic glyph. `ProviderMark` identifies the provider
- * separately on the same row. */
-export const CATALOG_KINDS: Array<{
-  kind: CatalogResourceKind;
-  label: string;
-  plural: string;
+/** What the frontend draws for one capability: the glyph its rows wear, and
+ * whether its cards open the artwork column — a preview tile filled inline
+ * for local captures and lazily for stored-only rows. */
+export interface CatalogGlyph {
   icon: IconName;
-}> = [
-  { kind: "agent_skill", label: "Skill", plural: "Skills", icon: "lightbulb" },
-  { kind: "plugin_install_intent", label: "Plugin", plural: "Plugins", icon: "puzzle" },
-  { kind: "codex_pet_v1", label: "Pet v1", plural: "Pets v1", icon: "paw" },
-  { kind: "codex_pet_v2", label: "Pet v2", plural: "Pets v2", icon: "paw" },
-];
-
-export function catalogKindMeta(kind: CatalogResourceKind) {
-  return CATALOG_KINDS.find((item) => item.kind === kind) ?? CATALOG_KINDS[0];
+  artwork: boolean;
 }
 
-/** "Skills · Codex home" — the row label always derives from the kind plus the
- * profile's current name, so renaming a profile renames its rows. */
+/** The frontend's vocabulary for the backend's presentation hints, the way
+ * `iconNameFromHint` is for storage hints and `ProviderMark` for provider
+ * marks. Each hint is a semantic glyph — `ProviderMark` identifies the
+ * provider separately on the same row — so no kind borrows `file`, `tool`,
+ * or a provider mark. A hint outside the vocabulary, a capability this build
+ * has never heard of, wears the Catalog glyph and opens no artwork. */
+const CATALOG_GLYPHS: Record<string, CatalogGlyph> = {
+  skill: { icon: "lightbulb", artwork: false },
+  plugin: { icon: "puzzle", artwork: false },
+  pet: { icon: "paw", artwork: true },
+  /* The second pet format is its own row beside the first, so it wears its
+     own mark — a face beside the print — rather than a second paw the eye
+     cannot tell from the first. */
+  "pet-v2": { icon: "cat", artwork: true },
+};
+const UNKNOWN_GLYPH: CatalogGlyph = { icon: "catalog", artwork: false };
+
+export function catalogPresentation(
+  capability: Pick<CatalogCapabilityDescriptor, "presentation"> | null,
+): CatalogGlyph {
+  const hint = capability?.presentation.icon;
+  return (hint && CATALOG_GLYPHS[hint]) || UNKNOWN_GLYPH;
+}
+
+export function sameCatalogCoordinate(left: CatalogCoordinate, right: CatalogCoordinate): boolean {
+  return left.provider === right.provider
+    && left.resource_kind === right.resource_kind
+    && left.format === right.format
+    && left.format_version === right.format_version;
+}
+
+/** The capability this build registers for a coordinate, or null: the
+ * backend's registry is the authority, and this is only the lookup. */
+export function catalogCapabilityFor(
+  capabilities: readonly CatalogCapabilityDescriptor[],
+  coordinate: CatalogCoordinate,
+): CatalogCapabilityDescriptor | null {
+  return capabilities.find((candidate) => sameCatalogCoordinate(candidate, coordinate)) ?? null;
+}
+
+/** Scope rows joined to the capabilities they register, in the order the
+ * backend listed the rows. */
+export function catalogScopeViews(
+  scopes: readonly CatalogScopeDto[],
+  capabilities: readonly CatalogCapabilityDescriptor[],
+): CatalogScopeView[] {
+  return scopes.map((scope) => ({
+    ...scope,
+    capability: catalogCapabilityFor(capabilities, scope.scope),
+  }));
+}
+
+export function catalogStorageRepositoryViews(
+  repositories: readonly CatalogStorageRepository[],
+  capabilities: readonly CatalogCapabilityDescriptor[],
+): CatalogStorageRepositoryView[] {
+  return repositories.map((repository) => ({
+    ...repository,
+    capability: catalogCapabilityFor(capabilities, repository),
+  }));
+}
+
+/** "Skills · Codex home" — the row label is the capability's label plus the
+ * profile's current name, so renaming a profile renames its rows. An
+ * unavailable row carries its raw coordinate as the label. */
 export function catalogScopeLabel(
-  scope: CatalogScope,
-  profile: Pick<LocalCatalogProfile, "display_name"> | null,
+  scope: Pick<CatalogScopeDto, "label"> & { profile: Pick<CatalogProfile, "display_name"> },
 ): string {
-  const meta = catalogKindMeta(scope.resource_kind);
-  return profile ? `${meta.plural} · ${profile.display_name}` : meta.plural;
+  return `${scope.label} · ${scope.profile.display_name}`;
+}
+
+export function catalogScopeIcon(scope: Pick<CatalogScopeView, "capability">): IconName {
+  return catalogPresentation(scope.capability).icon;
+}
+
+export function catalogNoun(pluralLabel: string, singularLabel: string, count: number): string {
+  return (count === 1 ? singularLabel : pluralLabel).toLowerCase();
+}
+
+/** One radio of the Add chooser: a portable shape — kind, format, and
+ * version — with every provider the backend registers it for, in the
+ * backend's own order. Descriptors group by shape so the chooser reads
+ * "Skills · Codex and Claude" the way the menu rows do, and the provider is
+ * the next choice rather than a repeat of the kind. */
+export interface CatalogAddChoice {
+  key: string;
+  label: string;
+  providers: CatalogCapabilityDescriptor[];
+}
+
+export function catalogAddChoices(
+  capabilities: readonly CatalogCapabilityDescriptor[],
+): CatalogAddChoice[] {
+  const choices: CatalogAddChoice[] = [];
+  for (const capability of capabilities) {
+    const key = `${capability.resource_kind}/${capability.format}@${capability.format_version}`;
+    const existing = choices.find((choice) => choice.key === key);
+    if (existing) existing.providers.push(capability);
+    else choices.push({ key, label: capability.label, providers: [capability] });
+  }
+  return choices;
+}
+
+/** The doors of an empty Catalog: the Add chooser's choices, in its order,
+ * each wearing the glyph of the shape it names. The sidebar's empty pane and
+ * the index page draw the same list. */
+export type CatalogDoor = CatalogAddChoice & { icon: IconName };
+
+export function catalogDoors(capabilities: readonly CatalogCapabilityDescriptor[]): CatalogDoor[] {
+  return catalogAddChoices(capabilities).map((choice) => ({
+    ...choice,
+    icon: catalogPresentation(choice.providers[0]).icon,
+  }));
+}
+
+/** "Codex only", "Codex and Claude" — which providers offer one shape. */
+export function catalogProviderList(labels: readonly string[]): string {
+  if (labels.length === 1) return `${labels[0]} only`;
+  return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
 }
 
 const CATALOG_SCOPE_LINKS_STORAGES = "still links storages";
@@ -164,20 +260,17 @@ export function rowStamp(row: CatalogScopeRow): { seconds: number; detail: strin
   };
 }
 
+/** The sentence a Pull action reduces to. The four kinds are the protocol's
+ * own outcomes, the same for every format. */
 export function actionLabel(action: CatalogPullAction): string {
   switch (action.kind.kind) {
-    case "preserve_skill_as_copy_and_overwrite":
-    case "preserve_pet_as_copy_and_overwrite":
+    case "preserve_as_copy_and_overwrite":
       return `Keep local as ${action.kind.copy.copy_name} and overwrite`;
-    case "overwrite_plugin_with_storage":
-    case "overwrite_skill_with_storage":
-    case "overwrite_pet_with_storage":
+    case "overwrite_with_storage":
       return "Overwrite local content";
-    case "install_plugin":
-    case "install_skill":
-    case "install_pet":
+    case "install":
       return "Install stored content";
-    default:
+    case "update":
       return "Update from storage";
   }
 }

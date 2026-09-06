@@ -3,7 +3,7 @@
 use crate::providers::traits::{MaterializationTargetRequest, PlannedProviderTarget};
 use chrono::TimeZone as _;
 use chrono::Utc;
-use mallard_domain::{validate_absolute_clean_path, ConversationFileRole};
+use mallard_domain::{validate_absolute_clean_path, validate_title, ConversationFileRole};
 
 pub(super) fn materialization_targets(
     request: &MaterializationTargetRequest<'_>,
@@ -70,11 +70,7 @@ pub(super) fn validate_codex_index_fragment(bytes: &[u8], thread_id: &str) -> Re
             let named = object
                 .get("thread_name")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|name| {
-                    !name.trim().is_empty()
-                        && name.len() <= 1024
-                        && !name.chars().any(char::is_control)
-                });
+                .is_some_and(|name| validate_title("Codex thread name", name).is_ok());
             let updated = object
                 .get("updated_at")
                 .and_then(serde_json::Value::as_str)
@@ -101,6 +97,50 @@ pub(super) fn validate_codex_index_fragment(bytes: &[u8], thread_id: &str) -> Re
 #[cfg(test)]
 mod tests {
     use super::validate_codex_index_fragment;
+
+    #[test]
+    fn accepts_control_characters_in_destination_titles() {
+        for title in [
+            "Imported\u{0002}\u{0013}",
+            "\0\u{001b}\r\n\t\u{007f}\u{0085}\u{009f}",
+            " \t\n",
+        ] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "id": "destination",
+                "thread_name": title,
+                "updated_at": "2026-07-31T22:00:03.000000Z",
+            }))
+            .unwrap();
+
+            validate_codex_index_fragment(&bytes, "destination").unwrap();
+            let decoded: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(decoded["thread_name"].as_str(), Some(title));
+        }
+    }
+
+    #[test]
+    fn destination_titles_remain_bounded_and_thread_ids_reject_controls() {
+        for title in [String::new(), "a".repeat(1_025), "é".repeat(513)] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "id": "destination",
+                "thread_name": title,
+                "updated_at": "2026-07-31T22:00:03.000000Z",
+            }))
+            .unwrap();
+            assert!(validate_codex_index_fragment(&bytes, "destination").is_err());
+        }
+
+        let thread_id = "destination\u{0002}";
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "id": thread_id,
+            "thread_name": "Imported",
+            "updated_at": "2026-07-31T22:00:03.000000Z",
+        }))
+        .unwrap();
+        assert!(validate_codex_index_fragment(&bytes, thread_id)
+            .unwrap_err()
+            .contains("invalid thread id"));
+    }
 
     #[test]
     fn accepts_repeated_pre_existing_ids_in_append_only_index() {

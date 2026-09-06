@@ -1,31 +1,32 @@
 import { invoke } from "../../ipc";
 import type {
   CatalogActionResult,
-  CatalogCapability,
-  CatalogProviderKey,
+  CatalogCapabilityDescriptor,
+  CatalogCoordinate,
+  CatalogProfile,
   CatalogResourceForkPlan,
-  CatalogResourceKind,
+  CatalogScopeDto,
   CatalogScopeLinkOutcome,
   CatalogScopePullOutcome,
   CatalogScopePullPlan,
   CatalogScopePushOutcome,
   CatalogScopePushPlan,
   CatalogScopeResources,
-  CatalogScopeView,
   CatalogStorageRepository,
-  LocalCatalogProfile,
 } from "./types";
 
 export const storageCatalogApi = {
-  listCapabilities: () => invoke<CatalogCapability[]>("list_catalog_capabilities"),
+  /** Every capability this build registers, in the backend's display order.
+   * The frontend joins scopes and repositories to these by coordinate. */
+  listCapabilities: () =>
+    invoke<CatalogCapabilityDescriptor[]>("list_catalog_capabilities"),
 
-  listProfiles: () =>
-    invoke<LocalCatalogProfile[]>("list_catalog_resource_profiles"),
+  listProfiles: () => invoke<CatalogProfile[]>("list_catalog_resource_profiles"),
 
   /** Saving a home derives its name from the folder — setup never asks for
    * one. Re-saving an existing home returns that profile. */
-  saveProfile: (provider: CatalogProviderKey, path: string) =>
-    invoke<LocalCatalogProfile>("save_catalog_resource_profile", {
+  saveProfile: (provider: string, path: string) =>
+    invoke<CatalogProfile>("save_catalog_resource_profile", {
       provider,
       path,
     }),
@@ -33,7 +34,7 @@ export const storageCatalogApi = {
   /** Renames the profile everywhere it appears — every Catalog row using this
    * home relabels at once. */
   renameProfile: (profileId: string, displayName: string, expectedRevision: number) =>
-    invoke<LocalCatalogProfile>("rename_catalog_resource_profile", {
+    invoke<CatalogProfile>("rename_catalog_resource_profile", {
       profileId,
       displayName,
       expectedRevision,
@@ -48,19 +49,17 @@ export const storageCatalogApi = {
   openProfileTerminal: (profileId: string) =>
     invoke<void>("open_catalog_profile_in_terminal", { profileId }),
 
-  listScopes: () => invoke<CatalogScopeView[]>("list_catalog_scopes"),
+  listScopes: () => invoke<CatalogScopeDto[]>("list_catalog_scopes"),
 
-  /** Adding a row records a scope and nothing else — no inventory, no
-   * provider CLI, no storage traffic. */
-  createScope: (
-    provider: CatalogProviderKey,
-    profileId: string,
-    resourceKind: CatalogResourceKind,
-  ) =>
-    invoke<CatalogScopeView>("create_catalog_scope", {
-      provider,
+  /** Adding a row records a scope at one coordinate and nothing else — no
+   * inventory, no provider CLI, no storage traffic. */
+  createScope: (coordinate: CatalogCoordinate, profileId: string) =>
+    invoke<CatalogScopeDto>("create_catalog_scope", {
+      provider: coordinate.provider,
       profileId,
-      resourceKind,
+      resourceKind: coordinate.resource_kind,
+      format: coordinate.format,
+      formatVersion: coordinate.format_version,
     }),
 
   deleteScope: (scopeId: string, expectedRevision: number) =>
@@ -72,22 +71,23 @@ export const storageCatalogApi = {
       storageId: storageId ?? null,
     }),
 
-  /** The Catalog's kind repositories in one storage — derived ids, one head
-   * read each, refusal rows for anything present but unreadable. Rendered by
-   * the storage page beside the project repositories. */
+  /** The Catalog's repositories in one storage — derived ids, one head read
+   * each, refusal rows for anything present but unreadable. Rendered by the
+   * storage page beside the project repositories. */
   listStorageRepositories: (storageId: string) =>
     invoke<CatalogStorageRepository[]>("list_catalog_storage_repositories", {
       storageId,
     }),
 
-  /** The preview for a stored-only pet row, fetched from the storage on
-   * demand and cached by the atlas digest. Called lazily per card — never in
-   * the list path — and a failure just leaves the glyph tile. */
-  getPetPreview: (scopeId: string, storageId: string, resourceId: string) =>
-    invoke<string>("get_catalog_pet_preview", { scopeId, storageId, resourceId }),
+  /** The preview for a stored-only row, fetched from the storage on demand
+   * and cached by digest; the codec of the row's format draws it. Called
+   * lazily per card — never in the list path — and a failure just leaves the
+   * glyph tile. */
+  getPreview: (scopeId: string, storageId: string, resourceId: string) =>
+    invoke<string>("get_catalog_resource_preview", { scopeId, storageId, resourceId }),
 
-  /** The scope links to the storage once; every resource of this kind syncs
-   * through that one pairing. Linking is configuration only. */
+  /** The scope links to the storage once; every resource of this coordinate
+   * syncs through that one pairing. Linking is configuration only. */
   linkScopeStorage: (scopeId: string, storageId: string) =>
     invoke<CatalogScopeLinkOutcome>("link_catalog_scope_storage", {
       scopeId,

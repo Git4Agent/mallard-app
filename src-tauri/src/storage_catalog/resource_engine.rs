@@ -1,59 +1,44 @@
 //! Immutable/CAS storage protocol for draft-linked Library resources.
 //!
-//! Each repository holds every resource of one (provider, kind) pair as one
-//! set manifest. The flat `.mallard/v1/catalog` namespace is deliberately
+//! Each repository holds every resource of one coordinate as one set
+//! manifest. The flat `.mallard/v1/catalog` namespace is deliberately
 //! absent from this module, and so is bucket listing: a repository is always
 //! addressed by its derived id and read as one head plus one manifest.
 
 use bytes::Bytes;
-use mallard_domain::{StorageConfig, StorageKind};
+use mallard_domain::StorageConfig;
 use mallard_infrastructure::storage_core::{
     ensure_storage_marker, library_object_key, CasExpectation, CasOutcome, ExpectedObject,
     ImmutablePutOutcome, ObjectStore, StageOutcome, HEAD_FILE, TAG_FILE,
 };
+use mallard_infrastructure::storage_providers::StorageProviderRegistry;
 use std::collections::BTreeMap;
 
 use super::domain::{
     library_commit_relative_key, library_manifest_relative_key, sha256_hex, CatalogCommitId,
-    CatalogResource, CatalogResourceId, CatalogResourceRepositoryId, LibraryHeadCoordinate,
-    LibraryResourceCommit, LibraryResourceHead, LibraryResourceManifest, LibraryResourceTag,
-    PortableCatalogOrigin, PublishedResourceEntry, CATALOG_SCHEMA, MAX_REVISION_PAYLOAD_BYTES,
+    CatalogResourceId, CatalogResourceRepositoryId, LibraryHeadCoordinate, LibraryResourceCommit,
+    LibraryResourceHead, LibraryResourceManifest, LibraryResourceTag, PortableCatalogOrigin,
+    PublishedResourceEntry, CATALOG_SCHEMA, MAX_REVISION_PAYLOAD_BYTES,
 };
 
 const MAX_TAG_BYTES: u64 = 64 * 1024;
 const MAX_HEAD_BYTES: u64 = 64 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
 
-fn referenced_payloads(resource: &CatalogResource) -> BTreeMap<String, u64> {
-    match resource {
-        CatalogResource::AgentSkill(skill) => skill
-            .files
-            .values()
-            .map(|entry| (entry.sha256.clone(), entry.size))
-            .collect(),
-        CatalogResource::CodexPetV1(pet) | CatalogResource::CodexPetV2(pet) => BTreeMap::from([(
-            pet.descriptor.atlas.sha256.clone(),
-            pet.descriptor.atlas.size,
-        )]),
-        CatalogResource::PluginInstallIntent(_) => BTreeMap::new(),
-    }
-}
-
-pub fn storage_identity_for_config(config: &StorageConfig) -> String {
-    match config.kind {
-        StorageKind::Local => {
-            super::domain::storage_connection_identity_sha256("local", &[config.local_dir.as_str()])
-        }
-        StorageKind::S3 => super::domain::storage_connection_identity_sha256(
-            "s3",
-            &[
-                config.bucket.as_str(),
-                config.account_id.as_str(),
-                config.s3_endpoint.as_str(),
-                config.region.as_str(),
-            ],
-        ),
-    }
+/// The continuity identity of one storage: the provider key hashed with the
+/// adapter's canonical coordinates. Never a credential or display name.
+pub fn storage_identity_for_config(config: &StorageConfig) -> Result<String, String> {
+    config.validate()?;
+    let registry = StorageProviderRegistry::production();
+    let adapter = registry.require(&config.provider, config.provider_config.version)?;
+    adapter
+        .validate_config(&config.provider_config)
+        .map_err(|error| error.to_string())?;
+    let coordinates = adapter.continuity_coordinates(&config.provider_config)?;
+    Ok(super::domain::storage_connection_identity_sha256(
+        config.provider.as_str(),
+        &coordinates.iter().map(String::as_str).collect::<Vec<_>>(),
+    ))
 }
 
 pub fn head_coordinate(
@@ -274,12 +259,12 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
             let previous_contents: BTreeMap<_, _> = previous
                 .resources
                 .iter()
-                .map(|(id, entry)| (id.clone(), entry.resource.content_sha256().to_string()))
+                .map(|(id, entry)| (id.clone(), entry.resource.content_sha256.clone()))
                 .collect();
             let requested_contents: BTreeMap<_, _> = request
                 .resources
                 .iter()
-                .map(|(id, entry)| (id.clone(), entry.resource.content_sha256().to_string()))
+                .map(|(id, entry)| (id.clone(), entry.resource.content_sha256.clone()))
                 .collect();
             if previous_contents == requested_contents {
                 return Ok(PublishedLibraryResource {
@@ -292,7 +277,7 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
 
         let mut referenced: BTreeMap<String, u64> = BTreeMap::new();
         for entry in request.resources.values() {
-            for (sha256, size) in referenced_payloads(&entry.resource) {
+            for (sha256, size) in entry.resource.referenced_payloads() {
                 if let Some(existing) = referenced.insert(sha256.clone(), size) {
                     if existing != size {
                         return Err(
@@ -469,58 +454,63 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::storage_catalog::domain::{
-        CatalogCapturedWith, CatalogResourceKindTag, GitMarketplaceSource,
-        PluginInstallIntentDescriptor, PluginInstallIntentResource, PluginResolutionPolicy,
-        PortablePluginSource, ProviderKey,
+        CatalogCapturedWith, CatalogCoordinate, CatalogResourceEnvelope, ProviderKey,
+    };
+    use crate::storage_catalog::plugin_intent::{
+        GitMarketplaceSource, PluginInstallIntent, PluginInstallIntentDescriptor,
+        PluginInstallIntentIdentity, PluginResolutionPolicy, PortablePluginSource,
     };
 
-    fn plugin(plugin_id: &str, git_ref: &str) -> CatalogResource {
-        let descriptor = PluginInstallIntentDescriptor {
-            provider: ProviderKey::Codex,
-            provider_native_namespace: "review-market".to_string(),
-            plugin_id: plugin_id.to_string(),
-            source: PortablePluginSource::ProviderMarketplace {
-                namespace: "review-market".to_string(),
-                git: Some(GitMarketplaceSource {
-                    location: "https://github.com/example/review-market".to_string(),
-                    git_ref: Some(git_ref.to_string()),
-                }),
+    fn codex() -> ProviderKey {
+        ProviderKey::parse("codex").unwrap()
+    }
+
+    fn plugin(plugin_id: &str, git_ref: &str) -> CatalogResourceEnvelope {
+        let (_, namespace) = plugin_id.split_once('@').unwrap();
+        PluginInstallIntent {
+            identity: PluginInstallIntentIdentity {
+                namespace: namespace.to_string(),
+                plugin_id: plugin_id.to_string(),
             },
-            resolution: PluginResolutionPolicy::ProviderResolved,
-        };
-        let mut resource = PluginInstallIntentResource {
-            descriptor,
-            content_sha256: "0".repeat(64),
-        };
-        resource.content_sha256 = resource.compute_content_sha256();
-        CatalogResource::PluginInstallIntent(resource)
+            descriptor: PluginInstallIntentDescriptor {
+                source: PortablePluginSource::ProviderMarketplace {
+                    namespace: namespace.to_string(),
+                    git: Some(GitMarketplaceSource {
+                        location: "https://github.com/example/review-market".to_string(),
+                        git_ref: Some(git_ref.to_string()),
+                    }),
+                },
+                resolution: PluginResolutionPolicy::ProviderResolved,
+            },
+        }
+        .envelope(&codex())
+        .unwrap()
+    }
+
+    fn plugin_coordinate() -> CatalogCoordinate {
+        PluginInstallIntent::coordinate(&codex())
     }
 
     fn plugin_repository() -> CatalogResourceRepositoryId {
-        CatalogResourceRepositoryId::for_kind(
-            ProviderKey::Codex,
-            CatalogResourceKindTag::PluginInstallIntent,
+        CatalogResourceRepositoryId::for_coordinate(&plugin_coordinate())
+    }
+
+    fn tag(coordinate: &CatalogCoordinate) -> LibraryResourceTag {
+        LibraryResourceTag::new(
+            coordinate,
+            CatalogResourceRepositoryId::for_coordinate(coordinate),
+            1,
         )
     }
 
-    fn tag(repository_id: &CatalogResourceRepositoryId) -> LibraryResourceTag {
-        LibraryResourceTag {
-            schema_version: CATALOG_SCHEMA,
-            repository_id: repository_id.clone(),
-            provider: ProviderKey::Codex,
-            resource_kind: CatalogResourceKindTag::PluginInstallIntent,
-            created_at: 1,
-        }
-    }
-
     fn set_of(
-        resources: &[CatalogResource],
+        resources: &[CatalogResourceEnvelope],
     ) -> BTreeMap<CatalogResourceId, PublishedResourceEntry> {
         resources
             .iter()
             .map(|resource| {
                 (
-                    resource.resource_id(),
+                    resource.resource_id.clone(),
                     PublishedResourceEntry {
                         resource: resource.clone(),
                         updated_at: 1,
@@ -530,16 +520,16 @@ mod tests {
             .collect()
     }
 
-    fn publish(
-        engine: &LibraryResourceEngine<LocalObjectStore>,
+    fn request(
         repository_id: &CatalogResourceRepositoryId,
+        tag: LibraryResourceTag,
         observed: Option<ObservedLibraryHead>,
-        resources: &[CatalogResource],
+        resources: &[CatalogResourceEnvelope],
         updated_at: u64,
-    ) -> Result<PublishedLibraryResource, String> {
-        engine.publish(PublishLibraryResourceRequest {
+    ) -> PublishLibraryResourceRequest {
+        PublishLibraryResourceRequest {
             repository_id: repository_id.clone(),
-            tag: tag(repository_id),
+            tag,
             observed,
             resources: set_of(resources),
             payloads: BTreeMap::new(),
@@ -552,24 +542,56 @@ mod tests {
                 origin_replica_token: "b".repeat(64),
             },
             updated_at,
-        })
+        }
+    }
+
+    fn publish(
+        engine: &LibraryResourceEngine<LocalObjectStore>,
+        observed: Option<ObservedLibraryHead>,
+        resources: &[CatalogResourceEnvelope],
+        updated_at: u64,
+    ) -> Result<PublishedLibraryResource, String> {
+        engine.publish(request(
+            &plugin_repository(),
+            tag(&plugin_coordinate()),
+            observed,
+            resources,
+            updated_at,
+        ))
     }
 
     #[test]
-    fn one_kind_repository_grows_its_set_and_rejects_a_stale_writer() {
+    fn storage_identity_rejects_a_provider_invalid_configuration() {
+        let temporary = tempdir().unwrap();
+        let mut config = mallard_infrastructure::storage_providers::local::local_storage_config(
+            mallard_domain::StorageId::parse("storage-invalid").unwrap(),
+            "Invalid",
+            &temporary.path().join("storage"),
+        );
+        config
+            .provider_config
+            .secrets
+            .insert(
+                mallard_domain::SecretKey::parse("unexpected").unwrap(),
+                mallard_domain::SecretValue::parse("secret-canary").unwrap(),
+            )
+            .unwrap();
+        assert!(config.validate().is_ok());
+
+        let error = storage_identity_for_config(&config).unwrap_err();
+
+        assert_eq!(error, "A local folder storage has no secrets.");
+        assert!(!error.contains("secret-canary"));
+    }
+
+    #[test]
+    fn one_coordinate_repository_grows_its_set_and_rejects_a_stale_writer() {
         let temporary = tempdir().unwrap();
         let store = LocalObjectStore::open(temporary.path()).unwrap();
         let engine = LibraryResourceEngine::new(store);
         let repository_id = plugin_repository();
         let first_resource = plugin("review@review-market", "main");
-        let first = publish(
-            &engine,
-            &repository_id,
-            None,
-            std::slice::from_ref(&first_resource),
-            1,
-        )
-        .unwrap();
+        let first = publish(&engine, None, std::slice::from_ref(&first_resource), 1).unwrap();
         assert_eq!(first.head.revision, 1);
         assert_eq!(
             engine
@@ -578,15 +600,16 @@ mod tests {
                 .unwrap()
                 .1
                 .resource_map(),
-            BTreeMap::from([(first_resource.resource_id(), first_resource.clone())])
+            BTreeMap::from([(first_resource.resource_id.clone(), first_resource.clone())])
         );
+        let (stored_tag, _) = engine.read_tag(&repository_id).unwrap().unwrap();
+        assert_eq!(stored_tag.coordinate(), plugin_coordinate());
 
         // The set grows: a second resource joins the first in one manifest.
         let stale = engine.read_head(&repository_id).unwrap().unwrap();
         let second_resource = plugin("tools@review-market", "main");
         let second = publish(
             &engine,
-            &repository_id,
             Some(stale.clone()),
             &[first_resource.clone(), second_resource.clone()],
             2,
@@ -598,7 +621,6 @@ mod tests {
         // A writer holding the superseded head is refused.
         let error = publish(
             &engine,
-            &repository_id,
             Some(stale),
             &[
                 first_resource,
@@ -625,51 +647,33 @@ mod tests {
         let temporary = tempdir().unwrap();
         let store = LocalObjectStore::open(temporary.path()).unwrap();
         let engine = LibraryResourceEngine::new(store);
-        let repository_id = plugin_repository();
         let resource = plugin("review@review-market", "main");
-        publish(
-            &engine,
-            &repository_id,
-            None,
-            std::slice::from_ref(&resource),
-            1,
-        )
-        .unwrap();
+        publish(&engine, None, std::slice::from_ref(&resource), 1).unwrap();
 
-        let observed = engine.read_head(&repository_id).unwrap();
-        let repeat = publish(&engine, &repository_id, observed, &[resource], 2).unwrap();
+        let observed = engine.read_head(&plugin_repository()).unwrap();
+        let repeat = publish(&engine, observed, &[resource], 2).unwrap();
         assert!(!repeat.published);
         assert_eq!(repeat.head.revision, 1);
     }
 
     #[test]
-    fn a_kind_repository_rejects_foreign_kinds() {
+    fn a_repository_rejects_foreign_coordinates() {
         let temporary = tempdir().unwrap();
         let store = LocalObjectStore::open(temporary.path()).unwrap();
         let engine = LibraryResourceEngine::new(store);
-        // A tag pinned to the skills repository cannot publish under the
-        // plugin repository id: the derivation check fails closed.
-        let skills_repository = CatalogResourceRepositoryId::for_kind(
-            ProviderKey::Codex,
-            CatalogResourceKindTag::AgentSkill,
-        );
+        let skills =
+            CatalogCoordinate::new("codex", "agent_skill", "agentskills.io.skill", 1).unwrap();
+        let skills_repository = CatalogResourceRepositoryId::for_coordinate(&skills);
+        // A tag pinned to the plugin repository cannot publish under the
+        // skills repository id: the derivation check fails closed.
         let error = engine
-            .publish(PublishLibraryResourceRequest {
-                repository_id: skills_repository.clone(),
-                tag: tag(&plugin_repository()),
-                observed: None,
-                resources: set_of(&[plugin("review@review-market", "main")]),
-                payloads: BTreeMap::new(),
-                captured_with: CatalogCapturedWith {
-                    app: "mallard".to_string(),
-                    version: "test".to_string(),
-                },
-                published_by_origin: PortableCatalogOrigin {
-                    origin_host_token: "a".repeat(64),
-                    origin_replica_token: "b".repeat(64),
-                },
-                updated_at: 1,
-            })
+            .publish(request(
+                &skills_repository,
+                tag(&plugin_coordinate()),
+                None,
+                &[plugin("review@review-market", "main")],
+                1,
+            ))
             .unwrap_err();
         assert!(
             error.contains("tag does not match its repository"),
@@ -680,31 +684,16 @@ mod tests {
         // skills repository's own valid tag: the manifest's homogeneity
         // validation refuses the set.
         let error = engine
-            .publish(PublishLibraryResourceRequest {
-                repository_id: skills_repository.clone(),
-                tag: LibraryResourceTag {
-                    schema_version: CATALOG_SCHEMA,
-                    repository_id: skills_repository,
-                    provider: ProviderKey::Codex,
-                    resource_kind: CatalogResourceKindTag::AgentSkill,
-                    created_at: 1,
-                },
-                observed: None,
-                resources: set_of(&[plugin("review@review-market", "main")]),
-                payloads: BTreeMap::new(),
-                captured_with: CatalogCapturedWith {
-                    app: "mallard".to_string(),
-                    version: "test".to_string(),
-                },
-                published_by_origin: PortableCatalogOrigin {
-                    origin_host_token: "a".repeat(64),
-                    origin_replica_token: "b".repeat(64),
-                },
-                updated_at: 1,
-            })
+            .publish(request(
+                &skills_repository,
+                tag(&skills),
+                None,
+                &[plugin("review@review-market", "main")],
+                1,
+            ))
             .unwrap_err();
         assert!(
-            error.contains("does not belong to this kind repository"),
+            error.contains("does not belong to this repository"),
             "{error}"
         );
     }

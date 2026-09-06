@@ -18,11 +18,10 @@
 //! operations is always visible to the second one.
 
 use super::service::LocalTailObservation;
-use mallard_domain::{
-    now_secs, LocalProjectId, ProviderKey, StorageId, TargetExpectation, ThreadId,
-};
+use mallard_domain::{now_secs, LocalProjectId, ProviderKey, StorageId, ThreadId};
 use mallard_infrastructure::persistence::write_json_atomic;
 use mallard_infrastructure::provider_capture::{self, CaptureRequest, Discovery, LocalSessionView};
+use mallard_infrastructure::providers::AgentProviderRegistry;
 use mallard_infrastructure::sync_metrics;
 #[cfg(not(test))]
 use notify::{Config, RecommendedWatcher, Watcher};
@@ -193,24 +192,6 @@ struct CachedObservation {
     observation: LocalTailObservation,
 }
 
-/// One candidate's cached byte pin: the review-time local-target digest
-/// for a push/pull candidate whose transcript the watcher proves
-/// unchanged. The pin freezes review-to-apply state, so serving a stale
-/// one can only make apply fail the stale-pin check. Advisory secret
-/// warnings surface whenever a candidate is actually captured — the first
-/// review, and any review after its transcript changed.
-struct CachedCandidatePin {
-    depends_on: Vec<PathBuf>,
-    expected_local_target: TargetExpectation,
-}
-
-/// One freshly captured candidate pin to retain.
-pub(crate) struct StoredCandidatePin {
-    pub(crate) resource_id: String,
-    pub(crate) depends_on: Vec<PathBuf>,
-    pub(crate) expected_local_target: TargetExpectation,
-}
-
 /// One reusable-observation lookup.
 pub(crate) struct ObservationQuery {
     pub(crate) thread_id: ThreadId,
@@ -370,7 +351,6 @@ struct ServiceInner {
     profiles: BTreeMap<PathBuf, ProfileWatch>,
     inventories: BTreeMap<(ProviderKey, PathBuf, LocalProjectId), CachedInventory>,
     observations: BTreeMap<ObservationKey, CachedObservation>,
-    candidate_pins: BTreeMap<(PathBuf, LocalProjectId, String), CachedCandidatePin>,
     /// Per state-root mirror of the on-disk observation cache, loaded
     /// lazily on first use and written through on every store.
     disk: BTreeMap<PathBuf, BTreeMap<ObservationKey, DiskObservationRecord>>,
@@ -451,12 +431,20 @@ fn canonical_event_path(path: &Path) -> PathBuf {
     }
 }
 
+/// The provider-home subdirectories the registered adapter declares as its
+/// session roots. An unregistered provider is not watched.
 fn session_root_names(provider: &ProviderKey) -> &'static [&'static str] {
-    match provider.as_str() {
-        "codex" => &["sessions", "archived_sessions"],
-        "claude" => &["projects", "file-history", "todos"],
-        _ => &[],
-    }
+    AgentProviderRegistry::production()
+        .get(provider)
+        .map(|adapter| adapter.watch_roots())
+        .unwrap_or(&[])
+}
+
+/// The adapter-declared file whose rewrite only invalidates display titles.
+fn session_title_index(provider: &ProviderKey) -> Option<&'static str> {
+    AgentProviderRegistry::production()
+        .get(provider)
+        .and_then(|adapter| adapter.session_title_index())
 }
 
 fn session_roots(provider: &ProviderKey, canonical_home: &Path) -> Vec<PathBuf> {
@@ -517,10 +505,10 @@ impl ProfileWatch {
         for delivered_path in &event.paths {
             let canonical_path = canonical_event_path(delivered_path);
             let path = canonical_path.as_path();
-            if self.provider.as_str() == "codex"
-                && path.file_name().and_then(|name| name.to_str()) == Some("session_index.jsonl")
-                && path.parent() == Some(self.canonical_home.as_path())
-            {
+            if session_title_index(&self.provider).is_some_and(|index| {
+                path.file_name().and_then(|name| name.to_str()) == Some(index)
+                    && path.parent() == Some(self.canonical_home.as_path())
+            }) {
                 self.titles_dirty = true;
                 continue;
             }
@@ -598,8 +586,6 @@ impl ServiceInner {
             .retain(|(_, home, _), _| home != canonical_home);
         self.observations
             .retain(|key, _| key.canonical_home != canonical_home);
-        self.candidate_pins
-            .retain(|(home, _, _), _| home != canonical_home);
     }
 
     /// Arm (or re-arm) the profile and drain its queue. Returns whether the
@@ -723,7 +709,7 @@ impl SessionWatchService {
     /// all reuse the same profile-scoped discovery.
     pub(crate) fn discovery_for(
         &self,
-        registry: &'static mallard_infrastructure::providers::ProviderRegistry,
+        registry: &'static mallard_infrastructure::providers::AgentProviderRegistry,
         local_project_id: &LocalProjectId,
         request: &CaptureRequest,
     ) -> Result<(Discovery, Vec<LocalSessionView>), String> {
@@ -793,9 +779,11 @@ impl SessionWatchService {
                 let mut stat_raced = false;
                 if let Some(cached) = inner.inventories.get_mut(&key) {
                     if cached.request == *request {
-                        if titles_dirty && provider.as_str() == "codex" {
+                        if titles_dirty && session_title_index(&provider).is_some() {
                             let mut discovery = cached.discovery.clone();
-                            provider_capture::refresh_codex_session_titles(&mut discovery, &home)?;
+                            AgentProviderRegistry::production()
+                                .require(&provider)?
+                                .refresh_session_titles(&mut discovery, &home)?;
                             cached.discovery = discovery;
                             cached.views = provider_capture::local_session_views(&cached.discovery);
                             refreshed_titles = true;
@@ -989,87 +977,15 @@ impl SessionWatchService {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.drop_profile_caches(&canonical_home);
         inner.profiles.remove(&canonical_home);
-    }
-
-    /// Serve every candidate pin the watcher proves clean; served
-    /// candidates skip review-time capture entirely.
-    pub(crate) fn take_reusable_candidate_pins(
-        &self,
-        provider: &ProviderKey,
-        canonical_home: &Path,
-        local_project_id: &LocalProjectId,
-        resource_ids: &BTreeSet<String>,
-    ) -> BTreeMap<String, TargetExpectation> {
-        let mut served = BTreeMap::new();
-        let Some(canonical_home) = canonical_home_of(canonical_home) else {
-            return served;
-        };
-        let canonical_home = canonical_home.as_path();
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if !inner.ensure_profile(provider, canonical_home) {
-            return served;
-        }
-        let Some(profile) = inner.profiles.get(canonical_home) else {
-            return served;
-        };
-        let dirty = profile.dirty_roots.clone();
-        for resource_id in resource_ids {
-            let key = (
-                canonical_home.to_path_buf(),
-                local_project_id.clone(),
-                resource_id.clone(),
-            );
-            let Some(cached) = inner.candidate_pins.get(&key) else {
+        let state_roots = inner.disk.keys().cloned().collect::<Vec<_>>();
+        for state_root in state_roots {
+            let Some(entries) = inner.disk.get_mut(&state_root) else {
                 continue;
             };
-            if cached.depends_on.iter().any(|path| dirty.contains(path)) {
-                continue;
-            }
-            sync_metrics::record_observation_reuse_hit(canonical_home);
-            served.insert(resource_id.clone(), cached.expected_local_target.clone());
-        }
-        served
-    }
-
-    /// Retain freshly captured candidate pins for the next review.
-    pub(crate) fn store_candidate_pins(
-        &self,
-        canonical_home: &Path,
-        local_project_id: &LocalProjectId,
-        stored: Vec<StoredCandidatePin>,
-    ) {
-        let Some(canonical_home) = canonical_home_of(canonical_home) else {
-            return;
-        };
-        let canonical_home = canonical_home.as_path();
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(profile) = inner.profiles.get(canonical_home) else {
-            return;
-        };
-        if !profile.healthy {
-            return;
-        }
-        for entry in stored {
-            let Some(depends_on) = canonical_paths(&entry.depends_on) else {
-                continue;
-            };
-            inner.candidate_pins.insert(
-                (
-                    canonical_home.to_path_buf(),
-                    local_project_id.clone(),
-                    entry.resource_id,
-                ),
-                CachedCandidatePin {
-                    depends_on,
-                    expected_local_target: entry.expected_local_target,
-                },
-            );
-        }
-        if inner.candidate_pins.len() > MAX_OBSERVATION_ENTRIES {
-            inner.evict_stale_profiles();
-            if inner.candidate_pins.len() > MAX_OBSERVATION_ENTRIES {
-                let home = canonical_home.to_path_buf();
-                inner.drop_profile_caches(&home);
+            let previous_len = entries.len();
+            entries.retain(|key, _| key.canonical_home != canonical_home);
+            if entries.len() != previous_len {
+                write_observation_disk_cache(&state_root, entries);
             }
         }
     }
@@ -1105,8 +1021,8 @@ impl SessionWatchService {
             })
             .collect();
         // Clearing a dirty path declares its change consumed, so every
-        // OTHER cached derivation of that path — a candidate pin, another
-        // storage's observation — is stale now and must recompute rather
+        // OTHER cached derivation of that path — including another storage's
+        // observation — is stale now and must recompute rather
         // than ride the cleared flag.
         let cleared: BTreeSet<PathBuf> = prepared
             .iter()
@@ -1119,9 +1035,6 @@ impl SessionWatchService {
         if !cleared.is_empty() {
             inner
                 .observations
-                .retain(|_, cached| !cached.depends_on.iter().any(|path| cleared.contains(path)));
-            inner
-                .candidate_pins
                 .retain(|_, cached| !cached.depends_on.iter().any(|path| cleared.contains(path)));
         }
         let stored_at = now_secs();
@@ -1305,7 +1218,7 @@ mod tests {
         let service = service();
         let (_, views) = service
             .discovery_for(
-                mallard_infrastructure::providers::ProviderRegistry::production(),
+                mallard_infrastructure::providers::AgentProviderRegistry::production(),
                 &project_id,
                 &request,
             )
@@ -1321,7 +1234,7 @@ mod tests {
         detail_request.excluded_content_roots = vec![project];
         let (_, detail_views) = service
             .discovery_for(
-                mallard_infrastructure::providers::ProviderRegistry::production(),
+                mallard_infrastructure::providers::AgentProviderRegistry::production(),
                 &project_id,
                 &detail_request,
             )
@@ -1502,6 +1415,76 @@ mod tests {
                 .is_empty(),
             "a drifted source must never be served from disk"
         );
+    }
+
+    #[test]
+    fn force_rebaseline_removes_memory_and_disk_observations_for_the_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex-home");
+        let sessions = home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let rollout = sessions.join("rollout-a.jsonl");
+        std::fs::write(&rollout, b"{\"a\":1}\n").unwrap();
+        let state_root = temp.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let (project, storage, thread) = ids();
+        let query = vec![ObservationQuery {
+            thread_id: thread.clone(),
+            checkpoint_generation: Some(3),
+            binding_revision: Some(1),
+        }];
+
+        let first_process = service();
+        first_process.take_reusable_observations(
+            &codex_provider(),
+            &home,
+            &state_root,
+            &project,
+            &storage,
+            &[],
+        );
+        first_process.store_observations(
+            &home,
+            &state_root,
+            &project,
+            &storage,
+            vec![stored(&thread, &rollout, 3)],
+        );
+        assert_eq!(
+            first_process
+                .take_reusable_observations(
+                    &codex_provider(),
+                    &home,
+                    &state_root,
+                    &project,
+                    &storage,
+                    &query,
+                )
+                .len(),
+            1
+        );
+
+        first_process.force_rebaseline(&home);
+        assert!(first_process
+            .take_reusable_observations(
+                &codex_provider(),
+                &home,
+                &state_root,
+                &project,
+                &storage,
+                &query,
+            )
+            .is_empty());
+        assert!(service()
+            .take_reusable_observations(
+                &codex_provider(),
+                &home,
+                &state_root,
+                &project,
+                &storage,
+                &query,
+            )
+            .is_empty());
     }
 
     #[test]

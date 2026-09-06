@@ -1,17 +1,19 @@
-//! Tauri command adapters for storage-scoped Library resources.
+//! Tauri command adapters for storage-scoped Library resources. Every
+//! provider, kind, format, and target crosses this boundary as a key or a
+//! coordinate object with backend-supplied labels; never a closed union.
 
 use std::collections::BTreeMap;
 
 use mallard_domain::StorageId;
 
 use super::domain::{
-    CatalogActionResult, CatalogLinkId, CatalogPlanActionId, CatalogPlanId,
-    CatalogResourceForkPlan, CatalogResourceId, CatalogResourceKindTag, CatalogScopeId,
-    CatalogScopePullPlan, CatalogScopePushPlan, LocalCatalogProfile, LocalCatalogProfileId,
-    ProviderKey,
+    CatalogActionResult, CatalogFormatKey, CatalogLinkId, CatalogPlanActionId, CatalogPlanId,
+    CatalogResourceForkPlan, CatalogResourceId, CatalogResourceKindKey, CatalogScopeId,
+    CatalogScopePullPlan, CatalogScopePushPlan, LocalCatalogProfileId, ProviderKey,
 };
+use super::registry::CatalogCapabilityDescriptor;
 use super::service::{
-    CatalogCapabilityDto, CatalogPullApproval, CatalogPushApproval, CatalogScopeDto,
+    CatalogProfileDto, CatalogPullApproval, CatalogPushApproval, CatalogScopeDto,
     CatalogScopeLinkOutcomeDto, CatalogScopePullOutcomeDto, CatalogScopePushOutcomeDto,
     CatalogScopeResourcesDto, CatalogStorageRepositoryDto, StorageCatalogService,
 };
@@ -25,12 +27,12 @@ async fn run_blocking<T: Send + 'static>(
 }
 
 #[tauri::command]
-pub async fn list_catalog_capabilities() -> Result<Vec<CatalogCapabilityDto>, String> {
-    Ok(StorageCatalogService::capabilities())
+pub async fn list_catalog_capabilities() -> Result<Vec<CatalogCapabilityDescriptor>, String> {
+    run_blocking(move || Ok(StorageCatalogService::from_user_home()?.capabilities())).await
 }
 
 #[tauri::command]
-pub async fn list_catalog_resource_profiles() -> Result<Vec<LocalCatalogProfile>, String> {
+pub async fn list_catalog_resource_profiles() -> Result<Vec<CatalogProfileDto>, String> {
     run_blocking(move || StorageCatalogService::from_user_home()?.list_profiles()).await
 }
 
@@ -38,7 +40,7 @@ pub async fn list_catalog_resource_profiles() -> Result<Vec<LocalCatalogProfile>
 pub async fn save_catalog_resource_profile(
     provider: ProviderKey,
     path: String,
-) -> Result<LocalCatalogProfile, String> {
+) -> Result<CatalogProfileDto, String> {
     run_blocking(move || StorageCatalogService::from_user_home()?.save_profile(provider, path))
         .await
 }
@@ -48,7 +50,7 @@ pub async fn rename_catalog_resource_profile(
     profile_id: LocalCatalogProfileId,
     display_name: String,
     expected_revision: u64,
-) -> Result<LocalCatalogProfile, String> {
+) -> Result<CatalogProfileDto, String> {
     run_blocking(move || {
         StorageCatalogService::from_user_home()?.rename_profile(
             &profile_id,
@@ -84,10 +86,18 @@ pub async fn list_catalog_scopes() -> Result<Vec<CatalogScopeDto>, String> {
 pub async fn create_catalog_scope(
     provider: ProviderKey,
     profile_id: LocalCatalogProfileId,
-    resource_kind: CatalogResourceKindTag,
+    resource_kind: CatalogResourceKindKey,
+    format: CatalogFormatKey,
+    format_version: u32,
 ) -> Result<CatalogScopeDto, String> {
     run_blocking(move || {
-        StorageCatalogService::from_user_home()?.create_scope(provider, profile_id, resource_kind)
+        StorageCatalogService::from_user_home()?.create_scope(
+            provider,
+            profile_id,
+            resource_kind,
+            format,
+            format_version,
+        )
     })
     .await
 }
@@ -116,13 +126,17 @@ pub async fn list_catalog_scope_resources(
 }
 
 #[tauri::command]
-pub async fn get_catalog_pet_preview(
+pub async fn get_catalog_resource_preview(
     scope_id: CatalogScopeId,
     storage_id: StorageId,
     resource_id: CatalogResourceId,
 ) -> Result<String, String> {
     run_blocking(move || {
-        StorageCatalogService::from_user_home()?.pet_preview(&scope_id, &storage_id, &resource_id)
+        StorageCatalogService::from_user_home()?.resource_preview(
+            &scope_id,
+            &storage_id,
+            &resource_id,
+        )
     })
     .await
 }

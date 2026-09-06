@@ -146,6 +146,20 @@ test("every status badge reads on the paper of its own theme", () => {
         `--text-3 is ${measured.toFixed(2)}:1 on ${surfaceToken} in ${theme}`,
       );
     }
+    // What marks a thing as chosen — the option row, the setup pill, the
+    // setup card — is a translucent accent laid over the paper it sits on,
+    // and the quiet line under a chosen name is read against that composite
+    // rather than against either token. Only the papers a chosen control
+    // actually lands on: the option list's row, a card, and the setup page
+    // itself, where the pills and the kind cards sit directly on the shell.
+    for (const surfaceToken of ["--surface-row", "--surface-card", "--app-shell"]) {
+      const chosen = composite(resolve("--accent-soft", tokens), resolve(surfaceToken, tokens));
+      const measured = contrast(neutral, chosen);
+      assert.ok(
+        measured >= 4.5,
+        `--text-3 is ${measured.toFixed(2)}:1 on --accent-soft over ${surfaceToken} in ${theme}`,
+      );
+    }
   }
 });
 
@@ -241,4 +255,81 @@ test("the session-detail inks read on an expanded tool row", () => {
       }
     }
   }
+});
+
+/* The grounds a glyph is actually drawn on: the gutter behind the sidebar, a
+   card, and a row in the two states that are darker than a card on cream.
+   Fewer than PAPER_SURFACES because a mark is placed, not flowed — nothing
+   paints a status glyph on a footer or a bare --bg-3. */
+const GRAPHIC_SURFACES = [
+  "--app-shell",
+  "--surface-card",
+  "--surface-row-hover",
+  "--surface-row-active",
+];
+
+/* Properties that put a token in front of the eye directly, rather than
+   mixing it into an edge or a wash. */
+const PAINTS_DIRECTLY = /^(color|background|background-color|fill|stroke)$/;
+
+test("every graphic ink reads on the ground it is drawn on", () => {
+  // The gates above all measure text. Nothing measured a mark until this one,
+  // and three tokens were painted as marks: the success tick on an outcome
+  // notice, the failed-pull icon, the git-folder mark. 1.4.11 holds a glyph to
+  // 3:1, not the 4.5 a sentence carries, because a shape is read by its
+  // silhouette — but 3:1 is a floor, not a formality, and light --green sat at
+  // 2.85 on the active row while clearing the page at 3.5.
+  for (const theme of ["light", "dark"] as const) {
+    const tokens = tokensFor(theme);
+    for (const ink of ["--green", "--blue", "--red"]) {
+      const colour = resolve(ink, tokens);
+      for (const surfaceToken of GRAPHIC_SURFACES) {
+        const measured = contrast(colour, resolve(surfaceToken, tokens));
+        assert.ok(
+          measured >= 3,
+          `${ink} is ${colour} on ${theme}, ${measured.toFixed(2)}:1 against ${surfaceToken} — needs 3`,
+        );
+      }
+    }
+  }
+});
+
+test("the switch shows which way it is set", () => {
+  // Thumb position is the whole of the off/on state, so the thumb has to read
+  // against the track it sits on — 1.4.11 again, and the one place in the app
+  // where a state is carried by a shape rather than a word. The track's own
+  // edge is --control-border and already clears the floor; this is the layer
+  // inside it. Light --switch-off held the thumb at 2.50:1 before #8d7c70.
+  for (const theme of ["light", "dark"] as const) {
+    const tokens = tokensFor(theme);
+    const [track, thumb] = [resolve("--switch-off", tokens), resolve("--switch-thumb", tokens)];
+    const measured = contrast(thumb, track);
+    assert.ok(
+      measured >= 3,
+      `--switch-thumb ${thumb} on --switch-off ${track} is ${measured.toFixed(2)}:1 on ${theme} — needs 3`,
+    );
+  }
+});
+
+test("no glyph is painted in a hue that misses the non-text floor", () => {
+  // --amber clears 3:1 on nothing this app paints in the light theme: 2.37 on
+  // a card, 2.00 on the active row. Five rules made it a glyph anyway — the
+  // sidebar storage warning, the path-menu banner, the profile state, the
+  // review tab's dot, the outcome notice — and it was the least readable mark
+  // in the theme. A warning mark uses --warning-text now, like the sentence
+  // beside it. Mixes stay legal: --yellow at 45% inside a border-color is an
+  // edge, and the notice's meaning is in the words it frames.
+  const offenders: string[] = [];
+  for (const block of stripComments(appCss).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    for (const decl of block[2].matchAll(/([a-z-]+)\s*:\s*var\(\s*(--[a-z0-9-]+)\s*\)\s*(?:;|$)/g)) {
+      if (!PAINTS_DIRECTLY.test(decl[1])) continue;
+      if (decl[2] !== "--yellow" && decl[2] !== "--amber") continue;
+      offenders.push(`${block[1].trim().split("\n").pop()!.trim()} { ${decl[1]}: var(${decl[2]}) }`);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `a bare amber is painted as a glyph here — use --warning-text:\n${offenders.join("\n")}`,
+  );
 });

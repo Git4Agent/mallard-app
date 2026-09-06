@@ -265,7 +265,7 @@ test("the header is one strip: hidden h1, facts as chips, verbs on the right", (
 
   // Facts state themselves: glyph chips, no caption row, full values in
   // tooltips — the sha bare and 7 chars, the way git prints it.
-  assert.match(html, /class="session-detail-chip" title="Branch main"/);
+  assert.match(html, /class="session-detail-chip" title="Recorded branch main"/);
   assert.match(html, /data-icon="git-branch"/);
   assert.match(html, /data-icon="git-commit"/);
   assert.match(html, new RegExp(`title="${"a".repeat(40)}"`));

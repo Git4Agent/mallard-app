@@ -7,7 +7,7 @@ use mallard_domain::{
 };
 use mallard_infrastructure::codex_history_graph::resolve_codex_root;
 use mallard_infrastructure::codex_standalone_builder::{
-    build_standalone_codex_root, StandaloneBuildMode,
+    decode_standalone_codex_root, encode_standalone_codex_root,
 };
 use mallard_infrastructure::conversation_codec::{
     analyze_codex_transcript, CodecLineage, CodecUnknownReason,
@@ -38,29 +38,27 @@ fn committed_codex_fixture_proves_wire_round_trip_and_semantic_continuation() {
     std::fs::write(&source_path, VALID_TRANSCRIPT).unwrap();
     let no_bases = |_: &str| Ok(None);
     let resolved = resolve_codex_root(&source_path, &no_bases).unwrap();
-    let wire = build_standalone_codex_root(
+    let wire = encode_standalone_codex_root(
         &resolved,
-        &StandaloneBuildMode::Encode {
-            root: "/fixture/project".to_string(),
-            canonical_root: None,
-        },
+        "/fixture/project",
         None,
+        None,
+        &mut mallard_infrastructure::credential_redaction::shared().begin_run(),
+        &mallard_infrastructure::session_path_origins::PathOrigins::default(),
     )
     .unwrap();
-    let wire_text = String::from_utf8(wire.root_bytes.clone()).unwrap();
+    let wire_text = String::from_utf8(wire.root_bytes.to_vec()).unwrap();
     assert!(!wire_text.contains("/fixture/project"));
     assert!(wire_text.contains("/__mallard_root__"));
 
     let staged_path = directory.path().join("staged.jsonl");
     std::fs::write(&staged_path, &wire.root_bytes).unwrap();
     let staged = resolve_codex_root(&staged_path, &no_bases).unwrap();
-    let decoded = build_standalone_codex_root(
+    let decoded = decode_standalone_codex_root(
         &staged,
-        &StandaloneBuildMode::Decode {
-            root_provider_thread_id: "thread-destination".to_string(),
-            target_root: "/fixture/destination".to_string(),
-            canonical_target_root: None,
-        },
+        "thread-destination",
+        "/fixture/destination",
+        None,
         None,
     )
     .unwrap();
@@ -89,13 +87,13 @@ fn committed_codex_fixture_proves_wire_round_trip_and_semantic_continuation() {
         .map(|message| message.message_id.clone())
         .collect();
     assert_eq!(before_ids, after_ids);
-    let decoded_text = String::from_utf8(decoded.root_bytes.clone()).unwrap();
+    let decoded_text = String::from_utf8(decoded.root_bytes.to_vec()).unwrap();
     assert!(decoded_text.contains("Final output:\\n/fixture/destination"));
     assert_eq!(
         normalized_records(VALID_TRANSCRIPT).len(),
         normalized_records(&decoded.root_bytes).len()
     );
-    let rewritten = decoded.root_bytes.clone();
+    let rewritten = decoded.root_bytes.to_vec();
 
     let index: Value = serde_json::from_slice(INDEX_FRAGMENT).unwrap();
     let sidecar: Value = serde_json::from_slice(SIDECAR).unwrap();

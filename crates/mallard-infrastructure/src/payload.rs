@@ -5,19 +5,26 @@
 //! `Bytes` handle and the bounded digest string; it never copies the payload.
 
 use bytes::Bytes;
-use mallard_domain::sha256_hex;
+use mallard_domain::hex_lower;
+use sha2::{Digest, Sha256};
 use std::ops::Deref;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PayloadBytes {
     bytes: Bytes,
     sha256: String,
+    sha256_digest: [u8; 32],
 }
 
 impl PayloadBytes {
     pub fn from_bytes(bytes: Bytes) -> Self {
-        let sha256 = sha256_hex(&bytes);
-        Self { bytes, sha256 }
+        let sha256_digest: [u8; 32] = Sha256::digest(&bytes).into();
+        let sha256 = hex_lower(&sha256_digest);
+        Self {
+            bytes,
+            sha256,
+            sha256_digest,
+        }
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -34,6 +41,11 @@ impl PayloadBytes {
 
     pub fn sha256(&self) -> &str {
         &self.sha256
+    }
+
+    /// The same content digest in binary form, for framed artifact hashes.
+    pub(crate) fn sha256_digest(&self) -> &[u8; 32] {
+        &self.sha256_digest
     }
 
     pub fn into_bytes(self) -> Bytes {
@@ -70,6 +82,7 @@ impl Deref for PayloadBytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mallard_domain::sha256_hex;
 
     #[test]
     fn vec_conversion_and_clones_share_the_payload_allocation() {
@@ -78,6 +91,7 @@ mod tests {
         let payload = PayloadBytes::from(source);
         assert_eq!(payload.as_bytes().as_ptr(), source_pointer);
         assert_eq!(payload.sha256(), sha256_hex(payload.as_bytes()));
+        assert_eq!(hex_lower(payload.sha256_digest()), payload.sha256());
 
         let cloned = payload.clone();
         assert_eq!(cloned.as_bytes().as_ptr(), payload.as_bytes().as_ptr());

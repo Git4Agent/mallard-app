@@ -93,7 +93,7 @@ interface MockSession {
   tools: number;
   tokens: string;
   length: string;
-  /** The first-parent commit the session produced, or null for uncommitted work. */
+  /** The selected rail's successor commit, or null when this rail has none. */
   commit: string | null;
   /** Outside the shipped review's first 30-day page: hidden there until Load
    *  earlier. In the whole-timeline review it is just another row. */
@@ -128,7 +128,7 @@ const SESSIONS: MockSession[] = [
   { id: "s1", title: "Refine sync review UX and bound session capture", provider: "claude", bytes: 96 * MB, age: 0, when: "Sep 1, 14:02", messages: 412, tools: 388, tokens: "3.1M", length: "6h 12m", commit: null },
   { id: "s5", title: "Finalize mainland storage research pagination", provider: "claude", bytes: 58 * MB, age: 1, when: "Aug 31, 09:08", messages: 188, tools: 140, tokens: "1.7M", length: "2h 44m", commit: "c1" },
   { id: "s2", title: "Optimize Claude session metadata scans", provider: "claude", bytes: 84 * MB, age: 1, when: "Aug 31, 22:40", messages: 356, tools: 301, tokens: "2.6M", length: "4h 51m", commit: "c3" },
-  { id: "s3", title: "Optimize provider scans and activity logs", provider: "claude", bytes: 71 * MB, age: 2, when: "Aug 30, 19:15", messages: 298, tools: 264, tokens: "2.2M", length: "3h 58m", commit: "c4" },
+  { id: "session-3", title: "Optimize provider scans and activity logs", provider: "claude", bytes: 71 * MB, age: 2, when: "Aug 30, 19:15", messages: 298, tools: 264, tokens: "2.2M", length: "3h 58m", commit: "c4" },
   { id: "s4", title: "Add storage reset and refine sync reviews", provider: "codex", bytes: 63 * MB, age: 3, when: "Aug 29, 16:33", messages: 240, tools: 211, tokens: "1.9M", length: "3h 20m", commit: "c5" },
   { id: "s6", title: "Dark mode Lamplight palette", provider: "claude", bytes: 49 * MB, age: 4, when: "Aug 28, 21:27", messages: 174, tools: 133, tokens: "1.5M", length: "2h 31m", commit: "c6" },
   { id: "s7", title: "Catalog profile launch buttons", provider: "codex", bytes: 118 * MB, age: 5, when: "Aug 27, 18:02", messages: 468, tools: 402, tokens: "3.8M", length: "7h 05m", commit: "c7" },
@@ -306,7 +306,7 @@ function MockReview({ direction, projectFilesBytes }: {
   const plan = useMemo(() => fit(SESSIONS, budget), [budget]);
   const [deselected, setDeselected] = useState<Set<string>>(new Set());
   const [collapsedCommits, setCollapsedCommits] = useState<Set<string>>(new Set());
-  const [uncommittedCollapsed, setUncommittedCollapsed] = useState(false);
+  const [branchUnmappedCollapsed, setBranchUnmappedCollapsed] = useState(false);
   const isSelected = (id: string) => plan.admitted.has(id) && !deselected.has(id);
   const toggle = (id: string) => setDeselected((current) => {
     const next = new Set(current);
@@ -341,7 +341,7 @@ function MockReview({ direction, projectFilesBytes }: {
   const visible = (row: MockSession) => !plan.unsyncable.has(row.id) && (showWaiting || (!row.older && plan.admitted.has(row.id)));
   const commits = COMMITS.filter((commit) => showWaiting || !commit.older);
   const sessionsOf = (commit: MockCommit) => SESSIONS.filter((row) => row.commit === commit.id && visible(row)).sort((a, b) => a.age - b.age);
-  const uncommitted = SESSIONS.filter((row) => row.commit === null && visible(row)).sort((a, b) => a.age - b.age);
+  const branchUnmapped = SESSIONS.filter((row) => row.commit === null && visible(row)).sort((a, b) => a.age - b.age);
 
   const banners: NoticeItem[] = [];
   if (direction === "before") {
@@ -403,21 +403,21 @@ function MockReview({ direction, projectFilesBytes }: {
           )}
           <div className="sync-history-page sync-history-embedded sync-history-selection-review">
             <section aria-label="Git history">
-              <div className={`sync-history-timeline${uncommitted.length > 0 ? " has-uncommitted" : ""}`}>
-                {uncommitted.length > 0 && (
-                  <section className={`sync-history-uncommitted${uncommittedCollapsed ? " collapsed" : ""}`} aria-labelledby={`uncommitted-heading-${direction}`}>
+              <div className={`sync-history-timeline${branchUnmapped.length > 0 ? " has-branch-unmapped" : ""}`}>
+                {branchUnmapped.length > 0 && (
+                  <section className={`sync-history-branch-unmapped${branchUnmappedCollapsed ? " collapsed" : ""}`} aria-labelledby={`branch-unmapped-heading-${direction}`}>
                     <Fold
-                      collapsed={uncommittedCollapsed}
-                      controls={`uncommitted-list-${direction}`}
-                      label={`${uncommittedCollapsed ? "Expand" : "Collapse"} ${uncommitted.length} session${uncommitted.length === 1 ? "" : "s"} not linked to a commit`}
-                      onToggle={() => setUncommittedCollapsed((current) => !current)}
+                      collapsed={branchUnmappedCollapsed}
+                      controls={`branch-unmapped-list-${direction}`}
+                      label={`${branchUnmappedCollapsed ? "Expand" : "Collapse"} ${branchUnmapped.length} uncommitted session${branchUnmapped.length === 1 ? "" : "s"}`}
+                      onToggle={() => setBranchUnmappedCollapsed((current) => !current)}
                     />
                     <div className="sync-history-section-heading">
-                      <h2 id={`uncommitted-heading-${direction}`}><Icon name="edit" size={13} />Uncommitted</h2>
+                      <h2 id={`branch-unmapped-heading-${direction}`}><Icon name="edit" size={13} />Uncommitted</h2>
                     </div>
-                    {!uncommittedCollapsed && (
-                      <div id={`uncommitted-list-${direction}`} className="sync-history-thread-list flat">
-                        {uncommitted.map((row) => (
+                    {!branchUnmappedCollapsed && (
+                      <div id={`branch-unmapped-list-${direction}`} className="sync-history-thread-list flat">
+                        {branchUnmapped.map((row) => (
                           <Row key={row.id} session={row} state={stateOf(row)} sizeChip={showWaiting} onToggle={() => toggle(row.id)} />
                         ))}
                       </div>
@@ -552,7 +552,7 @@ function Page() {
         <h2>A — The whole timeline: what fits, what waits</h2>
         <p>
           The same commit rail, no window: every commit and every session, newest first, with the
-          Uncommitted work on top as on the activity page — no Load earlier, no separate box. The cut is
+          Uncommitted sessions on top as on the activity page — no Load earlier, no separate box. The cut is
           a line in time: the six newest sessions fit, the seventh does not, and everything from there
           down sits under its commit without a checkbox, with a &quot;Later&quot; chip and a tooltip
           that says the push is full and to push again after this one. Review rows gain a size readout

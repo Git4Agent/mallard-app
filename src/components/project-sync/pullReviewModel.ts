@@ -1,9 +1,8 @@
 import type {
-  ConversationPlanAction,
   ConversationReviewRow,
   ProviderKey,
   RestoreAction,
-  RestorePlan,
+  PullReview,
 } from "../../types";
 import type { PullReviewSelection } from "./pullReviewFlow";
 
@@ -22,7 +21,6 @@ export interface PullReviewItem {
   detail: string;
   provider: ProviderKey | null;
   restoreActions: RestoreAction[];
-  conversationActions: ConversationPlanAction[];
   conversationReviewRows: ConversationReviewRow[];
   projectContentPath: string | null;
   projectContentEntryType: "file" | "directory" | null;
@@ -59,7 +57,7 @@ function blockedConversationDetail(row: ConversationReviewRow): string {
     case "detached_requires_pull":
       return "This task's local mapping changed. Refresh Pull to establish the current mapping.";
     case "busy":
-      return "Another sync operation still owns this task. Finish recovery, then refresh.";
+      return "Another sync operation still owns this task. Wait, then refresh.";
     default:
       return row.blocked_reason ?? "Mallard cannot prove that this task can be changed safely.";
   }
@@ -190,8 +188,8 @@ function restoreActionCopy(action: RestoreAction): {
   };
 }
 
-/** Merge the plan's file and conversation actions into one logical row per resource ID. */
-export function buildPullReviewItems(plan: RestorePlan): PullReviewItem[] {
+/** Group file comparisons and conversation review rows by resource ID. */
+export function buildPullReviewItems(plan: PullReview): PullReviewItem[] {
   const items = new Map<string, PullReviewItem>();
   const ensure = (
     resourceId: string,
@@ -213,7 +211,6 @@ export function buildPullReviewItems(plan: RestorePlan): PullReviewItem[] {
       detail,
       provider,
       restoreActions: [],
-      conversationActions: [],
       conversationReviewRows: [],
       projectContentPath: null,
       projectContentEntryType: null,
@@ -248,7 +245,6 @@ export function buildPullReviewItems(plan: RestorePlan): PullReviewItem[] {
     if (copy.projectContentSize != null) item.projectContentSize = copy.projectContentSize;
   }
 
-  const actionsById = new Map(plan.conversation_actions.map((action) => [action.action_id, action]));
   for (const row of plan.conversation_review) {
     if (!VISIBLE_PULL_CONVERSATION_ACTIONS.has(row.action)) continue;
     const detail = conversationActionDetail(row);
@@ -260,12 +256,6 @@ export function buildPullReviewItems(plan: RestorePlan): PullReviewItem[] {
       row.provider,
     );
     item.conversationReviewRows.push(row);
-    if (row.action_id) {
-      const action = actionsById.get(row.action_id);
-      if (action) {
-        item.conversationActions.push(action);
-      }
-    }
     item.detail = detail;
     // Assigned on the item rather than through ensure(): ensure early-returns
     // for a resource it has already seen and drops its title argument, which
@@ -317,9 +307,19 @@ export function restoreActionIds(item: PullReviewItem): string[] {
   const fileActions = item.restoreActions
     .filter((action) => !NON_DIRECT_RESTORE_KINDS.has(action.kind.kind))
     .map((action) => action.action_id);
-  const conversationActions = item.conversationActions
-    .map((action) => action.action_id);
-  return [...fileActions, ...conversationActions];
+  const conversationSelections = item.conversationReviewRows
+    .flatMap((row) => row.action_id ? [row.action_id] : []);
+  return [...fileActions, ...conversationSelections];
+}
+
+/** Apply receipts use the selection IDs from Review. Executable conversation
+ *  actions are built by the backend only after Apply starts. */
+export function pullActionResourceIds(plan: PullReview): Map<string, string> {
+  const resourceIds = new Map(plan.actions.map((action) => [action.action_id, action.resource_id]));
+  for (const row of plan.conversation_review) {
+    if (row.action_id) resourceIds.set(row.action_id, row.resource_id);
+  }
+  return resourceIds;
 }
 
 export function pendingIds(item: PullReviewItem, completedActionIds: ReadonlySet<string>): string[] {
@@ -367,14 +367,14 @@ export function recommendedPullSelection(item: PullReviewItem): boolean {
       || item.projectContentOperation === "create_directory";
   }
   const actions = item.restoreActions.filter((action) => !NON_DIRECT_RESTORE_KINDS.has(action.kind.kind));
-  return (actions.length > 0 || item.conversationActions.length > 0)
+  const conversationSelections = item.conversationReviewRows.some((row) => row.action_id != null);
+  return (actions.length > 0 || conversationSelections)
     && actions.every((action) => !action.requires_explicit_approval);
 }
 
 export function itemKindLabel(item: PullReviewItem): string {
   if (
     item.conversationReviewRows.length > 0
-    || item.conversationActions.length > 0
     || /^(codex|claude):session:/.test(item.resourceId)
     || item.restoreActions.some((action) => action.kind.kind === "materialize_conversation")
   ) return "Conversation";

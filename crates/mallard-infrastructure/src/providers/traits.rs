@@ -9,7 +9,7 @@
 use crate::conversation_codec::CodecLineage;
 use mallard_domain::{ConversationFileRole, NoticeSeverity, ProviderKey};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Split the expanded-detail budget (the installed preview limit) evenly,
@@ -41,6 +41,52 @@ pub(crate) fn timeline_tool_detail_budgets(
     (argument_budget, result_budget)
 }
 
+/// Attach each turn's tool count to its first non-tool entry, or its first
+/// entry if the turn contains only tools. Entries must be in timeline order.
+pub(crate) fn attach_turn_tool_summaries(
+    entries: &mut [SessionTimelineIndexEntry],
+    quality: SessionCountQuality,
+    explanation: Option<&str>,
+) {
+    struct TurnTools {
+        tool_calls: u64,
+        first_position: usize,
+        first_non_tool_position: Option<usize>,
+    }
+
+    let mut turns = BTreeMap::<String, TurnTools>::new();
+    for (position, entry) in entries.iter().enumerate() {
+        let Some(turn_id) = &entry.turn_id else {
+            continue;
+        };
+        let turn = turns.entry(turn_id.clone()).or_insert(TurnTools {
+            tool_calls: 0,
+            first_position: position,
+            first_non_tool_position: None,
+        });
+        if entry.kind == SessionTimelineEventKind::ToolCall {
+            turn.tool_calls += 1;
+        } else {
+            turn.first_non_tool_position.get_or_insert(position);
+        }
+    }
+
+    for (turn_id, turn) in turns {
+        if turn.tool_calls == 0 {
+            continue;
+        }
+        let position = turn.first_non_tool_position.unwrap_or(turn.first_position);
+        entries[position].turn_tool_summary = Some(SessionTurnToolSummary {
+            turn_id,
+            tool_calls: SessionCount {
+                value: Some(turn.tool_calls),
+                quality,
+                explanation: explanation.map(ToOwned::to_owned),
+            },
+        });
+    }
+}
+
 /// How to open this provider's coding-agent CLI with a prompt, for the R2
 /// setup hand-off. Absent when the provider ships no launchable CLI.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -52,12 +98,50 @@ pub struct ProviderCliLauncher {
     pub display_name: String,
 }
 
+/// Where a provider-declared maintenance action applies.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MaintenanceActionScope {
+    Profile,
+    AfterPull,
+}
+
+/// One provider-declared maintenance action. The frontend renders declared
+/// actions and never checks a provider key to decide whether to show one.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MaintenanceActionDescriptor {
+    pub action_id: mallard_domain::ActionKey,
+    pub label: String,
+    pub description: String,
+    pub scope: MaintenanceActionScope,
+    pub requires_confirmation: bool,
+    pub read_only: bool,
+    /// Display order among one provider's actions.
+    pub display_rank: u32,
+}
+
+/// One action a completed Pull offers, declared by the provider adapter.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AfterPullActionOffer {
+    pub provider: ProviderKey,
+    pub action_id: mallard_domain::ActionKey,
+    pub label: String,
+    pub message: String,
+    /// The action can run now; otherwise the message explains what to do
+    /// by hand.
+    pub available: bool,
+    /// Safe, adapter-typed arguments the shell hands back on execution.
+    pub arguments: mallard_domain::BoundedConfigObject,
+}
+
 /// Serializable provider facts for setup and Activity. The frontend iterates
 /// these; it never holds a fixed provider array.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ProviderDescriptor {
     pub key: ProviderKey,
     pub display_name: String,
+    /// Display order: lower ranks first, then key order.
+    pub display_rank: u32,
     /// Short label for the profile picker, e.g. ".codex profile".
     pub profile_label: String,
     /// Home-relative default directory name, e.g. ".codex".
@@ -69,6 +153,9 @@ pub struct ProviderDescriptor {
     /// argument at launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_launcher: Option<ProviderCliLauncher>,
+    /// Declared maintenance actions, in display order.
+    #[serde(default)]
+    pub maintenance_actions: Vec<MaintenanceActionDescriptor>,
 }
 
 /// Bounded provider-authoritative identity metadata from one session file.
@@ -168,7 +255,6 @@ pub struct SessionFileSummary {
     pub ended_at: Option<u64>,
     pub branch: Option<String>,
     pub recorded_sha: Option<String>,
-    pub recorded_branches: BTreeSet<String>,
     pub user_rounds: u64,
     pub agent_messages: u64,
     pub tool_calls: u64,
@@ -516,10 +602,97 @@ pub enum SessionActionOutcome {
     Launched,
 }
 
+/// One pasteable way to open a pulled project with this provider, as the
+/// post-Pull log lists it: `label: command`. A `command` may also be a
+/// short instruction when no single shell line exists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectOpenCommand {
+    pub label: String,
+    pub command: String,
+}
+
+/// Single-quote a value for a POSIX shell line.
+pub fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 pub trait SessionAdapter: Send + Sync {
     fn descriptor(&self) -> ProviderDescriptor;
     fn codec_key(&self) -> &str;
     fn codec_version(&self) -> u32;
+    /// Provider-home subdirectories the session watcher observes for this
+    /// provider. Empty means the provider home is not watched.
+    fn watch_roots(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// A provider-home file whose rewrite invalidates display titles only
+    /// (never tail evidence or membership).
+    fn session_title_index(&self) -> Option<&'static str> {
+        None
+    }
+    /// Re-run only the display-title enrichment over a cached discovery.
+    fn refresh_session_titles(
+        &self,
+        _discovery: &mut crate::provider_capture::Discovery,
+        _canonical_home: &Path,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    /// Whether this provider's conversations are physical rollout graphs
+    /// that Mallard reconstructs as standalone artifacts (alias-owner lookup,
+    /// relocated cloud materialization under freshly minted ids, and the
+    /// graph seeding primitives). Wire-tail providers materialize in place.
+    fn reconstructs_rollout_graph(&self) -> bool {
+        false
+    }
+    /// Mint one provider thread id for a new local copy. `taken` reports
+    /// ids already occupied; the default is the UUIDv4 convention.
+    fn mint_provider_thread_id(&self, taken: &dyn Fn(&str) -> bool) -> Result<String, String> {
+        loop {
+            let candidate = mallard_domain::generated_uuid_v4()?;
+            if !taken(&candidate) {
+                return Ok(candidate);
+            }
+        }
+    }
+    /// The root tail layout codec a materialized binding of this provider
+    /// must carry; `None` when the provider declares no layout.
+    fn tail_layout_codec(&self) -> Option<&'static str> {
+        None
+    }
+    /// The wire rules published conversations of this provider must
+    /// satisfy; `None` accepts any structurally valid thread.
+    fn conversation_wire_rules(&self) -> Option<mallard_domain::ConversationWireRules> {
+        None
+    }
+    /// Decode a portable display title into the local spelling. The
+    /// default keeps the title as published.
+    fn decode_portable_display_title(
+        &self,
+        title: &str,
+        _project_root: &str,
+        _canonical_project_root: &str,
+    ) -> Result<String, String> {
+        Ok(title.to_string())
+    }
+    /// Provider-declared maintenance actions, in display order.
+    fn maintenance_actions(&self) -> Vec<MaintenanceActionDescriptor> {
+        Vec::new()
+    }
+    /// The ways to open a pulled project with this provider from its
+    /// configured home, listed after a Pull. Empty when the provider has no
+    /// pasteable launch.
+    fn project_open_commands(&self, _home: &Path, _project_root: &str) -> Vec<ProjectOpenCommand> {
+        Vec::new()
+    }
+    /// The action a completed Pull offers for this provider, if any.
+    fn after_pull_offer(
+        &self,
+        _operation_id: &mallard_domain::ConversationOperationId,
+        _provider_home: Option<&Path>,
+    ) -> Option<AfterPullActionOffer> {
+        None
+    }
     /// Version of the normalized timeline projection. Changing event
     /// semantics or indexed metadata must increment this value so cached
     /// indexes and snapshot cursors invalidate safely.
@@ -546,6 +719,11 @@ pub trait SessionAdapter: Send + Sync {
     fn scan_metadata(&self, path: &Path) -> Result<SessionFileMetadata, String>;
     /// Full typed-codec analysis of one transcript.
     fn analyze(&self, bytes: &[u8]) -> SessionAnalysis;
+    /// Capture facts and presentation from one parsed record stream.
+    fn analyze_and_summarize(
+        &self,
+        bytes: &[u8],
+    ) -> (SessionAnalysis, Result<SessionFileSummary, String>);
     /// Verify one staged provider index fragment. Only meaningful when
     /// `index_fragment_limit() > 0`.
     fn verify_index_fragment(
@@ -554,6 +732,12 @@ pub trait SessionAdapter: Send + Sync {
         _expected_session_id: &str,
     ) -> Result<(), String> {
         Err("provider has no index fragments".to_string())
+    }
+    /// Verify one staged sidecar payload of `sidecar_kind` before it is
+    /// committed into the provider home. Providers without sidecars refuse
+    /// every kind.
+    fn verify_sidecar(&self, _sidecar_kind: &str, _bytes: &[u8]) -> Result<(), String> {
+        Err("provider has no sidecar files".to_string())
     }
     /// Propose materialization targets for one conversation.
     fn materialization_targets(
@@ -609,6 +793,74 @@ pub trait SessionAdapter: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_tool_summaries_preserve_placement_and_quality() {
+        use SessionTimelineEventKind::{Prompt, Response, ToolCall};
+
+        let entries = [
+            (None, Prompt),
+            (Some("a"), ToolCall),
+            (Some("tools-only"), ToolCall),
+            (Some("no-tools"), Prompt),
+            (Some("b"), Prompt),
+            (None, ToolCall),
+            (Some("a"), Response),
+            (Some("b"), ToolCall),
+            (Some("a"), Prompt),
+            (Some("tools-only"), ToolCall),
+            (Some("a"), ToolCall),
+            (Some("b"), Response),
+            (Some("no-tools"), Response),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(position, (turn_id, kind))| SessionTimelineIndexEntry {
+            event_id: format!("event-{position}"),
+            ordinal: position as u64,
+            timestamp: None,
+            kind,
+            quality: SessionCountQuality::Exact,
+            turn_id: turn_id.map(ToOwned::to_owned),
+            turn_tool_summary: None,
+            parent_event_id: None,
+            source: SessionSourceSpan {
+                offset: position as u64,
+                length: 1,
+            },
+            tool: (kind == ToolCall).then(|| SessionToolIndexEntry {
+                provider_call_id: format!("call-{position}"),
+                native_name: "shell".to_string(),
+                category: SessionToolCategory::Shell,
+                status: SessionToolCallStatus::Completed,
+                affected_paths: Vec::new(),
+                result_source: None,
+            }),
+        })
+        .collect::<Vec<_>>();
+
+        for (quality, explanation) in [
+            (SessionCountQuality::Exact, None),
+            (SessionCountQuality::LowerBound, Some("Incomplete history.")),
+        ] {
+            let mut actual = entries.clone();
+            let mut expected = entries.clone();
+            for (position, turn_id, count) in [(2, "tools-only", 2), (4, "b", 1), (6, "a", 2)] {
+                expected[position].turn_tool_summary = Some(SessionTurnToolSummary {
+                    turn_id: turn_id.to_string(),
+                    tool_calls: SessionCount {
+                        value: Some(count),
+                        quality,
+                        explanation: explanation.map(ToOwned::to_owned),
+                    },
+                });
+            }
+
+            attach_turn_tool_summaries(&mut actual, quality, explanation);
+
+            assert_eq!(actual, expected);
+        }
+    }
 
     #[test]
     fn expanded_tool_detail_shares_one_mib_and_lends_unused_space() {

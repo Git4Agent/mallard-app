@@ -30,7 +30,7 @@ test("a failed removal opens the affected row's storage menu", () => {
   const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
   const pathBar = readFileSync("src/components/sync-review/SyncPathBar.tsx", "utf8");
-  assert.match(shell, /catalogRemovalErrorTarget\?\.message === error/);
+  assert.match(shell, /catalogRemovalErrorTarget\?\.message === shellError/);
   assert.match(shell, /openCatalogScope\(catalogRemovalErrorTarget\.scopeId\)/);
   assert.match(shell, />\s*Open storage menu\s*<\/button>/);
   assert.match(page, /\{ menuId: "storage", requestId: openStorageMenuRequestId \}/);
@@ -63,4 +63,17 @@ test("the shell error banner is a panel in the workspace stack", () => {
     css,
     /\.sync-backend-banner\.sync-shell-error \{[^}]*background: var\(--danger-soft\)/,
   );
+});
+
+test("modal action failures do not repeat in the shell behind the dialog", () => {
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+
+  assert.match(
+    shell,
+    /const dialogOwnsError = Boolean\(\s*editingBinding\s*\|\| \(pendingBundleConnection && pendingConnectionProject && pendingConnectionStorage\),\s*\);/,
+  );
+  assert.match(shell, /const shellError = dialogOwnsError \? null : error;/);
+  assert.match(shell, /if \(shellError\) \{[\s\S]*?message: shellError,/);
+  assert.match(shell, /<BundleConnectionDialog[\s\S]*?error=\{error\}/);
+  assert.match(shell, /<ProjectBindingEditor[\s\S]*?error=\{error\}/);
 });

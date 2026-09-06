@@ -1,7 +1,7 @@
 //! Compile-time agent-provider registry and adapters.
 //!
 //! Common project-sync code discovers providers exclusively through
-//! [`registry::ProviderRegistry`] descriptors and the typed adapter traits in
+//! [`registry::AgentProviderRegistry`] descriptors and the typed adapter traits in
 //! [`traits`]; it never imports a concrete adapter or branches on a provider
 //! key. Adding a built-in provider is an adapter module plus one registry
 //! entry — no changes to setup, Activity, reconciliation, review, or storage
@@ -16,16 +16,17 @@ pub mod test_provider;
 pub mod timeparse;
 pub mod traits;
 
-pub use registry::ProviderRegistry;
+pub use registry::AgentProviderRegistry;
 pub use traits::{
-    DiscoveredProviderState, DiscoveredSession, DiscoveredSidecar, DiscoveredStateFile,
-    MaterializationTargetRequest, PlannedProviderTarget, ProviderCliLauncher, ProviderDescriptor,
-    SessionActionContext, SessionActionDescriptor, SessionActionKind, SessionActionOutcome,
-    SessionActionRequest, SessionAdapter, SessionAnalysis, SessionCheckpoint, SessionCount,
-    SessionCountQuality, SessionDetailWarning, SessionDiscovery, SessionDiscoveryContext,
-    SessionEventCounts, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
-    SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind,
-    SessionTimelineIndex, SessionTimelineIndexEntry, SessionTimelinePageSlice,
-    SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory,
-    SessionToolIndexEntry, SessionTurnToolSummary,
+    shell_quote, AfterPullActionOffer, DiscoveredProviderState, DiscoveredSession,
+    DiscoveredSidecar, DiscoveredStateFile, MaintenanceActionDescriptor, MaintenanceActionScope,
+    MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand, ProviderCliLauncher,
+    ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionKind,
+    SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis, SessionCheckpoint,
+    SessionCount, SessionCountQuality, SessionDetailWarning, SessionDiscovery,
+    SessionDiscoveryContext, SessionEventCounts, SessionEventDetail, SessionFileMetadata,
+    SessionFileSummary, SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent,
+    SessionTimelineEventKind, SessionTimelineIndex, SessionTimelineIndexEntry,
+    SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus,
+    SessionToolCategory, SessionToolIndexEntry, SessionTurnToolSummary,
 };

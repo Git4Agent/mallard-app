@@ -94,17 +94,31 @@ impl CodexTranscriptAnalysis {
 /// identity was already proven — the authoritative session_meta precedes
 /// every conversation item in any rollout that can succeed.
 pub fn analyze_codex_transcript(bytes: &[u8]) -> CodexTranscriptAnalysis {
+    analyze_codex_records(bytes, parsed_records(bytes))
+}
+
+pub(crate) fn parsed_records(
+    bytes: &[u8],
+) -> impl Iterator<Item = Result<Value, serde_json::Error>> + '_ {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .map(|raw| raw.strip_suffix(b"\r").unwrap_or(raw))
+        .filter(|raw| !raw.is_empty())
+        .map(serde_json::from_slice)
+}
+
+pub(crate) fn analyze_codex_records(
+    bytes: &[u8],
+    records: impl Iterator<Item = Result<Value, serde_json::Error>>,
+) -> CodexTranscriptAnalysis {
+    crate::sync_metrics::record_transcript_analysis(bytes.len() as u64);
     if let Err(error) = check_rollout_bounds(bytes) {
         return unknown(None, None, 0, structure_error_reason(error.kind), false);
     }
     let mut structure = CodexStructureAccumulator::new(None);
     let mut builder = CanonicalChainBuilder::new();
-    for raw in bytes.split(|byte| *byte == b'\n') {
-        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-        if raw.is_empty() {
-            continue;
-        }
-        let value: Value = match serde_json::from_slice(raw) {
+    for record in records {
+        let value = match record {
             Ok(value) => value,
             Err(_) => return unknown_from(&structure, CodecUnknownReason::MalformedJson),
         };
@@ -508,40 +522,14 @@ fn semantic_record_fingerprint(mut value: Value) -> String {
             payload.remove("id");
         }
     }
-    let canonical = canonical_json(&value);
-    sha256_hex(canonical.as_bytes())
+    sha256_hex(&canonical_json(value))
 }
 
-pub(crate) fn canonical_json(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        Value::String(value) => serde_json::to_string(value).expect("JSON string serialization"),
-        Value::Array(values) => format!(
-            "[{}]",
-            values
-                .iter()
-                .map(canonical_json)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        Value::Object(object) => {
-            let sorted = object.iter().collect::<BTreeMap<_, _>>();
-            let entries = sorted
-                .into_iter()
-                .map(|(key, value)| {
-                    format!(
-                        "{}:{}",
-                        serde_json::to_string(key).expect("JSON key serialization"),
-                        canonical_json(value)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{{{entries}}}")
-        }
-    }
+pub(crate) fn canonical_json(mut value: Value) -> Vec<u8> {
+    // Keep the sorted-key contract explicit. This is a no-op when JSON maps
+    // already use BTreeMap, as they do with the current dependency features.
+    value.sort_all_objects();
+    serde_json::to_vec(&value).expect("JSON value serialization")
 }
 
 /// The whole-chain digest pair of a complete analysis, `None` when lineage
@@ -571,6 +559,36 @@ fn string_field<'a>(object: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn canonical_json_preserves_byte_and_hash_fixtures() {
+        let fixtures: Vec<(String, String, String)> =
+            serde_json::from_str(include_str!("fixtures/canonical_json_cases.json")).unwrap();
+        for (input, expected, digest) in fixtures {
+            let value: Value = serde_json::from_str(&input).unwrap();
+            let canonical = canonical_json(value);
+            assert_eq!(canonical, expected.as_bytes(), "{input}");
+            assert_eq!(sha256_hex(&canonical), digest, "{input}");
+        }
+    }
+
+    #[test]
+    fn codex_semantic_fingerprint_preserves_fixture_hash() {
+        let value = json!({
+            "ordinal": 41, "timestamp": "2026-09-04T10:00:00Z",
+            "id": "envelope-id", "parent_id": "envelope-parent", "type": "response_item",
+            "payload": {
+                "id": "message-id", "parent_id": "message-parent",
+                "timestamp": "2026-09-04T10:00:01Z", "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "Quote: \"; slash: \\; line:\n雪"}],
+                "data": {"z": [null, true, false, -0.0, 1.5], "a": {"z": 2, "a": 1}}
+            }
+        });
+        assert_eq!(
+            semantic_record_fingerprint(value),
+            "72fe986de37367be9dde9a34653f682befe3e76407ef5ca0513adb59c29f37f4"
+        );
+    }
 
     fn transcript(thread: &str, cwd: &str, messages: &[(&str, Option<&str>, &str)]) -> Vec<u8> {
         let mut lines = vec![json!({

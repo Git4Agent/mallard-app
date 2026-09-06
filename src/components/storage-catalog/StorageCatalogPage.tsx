@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import Icon, { type IconName } from "../Icons";
+import Icon, { iconNameFromHint, type IconName } from "../Icons";
 import { formatFullDateTime } from "../../clock";
 import { formatBytes } from "../../format";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
@@ -18,8 +18,9 @@ import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { storageCatalogApi } from "./api";
 import {
   actionLabel,
-  catalogKindMeta,
-  providerLabel,
+  catalogNoun,
+  catalogPresentation,
+  catalogScopeIcon,
   catalogScopeLabel,
   filterCatalogPullReviewItems,
   rowPullable,
@@ -29,9 +30,7 @@ import {
   rowStatusLabel,
 } from "./model";
 import type {
-  CatalogProviderKey,
   CatalogPullItem,
-  CatalogResourceKind,
   CatalogResourceWarning,
   CatalogScopePullPlan,
   CatalogScopePushPlan,
@@ -56,9 +55,12 @@ import type {
 export interface CatalogStorageOption {
   id: string;
   name: string;
-  kind: "local" | "s3";
+  /** The provider's own label — what a transport failure is blamed on. */
+  provider_label: string;
+  /** The provider's presentation hint, resolved to a mark at draw time. */
+  icon: string;
   /** The one-line "where is it" the shell already computes for every storage
-   * menu — a folder for local, a bucket for S3. */
+   * menu — the first path-shaped fact, else the first fact. */
   detail: string;
   detailIsPath: boolean;
 }
@@ -69,14 +71,6 @@ type Mode = { kind: "list" } | { kind: "push" } | { kind: "pull" };
  *  may not depend on project-sync. */
 type CatalogNoticeTone = "ok" | "attention";
 
-/** "Codex pet v1", "Plugin intent", "Codex home skill" — the phrase the fork
- * button carries so the copy names exactly what it duplicates. */
-function resourceKindPhrase(kind: CatalogResourceKind, scopeLabel?: string | null): string {
-  if (kind === "codex_pet_v1") return "Codex pet v1";
-  if (kind === "codex_pet_v2") return "Codex pet v2";
-  if (kind === "plugin_install_intent") return "Plugin intent";
-  return scopeLabel ? `${scopeLabel} skill` : "Skill";
-}
 
 /** Client-side mirror of the backend's component-name rule: ASCII alphanumeric
  * start, then letters, digits, dots, dashes, underscores; no trailing dot. The
@@ -321,13 +315,16 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
             <span>Click a value to copy it.</span>
           </header>
           <div className="sync-history-debug-values">
+            {/* No aria-label: it would replace the row's content as the
+                accessible name, and the value is the one thing worth hearing.
+                Named from content instead, so the path or digest is announced
+                and stays navigable with a reading cursor. */}
             {values.map((entry) => (
               <button
                 key={entry.label}
                 type="button"
                 className="sync-history-debug-copy"
                 title={`Copy ${entry.label.toLowerCase()}`}
-                aria-label={`Copy ${entry.label.toLowerCase()}`}
                 onClick={() => {
                   void writeClipboardText(entry.value)
                     .then(() => setCopied(entry.label))
@@ -479,6 +476,7 @@ function ResourceCard({
   storageName,
   storageRevision,
   provider,
+  providerLabel,
   kindNoun,
   onOpenApp,
   onOpenTerminal,
@@ -497,17 +495,20 @@ function ResourceCard({
   row: CatalogScopeRow;
   storageName: string | null;
   storageRevision: number | null;
-  provider: CatalogProviderKey;
-  /** The scope's kind, lowercased, for the operation chip: "skill", "pet"… */
+  /** The profile's provider key, and the backend's label for it. */
+  provider: string;
+  providerLabel: string;
+  /** The capability's noun, lowercased, for the operation chip: "skill",
+   * "pet v1"… */
   kindNoun: string;
   /** The session card's launch pair, minus the session: the provider mark
    * opens the desktop app on this row's profile home, and Terminal opens the
    * provider CLI there — both at the default path. */
   onOpenApp: () => void;
   onOpenTerminal: () => void;
-  /** The pet's idle frame as a data URI. `null` draws the kind-glyph tile —
-   * the column never collapses and never shows a broken image — and
-   * `undefined` (non-pet scopes) draws no tile at all. */
+  /** The row's preview as a data URI. `null` draws the glyph tile — the
+   * column never collapses and never shows a broken image — and `undefined`
+   * (a capability without artwork) draws no tile at all. */
   preview?: string | null;
   onReveal: () => void;
   /** Given for a kind that can be forked at all. The row's own eligibility is
@@ -538,9 +539,9 @@ function ResourceCard({
       {preview !== undefined && (
         <span
           className="catalog-pet-preview"
-          data-tooltip={row.pet_description ?? undefined}
-          tabIndex={row.pet_description ? 0 : undefined}
-          aria-hidden={row.pet_description ? undefined : true}
+          data-tooltip={row.description ?? undefined}
+          tabIndex={row.description ? 0 : undefined}
+          aria-hidden={row.description ? undefined : true}
         >
           {preview
             ? <img src={preview} alt={`${row.display_name} preview`} />
@@ -628,11 +629,11 @@ function ResourceCard({
           <button
             type="button"
             className="btn btn-ghost sync-history-launch-action"
-            title={`Open in ${providerLabel(provider)}`}
-            aria-label={`Open in ${providerLabel(provider)}`}
+            title={`Open in ${providerLabel}`}
+            aria-label={`Open in ${providerLabel}`}
             onClick={onOpenApp}
           >
-            <ProviderMark provider={provider} displayName={providerLabel(provider)} />
+            <ProviderMark provider={provider} displayName={providerLabel} />
           </button>
           <button
             type="button"
@@ -766,13 +767,19 @@ export default function StorageCatalogPage({
    * union is declared locally: this module may not import from project-sync. */
   notify: (message: string, tone?: CatalogNoticeTone) => void;
 }) {
-  const label = catalogScopeLabel(scope.scope, scope.profile);
-  const kind = catalogKindMeta(scope.scope.resource_kind);
-  /* Pets are the one kind that carries artwork: their rows grow a preview
-     tile, filled inline for local atlases and lazily for stored-only rows. */
-  const petKind = scope.scope.resource_kind === "codex_pet_v1"
-    || scope.scope.resource_kind === "codex_pet_v2";
-  const forkableKind = scope.scope.resource_kind !== "plugin_install_intent";
+  const label = catalogScopeLabel(scope);
+  const glyph = catalogPresentation(scope.capability);
+  const plural = scope.label.toLowerCase();
+  const singular = scope.capability?.singular_label ?? scope.label;
+  const noun = useCallback(
+    (count: number) => catalogNoun(scope.label, singular, count),
+    [scope.label, singular],
+  );
+  const artwork = glyph.artwork;
+  const forkable = scope.capability?.capture === "directory_tree";
+  const unavailable = !scope.available;
+  const unavailableReason = scope.unavailable_reason
+    ?? "This row's coordinate is not supported by this build.";
   const [page, setPage] = useState<CatalogScopeResources | null>(null);
   const [chosenStorageId, setChosenStorageId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "list" });
@@ -827,7 +834,7 @@ export default function StorageCatalogPage({
      and the path bar has its own Refresh. */
   /* The same translation the project page applies: a transport failure names
      what to check instead of quoting the AWS SDK. `storages` carries each
-     storage's kind, which is all the translation needs. */
+     storage's provider label, which is all the translation needs. */
   const storageFailureMessage = (reason: unknown): string => storageAccessErrorMessage(
     storages.find((candidate) => candidate.id === (chosenStorageId ?? storageId)) ?? null,
     reason,
@@ -838,6 +845,10 @@ export default function StorageCatalogPage({
 
   const load = useCallback(async () => {
     const epoch = ++epochRef.current;
+    if (!scope.available) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     setFailures([]);
@@ -855,7 +866,7 @@ export default function StorageCatalogPage({
     } finally {
       if (epoch === epochRef.current) setLoading(false);
     }
-  }, [chosenStorageId, scope.scope.scope_id]);
+  }, [chosenStorageId, scope.available, scope.scope.scope_id]);
 
   useEffect(() => {
     void load();
@@ -937,11 +948,10 @@ export default function StorageCatalogPage({
   ] as Array<[string, string]>)
     .map(([status, phrase]) => {
       const count = rows.filter((row) => rowStatus(row) === status).length;
-      const noun = count === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase();
-      return count === 0 ? null : `${count} ${noun} ${phrase}`;
+      return count === 0 ? null : `${count} ${noun(count)} ${phrase}`;
     })
     .filter((phrase): phrase is string => phrase !== null)
-    .join(", "), [kind, rows]);
+    .join(", "), [noun, rows]);
 
   /* Outside-click and Escape dismiss the action menu, the same contract the
      path bar's own menus keep. */
@@ -967,12 +977,12 @@ export default function StorageCatalogPage({
     };
   }, [openChoices]);
 
-  /* Stored-only pet rows ask for their preview after the list is on screen:
+  /* Stored-only rows with artwork ask for their preview after the list is on screen:
      one storage round-trip per row, kept out of the list call on purpose —
      this Mac may be offline, and a page must never wait on its decoration.
      A failure keeps the glyph tile, silently. */
   useEffect(() => {
-    if (!petKind || !storageId) return;
+    if (!artwork || !storageId) return;
     const scopeId = scope.scope.scope_id;
     const targets = rows.filter((row) => !row.local_present && row.remote_present
       && row.resource_id && !row.preview_png && !previewAttempts.current.has(row.row_id));
@@ -982,7 +992,7 @@ export default function StorageCatalogPage({
       for (const row of targets) {
         previewAttempts.current.add(row.row_id);
         try {
-          const preview = await storageCatalogApi.getPetPreview(scopeId, storageId, row.resource_id!);
+          const preview = await storageCatalogApi.getPreview(scopeId, storageId, row.resource_id!);
           if (cancelled) return;
           setRemotePreviews((current) => ({ ...current, [row.row_id]: preview }));
         } catch {
@@ -994,7 +1004,7 @@ export default function StorageCatalogPage({
     return () => {
       cancelled = true;
     };
-  }, [petKind, rows, scope.scope.scope_id, storageId]);
+  }, [artwork, rows, scope.scope.scope_id, storageId]);
 
   /** The card's launch verbs. Failures land on the page's own error
    * surface, the same place every other verb reports. */
@@ -1021,9 +1031,10 @@ export default function StorageCatalogPage({
    * asks the user to link by hand. */
   const ensureLink = useCallback(async (): Promise<void> => {
     if (page?.link) return;
+    if (!scope.available) throw new Error(unavailableReason);
     if (!storageId) throw new Error("choose a storage first");
     await storageCatalogApi.linkScopeStorage(scope.scope.scope_id, storageId);
-  }, [page, scope.scope.scope_id, storageId]);
+  }, [page, scope.available, scope.scope.scope_id, storageId, unavailableReason]);
 
   const openPush = async () => {
     if (!storageId) return;
@@ -1052,15 +1063,14 @@ export default function StorageCatalogPage({
     setBusy(true);
     setError(null);
     setFailures([]);
-    setProgress(`Pushing ${selected.length} ${selected.length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase()}…`);
+    setProgress(`Pushing ${selected.length} ${noun(selected.length)}…`);
     try {
       const outcome = await storageCatalogApi.applyPush(pushPlan.plan_id, selected, [...pushAcks]);
       setMode({ kind: "list" });
       setPushPlan(null);
       await load();
-      const noun = selected.length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase();
       notify(outcome.published
-        ? `Pushed ${selected.length} ${noun} to ${storageName ?? "storage"}.`
+        ? `Pushed ${selected.length} ${noun(selected.length)} to ${storageName ?? "storage"}.`
         : outcome.message);
     } catch (reason) {
       setMode({ kind: "list" });
@@ -1117,7 +1127,7 @@ export default function StorageCatalogPage({
     setBusy(true);
     setError(null);
     setFailures([]);
-    setProgress(`Pulling ${Object.keys(choices).length} ${Object.keys(choices).length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase()}…`);
+    setProgress(`Pulling ${Object.keys(choices).length} ${noun(Object.keys(choices).length)}…`);
     try {
       const outcome = await storageCatalogApi.applyPull(pullPlan.plan_id, choices, acknowledgements);
       setMode({ kind: "list" });
@@ -1130,18 +1140,17 @@ export default function StorageCatalogPage({
         .filter((result) => result.outcome === "installed"
           || result.outcome === "updated"
           || result.outcome === "preserved_and_updated").length;
-      const noun = applied === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase();
       if (failed.length > 0) {
         notify(
-          `Pulled ${applied} of ${Object.keys(choices).length} ${kind.plural.toLowerCase()} — ${failed.length} failed.`,
+          `Pulled ${applied} of ${Object.keys(choices).length} ${plural} — ${failed.length} failed.`,
           "attention",
         );
         setFailures(failed);
         return;
       }
       notify(outcome.remote_accepted
-        ? `Pulled ${applied} ${noun} from ${storageName ?? "storage"}.`
-        : `Pulled ${applied} ${noun}. Pull did not advance the comparison base.`,
+        ? `Pulled ${applied} ${noun(applied)} from ${storageName ?? "storage"}.`
+        : `Pulled ${applied} ${noun(applied)}. Pull did not advance the comparison base.`,
         outcome.remote_accepted ? "ok" : "attention");
     } catch (reason) {
       setMode({ kind: "list" });
@@ -1158,7 +1167,7 @@ export default function StorageCatalogPage({
   const unlinkStorage = async () => {
     if (!storageId || !pageLink) return;
     const approved = await confirm(
-      `Unlink “${storageName}” from ${label}?\n\nPush and Pull stop for these ${kind.plural.toLowerCase()}. Content already stored there and local content are left untouched, and you can link again later.`,
+      `Unlink “${storageName}” from ${label}?\n\nPush and Pull stop for these ${plural}. Content already stored there and local content are left untouched, and you can link again later.`,
       { title: "Unlink storage" },
     );
     if (!approved) return;
@@ -1205,7 +1214,7 @@ export default function StorageCatalogPage({
     {
       id: "storage",
       label: storage?.name || (storageId ? "(unnamed)" : "No storage"),
-      icon: storage?.kind === "s3" ? "cloud" : "drive",
+      icon: iconNameFromHint(storage?.icon, "drive"),
       tone: "root",
       warning: !storageId,
       title: storage ? `${storage.name || "Storage"} · ${storage.detail}` : undefined,
@@ -1215,11 +1224,12 @@ export default function StorageCatalogPage({
         label: storage?.name || "No storage linked",
         detail: storage?.detail,
         detailIsPath: storage?.detailIsPath,
-        icon: storage?.kind === "s3" ? "cloud" : "drive",
+        icon: iconNameFromHint(storage?.icon, "drive"),
       },
-      menuBanner: storageId
+      /* A row that can never push or pull is not invited to add a storage. */
+      menuBanner: storageId || unavailable
         ? undefined
-        : `Add a storage to compare these ${kind.plural.toLowerCase()} and turn on Push and Pull.`,
+        : `Add a storage to compare these ${plural} and turn on Push and Pull.`,
       menu: [
         {
           items: [
@@ -1251,7 +1261,7 @@ export default function StorageCatalogPage({
               label: candidate.name || "(unnamed)",
               detail: candidate.detail,
               detailIsPath: candidate.detailIsPath,
-              icon: candidate.kind === "s3" ? ("cloud" as const) : ("drive" as const),
+              icon: iconNameFromHint(candidate.icon, "drive"),
               disabled: busy,
               onSelect: () => {
                 setChosenStorageId(candidate.id);
@@ -1273,7 +1283,7 @@ export default function StorageCatalogPage({
     {
       id: "scope",
       label,
-      icon: kind.icon,
+      icon: glyph.icon,
       title: `${label}\n${scope.profile.configured_home}`,
       ariaLabel: `${label}. Catalog row menu`,
       menuLabel: "Catalog row",
@@ -1281,7 +1291,7 @@ export default function StorageCatalogPage({
         label,
         detail: scope.profile.configured_home,
         detailIsPath: true,
-        icon: kind.icon,
+        icon: glyph.icon,
       },
       menu: [
         {
@@ -1323,10 +1333,10 @@ export default function StorageCatalogPage({
             .filter((candidate) => candidate.scope.scope_id !== scope.scope.scope_id)
             .map((candidate) => ({
               id: candidate.scope.scope_id,
-              label: catalogScopeLabel(candidate.scope, candidate.profile),
+              label: catalogScopeLabel(candidate),
               detail: candidate.profile.configured_home,
               detailIsPath: true,
-              icon: catalogKindMeta(candidate.scope.resource_kind).icon,
+              icon: catalogScopeIcon(candidate),
               disabled: busy,
               onSelect: () => onOpenScope(candidate.scope.scope_id),
             })),
@@ -1344,10 +1354,12 @@ export default function StorageCatalogPage({
     },
   ];
 
-  const syncDisabled = busy || !storageId || loading;
-  const syncDisabledReason = storageId
-    ? undefined
-    : `Add a storage to these ${kind.plural.toLowerCase()} before pushing or pulling`;
+  const syncDisabled = busy || !storageId || loading || unavailable;
+  const syncDisabledReason = unavailable
+    ? unavailableReason
+    : storageId
+      ? undefined
+      : `Add a storage to these ${plural} before pushing or pulling`;
   const pushReviewWarnings = pushPlan?.rows
     .filter((row) => pushSelected.has(row.row.resource_id))
     .flatMap((row) => row.row.warnings) ?? [];
@@ -1357,7 +1369,7 @@ export default function StorageCatalogPage({
     || pushSelected.size === 0
     || pushReviewUnacknowledged;
   const pushReviewDisabledReason = pushSelected.size === 0
-    ? `Select at least one ${kind.label.toLowerCase()} to push`
+    ? `Select at least one ${noun(1)} to push`
     : pushReviewUnacknowledged
       ? "Acknowledge the selected warnings before pushing"
       : undefined;
@@ -1373,7 +1385,7 @@ export default function StorageCatalogPage({
     || pullReviewSelectedCount === 0
     || pullReviewBlocked;
   const pullReviewDisabledReason = pullReviewSelectedCount === 0
-    ? `Select at least one ${kind.label.toLowerCase()} to pull`
+    ? `Select at least one ${noun(1)} to pull`
     : pullReviewBlocked
       ? "Acknowledge the selected overwrite before pulling"
       : undefined;
@@ -1456,14 +1468,15 @@ export default function StorageCatalogPage({
     />
   );
 
-  /* Keep work in flight and failures on screen. One zone takes the loudest
-     severity; per-item failures keep one line each. Successes use the shell
-     notice. */
+  /* Keep work in flight and failures over an existing page on screen. An
+     initial load failure uses the Retry panel below and is not repeated here.
+     One zone takes the loudest severity; per-item failures keep one line each.
+     Successes use the shell notice. */
   const pageNotices: NoticeItem[] = [];
   if (progress) {
     pageNotices.push({ key: "progress", severity: "info", message: progress });
   }
-  if (error) {
+  if (error && page) {
     pageNotices.push({ key: "error", severity: "danger", message: error });
   }
   for (const failure of failures) {
@@ -1471,10 +1484,9 @@ export default function StorageCatalogPage({
   }
   /* Nothing in this zone is standing content: the progress line is written
      while a Push or Pull runs, and both failure surfaces are written after
-     one. Even the load failure arrives after the page has already drawn its
-     "Loading…" state, so it is an event too — an assertive one, because the
-     thing the user asked for did not happen. Work in flight only advises. */
-  const noticeTiming: NoticeTiming = error || failures.length > 0
+     one. A failure blocks because the requested operation did not happen;
+     work in flight only advises. */
+  const noticeTiming: NoticeTiming = (error && page) || failures.length > 0
     ? { timing: "blocking" }
     : { timing: "progress" };
   const notices = (
@@ -1535,14 +1547,14 @@ export default function StorageCatalogPage({
                       severity="warning"
                       timing="standing"
                       label="Notes about this Push review"
-                      title={`${heldRows.length} ${heldRows.length === 1 ? kind.label.toLowerCase() : kind.plural.toLowerCase()} held for Pull`}
+                      title={`${heldRows.length} ${noun(heldRows.length)} held for Pull`}
                       action={(
                         <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void openPull()}>
                           Open Pull review
                         </button>
                       )}
                     >
-                      {`${storageName ?? "Storage"} has versions this Mac has not reviewed, so their local changes cannot push yet. Selected ${kind.plural.toLowerCase()} still push.`}
+                      {`${storageName ?? "Storage"} has versions this Mac has not reviewed, so their local changes cannot push yet. Selected ${plural} still push.`}
                     </Notice>
                   </div>
                 )}
@@ -1566,10 +1578,11 @@ export default function StorageCatalogPage({
                         storageName={storageName}
                         storageRevision={storageRevision}
                         provider={scope.scope.provider}
-                        kindNoun={kind.label.toLowerCase()}
+                        providerLabel={profile.provider_label}
+                        kindNoun={noun(1)}
                         onOpenApp={openProfileApp}
                         onOpenTerminal={openProfileTerminal}
-                        preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
+                        preview={artwork ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
                         onReveal={() => reveal(row)}
                         selectable={planRow.row.selectable}
                         selected={planRow.row.selectable && pushSelected.has(resourceId)}
@@ -1698,7 +1711,7 @@ export default function StorageCatalogPage({
                     <NoticeZone
                       timing="standing"
                       label="Notes about this Pull review"
-                      subject={`${kind.plural.toLowerCase()} claimed elsewhere`}
+                      subject={`${plural} claimed elsewhere`}
                       items={claimed.map((item) => ({
                         key: item.item.resource_id,
                         severity: "warning" as const,
@@ -1726,10 +1739,11 @@ export default function StorageCatalogPage({
                         storageName={storageName}
                         storageRevision={storageRevision}
                         provider={scope.scope.provider}
-                        kindNoun={kind.label.toLowerCase()}
+                        providerLabel={profile.provider_label}
+                        kindNoun={noun(1)}
                         onOpenApp={openProfileApp}
                         onOpenTerminal={openProfileTerminal}
-                        preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
+                        preview={artwork ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
                         onReveal={() => reveal(row)}
                         selectable={executable}
                         selected={included}
@@ -1785,7 +1799,7 @@ export default function StorageCatalogPage({
                       <Icon name="check-circle" size={16} />
                       <span>
                         <strong>Nothing to pull</strong>
-                        <small>{`These ${kind.plural.toLowerCase()} already match ${storageName ?? "storage"}.`}</small>
+                        <small>{`These ${plural} already match ${storageName ?? "storage"}.`}</small>
                       </span>
                     </div>
                   )}
@@ -1826,9 +1840,8 @@ export default function StorageCatalogPage({
   const localRows = rows.filter((row) => row.local_present || !row.remote_present);
 
   const renderRow = (row: CatalogScopeRow) => {
-    const forkable = forkableKind && row.local_present && !!row.resource_id;
-    const forkOpen = forkable && forkFor === row.resource_id;
-    const kindPhrase = resourceKindPhrase(scope.scope.resource_kind, row.scope_label);
+    const rowForkable = forkable && row.local_present && !!row.resource_id;
+    const forkOpen = rowForkable && forkFor === row.resource_id;
     return (
       <ResourceCard
         key={row.row_id}
@@ -1836,22 +1849,23 @@ export default function StorageCatalogPage({
         storageName={storageName}
         storageRevision={storageRevision}
         provider={scope.scope.provider}
-        kindNoun={kind.label.toLowerCase()}
+        providerLabel={profile.provider_label}
+        kindNoun={noun(1)}
         onOpenApp={openProfileApp}
         onOpenTerminal={openProfileTerminal}
-        preview={petKind ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
+        preview={artwork ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
         onReveal={() => reveal(row)}
-        onFork={forkableKind ? () => {
+        onFork={forkable ? () => {
           setForkError(null);
           setForkFor(forkOpen ? null : row.resource_id!);
         } : undefined}
         forkOpen={forkOpen}
-        forkTitle={`Fork ${row.display_name} — duplicate this ${kindPhrase} under a new name`}
+        forkTitle={`Fork ${row.display_name} — duplicate this ${noun(1)} under a new name`}
         footer={forkOpen && (
           <ForkDrawer
             displayName={row.display_name}
             seed={forkSeed(row)}
-            maxLength={petKind ? 64 : 128}
+            maxLength={128}
             busy={busy}
             error={forkError}
             onEdited={() => setForkError(null)}
@@ -1936,7 +1950,18 @@ export default function StorageCatalogPage({
             message,
           }))}
         />
-        {loading && !page ? (
+        {unavailable ? (
+          /* The backend's reason, standing: nothing was asked of the home or
+             the storage, and nothing on the bar can be pressed. */
+          <Notice
+            severity="danger"
+            timing="standing"
+            label="Why this Catalog row is unavailable"
+            title={`${label} can’t be used in this build.`}
+          >
+            {unavailableReason}
+          </Notice>
+        ) : loading && !page ? (
           <LoadingScaffold shape="rows" label={`Loading ${label}`} />
         ) : error && !page ? (
           /* "None stored yet" is a fact about the storage. When the request
@@ -1963,7 +1988,7 @@ export default function StorageCatalogPage({
              second border around it. Nor does it name the home or the
              storage — the crumb bar above is already saying both. */
           <div className="sync-history-state">
-            {`No ${kind.label.toLowerCase()} on this Mac, and none stored yet.`}
+            {`No ${noun(1)} on this Mac, and none stored yet.`}
           </div>
         ) : (
           <section className="profile-links-section" aria-label={label}>
@@ -1988,7 +2013,7 @@ export default function StorageCatalogPage({
             {localRows.length > 0 && (
               <>
                 <div className="sync-history-section-heading">
-                  <h2><Icon name={kind.icon} size={14} />{kind.plural}</h2>
+                  <h2><Icon name={glyph.icon} size={14} />{scope.label}</h2>
                 </div>
                 <div className="sync-history-thread-list">
                   {localRows.map(renderRow)}

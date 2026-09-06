@@ -802,13 +802,21 @@ fn sync_directory(_directory: &Path) {}
 #[cfg(test)]
 mod tests {
     use super::super::domain::{
-        CatalogCommitId, CatalogLinkId, CatalogProfilesDocument, CatalogResourceKindTag,
-        CatalogResourceRepositoryId, CatalogScope, CatalogScopeId, CatalogScopeLink,
-        CatalogScopesDocument, LibraryHeadCoordinate, LocalCatalogProfileId, ProviderKey,
+        CatalogCommitId, CatalogCoordinate, CatalogLinkId, CatalogProfilesDocument,
+        CatalogResourceId, CatalogResourceRepositoryId, CatalogScope, CatalogScopeId,
+        CatalogScopeLink, CatalogScopesDocument, LibraryHeadCoordinate, LocalCatalogProfileId,
     };
     use super::*;
     use mallard_domain::StorageId;
     use std::collections::BTreeMap;
+
+    fn skills() -> CatalogCoordinate {
+        CatalogCoordinate::new("codex", "agent_skill", "agentskills.io.skill", 1).unwrap()
+    }
+
+    fn skills_repository() -> CatalogResourceRepositoryId {
+        CatalogResourceRepositoryId::for_coordinate(&skills())
+    }
 
     fn repository(temp: &tempfile::TempDir) -> CatalogStateRepository {
         CatalogStateRepository::from_home_dir(temp.path()).unwrap()
@@ -823,11 +831,14 @@ mod tests {
             CatalogScopesDocument::default()
         );
         repo.mutate_scopes(|document| {
+            let coordinate = skills();
             document.scopes.push(CatalogScope {
                 scope_id: CatalogScopeId::generate().unwrap(),
-                provider: ProviderKey::Codex,
+                provider: coordinate.provider,
                 profile_id: LocalCatalogProfileId::generate().unwrap(),
-                resource_kind: CatalogResourceKindTag::AgentSkill,
+                resource_kind: coordinate.resource_kind,
+                format: coordinate.format,
+                format_version: coordinate.format_version,
                 revision: 1,
                 created_at: 1,
                 updated_at: 1,
@@ -874,10 +885,7 @@ mod tests {
                 link_id: CatalogLinkId::generate().unwrap(),
                 scope_id: CatalogScopeId::generate().unwrap(),
                 storage_id: storage_id.clone(),
-                repository_id: CatalogResourceRepositoryId::for_kind(
-                    ProviderKey::Codex,
-                    CatalogResourceKindTag::AgentSkill,
-                ),
+                repository_id: skills_repository(),
                 accepted_head: None,
                 accepted_resources: BTreeMap::new(),
                 revision: 1,
@@ -899,10 +907,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("storage-a").unwrap();
-        let repository_id = CatalogResourceRepositoryId::for_kind(
-            ProviderKey::Codex,
-            CatalogResourceKindTag::AgentSkill,
-        );
+        let repository_id = skills_repository();
         repo.mutate_scope_links(|document| {
             document.links.push(CatalogScopeLink {
                 link_id: CatalogLinkId::generate().unwrap(),
@@ -918,11 +923,7 @@ mod tests {
                     storage_identity_sha256: "b".repeat(64),
                 }),
                 accepted_resources: BTreeMap::from([(
-                    crate::storage_catalog::domain::skill_resource_id(
-                        crate::storage_catalog::domain::AgentSkillScope::CodexHome,
-                        "review",
-                        "review",
-                    ),
+                    CatalogResourceId::parse(format!("resource-{}", "d".repeat(64))).unwrap(),
                     "c".repeat(64),
                 )]),
                 revision: 1,

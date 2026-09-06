@@ -3,6 +3,9 @@
 //! Owns catalog scopes, per-storage links, and reviewed Push, Pull, and Fork
 //! operations. It reads the neutral configured-storage list but never loads a
 //! project registration, project binding, thread, or repository bundle.
+//! Every provider-, kind-, or format-specific step dispatches through the
+//! registry: a scope whose coordinate this build does not register lists as
+//! unavailable and cannot be operated on.
 
 use bytes::Bytes;
 use mallard_domain::{now_secs, StorageConfig, StorageId, SyncConfig};
@@ -12,19 +15,21 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use super::adapters::{capability_matrix, NativeProcessRunner, PluginProcessRunner};
+use super::adapters::{NativeProcessRunner, PluginProcessRunner, ResolvedCatalogTarget};
 use super::apply::{
     apply_resource_fork, execute_scope_pull_item, recover_catalog_operations, PullApplyEnvironment,
 };
 use super::domain::{
-    pet_resource_id, provider_owns_kind, sha256_hex, CatalogActionResult, CatalogCapturedWith,
-    CatalogLinkId, CatalogLinkState, CatalogPlanActionId, CatalogPlanId, CatalogResource,
-    CatalogResourceForkPlan, CatalogResourceId, CatalogResourceKindTag,
-    CatalogResourcePlanDocument, CatalogResourceRepositoryId, CatalogResourceWarning, CatalogScope,
-    CatalogScopeId, CatalogScopeLink, CatalogScopePullPlan, CatalogScopePushPlan, CodexPetFormat,
+    CatalogActionOutcome, CatalogActionResult, CatalogCapturedWith, CatalogCoordinate,
+    CatalogCoordinateLabels, CatalogFormatKey, CatalogLinkId, CatalogLinkState,
+    CatalogPlanActionId, CatalogPlanId, CatalogProviderConfig, CatalogResourceEnvelope,
+    CatalogResourceForkPlan, CatalogResourceId, CatalogResourceKindKey,
+    CatalogResourcePlanDocument, CatalogResourceWarning, CatalogScope, CatalogScopeId,
+    CatalogScopeLink, CatalogScopePullPlan, CatalogScopePushPlan, CatalogTargetConfig,
     LibraryResourceManifest, LibraryResourceTag, LocalCatalogProfile, LocalCatalogProfileId,
-    LocalCatalogTargetId, ProviderKey, PublishedResourceEntry, CATALOG_SCHEMA, MAX_PET_ATLAS_BYTES,
+    ProviderKey, PublishedResourceEntry,
 };
 use super::inventory::{inventory_local, CatalogLocalInventory, LocalResourceRecord};
 use super::persistence::CatalogStateRepository;
@@ -33,20 +38,21 @@ use super::profiles::{
     default_profile_home, resolve_profile_context, validate_new_profile_home,
     ResolvedCatalogContext,
 };
+use super::registry::{CatalogCapability, CatalogCapabilityDescriptor, CatalogRegistry};
 use super::resource_engine::{
     head_coordinate, storage_identity_for_config, verify_library_continuity, LibraryResourceEngine,
     ObservedLibraryHead, PublishLibraryResourceRequest,
 };
 use super::resource_planning::{
     build_resource_fork_plan, build_scope_pull_plan, build_scope_push_plan, conflicting_claim_pins,
-    scope_label, scope_local_records, scope_resource_state, validate_scope_pull_selection,
-    ScopeForkPlanInputs, ScopePullPlanInputs, ScopePushPlanInputs,
+    scope_resource_state, validate_scope_pull_selection, ScopeForkPlanInputs, ScopePullPlanInputs,
+    ScopePushPlanInputs,
 };
 
-fn pull_outcome_accepts_remote(outcome: super::domain::CatalogActionOutcome) -> bool {
+fn pull_outcome_accepts_remote(outcome: CatalogActionOutcome) -> bool {
     !matches!(
         outcome,
-        super::domain::CatalogActionOutcome::Failed | super::domain::CatalogActionOutcome::Partial
+        CatalogActionOutcome::Failed | CatalogActionOutcome::Partial
     )
 }
 
@@ -71,21 +77,82 @@ fn engine_for(
     ))
 }
 
-#[derive(Serialize, Clone, Debug)]
-pub struct CatalogCapabilityDto {
-    pub provider: ProviderKey,
-    pub kinds: Vec<CatalogResourceKindTag>,
+/// Machine-local, digest-keyed, and disposable: wiping `~/.mallard` wipes it,
+/// and every entry can be re-derived from its source.
+fn preview_cache_dir(user_home: &Path) -> PathBuf {
+    user_home.join(".mallard").join("preview_cache")
 }
 
-/// One Catalog menu row plus the profile its label derives from.
+/// One Library profile as the frontend sees it: the record plus the
+/// registered provider's label. The provider's own configuration envelope
+/// stays machine-local.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CatalogProfileDto {
+    pub profile_id: LocalCatalogProfileId,
+    pub provider: ProviderKey,
+    pub provider_label: String,
+    pub display_name: String,
+    pub configured_home: String,
+    pub revision: u64,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+fn profile_dto(registry: &CatalogRegistry, profile: &LocalCatalogProfile) -> CatalogProfileDto {
+    CatalogProfileDto {
+        profile_id: profile.profile_id.clone(),
+        provider: profile.provider.clone(),
+        provider_label: registry
+            .provider(&profile.provider)
+            .map(|adapter| adapter.descriptor().label)
+            .unwrap_or_else(|| profile.provider.to_string()),
+        display_name: profile.display_name.clone(),
+        configured_home: profile.configured_home.clone(),
+        revision: profile.revision,
+        created_at: profile.created_at,
+        updated_at: profile.updated_at,
+    }
+}
+
+/// One Catalog menu row plus the profile its label derives from and the
+/// registered capability's presentation. A row whose coordinate this build
+/// does not register is listed as unavailable: it keeps its raw coordinate,
+/// names itself, and cannot be operated on.
 #[derive(Serialize, Clone, Debug)]
 pub struct CatalogScopeDto {
     pub scope: CatalogScope,
-    pub profile: LocalCatalogProfile,
+    pub profile: CatalogProfileDto,
+    #[serde(flatten)]
+    pub labels: CatalogCoordinateLabels,
+    /// The registered capability's label, or the raw coordinate.
+    pub label: String,
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
-/// One row on a scope page: a resource of this kind, compared against the one
-/// storage the page is scoped to.
+fn scope_dto(
+    registry: &CatalogRegistry,
+    scope: CatalogScope,
+    profile: &LocalCatalogProfile,
+) -> CatalogScopeDto {
+    let coordinate = scope.coordinate();
+    let (label, available, unavailable_reason) = match registry.require_capability(&coordinate) {
+        Ok(capability) => (capability.descriptor.label.clone(), true, None),
+        Err(reason) => (coordinate.to_string(), false, Some(reason)),
+    };
+    CatalogScopeDto {
+        labels: registry.labels_for(&coordinate),
+        scope,
+        profile: profile_dto(registry, profile),
+        label,
+        available,
+        unavailable_reason,
+    }
+}
+
+/// One row on a scope page: a resource of this coordinate, compared against
+/// the one storage the page is scoped to.
 ///
 /// Local-only, stored-only, and both-sides resources are all this shape,
 /// because the page draws them the same way; which one a row happens to be is
@@ -96,6 +163,8 @@ pub struct CatalogScopeRowDto {
     pub row_id: String,
     pub display_name: String,
     pub resource_id: Option<CatalogResourceId>,
+    /// The codec's secondary label for this resource (a root class, a
+    /// format version), when the coordinate does not say it all.
     pub scope_label: Option<String>,
     /// `None` only when no storage is chosen: with nothing to compare
     /// against, no state can be claimed.
@@ -115,16 +184,17 @@ pub struct CatalogScopeRowDto {
     /// The digest the comparison used: the local capture's when one exists,
     /// otherwise the stored version's. `None` when neither side is captured.
     pub content_sha256: Option<String>,
-    /// A small PNG of the pet's idle frame, as a data URI, derived from this
-    /// Mac's atlas and cached by digest. Pet rows only; `None` when nothing
-    /// local can be drawn — stored-only rows fetch theirs lazily through
-    /// `get_catalog_pet_preview`.
+    /// A small PNG preview as a data URI, derived from this Mac's capture by
+    /// the codec and cached by digest. `None` when the format has no
+    /// preview or nothing local can be drawn — stored-only rows fetch theirs
+    /// lazily through `get_catalog_resource_preview`.
     pub preview_png: Option<String>,
-    /// The pet descriptor's own sentence about itself. Pet rows only.
-    pub pet_description: Option<String>,
+    /// The codec's one-line description from the descriptor, when the
+    /// format has one.
+    pub description: Option<String>,
     pub warnings: Vec<CatalogResourceWarning>,
-    /// Why this resource cannot be synced at all — a symlinked skill
-    /// directory, an unreadable package. Set only with `state` Blocked.
+    /// Why this resource cannot be synced at all — a symlinked directory,
+    /// an unreadable package. Set only with `state` Blocked.
     pub blocker: Option<String>,
 }
 
@@ -136,19 +206,21 @@ pub struct CatalogScopePageLinkDto {
 }
 
 /// The complete content of one scope page: the storage it compares against,
-/// the scope's link to it, and one row per resource of this kind on either
-/// side.
+/// the scope's link to it, and one row per resource of this coordinate on
+/// either side.
 #[derive(Serialize, Clone, Debug)]
 pub struct CatalogScopeResourcesDto {
     pub scope: CatalogScope,
-    pub profile: LocalCatalogProfile,
+    pub profile: CatalogProfileDto,
+    #[serde(flatten)]
+    pub labels: CatalogCoordinateLabels,
     /// The caller's choice when it made one; otherwise the storage this
     /// scope's links already point at, so the page opens on the pairing that
     /// exists rather than on nothing.
     pub storage_id: Option<StorageId>,
     pub storage_name: Option<String>,
     pub link: Option<CatalogScopePageLinkDto>,
-    /// The stored kind repository's current revision, when one exists.
+    /// The stored repository's current revision, when one exists.
     pub storage_revision: Option<u64>,
     pub rows: Vec<CatalogScopeRowDto>,
     /// Scan notes that belong to the whole home rather than to a row.
@@ -184,6 +256,24 @@ pub struct CatalogScopePullOutcomeDto {
     pub results: Vec<CatalogActionResult>,
 }
 
+/// One Library repository as the storage page lists it: the coordinate it
+/// derives from with its labels, the head facts when the repository reads,
+/// and the refusal when it does not. Absent repositories produce no entry.
+#[derive(Serialize, Clone, Debug)]
+pub struct CatalogStorageRepositoryDto {
+    pub repository_id: String,
+    #[serde(flatten)]
+    pub coordinate: CatalogCoordinate,
+    #[serde(flatten)]
+    pub labels: CatalogCoordinateLabels,
+    pub revision: Option<u64>,
+    pub updated_at: Option<u64>,
+    /// Display names of everything the set holds, sorted for the fold.
+    pub resource_names: Vec<String>,
+    /// Why the repository cannot be read; the row states it instead of chips.
+    pub error: Option<String>,
+}
+
 /// The complete approval captured by a reviewed scope Push.
 #[derive(Clone, Debug)]
 pub struct CatalogPushApproval {
@@ -200,10 +290,12 @@ pub struct CatalogPullApproval {
     pub destructive_acknowledged: Vec<CatalogResourceId>,
 }
 
-/// Production Catalog use cases over explicit machine and provider homes.
+/// Production Catalog use cases over explicit machine and provider homes and
+/// one compiled registry.
 pub struct StorageCatalogService {
     state: LocalStateRepository,
     catalog: CatalogStateRepository,
+    registry: Arc<CatalogRegistry>,
     runner: Box<dyn PluginProcessRunner>,
     user_home: PathBuf,
 }
@@ -212,13 +304,33 @@ impl StorageCatalogService {
     pub fn from_user_home() -> Result<Self, String> {
         let user_home = dirs::home_dir()
             .ok_or_else(|| "could not resolve the user home directory".to_string())?;
-        Self::from_home_dirs(user_home.clone(), user_home, Box::new(NativeProcessRunner))
+        let registry = CatalogRegistry::production();
+        Self::with_registry(
+            user_home.clone(),
+            user_home,
+            Box::new(NativeProcessRunner::new(registry.clone())),
+            registry,
+        )
     }
 
     pub fn from_home_dirs(
         machine_home: impl Into<PathBuf>,
         user_home: impl Into<PathBuf>,
         runner: Box<dyn PluginProcessRunner>,
+    ) -> Result<Self, String> {
+        Self::with_registry(
+            machine_home,
+            user_home,
+            runner,
+            CatalogRegistry::production(),
+        )
+    }
+
+    pub fn with_registry(
+        machine_home: impl Into<PathBuf>,
+        user_home: impl Into<PathBuf>,
+        runner: Box<dyn PluginProcessRunner>,
+        registry: Arc<CatalogRegistry>,
     ) -> Result<Self, String> {
         let machine_home = machine_home.into();
         let user_home = user_home.into();
@@ -237,33 +349,43 @@ impl StorageCatalogService {
         Ok(Self {
             state: LocalStateRepository::from_home_dir(machine_home.clone())?,
             catalog: CatalogStateRepository::from_home_dir(machine_home)?,
+            registry,
             runner,
             user_home,
         })
     }
 
-    pub fn capabilities() -> Vec<CatalogCapabilityDto> {
-        capability_matrix()
-            .into_iter()
-            .map(|(provider, kinds)| CatalogCapabilityDto { provider, kinds })
-            .collect()
+    /// Every registered capability, in display order. The frontend lists
+    /// these; it holds no provider, kind, format, or target table of its own.
+    pub fn capabilities(&self) -> Vec<CatalogCapabilityDescriptor> {
+        self.registry.descriptors()
     }
 
-    pub fn list_profiles(&self) -> Result<Vec<LocalCatalogProfile>, String> {
-        list_catalog_resource_profiles_with_repository(&self.catalog, &self.user_home, now_secs())
+    pub fn list_profiles(&self) -> Result<Vec<CatalogProfileDto>, String> {
+        Ok(list_catalog_resource_profiles_with_repository(
+            &self.registry,
+            &self.catalog,
+            &self.user_home,
+            now_secs(),
+        )?
+        .iter()
+        .map(|profile| profile_dto(&self.registry, profile))
+        .collect())
     }
 
     pub fn save_profile(
         &self,
         provider: ProviderKey,
         configured_home: String,
-    ) -> Result<LocalCatalogProfile, String> {
-        save_catalog_resource_profile_with_repository(
+    ) -> Result<CatalogProfileDto, String> {
+        let profile = save_catalog_resource_profile_with_repository(
+            &self.registry,
             &self.catalog,
             provider,
             configured_home,
             now_secs(),
-        )
+        )?;
+        Ok(profile_dto(&self.registry, &profile))
     }
 
     pub fn rename_profile(
@@ -271,29 +393,22 @@ impl StorageCatalogService {
         profile_id: &LocalCatalogProfileId,
         display_name: String,
         expected_revision: u64,
-    ) -> Result<LocalCatalogProfile, String> {
-        rename_catalog_resource_profile_with_repository(
+    ) -> Result<CatalogProfileDto, String> {
+        let profile = rename_catalog_resource_profile_with_repository(
             &self.catalog,
             profile_id,
             display_name,
             expected_revision,
             now_secs(),
-        )
+        )?;
+        Ok(profile_dto(&self.registry, &profile))
     }
 
     pub fn open_profile_in_app(&self, profile_id: &LocalCatalogProfileId) -> Result<(), String> {
         let (provider, home) = profile_launch_home(&self.catalog, profile_id)?;
-        match provider {
-            ProviderKey::Codex => {
-                mallard_infrastructure::providers::codex::actions::launch_codex_home_app(
-                    &home,
-                    &self.user_home,
-                )
-            }
-            ProviderKey::Claude => {
-                mallard_infrastructure::providers::claude::actions::launch_claude_home_app(&home)
-            }
-        }
+        self.registry
+            .require_provider(&provider)?
+            .launch_home_app(&home, &self.user_home)
     }
 
     pub fn open_profile_in_terminal(
@@ -301,16 +416,9 @@ impl StorageCatalogService {
         profile_id: &LocalCatalogProfileId,
     ) -> Result<(), String> {
         let (provider, home) = profile_launch_home(&self.catalog, profile_id)?;
-        match provider {
-            ProviderKey::Codex => {
-                mallard_infrastructure::providers::codex::actions::launch_codex_home_terminal(&home)
-            }
-            ProviderKey::Claude => {
-                mallard_infrastructure::providers::claude::actions::launch_claude_home_terminal(
-                    &home,
-                )
-            }
-        }
+        self.registry
+            .require_provider(&provider)?
+            .launch_home_terminal(&home)
     }
 
     pub fn list_scopes(&self) -> Result<Vec<CatalogScopeDto>, String> {
@@ -322,9 +430,8 @@ impl StorageCatalogService {
             .map(|scope| {
                 let profile = profiles
                     .profile(&scope.profile_id)
-                    .ok_or("a Catalog row lost its provider profile")?
-                    .clone();
-                Ok(CatalogScopeDto { scope, profile })
+                    .ok_or("a Catalog row lost its provider profile")?;
+                Ok(scope_dto(&self.registry, scope, profile))
             })
             .collect()
     }
@@ -333,13 +440,20 @@ impl StorageCatalogService {
         &self,
         provider: ProviderKey,
         profile_id: LocalCatalogProfileId,
-        resource_kind: CatalogResourceKindTag,
+        resource_kind: CatalogResourceKindKey,
+        format: CatalogFormatKey,
+        format_version: u32,
     ) -> Result<CatalogScopeDto, String> {
         create_catalog_scope_with_repositories(
+            &self.registry,
             &self.catalog,
-            provider,
+            CatalogCoordinate {
+                provider,
+                resource_kind,
+                format,
+                format_version,
+            },
             profile_id,
-            resource_kind,
             now_secs(),
         )
     }
@@ -358,6 +472,7 @@ impl StorageCatalogService {
         storage_id: Option<&StorageId>,
     ) -> Result<CatalogScopeResourcesDto, String> {
         list_catalog_scope_resources_with_repositories(
+            &self.registry,
             &self.state,
             &self.catalog,
             self.runner.as_ref(),
@@ -367,13 +482,14 @@ impl StorageCatalogService {
         )
     }
 
-    pub fn pet_preview(
+    pub fn resource_preview(
         &self,
         scope_id: &CatalogScopeId,
         storage_id: &StorageId,
         resource_id: &CatalogResourceId,
     ) -> Result<String, String> {
-        get_catalog_pet_preview_with_repositories(
+        get_catalog_resource_preview_with_repositories(
+            &self.registry,
             &self.state,
             &self.catalog,
             scope_id,
@@ -387,7 +503,7 @@ impl StorageCatalogService {
         &self,
         storage_id: &StorageId,
     ) -> Result<Vec<CatalogStorageRepositoryDto>, String> {
-        list_catalog_storage_repositories_with_repository(&self.state, storage_id)
+        list_catalog_storage_repositories_with_repository(&self.registry, &self.state, storage_id)
     }
 
     pub fn link_scope_storage(
@@ -396,6 +512,7 @@ impl StorageCatalogService {
         storage_id: &StorageId,
     ) -> Result<CatalogScopeLinkOutcomeDto, String> {
         link_catalog_scope_storage_with_repositories(
+            &self.registry,
             &self.state,
             &self.catalog,
             self.runner.as_ref(),
@@ -412,6 +529,7 @@ impl StorageCatalogService {
         expected_revision: u64,
     ) -> Result<bool, String> {
         unlink_catalog_scope_storage_with_repositories(
+            &self.registry,
             &self.catalog,
             link_id,
             expected_revision,
@@ -425,6 +543,7 @@ impl StorageCatalogService {
         storage_id: &StorageId,
     ) -> Result<CatalogScopePushPlan, String> {
         prepare_push_with_repositories(
+            &self.registry,
             &self.state,
             &self.catalog,
             self.runner.as_ref(),
@@ -440,6 +559,7 @@ impl StorageCatalogService {
         approval: CatalogPushApproval,
     ) -> Result<CatalogScopePushOutcomeDto, String> {
         apply_push_with_repositories(
+            &self.registry,
             &self.state,
             &self.catalog,
             self.runner.as_ref(),
@@ -458,6 +578,7 @@ impl StorageCatalogService {
         requested_copy_names: BTreeMap<CatalogResourceId, String>,
     ) -> Result<CatalogScopePullPlan, String> {
         prepare_pull_with_repositories(
+            &self.registry,
             &self.state,
             &self.catalog,
             self.runner.as_ref(),
@@ -474,6 +595,7 @@ impl StorageCatalogService {
         approval: CatalogPullApproval,
     ) -> Result<CatalogScopePullOutcomeDto, String> {
         apply_pull_with_repositories(
+            &self.registry,
             &self.state,
             &self.catalog,
             self.runner.as_ref(),
@@ -492,6 +614,7 @@ impl StorageCatalogService {
         requested_name: &str,
     ) -> Result<CatalogResourceForkPlan, String> {
         prepare_fork_with_repositories(
+            &self.registry,
             &self.catalog,
             self.runner.as_ref(),
             scope_id,
@@ -516,15 +639,23 @@ impl StorageCatalogService {
             return Err("the Fork review belongs to another row".to_string());
         }
         let ResolvedScope { scope, .. } = resolve_scope(&self.catalog, scope_id)?;
+        let capability = require_capability(&self.registry, &scope)?;
         let context = resolve_profile_context(
+            &self.registry,
             &self.catalog.load_profiles()?,
             &scope.profile_id,
-            scope.provider,
+            &scope.provider,
             &self.user_home,
         )
         .map_err(|blocker| blocker.to_string())?;
-        context.verify_pins(&plan.profile_pins, &plan.skill_root_pins)?;
-        let result = apply_resource_fork(&self.catalog, &plan, now_secs())?;
+        context.verify_pins(&plan.profile_pins, &plan.target_pins)?;
+        let result = apply_resource_fork(
+            &self.registry,
+            &self.catalog,
+            &capability,
+            &plan,
+            now_secs(),
+        )?;
         plan_store::discard(self.catalog.root(), plan_id);
         Ok(result)
     }
@@ -549,52 +680,65 @@ fn resolve_scope(
         .profile(&scope.profile_id)
         .ok_or("this Catalog row lost its provider profile")?
         .clone();
-    if profile.provider_key != scope.provider {
+    if profile.provider != scope.provider {
         return Err("this Catalog row's profile changed its provider".to_string());
     }
     Ok(ResolvedScope { scope, profile })
 }
 
+/// Registry validation for one scope: a coordinate this build does not
+/// register loads and lists, but nothing operates on it.
+fn require_capability(
+    registry: &CatalogRegistry,
+    scope: &CatalogScope,
+) -> Result<Arc<CatalogCapability>, String> {
+    registry
+        .require_capability(&scope.coordinate())
+        .map_err(|reason| format!("this Catalog row cannot be operated on: {}", reason))
+}
+
 fn list_catalog_resource_profiles_with_repository(
+    registry: &CatalogRegistry,
     catalog: &CatalogStateRepository,
     user_home: &Path,
     now: u64,
 ) -> Result<Vec<LocalCatalogProfile>, String> {
-    let candidates = capability_matrix()
-        .into_iter()
-        .map(|(provider, _)| provider)
-        .filter_map(|provider| {
-            let home = default_profile_home(provider, user_home)?;
-            home.is_dir().then_some((provider, home))
+    let providers = registry.providers();
+    let candidates = providers
+        .iter()
+        .filter_map(|descriptor| {
+            let adapter = registry.provider(&descriptor.key)?;
+            let home = default_profile_home(adapter, user_home)?;
+            home.is_dir().then_some((descriptor, home))
         })
-        .map(|(provider, home)| {
+        .map(|(descriptor, home)| {
             let canonical = validate_new_profile_home(catalog.root(), &home.to_string_lossy())?;
-            Ok((provider, canonical))
+            Ok((descriptor.key.clone(), descriptor.label.clone(), canonical))
         })
         .collect::<Result<Vec<_>, String>>()?;
 
     if !candidates.is_empty() {
         let current = catalog.load_profiles()?;
-        let has_missing = candidates.iter().any(|(provider, canonical)| {
+        let has_missing = candidates.iter().any(|(provider, _, canonical)| {
             !current.profiles.iter().any(|profile| {
-                profile.provider_key == *provider
-                    && Path::new(&profile.configured_home) == canonical
+                &profile.provider == provider && Path::new(&profile.configured_home) == canonical
             })
         });
         if has_missing {
             catalog.mutate_profiles(|document| {
-                for (provider, canonical) in candidates {
+                for (provider, label, canonical) in candidates {
                     if document.profiles.iter().any(|profile| {
-                        profile.provider_key == provider
+                        profile.provider == provider
                             && Path::new(&profile.configured_home) == canonical
                     }) {
                         continue;
                     }
                     document.profiles.push(LocalCatalogProfile {
                         profile_id: LocalCatalogProfileId::generate()?,
-                        provider_key: provider,
-                        display_name: format!("Default {}", provider.display_label()),
+                        provider,
+                        display_name: format!("Default {}", label),
                         configured_home: canonical.to_string_lossy().to_string(),
+                        provider_config: CatalogProviderConfig::version_1(),
                         revision: 1,
                         created_at: now,
                         updated_at: now,
@@ -605,10 +749,17 @@ fn list_catalog_resource_profiles_with_repository(
         }
     }
 
+    let rank: BTreeMap<ProviderKey, usize> = providers
+        .iter()
+        .enumerate()
+        .map(|(index, descriptor)| (descriptor.key.clone(), index))
+        .collect();
+    let rank_of = |provider: &ProviderKey| rank.get(provider).copied().unwrap_or(usize::MAX);
     let mut profiles = catalog.load_profiles()?.profiles;
     profiles.sort_by(|left, right| {
-        left.provider_key
-            .cmp(&right.provider_key)
+        rank_of(&left.provider)
+            .cmp(&rank_of(&right.provider))
+            .then_with(|| left.provider.cmp(&right.provider))
             .then_with(|| left.display_name.cmp(&right.display_name))
     });
     Ok(profiles)
@@ -618,7 +769,7 @@ fn list_catalog_resource_profiles_with_repository(
 /// de-duplicated against the names already taken. Setup never asks for a
 /// name — renaming afterwards is `rename_catalog_resource_profile`.
 fn derived_profile_name(
-    provider: ProviderKey,
+    provider_label: &str,
     canonical: &Path,
     taken: &[LocalCatalogProfile],
 ) -> String {
@@ -628,7 +779,7 @@ fn derived_profile_name(
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| format!("{} profile", provider.display_label()));
+        .unwrap_or_else(|| format!("{} profile", provider_label));
     let is_taken = |candidate: &str| {
         taken
             .iter()
@@ -644,26 +795,29 @@ fn derived_profile_name(
 }
 
 fn save_catalog_resource_profile_with_repository(
+    registry: &CatalogRegistry,
     catalog: &CatalogStateRepository,
     provider: ProviderKey,
     path: String,
     now: u64,
 ) -> Result<LocalCatalogProfile, String> {
+    let provider_label = registry.require_provider(&provider)?.descriptor().label;
     let canonical = validate_new_profile_home(catalog.root(), &path)?;
     let canonical_home = canonical.to_string_lossy().to_string();
     catalog.mutate_profiles(|document| {
         // Re-picking a home that is already a profile selects it rather than
         // failing the submission.
         if let Some(existing) = document.profiles.iter().find(|profile| {
-            profile.provider_key == provider && profile.configured_home == canonical_home
+            profile.provider == provider && profile.configured_home == canonical_home
         }) {
             return Ok(existing.clone());
         }
         let profile = LocalCatalogProfile {
             profile_id: LocalCatalogProfileId::generate()?,
-            provider_key: provider,
-            display_name: derived_profile_name(provider, &canonical, &document.profiles),
+            provider: provider.clone(),
+            display_name: derived_profile_name(&provider_label, &canonical, &document.profiles),
             configured_home: canonical_home.clone(),
+            provider_config: CatalogProviderConfig::version_1(),
             revision: 1,
             created_at: now,
             updated_at: now,
@@ -719,45 +873,44 @@ fn profile_launch_home(
     if !home.is_absolute() || !home.is_dir() {
         return Err("this profile's home folder is missing; pick it again in Library".to_string());
     }
-    Ok((profile.provider_key, home))
+    Ok((profile.provider.clone(), home))
 }
 
 fn create_catalog_scope_with_repositories(
+    registry: &CatalogRegistry,
     catalog: &CatalogStateRepository,
-    provider: ProviderKey,
+    coordinate: CatalogCoordinate,
     profile_id: LocalCatalogProfileId,
-    resource_kind: CatalogResourceKindTag,
     now: u64,
 ) -> Result<CatalogScopeDto, String> {
-    if !provider_owns_kind(provider, resource_kind) {
-        return Err("this provider cannot host that resource kind".to_string());
-    }
+    coordinate.validate()?;
+    registry.require_capability(&coordinate)?;
     let profiles = catalog.load_profiles()?;
     let profile = profiles
         .profile(&profile_id)
         .ok_or_else(|| format!("unknown catalog profile '{}'", profile_id))?
         .clone();
-    if profile.provider_key != provider {
+    if profile.provider != coordinate.provider {
         return Err(format!(
             "catalog profile '{}' is a {} profile, not {}",
-            profile_id,
-            profile.provider_key.as_str(),
-            provider.as_str()
+            profile_id, profile.provider, coordinate.provider
         ));
     }
     let scope = catalog.mutate_scopes(|document| {
         if document
             .scopes
             .iter()
-            .any(|scope| scope.profile_id == profile_id && scope.resource_kind == resource_kind)
+            .any(|scope| scope.profile_id == profile_id && scope.coordinate() == coordinate)
         {
             return Err("this Catalog row already exists".to_string());
         }
         let scope = CatalogScope {
             scope_id: CatalogScopeId::generate()?,
-            provider,
+            provider: coordinate.provider.clone(),
             profile_id: profile_id.clone(),
-            resource_kind,
+            resource_kind: coordinate.resource_kind.clone(),
+            format: coordinate.format.clone(),
+            format_version: coordinate.format_version,
             revision: 1,
             created_at: now,
             updated_at: now,
@@ -766,7 +919,7 @@ fn create_catalog_scope_with_repositories(
         document.scopes.push(scope.clone());
         Ok(scope)
     })?;
-    Ok(CatalogScopeDto { scope, profile })
+    Ok(scope_dto(registry, scope, &profile))
 }
 
 fn delete_catalog_scope_with_repositories(
@@ -829,11 +982,13 @@ fn scope_storage(
 }
 
 /// Everything a scope page or review needs, resolved once: the scope, its
-/// profile context and kind inventory, and — when a storage participates —
-/// the storage config, the scope link, and the verified repository view.
+/// registered capability, its profile context and inventory, and — when a
+/// storage participates — the storage config, the scope link, and the
+/// verified repository view.
 struct ResolvedScopeWorkspace {
     scope: CatalogScope,
     profile: LocalCatalogProfile,
+    capability: Arc<CatalogCapability>,
     context: ResolvedCatalogContext,
     inventory: CatalogLocalInventory,
     storage: Option<StorageConfig>,
@@ -843,7 +998,7 @@ struct ResolvedScopeWorkspace {
 }
 
 impl ResolvedScopeWorkspace {
-    fn remote_map(&self) -> BTreeMap<CatalogResourceId, CatalogResource> {
+    fn remote_map(&self) -> BTreeMap<CatalogResourceId, CatalogResourceEnvelope> {
         self.manifest
             .as_ref()
             .map(LibraryResourceManifest::resource_map)
@@ -852,6 +1007,7 @@ impl ResolvedScopeWorkspace {
 }
 
 fn resolve_scope_workspace(
+    registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
     runner: &dyn PluginProcessRunner,
@@ -860,14 +1016,16 @@ fn resolve_scope_workspace(
     user_home: &Path,
 ) -> Result<ResolvedScopeWorkspace, String> {
     let ResolvedScope { scope, profile } = resolve_scope(catalog, scope_id)?;
+    let capability = require_capability(registry, &scope)?;
     let context = resolve_profile_context(
+        registry,
         &catalog.load_profiles()?,
         &scope.profile_id,
-        scope.provider,
+        &scope.provider,
         user_home,
     )
     .map_err(|blocker| blocker.to_string())?;
-    let inventory = inventory_local(&context, scope.resource_kind, runner)
+    let inventory = inventory_local(registry, &capability, &context, runner)
         .map_err(|blocker| blocker.to_string())?;
 
     let links = catalog.load_scope_links()?;
@@ -882,11 +1040,13 @@ fn resolve_scope_workspace(
         .and_then(|storage| links.link_for(scope_id, &storage.id))
         .cloned();
 
-    let repository_id = CatalogResourceRepositoryId::for_kind(scope.provider, scope.resource_kind);
+    let coordinate = scope.coordinate();
+    let repository_id = capability.repository_id();
     if let Some(link) = &link {
         if link.repository_id != repository_id {
             return Err(
-                "this scope link points at a repository its kind no longer derives".to_string(),
+                "this scope link points at a repository its coordinate no longer derives"
+                    .to_string(),
             );
         }
     }
@@ -899,24 +1059,39 @@ fn resolve_scope_workspace(
             link.as_ref().and_then(|link| link.accepted_head.as_ref()),
             observed.as_ref().map(|observed| &observed.head),
             &repository_id,
-            &storage_identity_for_config(storage),
+            &storage_identity_for_config(storage)?,
         )?;
         if let Some(observed) = &observed {
-            // The tag freezes provider+kind; read_tag validates the
+            // The tag freezes the coordinate; read_tag validates the
             // derivation, so a repository written under a foreign identity
             // fails the page closed here.
             let (tag, _) = engine
                 .read_tag(&repository_id)?
-                .ok_or("the stored kind repository is missing its discovery tag")?;
-            if tag.provider != scope.provider || tag.resource_kind != scope.resource_kind {
-                return Err("the stored kind repository belongs to another kind".to_string());
+                .ok_or("the stored repository is missing its discovery tag")?;
+            if tag.coordinate() != coordinate {
+                return Err("the stored repository belongs to another coordinate".to_string());
             }
-            manifest = Some(engine.read_manifest(&observed.head)?);
+            let read = engine.read_manifest(&observed.head)?;
+            // Structural validation proved the set; the registered codec
+            // proves every entry is a resource of this exact coordinate.
+            for entry in read.resources.values() {
+                if entry.resource.coordinate() != coordinate {
+                    return Err(
+                        "the stored repository holds a resource of another coordinate".to_string(),
+                    );
+                }
+                capability
+                    .codec
+                    .validate(&entry.resource)
+                    .map_err(|error| format!("a stored resource failed validation: {}", error))?;
+            }
+            manifest = Some(read);
         }
     }
     Ok(ResolvedScopeWorkspace {
         scope,
         profile,
+        capability,
         context,
         inventory,
         storage,
@@ -934,6 +1109,7 @@ fn require_link(workspace: &ResolvedScopeWorkspace) -> Result<&CatalogScopeLink,
 }
 
 fn list_catalog_scope_resources_with_repositories(
+    registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
     runner: &dyn PluginProcessRunner,
@@ -941,8 +1117,10 @@ fn list_catalog_scope_resources_with_repositories(
     storage_id: Option<&StorageId>,
     user_home: &Path,
 ) -> Result<CatalogScopeResourcesDto, String> {
-    let workspace =
-        resolve_scope_workspace(state, catalog, runner, scope_id, storage_id, user_home)?;
+    let workspace = resolve_scope_workspace(
+        registry, state, catalog, runner, scope_id, storage_id, user_home,
+    )?;
+    let codec = workspace.capability.codec.as_ref();
     let remote = workspace.remote_map();
     let remote_updated: BTreeMap<&CatalogResourceId, u64> = workspace
         .manifest
@@ -956,17 +1134,16 @@ fn list_catalog_scope_resources_with_repositories(
         })
         .unwrap_or_default();
 
-    let locals: BTreeMap<&CatalogResourceId, &LocalResourceRecord> =
-        scope_local_records(&workspace.inventory, workspace.scope.resource_kind).collect();
-    let mut resource_ids: BTreeSet<&CatalogResourceId> = locals.keys().copied().collect();
+    let mut resource_ids: BTreeSet<&CatalogResourceId> =
+        workspace.inventory.resources.keys().collect();
     resource_ids.extend(remote.keys());
 
     let mut rows: Vec<CatalogScopeRowDto> = Vec::new();
     for resource_id in resource_ids {
-        let local = locals.get(resource_id).copied();
+        let local = workspace.inventory.resources.get(resource_id);
         let remote_resource = remote.get(resource_id);
-        let local_sha = local.map(|record| record.resource.content_sha256());
-        let remote_sha = remote_resource.map(|resource| resource.content_sha256());
+        let local_sha = local.map(|record| record.resource.content_sha256.as_str());
+        let remote_sha = remote_resource.map(|resource| resource.content_sha256.as_str());
         let state = if workspace.storage.is_none() {
             None
         } else {
@@ -983,15 +1160,14 @@ fn list_catalog_scope_resources_with_repositories(
                 },
             })
         };
-        let presented = match local.map(|record| &record.resource).or(remote_resource) {
-            Some(resource) => resource,
-            None => continue,
+        let Some(presented) = local.map(|record| &record.resource).or(remote_resource) else {
+            continue;
         };
         let mut row = CatalogScopeRowDto {
             row_id: format!("resource:{}", resource_id),
-            display_name: presented.display_name(),
+            display_name: codec.display_name(presented)?,
             resource_id: Some((*resource_id).clone()),
-            scope_label: scope_label(presented),
+            scope_label: codec.resource_label(presented),
             state,
             local_present: local.is_some(),
             local_path: local
@@ -1004,28 +1180,19 @@ fn list_catalog_scope_resources_with_repositories(
             remote_updated_at: remote_updated.get(resource_id).copied(),
             content_sha256: local_sha.or(remote_sha).map(str::to_string),
             preview_png: None,
-            pet_description: None,
+            description: codec.description(presented),
             warnings: local
                 .map(|record| record.warnings.clone())
                 .unwrap_or_default(),
             blocker: None,
         };
-        match (local, remote_resource) {
-            (Some(record), _) => decorate_pet_row(
-                &mut row,
-                &record.resource,
-                record.target_path.as_deref(),
-                user_home,
-            ),
-            (None, Some(resource)) => decorate_pet_row(&mut row, resource, None, user_home),
-            (None, None) => {}
-        }
+        decorate_local_preview(&mut row, &workspace.capability, local, user_home);
         rows.push(row);
     }
 
-    // Present on disk and impossible to capture — a symlinked skill
-    // directory, an unreadable pet package. Hiding them would make the page
-    // disagree with the folder it claims to describe.
+    // Present on disk and impossible to capture — a symlinked directory, an
+    // unreadable package. Hiding them would make the page disagree with the
+    // folder it claims to describe.
     for blocked in &workspace.inventory.blocked {
         rows.push(CatalogScopeRowDto {
             row_id: format!("blocked:{}", blocked.display_name),
@@ -1042,7 +1209,7 @@ fn list_catalog_scope_resources_with_repositories(
             remote_updated_at: None,
             content_sha256: None,
             preview_png: None,
-            pet_description: None,
+            description: None,
             warnings: Vec::new(),
             blocker: Some(blocked.reason.clone()),
         });
@@ -1057,10 +1224,11 @@ fn list_catalog_scope_resources_with_repositories(
             .then_with(|| left.row_id.cmp(&right.row_id))
     });
 
-    let recovery = recover_catalog_operations(catalog, now_secs())?;
+    let recovery = recover_catalog_operations(registry, catalog, now_secs())?;
     Ok(CatalogScopeResourcesDto {
         scope: workspace.scope,
-        profile: workspace.profile,
+        profile: profile_dto(registry, &workspace.profile),
+        labels: workspace.capability.labels(),
         storage_id: workspace.storage.as_ref().map(|storage| storage.id.clone()),
         storage_name: workspace
             .storage
@@ -1080,50 +1248,48 @@ fn list_catalog_scope_resources_with_repositories(
     })
 }
 
-/// Pet rows carry two things the scan already holds: the descriptor's own
-/// sentence about the pet, and — when the atlas is on this Mac — a small
-/// preview of its idle frame, derived once per digest and cached. Previews
-/// are decoration, so a failed derivation leaves the row without one rather
-/// than failing the page; the card draws the kind glyph instead. Stored-only
-/// rows are left to `get_catalog_pet_preview`, fetched lazily so no storage
-/// round-trip ever sits in the list's own path.
-fn decorate_pet_row(
+/// A local row's preview comes from the codec over the bytes capture already
+/// holds, derived once per digest and cached. Previews are decoration, so a
+/// failed derivation leaves the row without one rather than failing the
+/// page; the card draws the kind glyph instead. Stored-only rows are left to
+/// `get_catalog_resource_preview`, fetched lazily so no storage round-trip ever
+/// sits in the list's own path.
+fn decorate_local_preview(
     row: &mut CatalogScopeRowDto,
-    resource: &CatalogResource,
-    target_path: Option<&Path>,
+    capability: &CatalogCapability,
+    local: Option<&LocalResourceRecord>,
     user_home: &Path,
 ) {
-    let (format, pet) = match resource {
-        CatalogResource::CodexPetV1(pet) => (CodexPetFormat::V1, pet),
-        CatalogResource::CodexPetV2(pet) => (CodexPetFormat::V2, pet),
-        _ => return,
+    let Some(record) = local else {
+        return;
     };
-    row.pet_description = Some(pet.descriptor.description.clone());
-    let Some(directory) = target_path else { return };
-    let atlas_path = directory.join(&pet.descriptor.atlas_basename);
-    row.preview_png = super::pet_preview::cached_preview_data_uri(
-        &super::pet_preview::preview_cache_dir(user_home),
-        format,
-        &pet.descriptor.atlas.sha256,
-        || {
-            // Capture bounded this file already, but it can change between
-            // scan and list — never trust a path twice.
-            let metadata =
-                fs::metadata(&atlas_path).map_err(|error| format!("read pet atlas: {}", error))?;
-            if metadata.len() > MAX_PET_ATLAS_BYTES {
-                return Err("pet atlas exceeds its encoded size limit".to_string());
-            }
-            fs::read(&atlas_path).map_err(|error| format!("read pet atlas: {}", error))
-        },
-    )
-    .ok();
+    let Some(captured) = &record.captured else {
+        return;
+    };
+    let payloads = captured.payloads();
+    row.preview_png = capability
+        .codec
+        .preview(
+            &record.resource,
+            &preview_cache_dir(user_home),
+            &|sha256, size| {
+                payloads
+                    .get(sha256)
+                    .filter(|bytes| bytes.len() as u64 == size)
+                    .map(|bytes| bytes.to_vec())
+                    .ok_or_else(|| "the captured payload is missing".to_string())
+            },
+        )
+        .ok()
+        .flatten();
 }
 
-/// The preview for a stored-only pet row, fetched from the storage on demand
-/// and cached by the atlas digest. Kept out of the list call on purpose: a
-/// page must never wait on one storage round-trip per row, and this Mac may
-/// be offline — the card asks lazily and keeps its glyph when this fails.
-fn get_catalog_pet_preview_with_repositories(
+/// The preview for a stored-only row, fetched from the storage on demand and
+/// cached by payload digest. Kept out of the list call on purpose: a page
+/// must never wait on one storage round-trip per row, and this Mac may be
+/// offline — the card asks lazily and keeps its glyph when this fails.
+fn get_catalog_resource_preview_with_repositories(
+    registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
     scope_id: &CatalogScopeId,
@@ -1132,14 +1298,10 @@ fn get_catalog_pet_preview_with_repositories(
     user_home: &Path,
 ) -> Result<String, String> {
     let ResolvedScope { scope, .. } = resolve_scope(catalog, scope_id)?;
-    let format = match scope.resource_kind {
-        CatalogResourceKindTag::CodexPetV1 => CodexPetFormat::V1,
-        CatalogResourceKindTag::CodexPetV2 => CodexPetFormat::V2,
-        _ => return Err("this Catalog row's resources have no preview".to_string()),
-    };
+    let capability = require_capability(registry, &scope)?;
     let storage = storage_for(state, storage_id)?;
     let engine = engine_for(&storage)?;
-    let repository_id = CatalogResourceRepositoryId::for_kind(scope.provider, scope.resource_kind);
+    let repository_id = capability.repository_id();
     let (_, manifest) = engine
         .inspect(&repository_id)?
         .ok_or("the stored resource disappeared")?;
@@ -1148,80 +1310,49 @@ fn get_catalog_pet_preview_with_repositories(
         .get(resource_id)
         .map(|entry| &entry.resource)
         .ok_or("the stored resource disappeared")?;
-    let pet = match (resource, format) {
-        (CatalogResource::CodexPetV1(pet), CodexPetFormat::V1)
-        | (CatalogResource::CodexPetV2(pet), CodexPetFormat::V2) => pet,
-        _ => return Err("the stored resource is not a pet of this row's kind".to_string()),
-    };
-    let atlas = pet.descriptor.atlas.clone();
-    atlas.validate("stored pet atlas", MAX_PET_ATLAS_BYTES)?;
-    super::pet_preview::cached_preview_data_uri(
-        &super::pet_preview::preview_cache_dir(user_home),
-        format,
-        &atlas.sha256,
-        || engine.fetch_payload(&repository_id, &atlas.sha256, atlas.size),
-    )
+    if resource.coordinate() != scope.coordinate() {
+        return Err("the stored resource does not belong to this Catalog row".to_string());
+    }
+    capability.codec.validate(resource)?;
+    capability
+        .codec
+        .preview(resource, &preview_cache_dir(user_home), &|sha256, size| {
+            engine.fetch_payload(&repository_id, sha256, size)
+        })?
+        .ok_or_else(|| "this resource has no preview".to_string())
 }
 
-/// One Catalog kind repository as the storage page lists it: the derived
-/// identity, the head facts when the repository reads, and the refusal when
-/// it does not. Absent repositories produce no entry at all.
-#[derive(Serialize, Clone, Debug)]
-pub struct CatalogStorageRepositoryDto {
-    pub repository_id: String,
-    pub provider: ProviderKey,
-    pub resource_kind: CatalogResourceKindTag,
-    pub revision: Option<u64>,
-    pub updated_at: Option<u64>,
-    /// Display names of everything the set holds, sorted for the fold.
-    pub resource_names: Vec<String>,
-    /// Why the repository cannot be read; the row states it instead of chips.
-    pub error: Option<String>,
-}
-
-/// The storage page's Catalog listing: every kind repository this build can
-/// derive — the (provider, kind) ownership matrix — inspected with one head
-/// read each. Nothing is scanned: a repository is either derivable and read,
-/// or invisible to this build by construction. A derived id that answers but
+/// The storage page's Catalog listing: every repository this build can
+/// derive — one per registered capability — inspected with one head read
+/// each. Nothing is scanned: a repository is either derivable and read, or
+/// invisible to this build by construction. A derived id that answers but
 /// fails its tag or manifest checks is returned as a refusal row, never
 /// omitted — on a listing, a silent hole reads as "nothing stored".
 fn list_catalog_storage_repositories_with_repository(
+    registry: &CatalogRegistry,
     state: &LocalStateRepository,
     storage_id: &StorageId,
 ) -> Result<Vec<CatalogStorageRepositoryDto>, String> {
     let storage = storage_for(state, storage_id)?;
     let engine = engine_for(&storage)?;
-    let mut rows = Vec::new();
-    for kind in [
-        CatalogResourceKindTag::AgentSkill,
-        CatalogResourceKindTag::PluginInstallIntent,
-        CatalogResourceKindTag::CodexPetV1,
-        CatalogResourceKindTag::CodexPetV2,
-    ] {
-        for provider in [ProviderKey::Codex, ProviderKey::Claude] {
-            if !provider_owns_kind(provider, kind) {
-                continue;
-            }
-            if let Some(row) = read_storage_repository(&engine, provider, kind) {
-                rows.push(row);
-            }
-        }
-    }
-    Ok(rows)
+    Ok(registry
+        .capabilities()
+        .filter_map(|capability| read_storage_repository(&engine, capability))
+        .collect())
 }
 
 /// `None` when the repository does not exist in this storage; a refusal row
 /// when something exists under the derived id but cannot be read.
 fn read_storage_repository(
     engine: &LibraryResourceEngine<ConfiguredObjectStore>,
-    provider: ProviderKey,
-    kind: CatalogResourceKindTag,
+    capability: &CatalogCapability,
 ) -> Option<CatalogStorageRepositoryDto> {
-    let repository_id = CatalogResourceRepositoryId::for_kind(provider, kind);
+    let repository_id = capability.repository_id();
+    let coordinate = capability.coordinate();
     let refusal = |message: String| CatalogStorageRepositoryDto {
         repository_id: repository_id.as_str().to_string(),
-        provider,
-        resource_kind: kind,
+        coordinate: coordinate.clone(),
+        labels: capability.labels(),
         revision: None,
         updated_at: None,
         resource_names: Vec::new(),
@@ -1239,30 +1370,47 @@ fn read_storage_repository(
         return tag.map(|_| {
             // A tag with no head is what a failed first publish leaves
             // behind; say so rather than passing it off as absent.
-            refusal("the stored kind repository has a discovery tag but no head".to_string())
+            refusal("the stored repository has a discovery tag but no head".to_string())
         });
     };
     let Some((tag, _)) = tag else {
         return Some(refusal(
-            "the stored kind repository is missing its discovery tag".to_string(),
+            "the stored repository is missing its discovery tag".to_string(),
         ));
     };
     // read_tag already enforced the derivation; this is the same
     // belt-and-braces identity check the scope workspace keeps.
-    if tag.provider != provider || tag.resource_kind != kind {
+    if tag.coordinate() != coordinate {
         return Some(refusal(
-            "the stored kind repository belongs to another kind".to_string(),
+            "the stored repository belongs to another coordinate".to_string(),
         ));
     }
     let manifest = match engine.read_manifest(&observed.head) {
         Ok(manifest) => manifest,
         Err(message) => return Some(refusal(message)),
     };
-    let mut resource_names: Vec<String> = manifest
+    let names = manifest
         .resources
         .values()
-        .map(|entry| entry.resource.display_name())
-        .collect();
+        .map(|entry| {
+            if entry.resource.coordinate() != coordinate {
+                return Err(
+                    "the stored repository holds a resource of another coordinate".to_string(),
+                );
+            }
+            capability.codec.validate(&entry.resource)?;
+            capability.codec.display_name(&entry.resource)
+        })
+        .collect::<Result<Vec<String>, String>>();
+    let mut resource_names = match names {
+        Ok(names) => names,
+        Err(message) => {
+            return Some(refusal(format!(
+                "a stored resource failed validation: {}",
+                message
+            )))
+        }
+    };
     resource_names.sort_by(|left, right| {
         left.to_lowercase()
             .cmp(&right.to_lowercase())
@@ -1270,8 +1418,8 @@ fn read_storage_repository(
     });
     Some(CatalogStorageRepositoryDto {
         repository_id: repository_id.as_str().to_string(),
-        provider,
-        resource_kind: kind,
+        coordinate,
+        labels: capability.labels(),
         revision: Some(observed.head.revision),
         updated_at: Some(manifest.updated_at),
         resource_names,
@@ -1279,7 +1427,9 @@ fn read_storage_repository(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn link_catalog_scope_storage_with_repositories(
+    registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
     runner: &dyn PluginProcessRunner,
@@ -1289,6 +1439,7 @@ fn link_catalog_scope_storage_with_repositories(
     now: u64,
 ) -> Result<CatalogScopeLinkOutcomeDto, String> {
     let workspace = resolve_scope_workspace(
+        registry,
         state,
         catalog,
         runner,
@@ -1307,10 +1458,7 @@ fn link_catalog_scope_storage_with_repositories(
         .storage
         .as_ref()
         .ok_or("no storage is configured to link")?;
-    let repository_id = CatalogResourceRepositoryId::for_kind(
-        workspace.scope.provider,
-        workspace.scope.resource_kind,
-    );
+    let repository_id = workspace.capability.repository_id();
 
     // Pin per-resource bases where the local capture already equals the
     // stored copy; accept the head only when every stored resource agreed.
@@ -1323,21 +1471,16 @@ fn link_catalog_scope_storage_with_repositories(
             .inventory
             .resources
             .get(resource_id)
-            .is_some_and(|record| {
-                record.resource.content_sha256() == remote_resource.content_sha256()
-            });
+            .is_some_and(|record| record.resource.content_sha256 == remote_resource.content_sha256);
         if matches {
-            accepted_resources.insert(
-                resource_id.clone(),
-                remote_resource.content_sha256().to_string(),
-            );
+            accepted_resources.insert(resource_id.clone(), remote_resource.content_sha256.clone());
         }
     }
     let full_agreement = accepted_resources.len() == remote.len();
     let accepted_head = match (&workspace.observed, full_agreement) {
         (Some(observed), true) => Some(head_coordinate(
             &observed.head,
-            &storage_identity_for_config(storage),
+            &storage_identity_for_config(storage)?,
         )),
         _ => None,
     };
@@ -1375,53 +1518,23 @@ fn link_catalog_scope_storage_with_repositories(
     })
 }
 
-/// Whether a machine-local target belongs to this scope's kind under this
-/// resolved context. Pets additionally check the format through the claimed
-/// resource id, because the v1 and v2 formats share one directory.
-fn target_in_scope(
-    target: &LocalCatalogTargetId,
-    kind: CatalogResourceKindTag,
-    context: &ResolvedCatalogContext,
-    resource_id: Option<&CatalogResourceId>,
+/// Whether a machine-local record belongs to this scope: the same coordinate
+/// and a target root this profile currently resolves for the scope's
+/// capability. Two profiles of one provider share a coordinate but never a
+/// root, so their claims stay apart.
+fn record_in_scope(
+    coordinate: &CatalogCoordinate,
+    target: &CatalogTargetConfig,
+    scope_coordinate: &CatalogCoordinate,
+    roots: &[&ResolvedCatalogTarget],
 ) -> bool {
-    match (target, kind) {
-        (
-            LocalCatalogTargetId::SkillDirectory {
-                scope,
-                canonical_root,
-                ..
-            },
-            CatalogResourceKindTag::AgentSkill,
-        ) => context
-            .skill_root(*scope)
-            .is_some_and(|root| root == Path::new(canonical_root)),
-        (
-            LocalCatalogTargetId::Plugin {
-                provider,
-                canonical_home,
-                ..
-            },
-            CatalogResourceKindTag::PluginInstallIntent,
-        ) => context
-            .profile(*provider)
-            .is_some_and(|profile| profile.canonical_home == Path::new(canonical_home)),
-        (
-            LocalCatalogTargetId::PetDirectory {
-                canonical_home,
-                pet_id,
-            },
-            CatalogResourceKindTag::CodexPetV1 | CatalogResourceKindTag::CodexPetV2,
-        ) => {
-            let home_matches = context
-                .profile(ProviderKey::Codex)
-                .is_some_and(|profile| profile.canonical_home == Path::new(canonical_home));
-            let format = kind.pet_format().expect("pet kinds always carry a format");
-            home_matches
-                && resource_id
-                    .is_none_or(|resource_id| resource_id == &pet_resource_id(format, pet_id))
-        }
-        _ => false,
-    }
+    coordinate == scope_coordinate
+        && target.decode().is_ok_and(|identity| {
+            roots.iter().any(|root| {
+                root.target == target.target
+                    && root.canonical_root == Path::new(&identity.canonical_root)
+            })
+        })
 }
 
 /// Push and Pull reviews supersede per pairing: opening a new review for a
@@ -1443,6 +1556,7 @@ fn discard_scope_plans(
 }
 
 fn unlink_catalog_scope_storage_with_repositories(
+    registry: &CatalogRegistry,
     catalog: &CatalogStateRepository,
     link_id: &CatalogLinkId,
     expected_revision: u64,
@@ -1456,13 +1570,20 @@ fn unlink_catalog_scope_storage_with_repositories(
         return Err("the catalog link changed; refresh before unlinking".to_string());
     }
     let ResolvedScope { scope, .. } = resolve_scope(catalog, &link.scope_id)?;
+    let capability = require_capability(registry, &scope)?;
     let context = resolve_profile_context(
+        registry,
         &catalog.load_profiles()?,
         &scope.profile_id,
-        scope.provider,
+        &scope.provider,
         user_home,
     )
     .map_err(|blocker| blocker.to_string())?;
+    let roots = context.targets_for(&capability);
+    let scope_coordinate = scope.coordinate();
+    let in_scope = |coordinate: &CatalogCoordinate, target: &CatalogTargetConfig| {
+        record_in_scope(coordinate, target, &scope_coordinate, &roots)
+    };
 
     let storage_id = link.storage_id.clone();
     let active_operation = catalog
@@ -1472,7 +1593,7 @@ fn unlink_catalog_scope_storage_with_repositories(
         .any(|operation| {
             !operation.phase.is_terminal()
                 && operation.storage_id.as_ref() == Some(&storage_id)
-                && target_in_scope(&operation.target, scope.resource_kind, &context, None)
+                && in_scope(&operation.coordinate, &operation.target)
         });
     if active_operation {
         return Err("an operation for this link is still in progress".to_string());
@@ -1480,25 +1601,14 @@ fn unlink_catalog_scope_storage_with_repositories(
     discard_scope_plans(catalog, &link.scope_id, &storage_id);
     catalog.mutate_materializations(|claims| {
         claims.claims.retain(|claim| {
-            claim.storage_id != storage_id
-                || !target_in_scope(
-                    &claim.target,
-                    scope.resource_kind,
-                    &context,
-                    Some(&claim.resource_id),
-                )
+            claim.storage_id != storage_id || !in_scope(&claim.coordinate, &claim.target)
         });
         Ok(())
     })?;
     catalog.mutate_preservations(|preservations| {
         preservations.witnesses.retain(|witness| {
             witness.storage_id != storage_id
-                || !target_in_scope(
-                    &witness.source_target,
-                    scope.resource_kind,
-                    &context,
-                    Some(&witness.source_resource_id),
-                )
+                || !in_scope(&witness.coordinate, &witness.source_target)
         });
         Ok(())
     })?;
@@ -1506,7 +1616,7 @@ fn unlink_catalog_scope_storage_with_repositories(
         operations.operations.retain(|operation| {
             !(operation.phase.is_terminal()
                 && operation.storage_id.as_ref() == Some(&storage_id)
-                && target_in_scope(&operation.target, scope.resource_kind, &context, None))
+                && in_scope(&operation.coordinate, &operation.target))
         });
         Ok(())
     })?;
@@ -1517,7 +1627,9 @@ fn unlink_catalog_scope_storage_with_repositories(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_push_with_repositories(
+    registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
     runner: &dyn PluginProcessRunner,
@@ -1527,6 +1639,7 @@ fn prepare_push_with_repositories(
     now: u64,
 ) -> Result<CatalogScopePushPlan, String> {
     let workspace = resolve_scope_workspace(
+        registry,
         state,
         catalog,
         runner,
@@ -1539,12 +1652,18 @@ fn prepare_push_with_repositories(
         .storage
         .as_ref()
         .expect("a linked workspace always has its storage");
-    let storage_identity = storage_identity_for_config(storage);
+    let storage_identity = storage_identity_for_config(storage)?;
+    let storage_is_local = mallard_application::storage_setup::storage_local_root(
+        mallard_infrastructure::storage_providers::StorageProviderRegistry::production(),
+        storage,
+    )?
+    .is_some();
     let remote = workspace.remote_map();
     let plan = build_scope_push_plan(ScopePushPlanInputs {
         scope: &workspace.scope,
+        capability: &workspace.capability,
         link,
-        storage_kind: storage.kind,
+        storage_is_local,
         storage_identity_sha256: storage_identity.clone(),
         context: &workspace.context,
         inventory: &workspace.inventory,
@@ -1564,22 +1683,6 @@ fn prepare_push_with_repositories(
     Ok(plan)
 }
 
-fn payloads_for_record(record: &LocalResourceRecord) -> BTreeMap<String, Bytes> {
-    let mut payloads = BTreeMap::new();
-    if let Some(tree) = &record.skill_tree {
-        for file in tree.files.values() {
-            payloads.insert(sha256_hex(&file.bytes), Bytes::from(file.bytes.clone()));
-        }
-    }
-    if let Some(pet) = &record.pet {
-        payloads.insert(
-            sha256_hex(&pet.atlas_bytes),
-            Bytes::from(pet.atlas_bytes.clone()),
-        );
-    }
-    payloads
-}
-
 fn observed_matches(
     pinned: Option<&super::domain::LibraryHeadCoordinate>,
     observed: Option<&ObservedLibraryHead>,
@@ -1596,6 +1699,7 @@ fn observed_matches(
 
 #[allow(clippy::too_many_arguments)]
 fn apply_push_with_repositories(
+    registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
     runner: &dyn PluginProcessRunner,
@@ -1623,6 +1727,7 @@ fn apply_push_with_repositories(
     }
 
     let workspace = resolve_scope_workspace(
+        registry,
         state,
         catalog,
         runner,
@@ -1638,7 +1743,7 @@ fn apply_push_with_repositories(
         .storage
         .as_ref()
         .expect("a linked workspace always has its storage");
-    let storage_identity = storage_identity_for_config(storage);
+    let storage_identity = storage_identity_for_config(storage)?;
     if storage_identity != plan.storage_identity_sha256
         || !observed_matches(
             plan.observed_head.as_ref(),
@@ -1650,7 +1755,7 @@ fn apply_push_with_repositories(
     }
     workspace
         .context
-        .verify_pins(&plan.profile_pins, &plan.skill_root_pins)?;
+        .verify_pins(&plan.profile_pins, &plan.target_pins)?;
 
     let acknowledged: BTreeSet<_> = acknowledged_warning_digests.into_iter().collect();
     let selected: BTreeSet<CatalogResourceId> = selected_resource_ids.into_iter().collect();
@@ -1675,7 +1780,6 @@ fn apply_push_with_repositories(
             .inventory
             .resources
             .get(resource_id)
-            .filter(|record| record.resource.kind_tag() == workspace.scope.resource_kind)
             .ok_or("a selected resource disappeared after review")?;
         let reviewed = row
             .resource
@@ -1697,11 +1801,11 @@ fn apply_push_with_repositories(
         .as_ref()
         .map(|manifest| manifest.resources.clone())
         .unwrap_or_default();
-    let mut payloads = BTreeMap::new();
+    let mut payloads: BTreeMap<String, Bytes> = BTreeMap::new();
     for (resource_id, record) in &selected_records {
-        let unchanged = resources.get(*resource_id).is_some_and(|entry| {
-            entry.resource.content_sha256() == record.resource.content_sha256()
-        });
+        let unchanged = resources
+            .get(*resource_id)
+            .is_some_and(|entry| entry.resource.content_sha256 == record.resource.content_sha256);
         if !unchanged {
             resources.insert(
                 (*resource_id).clone(),
@@ -1711,20 +1815,20 @@ fn apply_push_with_repositories(
                 },
             );
         }
-        payloads.extend(payloads_for_record(record));
+        if let Some(captured) = &record.captured {
+            payloads.extend(captured.payloads());
+        }
     }
 
     let engine = engine_for(storage)?;
     let repository_id = link.repository_id.clone();
     let tag = match engine.read_tag(&repository_id)? {
         Some((tag, _)) => tag,
-        None => LibraryResourceTag {
-            schema_version: CATALOG_SCHEMA,
-            repository_id: repository_id.clone(),
-            provider: workspace.scope.provider,
-            resource_kind: workspace.scope.resource_kind,
-            created_at: link.created_at,
-        },
+        None => LibraryResourceTag::new(
+            &workspace.scope.coordinate(),
+            repository_id.clone(),
+            link.created_at,
+        ),
     };
     let host = state.load_or_create_host_identity()?;
     let published = engine.publish(PublishLibraryResourceRequest {
@@ -1758,7 +1862,7 @@ fn apply_push_with_repositories(
                 .ok_or("the published manifest lost a selected resource")?;
             Ok((
                 (*resource_id).clone(),
-                entry.resource.content_sha256().to_string(),
+                entry.resource.content_sha256.clone(),
             ))
         })
         .collect::<Result<_, String>>()?;
@@ -1795,52 +1899,26 @@ fn apply_push_with_repositories(
     })
 }
 
-fn name_taken_index<'a>(
-    inventory: &'a CatalogLocalInventory,
-) -> impl Fn(&LocalCatalogTargetId, &str) -> bool + 'a {
+/// Whether a copy name is already taken beside a target: by an inventoried
+/// occupant of the same root, or by anything else sitting in that directory.
+fn name_taken_index(
+    inventory: &CatalogLocalInventory,
+) -> impl Fn(&CatalogTargetConfig, &str) -> bool + '_ {
     move |target, candidate| {
         let folded = candidate.to_lowercase();
-        let inventoried =
-            inventory
-                .resources
-                .values()
-                .any(|record| match (&record.target, target) {
-                    (
-                        LocalCatalogTargetId::SkillDirectory {
-                            canonical_root: left_root,
-                            install_directory,
-                            ..
-                        },
-                        LocalCatalogTargetId::SkillDirectory {
-                            canonical_root: right_root,
-                            ..
-                        },
-                    ) => left_root == right_root && install_directory.to_lowercase() == folded,
-                    (
-                        LocalCatalogTargetId::PetDirectory {
-                            canonical_home: left_home,
-                            pet_id,
-                        },
-                        LocalCatalogTargetId::PetDirectory {
-                            canonical_home: right_home,
-                            ..
-                        },
-                    ) => left_home == right_home && pet_id.to_lowercase() == folded,
-                    _ => false,
-                });
+        let Ok(identity) = target.decode() else {
+            return true;
+        };
+        let inventoried = inventory.occupants().any(|record| {
+            record.target.decode().is_ok_and(|occupant| {
+                occupant.canonical_root == identity.canonical_root
+                    && occupant.member.to_lowercase() == folded
+            })
+        });
         if inventoried {
             return true;
         }
-        let parent = match target {
-            LocalCatalogTargetId::SkillDirectory { canonical_root, .. } => {
-                Path::new(canonical_root).to_path_buf()
-            }
-            LocalCatalogTargetId::PetDirectory { canonical_home, .. } => {
-                Path::new(canonical_home).join("pets")
-            }
-            LocalCatalogTargetId::Plugin { .. } => return true,
-        };
-        match fs::read_dir(parent) {
+        match fs::read_dir(&identity.canonical_root) {
             Ok(entries) => entries.flatten().any(|entry| {
                 entry
                     .file_name()
@@ -1855,6 +1933,7 @@ fn name_taken_index<'a>(
 
 #[allow(clippy::too_many_arguments)]
 fn prepare_pull_with_repositories(
+    registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
     runner: &dyn PluginProcessRunner,
@@ -1865,6 +1944,7 @@ fn prepare_pull_with_repositories(
     now: u64,
 ) -> Result<CatalogScopePullPlan, String> {
     let workspace = resolve_scope_workspace(
+        registry,
         state,
         catalog,
         runner,
@@ -1880,13 +1960,14 @@ fn prepare_pull_with_repositories(
     let observed = workspace
         .observed
         .as_ref()
-        .ok_or("the storage has nothing of this kind to Pull")?;
-    let storage_identity = storage_identity_for_config(storage);
+        .ok_or("the storage has nothing of this coordinate to Pull")?;
+    let storage_identity = storage_identity_for_config(storage)?;
     let remote = workspace.remote_map();
     let claims = catalog.load_materializations()?.claims;
     let name_taken = name_taken_index(&workspace.inventory);
     let plan = build_scope_pull_plan(ScopePullPlanInputs {
         scope: &workspace.scope,
+        capability: &workspace.capability,
         link,
         storage_identity_sha256: storage_identity.clone(),
         context: &workspace.context,
@@ -1909,6 +1990,7 @@ fn prepare_pull_with_repositories(
 
 #[allow(clippy::too_many_arguments)]
 fn apply_pull_with_repositories(
+    registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
     runner: &dyn PluginProcessRunner,
@@ -1926,6 +2008,7 @@ fn apply_pull_with_repositories(
         return Err("the Pull review expired; review again".to_string());
     }
     let workspace = resolve_scope_workspace(
+        registry,
         state,
         catalog,
         runner,
@@ -1941,12 +2024,12 @@ fn apply_pull_with_repositories(
         .storage
         .as_ref()
         .expect("a linked workspace always has its storage");
-    if storage_identity_for_config(storage) != plan.storage_identity_sha256 {
+    if storage_identity_for_config(storage)? != plan.storage_identity_sha256 {
         return Err("the storage changed after review".to_string());
     }
     workspace
         .context
-        .verify_pins(&plan.profile_pins, &plan.skill_root_pins)?;
+        .verify_pins(&plan.profile_pins, &plan.target_pins)?;
     let observed = workspace
         .observed
         .as_ref()
@@ -1986,7 +2069,7 @@ fn apply_pull_with_repositories(
         }
     }
 
-    let manifest_resources: BTreeMap<CatalogResourceId, CatalogResource> = plan
+    let manifest_resources: BTreeMap<CatalogResourceId, CatalogResourceEnvelope> = plan
         .items
         .iter()
         .filter_map(|item| {
@@ -2001,6 +2084,8 @@ fn apply_pull_with_repositories(
     let environment = PullApplyEnvironment {
         repository: catalog,
         runner,
+        registry,
+        capability: workspace.capability.clone(),
         fetch_payload: &fetch,
     };
     let mut results = Vec::new();
@@ -2020,14 +2105,14 @@ fn apply_pull_with_repositories(
         // on it, or when both sides already match. A skipped executable row
         // stays unreviewed — silently accepting it would flip a later
         // StorageChanged reading into LocalChanged.
-        let acted = selection.action.is_some()
-            || result.outcome == super::domain::CatalogActionOutcome::AlreadyMatching;
+        let acted =
+            selection.action.is_some() || result.outcome == CatalogActionOutcome::AlreadyMatching;
         if pull_outcome_accepts_remote(result.outcome) {
             if acted {
                 if let Some(resource) = &selection.item.resource {
                     accepted_updates.push((
                         selection.item.item.resource_id.clone(),
-                        resource.content_sha256().to_string(),
+                        resource.content_sha256.clone(),
                     ));
                 }
             }
@@ -2075,7 +2160,9 @@ fn apply_pull_with_repositories(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_fork_with_repositories(
+    registry: &CatalogRegistry,
     catalog: &CatalogStateRepository,
     runner: &dyn PluginProcessRunner,
     scope_id: &CatalogScopeId,
@@ -2085,18 +2172,21 @@ fn prepare_fork_with_repositories(
     now: u64,
 ) -> Result<CatalogResourceForkPlan, String> {
     let ResolvedScope { scope, .. } = resolve_scope(catalog, scope_id)?;
+    let capability = require_capability(registry, &scope)?;
     let context = resolve_profile_context(
+        registry,
         &catalog.load_profiles()?,
         &scope.profile_id,
-        scope.provider,
+        &scope.provider,
         user_home,
     )
     .map_err(|blocker| blocker.to_string())?;
-    let inventory = inventory_local(&context, scope.resource_kind, runner)
+    let inventory = inventory_local(registry, &capability, &context, runner)
         .map_err(|blocker| blocker.to_string())?;
     let name_taken = name_taken_index(&inventory);
     let plan = build_resource_fork_plan(ScopeForkPlanInputs {
         scope: &scope,
+        capability: &capability,
         resource_id,
         context: &context,
         inventory: &inventory,
@@ -2123,26 +2213,31 @@ fn prepare_fork_with_repositories(
 
 #[cfg(test)]
 mod tests {
-    use super::super::domain::{AgentSkillScope, CatalogActionOutcome, CatalogResourceRelation};
+    use super::super::adapters::CmdOutput;
+    use super::super::domain::{
+        CatalogResourceRelation, CatalogResourceRepositoryId, CATALOG_SCHEMA,
+    };
+    use super::super::registry::test_support;
     use super::*;
-    use mallard_domain::{StorageKind, SyncConfig};
+    use mallard_domain::SyncConfig;
+    use mallard_infrastructure::storage_providers::local::local_storage_config;
 
     struct EmptyCodexRunner;
 
     impl PluginProcessRunner for EmptyCodexRunner {
         fn run(
             &self,
-            provider: ProviderKey,
+            provider: &ProviderKey,
             _home: &Path,
             argv: &[String],
-        ) -> Result<super::super::adapters::CmdOutput, String> {
-            assert_eq!(provider, ProviderKey::Codex);
+        ) -> Result<CmdOutput, String> {
+            assert_eq!(provider.as_str(), "codex");
             let stdout = match argv.join(" ").as_str() {
                 "plugin marketplace list --json" => r#"{"marketplaces":[]}"#,
                 "plugin list --json" => r#"{"installed":[]}"#,
                 other => panic!("unexpected provider command: {other}"),
             };
-            Ok(super::super::adapters::CmdOutput {
+            Ok(CmdOutput {
                 success: true,
                 stdout: stdout.to_string(),
                 stderr: String::new(),
@@ -2150,8 +2245,59 @@ mod tests {
         }
     }
 
+    /// Panics on any provider CLI invocation, so "this path does no inventory
+    /// work" is asserted by construction rather than by timing.
+    struct PanicRunner;
+
+    impl PluginProcessRunner for PanicRunner {
+        fn run(
+            &self,
+            _provider: &ProviderKey,
+            _home: &Path,
+            argv: &[String],
+        ) -> Result<CmdOutput, String> {
+            panic!("provider inventory ran unexpectedly: {}", argv.join(" "));
+        }
+    }
+
     fn storage(value: &str) -> StorageId {
         StorageId::parse(value).unwrap()
+    }
+
+    fn provider(key: &str) -> ProviderKey {
+        ProviderKey::parse(key).unwrap()
+    }
+
+    fn coordinate(provider: &str, kind: &str, format: &str, version: u32) -> CatalogCoordinate {
+        CatalogCoordinate::new(provider, kind, format, version).unwrap()
+    }
+
+    fn codex_skills() -> CatalogCoordinate {
+        coordinate("codex", "agent_skill", "agentskills.io.skill", 1)
+    }
+
+    fn codex_pets(version: u32) -> CatalogCoordinate {
+        coordinate("codex", "desktop_pet", "openai.codex-pet", version)
+    }
+
+    fn registry() -> Arc<CatalogRegistry> {
+        CatalogRegistry::production()
+    }
+
+    fn create_scope(
+        fixture_registry: &CatalogRegistry,
+        catalog: &CatalogStateRepository,
+        coordinate: CatalogCoordinate,
+        profile_id: &LocalCatalogProfileId,
+        now: u64,
+    ) -> Result<CatalogScopeDto, String> {
+        create_catalog_scope_with_repositories(
+            fixture_registry,
+            catalog,
+            coordinate,
+            profile_id.clone(),
+            now,
+        )
     }
 
     #[test]
@@ -2176,26 +2322,38 @@ mod tests {
             Box::new(EmptyCodexRunner),
         )
         .expect("construct isolated service");
+        assert_eq!(service.capabilities().len(), 6);
         let profile = service
-            .save_profile(ProviderKey::Codex, codex_home.to_string_lossy().to_string())
+            .save_profile(provider("codex"), codex_home.to_string_lossy().to_string())
             .expect("save profile");
         assert_eq!(profile.display_name, "myconf1");
+        assert_eq!(profile.provider_label, "Codex");
         let scope = service
             .create_scope(
-                ProviderKey::Codex,
+                provider("codex"),
                 profile.profile_id,
-                CatalogResourceKindTag::AgentSkill,
+                codex_skills().resource_kind,
+                codex_skills().format,
+                1,
             )
             .expect("create scope");
+        assert!(scope.available);
+        assert_eq!(scope.label, "Skills");
+        assert_eq!(scope.labels.format_label, "Agent Skill");
         let resources = service
             .list_scope_resources(&scope.scope.scope_id, None)
             .expect("list resources");
 
         assert_eq!(resources.rows.len(), 1);
         assert_eq!(resources.rows[0].display_name, "mallard-alpha");
+        assert_eq!(
+            resources.rows[0].scope_label.as_deref(),
+            Some("Provider home")
+        );
         assert!(resources.rows[0].local_present);
         assert!(resources.link.is_none());
         assert!(!resources.rows[0].remote_present);
+        assert_eq!(resources.labels.kind_label, "Skills");
     }
 
     #[test]
@@ -2222,23 +2380,9 @@ mod tests {
         assert!(pull_outcome_accepts_remote(CatalogActionOutcome::Skipped));
     }
 
-    /// Panics on any provider CLI invocation, so "this path does no inventory
-    /// work" is asserted by construction rather than by timing.
-    struct PanicRunner;
-
-    impl PluginProcessRunner for PanicRunner {
-        fn run(
-            &self,
-            _provider: ProviderKey,
-            _home: &Path,
-            argv: &[String],
-        ) -> Result<super::super::adapters::CmdOutput, String> {
-            panic!("provider inventory ran unexpectedly: {}", argv.join(" "));
-        }
-    }
-
     struct LibraryFixture {
         _temporary: tempfile::TempDir,
+        registry: Arc<CatalogRegistry>,
         user_home: PathBuf,
         skill_path: PathBuf,
         storage_path: PathBuf,
@@ -2262,34 +2406,29 @@ mod tests {
         )
         .unwrap();
 
+        let registry = registry();
         let state = LocalStateRepository::from_home_dir(&user_home).unwrap();
         let catalog = CatalogStateRepository::from_home_dir(&user_home).unwrap();
         let profile = save_catalog_resource_profile_with_repository(
+            &registry,
             &catalog,
-            ProviderKey::Codex,
+            provider("codex"),
             codex_home.to_string_lossy().to_string(),
             1,
         )
         .unwrap();
-        let storage = StorageConfig {
-            id: storage("library-test"),
-            name: "Library test storage".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: storage_path.to_string_lossy().to_string(),
-            supports_conditional_writes: None,
-        };
+        let storage = local_storage_config(
+            storage("library-test"),
+            "Library test storage",
+            &storage_path,
+        );
         let mut config = SyncConfig::default();
         config.storages.push(storage.clone());
         state.save_config(config).unwrap();
 
         LibraryFixture {
             _temporary: temporary,
+            registry,
             user_home,
             skill_path,
             storage_path,
@@ -2311,42 +2450,38 @@ mod tests {
         let catalog = CatalogStateRepository::from_home_dir(&user_home).unwrap();
 
         let first =
-            list_catalog_resource_profiles_with_repository(&catalog, &user_home, 7).unwrap();
+            list_catalog_resource_profiles_with_repository(&registry(), &catalog, &user_home, 7)
+                .unwrap();
         assert_eq!(first.len(), 2);
-        assert_eq!(first[0].provider_key, ProviderKey::Codex);
+        assert_eq!(first[0].provider.as_str(), "codex");
         assert_eq!(first[0].display_name, "Default Codex");
         assert_eq!(first[0].configured_home, codex_home.to_string_lossy());
-        assert_eq!(first[1].provider_key, ProviderKey::Claude);
+        assert_eq!(first[0].provider_config, CatalogProviderConfig::version_1());
+        assert_eq!(first[1].provider.as_str(), "claude");
         assert_eq!(first[1].display_name, "Default Claude");
         assert_eq!(first[1].configured_home, claude_home.to_string_lossy());
 
         let revision = catalog.load_profiles().unwrap().revision;
         let second =
-            list_catalog_resource_profiles_with_repository(&catalog, &user_home, 9).unwrap();
+            list_catalog_resource_profiles_with_repository(&registry(), &catalog, &user_home, 9)
+                .unwrap();
         assert_eq!(second, first);
         assert_eq!(catalog.load_profiles().unwrap().revision, revision);
-    }
 
-    fn review_resource_id() -> CatalogResourceId {
-        super::super::domain::skill_resource_id(AgentSkillScope::CodexHome, "review", "review")
+        // The profile DTO carries the registered label and never the
+        // provider's configuration envelope.
+        let dto = profile_dto(&registry(), &first[0]);
+        assert_eq!(dto.provider_label, "Codex");
+        let json = serde_json::to_value(&dto).unwrap();
+        assert!(json.get("provider_config").is_none());
+        assert_eq!(json["provider"], "codex");
     }
 
     fn second_storage(fixture: &LibraryFixture) -> StorageConfig {
         let path = fixture.user_home.join("second-storage");
         fs::create_dir_all(&path).unwrap();
-        let storage = StorageConfig {
-            id: storage("library-second"),
-            name: "Second library storage".to_string(),
-            kind: StorageKind::Local,
-            bucket: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            account_id: String::new(),
-            s3_endpoint: String::new(),
-            region: String::new(),
-            local_dir: path.to_string_lossy().to_string(),
-            supports_conditional_writes: None,
-        };
+        let storage =
+            local_storage_config(storage("library-second"), "Second library storage", &path);
         fixture
             .state
             .mutate_config(|config| {
@@ -2358,11 +2493,11 @@ mod tests {
     }
 
     fn skill_scope(fixture: &LibraryFixture) -> CatalogScopeDto {
-        create_catalog_scope_with_repositories(
+        create_scope(
+            &fixture.registry,
             &fixture.catalog,
-            ProviderKey::Codex,
-            fixture.profile.profile_id.clone(),
-            CatalogResourceKindTag::AgentSkill,
+            codex_skills(),
+            &fixture.profile.profile_id,
             2,
         )
         .unwrap()
@@ -2375,6 +2510,7 @@ mod tests {
         now: u64,
     ) -> CatalogScopeLinkOutcomeDto {
         link_catalog_scope_storage_with_repositories(
+            &fixture.registry,
             &fixture.state,
             &fixture.catalog,
             &EmptyCodexRunner,
@@ -2386,9 +2522,13 @@ mod tests {
         .unwrap()
     }
 
-    /// Push everything selectable through the production prepare/apply pair.
-    fn push_all(fixture: &LibraryFixture, scope_id: &CatalogScopeId, storage_id: &StorageId) {
-        let plan = prepare_push_with_repositories(
+    fn prepare_push(
+        fixture: &LibraryFixture,
+        scope_id: &CatalogScopeId,
+        storage_id: &StorageId,
+    ) -> CatalogScopePushPlan {
+        prepare_push_with_repositories(
+            &fixture.registry,
             &fixture.state,
             &fixture.catalog,
             &EmptyCodexRunner,
@@ -2397,26 +2537,64 @@ mod tests {
             &fixture.user_home,
             now_secs(),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn apply_push(
+        fixture: &LibraryFixture,
+        plan: &CatalogScopePushPlan,
+        selected: Vec<CatalogResourceId>,
+    ) -> Result<CatalogScopePushOutcomeDto, String> {
+        apply_push_with_repositories(
+            &fixture.registry,
+            &fixture.state,
+            &fixture.catalog,
+            &EmptyCodexRunner,
+            plan.plan_id.clone(),
+            selected,
+            plan.warning_digests.clone(),
+            &fixture.user_home,
+            now_secs(),
+        )
+    }
+
+    /// Push everything selectable through the production prepare/apply pair.
+    fn push_all(fixture: &LibraryFixture, scope_id: &CatalogScopeId, storage_id: &StorageId) {
+        let plan = prepare_push(fixture, scope_id, storage_id);
         let selected: Vec<CatalogResourceId> = plan
             .rows
             .iter()
             .filter(|row| row.row.selectable)
             .map(|row| row.row.resource_id.clone())
             .collect();
-        let acknowledged: Vec<String> = plan.warning_digests.clone();
-        let outcome = apply_push_with_repositories(
+        let outcome = apply_push(fixture, &plan, selected).unwrap();
+        assert!(outcome.published, "{}", outcome.message);
+    }
+
+    fn page(
+        fixture: &LibraryFixture,
+        scope_id: &CatalogScopeId,
+        storage_id: Option<&StorageId>,
+    ) -> Result<CatalogScopeResourcesDto, String> {
+        list_catalog_scope_resources_with_repositories(
+            &fixture.registry,
             &fixture.state,
             &fixture.catalog,
             &EmptyCodexRunner,
-            plan.plan_id.clone(),
-            selected,
-            acknowledged,
+            scope_id,
+            storage_id,
             &fixture.user_home,
-            now_secs(),
         )
-        .unwrap();
-        assert!(outcome.published, "{}", outcome.message);
+    }
+
+    fn resource_id_of(plan: &CatalogScopePushPlan, name: &str) -> CatalogResourceId {
+        plan.rows
+            .iter()
+            .find(|row| row.row.display_name == name)
+            .unwrap_or_else(|| panic!("no row named '{name}'"))
+            .row
+            .resource_id
+            .clone()
     }
 
     #[test]
@@ -2426,9 +2604,9 @@ mod tests {
         let unknown = profile_launch_home(&fixture.catalog, &missing).unwrap_err();
         assert!(unknown.contains("unknown catalog profile"), "{unknown}");
 
-        let (provider, home) =
+        let (launch_provider, home) =
             profile_launch_home(&fixture.catalog, &fixture.profile.profile_id).unwrap();
-        assert_eq!(provider, ProviderKey::Codex);
+        assert_eq!(launch_provider.as_str(), "codex");
         assert_eq!(home.to_string_lossy(), fixture.profile.configured_home);
 
         fs::remove_dir_all(&home).unwrap();
@@ -2437,47 +2615,214 @@ mod tests {
     }
 
     #[test]
-    fn creating_a_scope_is_metadata_only_and_unique_per_profile_and_kind() {
+    fn creating_a_scope_is_metadata_only_and_unique_per_profile_and_coordinate() {
         let fixture = library_fixture();
         let row = skill_scope(&fixture);
-        assert_eq!(row.scope.resource_kind, CatalogResourceKindTag::AgentSkill);
+        assert_eq!(row.scope.coordinate(), codex_skills());
         assert_eq!(row.profile.profile_id, fixture.profile.profile_id);
+        assert_eq!(row.labels.provider_label, "Codex");
 
-        let duplicate = create_catalog_scope_with_repositories(
+        let duplicate = create_scope(
+            &fixture.registry,
             &fixture.catalog,
-            ProviderKey::Codex,
-            fixture.profile.profile_id.clone(),
-            CatalogResourceKindTag::AgentSkill,
+            codex_skills(),
+            &fixture.profile.profile_id,
             3,
         )
         .unwrap_err();
         assert_eq!(duplicate, "this Catalog row already exists");
 
-        // Pet v1 and v2 are distinct kinds and therefore distinct rows.
-        for kind in [
-            CatalogResourceKindTag::CodexPetV1,
-            CatalogResourceKindTag::CodexPetV2,
-        ] {
-            create_catalog_scope_with_repositories(
+        // Pet v1 and v2 are distinct coordinates and therefore distinct rows.
+        for version in [1, 2] {
+            let pets = create_scope(
+                &fixture.registry,
                 &fixture.catalog,
-                ProviderKey::Codex,
-                fixture.profile.profile_id.clone(),
-                kind,
+                codex_pets(version),
+                &fixture.profile.profile_id,
                 4,
             )
             .unwrap();
+            assert_eq!(pets.label, format!("Pets v{version}"));
         }
         assert_eq!(fixture.catalog.load_scopes().unwrap().scopes.len(), 3);
 
-        let rejected = create_catalog_scope_with_repositories(
+        // An invalid provider/kind/format combination is refused by the
+        // registry, as is a coordinate of an unregistered provider, and a
+        // profile of another provider.
+        let rejected = create_scope(
+            &fixture.registry,
             &fixture.catalog,
-            ProviderKey::Claude,
-            fixture.profile.profile_id.clone(),
-            CatalogResourceKindTag::CodexPetV1,
+            coordinate("claude", "desktop_pet", "openai.codex-pet", 1),
+            &fixture.profile.profile_id,
             5,
         )
         .unwrap_err();
-        assert_eq!(rejected, "this provider cannot host that resource kind");
+        assert!(
+            rejected.contains("is not supported by this build"),
+            "{rejected}"
+        );
+        let unknown = create_scope(
+            &fixture.registry,
+            &fixture.catalog,
+            coordinate("cursor", "agent_skill", "cursor.skill", 1),
+            &fixture.profile.profile_id,
+            5,
+        )
+        .unwrap_err();
+        assert!(
+            unknown.contains("no Library provider is registered"),
+            "{unknown}"
+        );
+        let foreign_profile = create_scope(
+            &fixture.registry,
+            &fixture.catalog,
+            coordinate("claude", "agent_skill", "agentskills.io.skill", 1),
+            &fixture.profile.profile_id,
+            5,
+        )
+        .unwrap_err();
+        assert!(
+            foreign_profile.contains("is a codex profile, not claude"),
+            "{foreign_profile}"
+        );
+        assert_eq!(fixture.catalog.load_scopes().unwrap().scopes.len(), 3);
+    }
+
+    #[test]
+    fn an_unregistered_scope_coordinate_loads_lists_unavailable_and_stays_inert() {
+        let fixture = library_fixture();
+        let foreign = coordinate("cursor", "agent_skill", "cursor.skill", 1);
+        // Written past the registry, as a newer build would have: a profile
+        // of a provider this build does not register, and a scope under it.
+        // Both records are structurally valid and load beside the known
+        // ones.
+        let foreign_profile = fixture
+            .catalog
+            .mutate_profiles(|document| {
+                let profile = LocalCatalogProfile {
+                    profile_id: LocalCatalogProfileId::generate().unwrap(),
+                    provider: foreign.provider.clone(),
+                    display_name: "Cursor".to_string(),
+                    configured_home: fixture.profile.configured_home.clone(),
+                    provider_config: CatalogProviderConfig::version_1(),
+                    revision: 1,
+                    created_at: 1,
+                    updated_at: 1,
+                };
+                document.profiles.push(profile.clone());
+                Ok(profile)
+            })
+            .unwrap();
+        let scope = fixture
+            .catalog
+            .mutate_scopes(|document| {
+                let scope = CatalogScope {
+                    scope_id: CatalogScopeId::generate().unwrap(),
+                    provider: foreign.provider.clone(),
+                    profile_id: foreign_profile.profile_id.clone(),
+                    resource_kind: foreign.resource_kind.clone(),
+                    format: foreign.format.clone(),
+                    format_version: foreign.format_version,
+                    revision: 1,
+                    created_at: 1,
+                    updated_at: 1,
+                };
+                document.scopes.push(scope.clone());
+                Ok(scope)
+            })
+            .unwrap();
+        let listed = {
+            let profiles = fixture.catalog.load_profiles().unwrap();
+            let scopes = fixture.catalog.load_scopes().unwrap();
+            assert_eq!(profiles.profiles.len(), 2);
+            assert_eq!(scopes.scopes.len(), 1);
+            scope_dto(
+                &fixture.registry,
+                scopes.scopes[0].clone(),
+                profiles.profile(&foreign_profile.profile_id).unwrap(),
+            )
+        };
+        assert!(!listed.available);
+        assert_eq!(listed.label, "cursor/agent_skill/cursor.skill@1");
+        assert_eq!(listed.labels.provider_label, "cursor");
+        assert_eq!(listed.labels.kind_label, "agent_skill");
+        assert_eq!(listed.labels.format_label, "cursor.skill@1");
+        assert_eq!(listed.profile.provider_label, "cursor");
+        assert!(listed
+            .unavailable_reason
+            .as_deref()
+            .unwrap()
+            .contains("no Library provider is registered for 'cursor'"));
+        let json = serde_json::to_value(&listed).unwrap();
+        assert_eq!(json["scope"]["format"], "cursor.skill");
+        assert_eq!(json["available"], false);
+        // The known rows keep working beside the unavailable one.
+        let known = skill_scope(&fixture);
+        assert!(known.available);
+        assert_eq!(
+            page(&fixture, &known.scope.scope_id, None)
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
+
+        // Nothing operates on it: no page, no link, no Push, no Pull, no
+        // Fork. The row cannot be selected or applied anywhere.
+        let inert = page(&fixture, &scope.scope_id, None).unwrap_err();
+        assert!(inert.contains("cannot be operated on"), "{inert}");
+        assert!(link_catalog_scope_storage_with_repositories(
+            &fixture.registry,
+            &fixture.state,
+            &fixture.catalog,
+            &EmptyCodexRunner,
+            &scope.scope_id,
+            &fixture.storage.id,
+            &fixture.user_home,
+            3,
+        )
+        .unwrap_err()
+        .contains("cannot be operated on"));
+        assert!(prepare_push_with_repositories(
+            &fixture.registry,
+            &fixture.state,
+            &fixture.catalog,
+            &EmptyCodexRunner,
+            &scope.scope_id,
+            &fixture.storage.id,
+            &fixture.user_home,
+            now_secs(),
+        )
+        .unwrap_err()
+        .contains("cannot be operated on"));
+        assert!(prepare_fork_with_repositories(
+            &fixture.registry,
+            &fixture.catalog,
+            &EmptyCodexRunner,
+            &scope.scope_id,
+            &CatalogResourceId::parse(format!("resource-{}", "a".repeat(64))).unwrap(),
+            "copy",
+            &fixture.user_home,
+            now_secs(),
+        )
+        .unwrap_err()
+        .contains("cannot be operated on"));
+        assert!(fixture.catalog.load_scope_links().unwrap().links.is_empty());
+        // The records stay exactly as loaded.
+        assert_eq!(
+            fixture.catalog.load_scopes().unwrap().scopes[0].coordinate(),
+            foreign
+        );
+        assert_eq!(
+            fixture
+                .catalog
+                .load_profiles()
+                .unwrap()
+                .profile(&foreign_profile.profile_id)
+                .unwrap()
+                .provider,
+            foreign.provider
+        );
     }
 
     #[test]
@@ -2500,15 +2845,7 @@ mod tests {
         assert_eq!(fixture.catalog.load_scope_links().unwrap().links.len(), 1);
 
         // The page reflects the link and the local skill's New state.
-        let page = list_catalog_scope_resources_with_repositories(
-            &fixture.state,
-            &fixture.catalog,
-            &EmptyCodexRunner,
-            &row.scope.scope_id,
-            None,
-            &fixture.user_home,
-        )
-        .unwrap();
+        let page = page(&fixture, &row.scope.scope_id, None).unwrap();
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.storage_id.as_ref(), Some(&fixture.storage.id));
         assert_eq!(
@@ -2519,27 +2856,17 @@ mod tests {
         assert!(!page.rows[0].remote_present);
         assert_eq!(page.rows[0].state, Some(CatalogLinkState::New));
         assert!(page.rows[0].local_modified_at.is_some());
+        assert_eq!(page.rows[0].local_files, Some(1));
     }
 
     #[test]
     fn a_scope_page_pairs_local_and_stored_resources_into_one_row() {
         let fixture = library_fixture();
         let row = skill_scope(&fixture);
-        let page = |storage: Option<&StorageId>| {
-            list_catalog_scope_resources_with_repositories(
-                &fixture.state,
-                &fixture.catalog,
-                &EmptyCodexRunner,
-                &row.scope.scope_id,
-                storage,
-                &fixture.user_home,
-            )
-            .unwrap()
-        };
 
         // Nothing linked yet: the local skill is still a row, and it is the
         // storage's problem that it has never seen it.
-        let before = page(None);
+        let before = page(&fixture, &row.scope.scope_id, None).unwrap();
         assert_eq!(before.rows.len(), 1);
         assert!(before.link.is_none());
         assert_eq!(before.rows[0].state, Some(CatalogLinkState::New));
@@ -2549,7 +2876,7 @@ mod tests {
         link_scope(&fixture, &row.scope.scope_id, &fixture.storage.id, 3);
         push_all(&fixture, &row.scope.scope_id, &fixture.storage.id);
 
-        let after = page(Some(&fixture.storage.id));
+        let after = page(&fixture, &row.scope.scope_id, Some(&fixture.storage.id)).unwrap();
         assert_eq!(after.rows.len(), 1);
         assert!(after.rows[0].local_present && after.rows[0].remote_present);
         assert_eq!(after.rows[0].state, Some(CatalogLinkState::InSync));
@@ -2559,7 +2886,7 @@ mod tests {
         // A second storage has never held it, so the same resource reads as
         // New there — the page's state belongs to the pairing, not the row.
         let second = second_storage(&fixture);
-        let elsewhere = page(Some(&second.id));
+        let elsewhere = page(&fixture, &row.scope.scope_id, Some(&second.id)).unwrap();
         assert_eq!(elsewhere.rows.len(), 1);
         assert!(elsewhere.link.is_none());
         assert_eq!(elsewhere.rows[0].state, Some(CatalogLinkState::New));
@@ -2568,16 +2895,7 @@ mod tests {
     /// A second machine, built beside the fixture's home and pointed at the
     /// same storage. Its skill carries whatever body the test wants to
     /// compare against the first machine's push.
-    fn sibling_machine(
-        fixture: &LibraryFixture,
-        name: &str,
-        skill_body: &[u8],
-    ) -> (
-        PathBuf,
-        LocalStateRepository,
-        CatalogStateRepository,
-        CatalogScopeDto,
-    ) {
+    fn sibling_machine(fixture: &LibraryFixture, name: &str, skill_body: &[u8]) -> LibraryFixture {
         let user_home = fixture.user_home.parent().unwrap().join(name);
         let codex_home = user_home.join("codex-home");
         let skill_path = codex_home.join("skills/review");
@@ -2587,8 +2905,9 @@ mod tests {
         let state = LocalStateRepository::from_home_dir(&user_home).unwrap();
         let catalog = CatalogStateRepository::from_home_dir(&user_home).unwrap();
         let profile = save_catalog_resource_profile_with_repository(
+            &fixture.registry,
             &catalog,
-            ProviderKey::Codex,
+            provider("codex"),
             codex_home.to_string_lossy().to_string(),
             1,
         )
@@ -2596,21 +2915,24 @@ mod tests {
         let mut config = SyncConfig::default();
         config.storages.push(fixture.storage.clone());
         state.save_config(config).unwrap();
-        let scope = create_catalog_scope_with_repositories(
-            &catalog,
-            ProviderKey::Codex,
-            profile.profile_id,
-            CatalogResourceKindTag::AgentSkill,
-            2,
-        )
-        .unwrap();
-        (user_home, state, catalog, scope)
+        LibraryFixture {
+            _temporary: tempfile::tempdir().unwrap(),
+            registry: fixture.registry.clone(),
+            user_home,
+            skill_path,
+            storage_path: fixture.storage_path.clone(),
+            state,
+            catalog,
+            profile,
+            storage: fixture.storage.clone(),
+        }
     }
 
-    /// The convergence rule end to end: every replica of one kind lands on
-    /// the same repository, and the manifest is the union of what they push.
+    /// The convergence rule end to end: every replica of one coordinate
+    /// lands on the same repository, and the manifest is the union of what
+    /// they push.
     #[test]
-    fn replicas_of_one_kind_converge_on_one_repository() {
+    fn replicas_of_one_coordinate_converge_on_one_repository() {
         let fixture = library_fixture();
         // Machine A owns two skills and pushes both.
         let second_skill = fixture.user_home.join("codex-home/skills/notes");
@@ -2627,38 +2949,22 @@ mod tests {
         // Machine B carries its own third skill plus an identical copy of
         // `review`. Linking pins the identical copy silently and routes the
         // stored-only skill to Pull.
-        let (twin_home, twin_state, twin_catalog, twin_scope) = sibling_machine(
+        let twin = sibling_machine(
             &fixture,
             "twin-user",
             b"---\nname: review\n---\nDraft-linked skill.\n",
         );
-        let third_skill = twin_home.join("codex-home/skills/extra");
+        let third_skill = twin.user_home.join("codex-home/skills/extra");
         fs::create_dir_all(&third_skill).unwrap();
         fs::write(
             third_skill.join("SKILL.md"),
             b"---\nname: extra\n---\nThird skill.\n",
         )
         .unwrap();
-        let linked = link_catalog_scope_storage_with_repositories(
-            &twin_state,
-            &twin_catalog,
-            &EmptyCodexRunner,
-            &twin_scope.scope.scope_id,
-            &fixture.storage.id,
-            &twin_home,
-            5,
-        )
-        .unwrap();
+        let twin_scope = skill_scope(&twin);
+        let linked = link_scope(&twin, &twin_scope.scope.scope_id, &fixture.storage.id, 5);
         assert_eq!(linked.completion, "review_pull");
-        let twin_page = list_catalog_scope_resources_with_repositories(
-            &twin_state,
-            &twin_catalog,
-            &EmptyCodexRunner,
-            &twin_scope.scope.scope_id,
-            Some(&fixture.storage.id),
-            &twin_home,
-        )
-        .unwrap();
+        let twin_page = page(&twin, &twin_scope.scope.scope_id, Some(&fixture.storage.id)).unwrap();
         assert_eq!(twin_page.rows.len(), 3);
         let state_of = |name: &str| {
             twin_page
@@ -2673,35 +2979,19 @@ mod tests {
         assert_eq!(state_of("extra"), Some(CatalogLinkState::New));
 
         // B pushes its own skill: one repository, a manifest of three.
-        let twin_fixture = LibraryFixture {
-            _temporary: tempfile::tempdir().unwrap(),
-            user_home: twin_home.clone(),
-            skill_path: twin_home.join("codex-home/skills/review"),
-            storage_path: fixture.storage_path.clone(),
-            state: twin_state,
-            catalog: twin_catalog,
-            profile: fixture.profile.clone(),
-            storage: fixture.storage.clone(),
-        };
-        push_all(
-            &twin_fixture,
-            &twin_scope.scope.scope_id,
-            &fixture.storage.id,
-        );
+        push_all(&twin, &twin_scope.scope.scope_id, &fixture.storage.id);
 
         let library = fixture.storage_path.join(".mallard/v1/library");
         assert_eq!(fs::read_dir(&library).unwrap().count(), 1);
         let engine = engine_for(&fixture.storage).unwrap();
-        let repository_id = CatalogResourceRepositoryId::for_kind(
-            ProviderKey::Codex,
-            CatalogResourceKindTag::AgentSkill,
-        );
+        let repository_id = CatalogResourceRepositoryId::for_coordinate(&codex_skills());
         let (head, manifest) = engine.inspect(&repository_id).unwrap().unwrap();
         assert_eq!(head.head.revision, 2);
         assert_eq!(manifest.resources.len(), 3);
 
         // A pulls B's skill through one review.
         let pull = prepare_pull_with_repositories(
+            &fixture.registry,
             &fixture.state,
             &fixture.catalog,
             &EmptyCodexRunner,
@@ -2718,11 +3008,13 @@ mod tests {
             .iter()
             .find(|item| item.item.display_name == "extra")
             .unwrap();
+        assert_eq!(extra.item.labels.kind_label, "Skills");
         let choices = BTreeMap::from([(
             extra.item.resource_id.clone(),
             extra.item.default_action_id.clone().unwrap(),
         )]);
         let outcome = apply_pull_with_repositories(
+            &fixture.registry,
             &fixture.state,
             &fixture.catalog,
             &EmptyCodexRunner,
@@ -2740,19 +3032,56 @@ mod tests {
             .is_file());
 
         // The pulled review accepted every row, so A's page is fully in sync.
-        let page = list_catalog_scope_resources_with_repositories(
-            &fixture.state,
-            &fixture.catalog,
-            &EmptyCodexRunner,
-            &row.scope.scope_id,
-            Some(&fixture.storage.id),
-            &fixture.user_home,
-        )
-        .unwrap();
+        let page = page(&fixture, &row.scope.scope_id, Some(&fixture.storage.id)).unwrap();
         assert!(page
             .rows
             .iter()
             .all(|row| row.state == Some(CatalogLinkState::InSync)));
+    }
+
+    #[test]
+    fn repository_ids_depend_on_the_coordinate_alone() {
+        let fixture = library_fixture();
+        // Two profiles of one provider with different homes (and therefore
+        // different target roots), two storages: one repository id.
+        let other_home = fixture.user_home.join("codex-other");
+        fs::create_dir_all(other_home.join("skills")).unwrap();
+        let other_profile = save_catalog_resource_profile_with_repository(
+            &fixture.registry,
+            &fixture.catalog,
+            provider("codex"),
+            other_home.to_string_lossy().to_string(),
+            1,
+        )
+        .unwrap();
+        let first = skill_scope(&fixture);
+        let second = create_scope(
+            &fixture.registry,
+            &fixture.catalog,
+            codex_skills(),
+            &other_profile.profile_id,
+            2,
+        )
+        .unwrap();
+        let second_storage = second_storage(&fixture);
+        link_scope(&fixture, &first.scope.scope_id, &fixture.storage.id, 3);
+        link_scope(&fixture, &second.scope.scope_id, &second_storage.id, 4);
+        let links = fixture.catalog.load_scope_links().unwrap();
+        let ids: BTreeSet<_> = links
+            .links
+            .iter()
+            .map(|link| link.repository_id.clone())
+            .collect();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(
+            ids.into_iter().next().unwrap(),
+            CatalogResourceRepositoryId::for_coordinate(&codex_skills())
+        );
+        // Another version of one format is another repository.
+        assert_ne!(
+            CatalogResourceRepositoryId::for_coordinate(&codex_pets(1)),
+            CatalogResourceRepositoryId::for_coordinate(&codex_pets(2))
+        );
     }
 
     #[test]
@@ -2768,50 +3097,21 @@ mod tests {
         let row = skill_scope(&fixture);
         link_scope(&fixture, &row.scope.scope_id, &fixture.storage.id, 3);
 
-        let plan = prepare_push_with_repositories(
-            &fixture.state,
-            &fixture.catalog,
-            &EmptyCodexRunner,
-            &row.scope.scope_id,
-            &fixture.storage.id,
-            &fixture.user_home,
-            now_secs(),
-        )
-        .unwrap();
+        let plan = prepare_push(&fixture, &row.scope.scope_id, &fixture.storage.id);
         assert_eq!(plan.rows.len(), 2);
-        let outcome = apply_push_with_repositories(
-            &fixture.state,
-            &fixture.catalog,
-            &EmptyCodexRunner,
-            plan.plan_id.clone(),
-            vec![review_resource_id()],
-            Vec::new(),
-            &fixture.user_home,
-            now_secs(),
-        )
-        .unwrap();
+        let review_id = resource_id_of(&plan, "review");
+        let outcome = apply_push(&fixture, &plan, vec![review_id.clone()]).unwrap();
         assert!(outcome.published);
 
         let engine = engine_for(&fixture.storage).unwrap();
-        let repository_id = CatalogResourceRepositoryId::for_kind(
-            ProviderKey::Codex,
-            CatalogResourceKindTag::AgentSkill,
-        );
+        let repository_id = CatalogResourceRepositoryId::for_coordinate(&codex_skills());
         let (_, manifest) = engine.inspect(&repository_id).unwrap().unwrap();
         assert_eq!(manifest.resources.len(), 1);
-        assert!(manifest.resources.contains_key(&review_resource_id()));
+        assert!(manifest.resources.contains_key(&review_id));
 
         // The selected resource remains visible as InSync while the
         // unselected resource still reads as New on the same page.
-        let page = list_catalog_scope_resources_with_repositories(
-            &fixture.state,
-            &fixture.catalog,
-            &EmptyCodexRunner,
-            &row.scope.scope_id,
-            Some(&fixture.storage.id),
-            &fixture.user_home,
-        )
-        .unwrap();
+        let page = page(&fixture, &row.scope.scope_id, Some(&fixture.storage.id)).unwrap();
         assert_eq!(
             page.rows
                 .iter()
@@ -2835,16 +3135,7 @@ mod tests {
 
         // The next review retains both rows. Its stable display-name order
         // matches the page; only the outstanding resource is selectable.
-        let next_plan = prepare_push_with_repositories(
-            &fixture.state,
-            &fixture.catalog,
-            &EmptyCodexRunner,
-            &row.scope.scope_id,
-            &fixture.storage.id,
-            &fixture.user_home,
-            now_secs(),
-        )
-        .unwrap();
+        let next_plan = prepare_push(&fixture, &row.scope.scope_id, &fixture.storage.id);
         assert_eq!(
             next_plan
                 .rows
@@ -2868,6 +3159,11 @@ mod tests {
         assert_eq!(review.row.relation, CatalogResourceRelation::Matching);
         assert!(!review.row.selectable);
         assert!(!review.row.held_for_pull);
+        // Review rows carry the coordinate and its labels, never a target.
+        let json = serde_json::to_value(&next_plan).unwrap();
+        assert_eq!(json["rows"][0]["row"]["format"], "agentskills.io.skill");
+        assert_eq!(json["rows"][0]["row"]["provider_label"], "Codex");
+        assert!(json.get("target_pins").is_none());
     }
 
     /// A repository whose tag disagrees with its own derivation was not
@@ -2884,20 +3180,12 @@ mod tests {
         let tag_path = repository.path().join("_tag.json");
         let tag_text = fs::read_to_string(&tag_path)
             .unwrap()
-            .replace("agent_skill", "codex_pet_v1");
+            .replace("agent_skill", "desktop_pet");
         fs::write(&tag_path, tag_text).unwrap();
 
-        let page = list_catalog_scope_resources_with_repositories(
-            &fixture.state,
-            &fixture.catalog,
-            &EmptyCodexRunner,
-            &row.scope.scope_id,
-            Some(&fixture.storage.id),
-            &fixture.user_home,
-        )
-        .unwrap_err();
+        let page = page(&fixture, &row.scope.scope_id, Some(&fixture.storage.id)).unwrap_err();
         assert!(
-            page.contains("does not match its provider and kind derivation"),
+            page.contains("does not match its coordinate derivation"),
             "{page}"
         );
     }
@@ -2907,6 +3195,7 @@ mod tests {
         let fixture = library_fixture();
         // An empty storage: no derivable id answers, so nothing is listed.
         assert!(list_catalog_storage_repositories_with_repository(
+            &fixture.registry,
             &fixture.state,
             &fixture.storage.id,
         )
@@ -2917,25 +3206,27 @@ mod tests {
         link_scope(&fixture, &row.scope.scope_id, &fixture.storage.id, 3);
         push_all(&fixture, &row.scope.scope_id, &fixture.storage.id);
 
-        let listed =
-            list_catalog_storage_repositories_with_repository(&fixture.state, &fixture.storage.id)
-                .unwrap();
+        let listed = list_catalog_storage_repositories_with_repository(
+            &fixture.registry,
+            &fixture.state,
+            &fixture.storage.id,
+        )
+        .unwrap();
         assert_eq!(listed.len(), 1);
         let repo = &listed[0];
-        assert_eq!(repo.provider, ProviderKey::Codex);
-        assert_eq!(repo.resource_kind, CatalogResourceKindTag::AgentSkill);
+        assert_eq!(repo.coordinate, codex_skills());
+        assert_eq!(repo.labels.kind_label, "Skills");
         assert_eq!(
             repo.repository_id,
-            CatalogResourceRepositoryId::for_kind(
-                ProviderKey::Codex,
-                CatalogResourceKindTag::AgentSkill,
-            )
-            .as_str()
+            CatalogResourceRepositoryId::for_coordinate(&codex_skills()).as_str()
         );
         assert_eq!(repo.revision, Some(1));
         assert!(repo.updated_at.is_some());
         assert_eq!(repo.resource_names, vec!["review".to_string()]);
         assert!(repo.error.is_none());
+        let json = serde_json::to_value(repo).unwrap();
+        assert_eq!(json["format_version"], 1);
+        assert_eq!(json["provider"], "codex");
     }
 
     #[test]
@@ -2950,20 +3241,23 @@ mod tests {
         let tag_path = repository.path().join("_tag.json");
         let tag_text = fs::read_to_string(&tag_path)
             .unwrap()
-            .replace("agent_skill", "codex_pet_v1");
+            .replace("agent_skill", "desktop_pet");
         fs::write(&tag_path, tag_text).unwrap();
 
-        let listed =
-            list_catalog_storage_repositories_with_repository(&fixture.state, &fixture.storage.id)
-                .unwrap();
+        let listed = list_catalog_storage_repositories_with_repository(
+            &fixture.registry,
+            &fixture.state,
+            &fixture.storage.id,
+        )
+        .unwrap();
         assert_eq!(listed.len(), 1);
         let repo = &listed[0];
-        assert_eq!(repo.resource_kind, CatalogResourceKindTag::AgentSkill);
+        assert_eq!(repo.coordinate, codex_skills());
         assert!(repo.revision.is_none());
         assert!(repo.resource_names.is_empty());
         let error = repo.error.as_deref().unwrap();
         assert!(
-            error.contains("does not match its provider and kind derivation"),
+            error.contains("does not match its coordinate derivation"),
             "{error}"
         );
     }
@@ -2977,8 +3271,9 @@ mod tests {
         fs::create_dir_all(&second_home).unwrap();
 
         let first = save_catalog_resource_profile_with_repository(
+            &fixture.registry,
             &fixture.catalog,
-            ProviderKey::Codex,
+            provider("codex"),
             first_home.to_string_lossy().to_string(),
             10,
         )
@@ -2987,8 +3282,9 @@ mod tests {
 
         // Same folder name somewhere else: the derived name steps aside.
         let second = save_catalog_resource_profile_with_repository(
+            &fixture.registry,
             &fixture.catalog,
-            ProviderKey::Codex,
+            provider("codex"),
             second_home.to_string_lossy().to_string(),
             11,
         )
@@ -2997,8 +3293,9 @@ mod tests {
 
         // Re-picking a saved home selects it rather than failing or forking.
         let again = save_catalog_resource_profile_with_repository(
+            &fixture.registry,
             &fixture.catalog,
-            ProviderKey::Codex,
+            provider("codex"),
             first_home.to_string_lossy().to_string(),
             12,
         )
@@ -3014,6 +3311,20 @@ mod tests {
                 .filter(|profile| profile.display_name.starts_with("myconf"))
                 .count(),
             2
+        );
+
+        // A provider this build does not register cannot get a profile.
+        let unknown = save_catalog_resource_profile_with_repository(
+            &fixture.registry,
+            &fixture.catalog,
+            provider("cursor"),
+            first_home.to_string_lossy().to_string(),
+            13,
+        )
+        .unwrap_err();
+        assert!(
+            unknown.contains("no Library provider is registered"),
+            "{unknown}"
         );
     }
 
@@ -3073,6 +3384,7 @@ mod tests {
         let linked = link_scope(&fixture, &row.scope.scope_id, &fixture.storage.id, 3);
 
         let stale = unlink_catalog_scope_storage_with_repositories(
+            &fixture.registry,
             &fixture.catalog,
             &linked.link_id,
             linked.revision + 5,
@@ -3082,6 +3394,7 @@ mod tests {
         assert!(stale.contains("refresh before unlinking"), "{stale}");
 
         assert!(unlink_catalog_scope_storage_with_repositories(
+            &fixture.registry,
             &fixture.catalog,
             &linked.link_id,
             linked.revision,
@@ -3102,16 +3415,7 @@ mod tests {
         let fixture = library_fixture();
         let row = skill_scope(&fixture);
         link_scope(&fixture, &row.scope.scope_id, &fixture.storage.id, 3);
-        let plan = prepare_push_with_repositories(
-            &fixture.state,
-            &fixture.catalog,
-            &EmptyCodexRunner,
-            &row.scope.scope_id,
-            &fixture.storage.id,
-            &fixture.user_home,
-            now_secs(),
-        )
-        .unwrap();
+        let plan = prepare_push(&fixture, &row.scope.scope_id, &fixture.storage.id);
 
         // New unrelated resources appear after review: one valid, one whose
         // directory name cannot even capture. Neither belongs to the
@@ -3130,17 +3434,8 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = apply_push_with_repositories(
-            &fixture.state,
-            &fixture.catalog,
-            &EmptyCodexRunner,
-            plan.plan_id.clone(),
-            vec![review_resource_id()],
-            Vec::new(),
-            &fixture.user_home,
-            now_secs(),
-        )
-        .unwrap();
+        let review_id = resource_id_of(&plan, "review");
+        let outcome = apply_push(&fixture, &plan, vec![review_id]).unwrap();
         assert!(outcome.published, "{}", outcome.message);
     }
 
@@ -3148,7 +3443,7 @@ mod tests {
     fn a_pets_scope_lists_without_provider_clis() {
         let fixture = library_fixture();
         let codex_home = fixture.user_home.join("codex-home");
-        let atlas = super::super::codex_pet::fixtures::webp_atlas(CodexPetFormat::V1);
+        let atlas = super::super::codex_pet::fixtures::webp_atlas(1);
         fs::create_dir_all(codex_home.join("pets/duck")).unwrap();
         fs::write(
             codex_home.join("pets/duck/pet.json"),
@@ -3157,15 +3452,16 @@ mod tests {
         .unwrap();
         fs::write(codex_home.join("pets/duck/spritesheet.webp"), &atlas).unwrap();
 
-        let row = create_catalog_scope_with_repositories(
+        let row = create_scope(
+            &fixture.registry,
             &fixture.catalog,
-            ProviderKey::Codex,
-            fixture.profile.profile_id.clone(),
-            CatalogResourceKindTag::CodexPetV1,
+            codex_pets(1),
+            &fixture.profile.profile_id,
             2,
         )
         .unwrap();
         let page = list_catalog_scope_resources_with_repositories(
+            &fixture.registry,
             &fixture.state,
             &fixture.catalog,
             &PanicRunner,
@@ -3182,19 +3478,20 @@ mod tests {
         // decoration: the row ships without one, the page does not fail, and
         // the descriptor's sentence still arrives.
         assert!(page.rows[0].preview_png.is_none());
-        assert_eq!(page.rows[0].pet_description.as_deref(), Some("A duck."));
+        assert_eq!(page.rows[0].description.as_deref(), Some("A duck."));
 
         // The sibling v2 scope shares the pets directory but not the row: a
         // v1 pet never renders inside the v2 scope's page.
-        let sibling = create_catalog_scope_with_repositories(
+        let sibling = create_scope(
+            &fixture.registry,
             &fixture.catalog,
-            ProviderKey::Codex,
-            fixture.profile.profile_id.clone(),
-            CatalogResourceKindTag::CodexPetV2,
+            codex_pets(2),
+            &fixture.profile.profile_id,
             3,
         )
         .unwrap();
         let sibling_page = list_catalog_scope_resources_with_repositories(
+            &fixture.registry,
             &fixture.state,
             &fixture.catalog,
             &PanicRunner,
@@ -3206,26 +3503,11 @@ mod tests {
         assert!(sibling_page.rows.is_empty());
     }
 
-    /// A real, decodable PNG atlas with the format's exact dimensions — what
-    /// the header-only fixtures cannot provide.
-    fn decodable_png_atlas(format: CodexPetFormat) -> Vec<u8> {
-        let (width, height) = format.atlas_dimensions();
-        let image = image::RgbaImage::from_pixel(width, height, image::Rgba([90, 60, 30, 255]));
-        let mut bytes = Vec::new();
-        image
-            .write_to(
-                &mut std::io::Cursor::new(&mut bytes),
-                image::ImageFormat::Png,
-            )
-            .unwrap();
-        bytes
-    }
-
     #[test]
     fn a_pet_scope_lists_with_a_preview_derived_from_its_atlas() {
         let fixture = library_fixture();
         let codex_home = fixture.user_home.join("codex-home");
-        let atlas = decodable_png_atlas(CodexPetFormat::V1);
+        let atlas = super::super::codex_pet::fixtures::decodable_png_atlas(1);
         fs::create_dir_all(codex_home.join("pets/drake")).unwrap();
         fs::write(
             codex_home.join("pets/drake/pet.json"),
@@ -3234,15 +3516,16 @@ mod tests {
         .unwrap();
         fs::write(codex_home.join("pets/drake/spritesheet.png"), &atlas).unwrap();
 
-        let row = create_catalog_scope_with_repositories(
+        let row = create_scope(
+            &fixture.registry,
             &fixture.catalog,
-            ProviderKey::Codex,
-            fixture.profile.profile_id.clone(),
-            CatalogResourceKindTag::CodexPetV1,
+            codex_pets(1),
+            &fixture.profile.profile_id,
             2,
         )
         .unwrap();
         let page = list_catalog_scope_resources_with_repositories(
+            &fixture.registry,
             &fixture.state,
             &fixture.catalog,
             &PanicRunner,
@@ -3253,59 +3536,53 @@ mod tests {
         .unwrap();
         assert_eq!(page.rows.len(), 1);
         let listed = &page.rows[0];
-        assert_eq!(listed.pet_description.as_deref(), Some("A local pet."));
+        assert_eq!(listed.description.as_deref(), Some("A local pet."));
         let preview = listed.preview_png.as_deref().unwrap();
         assert!(preview.starts_with("data:image/png;base64,"), "{}", preview);
         // Derived once, cached by the atlas digest under `~/.mallard`.
-        let cache = super::super::pet_preview::preview_cache_dir(&fixture.user_home);
+        let cache = preview_cache_dir(&fixture.user_home);
         let digest = super::super::domain::sha256_hex(&atlas);
         assert!(cache.join(format!("{}.png", digest)).is_file());
     }
 
     #[test]
     fn a_stored_only_pet_serves_its_preview_from_the_storage_then_the_cache() {
-        use super::super::domain::{
-            CatalogFileEntry, CodexPetDescriptor, CodexPetResource, PortableCatalogOrigin,
-        };
+        use super::super::codec::CatalogFormatCodec;
+        use super::super::codex_pet::CodexPetCodec;
+        use super::super::domain::PortableCatalogOrigin;
 
         let fixture = library_fixture();
-        let atlas = decodable_png_atlas(CodexPetFormat::V2);
+        // Capture a v2 pet from a scratch directory that is not the profile's
+        // home, so the resource exists only in the storage.
+        let scratch = fixture.user_home.join("scratch/biscuit");
+        fs::create_dir_all(&scratch).unwrap();
+        let atlas = super::super::codex_pet::fixtures::decodable_png_atlas(2);
+        fs::write(
+            scratch.join("pet.json"),
+            super::super::codex_pet::fixtures::manifest(
+                2,
+                "biscuit",
+                "Biscuit",
+                "A stored-only pet.",
+                "spritesheet.png",
+            ),
+        )
+        .unwrap();
+        fs::write(scratch.join("spritesheet.png"), &atlas).unwrap();
+        let captured = CodexPetCodec::for_version(2)
+            .unwrap()
+            .capture_directory(&scratch, "provider-home")
+            .unwrap();
+        let resource = captured.to_envelope(&codex_pets(2));
+        let resource_id = resource.resource_id.clone();
         let atlas_sha = super::super::domain::sha256_hex(&atlas);
-        let descriptor = CodexPetDescriptor {
-            pet_id: "biscuit".to_string(),
-            display_name: "Biscuit".to_string(),
-            description: "A stored-only pet.".to_string(),
-            atlas_basename: "spritesheet.png".to_string(),
-            atlas: CatalogFileEntry {
-                sha256: atlas_sha.clone(),
-                size: atlas.len() as u64,
-                mode: 0o644,
-                object_key: format!("_objects/{}", atlas_sha),
-            },
-        };
-        let mut pet = CodexPetResource {
-            descriptor,
-            content_sha256: String::new(),
-        };
-        pet.content_sha256 = pet.compute_content_sha256(CodexPetFormat::V2);
-        let resource = CatalogResource::CodexPetV2(pet);
-        let resource_id = resource.resource_id();
 
-        let repository_id = CatalogResourceRepositoryId::for_kind(
-            ProviderKey::Codex,
-            CatalogResourceKindTag::CodexPetV2,
-        );
+        let repository_id = CatalogResourceRepositoryId::for_coordinate(&codex_pets(2));
         let engine = engine_for(&fixture.storage).unwrap();
         engine
             .publish(PublishLibraryResourceRequest {
                 repository_id: repository_id.clone(),
-                tag: LibraryResourceTag {
-                    schema_version: CATALOG_SCHEMA,
-                    repository_id: repository_id.clone(),
-                    provider: ProviderKey::Codex,
-                    resource_kind: CatalogResourceKindTag::CodexPetV2,
-                    created_at: 1,
-                },
+                tag: LibraryResourceTag::new(&codex_pets(2), repository_id.clone(), 1),
                 observed: None,
                 resources: BTreeMap::from([(
                     resource_id.clone(),
@@ -3314,7 +3591,7 @@ mod tests {
                         updated_at: 1,
                     },
                 )]),
-                payloads: BTreeMap::from([(atlas_sha.clone(), Bytes::from(atlas.clone()))]),
+                payloads: captured.payloads(),
                 captured_with: CatalogCapturedWith {
                     app: "mallard".to_string(),
                     version: "test".to_string(),
@@ -3327,15 +3604,16 @@ mod tests {
             })
             .unwrap();
 
-        let row = create_catalog_scope_with_repositories(
+        let row = create_scope(
+            &fixture.registry,
             &fixture.catalog,
-            ProviderKey::Codex,
-            fixture.profile.profile_id.clone(),
-            CatalogResourceKindTag::CodexPetV2,
+            codex_pets(2),
+            &fixture.profile.profile_id,
             2,
         )
         .unwrap();
-        let first = get_catalog_pet_preview_with_repositories(
+        let first = get_catalog_resource_preview_with_repositories(
+            &fixture.registry,
             &fixture.state,
             &fixture.catalog,
             &row.scope.scope_id,
@@ -3354,7 +3632,8 @@ mod tests {
             .find(|entry| entry.file_type().is_file() && entry.file_name() == atlas_sha.as_str())
             .expect("the published atlas payload exists in the storage");
         fs::remove_file(payload.path()).unwrap();
-        let second = get_catalog_pet_preview_with_repositories(
+        let second = get_catalog_resource_preview_with_repositories(
+            &fixture.registry,
             &fixture.state,
             &fixture.catalog,
             &row.scope.scope_id,
@@ -3364,6 +3643,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(second, first);
+
+        // A skills scope has no preview to serve.
+        let skills = skill_scope(&fixture);
+        link_scope(&fixture, &skills.scope.scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &skills.scope.scope_id, &fixture.storage.id);
+        let plan = prepare_push(&fixture, &skills.scope.scope_id, &fixture.storage.id);
+        let error = get_catalog_resource_preview_with_repositories(
+            &fixture.registry,
+            &fixture.state,
+            &fixture.catalog,
+            &skills.scope.scope_id,
+            &fixture.storage.id,
+            &resource_id_of(&plan, "review"),
+            &fixture.user_home,
+        )
+        .unwrap_err();
+        assert_eq!(error, "this resource has no preview");
     }
 
     /// `delete_catalog_scope` is live and UI-reachable. Its success path and
@@ -3397,6 +3693,7 @@ mod tests {
             "this row still links storages; unlink them first"
         );
         unlink_catalog_scope_storage_with_repositories(
+            &fixture.registry,
             &fixture.catalog,
             &linked.link_id,
             linked.revision,
@@ -3431,5 +3728,130 @@ mod tests {
             delete_catalog_scope_with_repositories(&fixture.catalog, &row.scope.scope_id, 1)
                 .unwrap_err();
         assert!(refused.contains("still links storages"), "{refused}");
+    }
+
+    /// The extension proof: a provider, kind, format, version, and target
+    /// that exist only in the test registry travel through every common
+    /// path — profile, scope, page, link, Push, Pull, storage listing —
+    /// without any common-code change.
+    #[test]
+    fn the_test_capability_syncs_end_to_end_through_common_code() {
+        let temporary = tempfile::tempdir().unwrap();
+        let storage_path = temporary.path().join("storage");
+        fs::create_dir_all(&storage_path).unwrap();
+        let storage =
+            local_storage_config(storage("notes-storage"), "Notes storage", &storage_path);
+        let registry = CatalogRegistry::with_test_capability();
+        let key = test_support::provider_key();
+        let coordinate = test_support::coordinate();
+
+        let replica = |name: &str| {
+            let user_home = temporary.path().join(name);
+            let home = user_home.join("testprov-home");
+            fs::create_dir_all(&home).unwrap();
+            let state = LocalStateRepository::from_home_dir(&user_home).unwrap();
+            let mut config = SyncConfig::default();
+            config.storages.push(storage.clone());
+            state.save_config(config).unwrap();
+            let service = StorageCatalogService::with_registry(
+                &user_home,
+                &user_home,
+                Box::new(PanicRunner),
+                registry.clone(),
+            )
+            .unwrap();
+            let profile = service
+                .save_profile(key.clone(), home.to_string_lossy().to_string())
+                .unwrap();
+            assert_eq!(profile.provider_label, "Test Provider");
+            let scope = service
+                .create_scope(
+                    key.clone(),
+                    profile.profile_id,
+                    coordinate.resource_kind.clone(),
+                    coordinate.format.clone(),
+                    coordinate.format_version,
+                )
+                .unwrap();
+            assert!(scope.available);
+            assert_eq!(scope.label, "Notes");
+            (service, home, scope.scope.scope_id)
+        };
+
+        let (service_a, home_a, scope_a) = replica("a");
+        fs::create_dir_all(home_a.join("notes/todo")).unwrap();
+        fs::write(
+            home_a.join("notes/todo/NOTE.md"),
+            b"# Things to do\n- ship the registry\n",
+        )
+        .unwrap();
+        let page = service_a.list_scope_resources(&scope_a, None).unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].display_name, "Things to do");
+        assert_eq!(page.labels.format_label, "Test note");
+        assert_eq!(
+            service_a
+                .link_scope_storage(&scope_a, &storage.id)
+                .unwrap()
+                .completion,
+            "open"
+        );
+        let push = service_a.prepare_push(&scope_a, &storage.id).unwrap();
+        assert_eq!(push.rows.len(), 1);
+        assert!(push.rows[0].row.selectable);
+        assert_eq!(push.rows[0].row.coordinate, coordinate);
+        let outcome = service_a
+            .apply_push(CatalogPushApproval {
+                plan_id: push.plan_id.clone(),
+                selected_resource_ids: vec![push.rows[0].row.resource_id.clone()],
+                acknowledged_warning_digests: push.warning_digests.clone(),
+            })
+            .unwrap();
+        assert!(outcome.published);
+
+        let (service_b, home_b, scope_b) = replica("b");
+        assert_eq!(
+            service_b
+                .link_scope_storage(&scope_b, &storage.id)
+                .unwrap()
+                .completion,
+            "review_pull"
+        );
+        let pull = service_b
+            .prepare_pull(&scope_b, &storage.id, BTreeMap::new())
+            .unwrap();
+        assert_eq!(pull.items.len(), 1);
+        let item = &pull.items[0];
+        assert!(matches!(
+            item.item.actions[0].kind,
+            super::super::domain::CatalogPullActionKind::Install
+        ));
+        let outcome = service_b
+            .apply_pull(CatalogPullApproval {
+                plan_id: pull.plan_id.clone(),
+                choices: BTreeMap::from([(
+                    item.item.resource_id.clone(),
+                    item.item.default_action_id.clone().unwrap(),
+                )]),
+                destructive_acknowledged: Vec::new(),
+            })
+            .unwrap();
+        assert!(outcome.remote_accepted);
+        assert_eq!(outcome.results[0].outcome, CatalogActionOutcome::Installed);
+        assert_eq!(
+            fs::read(home_b.join("notes/todo/NOTE.md")).unwrap(),
+            b"# Things to do\n- ship the registry\n"
+        );
+
+        let listed = service_b.list_storage_repositories(&storage.id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].coordinate, coordinate);
+        assert_eq!(listed[0].labels.provider_label, "Test Provider");
+        assert_eq!(listed[0].resource_names, vec!["Things to do".to_string()]);
+        assert!(service_b
+            .capabilities()
+            .iter()
+            .any(|descriptor| descriptor.coordinate() == coordinate));
+        assert_eq!(CATALOG_SCHEMA, 1);
     }
 }

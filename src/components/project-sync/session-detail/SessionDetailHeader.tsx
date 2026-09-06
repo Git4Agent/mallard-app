@@ -56,7 +56,7 @@ export default function SessionDetailHeader({
             7-char sha need no caption. Only the token count keeps a word. */}
         <div className="session-detail-chips" aria-label="Session facts">
           {detail.branch && (
-            <FactChip title={`Branch ${detail.branch}`}>
+            <FactChip title={`Recorded branch ${detail.branch}`}>
               <Icon name="git-branch" size={12} />
               <code>{detail.branch}</code>
             </FactChip>

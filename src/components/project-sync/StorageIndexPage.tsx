@@ -1,8 +1,15 @@
-import Icon from "../Icons";
-import type { ProjectStorageLink, StorageConfig, StorageSetupDraft } from "../../types";
+import Icon, { iconNameFromHint } from "../Icons";
+import type {
+  ProjectStorageLink,
+  StorageProviderDescriptor,
+  StorageProviderKey,
+  StorageSetupDraft,
+  StorageSummary,
+} from "../../types";
 import SyncPathBar, { type PathBarMenuGroup } from "../sync-review/SyncPathBar";
-import LandingPicker, { type LandingCard } from "./LandingPicker";
-import { storageSubtitle } from "./ProjectLinksWorkspace";
+import LandingPicker, { type LandingCard, type LandingDoor } from "./LandingPicker";
+import { storageDoors } from "./model";
+import { findStorageProvider, storageSubtitle } from "./StorageSettings";
 
 /**
  * The page the storage trail is rooted at: every storage page begins its path
@@ -16,18 +23,25 @@ import { storageSubtitle } from "./ProjectLinksWorkspace";
  */
 
 interface Props {
-  storages: StorageConfig[];
+  storages: StorageSummary[];
   links: ProjectStorageLink[];
   storageIssues: Record<string, string>;
-  /** Persisted setup drafts — storages that were never created. A row only
-      reopens its draft; discard lives on the setup page, like every verb. */
+  /** Persisted setup drafts — storages that were never created, and unsaved
+      edits of existing ones. A row only reopens its draft; discard lives on
+      the setup page, like every verb. */
   drafts: StorageSetupDraft[];
+  /** Compiled provider descriptors: a draft carries no icon of its own, so
+      its row borrows the provider's, and with nothing listed each provider
+      is a door. */
+  storageProviders: StorageProviderDescriptor[];
   busy: boolean;
   /** Theme and app-wide commands; the bar here is the window's only chrome. */
   appActions: PathBarMenuGroup[];
   onOpenStorage: (storageId: string) => void;
   onOpenStorageDraft: (draftId: string) => void;
-  onAddStorage: () => void;
+  /** Add, with the provider already chosen when a door names one; without
+      one, the provider picker asks. */
+  onAddStorage: (provider?: StorageProviderKey) => void;
 }
 
 export default function StorageIndexPage({
@@ -35,6 +49,7 @@ export default function StorageIndexPage({
   links,
   storageIssues,
   drafts,
+  storageProviders,
   busy,
   appActions,
   onOpenStorage,
@@ -44,13 +59,17 @@ export default function StorageIndexPage({
   const cards: LandingCard[] = [
     ...storages.map((storage): LandingCard => {
       const name = storage.name || "(unnamed)";
-      const issue = storageIssues[storage.id] ?? null;
-      const linked = links.filter((link) => link.storage_id === storage.id).length;
+      const issue = storageIssues[storage.storage_id] ?? null;
+      const linked = links.filter((link) => link.storage_id === storage.storage_id).length;
       return {
-        key: storage.id,
-        icon: storage.kind === "local" ? "drive" : "cloud",
+        key: storage.storage_id,
+        icon: iconNameFromHint(storage.icon, "drive"),
         title: name,
-        ariaLabel: issue ? `Open ${name}. Storage issue: ${issue}` : `Open ${name}`,
+        ariaLabel: [
+          `Open ${name}`,
+          storage.available ? null : `Unavailable: this build has no ${storage.provider_label} adapter`,
+          issue ? `Storage issue: ${issue}` : null,
+        ].filter(Boolean).join(". "),
         location: storageSubtitle(storage),
         /* The tally and the issue word are the card's two facts; the word is
            the second channel beyond colour (WCAG 1.4.1), and it stays one
@@ -62,6 +81,12 @@ export default function StorageIndexPage({
               <span>Projects</span>
               <b>{linked}</b>
             </span>
+            {!storage.available && (
+              <span className="sync-storage-index-warning">
+                <Icon name="alert-triangle" size={12} aria-hidden="true" />
+                <span>Unavailable</span>
+              </span>
+            )}
             {issue && (
               <span className="sync-storage-index-warning">
                 <Icon name="alert-triangle" size={12} aria-hidden="true" />
@@ -70,19 +95,24 @@ export default function StorageIndexPage({
             )}
           </span>
         ),
-        onOpen: () => onOpenStorage(storage.id),
+        onOpen: () => onOpenStorage(storage.storage_id),
       };
     }),
     // A persisted setup draft is content too: badged, tally-less, opening
-    // its draft — and never leaking a secret (the view arrives redacted).
+    // its draft — and never leaking a secret (drafts carry presence only).
     ...drafts.map((draft): LandingCard => {
-      const name = draft.storage.name || "(unnamed)";
+      const name = draft.name || "(unnamed)";
       return {
         key: draft.draft_id,
-        icon: draft.storage.kind === "local" ? "drive" : "cloud",
+        icon: iconNameFromHint(
+          findStorageProvider(storageProviders, draft.provider, draft.config_version)?.icon,
+          "drive",
+        ),
         title: name,
         ariaLabel: `Continue setting up ${name} — resumable storage draft`,
-        location: "Setup not finished — not connected to Mallard yet",
+        location: draft.edits_existing
+          ? `Unsaved ${draft.provider_label} settings — not applied yet`
+          : "Setup not finished — not connected to Mallard yet",
         detail: (
           <span className="landing-picker-card-chips">
             <span className="sync-draft-badge">Draft</span>
@@ -92,6 +122,13 @@ export default function StorageIndexPage({
       };
     }),
   ];
+  const doors: LandingDoor[] = storageDoors(storageProviders).map((door) => ({
+    key: door.key,
+    icon: door.icon,
+    label: door.label,
+    ariaLabel: `Add ${door.label} storage`,
+    onOpen: () => onAddStorage(door.key),
+  }));
   return (
     <>
       <SyncPathBar
@@ -105,9 +142,18 @@ export default function StorageIndexPage({
           title="Storages"
           count={cards.length === 1 ? "1 on this machine" : `${cards.length} on this machine`}
           actionLabel="Add storage…"
-          emptyTitle="No storages yet"
           busy={busy}
-          onAction={onAddStorage}
+          onAction={() => onAddStorage()}
+          /* A build whose descriptors have not arrived still leaves one door:
+             the picker itself. */
+          doors={doors.length > 0 ? doors : [{
+            key: "any",
+            icon: "drive",
+            label: "Add storage…",
+            ariaLabel: "Add storage",
+            onOpen: () => onAddStorage(),
+          }]}
+          caption={{ icons: ["folder", "catalog"], text: "Projects & Catalog sync here" }}
           cards={cards}
         />
       </main>

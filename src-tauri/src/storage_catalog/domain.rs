@@ -1,41 +1,50 @@
-//! Scope-rowed Library resource domain: portable schema-1 kind
-//! repositories with set manifests, machine-local profiles, scopes, and
-//! scope-storage links, immutable Push/Pull/Fork plans, and their validation.
+//! Scope-rowed Library resource domain: open catalog coordinates, the
+//! portable resource envelope, schema-1 repositories with set manifests,
+//! machine-local profiles, scopes, scope-storage links, apply targets,
+//! claims, witnesses, the operations journal, immutable Push/Pull/Fork plans,
+//! and their structural validation.
+//!
+//! Only structural validation lives here: key grammar, bounds, digests, and
+//! document invariants. Nothing in this module resolves a coordinate to a
+//! codec or adapter — that is registry validation in `registry` — so records
+//! with coordinates this build does not register still load and stay inert.
 //!
 //! This module is deliberately independent of the project-sync domain. It
-//! imports only storage-neutral identifiers (`StorageId`) and shared digest
-//! validation from `mallard_domain`; it never uses bundle, project, thread,
-//! or restore-plan types. Keep it free of Tauri and filesystem concerns.
+//! imports only storage-neutral identifiers, keys, bounded objects, and
+//! shared digest validation from `mallard_domain`; it never uses bundle,
+//! project, thread, or restore-plan types. Keep it free of Tauri and
+//! filesystem concerns.
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::path::Path;
 
 pub(crate) use mallard_domain::sha256_hex;
 use mallard_domain::{
     generated_named_id, hex_lower, update_length_prefixed, validate_absolute_clean_path,
-    validate_sha256, StorageId,
+    validate_bounded_key, validate_sha256, StorageId,
+};
+pub use mallard_domain::{
+    BoundedConfigObject, BoundedPortableObject, CatalogFormatKey, CatalogProviderConfig,
+    CatalogResourceKindKey, CatalogTargetKey, ProviderKey,
 };
 
 /// Portable catalog schema. Exactly 1; unknown versions block catalog work.
 pub const CATALOG_SCHEMA: u32 = 1;
 
 // Enforced limits applied consistently in validation, capture, storage reads,
-// and tests.
+// and tests. Format-specific limits live beside their codec.
 pub const MAX_CATALOG_RESOURCES: usize = 512;
 pub const MAX_CATALOG_FILES: usize = 8_192;
-pub const MAX_SKILL_FILES: usize = 256;
-pub const MAX_SKILL_FILE_BYTES: u64 = 2 * 1024 * 1024;
-pub const MAX_SKILL_TREE_BYTES: u64 = 16 * 1024 * 1024;
-pub const MAX_PET_MANIFEST_BYTES: u64 = 16 * 1024;
-pub const MAX_PET_ATLAS_BYTES: u64 = 8 * 1024 * 1024;
-pub const MAX_PET_DECODED_BYTES: u64 = 16 * 1024 * 1024;
+/// Structural per-file ceiling for every portable payload file; codecs
+/// enforce their own tighter limits.
+pub const MAX_CATALOG_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_REVISION_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_CATALOG_PROFILES: usize = 64;
-// Every scope is a distinct (profile, kind) pair, so the ceiling is exactly
-// profiles times the four resource kinds.
-pub const MAX_CATALOG_SCOPES: usize = MAX_CATALOG_PROFILES * 4;
+pub const MAX_CATALOG_SCOPES: usize = 1_024;
 pub const MAX_CATALOG_LINKS_PER_SCOPE: usize = 128;
 pub const MAX_CATALOG_CLAIMS: usize = 4_096;
 pub const MAX_CATALOG_WITNESSES: usize = 512;
@@ -102,8 +111,8 @@ macro_rules! catalog_id {
             }
         }
 
-        impl std::fmt::Display for $name {
-            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str(&self.0)
             }
         }
@@ -154,21 +163,6 @@ impl CatalogOperationId {
     }
 }
 
-impl CatalogResourceRepositoryId {
-    /// The one repository a (provider, kind) pair maps to, on every machine.
-    /// Deriving instead of minting is what makes two replicas that push
-    /// resources of the same kind converge on the same repository without
-    /// ever seeing each other first.
-    pub fn for_kind(provider: ProviderKey, kind: CatalogResourceKindTag) -> Self {
-        let digest = length_prefixed_digest(
-            b"mallard-catalog-kind-repository-v1",
-            &[provider.as_str().as_bytes(), kind.kind_token().as_bytes()],
-        );
-        Self::parse(format!("library-{}", &digest[..32]))
-            .expect("derived catalog repository ids are always valid")
-    }
-}
-
 impl CatalogLinkId {
     pub fn generate() -> Result<Self, String> {
         Self::parse(generate_catalog_id("catlink")?)
@@ -187,109 +181,102 @@ impl LocalCatalogProfileId {
     }
 }
 
-/// The closed provider registry. Exactly Codex and Claude; a portable provider
-/// key never selects an executable by itself.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderKey {
-    Codex,
-    Claude,
+// ---------------------------------------------------------------------------
+// Open coordinates
+// ---------------------------------------------------------------------------
+
+/// The four independent Library axes that address one portable resource
+/// shape. Every axis is an open key; `format_version` versions the portable
+/// shape of `format`. Structurally any well-formed coordinate parses — only
+/// the registry decides whether this build can operate on it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogCoordinate {
+    pub provider: ProviderKey,
+    pub resource_kind: CatalogResourceKindKey,
+    pub format: CatalogFormatKey,
+    pub format_version: u32,
 }
 
-impl ProviderKey {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ProviderKey::Codex => "codex",
-            ProviderKey::Claude => "claude",
-        }
+impl CatalogCoordinate {
+    pub fn new(
+        provider: impl Into<String>,
+        resource_kind: impl Into<String>,
+        format: impl Into<String>,
+        format_version: u32,
+    ) -> Result<Self, String> {
+        let coordinate = Self {
+            provider: ProviderKey::parse(provider)?,
+            resource_kind: CatalogResourceKindKey::parse(resource_kind)?,
+            format: CatalogFormatKey::parse(format)?,
+            format_version,
+        };
+        coordinate.validate()?;
+        Ok(coordinate)
     }
 
-    pub fn display_label(&self) -> &'static str {
-        match self {
-            ProviderKey::Codex => "Codex",
-            ProviderKey::Claude => "Claude",
+    pub fn validate(&self) -> Result<(), String> {
+        if self.format_version == 0 {
+            return Err(format!(
+                "catalog coordinate {} declares format version 0",
+                self
+            ));
         }
-    }
-}
-
-/// The closed portable skill scopes: two Codex root classes and one Claude
-/// root. Root class participates in resource identity, so equal names across
-/// `<CODEX_HOME>/skills` and `$HOME/.agents/skills` stay distinct resources.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentSkillScope {
-    CodexHome,
-    CodexSharedUser,
-    ClaudeUser,
-}
-
-impl AgentSkillScope {
-    /// Stable identity token used in the resource-ID tuple.
-    pub fn root_class_token(&self) -> &'static str {
-        match self {
-            AgentSkillScope::CodexHome => "provider/codex/codex_home",
-            AgentSkillScope::CodexSharedUser => "agentskills/shared",
-            AgentSkillScope::ClaudeUser => "provider/claude",
-        }
+        Ok(())
     }
 
-    pub fn provider(&self) -> ProviderKey {
-        match self {
-            AgentSkillScope::CodexHome | AgentSkillScope::CodexSharedUser => ProviderKey::Codex,
-            AgentSkillScope::ClaudeUser => ProviderKey::Claude,
-        }
-    }
-
-    /// Review label distinguishing the two Codex root classes.
-    pub fn display_label(&self) -> &'static str {
-        match self {
-            AgentSkillScope::CodexHome => "Codex home",
-            AgentSkillScope::CodexSharedUser => "Shared user",
-            AgentSkillScope::ClaudeUser => "Claude",
-        }
+    /// Same provider, kind, and format — only the version may differ.
+    pub fn shares_format(&self, other: &Self) -> bool {
+        self.provider == other.provider
+            && self.resource_kind == other.resource_kind
+            && self.format == other.format
     }
 }
 
-/// The two supported Codex pet formats. The portable resource kind is the
-/// format discriminator; there is no conversion between them.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum CodexPetFormat {
-    V1,
-    V2,
-}
-
-impl CodexPetFormat {
-    pub fn kind_token(&self) -> &'static str {
-        match self {
-            CodexPetFormat::V1 => "codex_pet_v1",
-            CodexPetFormat::V2 => "codex_pet_v2",
-        }
-    }
-
-    /// Exact atlas pixel dimensions for this format.
-    pub fn atlas_dimensions(&self) -> (u32, u32) {
-        match self {
-            CodexPetFormat::V1 => (1536, 1872),
-            CodexPetFormat::V2 => (1536, 2288),
-        }
-    }
-
-    /// Sprite grid: 8 columns of 192x208 cells; 9 rows for v1, 11 for v2.
-    pub fn cell_grid(&self) -> (u32, u32) {
-        match self {
-            CodexPetFormat::V1 => (8, 9),
-            CodexPetFormat::V2 => (8, 11),
-        }
-    }
-
-    pub fn display_label(&self) -> &'static str {
-        match self {
-            CodexPetFormat::V1 => "v1",
-            CodexPetFormat::V2 => "v2",
-        }
+impl fmt::Display for CatalogCoordinate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}/{}/{}@{}",
+            self.provider, self.resource_kind, self.format, self.format_version
+        )
     }
 }
+
+impl CatalogResourceRepositoryId {
+    /// The one repository a coordinate maps to, on every machine. Deriving
+    /// instead of minting is what makes two replicas that push resources of
+    /// the same coordinate converge on the same repository without ever
+    /// seeing each other first. The derivation takes exactly the provider,
+    /// kind, format, and format version: never a profile, path, target,
+    /// storage, or credential.
+    pub fn for_coordinate(coordinate: &CatalogCoordinate) -> Self {
+        let digest = length_prefixed_digest(
+            b"mallard-library-repository-v1",
+            &[
+                coordinate.provider.as_str().as_bytes(),
+                coordinate.resource_kind.as_str().as_bytes(),
+                coordinate.format.as_str().as_bytes(),
+                &coordinate.format_version.to_be_bytes(),
+            ],
+        );
+        Self::parse(format!("library-{}", &digest[..32]))
+            .expect("derived catalog repository ids are always valid")
+    }
+}
+
+/// Backend-supplied labels for one coordinate, served beside the raw keys so
+/// the frontend never holds a provider, kind, or format label table.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CatalogCoordinateLabels {
+    pub provider_label: String,
+    pub kind_label: String,
+    pub format_label: String,
+}
+
+// ---------------------------------------------------------------------------
+// Validators
+// ---------------------------------------------------------------------------
 
 pub fn validate_display_text(label: &str, value: &str, max_bytes: usize) -> Result<(), String> {
     if value.trim().is_empty() || value.len() > max_bytes || value.chars().any(char::is_control) {
@@ -298,8 +285,8 @@ pub fn validate_display_text(label: &str, value: &str, max_bytes: usize) -> Resu
     Ok(())
 }
 
-/// Skill and pet install-directory / effective-name rule: ASCII alphanumeric
-/// start, `[A-Za-z0-9._-]` body, bounded, never a dot path, no trailing dot.
+/// Directory-member and effective-name rule: ASCII alphanumeric start,
+/// `[A-Za-z0-9._-]` body, bounded, never a dot path, no trailing dot.
 pub fn validate_component_name(label: &str, value: &str, max_bytes: usize) -> Result<(), String> {
     let valid_start = value
         .bytes()
@@ -319,109 +306,33 @@ pub fn validate_component_name(label: &str, value: &str, max_bytes: usize) -> Re
     Ok(())
 }
 
-pub fn validate_skill_name(label: &str, value: &str) -> Result<(), String> {
-    validate_component_name(label, value, 128)
+/// A portable root-class token inside a resource identity (`provider-home`,
+/// `shared-user`): the stable key grammar.
+pub fn validate_root_class(label: &str, value: &str) -> Result<(), String> {
+    validate_bounded_key(label, value)
 }
 
-pub fn validate_pet_id(label: &str, value: &str) -> Result<(), String> {
-    validate_component_name(label, value, 64)
-}
-
-pub fn validate_plugin_namespace(label: &str, value: &str) -> Result<(), String> {
+/// The member a resource occupies inside its target root: a directory name
+/// for directory resources, a native identifier (`tools@acme`) for
+/// provider-inventory resources. Bounded, never a path, never a dot path.
+pub fn validate_target_member(label: &str, value: &str) -> Result<(), String> {
     if value.is_empty()
-        || value.len() > 128
-        || value.contains("..")
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-        || !value
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || value.len() > 512
+        || value == "."
+        || value == ".."
+        || value.contains('/')
+        || value.contains('\\')
+        || value.chars().any(char::is_control)
     {
         return Err(format!("invalid {}: '{}'", label, value.escape_debug()));
     }
     Ok(())
 }
 
-/// A canonical plugin ID is the provider-native qualified form
-/// `<plugin>@<namespace>`; the namespace participates in identity.
-pub fn validate_canonical_plugin_id(label: &str, value: &str) -> Result<(), String> {
-    let invalid = || format!("invalid {}: '{}'", label, value.escape_debug());
-    if value.len() > 512 || value.contains("..") {
-        return Err(invalid());
-    }
-    let Some((name, namespace)) = value.split_once('@') else {
-        return Err(invalid());
-    };
-    if name.is_empty()
-        || name.len() > 256
-        || namespace.contains('@')
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-        || !name
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphanumeric())
-    {
-        return Err(invalid());
-    }
-    validate_plugin_namespace(label, namespace)
-}
-
-fn contains_url_credentials(value: &str) -> bool {
-    let Some((_, remainder)) = value.split_once("://") else {
-        return false;
-    };
-    let authority_end = remainder.find('/').unwrap_or(remainder.len());
-    remainder[..authority_end].contains('@')
-}
-
-/// A credential-free, normalized public Git location: an `https`/`git` URL or
-/// an `owner/repo` shorthand. Absolute paths, embedded credentials, query
-/// tokens, and shell fragments are rejected.
-pub fn validate_git_location(label: &str, value: &str) -> Result<(), String> {
-    let invalid = || format!("invalid {}: '{}'", label, value.escape_debug());
-    if value.is_empty()
-        || value.len() > 1024
-        || value.chars().any(char::is_control)
-        || value.contains(' ')
-        || value.contains('?')
-        || value.contains('#')
-        || value.starts_with('/')
-        || value.starts_with('.')
-        || value.starts_with('~')
-        || value.contains('\\')
-        || contains_url_credentials(value)
-    {
-        return Err(invalid());
-    }
-    if let Some((scheme, _)) = value.split_once("://") {
-        if !matches!(scheme, "https" | "git") {
-            return Err(invalid());
-        }
-        return Ok(());
-    }
-    // owner/repo shorthand: exactly one separator, safe components.
-    let parts: Vec<&str> = value.split('/').collect();
-    if parts.len() != 2
-        || parts.iter().any(|part| {
-            part.is_empty()
-                || !part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-        })
-    {
-        return Err(invalid());
-    }
-    Ok(())
-}
-
-/// A skill-relative payload path: bounded depth and length, no traversal, no
-/// nested VCS metadata, portable component names.
-pub fn validate_skill_relative_path(value: &str) -> Result<(), String> {
-    let invalid = || format!("invalid skill payload path: '{}'", value.escape_debug());
+/// A resource-relative payload path: bounded depth and length, no traversal,
+/// no nested VCS metadata, portable component names.
+pub fn validate_portable_relative_path(value: &str) -> Result<(), String> {
+    let invalid = || format!("invalid portable payload path: '{}'", value.escape_debug());
     if value.is_empty()
         || value.len() > 1024
         || value.starts_with('/')
@@ -449,47 +360,29 @@ pub fn validate_skill_relative_path(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Closed Library logical-path grammar:
-/// `resources/<resource-id>/skill/<relative-path>` or
-/// `resources/<resource-id>/pet/<atlas-basename>`. Catalog paths can never
-/// begin with the project namespaces.
-pub fn catalog_logical_path(
-    resource_id: &CatalogResourceId,
-    segment: &str,
-    relative: &str,
-) -> Result<String, String> {
-    if !matches!(segment, "skill" | "pet") {
-        return Err(format!("unknown catalog payload segment '{}'", segment));
-    }
-    if segment == "pet" && relative.contains('/') {
-        return Err(format!(
-            "pet payloads own exactly one atlas basename: '{}'",
-            relative.escape_debug()
-        ));
-    }
-    validate_skill_relative_path(relative)?;
-    let path = format!("resources/{}/{}/{}", resource_id, segment, relative);
-    for reserved in ["project/", "state/", "dependencies/", "requirements/"] {
-        if path.starts_with(reserved) {
-            return Err(format!("catalog path cannot begin with '{}'", reserved));
-        }
-    }
-    Ok(path)
-}
+// ---------------------------------------------------------------------------
+// Portable resources
+// ---------------------------------------------------------------------------
 
-/// One immutable payload file: exact size, SHA-256, safe portable mode, and
-/// its content-addressed object reference.
+/// One immutable payload file: its resource-relative path, exact size,
+/// SHA-256, and safe portable mode. The object key is content-addressed and
+/// derived, never stored.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct CatalogFileEntry {
+pub struct CatalogPortableFile {
+    pub path: String,
     pub sha256: String,
     pub size: u64,
     pub mode: u32,
-    pub object_key: String,
 }
 
-impl CatalogFileEntry {
+impl CatalogPortableFile {
+    pub fn object_key(&self) -> String {
+        format!("_objects/{}", self.sha256)
+    }
+
     pub fn validate(&self, label: &str, max_bytes: u64) -> Result<(), String> {
+        validate_portable_relative_path(&self.path)?;
         validate_sha256(label, &self.sha256)?;
         if self.size > max_bytes {
             return Err(format!("{} exceeds its size limit", label));
@@ -500,430 +393,191 @@ impl CatalogFileEntry {
                 label, self.mode
             ));
         }
-        if self.object_key != format!("_objects/{}", self.sha256) {
-            return Err(format!("{} object key is not content-addressed", label));
-        }
         Ok(())
     }
 }
 
-// ---------------------------------------------------------------------------
-// Portable resources
-// ---------------------------------------------------------------------------
-
+/// The open cloud resource envelope. Provider-specific meaning lives in the
+/// bounded `identity` and `descriptor` objects, which a registered format
+/// codec decodes into typed structures for its exact coordinate. Structural
+/// validation proves ids, digests, bounds, and file entries; an envelope
+/// whose coordinate this build does not register still parses, is
+/// preserved, and is inert.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct AgentSkillDescriptor {
-    pub scope: AgentSkillScope,
-    pub effective_name: String,
-    pub install_directory: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct AgentSkillResource {
-    pub descriptor: AgentSkillDescriptor,
-    pub content_sha256: String,
-    pub files: BTreeMap<String, CatalogFileEntry>,
-}
-
-impl AgentSkillResource {
-    pub fn validate(&self) -> Result<(), String> {
-        validate_skill_name("skill effective name", &self.descriptor.effective_name)?;
-        validate_skill_name(
-            "skill install directory",
-            &self.descriptor.install_directory,
-        )?;
-        if self.files.is_empty() || self.files.len() > MAX_SKILL_FILES {
-            return Err(format!(
-                "skill '{}' must own between 1 and {} files",
-                self.descriptor.effective_name, MAX_SKILL_FILES
-            ));
-        }
-        if !self.files.contains_key("SKILL.md") {
-            return Err(format!(
-                "skill '{}' has no SKILL.md declaration",
-                self.descriptor.effective_name
-            ));
-        }
-        let resource_id = skill_resource_id(
-            self.descriptor.scope,
-            &self.descriptor.effective_name,
-            &self.descriptor.install_directory,
-        );
-        let mut folded = BTreeSet::new();
-        let mut total: u64 = 0;
-        for (path, entry) in &self.files {
-            // The composed catalog logical path enforces the closed grammar
-            // and the reserved-root exclusions for every payload file.
-            catalog_logical_path(&resource_id, "skill", path)?;
-            if !folded.insert(path.to_lowercase()) {
-                return Err(format!(
-                    "skill '{}' has a case-folded path collision at '{}'",
-                    self.descriptor.effective_name, path
-                ));
-            }
-            entry.validate(&format!("skill file '{}'", path), MAX_SKILL_FILE_BYTES)?;
-            total = total.saturating_add(entry.size);
-        }
-        if total > MAX_SKILL_TREE_BYTES {
-            return Err(format!(
-                "skill '{}' exceeds the skill tree byte limit",
-                self.descriptor.effective_name
-            ));
-        }
-        let computed = self.compute_content_sha256();
-        if computed != self.content_sha256 {
-            return Err(format!(
-                "skill '{}' content digest does not match its files",
-                self.descriptor.effective_name
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn compute_content_sha256(&self) -> String {
-        let descriptor = serde_json::to_vec(&self.descriptor).unwrap_or_default();
-        let mut hasher = Sha256::new();
-        update_length_prefixed(&mut hasher, b"mallard-catalog-content-v1");
-        update_length_prefixed(&mut hasher, b"agent_skill");
-        update_length_prefixed(&mut hasher, &descriptor);
-        for (path, entry) in &self.files {
-            update_length_prefixed(&mut hasher, path.as_bytes());
-            update_length_prefixed(&mut hasher, entry.sha256.as_bytes());
-            hasher.update(entry.size.to_be_bytes());
-            hasher.update(entry.mode.to_be_bytes());
-        }
-        hex_lower(&hasher.finalize())
-    }
-}
-
-/// How a plugin restore resolves content: through the provider's own
-/// install/update operation, or manually when the source is machine-local or
-/// otherwise unenforceable.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginResolutionPolicy {
-    ProviderResolved,
-    ManualOnly,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GitMarketplaceSource {
-    pub location: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_ref: Option<String>,
-}
-
-/// The closed portable plugin source forms. A provider-managed marketplace
-/// identity always carries its namespace; a credential-free Git location is
-/// present when the marketplace itself is portable. A `None` Git source is a
-/// machine-local marketplace: the intent stays portable but restores manually.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PortablePluginSource {
-    ProviderMarketplace {
-        namespace: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        git: Option<GitMarketplaceSource>,
-    },
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct PluginInstallIntentDescriptor {
+pub struct CatalogResourceEnvelope {
+    pub resource_id: CatalogResourceId,
     pub provider: ProviderKey,
-    pub provider_native_namespace: String,
-    pub plugin_id: String,
-    pub source: PortablePluginSource,
-    pub resolution: PluginResolutionPolicy,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct PluginInstallIntentResource {
-    pub descriptor: PluginInstallIntentDescriptor,
+    pub resource_kind: CatalogResourceKindKey,
+    pub format: CatalogFormatKey,
+    pub format_version: u32,
+    pub identity: BoundedPortableObject,
+    pub descriptor: BoundedPortableObject,
     pub content_sha256: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<CatalogPortableFile>,
 }
 
-impl PluginInstallIntentResource {
-    pub fn validate(&self) -> Result<(), String> {
-        let descriptor = &self.descriptor;
-        validate_plugin_namespace("plugin namespace", &descriptor.provider_native_namespace)?;
-        validate_canonical_plugin_id("plugin id", &descriptor.plugin_id)?;
-        let Some((_, namespace)) = descriptor.plugin_id.split_once('@') else {
-            return Err(format!(
-                "plugin id '{}' has no namespace qualifier",
-                descriptor.plugin_id
-            ));
-        };
-        if namespace != descriptor.provider_native_namespace {
-            return Err(format!(
-                "plugin id '{}' does not match its namespace '{}'",
-                descriptor.plugin_id, descriptor.provider_native_namespace
-            ));
-        }
-        let PortablePluginSource::ProviderMarketplace {
-            namespace: source_namespace,
-            git,
-        } = &descriptor.source;
-        if source_namespace != &descriptor.provider_native_namespace {
-            return Err(format!(
-                "plugin '{}' source namespace differs from its identity namespace",
-                descriptor.plugin_id
-            ));
-        }
-        match git {
-            Some(git) => {
-                validate_git_location("plugin marketplace source", &git.location)?;
-                if let Some(git_ref) = &git.git_ref {
-                    validate_display_text("plugin marketplace ref", git_ref, 256)?;
-                }
-                if descriptor.resolution != PluginResolutionPolicy::ProviderResolved {
-                    return Err(format!(
-                        "plugin '{}' with a portable marketplace source must be provider-resolved",
-                        descriptor.plugin_id
-                    ));
-                }
-            }
-            None => {
-                if descriptor.resolution != PluginResolutionPolicy::ManualOnly {
-                    return Err(format!(
-                        "plugin '{}' without a portable marketplace source must be manual-only",
-                        descriptor.plugin_id
-                    ));
-                }
-            }
-        }
-        let computed = self.compute_content_sha256();
-        if computed != self.content_sha256 {
-            return Err(format!(
-                "plugin '{}' semantic intent digest does not match its descriptor",
-                descriptor.plugin_id
-            ));
-        }
-        Ok(())
-    }
-
-    /// Semantic install-intent digest. Machine-local observations (installed
-    /// version, install root, exported skills, enablement) never enter it, so
-    /// provider auto-updates do not create catalog conflicts.
-    pub fn compute_content_sha256(&self) -> String {
-        let descriptor = serde_json::to_vec(&self.descriptor).unwrap_or_default();
-        length_prefixed_digest(
-            b"mallard-catalog-content-v1",
-            &[b"plugin_install_intent", &descriptor],
-        )
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodexPetDescriptor {
-    pub pet_id: String,
-    pub display_name: String,
-    pub description: String,
-    pub atlas_basename: String,
-    pub atlas: CatalogFileEntry,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodexPetResource {
-    pub descriptor: CodexPetDescriptor,
-    pub content_sha256: String,
-}
-
-impl CodexPetResource {
-    pub fn validate(&self, format: CodexPetFormat) -> Result<(), String> {
-        let descriptor = &self.descriptor;
-        validate_pet_id("pet id", &descriptor.pet_id)?;
-        validate_display_text("pet display name", &descriptor.display_name, 128)?;
-        validate_display_text("pet description", &descriptor.description, 1024)?;
-        validate_component_name("pet atlas basename", &descriptor.atlas_basename, 255)?;
-        let lowered = descriptor.atlas_basename.to_ascii_lowercase();
-        if !(lowered.ends_with(".png") || lowered.ends_with(".webp")) {
-            return Err(format!(
-                "pet '{}' atlas must be a PNG or WebP basename",
-                descriptor.pet_id
-            ));
-        }
-        catalog_logical_path(
-            &pet_resource_id(format, &descriptor.pet_id),
-            "pet",
-            &descriptor.atlas_basename,
-        )?;
-        descriptor.atlas.validate(
-            &format!("pet '{}' atlas", descriptor.pet_id),
-            MAX_PET_ATLAS_BYTES,
-        )?;
-        let computed = self.compute_content_sha256(format);
-        if computed != self.content_sha256 {
-            return Err(format!(
-                "pet '{}' content digest does not match its package",
-                descriptor.pet_id
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn compute_content_sha256(&self, format: CodexPetFormat) -> String {
-        let descriptor = serde_json::to_vec(&self.descriptor).unwrap_or_default();
-        length_prefixed_digest(
-            b"mallard-catalog-content-v1",
-            &[format.kind_token().as_bytes(), &descriptor],
-        )
-    }
-}
-
-/// The closed portable resource enum. Unknown kinds block catalog operations;
-/// executable content never gains semantics through permissive parsing. The
-/// v1 and v2 pet kinds are distinct resources that may coexist in storage.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CatalogResource {
-    AgentSkill(AgentSkillResource),
-    PluginInstallIntent(PluginInstallIntentResource),
-    CodexPetV1(CodexPetResource),
-    CodexPetV2(CodexPetResource),
-}
-
-impl CatalogResource {
-    pub fn provider(&self) -> ProviderKey {
-        match self {
-            CatalogResource::AgentSkill(skill) => skill.descriptor.scope.provider(),
-            CatalogResource::PluginInstallIntent(plugin) => plugin.descriptor.provider,
-            CatalogResource::CodexPetV1(_) | CatalogResource::CodexPetV2(_) => ProviderKey::Codex,
-        }
-    }
-
-    pub fn display_name(&self) -> String {
-        match self {
-            CatalogResource::AgentSkill(skill) => skill.descriptor.effective_name.clone(),
-            CatalogResource::PluginInstallIntent(plugin) => plugin.descriptor.plugin_id.clone(),
-            CatalogResource::CodexPetV1(pet) | CatalogResource::CodexPetV2(pet) => {
-                pet.descriptor.display_name.clone()
-            }
-        }
-    }
-
-    pub fn content_sha256(&self) -> &str {
-        match self {
-            CatalogResource::AgentSkill(skill) => &skill.content_sha256,
-            CatalogResource::PluginInstallIntent(plugin) => &plugin.content_sha256,
-            CatalogResource::CodexPetV1(pet) | CatalogResource::CodexPetV2(pet) => {
-                &pet.content_sha256
-            }
-        }
-    }
-
-    pub fn resource_id(&self) -> CatalogResourceId {
-        match self {
-            CatalogResource::AgentSkill(skill) => skill_resource_id(
-                skill.descriptor.scope,
-                &skill.descriptor.effective_name,
-                &skill.descriptor.install_directory,
-            ),
-            CatalogResource::PluginInstallIntent(plugin) => plugin_resource_id(
-                plugin.descriptor.provider,
-                &plugin.descriptor.provider_native_namespace,
-                &plugin.descriptor.plugin_id,
-            ),
-            CatalogResource::CodexPetV1(pet) => {
-                pet_resource_id(CodexPetFormat::V1, &pet.descriptor.pet_id)
-            }
-            CatalogResource::CodexPetV2(pet) => {
-                pet_resource_id(CodexPetFormat::V2, &pet.descriptor.pet_id)
-            }
-        }
-    }
-
-    pub fn pet_format(&self) -> Option<CodexPetFormat> {
-        match self {
-            CatalogResource::CodexPetV1(_) => Some(CodexPetFormat::V1),
-            CatalogResource::CodexPetV2(_) => Some(CodexPetFormat::V2),
-            _ => None,
-        }
-    }
-
-    pub fn kind_tag(&self) -> CatalogResourceKindTag {
-        match self {
-            CatalogResource::AgentSkill(_) => CatalogResourceKindTag::AgentSkill,
-            CatalogResource::PluginInstallIntent(_) => CatalogResourceKindTag::PluginInstallIntent,
-            CatalogResource::CodexPetV1(_) => CatalogResourceKindTag::CodexPetV1,
-            CatalogResource::CodexPetV2(_) => CatalogResourceKindTag::CodexPetV2,
-        }
-    }
-
-    /// Total portable payload bytes owned by this resource.
-    pub fn payload_bytes(&self) -> u64 {
-        match self {
-            CatalogResource::AgentSkill(skill) => skill
-                .files
-                .values()
-                .fold(0_u64, |total, entry| total.saturating_add(entry.size)),
-            CatalogResource::PluginInstallIntent(_) => 0,
-            CatalogResource::CodexPetV1(pet) | CatalogResource::CodexPetV2(pet) => {
-                pet.descriptor.atlas.size
-            }
-        }
-    }
-
-    pub fn file_count(&self) -> usize {
-        match self {
-            CatalogResource::AgentSkill(skill) => skill.files.len(),
-            CatalogResource::PluginInstallIntent(_) => 0,
-            CatalogResource::CodexPetV1(_) | CatalogResource::CodexPetV2(_) => 1,
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        match self {
-            CatalogResource::AgentSkill(skill) => skill.validate(),
-            CatalogResource::PluginInstallIntent(plugin) => plugin.validate(),
-            CatalogResource::CodexPetV1(pet) => pet.validate(CodexPetFormat::V1),
-            CatalogResource::CodexPetV2(pet) => pet.validate(CodexPetFormat::V2),
-        }
-    }
-}
-
-/// Resource identity is stable across content updates; identity components
-/// are length-delimited and domain-tagged.
-fn identity_resource_id(kind_token: &str, components: &[&str]) -> CatalogResourceId {
-    let mut fields: Vec<&[u8]> = vec![kind_token.as_bytes()];
-    for component in components {
-        fields.push(component.as_bytes());
-    }
-    let digest = length_prefixed_digest(b"mallard-catalog-resource-v1", &fields);
+/// Resource identity is stable across content updates: it is derived from
+/// the coordinate plus the canonical identity object, with every component
+/// length-delimited and domain-tagged. The format version participates so
+/// two versions of one format never share a resource, even in one directory.
+pub fn derive_resource_id(
+    coordinate: &CatalogCoordinate,
+    identity: &BoundedPortableObject,
+) -> CatalogResourceId {
+    let digest = length_prefixed_digest(
+        b"mallard-catalog-resource-v1",
+        &[
+            coordinate.provider.as_str().as_bytes(),
+            coordinate.resource_kind.as_str().as_bytes(),
+            coordinate.format.as_str().as_bytes(),
+            &coordinate.format_version.to_be_bytes(),
+            &identity.canonical_json(),
+        ],
+    );
     CatalogResourceId::parse(format!("resource-{}", digest))
         .expect("catalog resource ids derived from digests are always valid")
 }
 
-pub fn skill_resource_id(
-    scope: AgentSkillScope,
-    effective_name: &str,
-    install_directory: &str,
-) -> CatalogResourceId {
-    identity_resource_id(
-        "agent_skill",
-        &[scope.root_class_token(), effective_name, install_directory],
-    )
-}
+impl CatalogResourceEnvelope {
+    /// Build an envelope with its derived id and content digest. Files are
+    /// canonicalized to path order.
+    pub fn new(
+        coordinate: &CatalogCoordinate,
+        identity: BoundedPortableObject,
+        descriptor: BoundedPortableObject,
+        mut files: Vec<CatalogPortableFile>,
+    ) -> Self {
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        let mut envelope = Self {
+            resource_id: derive_resource_id(coordinate, &identity),
+            provider: coordinate.provider.clone(),
+            resource_kind: coordinate.resource_kind.clone(),
+            format: coordinate.format.clone(),
+            format_version: coordinate.format_version,
+            identity,
+            descriptor,
+            content_sha256: String::new(),
+            files,
+        };
+        envelope.content_sha256 = envelope.compute_content_sha256();
+        envelope
+    }
 
-pub fn plugin_resource_id(
-    provider: ProviderKey,
-    namespace: &str,
-    plugin_id: &str,
-) -> CatalogResourceId {
-    identity_resource_id(
-        "plugin_install_intent",
-        &[provider.as_str(), namespace, plugin_id],
-    )
-}
+    pub fn coordinate(&self) -> CatalogCoordinate {
+        CatalogCoordinate {
+            provider: self.provider.clone(),
+            resource_kind: self.resource_kind.clone(),
+            format: self.format.clone(),
+            format_version: self.format_version,
+        }
+    }
 
-pub fn pet_resource_id(format: CodexPetFormat, pet_id: &str) -> CatalogResourceId {
-    identity_resource_id(format.kind_token(), &[pet_id])
+    /// Content digest over the coordinate, identity, descriptor, and every
+    /// file's path, digest, size, and mode. Machine-local observations never
+    /// enter it.
+    pub fn compute_content_sha256(&self) -> String {
+        let mut hasher = Sha256::new();
+        update_length_prefixed(&mut hasher, b"mallard-catalog-content-v1");
+        update_length_prefixed(&mut hasher, self.provider.as_str().as_bytes());
+        update_length_prefixed(&mut hasher, self.resource_kind.as_str().as_bytes());
+        update_length_prefixed(&mut hasher, self.format.as_str().as_bytes());
+        hasher.update(self.format_version.to_be_bytes());
+        update_length_prefixed(&mut hasher, &self.identity.canonical_json());
+        update_length_prefixed(&mut hasher, &self.descriptor.canonical_json());
+        for file in &self.files {
+            update_length_prefixed(&mut hasher, file.path.as_bytes());
+            update_length_prefixed(&mut hasher, file.sha256.as_bytes());
+            hasher.update(file.size.to_be_bytes());
+            hasher.update(file.mode.to_be_bytes());
+        }
+        hex_lower(&hasher.finalize())
+    }
+
+    /// Structural validation: coordinate grammar, non-empty identity, id and
+    /// digest derivations, and bounded canonical file entries.
+    pub fn validate(&self) -> Result<(), String> {
+        self.coordinate().validate()?;
+        if self.identity.is_empty() {
+            return Err(format!(
+                "catalog resource '{}' has an empty identity",
+                self.resource_id
+            ));
+        }
+        if self.resource_id != derive_resource_id(&self.coordinate(), &self.identity) {
+            return Err(format!(
+                "catalog resource '{}' id does not match its identity derivation",
+                self.resource_id
+            ));
+        }
+        if self.files.len() > MAX_CATALOG_FILES {
+            return Err(format!(
+                "catalog resource '{}' exceeds the {} file limit",
+                self.resource_id, MAX_CATALOG_FILES
+            ));
+        }
+        let mut folded = BTreeSet::new();
+        let mut previous: Option<&str> = None;
+        let mut total: u64 = 0;
+        for file in &self.files {
+            file.validate(
+                &format!("catalog payload file '{}'", file.path),
+                MAX_CATALOG_FILE_BYTES,
+            )?;
+            if previous.is_some_and(|previous| previous >= file.path.as_str()) {
+                return Err(format!(
+                    "catalog resource '{}' file entries are not in canonical order",
+                    self.resource_id
+                ));
+            }
+            previous = Some(file.path.as_str());
+            if !folded.insert(file.path.to_lowercase()) {
+                return Err(format!(
+                    "catalog resource '{}' has a case-folded path collision at '{}'",
+                    self.resource_id, file.path
+                ));
+            }
+            total = total.saturating_add(file.size);
+        }
+        if total > MAX_REVISION_PAYLOAD_BYTES {
+            return Err(format!(
+                "catalog resource '{}' exceeds its payload limit",
+                self.resource_id
+            ));
+        }
+        validate_sha256("catalog resource content digest", &self.content_sha256)?;
+        if self.content_sha256 != self.compute_content_sha256() {
+            return Err(format!(
+                "catalog resource '{}' content digest does not match its envelope",
+                self.resource_id
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn file(&self, path: &str) -> Option<&CatalogPortableFile> {
+        self.files.iter().find(|file| file.path == path)
+    }
+
+    /// Total portable payload bytes owned by this resource.
+    pub fn payload_bytes(&self) -> u64 {
+        self.files
+            .iter()
+            .fold(0_u64, |total, file| total.saturating_add(file.size))
+    }
+
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Every content-addressed payload this resource references, by digest.
+    pub fn referenced_payloads(&self) -> BTreeMap<String, u64> {
+        self.files
+            .iter()
+            .map(|file| (file.sha256.clone(), file.size))
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -998,24 +652,51 @@ pub fn derive_library_origin(
 }
 
 // ---------------------------------------------------------------------------
-// Per-kind Library repositories
+// Per-coordinate Library repositories
 // ---------------------------------------------------------------------------
 
-/// Immutable discovery metadata for one kind repository. It freezes exactly
-/// the identity the repository id derives from — provider and kind — and it
-/// contains no local profile/path/storage identity. It is never trusted in
-/// place of the verified head and manifest.
+/// Immutable discovery metadata for one repository. It freezes exactly the
+/// coordinate the repository id derives from and contains no local
+/// profile/path/target/storage identity. It is never trusted in place of the
+/// verified head and manifest.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryResourceTag {
     pub schema_version: u32,
     pub repository_id: CatalogResourceRepositoryId,
     pub provider: ProviderKey,
-    pub resource_kind: CatalogResourceKindTag,
+    pub resource_kind: CatalogResourceKindKey,
+    pub format: CatalogFormatKey,
+    pub format_version: u32,
     pub created_at: u64,
 }
 
 impl LibraryResourceTag {
+    pub fn new(
+        coordinate: &CatalogCoordinate,
+        repository_id: CatalogResourceRepositoryId,
+        created_at: u64,
+    ) -> Self {
+        Self {
+            schema_version: CATALOG_SCHEMA,
+            repository_id,
+            provider: coordinate.provider.clone(),
+            resource_kind: coordinate.resource_kind.clone(),
+            format: coordinate.format.clone(),
+            format_version: coordinate.format_version,
+            created_at,
+        }
+    }
+
+    pub fn coordinate(&self) -> CatalogCoordinate {
+        CatalogCoordinate {
+            provider: self.provider.clone(),
+            resource_kind: self.resource_kind.clone(),
+            format: self.format.clone(),
+            format_version: self.format_version,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.schema_version != CATALOG_SCHEMA {
             return Err(format!(
@@ -1023,14 +704,10 @@ impl LibraryResourceTag {
                 self.schema_version, CATALOG_SCHEMA
             ));
         }
-        if !provider_owns_kind(self.provider, self.resource_kind) {
-            return Err("library tag pairs a provider with a kind it cannot host".to_string());
-        }
-        if self.repository_id
-            != CatalogResourceRepositoryId::for_kind(self.provider, self.resource_kind)
-        {
+        self.coordinate().validate()?;
+        if self.repository_id != CatalogResourceRepositoryId::for_coordinate(&self.coordinate()) {
             return Err(
-                "library repository id does not match its provider and kind derivation".to_string(),
+                "library repository id does not match its coordinate derivation".to_string(),
             );
         }
         if self.created_at == 0 {
@@ -1040,11 +717,11 @@ impl LibraryResourceTag {
     }
 }
 
-/// One resource inside a kind repository's published set.
+/// One resource inside a repository's published set.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PublishedResourceEntry {
-    pub resource: CatalogResource,
+    pub resource: CatalogResourceEnvelope,
     pub updated_at: u64,
 }
 
@@ -1083,34 +760,25 @@ impl LibraryResourceManifest {
         }
         for (resource_id, entry) in &self.resources {
             entry.resource.validate()?;
-            if resource_id != &entry.resource.resource_id() {
+            if resource_id != &entry.resource.resource_id {
                 return Err("library manifest entry is keyed by a foreign resource id".to_string());
             }
             if entry.updated_at == 0 {
                 return Err("library manifest entry requires a timestamp".to_string());
             }
             // Every entry must belong to the repository's own derivation, so
-            // one manifest can never mix providers or kinds.
-            if CatalogResourceRepositoryId::for_kind(
-                entry.resource.provider(),
-                entry.resource.kind_tag(),
-            ) != self.repository_id
+            // one manifest can never mix coordinates.
+            if CatalogResourceRepositoryId::for_coordinate(&entry.resource.coordinate())
+                != self.repository_id
             {
-                return Err(
-                    "library manifest entry does not belong to this kind repository".to_string(),
-                );
-            }
-            if entry.resource.file_count() > MAX_CATALOG_FILES
-                || entry.resource.payload_bytes() > MAX_REVISION_PAYLOAD_BYTES
-            {
-                return Err("a library resource exceeds its revision limits".to_string());
+                return Err("library manifest entry does not belong to this repository".to_string());
             }
         }
         Ok(())
     }
 
     /// The published set as plain resources, the shape Pull execution reads.
-    pub fn resource_map(&self) -> BTreeMap<CatalogResourceId, CatalogResource> {
+    pub fn resource_map(&self) -> BTreeMap<CatalogResourceId, CatalogResourceEnvelope> {
         self.resources
             .iter()
             .map(|(resource_id, entry)| (resource_id.clone(), entry.resource.clone()))
@@ -1225,15 +893,18 @@ pub fn storage_connection_identity_sha256(kind: &str, coordinates: &[&str]) -> S
     length_prefixed_digest(b"mallard-catalog-storage-identity-v1", &fields)
 }
 
-/// Machine-local catalog profile. This is a new catalog-owned domain; it does
-/// not widen or reuse the project-sync provider profile.
+/// Machine-local catalog profile. This is a catalog-owned record; it does not
+/// widen or reuse the project-sync provider profile. The provider's own
+/// versioned settings live in `provider_config`; current providers use
+/// version 1 with no settings.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LocalCatalogProfile {
     pub profile_id: LocalCatalogProfileId,
-    pub provider_key: ProviderKey,
+    pub provider: ProviderKey,
     pub display_name: String,
     pub configured_home: String,
+    pub provider_config: CatalogProviderConfig,
     pub revision: u64,
     pub created_at: u64,
     pub updated_at: u64,
@@ -1242,7 +913,8 @@ pub struct LocalCatalogProfile {
 impl LocalCatalogProfile {
     pub fn validate(&self) -> Result<(), String> {
         validate_display_text("catalog profile name", &self.display_name, 128)?;
-        validate_absolute_clean_path("catalog profile home", &self.configured_home)
+        validate_absolute_clean_path("catalog profile home", &self.configured_home)?;
+        self.provider_config.validate()
     }
 }
 
@@ -1299,30 +971,38 @@ impl CatalogProfilesDocument {
     }
 }
 
-/// One user-added Catalog menu row: every resource of one kind under one
-/// provider profile. Carries no display name — the label always derives from
-/// the kind plus the profile's current name — and no storage, because the
-/// scope links to storages through `CatalogScopeLink` records.
+/// One user-added Catalog menu row: every resource of one coordinate under
+/// one provider profile. Carries no display name — the label always derives
+/// from the registered capability plus the profile's current name — and no
+/// storage, because the scope links to storages through `CatalogScopeLink`
+/// records. A scope whose coordinate this build does not register loads,
+/// lists as unavailable, and cannot be operated on.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogScope {
     pub scope_id: CatalogScopeId,
     pub provider: ProviderKey,
     pub profile_id: LocalCatalogProfileId,
-    pub resource_kind: CatalogResourceKindTag,
+    pub resource_kind: CatalogResourceKindKey,
+    pub format: CatalogFormatKey,
+    pub format_version: u32,
     pub revision: u64,
     pub created_at: u64,
     pub updated_at: u64,
 }
 
 impl CatalogScope {
-    pub fn validate(&self) -> Result<(), String> {
-        if !provider_owns_kind(self.provider, self.resource_kind) {
-            return Err(format!(
-                "catalog scope '{}' pairs a provider with a kind it cannot host",
-                self.scope_id
-            ));
+    pub fn coordinate(&self) -> CatalogCoordinate {
+        CatalogCoordinate {
+            provider: self.provider.clone(),
+            resource_kind: self.resource_kind.clone(),
+            format: self.format.clone(),
+            format_version: self.format_version,
         }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.coordinate().validate()?;
         if self.revision == 0 || self.created_at == 0 || self.created_at > self.updated_at {
             return Err(format!(
                 "catalog scope '{}' has invalid revision or timestamps",
@@ -1373,9 +1053,9 @@ impl CatalogScopesDocument {
             if !ids.insert(scope.scope_id.clone()) {
                 return Err(format!("duplicate catalog scope '{}'", scope.scope_id));
             }
-            if !rows.insert((scope.profile_id.clone(), scope.resource_kind)) {
+            if !rows.insert((scope.profile_id.clone(), scope.coordinate())) {
                 return Err(format!(
-                    "catalog scope '{}' duplicates another row for its profile and kind",
+                    "catalog scope '{}' duplicates another row for its profile and coordinate",
                     scope.scope_id
                 ));
             }
@@ -1392,7 +1072,7 @@ impl CatalogScopesDocument {
 // Scope-storage links
 // ---------------------------------------------------------------------------
 
-/// One scope's connection to one storage: the kind repository it reads, the
+/// One scope's connection to one storage: the repository it reads, the
 /// continuity pin for that repository's head, and the per-resource accepted
 /// content bases the three-way comparison runs against.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1512,65 +1192,87 @@ impl CatalogScopeLinksDocument {
     }
 }
 
-/// Canonical machine-local target identity used by claims, journals, plans,
-/// and locks. Contains canonical absolute roots; never portable.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum LocalCatalogTargetId {
-    SkillDirectory {
-        scope: AgentSkillScope,
-        canonical_root: String,
-        install_directory: String,
-    },
-    Plugin {
-        provider: ProviderKey,
-        canonical_home: String,
-        namespace: String,
-        plugin_id: String,
-    },
-    PetDirectory {
-        canonical_home: String,
-        pet_id: String,
-    },
+// ---------------------------------------------------------------------------
+// Machine-local apply targets
+// ---------------------------------------------------------------------------
+
+/// The typed identity every target this build operates on carries: the
+/// canonical directory the target root occupies (a skills root, a pets root,
+/// or the provider home for native resources), the adapter-declared portable
+/// class of that root, and the member the resource occupies inside it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogTargetIdentity {
+    pub canonical_root: String,
+    pub root_class: String,
+    pub member: String,
 }
 
-impl LocalCatalogTargetId {
-    pub fn provider(&self) -> ProviderKey {
-        match self {
-            LocalCatalogTargetId::SkillDirectory { scope, .. } => scope.provider(),
-            LocalCatalogTargetId::Plugin { provider, .. } => *provider,
-            LocalCatalogTargetId::PetDirectory { .. } => ProviderKey::Codex,
-        }
+impl CatalogTargetIdentity {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_absolute_clean_path("catalog target root", &self.canonical_root)?;
+        validate_root_class("catalog target root class", &self.root_class)?;
+        validate_target_member("catalog target member", &self.member)
+    }
+}
+
+/// Canonical machine-local target of one resource, used by claims, journals,
+/// witnesses, plans, and locks. The identity is a bounded machine-local
+/// object — it carries canonical absolute roots and must never enter cloud
+/// data, frontend DTOs, logs, or receipts. Structural validation keeps a
+/// target with a shape this build does not decode loadable and inert;
+/// operating on it decodes the typed identity.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogTargetConfig {
+    pub provider: ProviderKey,
+    pub target: CatalogTargetKey,
+    pub identity: BoundedConfigObject,
+}
+
+impl CatalogTargetConfig {
+    pub fn new(
+        provider: ProviderKey,
+        target: CatalogTargetKey,
+        identity: &CatalogTargetIdentity,
+    ) -> Result<Self, String> {
+        identity.validate()?;
+        Ok(Self {
+            provider,
+            target,
+            identity: BoundedConfigObject::encode(identity)?,
+        })
     }
 
+    /// Structural validation only: the keys and the bounded object are
+    /// already validated by their types; an empty identity is the one
+    /// unrepresentable shape.
     pub fn validate(&self) -> Result<(), String> {
-        match self {
-            LocalCatalogTargetId::SkillDirectory {
-                canonical_root,
-                install_directory,
-                ..
-            } => {
-                validate_absolute_clean_path("skill target root", canonical_root)?;
-                validate_skill_name("skill target directory", install_directory)
-            }
-            LocalCatalogTargetId::Plugin {
-                canonical_home,
-                namespace,
-                plugin_id,
-                ..
-            } => {
-                validate_absolute_clean_path("plugin target home", canonical_home)?;
-                validate_plugin_namespace("plugin target namespace", namespace)?;
-                validate_canonical_plugin_id("plugin target id", plugin_id)
-            }
-            LocalCatalogTargetId::PetDirectory {
-                canonical_home,
-                pet_id,
-            } => {
-                validate_absolute_clean_path("pet target home", canonical_home)?;
-                validate_pet_id("pet target id", pet_id)
-            }
+        if self.identity.is_empty() {
+            return Err(format!(
+                "catalog target '{}' has an empty identity",
+                self.target
+            ));
         }
+        Ok(())
+    }
+
+    /// The typed identity, for operating on this target.
+    pub fn decode(&self) -> Result<CatalogTargetIdentity, String> {
+        let identity: CatalogTargetIdentity = self
+            .identity
+            .decode()
+            .map_err(|error| format!("catalog target '{}' identity: {}", self.target, error))?;
+        identity.validate()?;
+        Ok(identity)
+    }
+
+    /// The same root with another member: the target a preservation copy or
+    /// Fork copy occupies.
+    pub fn with_member(&self, member: &str) -> Result<Self, String> {
+        let mut identity = self.decode()?;
+        identity.member = member.to_string();
+        Self::new(self.provider.clone(), self.target.clone(), &identity)
     }
 }
 
@@ -1580,7 +1282,8 @@ impl LocalCatalogTargetId {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogClaim {
-    pub target: LocalCatalogTargetId,
+    pub target: CatalogTargetConfig,
+    pub coordinate: CatalogCoordinate,
     pub storage_id: StorageId,
     pub resource_id: CatalogResourceId,
     pub content_sha256: String,
@@ -1641,8 +1344,12 @@ impl CatalogMaterializationsDocument {
         let mut edges = BTreeSet::new();
         for claim in &self.claims {
             claim.target.validate()?;
+            claim.coordinate.validate()?;
             validate_sha256("catalog claim digest", &claim.content_sha256)?;
-            if !edges.insert((claim.target.clone(), claim.storage_id.clone())) {
+            if !edges.insert((
+                claim.target.identity.canonical_json(),
+                claim.storage_id.clone(),
+            )) {
                 return Err("duplicate catalog claim edge".to_string());
             }
         }
@@ -1657,12 +1364,13 @@ impl CatalogMaterializationsDocument {
 #[serde(deny_unknown_fields)]
 pub struct CatalogPreservationWitness {
     pub storage_id: StorageId,
+    pub coordinate: CatalogCoordinate,
     pub source_resource_id: CatalogResourceId,
-    pub source_target: LocalCatalogTargetId,
+    pub source_target: CatalogTargetConfig,
     pub local_source_sha256: String,
     pub storage_source_sha256: String,
     pub preserved_resource_id: CatalogResourceId,
-    pub preserved_target: LocalCatalogTargetId,
+    pub preserved_target: CatalogTargetConfig,
     pub preserved_content_sha256: String,
     pub operation_id: CatalogOperationId,
     pub created_at: u64,
@@ -1670,6 +1378,7 @@ pub struct CatalogPreservationWitness {
 
 impl CatalogPreservationWitness {
     pub fn validate(&self) -> Result<(), String> {
+        self.coordinate.validate()?;
         self.source_target.validate()?;
         self.preserved_target.validate()?;
         validate_sha256("witness local source digest", &self.local_source_sha256)?;
@@ -1728,7 +1437,7 @@ pub enum CatalogOperationKind {
     DirectoryReplace,
     Preservation,
     Fork,
-    PluginApply,
+    NativeApply,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1738,7 +1447,6 @@ pub enum CatalogOperationPhase {
     CopyActivated,
     WitnessRecorded,
     OriginalBackedUp,
-    Activated,
     Completed,
     RolledBack,
     Failed,
@@ -1756,23 +1464,27 @@ impl CatalogOperationPhase {
 }
 
 /// One journaled catalog mutation. Recovery resumes the same operation and
-/// name; a retry never mints a second copy.
+/// name; a retry never mints a second copy. The coordinate names the codec
+/// recovery verifies with.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogOperationJournalEntry {
     pub operation_id: CatalogOperationId,
     pub kind: CatalogOperationKind,
+    pub coordinate: CatalogCoordinate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_id: Option<StorageId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<CatalogPlanId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_id: Option<CatalogPlanActionId>,
-    pub target: LocalCatalogTargetId,
+    pub target: CatalogTargetConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_tree_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_target_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1792,6 +1504,271 @@ pub struct CatalogOperationJournalEntry {
     pub message: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+impl CatalogOperationJournalEntry {
+    pub fn validate(&self) -> Result<(), String> {
+        self.target.validate()?;
+        self.coordinate.validate()?;
+        if self.coordinate.provider != self.target.provider {
+            return Err(format!(
+                "catalog operation '{}' coordinate does not own its target",
+                self.operation_id
+            ));
+        }
+        if self.created_at == 0 || self.updated_at < self.created_at {
+            return Err(format!(
+                "catalog operation '{}' has invalid timestamps",
+                self.operation_id
+            ));
+        }
+        for (label, digest) in [
+            ("expected target", &self.expected_target_sha256),
+            ("incoming content", &self.incoming_content_sha256),
+            ("copy content", &self.copy_content_sha256),
+            ("backup tree", &self.backup_tree_sha256),
+        ] {
+            if let Some(digest) = digest {
+                validate_sha256(&format!("catalog operation {label} digest"), digest)?;
+            }
+        }
+        for (label, path) in [
+            ("target", &self.target_path),
+            ("backup", &self.backup_path),
+            ("copy target", &self.copy_target_path),
+        ] {
+            if let Some(path) = path {
+                validate_absolute_clean_path(&format!("catalog operation {label}"), path)?;
+            }
+        }
+        if let Some(copy_name) = &self.copy_name {
+            validate_target_member("catalog operation copy name", copy_name)?;
+        }
+
+        let has_storage_plan_action =
+            self.storage_id.is_some() && self.plan_id.is_some() && self.action_id.is_some();
+        let has_target = self.target_path.is_some();
+        let any_copy = self.copy_target_path.is_some()
+            || self.copy_name.is_some()
+            || self.copy_resource_id.is_some();
+        let has_copy = self.copy_target_path.is_some()
+            && self.copy_name.is_some()
+            && self.copy_resource_id.is_some();
+        if any_copy != has_copy {
+            return Err(format!(
+                "catalog operation '{}' has an incomplete copy target",
+                self.operation_id
+            ));
+        }
+        match self.kind {
+            CatalogOperationKind::DirectoryReplace => {
+                if !has_storage_plan_action
+                    || !has_target
+                    || self.incoming_content_sha256.is_none()
+                    || any_copy
+                    || self.copy_content_sha256.is_some()
+                {
+                    return Err(format!(
+                        "catalog directory-replace operation '{}' has inconsistent fields",
+                        self.operation_id
+                    ));
+                }
+                if !matches!(
+                    self.phase,
+                    CatalogOperationPhase::Journaled
+                        | CatalogOperationPhase::OriginalBackedUp
+                        | CatalogOperationPhase::Completed
+                        | CatalogOperationPhase::RolledBack
+                        | CatalogOperationPhase::Failed
+                ) {
+                    return Err(format!(
+                        "catalog directory-replace operation '{}' has an invalid phase",
+                        self.operation_id
+                    ));
+                }
+            }
+            CatalogOperationKind::Preservation => {
+                if !has_storage_plan_action
+                    || !has_target
+                    || !has_copy
+                    || self.expected_target_sha256.is_none()
+                    || self.incoming_content_sha256.is_none()
+                    || self.copy_content_sha256.is_none()
+                {
+                    return Err(format!(
+                        "catalog preservation operation '{}' has inconsistent fields",
+                        self.operation_id
+                    ));
+                }
+                if !matches!(
+                    self.phase,
+                    CatalogOperationPhase::Journaled
+                        | CatalogOperationPhase::CopyActivated
+                        | CatalogOperationPhase::WitnessRecorded
+                        | CatalogOperationPhase::OriginalBackedUp
+                        | CatalogOperationPhase::Completed
+                        | CatalogOperationPhase::RolledBack
+                        | CatalogOperationPhase::Failed
+                ) {
+                    return Err(format!(
+                        "catalog preservation operation '{}' has an invalid phase",
+                        self.operation_id
+                    ));
+                }
+            }
+            CatalogOperationKind::Fork => {
+                if self.storage_id.is_some()
+                    || self.plan_id.is_none()
+                    || self.action_id.is_some()
+                    || !has_target
+                    || !has_copy
+                    || self.expected_target_sha256.is_none()
+                    || self.incoming_content_sha256.is_some()
+                    || self.copy_content_sha256.is_none()
+                    || self.backup_path.is_some()
+                    || self.backup_tree_sha256.is_some()
+                    || !matches!(
+                        self.phase,
+                        CatalogOperationPhase::Journaled
+                            | CatalogOperationPhase::Completed
+                            | CatalogOperationPhase::Failed
+                    )
+                {
+                    return Err(format!(
+                        "catalog fork operation '{}' has inconsistent fields or phase",
+                        self.operation_id
+                    ));
+                }
+            }
+            CatalogOperationKind::NativeApply => {
+                if !has_storage_plan_action
+                    || has_target
+                    || self.backup_path.is_some()
+                    || self.backup_tree_sha256.is_some()
+                    || any_copy
+                    || self.expected_target_sha256.is_some()
+                    || self.incoming_content_sha256.is_none()
+                    || self.copy_content_sha256.is_some()
+                    || !matches!(
+                        self.phase,
+                        CatalogOperationPhase::Journaled
+                            | CatalogOperationPhase::Completed
+                            | CatalogOperationPhase::Failed
+                    )
+                {
+                    return Err(format!(
+                        "catalog native operation '{}' has inconsistent fields or phase",
+                        self.operation_id
+                    ));
+                }
+            }
+        }
+
+        if self.phase == CatalogOperationPhase::OriginalBackedUp && self.backup_path.is_none() {
+            return Err(format!(
+                "catalog operation '{}' records a backup phase without a backup",
+                self.operation_id
+            ));
+        }
+        if self.backup_path.is_some()
+            && self.kind == CatalogOperationKind::Preservation
+            && matches!(
+                self.phase,
+                CatalogOperationPhase::Journaled | CatalogOperationPhase::CopyActivated
+            )
+        {
+            return Err(format!(
+                "catalog operation '{}' records a backup before its backup phase",
+                self.operation_id
+            ));
+        }
+        if self.backup_path.is_some()
+            != (self.backup_tree_sha256.is_some() && self.expected_target_sha256.is_some())
+        {
+            return Err(format!(
+                "catalog operation '{}' has an incomplete backup witness",
+                self.operation_id
+            ));
+        }
+        if self.phase == CatalogOperationPhase::Completed
+            && (self.kind == CatalogOperationKind::Preservation
+                || self.kind == CatalogOperationKind::DirectoryReplace
+                    && self.expected_target_sha256.is_some())
+            && self.backup_path.is_none()
+        {
+            return Err(format!(
+                "catalog operation '{}' completed without its required backup",
+                self.operation_id
+            ));
+        }
+        if let Some(target_path) = &self.target_path {
+            let identity = self.target.decode()?;
+            let expected_target = Path::new(&identity.canonical_root).join(&identity.member);
+            if Path::new(target_path) != expected_target {
+                return Err(format!(
+                    "catalog operation '{}' target path does not match its target identity",
+                    self.operation_id
+                ));
+            }
+            if let (Some(copy_path), Some(copy_name)) = (&self.copy_target_path, &self.copy_name) {
+                let expected_copy = Path::new(&identity.canonical_root).join(copy_name);
+                if Path::new(copy_path) != expected_copy {
+                    return Err(format!(
+                        "catalog operation '{}' copy path does not match its target identity",
+                        self.operation_id
+                    ));
+                }
+            }
+        }
+        if let (Some(target_path), Some(backup_path)) = (&self.target_path, &self.backup_path) {
+            let target_path = Path::new(target_path);
+            let target_name = target_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    format!(
+                        "catalog operation '{}' target has no name",
+                        self.operation_id
+                    )
+                })?;
+            let local_name = format!(".mallard-backup-{}-{}", self.operation_id, target_name);
+            let repository_name = format!("{}-{}", self.operation_id, target_name);
+            let sibling_backup = target_path
+                .parent()
+                .ok_or_else(|| {
+                    format!(
+                        "catalog operation '{}' target has no parent",
+                        self.operation_id
+                    )
+                })?
+                .join(&local_name);
+            let plan_id = self.plan_id.as_ref().ok_or_else(|| {
+                format!(
+                    "catalog operation '{}' backup has no plan",
+                    self.operation_id
+                )
+            })?;
+            let repository_suffix = Path::new("backups")
+                .join("catalog_resources")
+                .join(plan_id.as_str())
+                .join(&repository_name);
+            if Path::new(backup_path) != sibling_backup
+                && !Path::new(backup_path).ends_with(&repository_suffix)
+            {
+                return Err(format!(
+                    "catalog operation '{}' backup path is not bound to the operation",
+                    self.operation_id
+                ));
+            }
+        }
+        if self.phase.is_terminal() != self.outcome.is_some() {
+            return Err(format!(
+                "catalog operation '{}' outcome does not match its phase",
+                self.operation_id
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1829,7 +1806,7 @@ impl CatalogOperationsDocument {
         }
         let mut ids = BTreeSet::new();
         for entry in &self.operations {
-            entry.target.validate()?;
+            entry.validate()?;
             if !ids.insert(entry.operation_id.clone()) {
                 return Err(format!(
                     "duplicate catalog operation '{}'",
@@ -1875,49 +1852,6 @@ pub enum CatalogLinkState {
     Blocked,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum CatalogResourceKindTag {
-    AgentSkill,
-    PluginInstallIntent,
-    CodexPetV1,
-    CodexPetV2,
-}
-
-impl CatalogResourceKindTag {
-    /// Stable identity token for the kind-repository derivation. Pet tokens
-    /// reuse the format's own token so identities stay format-distinct.
-    pub fn kind_token(&self) -> &'static str {
-        match self {
-            CatalogResourceKindTag::AgentSkill => "agent_skill",
-            CatalogResourceKindTag::PluginInstallIntent => "plugin_install_intent",
-            CatalogResourceKindTag::CodexPetV1 => CodexPetFormat::V1.kind_token(),
-            CatalogResourceKindTag::CodexPetV2 => CodexPetFormat::V2.kind_token(),
-        }
-    }
-
-    pub fn pet_format(&self) -> Option<CodexPetFormat> {
-        match self {
-            CatalogResourceKindTag::CodexPetV1 => Some(CodexPetFormat::V1),
-            CatalogResourceKindTag::CodexPetV2 => Some(CodexPetFormat::V2),
-            _ => None,
-        }
-    }
-}
-
-/// The closed provider capability rule: which portable resource kinds a
-/// provider can host locally. Pets are Codex-native; skills and plugins exist
-/// for both providers. Scope validation and the served capability matrix both
-/// derive from this single match, so they cannot drift apart.
-pub fn provider_owns_kind(provider: ProviderKey, kind: CatalogResourceKindTag) -> bool {
-    match kind {
-        CatalogResourceKindTag::AgentSkill | CatalogResourceKindTag::PluginInstallIntent => true,
-        CatalogResourceKindTag::CodexPetV1 | CatalogResourceKindTag::CodexPetV2 => {
-            provider == ProviderKey::Codex
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogResourceWarning {
@@ -1926,29 +1860,31 @@ pub struct CatalogResourceWarning {
     pub digest: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+/// The profile a review was built against; apply refuses when it moved.
+/// Machine-local: never serialized to the frontend.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogProfilePin {
     pub profile_id: LocalCatalogProfileId,
-    pub provider_key: ProviderKey,
+    pub provider: ProviderKey,
     pub revision: u64,
     pub canonical_home: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CatalogSkillRootPin {
-    pub scope: AgentSkillScope,
+/// One resolved target root a review was built against. Machine-local.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogTargetPin {
+    pub target: CatalogTargetKey,
     pub canonical_root: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CatalogPushRow {
     pub resource_id: CatalogResourceId,
-    pub kind: CatalogResourceKindTag,
+    #[serde(flatten)]
+    pub coordinate: CatalogCoordinate,
+    #[serde(flatten)]
+    pub labels: CatalogCoordinateLabels,
     pub display_name: String,
-    pub provider: ProviderKey,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_label: Option<String>,
     pub relation: CatalogResourceRelation,
@@ -1976,8 +1912,7 @@ pub enum CatalogTargetExpectation {
 
 /// Pinned identity for a reviewed preservation copy. Apply never chooses or
 /// changes the name.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CatalogPreservationPin {
     pub copy_name: String,
     pub copy_resource_id: CatalogResourceId,
@@ -1990,83 +1925,65 @@ pub struct CatalogPreservationPin {
     pub reusable_witness: bool,
 }
 
-/// Structured native plugin invocation pinned at plan time. Portable strings
-/// never become a shell command; argv is revalidated before launch.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+/// Structured native invocation pinned at plan time. Portable strings never
+/// become a shell command; argv is revalidated before launch. Machine-local
+/// review state: never serialized to the frontend.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativePluginPlan {
     pub provider: ProviderKey,
     pub argv: Vec<String>,
     /// Marketplace registration argv required before install, when the
     /// portable source proves it. Empty when the marketplace already exists.
-    #[serde(default)]
     pub marketplace_argv: Vec<Vec<String>>,
     pub mode: PluginApplyMode,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PluginApplyMode {
     InstallMissing,
     OverwriteExisting,
 }
 
-/// The closed executable Pull action kinds (plan §8.1). Only skills and pets
-/// can preserve-as-copy; only plugins can overwrite through the provider.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+/// The fixed protocol outcomes an executable Pull action can take. They
+/// describe the common workflow, never a provider, kind, or format identity:
+/// a native (provider-inventory) action carries its pinned invocation beside
+/// the action, and a directory action carries its target path.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CatalogPullActionKind {
-    InstallSkill,
-    UpdateSkill,
-    PreserveSkillAsCopyAndOverwrite { copy: CatalogPreservationPin },
-    OverwriteSkillWithStorage,
-    InstallPlugin { plan: NativePluginPlan },
-    UpdatePlugin { plan: NativePluginPlan },
-    OverwritePluginWithStorage { plan: NativePluginPlan },
-    InstallPet,
-    UpdatePet,
-    PreservePetAsCopyAndOverwrite { copy: CatalogPreservationPin },
-    OverwritePetWithStorage,
+    Install,
+    Update,
+    PreserveAsCopyAndOverwrite { copy: CatalogPreservationPin },
+    OverwriteWithStorage,
 }
 
 impl CatalogPullActionKind {
-    pub fn is_plugin(&self) -> bool {
-        matches!(
-            self,
-            CatalogPullActionKind::InstallPlugin { .. }
-                | CatalogPullActionKind::UpdatePlugin { .. }
-                | CatalogPullActionKind::OverwritePluginWithStorage { .. }
-        )
-    }
-
     pub fn preservation(&self) -> Option<&CatalogPreservationPin> {
         match self {
-            CatalogPullActionKind::PreserveSkillAsCopyAndOverwrite { copy }
-            | CatalogPullActionKind::PreservePetAsCopyAndOverwrite { copy } => Some(copy),
+            CatalogPullActionKind::PreserveAsCopyAndOverwrite { copy } => Some(copy),
             _ => None,
         }
     }
 
     pub fn is_destructive_overwrite(&self) -> bool {
-        matches!(
-            self,
-            CatalogPullActionKind::OverwriteSkillWithStorage
-                | CatalogPullActionKind::OverwritePetWithStorage
-                | CatalogPullActionKind::OverwritePluginWithStorage { .. }
-        )
+        matches!(self, CatalogPullActionKind::OverwriteWithStorage)
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CatalogPullAction {
     pub action_id: CatalogPlanActionId,
     pub resource_id: CatalogResourceId,
     pub kind: CatalogPullActionKind,
     pub requires_destructive_approval: bool,
-    pub target: LocalCatalogTargetId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Machine-local target identity: review state only, never IPC.
+    #[serde(skip_serializing)]
+    pub target: CatalogTargetConfig,
+    #[serde(skip_serializing)]
     pub target_path: Option<String>,
+    /// The pinned native invocation for provider-inventory resources.
+    #[serde(skip_serializing)]
+    pub native: Option<NativePluginPlan>,
     pub expected_target_state: CatalogTargetExpectation,
     pub incoming_content_sha256: String,
 }
@@ -2078,24 +1995,17 @@ impl CatalogPullAction {
         if let CatalogTargetExpectation::Sha256 { sha256 } = &self.expected_target_state {
             validate_sha256("pull action target digest", sha256)?;
         }
-        let target_is_plugin = matches!(self.target, LocalCatalogTargetId::Plugin { .. });
-        if self.kind.is_plugin() != target_is_plugin {
+        if self.native.is_some()
+            && (self.target_path.is_some() || self.kind.preservation().is_some())
+        {
             return Err(format!(
-                "pull action '{}' pairs a plugin operation with a directory target or vice versa",
+                "pull action '{}' pairs a native invocation with a directory operation",
                 self.action_id
             ));
         }
-        let target_is_pet = matches!(self.target, LocalCatalogTargetId::PetDirectory { .. });
-        let kind_is_pet = matches!(
-            self.kind,
-            CatalogPullActionKind::InstallPet
-                | CatalogPullActionKind::UpdatePet
-                | CatalogPullActionKind::PreservePetAsCopyAndOverwrite { .. }
-                | CatalogPullActionKind::OverwritePetWithStorage
-        );
-        if kind_is_pet != target_is_pet {
+        if self.native.is_none() && self.target_path.is_none() {
             return Err(format!(
-                "pull action '{}' pairs a pet operation with a non-pet target",
+                "pull action '{}' has neither a target path nor a native invocation",
                 self.action_id
             ));
         }
@@ -2134,13 +2044,14 @@ pub enum CatalogPullDisposition {
     Blocked { reason: String },
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CatalogPullItem {
     pub resource_id: CatalogResourceId,
-    pub kind: CatalogResourceKindTag,
+    #[serde(flatten)]
+    pub coordinate: CatalogCoordinate,
+    #[serde(flatten)]
+    pub labels: CatalogCoordinateLabels,
     pub display_name: String,
-    pub provider: ProviderKey,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_label: Option<String>,
     pub relation: CatalogResourceRelation,
@@ -2198,15 +2109,6 @@ impl CatalogPullItem {
     }
 }
 
-/// The closed Fork source kinds: a plugin fork is unrepresentable.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CatalogForkSourceKind {
-    AgentSkill,
-    CodexPetV1,
-    CodexPetV2,
-}
-
 /// One row inside a scope Push review: the presentation row plus the exact
 /// captured resource the publish would upsert. Storage-only rows carry no
 /// resource and can never be selected. The capture stays backend-side —
@@ -2215,7 +2117,7 @@ pub enum CatalogForkSourceKind {
 pub struct CatalogScopePushRow {
     pub row: CatalogPushRow,
     #[serde(skip_serializing)]
-    pub resource: Option<CatalogResource>,
+    pub resource: Option<CatalogResourceEnvelope>,
 }
 
 impl CatalogScopePushRow {
@@ -2223,13 +2125,12 @@ impl CatalogScopePushRow {
         match &self.resource {
             Some(resource) => {
                 resource.validate()?;
-                if resource.resource_id() != self.row.resource_id
-                    || resource.kind_tag() != self.row.kind
-                    || resource.provider() != self.row.provider
+                if resource.resource_id != self.row.resource_id
+                    || resource.coordinate() != self.row.coordinate
                 {
                     return Err("catalog Push row does not match its resource".to_string());
                 }
-                if self.row.local_content_sha256.as_deref() != Some(resource.content_sha256()) {
+                if self.row.local_content_sha256.as_deref() != Some(&resource.content_sha256) {
                     return Err(
                         "catalog Push row content pin does not match its capture".to_string()
                     );
@@ -2257,8 +2158,10 @@ pub struct CatalogScopePushPlan {
     pub storage_id: StorageId,
     pub repository_id: CatalogResourceRepositoryId,
     pub storage_identity_sha256: String,
+    #[serde(skip_serializing)]
     pub profile_pins: Vec<CatalogProfilePin>,
-    pub skill_root_pins: Vec<CatalogSkillRootPin>,
+    #[serde(skip_serializing)]
+    pub target_pins: Vec<CatalogTargetPin>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_head: Option<LibraryHeadCoordinate>,
     pub rows: Vec<CatalogScopePushRow>,
@@ -2318,7 +2221,7 @@ impl CatalogScopePushPlan {
 pub struct CatalogScopePullItem {
     pub item: CatalogPullItem,
     #[serde(skip_serializing)]
-    pub resource: Option<CatalogResource>,
+    pub resource: Option<CatalogResourceEnvelope>,
     pub conflicting_claims: Vec<CatalogClaimPin>,
 }
 
@@ -2328,9 +2231,8 @@ impl CatalogScopePullItem {
         match &self.resource {
             Some(resource) => {
                 resource.validate()?;
-                if resource.resource_id() != self.item.resource_id
-                    || resource.kind_tag() != self.item.kind
-                    || resource.provider() != self.item.provider
+                if resource.resource_id != self.item.resource_id
+                    || resource.coordinate() != self.item.coordinate
                 {
                     return Err("catalog Pull item does not match its resource".to_string());
                 }
@@ -2338,7 +2240,7 @@ impl CatalogScopePullItem {
                     .item
                     .actions
                     .iter()
-                    .any(|action| action.incoming_content_sha256 != resource.content_sha256())
+                    .any(|action| action.incoming_content_sha256 != resource.content_sha256)
                 {
                     return Err("catalog Pull action pins a different content digest".to_string());
                 }
@@ -2390,8 +2292,10 @@ pub struct CatalogScopePullPlan {
     pub storage_id: StorageId,
     pub repository_id: CatalogResourceRepositoryId,
     pub storage_identity_sha256: String,
+    #[serde(skip_serializing)]
     pub profile_pins: Vec<CatalogProfilePin>,
-    pub skill_root_pins: Vec<CatalogSkillRootPin>,
+    #[serde(skip_serializing)]
+    pub target_pins: Vec<CatalogTargetPin>,
     pub head: LibraryHeadCoordinate,
     pub items: Vec<CatalogScopePullItem>,
     pub created_at: u64,
@@ -2445,12 +2349,16 @@ impl CatalogScopePullPlan {
 pub struct CatalogResourceForkPlan {
     pub plan_id: CatalogPlanId,
     pub scope_id: CatalogScopeId,
+    #[serde(skip_serializing)]
     pub profile_pins: Vec<CatalogProfilePin>,
-    pub skill_root_pins: Vec<CatalogSkillRootPin>,
-    pub source_kind: CatalogForkSourceKind,
+    #[serde(skip_serializing)]
+    pub target_pins: Vec<CatalogTargetPin>,
+    pub source_coordinate: CatalogCoordinate,
     pub source_resource_id: CatalogResourceId,
     pub source_display_name: String,
-    pub source_target: LocalCatalogTargetId,
+    #[serde(skip_serializing)]
+    pub source_target: CatalogTargetConfig,
+    #[serde(skip_serializing)]
     pub source_path: String,
     pub source_content_sha256: String,
     pub copy_name: String,
@@ -2463,10 +2371,8 @@ pub struct CatalogResourceForkPlan {
 
 impl CatalogResourceForkPlan {
     pub fn validate(&self) -> Result<(), String> {
+        self.source_coordinate.validate()?;
         self.source_target.validate()?;
-        if matches!(self.source_target, LocalCatalogTargetId::Plugin { .. }) {
-            return Err("plugins do not support Fork".to_string());
-        }
         validate_component_name("Fork copy name", &self.copy_name, 128)?;
         validate_absolute_clean_path("Fork source path", &self.source_path)?;
         validate_absolute_clean_path("Fork copy target", &self.copy_target_path)?;
@@ -2557,11 +2463,14 @@ pub struct CatalogActionResult {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum CatalogBlocker {
-    OverlappingSkillRoots {
+    OverlappingTargets {
         roots: Vec<String>,
     },
     UnsupportedProvider {
         provider: String,
+    },
+    UnsupportedCoordinate {
+        detail: String,
     },
     ProfileUnavailable {
         detail: String,
@@ -2574,18 +2483,26 @@ pub enum CatalogBlocker {
     InventoryFailed {
         detail: String,
     },
+    /// The native resource restores by hand: its portable intent carries no
+    /// source the provider can resolve.
+    ManualInstall {
+        detail: String,
+    },
 }
 
-impl std::fmt::Display for CatalogBlocker {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for CatalogBlocker {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CatalogBlocker::OverlappingSkillRoots { roots } => write!(
+            CatalogBlocker::OverlappingTargets { roots } => write!(
                 formatter,
-                "overlapping_skill_roots: the active skill roots overlap ({})",
+                "overlapping_targets: the active target roots overlap ({})",
                 roots.join(", ")
             ),
             CatalogBlocker::UnsupportedProvider { provider } => {
                 write!(formatter, "unsupported provider '{}'", provider)
+            }
+            CatalogBlocker::UnsupportedCoordinate { detail } => {
+                write!(formatter, "unsupported Library coordinate: {}", detail)
             }
             CatalogBlocker::ProfileUnavailable { detail } => {
                 write!(formatter, "catalog profile unavailable: {}", detail)
@@ -2604,6 +2521,7 @@ impl std::fmt::Display for CatalogBlocker {
             CatalogBlocker::InventoryFailed { detail } => {
                 write!(formatter, "catalog inventory failed: {}", detail)
             }
+            CatalogBlocker::ManualInstall { detail } => formatter.write_str(detail),
         }
     }
 }
@@ -2621,146 +2539,241 @@ pub fn warning_digest(code: &str, resource_id: &CatalogResourceId, message: &str
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod fixtures {
+    //! Envelope fixtures for common-code tests. They build structurally valid
+    //! envelopes at arbitrary coordinates without touching any codec.
 
-    fn sha(byte: u8) -> String {
+    use super::*;
+    use serde_json::json;
+
+    pub fn coordinate(provider: &str, kind: &str, format: &str, version: u32) -> CatalogCoordinate {
+        CatalogCoordinate::new(provider, kind, format, version).unwrap()
+    }
+
+    pub fn sha(byte: u8) -> String {
         hex_lower(&[byte; 32])
     }
 
-    fn skill_resource(name: &str, scope: AgentSkillScope) -> AgentSkillResource {
-        let mut files = BTreeMap::new();
-        files.insert(
-            "SKILL.md".to_string(),
-            CatalogFileEntry {
-                sha256: sha(1),
-                size: 64,
-                mode: 0o644,
-                object_key: format!("_objects/{}", sha(1)),
-            },
-        );
-        let mut resource = AgentSkillResource {
-            descriptor: AgentSkillDescriptor {
-                scope,
-                effective_name: name.to_string(),
-                install_directory: name.to_string(),
-            },
-            content_sha256: sha(0),
-            files,
-        };
-        resource.content_sha256 = resource.compute_content_sha256();
-        resource
+    pub fn portable_file(path: &str, byte: u8, size: u64) -> CatalogPortableFile {
+        CatalogPortableFile {
+            path: path.to_string(),
+            sha256: sha(byte),
+            size,
+            mode: 0o644,
+        }
     }
 
-    fn pet_resource(pet_id: &str, format: CodexPetFormat) -> CodexPetResource {
-        let mut resource = CodexPetResource {
-            descriptor: CodexPetDescriptor {
-                pet_id: pet_id.to_string(),
-                display_name: "Pet".to_string(),
-                description: "One short sentence.".to_string(),
-                atlas_basename: "spritesheet.webp".to_string(),
-                atlas: CatalogFileEntry {
-                    sha256: sha(2),
-                    size: 1024,
-                    mode: 0o644,
-                    object_key: format!("_objects/{}", sha(2)),
-                },
-            },
-            content_sha256: sha(0),
-        };
-        resource.content_sha256 = resource.compute_content_sha256(format);
-        resource
+    pub fn envelope(
+        coordinate: &CatalogCoordinate,
+        identity: serde_json::Value,
+        descriptor: serde_json::Value,
+        files: Vec<CatalogPortableFile>,
+    ) -> CatalogResourceEnvelope {
+        CatalogResourceEnvelope::new(
+            coordinate,
+            BoundedPortableObject::from_json(&identity).unwrap(),
+            BoundedPortableObject::from_json(&descriptor).unwrap(),
+            files,
+        )
+    }
+
+    pub fn named_envelope(coordinate: &CatalogCoordinate, name: &str) -> CatalogResourceEnvelope {
+        envelope(
+            coordinate,
+            json!({ "name": name }),
+            json!({}),
+            vec![portable_file("BODY.md", 1, 64)],
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixtures::*;
+    use super::*;
+    use serde_json::json;
+
+    fn codex_skills() -> CatalogCoordinate {
+        coordinate("codex", "agent_skill", "agentskills.io.skill", 1)
+    }
+
+    fn codex_pets(version: u32) -> CatalogCoordinate {
+        coordinate("codex", "desktop_pet", "openai.codex-pet", version)
     }
 
     #[test]
     fn resource_ids_are_stable_and_content_digests_change_with_bytes() {
-        let first = skill_resource("review", AgentSkillScope::CodexHome);
-        let mut second = skill_resource("review", AgentSkillScope::CodexHome);
-        second.files.insert(
-            "notes.md".to_string(),
-            CatalogFileEntry {
-                sha256: sha(3),
-                size: 10,
-                mode: 0o644,
-                object_key: format!("_objects/{}", sha(3)),
-            },
+        let identity = json!({ "root": "provider-home", "effective_name": "review", "install_directory": "review" });
+        let first = envelope(
+            &codex_skills(),
+            identity.clone(),
+            json!({}),
+            vec![portable_file("SKILL.md", 1, 64)],
         );
-        second.content_sha256 = second.compute_content_sha256();
-        let first_wrapped = CatalogResource::AgentSkill(first);
-        let second_wrapped = CatalogResource::AgentSkill(second);
-        assert_eq!(first_wrapped.resource_id(), second_wrapped.resource_id());
-        assert_ne!(
-            first_wrapped.content_sha256(),
-            second_wrapped.content_sha256()
+        let second = envelope(
+            &codex_skills(),
+            identity,
+            json!({}),
+            vec![
+                portable_file("SKILL.md", 1, 64),
+                portable_file("notes.md", 3, 10),
+            ],
         );
+        assert_eq!(first.resource_id, second.resource_id);
+        assert_ne!(first.content_sha256, second.content_sha256);
+        first.validate().unwrap();
+        second.validate().unwrap();
     }
 
     #[test]
-    fn codex_skill_root_class_participates_in_identity() {
-        let home = skill_resource("review", AgentSkillScope::CodexHome);
-        let shared = skill_resource("review", AgentSkillScope::CodexSharedUser);
-        assert_ne!(
-            CatalogResource::AgentSkill(home).resource_id(),
-            CatalogResource::AgentSkill(shared).resource_id()
+    fn identity_fields_and_coordinates_participate_in_identity() {
+        let home = envelope(
+            &codex_skills(),
+            json!({ "root": "provider-home", "effective_name": "review", "install_directory": "review" }),
+            json!({}),
+            vec![portable_file("SKILL.md", 1, 64)],
         );
+        let shared = envelope(
+            &codex_skills(),
+            json!({ "root": "shared-user", "effective_name": "review", "install_directory": "review" }),
+            json!({}),
+            vec![portable_file("SKILL.md", 1, 64)],
+        );
+        assert_ne!(home.resource_id, shared.resource_id);
+
+        // Two format versions of one format never share a resource id, and a
+        // different provider never shares one either.
+        let v1 = envelope(
+            &codex_pets(1),
+            json!({ "pet_id": "duck" }),
+            json!({}),
+            vec![],
+        );
+        let v2 = envelope(
+            &codex_pets(2),
+            json!({ "pet_id": "duck" }),
+            json!({}),
+            vec![],
+        );
+        assert_ne!(v1.resource_id, v2.resource_id);
+        let claude = envelope(
+            &coordinate("claude", "agent_skill", "agentskills.io.skill", 1),
+            json!({ "root": "provider-home", "effective_name": "review", "install_directory": "review" }),
+            json!({}),
+            vec![portable_file("SKILL.md", 1, 64)],
+        );
+        assert_ne!(home.resource_id, claude.resource_id);
     }
 
     #[test]
-    fn v1_and_v2_pets_share_a_pet_id_but_never_a_resource_id() {
-        let v1 = CatalogResource::CodexPetV1(pet_resource("duck", CodexPetFormat::V1));
-        let v2 = CatalogResource::CodexPetV2(pet_resource("duck", CodexPetFormat::V2));
-        assert_ne!(v1.resource_id(), v2.resource_id());
+    fn envelopes_validate_structurally_without_a_registry() {
+        // An unknown coordinate parses and validates structurally; nothing
+        // here needs a registered codec.
+        let unknown = envelope(
+            &coordinate("cursor", "agent_skill", "cursor.skill", 3),
+            json!({ "name": "x" }),
+            json!({ "anything": [1, 2, 3] }),
+            vec![portable_file("a/b.txt", 4, 1)],
+        );
+        unknown.validate().unwrap();
+        let text = serde_json::to_string(&unknown).unwrap();
+        let parsed: CatalogResourceEnvelope = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, unknown);
+
+        // Structural failures: empty identity, wrong id, wrong digest, bad
+        // paths, non-canonical file order, extra fields.
+        let mut empty = unknown.clone();
+        empty.identity = BoundedPortableObject::empty();
+        assert!(empty.validate().unwrap_err().contains("empty identity"));
+        let mut foreign_id = unknown.clone();
+        foreign_id.resource_id =
+            CatalogResourceId::parse(format!("resource-{}", "a".repeat(64))).unwrap();
+        assert!(foreign_id
+            .validate()
+            .unwrap_err()
+            .contains("identity derivation"));
+        let mut wrong_digest = unknown.clone();
+        wrong_digest.content_sha256 = sha(9);
+        assert!(wrong_digest
+            .validate()
+            .unwrap_err()
+            .contains("content digest"));
+        let mut traversal = unknown.clone();
+        traversal.files[0].path = "../escape".to_string();
+        traversal.content_sha256 = traversal.compute_content_sha256();
+        assert!(traversal.validate().is_err());
+        let mut unordered = unknown.clone();
+        unordered.files = vec![portable_file("b", 1, 1), portable_file("a", 2, 1)];
+        unordered.content_sha256 = unordered.compute_content_sha256();
+        assert!(unordered
+            .validate()
+            .unwrap_err()
+            .contains("canonical order"));
+        let mut extra: serde_json::Value = serde_json::from_str(&text).unwrap();
+        extra["surprise"] = json!(true);
+        assert!(serde_json::from_value::<CatalogResourceEnvelope>(extra).is_err());
+        assert!(serde_json::from_value::<CatalogResourceEnvelope>(json!({
+            "resource_id": "resource-zz"
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn portable_objects_keep_machine_paths_out_of_envelopes() {
+        let text = serde_json::to_string(&json!({
+            "resource_id": format!("resource-{}", "a".repeat(64)),
+            "provider": "codex",
+            "resource_kind": "agent_skill",
+            "format": "agentskills.io.skill",
+            "format_version": 1,
+            "identity": { "path": "/Users/someone/.codex/skills/review" },
+            "descriptor": {},
+            "content_sha256": "a".repeat(64),
+        }))
+        .unwrap();
+        assert!(serde_json::from_str::<CatalogResourceEnvelope>(&text).is_err());
+    }
+
+    #[test]
+    fn repository_ids_derive_from_the_four_coordinates_only() {
+        let skills = CatalogResourceRepositoryId::for_coordinate(&codex_skills());
         assert_eq!(
-            v1.resource_id(),
-            pet_resource_id(CodexPetFormat::V1, "duck")
+            skills,
+            CatalogResourceRepositoryId::for_coordinate(&codex_skills())
         );
-        assert_eq!(
-            v2.resource_id(),
-            pet_resource_id(CodexPetFormat::V2, "duck")
+        assert_ne!(
+            skills,
+            CatalogResourceRepositoryId::for_coordinate(&coordinate(
+                "claude",
+                "agent_skill",
+                "agentskills.io.skill",
+                1
+            ))
+        );
+        assert_ne!(
+            CatalogResourceRepositoryId::for_coordinate(&codex_pets(1)),
+            CatalogResourceRepositoryId::for_coordinate(&codex_pets(2))
+        );
+        assert_ne!(
+            skills,
+            CatalogResourceRepositoryId::for_coordinate(&coordinate(
+                "codex",
+                "agent_skill",
+                "other.skill",
+                1
+            ))
         );
     }
 
     #[test]
-    fn v1_and_v2_pets_live_in_separate_kind_repositories() {
-        let v1 = CatalogResource::CodexPetV1(pet_resource("duck", CodexPetFormat::V1));
-        let v2 = CatalogResource::CodexPetV2(pet_resource("duck", CodexPetFormat::V2));
-        let v1_repository =
-            CatalogResourceRepositoryId::for_kind(ProviderKey::Codex, v1.kind_tag());
-        let v2_repository =
-            CatalogResourceRepositoryId::for_kind(ProviderKey::Codex, v2.kind_tag());
-        assert_ne!(v1_repository, v2_repository);
-        for (repository_id, resource) in [(v1_repository, v1), (v2_repository, v2)] {
-            let manifest = LibraryResourceManifest {
-                schema_version: CATALOG_SCHEMA,
-                repository_id: repository_id.clone(),
-                revision: 1,
-                commit_id: CatalogCommitId::generate().unwrap(),
-                updated_at: 10,
-                captured_with: CatalogCapturedWith {
-                    app: "mallard".to_string(),
-                    version: "0.1.2".to_string(),
-                },
-                published_by_origin: derive_library_origin("host", "replica", &repository_id)
-                    .unwrap(),
-                resources: BTreeMap::from([(
-                    resource.resource_id(),
-                    PublishedResourceEntry {
-                        resource,
-                        updated_at: 10,
-                    },
-                )]),
-            };
-            manifest.validate().unwrap();
-        }
-    }
-
-    #[test]
-    fn set_manifests_reject_foreign_keys_and_mixed_kinds() {
-        let repository_id = CatalogResourceRepositoryId::for_kind(
-            ProviderKey::Codex,
-            CatalogResourceKindTag::CodexPetV2,
+    fn set_manifests_are_homogeneous_per_repository() {
+        let repository_id = CatalogResourceRepositoryId::for_coordinate(&codex_pets(2));
+        let duck = envelope(
+            &codex_pets(2),
+            json!({ "pet_id": "duck" }),
+            json!({}),
+            vec![],
         );
-        let duck = CatalogResource::CodexPetV2(pet_resource("duck", CodexPetFormat::V2));
         let manifest = |resources| LibraryResourceManifest {
             schema_version: CATALOG_SCHEMA,
             repository_id: repository_id.clone(),
@@ -2774,10 +2787,25 @@ mod tests {
             published_by_origin: derive_library_origin("host", "replica", &repository_id).unwrap(),
             resources,
         };
+        manifest(BTreeMap::from([(
+            duck.resource_id.clone(),
+            PublishedResourceEntry {
+                resource: duck.clone(),
+                updated_at: 10,
+            },
+        )]))
+        .validate()
+        .unwrap();
 
         // An entry keyed by another resource's id is unrepresentable.
         let foreign_key = manifest(BTreeMap::from([(
-            pet_resource_id(CodexPetFormat::V2, "other"),
+            envelope(
+                &codex_pets(2),
+                json!({ "pet_id": "other" }),
+                json!({}),
+                vec![],
+            )
+            .resource_id,
             PublishedResourceEntry {
                 resource: duck.clone(),
                 updated_at: 10,
@@ -2788,10 +2816,15 @@ mod tests {
             .unwrap_err()
             .contains("foreign resource id"));
 
-        // A v1 pet cannot enter the v2 kind repository.
-        let stranger = CatalogResource::CodexPetV1(pet_resource("duck", CodexPetFormat::V1));
+        // A version-1 pet cannot enter the version-2 repository.
+        let stranger = envelope(
+            &codex_pets(1),
+            json!({ "pet_id": "duck" }),
+            json!({}),
+            vec![],
+        );
         let mixed = manifest(BTreeMap::from([(
-            stranger.resource_id(),
+            stranger.resource_id.clone(),
             PublishedResourceEntry {
                 resource: stranger,
                 updated_at: 10,
@@ -2800,183 +2833,42 @@ mod tests {
         assert!(mixed
             .validate()
             .unwrap_err()
-            .contains("does not belong to this kind repository"));
+            .contains("does not belong to this repository"));
     }
 
     #[test]
-    fn unknown_resource_kinds_and_fields_are_rejected() {
-        let unknown_kind = serde_json::json!({
-            "kind": "custom_agent",
-            "descriptor": {}
-        });
-        assert!(serde_json::from_value::<CatalogResource>(unknown_kind).is_err());
-        let unknown_field = serde_json::json!({
-            "kind": "codex_pet_v1",
-            "descriptor": {
-                "pet_id": "duck",
-                "display_name": "Duck",
-                "description": "A duck.",
-                "atlas_basename": "spritesheet.webp",
-                "atlas": {
-                    "sha256": sha(2),
-                    "size": 10,
-                    "mode": 420,
-                    "object_key": format!("_objects/{}", sha(2)),
-                },
-                "surprise": true
-            },
-            "content_sha256": sha(0)
-        });
-        assert!(serde_json::from_value::<CatalogResource>(unknown_field).is_err());
-    }
-
-    #[test]
-    fn plugin_intent_digest_ignores_observations_and_tracks_semantic_fields() {
-        let descriptor = PluginInstallIntentDescriptor {
-            provider: ProviderKey::Codex,
-            provider_native_namespace: "acme".to_string(),
-            plugin_id: "tools@acme".to_string(),
-            source: PortablePluginSource::ProviderMarketplace {
-                namespace: "acme".to_string(),
-                git: Some(GitMarketplaceSource {
-                    location: "https://example.com/acme/tools".to_string(),
-                    git_ref: None,
-                }),
-            },
-            resolution: PluginResolutionPolicy::ProviderResolved,
-        };
-        let mut resource = PluginInstallIntentResource {
-            descriptor,
-            content_sha256: sha(0),
-        };
-        resource.content_sha256 = resource.compute_content_sha256();
-        resource.validate().unwrap();
-        let baseline = resource.content_sha256.clone();
-
-        // A source change alters semantic intent.
-        let mut changed = resource.clone();
-        changed.descriptor.source = PortablePluginSource::ProviderMarketplace {
-            namespace: "acme".to_string(),
-            git: Some(GitMarketplaceSource {
-                location: "https://example.com/acme/tools-next".to_string(),
-                git_ref: None,
-            }),
-        };
-        changed.content_sha256 = changed.compute_content_sha256();
-        assert_ne!(baseline, changed.content_sha256);
-
-        // Exact requirements are not part of the supported portable contract.
-        let mut with_requirement = serde_json::to_value(&resource).unwrap();
-        with_requirement["descriptor"]["requirement"] = serde_json::json!({ "exact": "1.2.3" });
-        assert!(serde_json::from_value::<PluginInstallIntentResource>(with_requirement).is_err());
-    }
-
-    #[test]
-    fn plugin_namespaces_distinguish_identity() {
-        assert_ne!(
-            plugin_resource_id(ProviderKey::Claude, "acme", "tools@acme"),
-            plugin_resource_id(ProviderKey::Claude, "other", "tools@other")
+    fn a_library_tag_must_match_its_coordinate_derivation() {
+        let tag = LibraryResourceTag::new(
+            &codex_skills(),
+            CatalogResourceRepositoryId::for_coordinate(&codex_skills()),
+            1,
         );
-    }
-
-    #[test]
-    fn catalog_logical_paths_follow_the_grammar() {
-        let resource_id = pet_resource_id(CodexPetFormat::V1, "duck");
-        let path = catalog_logical_path(&resource_id, "pet", "spritesheet.webp").unwrap();
-        assert!(path.starts_with("resources/resource-"));
-        assert!(catalog_logical_path(&resource_id, "pet", "a/b.webp").is_err());
-        assert!(catalog_logical_path(&resource_id, "skill", "../escape").is_err());
-        assert!(catalog_logical_path(&resource_id, "skill", ".git/config").is_err());
-        assert!(catalog_logical_path(&resource_id, "config", "x").is_err());
-    }
-
-    #[test]
-    fn pull_actions_pair_kinds_with_matching_targets() {
-        let plugin_target = LocalCatalogTargetId::Plugin {
-            provider: ProviderKey::Claude,
-            canonical_home: "/tmp/claude".to_string(),
-            namespace: "acme".to_string(),
-            plugin_id: "tools@acme".to_string(),
-        };
-        let action = CatalogPullAction {
-            action_id: CatalogPlanActionId::generate().unwrap(),
-            resource_id: plugin_resource_id(ProviderKey::Claude, "acme", "tools@acme"),
-            kind: CatalogPullActionKind::InstallSkill,
-            requires_destructive_approval: false,
-            target: plugin_target,
-            target_path: None,
-            expected_target_state: CatalogTargetExpectation::Absent,
-            incoming_content_sha256: sha(5),
-        };
-        assert!(action.validate().unwrap_err().contains("plugin operation"));
-    }
-
-    #[test]
-    fn repository_ids_derive_from_provider_and_kind() {
-        let skills = CatalogResourceRepositoryId::for_kind(
-            ProviderKey::Codex,
-            CatalogResourceKindTag::AgentSkill,
-        );
-        // Deterministic on every machine, distinct per provider and per kind.
-        assert_eq!(
-            skills,
-            CatalogResourceRepositoryId::for_kind(
-                ProviderKey::Codex,
-                CatalogResourceKindTag::AgentSkill,
-            )
-        );
-        assert_ne!(
-            skills,
-            CatalogResourceRepositoryId::for_kind(
-                ProviderKey::Claude,
-                CatalogResourceKindTag::AgentSkill,
-            )
-        );
-        assert_ne!(
-            CatalogResourceRepositoryId::for_kind(
-                ProviderKey::Codex,
-                CatalogResourceKindTag::CodexPetV1,
-            ),
-            CatalogResourceRepositoryId::for_kind(
-                ProviderKey::Codex,
-                CatalogResourceKindTag::CodexPetV2,
-            )
-        );
-    }
-
-    #[test]
-    fn a_library_tag_must_match_its_kind_derivation() {
-        let tag = LibraryResourceTag {
-            schema_version: CATALOG_SCHEMA,
-            repository_id: CatalogResourceRepositoryId::for_kind(
-                ProviderKey::Codex,
-                CatalogResourceKindTag::AgentSkill,
-            ),
-            provider: ProviderKey::Codex,
-            resource_kind: CatalogResourceKindTag::AgentSkill,
-            created_at: 1,
-        };
         tag.validate().unwrap();
+        assert_eq!(tag.coordinate(), codex_skills());
 
         let mismatched = LibraryResourceTag {
-            resource_kind: CatalogResourceKindTag::CodexPetV1,
+            format_version: 2,
             ..tag.clone()
         };
         assert!(mismatched
             .validate()
             .unwrap_err()
-            .contains("does not match its provider and kind derivation"));
+            .contains("does not match its coordinate derivation"));
 
-        let unhostable = LibraryResourceTag {
-            provider: ProviderKey::Claude,
-            resource_kind: CatalogResourceKindTag::CodexPetV1,
-            repository_id: CatalogResourceRepositoryId::for_kind(
-                ProviderKey::Claude,
-                CatalogResourceKindTag::AgentSkill,
-            ),
+        // An unknown coordinate is structurally fine: the registry decides.
+        let unknown = coordinate("cursor", "agent_skill", "cursor.skill", 1);
+        LibraryResourceTag::new(
+            &unknown,
+            CatalogResourceRepositoryId::for_coordinate(&unknown),
+            1,
+        )
+        .validate()
+        .unwrap();
+        let zero = LibraryResourceTag {
+            format_version: 0,
             ..tag
         };
-        assert!(unhostable.validate().unwrap_err().contains("cannot host"));
+        assert!(zero.validate().unwrap_err().contains("format version 0"));
     }
 
     #[test]
@@ -2986,10 +2878,7 @@ mod tests {
             link_id: CatalogLinkId::generate().unwrap(),
             scope_id: scope_id.clone(),
             storage_id: StorageId::parse(storage).unwrap(),
-            repository_id: CatalogResourceRepositoryId::for_kind(
-                ProviderKey::Codex,
-                CatalogResourceKindTag::CodexPetV2,
-            ),
+            repository_id: CatalogResourceRepositoryId::for_coordinate(&codex_pets(2)),
             accepted_head: None,
             accepted_resources: BTreeMap::new(),
             revision: 1,
@@ -3012,10 +2901,7 @@ mod tests {
         // An accepted head must belong to the link's own repository.
         let mut crossed = link("storage-a");
         crossed.accepted_head = Some(LibraryHeadCoordinate {
-            repository_id: CatalogResourceRepositoryId::for_kind(
-                ProviderKey::Codex,
-                CatalogResourceKindTag::AgentSkill,
-            ),
+            repository_id: CatalogResourceRepositoryId::for_coordinate(&codex_skills()),
             revision: 1,
             commit_id: CatalogCommitId::generate().unwrap(),
             manifest_sha256: sha(1),
@@ -3028,47 +2914,230 @@ mod tests {
             .contains("accepted a different repository"));
     }
 
+    fn target(root: &str, member: &str) -> CatalogTargetConfig {
+        CatalogTargetConfig::new(
+            ProviderKey::parse("codex").unwrap(),
+            CatalogTargetKey::parse("provider-home.skills").unwrap(),
+            &CatalogTargetIdentity {
+                canonical_root: root.to_string(),
+                root_class: "provider-home".to_string(),
+                member: member.to_string(),
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
-    fn fork_plans_cannot_target_plugins() {
+    fn targets_round_trip_their_typed_identity_and_stay_loadable_when_foreign() {
+        let target = target("/tmp/codex/skills", "review");
+        let identity = target.decode().unwrap();
+        assert_eq!(identity.member, "review");
+        let copy = target.with_member("review-local-copy").unwrap();
+        assert_eq!(copy.decode().unwrap().member, "review-local-copy");
+        assert_eq!(copy.decode().unwrap().canonical_root, "/tmp/codex/skills");
+        assert_ne!(copy, target);
+
+        // A target shape this build does not decode still loads as part of a
+        // document and only fails when something tries to operate on it.
+        let foreign: CatalogTargetConfig = serde_json::from_value(json!({
+            "provider": "cursor",
+            "target": "workspace.rules",
+            "identity": { "workspace": "main", "rule": "style" }
+        }))
+        .unwrap();
+        foreign.validate().unwrap();
+        assert!(foreign.decode().is_err());
+        let empty: CatalogTargetConfig = serde_json::from_value(json!({
+            "provider": "cursor",
+            "target": "workspace.rules",
+            "identity": {}
+        }))
+        .unwrap();
+        assert!(empty.validate().unwrap_err().contains("empty identity"));
+        assert!(CatalogTargetConfig::new(
+            ProviderKey::parse("codex").unwrap(),
+            CatalogTargetKey::parse("provider-home.skills").unwrap(),
+            &CatalogTargetIdentity {
+                canonical_root: "relative/root".to_string(),
+                root_class: "provider-home".to_string(),
+                member: "review".to_string(),
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn claims_dedupe_per_target_and_storage() {
+        let claim = |storage: &str| CatalogClaim {
+            target: target("/tmp/codex/skills", "review"),
+            coordinate: codex_skills(),
+            storage_id: StorageId::parse(storage).unwrap(),
+            resource_id: named_envelope(&codex_skills(), "review").resource_id,
+            content_sha256: sha(1),
+            outcome: CatalogActionOutcome::Installed,
+            recorded_at: 1,
+            plan_id: None,
+        };
+        let document = |claims| CatalogMaterializationsDocument {
+            schema: CATALOG_SCHEMA,
+            revision: 1,
+            claims,
+        };
+        document(vec![claim("storage-a"), claim("storage-b")])
+            .validate()
+            .unwrap();
+        assert!(document(vec![claim("storage-a"), claim("storage-a")])
+            .validate()
+            .unwrap_err()
+            .contains("duplicate catalog claim edge"));
+    }
+
+    #[test]
+    fn pull_actions_pair_protocols_with_matching_targets() {
+        let action = CatalogPullAction {
+            action_id: CatalogPlanActionId::generate().unwrap(),
+            resource_id: named_envelope(&codex_skills(), "review").resource_id,
+            kind: CatalogPullActionKind::Install,
+            requires_destructive_approval: false,
+            target: target("/tmp/codex/skills", "review"),
+            target_path: Some("/tmp/codex/skills/review".to_string()),
+            native: Some(NativePluginPlan {
+                provider: ProviderKey::parse("codex").unwrap(),
+                argv: vec!["plugin".to_string()],
+                marketplace_argv: Vec::new(),
+                mode: PluginApplyMode::InstallMissing,
+            }),
+            expected_target_state: CatalogTargetExpectation::Absent,
+            incoming_content_sha256: sha(5),
+        };
+        assert!(action
+            .validate()
+            .unwrap_err()
+            .contains("native invocation with a directory operation"));
+        let neither = CatalogPullAction {
+            target_path: None,
+            native: None,
+            ..action.clone()
+        };
+        assert!(neither.validate().unwrap_err().contains("neither"));
+        let destructive = CatalogPullAction {
+            kind: CatalogPullActionKind::OverwriteWithStorage,
+            native: None,
+            ..action.clone()
+        };
+        assert!(destructive
+            .validate()
+            .unwrap_err()
+            .contains("explicit approval"));
+        let directory = CatalogPullAction {
+            native: None,
+            ..action
+        };
+        directory.validate().unwrap();
+        // Machine-local target identity never crosses IPC.
+        let json = serde_json::to_value(&directory).unwrap();
+        assert!(json.get("target").is_none());
+        assert!(json.get("target_path").is_none());
+        assert!(json.get("native").is_none());
+    }
+
+    #[test]
+    fn plans_serialize_coordinates_with_labels_and_no_machine_paths() {
+        let resource = named_envelope(&codex_skills(), "review");
+        let row = CatalogPushRow {
+            resource_id: resource.resource_id.clone(),
+            coordinate: codex_skills(),
+            labels: CatalogCoordinateLabels {
+                provider_label: "Codex".to_string(),
+                kind_label: "Skills".to_string(),
+                format_label: "Agent Skill".to_string(),
+            },
+            display_name: "review".to_string(),
+            scope_label: None,
+            relation: CatalogResourceRelation::LocalOnly,
+            selectable: true,
+            selected_by_default: true,
+            held_for_pull: false,
+            local_content_sha256: Some(resource.content_sha256.clone()),
+            storage_content_sha256: None,
+            blocked_reason: None,
+            warnings: Vec::new(),
+            detail: None,
+        };
+        let plan = CatalogScopePushPlan {
+            plan_id: CatalogPlanId::generate().unwrap(),
+            scope_id: CatalogScopeId::generate().unwrap(),
+            link_id: CatalogLinkId::generate().unwrap(),
+            link_revision: 1,
+            storage_id: StorageId::parse("storage-a").unwrap(),
+            repository_id: CatalogResourceRepositoryId::for_coordinate(&codex_skills()),
+            storage_identity_sha256: sha(2),
+            profile_pins: vec![CatalogProfilePin {
+                profile_id: LocalCatalogProfileId::generate().unwrap(),
+                provider: ProviderKey::parse("codex").unwrap(),
+                revision: 1,
+                canonical_home: "/Users/someone/.codex".to_string(),
+            }],
+            target_pins: vec![CatalogTargetPin {
+                target: CatalogTargetKey::parse("provider-home.skills").unwrap(),
+                canonical_root: "/Users/someone/.codex/skills".to_string(),
+            }],
+            observed_head: None,
+            rows: vec![CatalogScopePushRow {
+                row,
+                resource: Some(resource),
+            }],
+            warning_digests: Vec::new(),
+            created_at: 1,
+            expires_at: 2,
+        };
+        plan.validate().unwrap();
+        let json = serde_json::to_value(&plan).unwrap();
+        assert!(json.get("profile_pins").is_none());
+        assert!(json.get("target_pins").is_none());
+        let row = &json["rows"][0]["row"];
+        assert_eq!(row["provider"], "codex");
+        assert_eq!(row["resource_kind"], "agent_skill");
+        assert_eq!(row["format"], "agentskills.io.skill");
+        assert_eq!(row["format_version"], 1);
+        assert_eq!(row["provider_label"], "Codex");
+        assert_eq!(row["kind_label"], "Skills");
+        assert!(json["rows"][0].get("resource").is_none());
+        assert!(!serde_json::to_string(&plan)
+            .unwrap()
+            .contains("/Users/someone"));
+    }
+
+    #[test]
+    fn fork_plans_hide_source_targets_and_paths() {
         let plan = CatalogResourceForkPlan {
             plan_id: CatalogPlanId::generate().unwrap(),
             scope_id: CatalogScopeId::generate().unwrap(),
             profile_pins: Vec::new(),
-            skill_root_pins: Vec::new(),
-            source_kind: CatalogForkSourceKind::AgentSkill,
-            source_resource_id: skill_resource_id(AgentSkillScope::CodexHome, "review", "review"),
+            target_pins: Vec::new(),
+            source_coordinate: codex_skills(),
+            source_resource_id: named_envelope(&codex_skills(), "review").resource_id,
             source_display_name: "review".to_string(),
-            source_target: LocalCatalogTargetId::Plugin {
-                provider: ProviderKey::Codex,
-                canonical_home: "/tmp/codex".to_string(),
-                namespace: "acme".to_string(),
-                plugin_id: "tools@acme".to_string(),
-            },
+            source_target: target("/tmp/codex/skills", "review"),
             source_path: "/tmp/codex/skills/review".to_string(),
             source_content_sha256: sha(8),
             copy_name: "review-local-copy".to_string(),
-            copy_resource_id: skill_resource_id(
-                AgentSkillScope::CodexHome,
-                "review-local-copy",
-                "review-local-copy",
-            ),
+            copy_resource_id: named_envelope(&codex_skills(), "review-local-copy").resource_id,
             copy_target_path: "/tmp/codex/skills/review-local-copy".to_string(),
             transformed_content_sha256: sha(9),
             created_at: 1,
             expires_at: 2,
         };
-        assert!(plan
-            .validate()
-            .unwrap_err()
-            .contains("plugins do not support Fork"));
+        plan.validate().unwrap();
+        let json = serde_json::to_value(&plan).unwrap();
+        assert!(json.get("source_target").is_none());
+        assert!(json.get("source_path").is_none());
+        assert_eq!(json["source_coordinate"]["format_version"], 1);
     }
 
     #[test]
     fn library_origin_tokens_are_domain_separated() {
-        let repository_id = CatalogResourceRepositoryId::for_kind(
-            ProviderKey::Codex,
-            CatalogResourceKindTag::AgentSkill,
-        );
+        let repository_id = CatalogResourceRepositoryId::for_coordinate(&codex_skills());
         let origin = derive_library_origin("host", "replica", &repository_id).unwrap();
         origin.validate().unwrap();
         let other = derive_library_origin("host", "replica-2", &repository_id).unwrap();
@@ -3113,12 +3182,14 @@ mod tests {
         }
     }
 
-    fn scope_row(provider: ProviderKey, kind: CatalogResourceKindTag) -> CatalogScope {
+    fn scope_row(coordinate: &CatalogCoordinate) -> CatalogScope {
         CatalogScope {
             scope_id: CatalogScopeId::generate().unwrap(),
-            provider,
+            provider: coordinate.provider.clone(),
             profile_id: LocalCatalogProfileId::generate().unwrap(),
-            resource_kind: kind,
+            resource_kind: coordinate.resource_kind.clone(),
+            format: coordinate.format.clone(),
+            format_version: coordinate.format_version,
             revision: 1,
             created_at: 1,
             updated_at: 1,
@@ -3126,24 +3197,14 @@ mod tests {
     }
 
     #[test]
-    fn a_scope_requires_a_provider_that_owns_its_kind() {
-        scope_row(ProviderKey::Claude, CatalogResourceKindTag::AgentSkill)
+    fn scopes_load_any_well_formed_coordinate_and_stay_unique_per_profile() {
+        let first = scope_row(&codex_skills());
+        first.validate().unwrap();
+        // An unregistered coordinate is structurally a scope; only the
+        // registry marks it unavailable.
+        scope_row(&coordinate("cursor", "agent_skill", "cursor.skill", 1))
             .validate()
             .unwrap();
-        scope_row(ProviderKey::Codex, CatalogResourceKindTag::CodexPetV1)
-            .validate()
-            .unwrap();
-        assert!(
-            scope_row(ProviderKey::Claude, CatalogResourceKindTag::CodexPetV1)
-                .validate()
-                .unwrap_err()
-                .contains("cannot host")
-        );
-    }
-
-    #[test]
-    fn scope_rows_are_unique_per_profile_and_kind() {
-        let first = scope_row(ProviderKey::Codex, CatalogResourceKindTag::AgentSkill);
         let duplicate = CatalogScope {
             scope_id: CatalogScopeId::generate().unwrap(),
             ..first.clone()
@@ -3158,21 +3219,53 @@ mod tests {
             .unwrap_err()
             .contains("duplicates another row"));
 
-        // Pet v1 and v2 are distinct kinds, so the same profile holds both rows.
+        // Pet versions are distinct coordinates, so one profile holds both.
         let pet_v1 = CatalogScope {
             scope_id: CatalogScopeId::generate().unwrap(),
-            resource_kind: CatalogResourceKindTag::CodexPetV1,
+            resource_kind: CatalogResourceKindKey::parse("desktop_pet").unwrap(),
+            format: CatalogFormatKey::parse("openai.codex-pet").unwrap(),
+            format_version: 1,
             ..first.clone()
         };
         let pet_v2 = CatalogScope {
             scope_id: CatalogScopeId::generate().unwrap(),
-            resource_kind: CatalogResourceKindTag::CodexPetV2,
-            ..first.clone()
+            format_version: 2,
+            ..pet_v1.clone()
         };
-        // The same kind under another profile is another config's row.
-        let other_profile = scope_row(ProviderKey::Codex, CatalogResourceKindTag::AgentSkill);
+        let other_profile = scope_row(&codex_skills());
         document(vec![first, pet_v1, pet_v2, other_profile])
             .validate()
             .unwrap();
+
+        let unknown: Result<CatalogScope, _> = serde_json::from_value(json!({
+            "scope_id": "catscope-zz",
+        }));
+        assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn profiles_carry_a_versioned_provider_config() {
+        let profile = LocalCatalogProfile {
+            profile_id: LocalCatalogProfileId::generate().unwrap(),
+            provider: ProviderKey::parse("codex").unwrap(),
+            display_name: "Codex".to_string(),
+            configured_home: "/tmp/codex".to_string(),
+            provider_config: CatalogProviderConfig::version_1(),
+            revision: 1,
+            created_at: 1,
+            updated_at: 1,
+        };
+        profile.validate().unwrap();
+        let json = serde_json::to_value(&profile).unwrap();
+        assert_eq!(json["provider"], "codex");
+        assert_eq!(json["provider_config"]["version"], 1);
+        let zero = LocalCatalogProfile {
+            provider_config: CatalogProviderConfig {
+                version: 0,
+                settings: BoundedConfigObject::empty(),
+            },
+            ..profile
+        };
+        assert!(zero.validate().is_err());
     }
 }

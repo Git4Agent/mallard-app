@@ -8,7 +8,7 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -16,16 +16,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::payload::PayloadBytes;
+use crate::portable_resources::PortableResourceRegistry;
 use crate::provider_capture::CapturedResources;
-use crate::providers::ProviderRegistry;
+use crate::providers::AgentProviderRegistry;
+use mallard_domain::portable::contracts;
 use mallard_domain::{
-    self as domain, hex_lower, now_secs, sha256_hex, ActionId, ActionStatus, ApplyPolicy,
+    self as domain, hex_lower, now_secs, sha256_hex, ActionId, ActionStatus, ApplyPolicyPrimitive,
     ApplyReceipt, BindingState, BundleDirectoryEntry, BundleFileEntry, BundleHead, BundleId,
     BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleScope, BundleSnapshot,
-    CapturedWith, CloudThreadId, ConversationThread, LogicalPath, PlanId, PortableOrigin,
-    ProjectBinding, ProjectFilePreservationPin, ProviderKey, ResourceDescriptor, ResourceId,
-    ResourceKind, RestoreAction, RestoreActionKind, RestorePlan, StorageId, SyncScopeKey,
-    Tombstone, TombstoneTarget, BUNDLE_SCHEMA, RESTORE_PLAN_SCHEMA,
+    CapturedWith, CloudThreadId, ConversationThread, LogicalPath, PlanId, PortableContractResolver,
+    PortableOrigin, ProjectBinding, ProjectFilePreservationPin, ProviderKey, ResolvedScope,
+    ResourceDescriptor, ResourceId, ResourceKindPrimitive, RestoreAction, RestoreActionKind,
+    RestorePlan, StorageId, SyncScopeKey, Tombstone, TombstoneTargetPrimitive, BUNDLE_SCHEMA,
+    RESTORE_PLAN_SCHEMA,
 };
 
 use crate::storage_core::{
@@ -90,9 +93,8 @@ pub struct ScopePublishInput {
 
 /// A scoped publication. Only the named writable scopes may change; every
 /// other scope is carried from the verified current manifest with exactly
-/// the same revision and content digest (the mutation firewall), and a CAS
-/// loss grafts the prepared writable scopes onto the winner as long as the
-/// winner's writable-scope coordinates still match the reviewed pins.
+/// the same revision and content digest (the mutation firewall). Apply reads
+/// the head once and makes one compare-and-swap attempt.
 #[derive(Clone, Debug)]
 pub struct PublishBundleRequest {
     pub identity: BundleIdentity,
@@ -303,6 +305,7 @@ impl<S: ObjectStore> BundleBytes for EngineByteSource<'_, S> {
     fn prefetch(&mut self, paths: &[LogicalPath]) -> Result<(), String> {
         // Serve cache hits first so progress totals cover the real transfer.
         let mut pending = Vec::new();
+        let mut pending_paths = HashSet::<&LogicalPath>::new();
         for path in paths {
             if self.loaded.contains_key(path) {
                 continue;
@@ -323,7 +326,7 @@ impl<S: ObjectStore> BundleBytes for EngineByteSource<'_, S> {
                 self.loaded.insert(path.clone(), hit);
                 continue;
             }
-            if pending.iter().any(|(current, _)| current == path) {
+            if !pending_paths.insert(path) {
                 continue;
             }
             pending.push((path.clone(), entry.clone()));
@@ -411,7 +414,6 @@ enum PlannedOutcome {
 struct PlannedFile<'m> {
     logical_path: &'m LogicalPath,
     entry: &'m BundleFileEntry,
-    descriptor: &'m ResourceDescriptor,
     target: Option<PathBuf>,
     target_digest: Option<String>,
     target_mode: Option<u32>,
@@ -474,12 +476,36 @@ pub struct RemoteBundleSummary {
 pub struct BundleEngine<S> {
     store: S,
     storage_id: StorageId,
+    /// The portable contracts this build can execute. Publish resolves every
+    /// writable scope through it; planning and apply resolve every fetched
+    /// scope and leave unresolvable ones preserved and inert.
+    contracts: Arc<PortableResourceRegistry>,
 }
 
 impl<S: ObjectStore> BundleEngine<S> {
     pub fn open(store: S, storage_id: StorageId) -> Result<Self, String> {
+        Self::open_with_contracts(
+            store,
+            storage_id,
+            Arc::new(PortableResourceRegistry::production().clone()),
+        )
+    }
+
+    pub fn open_with_contracts(
+        store: S,
+        storage_id: StorageId,
+        contracts: Arc<PortableResourceRegistry>,
+    ) -> Result<Self, String> {
         crate::storage_core::ensure_storage_marker(&store)?;
-        Ok(Self { store, storage_id })
+        Ok(Self {
+            store,
+            storage_id,
+            contracts,
+        })
+    }
+
+    pub fn contracts(&self) -> &PortableResourceRegistry {
+        self.contracts.as_ref()
     }
 
     pub fn storage_id(&self) -> &StorageId {
@@ -682,7 +708,7 @@ impl<S: ObjectStore> BundleEngine<S> {
             }
         }
 
-        let mut current = self.read_head(&request.identity.bundle_id)?;
+        let current = self.read_head(&request.identity.bundle_id)?;
         // A moved head is not by itself fatal: disjoint-scope publishers may
         // land between review and push. The per-scope firewall below decides
         // whether this publication can graft onto the winner.
@@ -697,11 +723,9 @@ impl<S: ObjectStore> BundleEngine<S> {
         }
         on_phase("publish: read head", phase_started.elapsed());
 
-        // Captured payloads are attempt-invariant: the CAS loop refetches
-        // only the head and manifest, never the request. Capture already
-        // bound each immutable allocation to its digest; moving that body
-        // into its entry here lets every CAS attempt and upload batch share
-        // the same allocation.
+        // Capture already bound each immutable allocation to its digest.
+        // Moving the body into its entry lets manifest construction and the
+        // upload batch share the same allocation.
         let mut prepared_captures = BTreeMap::new();
         for (scope_key, input) in &mut request.writable_scopes {
             let mut prepared = BTreeMap::new();
@@ -734,8 +758,7 @@ impl<S: ObjectStore> BundleEngine<S> {
             prepared_captures.insert(scope_key.clone(), prepared);
         }
 
-        const MAX_CAS_ATTEMPTS: usize = 4;
-        for attempt in 0..MAX_CAS_ATTEMPTS {
+        {
             let phase_started = Instant::now();
             let previous_manifest = current
                 .as_ref()
@@ -753,25 +776,40 @@ impl<S: ObjectStore> BundleEngine<S> {
                     .unwrap_or_else(absent_scope_pin);
                 if &observed != pin {
                     return Err(format!(
-                        "sync scope '{}' changed since review; pull and replan before pushing",
+                        "sync scope '{}' changed since review; pull and compare again before pushing",
                         scope_key
                     ));
                 }
             }
             for (scope_key, input) in &request.writable_scopes {
+                if input.retained_files.is_empty() {
+                    continue;
+                }
                 let previous_scope = previous_manifest
                     .as_ref()
                     .and_then(|manifest| manifest.scopes.get(scope_key));
+                let published_file_identities: BTreeSet<(&str, &str, u64)> = previous_scope
+                    .map(|scope| {
+                        scope
+                            .files
+                            .values()
+                            .map(|candidate| {
+                                (
+                                    candidate.object_key.as_str(),
+                                    candidate.sha256.as_str(),
+                                    candidate.size,
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 for (path, entry) in &input.retained_files {
                     entry.validate()?;
-                    let was_published = previous_scope.is_some_and(|scope| {
-                        scope.files.values().any(|candidate| {
-                            candidate.object_key == entry.object_key
-                                && candidate.sha256 == entry.sha256
-                                && candidate.size == entry.size
-                        })
-                    });
-                    if !was_published {
+                    if !published_file_identities.contains(&(
+                        entry.object_key.as_str(),
+                        entry.sha256.as_str(),
+                        entry.size,
+                    )) {
                         return Err(format!(
                             "retained file '{}' was not in the reviewed manifest",
                             path
@@ -798,7 +836,11 @@ impl<S: ObjectStore> BundleEngine<S> {
                     files.insert(path.clone(), entry.clone());
                 }
                 if let Some(previous_scope) = previous_scope {
-                    validate_scope_conversation_retention(previous_scope, input)?;
+                    validate_scope_conversation_retention(
+                        self.contracts.as_ref(),
+                        previous_scope,
+                        input,
+                    )?;
                     if scope_content_is_semantic_noop(previous_scope, input, &files) {
                         continue;
                     }
@@ -870,6 +912,15 @@ impl<S: ObjectStore> BundleEngine<S> {
                 scopes,
             };
             manifest.validate()?;
+            // Registry validation for what this publication writes: every
+            // writable scope must resolve to primitives this build executes.
+            for scope_key in request.writable_scopes.keys() {
+                if let Some(scope) = manifest.scopes.get(scope_key) {
+                    scope
+                        .resolve(scope_key, self.contracts.as_ref())
+                        .map_err(|error| format!("scope '{}': {}", scope_key, error))?;
+                }
+            }
 
             // The final mutation firewall at the request boundary: a
             // publication may change only scopes named by the reviewed
@@ -1011,7 +1062,7 @@ impl<S: ObjectStore> BundleEngine<S> {
                 CasOutcome::Written { .. } => {
                     let _ = self.publish_tag(&manifest);
                     on_phase("publish: swing head", phase_started.elapsed());
-                    return Ok(PublishedBundle {
+                    Ok(PublishedBundle {
                         published: true,
                         snapshot: BundleSnapshot {
                             storage_id: self.storage_id.clone(),
@@ -1019,28 +1070,14 @@ impl<S: ObjectStore> BundleEngine<S> {
                             manifest,
                             fetched_at: request.updated_at,
                         },
-                    });
+                    })
                 }
                 CasOutcome::Conflict { .. } => {
                     on_phase("publish: head CAS conflict", phase_started.elapsed());
-                    if attempt + 1 == MAX_CAS_ATTEMPTS {
-                        return Err("bundle head CAS conflict; fetch and rebase before retrying"
-                            .to_string());
-                    }
-                    // Graft retry: read the winner and re-verify the reviewed
-                    // writable-scope pins against it on the next iteration.
-                    current = self.read_head(&request.identity.bundle_id)?;
-                    if current.is_none() {
-                        return Err(
-                            "bundle head disappeared during publication; the repository was \
-                             removed"
-                                .to_string(),
-                        );
-                    }
+                    Err("bundle head CAS conflict; compare again before pushing".to_string())
                 }
             }
         }
-        Err("bundle head CAS conflict; fetch and rebase before retrying".to_string())
     }
 
     /// Lazy payload access for `snapshot`, sharing verified objects through
@@ -1197,7 +1234,7 @@ impl<S: ObjectStore> BundleEngine<S> {
             let page = self
                 .store
                 .list(&prefix, object_cursor.as_deref(), MAX_LIST_PAGE)?;
-            tag_keys.extend(page.keys);
+            tag_keys.extend(page.entries.into_iter().map(|entry| entry.key));
             if tag_keys.len() > MAX_LISTED_BUNDLES {
                 return Err(format!(
                     "remote bundle listing exceeds the {}-bundle safety limit",
@@ -1264,7 +1301,7 @@ impl<S: ObjectStore> BundleEngine<S> {
     #[allow(clippy::too_many_arguments)]
     pub fn build_restore_plan_from_snapshot(
         &self,
-        registry: &ProviderRegistry,
+        registry: &AgentProviderRegistry,
         snapshot: &BundleSnapshot,
         binding: &ProjectBinding,
         provider_homes: &BTreeMap<ProviderKey, String>,
@@ -1300,6 +1337,20 @@ impl<S: ObjectStore> BundleEngine<S> {
                         // view-only and the scope is preserved untouched.
                         None => continue,
                     }
+                }
+            };
+            // Registry validation: a scope whose contracts this build does
+            // not register stays preserved and inert. Its rows say why.
+            let resolved = match scope.resolve(scope_key, self.contracts.as_ref()) {
+                Ok(resolved) => resolved,
+                Err(reason) => {
+                    for resource_id in scope.resources.keys() {
+                        actions.push(manual_action(
+                            resource_id,
+                            &format!("Not applicable in this build: {}", reason),
+                        )?);
+                    }
+                    continue;
                 }
             };
 
@@ -1348,16 +1399,18 @@ impl<S: ObjectStore> BundleEngine<S> {
             // outcome.
             let mut planned_files = Vec::new();
             for (logical_path, entry) in &scope.files {
-                let descriptor = scope
-                    .resources
-                    .get(&entry.resource_id)
-                    .ok_or_else(|| format!("file '{}' has no resource", logical_path))?;
-                if descriptor.kind == ResourceKind::Conversation {
+                if !scope.resources.contains_key(&entry.resource_id) {
+                    return Err(format!("file '{}' has no resource", logical_path));
+                }
+                let kind = resolved
+                    .kind(&entry.resource_id)
+                    .ok_or_else(|| format!("file '{}' has no resolved kind", logical_path))?;
+                if kind == ResourceKindPrimitive::Conversation {
                     continue;
                 }
-                let target = match (&scope_home, descriptor.kind) {
+                let target = match (&scope_home, kind) {
                     (None, _) => map_project_logical_target(logical_path, binding)?,
-                    (Some((provider, home)), ResourceKind::ProviderState) => {
+                    (Some((provider, home)), ResourceKindPrimitive::ProviderState) => {
                         provider_state_target(registry, provider, home, binding, logical_path)
                     }
                     (Some(_), _) => None,
@@ -1366,7 +1419,6 @@ impl<S: ObjectStore> BundleEngine<S> {
                     planned_files.push(PlannedFile {
                         logical_path,
                         entry,
-                        descriptor,
                         target: None,
                         target_digest: None,
                         target_mode: None,
@@ -1386,11 +1438,10 @@ impl<S: ObjectStore> BundleEngine<S> {
                 }
                 let target_state = match inspect_restore_target(&target) {
                     Ok(state) => state,
-                    Err(error) if descriptor.kind == ResourceKind::ProjectContentFile => {
+                    Err(error) if kind == ResourceKindPrimitive::ProjectContentFile => {
                         planned_files.push(PlannedFile {
                             logical_path,
                             entry,
-                            descriptor,
                             target: None,
                             target_digest: None,
                             target_mode: None,
@@ -1407,7 +1458,7 @@ impl<S: ObjectStore> BundleEngine<S> {
                 };
                 let target_digest = target_state.digest;
                 let target_mode = target_state.mode;
-                let outcome = if descriptor.kind != ResourceKind::ProjectContentFile
+                let outcome = if kind != ResourceKindPrimitive::ProjectContentFile
                     && target_digest.as_deref() == Some(entry.sha256.as_str())
                 {
                     // Generic files have no enforced mode, so byte identity
@@ -1420,7 +1471,6 @@ impl<S: ObjectStore> BundleEngine<S> {
                 planned_files.push(PlannedFile {
                     logical_path,
                     entry,
-                    descriptor,
                     target: Some(target),
                     target_digest,
                     target_mode,
@@ -1432,7 +1482,6 @@ impl<S: ObjectStore> BundleEngine<S> {
             for planned in planned_files {
                 let logical_path = planned.logical_path;
                 let entry = planned.entry;
-                let descriptor = planned.descriptor;
                 match planned.outcome {
                     PlannedOutcome::Manual(message) => {
                         actions.push(manual_action(&entry.resource_id, &message)?);
@@ -1442,7 +1491,13 @@ impl<S: ObjectStore> BundleEngine<S> {
                     PlannedOutcome::Action => {}
                 };
                 let target = planned.target.as_ref().expect("file action has a target");
-                let preserve = if descriptor.kind == ResourceKind::ProjectContentFile {
+                let kind_primitive = resolved
+                    .kind(&entry.resource_id)
+                    .ok_or_else(|| format!("file '{}' has no resolved kind", logical_path))?;
+                let policy_primitive = resolved
+                    .policy(&entry.resource_id)
+                    .ok_or_else(|| format!("file '{}' has no resolved policy", logical_path))?;
+                let preserve = if kind_primitive == ResourceKindPrimitive::ProjectContentFile {
                     plan_project_file_preservation(
                         logical_path,
                         entry,
@@ -1455,9 +1510,15 @@ impl<S: ObjectStore> BundleEngine<S> {
                 } else {
                     None
                 };
-                let kind = restore_kind_for_file(logical_path, descriptor, entry, preserve)?;
+                let kind = restore_kind_for_file(
+                    logical_path,
+                    kind_primitive,
+                    policy_primitive,
+                    entry,
+                    preserve,
+                )?;
                 let requires_explicit_approval = action_needs_explicit_approval(
-                    descriptor,
+                    policy_primitive,
                     planned.target_digest.as_deref(),
                     &entry.sha256,
                 );
@@ -1472,7 +1533,8 @@ impl<S: ObjectStore> BundleEngine<S> {
                     target_path: Some(path_text(target)?),
                     source_sha256: Some(entry.sha256.clone()),
                     expected_target_sha256: planned.target_digest.clone(),
-                    expected_target_mode: (descriptor.kind == ResourceKind::ProjectContentFile)
+                    expected_target_mode: (kind_primitive
+                        == ResourceKindPrimitive::ProjectContentFile)
                         .then_some(planned.target_mode)
                         .flatten(),
                     materialized_sha256: Some(entry.sha256.clone()),
@@ -1481,12 +1543,12 @@ impl<S: ObjectStore> BundleEngine<S> {
                 });
             }
 
-            for tombstone in scope.tombstones.values() {
-                match &tombstone.target {
-                    TombstoneTarget::ProjectContentFile {
+            for (tombstone_key, tombstone) in &scope.tombstones {
+                match resolved.tombstone(tombstone_key) {
+                    Some(TombstoneTargetPrimitive::ProjectContentFile {
                         resource_id,
                         logical_path,
-                    } => {
+                    }) => {
                         let last_sha256 = tombstone.last_sha256.clone().ok_or_else(|| {
                             format!(
                                 "project-content file tombstone '{}' lacks its last digest",
@@ -1533,10 +1595,10 @@ impl<S: ObjectStore> BundleEngine<S> {
                             requires_explicit_approval: true,
                         });
                     }
-                    TombstoneTarget::ProjectContentDirectory {
+                    Some(TombstoneTargetPrimitive::ProjectContentDirectory {
                         resource_id,
                         logical_path,
-                    } => {
+                    }) => {
                         let target = project_content_target(logical_path, binding)?;
                         let expected_target_mode = match inspect_project_directory_target(&target) {
                             Ok(Some(mode)) => Some(mode),
@@ -1726,8 +1788,8 @@ mod tests {
         capture_recipe, discover_project, domain_resources, CaptureRequest,
     };
     use crate::storage_core::{
-        ImmutablePutOutcome, LocalObjectStore, ObjectKey, StoreListPage, StoredMetadata,
-        REPOSITORY_PREFIX, STORAGE_MARKER_KEY,
+        DeleteOutcome, ImmutablePutOutcome, LocalObjectStore, ObjectKey, StoreListPage,
+        StoredMetadata, REPOSITORY_PREFIX, STORAGE_MARKER_KEY,
     };
     use mallard_domain::{LocalProjectId, RecipeEntry, ReplicaId};
 
@@ -1739,8 +1801,8 @@ mod tests {
         StorageId::parse("storage-local").unwrap()
     }
 
-    fn registry() -> &'static ProviderRegistry {
-        ProviderRegistry::production()
+    fn registry() -> &'static AgentProviderRegistry {
+        AgentProviderRegistry::production()
     }
 
     fn claude_key() -> ProviderKey {
@@ -1764,7 +1826,7 @@ mod tests {
                 resource_id.clone(),
                 RecipeEntry {
                     resource_id,
-                    apply_policy: ApplyPolicy::Merge,
+                    apply_policy: contracts::merge(),
                     required: false,
                 },
             );
@@ -1893,8 +1955,11 @@ mod tests {
                     scope_descriptors.insert(resource_id.clone(), descriptor.clone());
                 }
             }
+            align_recipe_policies(&mut scope_recipe, &scope_descriptors);
             let (resources, mut retained_files, mut directories, tombstones) =
                 reconcile_scope_content(
+                    engine.contracts.as_ref(),
+                    &scope_key,
                     &scope_recipe,
                     &scope_descriptors,
                     captured,
@@ -2164,7 +2229,7 @@ mod tests {
             .snapshot
             .manifest
             .all_tombstones()
-            .any(|(_, _, tombstone)| matches!(tombstone.target, TombstoneTarget::Resource { .. })));
+            .any(|(_, _, tombstone)| tombstone.target.kind.as_str() == contracts::RESOURCE));
     }
 
     /// Forces tiny list pages so the one-pass listing's internal store
@@ -2207,8 +2272,8 @@ mod tests {
             self.inner.compare_and_swap(key, expectation, bytes)
         }
 
-        fn delete(&self, key: &ObjectKey) -> Result<(), String> {
-            self.inner.delete(key)
+        fn delete(&self, key: &ObjectKey, expected_etag: &str) -> Result<DeleteOutcome, String> {
+            self.inner.delete(key, expected_etag)
         }
 
         fn list(
@@ -2647,6 +2712,7 @@ mod tests {
         puts: Arc<Mutex<Vec<String>>>,
         put_pointers: Arc<Mutex<Vec<(String, usize)>>>,
         cas_writes: Arc<Mutex<Vec<String>>>,
+        force_next_cas_conflict: Arc<Mutex<bool>>,
     }
 
     impl CountingStore {
@@ -2657,6 +2723,7 @@ mod tests {
                 puts: Arc::new(Mutex::new(Vec::new())),
                 put_pointers: Arc::new(Mutex::new(Vec::new())),
                 cas_writes: Arc::new(Mutex::new(Vec::new())),
+                force_next_cas_conflict: Arc::new(Mutex::new(false)),
             }
         }
 
@@ -2694,6 +2761,10 @@ mod tests {
 
         fn cas_count(&self) -> usize {
             self.cas_writes.lock().unwrap().len()
+        }
+
+        fn conflict_next_cas(&self) {
+            *self.force_next_cas_conflict.lock().unwrap() = true;
         }
 
         /// Repository object reads that are payloads — heads, discovery
@@ -2767,11 +2838,16 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(key.as_str().to_string());
+            let mut force_conflict = self.force_next_cas_conflict.lock().unwrap();
+            if *force_conflict {
+                *force_conflict = false;
+                return Ok(CasOutcome::Conflict { current_etag: None });
+            }
             self.inner.compare_and_swap(key, expectation, bytes)
         }
 
-        fn delete(&self, key: &ObjectKey) -> Result<(), String> {
-            self.inner.delete(key)
+        fn delete(&self, key: &ObjectKey, expected_etag: &str) -> Result<DeleteOutcome, String> {
+            self.inner.delete(key, expected_etag)
         }
 
         fn list(
@@ -2786,6 +2862,40 @@ mod tests {
         fn local_root(&self) -> Option<&Path> {
             self.inner.local_root()
         }
+    }
+
+    #[test]
+    fn publish_makes_one_head_cas_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        write(&project.join("CLAUDE.md"), b"one attempt");
+        let mut request = CaptureRequest::for_project(&project);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let recipe = recipe_for(
+            inventory
+                .resources
+                .iter()
+                .map(|resource| resource.resource_id.clone()),
+        );
+        let captured = capture_recipe(registry(), &request, &recipe).unwrap();
+        let store = CountingStore::open(&temp.path().join("store"));
+        store.conflict_next_cas();
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+
+        let error = publish_captured(
+            &engine,
+            identity(bundle_id(92), "One attempt"),
+            &recipe,
+            &captured,
+            None,
+            10,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("compare again before pushing"), "{error}");
+        assert_eq!(store.cas_count(), 1);
     }
 
     #[test]
@@ -2861,6 +2971,80 @@ mod tests {
             project_scope(&first.snapshot.manifest).files[&stable_path],
             "the unchanged entry carries over verbatim, object key included"
         );
+    }
+
+    #[test]
+    fn publish_rejects_retained_file_identity_not_in_reviewed_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-project");
+        fs::create_dir_all(&source).unwrap();
+        write(&source.join("stable.md"), b"stable contents");
+        let mut capture_request = CaptureRequest::for_project(&source);
+        capture_request.include_project_content = true;
+        let inventory = discover_project(registry(), &capture_request).unwrap();
+        let recipe = recipe_for(
+            inventory
+                .resources
+                .iter()
+                .map(|resource| resource.resource_id.clone()),
+        );
+        let id = bundle_id(93);
+        let store = CountingStore::open(&temp.path().join("store"));
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+        let first = publish_captured(
+            &engine,
+            identity(id.clone(), "Retention firewall"),
+            &recipe,
+            &capture_recipe(registry(), &capture_request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        let first_token = engine.read_head(&id).unwrap().unwrap().1;
+        let first_scope = project_scope(&first.snapshot.manifest).clone();
+        let mut retained_files = first_scope.files.clone();
+        let retained_path = {
+            let (path, entry) = retained_files.iter_mut().next().unwrap();
+            entry.size = entry.size.saturating_add(1);
+            path.clone()
+        };
+
+        store.reset();
+        let error = engine
+            .publish(PublishBundleRequest {
+                identity: first.snapshot.manifest.bundle.clone(),
+                published_by_origin: first.snapshot.manifest.published_by_origin.clone(),
+                writable_scopes: BTreeMap::from([(
+                    SyncScopeKey::Project,
+                    ScopePublishInput {
+                        recipe: first_scope.recipe.clone(),
+                        captured_with: first_scope.captured_with.clone(),
+                        conversations: first_scope.conversations.clone(),
+                        resources: first_scope.resources.clone(),
+                        retained_files,
+                        captured_files: BTreeMap::new(),
+                        directories: first_scope.directories.clone(),
+                        tombstones: first_scope.tombstones.clone(),
+                    },
+                )]),
+                reviewed_scope_pins: BTreeMap::from([(
+                    SyncScopeKey::Project,
+                    (first_scope.revision, first_scope.content_sha256.clone()),
+                )]),
+                expected_head: PublishExpectation::Match(first_token),
+                updated_at: 20,
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            format!(
+                "retained file '{}' was not in the reviewed manifest",
+                retained_path
+            )
+        );
+        assert_eq!(store.put_count(), 0);
+        assert_eq!(store.cas_count(), 0);
     }
 
     /// The continuity probe answers from the store on every call — a local
@@ -3229,6 +3413,92 @@ mod tests {
         assert_eq!(events[0].total_objects, 1);
         assert_eq!(events[0].total_bytes, changed_bytes);
         assert_eq!(events[0].fetched_bytes, changed_bytes);
+    }
+
+    #[test]
+    fn prefetch_deduplicates_paths_and_preserves_order_and_progress() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-project");
+        write(&source.join("a.md"), b"short");
+        write(&source.join("b.md"), b"a longer payload");
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let recipe = recipe_for(
+            inventory
+                .resources
+                .iter()
+                .map(|resource| resource.resource_id.clone()),
+        );
+        let store = CountingStore::open(&temp.path().join("store"));
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+        let snapshot = publish_captured(
+            &engine,
+            identity(bundle_id(45), "Prefetch"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap()
+        .snapshot;
+        let files = &project_scope(&snapshot.manifest).files;
+        let paths = files.keys().rev().cloned().collect::<Vec<_>>();
+        assert_eq!(paths.len(), 2);
+        let requested = [
+            paths[0].clone(),
+            paths[1].clone(),
+            paths[0].clone(),
+            paths[1].clone(),
+        ];
+        let expected_keys = paths
+            .iter()
+            .map(|path| {
+                repository_object_key(&snapshot.head.bundle_id, &files[path].object_key)
+                    .unwrap()
+                    .as_str()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        let cache = Arc::new(ObjectCache::default());
+        let mut events = Vec::new();
+        store.reset();
+        {
+            let mut on_progress = |progress| events.push(progress);
+            let mut bytes =
+                engine.byte_source(&snapshot, Some(cache.clone()), Some(&mut on_progress));
+            bytes.prefetch(&requested).unwrap();
+            assert_eq!(*store.keys.lock().unwrap(), expected_keys);
+
+            store.reset();
+            bytes.prefetch(&requested).unwrap();
+            assert!(store.keys.lock().unwrap().is_empty());
+        }
+        let total_bytes = files[&paths[0]].size + files[&paths[1]].size;
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (
+                    event.index,
+                    event.total_objects,
+                    event.fetched_bytes,
+                    event.total_bytes,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, 2, files[&paths[0]].size, total_bytes),
+                (2, 2, total_bytes, total_bytes),
+            ]
+        );
+
+        events.clear();
+        {
+            let mut on_progress = |progress| events.push(progress);
+            let mut bytes = engine.byte_source(&snapshot, Some(cache), Some(&mut on_progress));
+            bytes.prefetch(&requested).unwrap();
+        }
+        assert!(store.keys.lock().unwrap().is_empty());
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -3627,24 +3897,25 @@ fn manual_action(resource_id: &ResourceId, message: &str) -> Result<RestoreActio
 
 fn restore_kind_for_file(
     logical_path: &LogicalPath,
-    descriptor: &ResourceDescriptor,
+    kind: ResourceKindPrimitive,
+    apply_policy: ApplyPolicyPrimitive,
     entry: &BundleFileEntry,
     preserve: Option<ProjectFilePreservationPin>,
 ) -> Result<RestoreActionKind, String> {
-    Ok(match descriptor.kind {
-        ResourceKind::Conversation => {
+    Ok(match kind {
+        ResourceKindPrimitive::Conversation => {
             return Err(format!(
                 "conversation file '{}' belongs to the typed conversation planner",
                 logical_path
             ))
         }
-        ResourceKind::ProjectContentFile => RestoreActionKind::WriteProjectFile {
+        ResourceKindPrimitive::ProjectContentFile => RestoreActionKind::WriteProjectFile {
             logical_path: logical_path.clone(),
             mode: entry.mode.unwrap_or(0o600) & 0o777,
             source_mtime: entry.source_mtime,
             preserve,
         },
-        _ if descriptor.apply_policy == ApplyPolicy::Merge => RestoreActionKind::MergeFile {
+        _ if apply_policy == ApplyPolicyPrimitive::Merge => RestoreActionKind::MergeFile {
             logical_path: logical_path.clone(),
         },
         _ => RestoreActionKind::WriteFile {
@@ -3654,13 +3925,15 @@ fn restore_kind_for_file(
 }
 
 fn action_needs_explicit_approval(
-    descriptor: &ResourceDescriptor,
+    apply_policy: ApplyPolicyPrimitive,
     target_digest: Option<&str>,
     source_digest: &str,
 ) -> bool {
     matches!(
-        descriptor.apply_policy,
-        ApplyPolicy::ExplicitReview | ApplyPolicy::ManualOnly | ApplyPolicy::Merge
+        apply_policy,
+        ApplyPolicyPrimitive::ExplicitReview
+            | ApplyPolicyPrimitive::ManualOnly
+            | ApplyPolicyPrimitive::Merge
     ) || target_digest.is_some_and(|target| target != source_digest)
 }
 
@@ -3836,7 +4109,7 @@ fn map_project_logical_target(
 /// Map one provider-state logical path through the registered adapter. A
 /// mapping failure downgrades to a manual row rather than blocking the plan.
 fn provider_state_target(
-    registry: &ProviderRegistry,
+    registry: &AgentProviderRegistry,
     provider: &ProviderKey,
     provider_home: &str,
     binding: &ProjectBinding,
@@ -4497,11 +4770,27 @@ pub type ReconciledManifestContent = (
     BTreeMap<String, Tombstone>,
 );
 
+/// A recipe selects resources; it never chooses their policy. Every entry
+/// takes the apply policy its registered resource contract declared on the
+/// descriptor, so the published scope satisfies the exact-match rule.
+pub fn align_recipe_policies(
+    recipe: &mut BundleRecipe,
+    descriptors: &BTreeMap<ResourceId, ResourceDescriptor>,
+) {
+    for (resource_id, entry) in recipe.entries.iter_mut() {
+        if let Some(descriptor) = descriptors.get(resource_id) {
+            entry.apply_policy = descriptor.apply_policy.clone();
+        }
+    }
+}
+
 /// Reconcile one sync scope's next content from its reviewed recipe, this
 /// capture, and the verified previous scope. Tombstones are minted only
 /// inside the scope being reconciled, so no tombstone can ever target an
 /// unbound or unknown provider scope.
 pub fn reconcile_scope_content(
+    contracts: &PortableResourceRegistry,
+    scope: &SyncScopeKey,
     recipe: &BundleRecipe,
     captured_descriptors: &BTreeMap<ResourceId, ResourceDescriptor>,
     captured: &CapturedResources,
@@ -4513,6 +4802,12 @@ pub fn reconcile_scope_content(
             return Err(format!("capture returned unselected resource '{}'", id));
         }
     }
+    // A previous scope this build cannot resolve cannot be reconciled over:
+    // publishing would silently drop records it does not understand.
+    let previous_resolved = match previous {
+        Some(previous) => previous.resolve(scope, contracts)?,
+        None => ResolvedScope::default(),
+    };
     let captured_file_paths = captured
         .files
         .keys()
@@ -4563,25 +4858,22 @@ pub fn reconcile_scope_content(
         // conversation actions, so their absence from the recipe is not a
         // deletion.
         let conversation_owned = |resource_id: &ResourceId| {
-            previous
-                .resources
-                .get(resource_id)
-                .is_some_and(|descriptor| descriptor.kind == ResourceKind::Conversation)
+            previous_resolved.kind(resource_id) == Some(ResourceKindPrimitive::Conversation)
         };
         for (id, descriptor) in &previous.resources {
-            if descriptor.kind == ResourceKind::Conversation {
+            if conversation_owned(id) {
                 continue;
             }
             if !recipe.entries.contains_key(id) {
-                let last_sha256 = descriptor.metadata.get("content_sha256").cloned();
+                let last_sha256 = descriptor
+                    .attribute_str("content_sha256")
+                    .map(str::to_string);
                 let tombstone = Tombstone {
-                    target: TombstoneTarget::Resource {
-                        resource_id: id.clone(),
-                    },
+                    target: contracts::tombstone_resource(id)?,
                     last_sha256,
                     deleted_at: updated_at,
                 };
-                tombstones.insert(tombstone.canonical_key(), tombstone);
+                tombstones.insert(tombstone.structural_key(), tombstone);
             }
         }
         for (path, old_entry) in &previous.files {
@@ -4592,26 +4884,18 @@ pub fn reconcile_scope_content(
             let recaptured_without_file = captured_ids.contains(&old_entry.resource_id)
                 && !captured_file_paths.contains(path);
             if owner_removed || recaptured_without_file {
-                let is_project_content = previous
-                    .resources
-                    .get(&old_entry.resource_id)
-                    .is_some_and(|descriptor| descriptor.kind == ResourceKind::ProjectContentFile);
+                let is_project_content = previous_resolved.kind(&old_entry.resource_id)
+                    == Some(ResourceKindPrimitive::ProjectContentFile);
                 let tombstone = Tombstone {
                     target: if is_project_content {
-                        TombstoneTarget::ProjectContentFile {
-                            resource_id: old_entry.resource_id.clone(),
-                            logical_path: path.clone(),
-                        }
+                        contracts::tombstone_project_content_file(&old_entry.resource_id, path)?
                     } else {
-                        TombstoneTarget::File {
-                            resource_id: old_entry.resource_id.clone(),
-                            logical_path: path.clone(),
-                        }
+                        contracts::tombstone_file(&old_entry.resource_id, path)?
                     },
                     last_sha256: Some(old_entry.sha256.clone()),
                     deleted_at: updated_at,
                 };
-                tombstones.insert(tombstone.canonical_key(), tombstone);
+                tombstones.insert(tombstone.structural_key(), tombstone);
                 files.remove(path);
             }
         }
@@ -4621,38 +4905,44 @@ pub fn reconcile_scope_content(
                 && !captured_directory_paths.contains(path);
             if owner_removed || recaptured_without_directory {
                 let tombstone = Tombstone {
-                    target: TombstoneTarget::ProjectContentDirectory {
-                        resource_id: old_entry.resource_id.clone(),
-                        logical_path: path.clone(),
-                    },
+                    target: contracts::tombstone_project_content_directory(
+                        &old_entry.resource_id,
+                        path,
+                    )?,
                     last_sha256: None,
                     deleted_at: updated_at,
                 };
-                tombstones.insert(tombstone.canonical_key(), tombstone);
+                tombstones.insert(tombstone.structural_key(), tombstone);
                 directories.remove(path);
             }
         }
     }
 
-    tombstones.retain(|_, tombstone| match &tombstone.target {
-        TombstoneTarget::Resource { resource_id } => !resources.contains_key(resource_id),
-        TombstoneTarget::File { logical_path, .. }
-        | TombstoneTarget::ProjectContentFile { logical_path, .. } => {
-            !files.contains_key(logical_path) && !captured_file_paths.contains(logical_path)
-        }
-        TombstoneTarget::ProjectContentDirectory {
-            resource_id: _,
-            logical_path,
-        } => {
-            !directories.contains_key(logical_path)
-                && !captured_directory_paths.contains(logical_path)
-        }
-        TombstoneTarget::ConversationThread { .. } => true,
-    });
+    // Tombstones this build cannot decode stay preserved and inert.
+    tombstones.retain(
+        |_, tombstone| match contracts.tombstone_target(&tombstone.target) {
+            Ok(Some(TombstoneTargetPrimitive::Resource { resource_id })) => {
+                !resources.contains_key(&resource_id)
+            }
+            Ok(Some(TombstoneTargetPrimitive::File { logical_path, .. }))
+            | Ok(Some(TombstoneTargetPrimitive::ProjectContentFile { logical_path, .. })) => {
+                !files.contains_key(&logical_path) && !captured_file_paths.contains(&logical_path)
+            }
+            Ok(Some(TombstoneTargetPrimitive::ProjectContentDirectory {
+                logical_path, ..
+            })) => {
+                !directories.contains_key(&logical_path)
+                    && !captured_directory_paths.contains(&logical_path)
+            }
+            Ok(Some(TombstoneTargetPrimitive::ConversationThread { .. })) => true,
+            Ok(None) | Err(_) => true,
+        },
+    );
     Ok((resources, files, directories, tombstones))
 }
 
 fn validate_scope_conversation_retention(
+    contracts: &PortableResourceRegistry,
     previous: &BundleScope,
     input: &ScopePublishInput,
 ) -> Result<(), String> {
@@ -4662,9 +4952,9 @@ fn validate_scope_conversation_retention(
         }
         let deleted = input.tombstones.values().any(|tombstone| {
             matches!(
-                &tombstone.target,
-                TombstoneTarget::ConversationThread { thread_id: deleted_thread_id }
-                    if deleted_thread_id == thread_id
+                contracts.tombstone_target(&tombstone.target),
+                Ok(Some(TombstoneTargetPrimitive::ConversationThread { thread_id: deleted_thread_id }))
+                    if &deleted_thread_id == thread_id
             )
         });
         if !deleted {
@@ -5278,11 +5568,11 @@ impl<S: ObjectStore> BundleEngine<S> {
             .manifest
             .scope(scope_key)
             .ok_or_else(|| "restore action scope is missing".to_string())?;
-        let descriptor = scope
-            .resources
-            .get(&entry.resource_id)
-            .ok_or_else(|| "restore action resource is missing".to_string())?;
-        if descriptor.kind == ResourceKind::Conversation {
+        if !scope.resources.contains_key(&entry.resource_id) {
+            return Err("restore action resource is missing".to_string());
+        }
+        let resolved = scope.resolve(scope_key, self.contracts.as_ref())?;
+        if resolved.kind(&entry.resource_id) == Some(ResourceKindPrimitive::Conversation) {
             return Err(format!(
                 "conversation file '{}' belongs to the typed conversation pipeline",
                 logical_path

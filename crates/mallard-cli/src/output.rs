@@ -76,13 +76,7 @@ pub(crate) fn list(
         writeln!(
             writer,
             "{} [{}] — {}",
-            storage.name,
-            storage.storage_id,
-            match storage.kind {
-                "r2" => "Cloudflare R2",
-                "local" => "Local folder",
-                _ => "Storage",
-            }
+            storage.name, storage.storage_id, storage.provider_label
         )?;
     }
     Ok(())

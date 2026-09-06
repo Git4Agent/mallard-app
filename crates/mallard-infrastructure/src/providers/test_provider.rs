@@ -5,9 +5,10 @@
 
 use super::claude::codec::analyze_claude_transcript;
 use super::traits::{
-    DiscoveredSession, MaterializationTargetRequest, PlannedProviderTarget, ProviderDescriptor,
-    SessionActionContext, SessionActionDescriptor, SessionActionOutcome, SessionActionRequest,
-    SessionAdapter, SessionAnalysis, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
+    DiscoveredSession, MaintenanceActionDescriptor, MaintenanceActionScope,
+    MaterializationTargetRequest, PlannedProviderTarget, ProviderDescriptor, SessionActionContext,
+    SessionActionDescriptor, SessionActionOutcome, SessionActionRequest, SessionAdapter,
+    SessionAnalysis, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
     SessionFileMetadata, SessionFileSummary, SessionTimelineContext, SessionTimelineIndex,
     SessionTimelinePageSlice, SessionTimelineQuery,
 };
@@ -83,11 +84,29 @@ impl SessionAdapter for TestProviderAdapter {
         ProviderDescriptor {
             key: provider_key(),
             display_name: "Test Provider".to_string(),
+            display_rank: 90,
             profile_label: ".testprov profile".to_string(),
             default_profile_directory: Some(".testprov".to_string()),
             setup_default: false,
             cli_launcher: None,
+            maintenance_actions: self.maintenance_actions(),
         }
+    }
+
+    fn watch_roots(&self) -> &'static [&'static str] {
+        &["sessions"]
+    }
+
+    fn maintenance_actions(&self) -> Vec<MaintenanceActionDescriptor> {
+        vec![MaintenanceActionDescriptor {
+            action_id: mallard_domain::ActionKey::parse("testprov.home.inspect").unwrap(),
+            label: "Inspect test home".to_string(),
+            description: "A test-only read-only maintenance action.".to_string(),
+            scope: MaintenanceActionScope::Profile,
+            requires_confirmation: false,
+            read_only: true,
+            display_rank: 10,
+        }]
     }
 
     fn codec_key(&self) -> &str {
@@ -154,6 +173,13 @@ impl SessionAdapter for TestProviderAdapter {
 
     fn analyze(&self, bytes: &[u8]) -> SessionAnalysis {
         analyze_claude_transcript(bytes)
+    }
+
+    fn analyze_and_summarize(
+        &self,
+        bytes: &[u8],
+    ) -> (SessionAnalysis, Result<SessionFileSummary, String>) {
+        (self.analyze(bytes), self.summarize_bytes(bytes))
     }
 
     fn materialization_targets(

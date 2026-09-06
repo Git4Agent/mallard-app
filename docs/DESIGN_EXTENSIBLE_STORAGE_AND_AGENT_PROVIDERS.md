@@ -1,6 +1,6 @@
 # Design: Extensible Mallard providers and portable contracts
 
-**Status:** proposed clean-cut foundation
+**Status:** implemented
 
 **Date:** 2026-09-03
 
@@ -10,10 +10,10 @@ assistance, and provider maintenance actions
 
 ## 1. Decision
 
-Mallard will use stable, versioned keys in persisted data and compiled
+Mallard uses stable, versioned keys in persisted data and compiled
 registries at runtime.
 
-This design opens four independent extension areas:
+The implementation has four independent extension areas:
 
 - storage providers;
 - agent providers;
@@ -21,12 +21,7 @@ This design opens four independent extension areas:
 - Project Sync resource kinds, apply policies, provenance kinds, and
   tombstone targets.
 
-Mallard will make one final clean cutover while the product has no customers.
-All affected machine-local document schemas and both portable schemas will
-remain `1`. The user can delete disposable `~/.mallard` and cloud test data
-for this cutover.
-
-After the cutover, a built-in addition such as Dropbox storage, Cursor or
+A built-in addition such as Dropbox storage, Cursor or
 Qoder agent support, a Gemini skill, or a Cursor plug-in intent will require:
 
 - a compiled adapter or codec;
@@ -34,7 +29,7 @@ Qoder agent support, a Gemini skill, or a Cursor plug-in intent will require:
 - tests; and
 - a Mallard application release.
 
-It will not require:
+It does not require:
 
 - a new top-level schema version;
 - a migration;
@@ -80,11 +75,11 @@ document.
 
 Registration alone is read-only:
 
-> Given valid schema-1 state written after this cutover, installing and
+> Given valid current schema-1 state, installing and
 > starting a build with more registry entries performs no persistence write.
 
 A persistence write is any create, replace, or delete below the machine-local
-state root, with three exclusions that exist today and hold no provider
+state root, with three exclusions that hold no provider
 state:
 
 - activity-log appends under `logs/`, including the `system.app_started`
@@ -94,7 +89,7 @@ state:
 - the startup recovery command, which must be proven to write nothing when no
   interrupted conversation sync operation exists.
 
-The no-wipe proof in section 14.1 excludes exactly these paths and nothing
+The no-wipe proof in section 13.1 excludes exactly these paths and nothing
 else.
 
 The same rule applies to cloud state:
@@ -116,30 +111,23 @@ A user action can write its normal state:
 An intentional write must not normalize, replace, or remove unrelated
 records.
 
-## 2. Problem and design boundaries
+## 2. Design boundaries
 
-Mallard is only partly extensible now.
+The implemented extension boundaries are:
 
-| Area | Current foundation | Remaining closure |
-|---|---|---|
-| Agent identity | `ProviderKey` is a validated string | None |
-| Agent execution | `ProviderRegistry` dispatches `SessionAdapter` implementations | Adapter boundary is incomplete |
-| Portable agent scopes | Unknown provider keys are preserved | None |
-| Storage configuration | Provider-specific fields and enums | Closed |
-| Configured object store | Provider-specific variants | Closed |
-| Library catalog | Closed provider, kind, format, and target types | Closed |
-| Project Sync resources | `ResourceKind` enum | Closed |
-| Project Sync apply behavior | `ApplyPolicy` enum | Closed |
-| Project Sync provenance | `Provenance` tagged enum | Closed |
-| Project Sync deletion | `TombstoneTarget` tagged enum | Closed |
-| Provider capture result | Common capture enums and conversion matches | Closed |
-| Storage provisioning | R2-only browser flow in the CLI behind the public `launch_r2_agent_setup` command | Closed |
-| Storage setup journal | R2-only schema-1 journal with R2 account, bucket, and jurisdiction fields | Closed |
-| Provider maintenance | Codex-only public commands for conversation-path audit and repair and for the post-pull app restart | Closed |
-| Provider dispatch in common modules | Provider-name matches in the service, the session watcher, and the domain crate | Closed |
+| Area | Current contract |
+|---|---|
+| Agent identity and execution | Validated `ProviderKey` values and registry-dispatched `SessionAdapter` implementations |
+| Portable agent scopes | Unknown provider keys are preserved and inert |
+| Storage | Versioned provider configuration, registered adapters, and one opaque configured object store |
+| Library | Open provider, kind, format, format-version, and target coordinates |
+| Project Sync resources | Open resource, policy, provenance, and tombstone coordinates |
+| Provider capture | Registered portable coordinates plus typed machine-local project-content facts |
+| Storage setup | Descriptor-driven drafts, generic commands, and a provider-neutral journal |
+| Provider maintenance | Actions declared in provider descriptors and run through one generic execute path |
+| Common modules | Registry dispatch without provider-name branches |
 
-The design removes closed discriminants from portable and machine-local
-extension axes. It does not make every internal enum extensible.
+The design does not make every internal enum extensible.
 
 Closed internal types remain valid for:
 
@@ -325,16 +313,13 @@ Provider settings and secrets are separate so the frontend can edit safe
 settings without reading a saved credential.
 
 `SecretMap` holds at most 16 entries. Keys use the stable key grammar; values
-are control-free and at most 64 KiB. The current draft-detail command returns
-a drafted secret so the user can review it before commit. That behavior is
-removed: every draft and configuration response reports secret presence only,
-and a secret typed into the setup form leaves frontend state as soon as the
-draft update completes.
+are control-free and at most 64 KiB. Listings, update responses, committed
+configuration, and edit drafts report secret presence only. An exact fetch of
+a new draft can return that draft's own secret for review before commit; it
+never reveals a secret copied from committed configuration.
 
-The current `supports_conditional_writes` flag leaves the common storage
-record. It is a probe result about one S3-compatible endpoint, so the
-S3-compatible adapter owns it inside its version-1 settings if it still needs
-it.
+Endpoint-specific capabilities are owned by the storage adapter. They do not
+add flags to the common storage record.
 
 OAuth authorization, callbacks, code exchange, and token refresh are outside
 the provider contract. A user supplies a pre-issued storage credential or
@@ -460,29 +445,21 @@ in section 7.4 is registered only when Cursor support lands.
 Not every combination is valid. The exact registered capability defines the
 allowed provider, kind, format, version, target, capture mode, and apply mode.
 
-The two current Codex pet formats become one format key with two registered
-format versions:
+The two Codex pet formats use one format key with two registered format
+versions:
 
-| Current kind | Coordinate after the cutover |
+| Atlas version | Current coordinate |
 |---|---|
-| `codex_pet_v1` | kind `desktop_pet`, format `openai.codex-pet`, version `1` (1536 by 1872 atlas, 8 by 9 cells) |
-| `codex_pet_v2` | kind `desktop_pet`, format `openai.codex-pet`, version `2` (1536 by 2288 atlas, 8 by 11 cells) |
+| `1` | kind `desktop_pet`, format `openai.codex-pet`, version `1` (1536 by 1872 atlas, 8 by 9 cells) |
+| `2` | kind `desktop_pet`, format `openai.codex-pet`, version `2` (1536 by 2288 atlas, 8 by 11 cells) |
 
 Each version keeps its own codec and its own Library repository. There is no
 conversion between them, as today.
 
 ### 4.4 Project Sync resource contracts
 
-The common portable contract must not use these closed extension types:
-
-```rust
-enum ResourceKind { /* ... */ }
-enum ApplyPolicy { /* ... */ }
-enum Provenance { /* ... */ }
-enum TombstoneTarget { /* ... */ }
-```
-
-Replace them with versioned coordinates and bounded envelopes:
+The common portable contract uses versioned coordinates and bounded
+envelopes:
 
 ```rust
 struct ResourceKindCoordinate {
@@ -578,8 +555,8 @@ separate internal type. It is not the open provenance axis in
 
 Two structural rules follow from open keys:
 
-- The current kind-to-provider consistency check moves into the resource-kind
-  adapter, because structural validation cannot know whether an unregistered
+- The kind-to-provider consistency check belongs to the resource-kind
+  adapter because structural validation cannot know whether an unregistered
   kind requires a provider. Structural validation still verifies that a
   provider, when present, is a valid key, and that a provider subtype never
   appears without a provider.
@@ -602,10 +579,8 @@ authority.
 | `CatalogRegistry` | provider, kind, format, and format version | capability, provider adapter, and codec |
 | `PortableResourceRegistry` | resource/policy/provenance/tombstone key and version | narrowly scoped adapter or codec |
 
-Duplicate registrations are startup errors. The current
-`ProviderRegistry::from_adapters` collects into a map and silently keeps the
-last adapter for a repeated key; it must reject the duplicate instead, and
-every registry shares that check and its test.
+Duplicate registrations are startup errors. Every registry rejects a repeated
+key and has direct test coverage for that boundary.
 
 Registry iteration order is ascending key order. Display order is separate:
 each descriptor carries a `display_rank`, the backend sorts descriptors by
@@ -636,27 +611,30 @@ The common storage layer owns:
 - compare-and-swap heads;
 - SHA-256 verification;
 - bounded, revision-bearing reads and listings;
-- conditional deletion against a listed revision; and
-- the exact, nonrecursive managed clear.
+- conditional deletion against a listed revision for stores that declare it;
+  and
+- the exact, nonrecursive managed clear for those stores.
 
-#### Object-store contract correction
+#### Object-store contract
 
-The current trait lists keys without revisions and deletes unconditionally,
-so a managed clear cannot bind a deletion to the revision it listed. The
-common contract changes for every adapter:
+The common contract binds managed deletion to the revision that it listed:
 
 - list entries carry the object key and its opaque revision;
-- delete requires the expected revision and returns `Deleted`, `Missing`, or
-  `Conflict`;
-- there is no delete-any variant; and
+- conditional-delete support defaults to false;
+- supported delete requires the expected revision and returns `Deleted`,
+  `Missing`, or `Conflict`;
+- there is no public delete-any variant;
+- the storage descriptor exposes `supports_managed_clear` for the UI;
+- the backend checks the store capability before any clear I/O; and
 - managed clear stops on the first conflict.
 
-Local verifies its SHA-256 revision under its store lock; S3-compatible
-stores use `If-Match`. The correction lands at the start of Layer 2, before
-the conformance suite is written, and a live R2 run must prove conditional
-delete before Layer 2 merges.
+Local verifies its SHA-256 revision under its store lock. R2 declares no
+conditional-delete support because Cloudflare R2 does not evaluate `If-Match`
+for `DeleteObject`. R2 setup cleanup may delete only its unique generated
+probe key through a private operation and must verify absence. It is not a
+public or managed-clear fallback.
 
-`ConfiguredObjectStore` becomes an opaque wrapper:
+`ConfiguredObjectStore` is an opaque wrapper:
 
 ```rust
 struct ConfiguredObjectStore {
@@ -667,8 +645,8 @@ struct ConfiguredObjectStore {
 
 It must not have Local, R2, Dropbox, or other provider variants.
 
-Every storage adapter must pass one object-store conformance suite. The suite
-must cover:
+Every storage adapter must pass one object-store conformance suite. The
+mandatory cases cover:
 
 - bounded reads;
 - bounded, deterministic, revision-bearing listing;
@@ -676,9 +654,12 @@ must cover:
 - compare-and-swap update;
 - revision conflict behavior;
 - digest verification;
-- conditional delete, including the missing and conflict outcomes;
 - marker isolation; and
 - credential redaction.
+
+Adapters that declare conditional-delete support must also pass the deleted,
+missing, stale-conflict, and replacement-preservation cases. R2 must prove
+that it does not advertise managed clear and does not send conditional delete.
 
 #### Generic setup
 
@@ -702,24 +683,21 @@ to the frontend.
 
 #### Setup assistant
 
-The R2 provisioning flow stays. Today the public `launch_r2_agent_setup`
-command opens an agent CLI with an instruction, the agent runs the packaged
-Mallard CLI, and the CLI drives a browser authorization with Cloudflare's
-tooling, provisions a bucket and an exact-bucket credential, and prepares an
-ordinary storage draft. That flow is R2-specific by nature and remains inside
-the R2 adapter and the CLI's R2 module.
+The R2-specific browser provisioning logic remains inside the R2 adapter and
+the CLI's R2 module. It provisions a bucket and an exact-bucket credential and
+updates an ordinary storage draft.
 
-Its public entry point becomes generic. A storage descriptor may declare one
-`setup_assistant` with a label, a description, and the instruction template
-the agent receives. One command, `launch_storage_setup_assistant`, takes a
-storage provider key and an agent provider key, resolves both through their
-registries, and refuses a provider that declares no assistant. The assistant
-must end in the generic draft flow above; it has no private commit path.
+A storage descriptor can declare one `setup_assistant` with a label,
+description, and instruction template. The generic
+`launch_storage_setup_assistant` command takes the storage provider, agent
+provider, draft ID, and expected revision. It resolves both providers through
+their registries and refuses a storage provider that declares no assistant.
+The assistant has no private commit path.
 
 #### Setup journal
 
-The R2 setup journal becomes a provider-neutral storage setup journal in the
-same schema-1 style: a `setup_id`, the storage provider key and config
+The provider-neutral schema-1 storage setup journal contains a `setup_id`,
+the storage provider key and config
 version, a `stage` (`probe_running` or `cleanup_required`), a sanitized
 `error_code`, timestamps, and a bounded, non-secret `facts` object that the
 adapter types. The R2 adapter's facts are its account ID, bucket, and
@@ -748,10 +726,7 @@ the token is a secret.
 
 ### 5.2 Agent provider adapter
 
-Keep the current `ProviderKey`, provider-scoped repository model, unknown
-provider preservation, and `SessionAdapter` foundation.
-
-Complete the adapter boundary so an agent adapter owns:
+An agent adapter owns:
 
 - profile validation;
 - provider-home discovery;
@@ -784,37 +759,17 @@ profile records. Any later agent provider follows the same rule.
 
 #### Provider maintenance actions
 
-Session actions already flow through adapter-declared descriptors and one
-generic execute command. The same pattern extends to provider-level actions.
-An adapter declares maintenance actions with an action ID in the stable key
-grammar, a label, a scope (`profile`, `project`, or `after_pull`), and a
-confirmation requirement. Two generic commands list and execute them. The
-current Codex-only public commands become declared Codex actions:
-
-| Current command | Declared action |
-|---|---|
-| `audit_codex_conversation_paths` | `codex.conversation_paths.audit`, project scope, read-only |
-| `repair_codex_conversation_paths` | `codex.conversation_paths.repair`, project scope, confirmed |
-| `restart_codex_app_after_pull` | `codex.app.restart`, after-pull scope |
+Session and provider maintenance actions use adapter-declared descriptors and
+one generic execute command. An adapter declares an action ID in the stable key
+grammar, a label, a scope (`profile` or `after_pull`), and a
+confirmation requirement. Codex declares only `codex.app.restart`. There are
+no Codex-specific public commands.
 
 The frontend renders declared actions and never checks a provider key to
 decide whether to show one.
 
-#### Branches to remove
-
-Common modules contain these provider-name branches today. Layer 4 moves each
-behind an adapter method or a declared capability, and the section 14.4
-source guard then rejects reintroduction:
-
-| Location | Branch | Replacement |
-|---|---|---|
-| `src-tauri/src/project_sync/session_watch_service.rs` | watched provider-home subdirectories chosen by key | adapter-declared watch roots |
-| `src-tauri/src/project_sync/service.rs`, conversation push and Pull apply | `is_codex` gates for alias-owner lookup and standalone reconstruction | adapter capability flags beside `supports_tail_cursor` |
-| `crates/mallard-domain/src/lib.rs`, materialized-binding layout check | expected portable tail codec chosen by provider name | codec key recorded on the profile or binding by the adapter |
-| `crates/mallard-domain/src/lib.rs`, conversation thread validation | path-map stamp and wire-tail validation chosen by provider name | adapter-declared wire rules, resolved by the caller and passed into domain validation |
-
-`codex_binary.rs` and the Codex and Claude adapter modules keep provider
-names; they are adapter-local.
+Common execution modules use adapter capabilities. Provider-name logic is
+allowed only inside the owning adapter or maintenance module.
 
 ### 5.3 Library catalog registry
 
@@ -834,6 +789,7 @@ struct CatalogCapabilityDescriptor {
     format: CatalogFormatKey,
     format_version: u32,
     label: String,
+    singular_label: String,
     presentation: CatalogPresentation,
     capture: CaptureSupport,
     apply: ApplySupport,
@@ -854,10 +810,9 @@ The frontend lists capabilities supplied by the backend. It must not contain
 fixed provider, resource-kind, format, target, icon, label, group, or apply
 mode unions.
 
-The current `CatalogProviderAdapter` trait, `adapter_for`, and
-`capability_matrix` in `storage_catalog/adapters.rs` are the seed of this
-registry. Layer 4 opens their keys and adds the format, format-version, and
-target axes; it does not introduce a second adapter layer.
+The catalog registry joins the provider adapter and format codec on open
+provider, kind, format, format-version, and target coordinates. It does not
+introduce a second provider-adapter layer.
 
 ### 5.4 Portable resource registry
 
@@ -906,10 +861,10 @@ The common engine continues to own:
 - exact empty-directory deletion; and
 - atomic apply and receipts.
 
-`CaptureResourceKind` and `CaptureApplyPolicy` must be removed from the common
-capture boundary. An agent adapter emits registered coordinates directly.
-There must be no later conversion match from provider output to the portable
-wire type.
+The common capture boundary has no `CaptureResourceKind` or
+`CaptureApplyPolicy`. An agent adapter emits registered coordinates directly,
+with no later conversion match from provider output to the portable wire
+type.
 
 The backend supplies safe labels, grouping, and availability for these
 contracts. The frontend renders those descriptors and one generic unavailable
@@ -951,7 +906,7 @@ Required command classes are:
 - set, replace, clear, or retain one secret;
 - rename or remove one configured record;
 - launch one declared storage setup assistant;
-- list and execute one declared provider maintenance action; and
+- execute one provider-descriptor maintenance action; and
 - plan, approve, and apply one reviewed sync or catalog operation.
 
 The backend owns merging and unknown-field preservation.
@@ -992,11 +947,8 @@ does not change an older bundle.
 
 ### 7.3 Library schema 1
 
-The existing `.mallard/v1/library/...` object-key grammar stays unchanged.
-Repository IDs and the tag shape do change, because the derivation gains the
-format and format version. Every Library repository therefore has a new ID
-after the cutover; the disposable pre-cutover cloud data is deleted, not
-mapped.
+The `.mallard/v1/library/...` object-key grammar is unchanged. Repository IDs
+derive from the provider, kind, format, and format version.
 
 The repository tag is open by coordinate:
 
@@ -1178,33 +1130,11 @@ Official references:
 Provider adapters must use version-pinned tests for any external format or
 local layout on which automatic capture or apply depends.
 
-## 11. One-time clean cutover
+## 11. Clean-cutover contract
 
-This repository does not preserve the pre-cutover format. The cutover keeps
-the top-level schema number `1` because all disposable pre-cutover local and
-cloud state will be deleted before retesting.
-
-Remove, do not migrate:
-
-- flat provider-specific `StorageConfig` fields;
-- a closed `StorageKind`;
-- provider variants in `ConfiguredObjectStore`;
-- the provider-specific public storage setup commands
-  `launch_r2_agent_setup`, `upsert_r2_storage`, and `test_r2_storage`;
-- the R2-only setup journal and its R2 field shape;
-- the Codex-only public commands for conversation-path audit and repair and
-  for the post-pull app restart;
-- `supports_conditional_writes` on the common storage record;
-- key-only listing and unconditional delete in the object-store trait;
-- closed Library provider, resource-kind, format, and target enums;
-- closed Library resource payload variants;
-- closed Project Sync `ResourceKind`, `ApplyPolicy`, `Provenance`, and
-  `TombstoneTarget` wire types;
-- `CaptureResourceKind` and `CaptureApplyPolicy` in the common capture
-  boundary;
-- conversion matches from capture output to portable descriptors;
-- frontend provider, kind, format, policy, provenance, or target unions; and
-- whole-document provider-config replacement from the frontend.
+The repository supports only the current schema-1 product path. Provider
+configuration, setup, maintenance, capture, portable resources, and Library
+resources use their registered, provider-neutral interfaces.
 
 Do not add:
 
@@ -1214,10 +1144,10 @@ Do not add:
 - dual writers;
 - legacy commands;
 - fallback parsing; or
-- automatic import from the deleted state.
+- automatic import from pre-cutover state.
 
-After this cutover, every addition in the compatibility table must satisfy the
-no-write and no-rewrite guarantees.
+Every addition in the compatibility table must satisfy the no-write and
+no-rewrite guarantees.
 
 ## 12. Source ownership
 
@@ -1230,13 +1160,14 @@ Keep execution and safety responsibilities in their current layers.
 | Immutable publication, restore planning, backups, and apply | `crates/mallard-infrastructure/src/bundle_engine.rs` |
 | Tauri orchestration and focused transactions | `src-tauri/src/project_sync/` |
 | Bounded atomic machine-local persistence | `crates/mallard-infrastructure/src/persistence.rs` and catalog persistence |
-| Neutral object-store trait, object keys, Local, R2, and Dropbox adapters | `crates/mallard-infrastructure/src/storage_core/` |
+| Neutral object-store trait, object keys, and Local and S3-compatible transports | `crates/mallard-infrastructure/src/storage_core/` |
+| Storage-provider descriptors, configuration, setup, and store construction | `crates/mallard-infrastructure/src/storage_providers/` |
 | Library coordinates, registries, codecs, inventory, plans, and apply | `src-tauri/src/storage_catalog/` |
 | Provider-neutral frontend DTOs and views | `src/types.ts` and feature-local frontend modules |
-| Storage drafts, commit transactions, and assistant launch | `crates/mallard-application/src/storage_setup.rs`, provider-neutral after Layer 2 |
+| Storage drafts, commit transactions, and assistant instructions | `crates/mallard-application/src/storage_setup.rs` |
 | R2 provisioning assistant | `crates/mallard-cli/src/r2_browser_setup.rs`, inside the R2 adapter boundary; the CLI resolves storage providers through the same registry |
-| Storage setup journal | `crates/mallard-infrastructure/src/storage_setup_journal.rs`, replacing `r2_setup_journal.rs` |
-| Provider maintenance actions | adapter modules under `providers/`; the generic list and execute commands in `src-tauri/src/project_sync/` |
+| Storage setup journal | `crates/mallard-infrastructure/src/storage_setup_journal.rs` |
+| Provider maintenance actions | `src-tauri/src/project_sync/maintenance.rs` and provider-owned modules such as `codex_maintenance.rs` |
 
 `mallard-domain` stays free of Tauri and filesystem concerns. The Library
 remains independent of Project Sync feature DTOs and components.
@@ -1244,87 +1175,9 @@ remains independent of Project Sync feature DTOs and components.
 Do not create one universal provider trait. Storage, agent, catalog, resource,
 policy, provenance, and tombstone registrations have different authority.
 
-## 13. Implementation sequence
+## 13. Required release tests
 
-Each layer must leave a working end-to-end product. A closed type is removed
-in the layer that replaces it, and the matching section 14.4 source guard is
-enabled in that same layer, never earlier. No layer may carry a temporary
-provider-name branch to bridge to the next one; that is why the storage
-envelope moves with the storage registry in Layer 2 rather than landing
-alone in Layer 1.
-
-### Layer 1 — Stable keys, bounded objects, and IPC
-
-- add the validated key newtypes;
-- add bounded config and portable objects with their limit tests and
-  canonical form;
-- add the agent and catalog profile config envelopes at version `1` with
-  empty settings;
-- add secret presence operations;
-- replace whole-document frontend writes with focused commands; and
-- prove no-write startup under the section 1.2 definition and
-  unknown-record preservation.
-
-### Layer 2 — Storage registry
-
-- correct the object-store trait: revision-bearing listing and conditional
-  delete for Local and R2, with the live R2 proof;
-- add `StorageProviderRegistry` with duplicate rejection;
-- replace the flat storage record with `StorageProviderConfig` and make Local
-  and R2 compiled adapters;
-- replace provider variants with `Arc<dyn ObjectStore>`;
-- add generic setup descriptors, drafts, and the generic assistant launch,
-  and move the R2 browser flow behind the R2 descriptor;
-- replace the R2 setup journal with the neutral setup journal;
-- remove the three R2-specific public commands; and
-- pass the shared object-store conformance suite.
-
-### Layer 3 — Portable resource registry
-
-- replace the four closed Project Sync wire axes;
-- register all current version-1 contracts;
-- move the kind-to-provider consistency check into the resource-kind
-  adapter and add the unregistered-tombstone map key;
-- remove common capture enums and conversion matches;
-- make plans pin exact contract coordinates; and
-- prove current Codex and Claude behavior is unchanged.
-
-### Layer 4 — Agent and catalog registries
-
-- complete the agent adapter boundary and remove every branch in the section
-  5.2 table;
-- add `display_rank` and declared maintenance actions, and remove the three
-  Codex-specific public commands;
-- open all Library coordinate axes on the existing catalog adapter seed;
-- register current Codex and Claude skills, the shared plug-in intent
-  format, and the two Codex pet format versions;
-- derive Library repository IDs from open coordinates; and
-- make the frontend descriptor-driven, including ordering and actions.
-
-### Layer 5 — Extension proofs
-
-Use test-only registrations to add:
-
-- one storage provider, with a declared setup assistant;
-- one agent provider, with a declared maintenance action;
-- one Library kind, format, format version, and target;
-- one Project Sync resource kind;
-- one apply policy;
-- one provenance kind; and
-- one tombstone target.
-
-Each proof must add no common provider-name branch and require no state
-conversion.
-
-### Layer 6 — Product additions
-
-Add Dropbox, Qoder, Cursor, or Gemini support only after the corresponding
-extension proof passes. Each product addition then changes only its adapter
-or codec, registry entry, descriptor assets, and tests.
-
-## 14. Required release tests
-
-### 14.1 No-wipe proof
+### 13.1 No-wipe proof
 
 Use temporary machine-local roots only.
 
@@ -1344,7 +1197,7 @@ Then configure the new provider and assert:
 - unknown records remain intact; and
 - no migration or reset path ran.
 
-### 14.2 Open-cloud proof
+### 13.2 Open-cloud proof
 
 Use a temporary object store.
 
@@ -1358,41 +1211,22 @@ Use a temporary object store.
 An older registry must parse the new coordinate as unavailable and inert. A
 later registry must activate it without conversion.
 
-### 14.3 Registry and safety tests
+### 13.3 Registry and safety tests
 
 | Area | Required proof |
 |---|---|
-| Storage | duplicate-key rejection, unknown provider, unsupported version, typed decoding, redaction, deterministic order, all object-store conformance cases including revision-bearing listing and the conditional-delete outcomes |
+| Storage | duplicate-key rejection, unknown provider, unsupported version, typed decoding, redaction, deterministic order, revision-bearing listing, the mandatory object-store cases, conditional-delete outcomes for providers that advertise managed clear, and R2 refusal of managed clear without a remote delete |
 | Storage setup | generic assistant launch refuses a provider without an assistant, neutral journal round-trip and bounds, no R2 field in the common journal shape |
-| Agent | current Codex and Claude parity, test provider addition, unknown scope preservation, isolated provider failure, display-rank ordering, declared maintenance actions listed and executed without a provider-name check |
+| Agent | current Codex and Claude parity, test provider addition, unknown scope preservation, isolated provider failure, display-rank ordering, declared maintenance actions exposed and executed without a provider-name check |
 | Library | test provider/kind/format/version/target additions, deterministic repository ID, invalid combination rejection, unknown coordinate inertness, descriptor-driven frontend |
 | Project resources | test kind/policy/provenance/tombstone additions, exact recipe-policy match, direct capture coordinates, unknown contract scope isolation |
 | IPC | focused revision conflicts, secret presence operations, unknown subtree preservation, no full config or local target identity in frontend DTOs |
 | Apply | plan coordinate pins, digest and revision recheck, expiry, canonical paths, backups, deletion limits, receipts |
 
-### 14.4 Source guards
+### 13.4 Verification commands
 
-Tests must reject reintroduction of:
-
-- a closed storage-provider enum in persisted configuration;
-- provider variants in `ConfiguredObjectStore`;
-- provider-specific public commands of any kind, including setup and
-  maintenance;
-- an R2-specific or otherwise provider-specific setup journal shape;
-- key-only listing or unconditional delete on the object-store trait;
-- closed Library provider, kind, format, or target unions;
-- closed portable `ResourceKind`, `ApplyPolicy`, `Provenance`, or
-  `TombstoneTarget` discriminants;
-- `CaptureResourceKind` or `CaptureApplyPolicy` in common capture output;
-- provider-name matches in common execution modules; and
-- complete provider documents sent to or replaced by the frontend.
-
-Typed enums and matches inside one adapter are allowed.
-
-### 14.5 Verification commands
-
-Run the smallest relevant check during each layer. Run the full handoff set
-after the cutover:
+Run the smallest relevant check while editing. Run the full handoff set before
+release:
 
 ```bash
 npm run build
@@ -1404,7 +1238,7 @@ npm run test:integration
 
 Some object-store tests can require permission to bind a loopback server.
 
-## 15. Rejected alternatives
+## 14. Rejected alternatives
 
 | Alternative | Reason for rejection |
 |---|---|
@@ -1417,17 +1251,17 @@ Some object-store tests can require permission to bind a loopback server.
 | Use one universal provider trait | It combines unrelated authority and weakens module boundaries |
 | Load Rust dynamic libraries | It creates ABI, signing, update, sandbox, and trust problems |
 | Let JSON manifests define commands or paths | Persisted data would become executable authority |
-| Preserve pre-cutover readers and writers | There are no customers, and the project requires a clean cutover |
+| Preserve pre-cutover readers and writers | The product contract has one current schema-1 execution path |
 
-## 16. Completion criteria
+## 15. Completion criteria
 
-The foundation is complete only when all these statements are true:
+The foundation enforces these completion properties:
 
 1. All affected machine-local document schemas and the Project Sync and
    Library portable schemas remain `1`.
 2. Startup with a larger compiled registry performs no persistence or cloud
    write.
-3. Existing post-cutover state needs no migration, wipe, or rewrite.
+3. Existing current state needs no migration, wipe, or rewrite.
 4. All persisted extension axes use validated versioned keys or envelopes.
 5. Unknown keys and versions load, remain inert, and survive focused edits.
 6. Only exact compiled registrations can execute.
@@ -1444,13 +1278,14 @@ The foundation is complete only when all these statements are true:
 13. Generic bounded objects cannot define executable behavior.
 14. Review, integrity, path, backup, and deletion invariants remain enforced
     by common code.
-15. Dropbox, Cursor, Gemini, and Qoder can be added after the cutover without
+15. Dropbox, Cursor, Gemini, and Qoder can be added without
     changing a top-level schema or deleting `~/.mallard`.
-16. The object-store trait carries revision-bearing listing and conditional
-    delete, and Local and R2 pass those conformance cases, with a live R2
-    proof of conditional delete.
+16. The object-store trait carries revision-bearing listing and gates
+    conditional delete. Local passes the conditional-delete cases. R2 does not
+    advertise managed clear, rejects it before remote I/O, and sends no
+    conditional delete.
 17. No public command names a storage or agent provider. The R2 provisioning
-    assistant and the Codex maintenance actions run through declared
+    assistant and the Codex maintenance action run through declared
     descriptors and generic commands.
 18. The storage setup journal is provider-neutral and holds provider facts
     only inside a bounded object.

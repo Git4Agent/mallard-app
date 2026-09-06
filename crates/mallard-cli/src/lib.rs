@@ -130,7 +130,8 @@ mod tests {
             Ok(vec![StorageSummary {
                 storage_id: "storage-safe".to_string(),
                 name: "Team backup".to_string(),
-                kind: "r2",
+                provider: "r2".to_string(),
+                provider_label: "Cloudflare R2".to_string(),
             }])
         }
 

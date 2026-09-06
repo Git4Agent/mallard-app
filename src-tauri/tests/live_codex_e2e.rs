@@ -20,23 +20,23 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use mallard_domain::{
-    ActionId, BundleId, CloudThreadId, ConversationFileRole, ConversationPlanActionType,
-    ConversationReviewAction, DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection,
-    LocalConversationBinding, LocalProjectId, ProjectBinding, ProjectSetupDraft, ProviderKey,
-    ResourceId, RestoreActionKind, RestorePlan, StorageConfig, StorageId, StorageKind,
-    SyncScopeKey, ThreadId, MAX_CONVERSATION_FILE_BYTES,
+    ActionId, BundleId, CloudThreadId, ConversationFileRole, ConversationReviewAction,
+    DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection, LocalConversationBinding,
+    LocalProjectId, ProjectBinding, ProjectSetupDraft, ProviderKey, ResourceId, RestoreActionKind,
+    RestorePlan, StorageConfig, StorageId, SyncScopeKey, ThreadId, MAX_CONVERSATION_FILE_BYTES,
 };
 use mallard_infrastructure::codex_history_graph::{resolve_codex_root, seed_codex_root};
 use mallard_infrastructure::codex_paginated_projection::verify_projection_fixpoint;
 use mallard_infrastructure::codex_rollout::analyze_codex_rollout_structure;
 use mallard_infrastructure::codex_standalone_builder::{
-    build_standalone_codex_root, StandaloneBuildMode,
+    decode_standalone_codex_root, encode_standalone_codex_root,
 };
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::providers::{
-    ProviderRegistry, SessionCountQuality, SessionTimelineContext, SessionTimelineQuery,
+    AgentProviderRegistry, SessionCountQuality, SessionTimelineContext, SessionTimelineQuery,
 };
 use mallard_infrastructure::storage_core::repository_object_key;
+use mallard_infrastructure::storage_providers::local::local_storage_config;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
@@ -2068,15 +2068,16 @@ fn validate_paginated_rollout(
         seeded.mapping.consumed_record_ordinal,
         exact_cutoff(&node.provider_thread_id, &bytes).end_ordinal_exclusive
     );
-    let artifact = build_standalone_codex_root(
+    let artifact = encode_standalone_codex_root(
         &resolved,
-        &StandaloneBuildMode::Encode {
-            root: project_root.to_string_lossy().into_owned(),
-            canonical_root: std::fs::canonicalize(project_root)
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned()),
-        },
+        &project_root.to_string_lossy().into_owned(),
+        (std::fs::canonicalize(project_root)
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned()))
+        .as_deref(),
         None,
+        &mut mallard_infrastructure::credential_redaction::shared().begin_run(),
+        &mallard_infrastructure::session_path_origins::PathOrigins::default(),
     )
     .expect("standalone production builder rejected generated paginated rollout");
     assert_eq!(artifact.message_count as usize, node.expected.len());
@@ -2389,15 +2390,16 @@ fn append_paginated_turn(
         seeded.mapping.consumed_record_ordinal,
         start_ordinal + records.len() as u64
     );
-    build_standalone_codex_root(
+    encode_standalone_codex_root(
         &refreshed,
-        &StandaloneBuildMode::Encode {
-            root: project_root.to_string_lossy().into_owned(),
-            canonical_root: std::fs::canonicalize(project_root)
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned()),
-        },
+        &project_root.to_string_lossy().into_owned(),
+        (std::fs::canonicalize(project_root)
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned()))
+        .as_deref(),
         None,
+        &mut mallard_infrastructure::credential_redaction::shared().begin_run(),
+        &mallard_infrastructure::session_path_origins::PathOrigins::default(),
     )
     .expect("standalone production builder rejected appended paginated rollout");
 }
@@ -2544,7 +2546,7 @@ fn timeline_history_from_standalone(
     let mut project_root_aliases = vec![project_root.to_path_buf(), canonical_project_root.clone()];
     project_root_aliases.sort();
     project_root_aliases.dedup();
-    let registry = ProviderRegistry::production();
+    let registry = AgentProviderRegistry::production();
     let adapter = registry
         .require(&codex_key())
         .map_err(|_| failure(5, 0, 0, 0))?;
@@ -2707,15 +2709,16 @@ fn resolved_local_alias_history(
         "production resolver rejected exact local history alias",
     );
     let artifact = redacted(
-        build_standalone_codex_root(
+        encode_standalone_codex_root(
             &resolved,
-            &StandaloneBuildMode::Encode {
-                root: project_root.to_string_lossy().into_owned(),
-                canonical_root: std::fs::canonicalize(project_root)
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned()),
-            },
+            &project_root.to_string_lossy().into_owned(),
+            (std::fs::canonicalize(project_root)
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned()))
+            .as_deref(),
             root_tail_layout,
+            &mut mallard_infrastructure::credential_redaction::shared().begin_run(),
+            &mallard_infrastructure::session_path_origins::PathOrigins::default(),
         ),
         "production standalone builder rejected exact local history alias",
     );
@@ -3102,19 +3105,11 @@ fn verify_all_histories(
 }
 
 fn local_storage(storage_root: &Path) -> StorageConfig {
-    StorageConfig {
-        id: StorageId::parse("storage-live-codex-e2e").expect("static storage id"),
-        name: "Live Codex local storage".to_string(),
-        kind: StorageKind::Local,
-        bucket: String::new(),
-        access_key_id: String::new(),
-        secret_access_key: String::new(),
-        account_id: String::new(),
-        s3_endpoint: String::new(),
-        region: String::new(),
-        local_dir: storage_root.to_string_lossy().into_owned(),
-        supports_conditional_writes: None,
-    }
+    local_storage_config(
+        StorageId::parse("storage-live-codex-e2e").expect("static storage id"),
+        "Live Codex local storage",
+        storage_root,
+    )
 }
 
 fn codex_key() -> ProviderKey {
@@ -3122,12 +3117,25 @@ fn codex_key() -> ProviderKey {
 }
 
 fn finish_setup(
+    repository: &LocalStateRepository,
     service: &ProjectSyncService<'_>,
     project_root: &Path,
     codex_home: &Path,
     storage: StorageConfig,
     repository_choice: DraftRepositoryChoice,
 ) -> ProjectDetail {
+    let storage_id = storage.id.clone();
+    let mut config = redacted(
+        repository.load_config(),
+        "cannot load storage configuration",
+    );
+    if !config.storages.iter().any(|stored| stored.id == storage_id) {
+        config.storages.push(storage);
+        redacted(
+            repository.save_config(config),
+            "cannot save storage configuration",
+        );
+    }
     let mut draft: ProjectSetupDraft = redacted(
         service.create_setup_draft(project_root),
         "cannot create project setup draft",
@@ -3140,7 +3148,7 @@ fn finish_setup(
             display_name: String::new(),
         },
     );
-    draft.storage = Some(DraftStorageSelection::Pending { storage });
+    draft.storage = Some(DraftStorageSelection { storage_id });
     draft.repository = repository_choice;
     let draft = redacted(
         service.update_setup_draft(draft),
@@ -3163,18 +3171,9 @@ fn approved_pull_actions(plan: &RestorePlan) -> Vec<ActionId> {
         .filter(|action| !matches!(action.kind, RestoreActionKind::Manual { .. }))
         .map(|action| action.action_id.clone())
         .chain(
-            plan.conversation_actions
+            plan.conversation_review
                 .iter()
-                .filter(|action| {
-                    matches!(
-                        action.action,
-                        ConversationPlanActionType::AdoptCloudMetadata
-                            | ConversationPlanActionType::MaterializeCloud
-                            | ConversationPlanActionType::KeepBoth
-                            | ConversationPlanActionType::CreateLocal
-                    )
-                })
-                .map(|action| action.action_id.clone()),
+                .filter_map(|row| row.action_id.clone()),
         )
         .collect()
 }
@@ -3190,7 +3189,7 @@ fn pull_and_apply(
         "cannot plan reviewed Pull",
     );
     let result = redacted(
-        service.apply_bundle_restore(&plan.plan_id, approved_pull_actions(&plan)),
+        service.apply_bundle_restore(&plan, approved_pull_actions(&plan)),
         "cannot apply reviewed Pull",
     );
     assert!(result.success, "reviewed Pull did not complete");
@@ -3449,17 +3448,20 @@ fn assert_local_file_change_keys(bytes: &[u8], project_root: &Path, outside_root
 }
 
 fn assert_portable_file_change_keys(bytes: &[u8], outside_root: &Path) {
-    let expected = IN_PROJECT_FIXTURES
-        .iter()
-        .map(|(relative, _)| format!("/__mallard_root__/{relative}"))
-        .chain(
-            canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES)
-                .into_iter()
-                .map(|path| path.to_string_lossy().into_owned()),
-        )
-        .collect::<BTreeSet<_>>();
+    let actual = file_change_keys(bytes);
+    let candidates = ["b", "c"].map(|style| {
+        IN_PROJECT_FIXTURES
+            .iter()
+            .map(|(relative, _)| format!("/__mallard_root__/{style};/{relative}"))
+            .chain(
+                canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES)
+                    .into_iter()
+                    .map(|path| path.to_string_lossy().into_owned()),
+            )
+            .collect::<BTreeSet<_>>()
+    });
     assert!(
-        file_change_keys(bytes) == expected,
+        candidates.contains(&actual),
         "portable rollout file-change keys did not tokenize only in-project fixtures"
     );
 }
@@ -3571,9 +3573,11 @@ fn assert_portable_rollout_paths(
     );
     assert_portable_file_change_keys(&bytes, outside_root);
     for (relative, _) in IN_PROJECT_FIXTURES {
-        let token_path = format!("/__mallard_root__/{relative}");
         assert!(
-            byte_slice_contains(&bytes, token_path.as_bytes()),
+            ["b", "c"].iter().any(|style| byte_slice_contains(
+                &bytes,
+                format!("/__mallard_root__/{style};/{relative}").as_bytes()
+            )),
             "portable rollout lacks an expected tokenized project path"
         );
     }
@@ -3843,11 +3847,11 @@ fn local_thread_of_cloud(
 /// Plans are pure intent: the divergent offer names the local thread and
 /// mints nothing — every keep-both identity exists only after apply.
 fn assert_keep_both_offered(plan: &RestorePlan, logical_thread_id: &ThreadId) {
-    plan.conversation_actions
+    plan.conversation_review
         .iter()
-        .find(|action| {
-            action.thread_id.as_ref() == Some(logical_thread_id)
-                && action.action == ConversationPlanActionType::KeepBoth
+        .find(|row| {
+            row.thread_id.as_ref() == Some(logical_thread_id)
+                && row.action == ConversationReviewAction::KeepBoth
         })
         .expect("divergent Pull does not offer Keep Both");
 }
@@ -4074,15 +4078,16 @@ fn assert_pulled_standalone_rollout(
         .expect("production graph resolver rejected pulled standalone rollout");
     assert_eq!(resolved.segments.len(), 1);
     assert_eq!(resolved.chain.len(), expected.len());
-    let artifact = build_standalone_codex_root(
+    let artifact = encode_standalone_codex_root(
         &resolved,
-        &StandaloneBuildMode::Encode {
-            root: project_root.to_string_lossy().into_owned(),
-            canonical_root: std::fs::canonicalize(project_root)
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned()),
-        },
+        &project_root.to_string_lossy().into_owned(),
+        (std::fs::canonicalize(project_root)
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned()))
+        .as_deref(),
         None,
+        &mut mallard_infrastructure::credential_redaction::shared().begin_run(),
+        &mallard_infrastructure::session_path_origins::PathOrigins::default(),
     )
     .expect("production standalone builder rejected pulled rollout");
     let actual = timeline_history_from_standalone(
@@ -4428,7 +4433,7 @@ fn assert_offline_path_timeline(
     outside_root: &Path,
     expected_provider_call_id: &str,
 ) {
-    let adapter = ProviderRegistry::production()
+    let adapter = AgentProviderRegistry::production()
         .require(&codex_key())
         .expect("Codex session adapter is unavailable");
     let context = SessionTimelineContext {
@@ -5087,20 +5092,20 @@ fn current_codex_nested_file_edit_paths_survive_wire_projection() {
     let no_bases = |_: &str| Ok(None);
     let source = resolve_codex_root(&source_rollout, &no_bases)
         .expect("resolve source current Codex path fixture");
-    let wire = build_standalone_codex_root(
+    let wire = encode_standalone_codex_root(
         &source,
-        &StandaloneBuildMode::Encode {
-            root: project1.to_string_lossy().into_owned(),
-            canonical_root: Some(project1.to_string_lossy().into_owned()),
-        },
+        &project1.to_string_lossy().into_owned(),
+        (Some(project1.to_string_lossy().into_owned())).as_deref(),
         None,
+        &mut mallard_infrastructure::credential_redaction::shared().begin_run(),
+        &mallard_infrastructure::session_path_origins::PathOrigins::default(),
     )
     .expect("encode current Codex path fixture");
     assert_portable_file_change_keys(&wire.root_bytes, &project1_external);
     for (relative, _) in IN_PROJECT_FIXTURES {
         assert!(byte_slice_contains(
             &wire.root_bytes,
-            format!("/__mallard_root__/{relative}").as_bytes()
+            format!("/__mallard_root__/b;/{relative}").as_bytes()
         ));
     }
     for path in &inside_paths {
@@ -5114,13 +5119,11 @@ fn current_codex_nested_file_edit_paths_survive_wire_projection() {
     std::fs::write(&wire_rollout, &wire.root_bytes).expect("write portable path fixture rollout");
     let wire_root = resolve_codex_root(&wire_rollout, &no_bases)
         .expect("resolve portable current Codex path fixture");
-    let target = build_standalone_codex_root(
+    let target = decode_standalone_codex_root(
         &wire_root,
-        &StandaloneBuildMode::Decode {
-            root_provider_thread_id: target_thread_id,
-            target_root: project1_copy.to_string_lossy().into_owned(),
-            canonical_target_root: Some(project1_copy.to_string_lossy().into_owned()),
-        },
+        &target_thread_id,
+        &project1_copy.to_string_lossy().into_owned(),
+        (Some(project1_copy.to_string_lossy().into_owned())).as_deref(),
         None,
     )
     .expect("decode current Codex path fixture");
@@ -5174,28 +5177,28 @@ fn current_codex_paginated_graph_fixture_passes_production_validators() {
     let p2_path = graph.nodes["p2"].path.clone();
     let lookup = |thread_id: &str| rollout_lookup(&codex_home, thread_id);
     let resolved = resolve_codex_root(&p2_path, &lookup).expect("resolve native P2 fixture");
-    let wire = build_standalone_codex_root(
+    let wire = encode_standalone_codex_root(
         &resolved,
-        &StandaloneBuildMode::Encode {
-            root: project_root.to_string_lossy().into_owned(),
-            canonical_root: std::fs::canonicalize(&project_root)
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned()),
-        },
+        &project_root.to_string_lossy().into_owned(),
+        (std::fs::canonicalize(&project_root)
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned()))
+        .as_deref(),
         None,
+        &mut mallard_infrastructure::credential_redaction::shared().begin_run(),
+        &mallard_infrastructure::session_path_origins::PathOrigins::default(),
     )
     .expect("encode standalone P2 fixture");
     std::fs::write(&p2_path, wire.root_bytes).expect("stage wire P2 fixture");
     let wire_resolved = resolve_codex_root(&p2_path, &lookup).expect("resolve wire P2 fixture");
-    let local = build_standalone_codex_root(
+    let local = decode_standalone_codex_root(
         &wire_resolved,
-        &StandaloneBuildMode::Decode {
-            root_provider_thread_id: P2.to_string(),
-            target_root: project_root.to_string_lossy().into_owned(),
-            canonical_target_root: std::fs::canonicalize(&project_root)
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned()),
-        },
+        &P2,
+        &project_root.to_string_lossy().into_owned(),
+        (std::fs::canonicalize(&project_root)
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned()))
+        .as_deref(),
         None,
     )
     .expect("decode standalone P2 fixture");
@@ -5358,6 +5361,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     // thread and publishes the first content revision 2.
     eprintln!("live Codex phase: conversation revisions 2-6");
     let first = finish_setup(
+        &repository1,
         &service1,
         &project1,
         &myconf1,
@@ -5459,6 +5463,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     // Replica B links the existing repository, pulls content revision 2,
     // resumes the materialized task, and publishes its branch as revision 3.
     let second = finish_setup(
+        &repository2,
         &service2,
         &project1_copy,
         &myconf2,
@@ -5587,10 +5592,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     );
     assert_keep_both_offered(&divergent_plan1, &logical_thread);
     let divergent_apply1 = redacted(
-        service1.apply_bundle_restore(
-            &divergent_plan1.plan_id,
-            approved_pull_actions(&divergent_plan1),
-        ),
+        service1.apply_bundle_restore(&divergent_plan1, approved_pull_actions(&divergent_plan1)),
         "cannot apply first Keep Both",
     );
     assert!(divergent_apply1.success);
@@ -5709,10 +5711,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     );
     assert_keep_both_offered(&divergent_plan2, &logical_thread2);
     let divergent_apply2 = redacted(
-        service2.apply_bundle_restore(
-            &divergent_plan2.plan_id,
-            approved_pull_actions(&divergent_plan2),
-        ),
+        service2.apply_bundle_restore(&divergent_plan2, approved_pull_actions(&divergent_plan2)),
         "cannot apply second Keep Both",
     );
     assert!(divergent_apply2.success);
@@ -6014,10 +6013,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     );
     assert_keep_both_offered(&seventh_plan_a, &graph_threads["p3"]);
     let seventh_apply_a = redacted(
-        service1.apply_bundle_restore(
-            &seventh_plan_a.plan_id,
-            approved_pull_actions(&seventh_plan_a),
-        ),
+        service1.apply_bundle_restore(&seventh_plan_a, approved_pull_actions(&seventh_plan_a)),
         "cannot apply mixed paginated Pull on replica A",
     );
     assert!(seventh_apply_a.success);
@@ -6179,7 +6175,7 @@ fn live_codex_mallard_setup_push_pull_divergence() {
     );
     assert_keep_both_offered(&ninth_plan_b, &graph_threads_b["p4"]);
     let ninth_apply_b = redacted(
-        service2.apply_bundle_restore(&ninth_plan_b.plan_id, approved_pull_actions(&ninth_plan_b)),
+        service2.apply_bundle_restore(&ninth_plan_b, approved_pull_actions(&ninth_plan_b)),
         "cannot apply reverse Keep Both",
     );
     assert!(ninth_apply_b.success);

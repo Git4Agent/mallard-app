@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import PushResourceWorkspace, {
-  preserveSyncedPushRecipeEntries,
   pullRequiredCopy,
   pushReviewBlockers,
   pushReviewPullHolds,
@@ -15,7 +14,7 @@ import { recipeWithSelection } from "../../src/components/project-sync/model";
 import type {
   BundleRecipe,
   ConversationReviewAction,
-  ProjectResourceDescriptor,
+  InventoryResource,
   ThreadSyncEntry,
   ThreadSyncComparison,
   ThreadSyncDecision,
@@ -32,39 +31,47 @@ function decision(
   };
 }
 
+/* Inventory rows as the backend flattens them: the portable descriptor plus
+   the presentation its registered contracts supply. */
 function memoryResource(
   name: string,
   blockedReason: string | null = null,
-): ProjectResourceDescriptor {
+): InventoryResource {
   return {
     resource_id: `codex:memory:${name}`,
-    kind: "provider_state",
+    kind: { key: "provider_state", version: 1 },
     provider: "codex",
     provider_resource_type: "memory",
     display_name: name,
-    provenance: { kind: "unknown" },
-    apply_policy: blockedReason ? "explicit_review" : "safe_file",
+    provenance: { kind: "unknown", version: 1, fields: {} },
+    apply_policy: { key: blockedReason ? "explicit_review" : "safe_file", version: 1 },
     codec_version: 1,
-    metadata: {},
+    attributes: {},
     category: "conversations",
+    kind_label: "Provider state",
+    apply_policy_label: blockedReason ? "Explicit review" : "Safe file",
+    selectable: true,
     logical_paths: [`state/codex/memory/${name}/context.md`],
     default_selected: false,
     blocked_reason: blockedReason,
   };
 }
 
-function conversation(resourceId: string): ProjectResourceDescriptor {
+function conversation(resourceId: string): InventoryResource {
   return {
     resource_id: resourceId,
-    kind: "conversation",
+    kind: { key: "conversation", version: 1 },
     provider: "codex",
     provider_resource_type: "session",
     display_name: resourceId,
-    provenance: { kind: "conversation" },
-    apply_policy: "safe_file",
+    provenance: { kind: "conversation", version: 1, fields: {} },
+    apply_policy: { key: "safe_file", version: 1 },
     codec_version: 1,
-    metadata: {},
+    attributes: {},
     category: "conversations",
+    kind_label: "Conversation",
+    apply_policy_label: "Safe file",
+    selectable: true,
     default_selected: false,
   };
 }
@@ -166,15 +173,15 @@ test("recommended Push selection includes only locally changed sessions", () => 
       required: false,
     }])),
   };
-  const selectedRecipe: BundleRecipe = {
-    ...sourceRecipe,
-    entries: { [memory.resource_id]: sourceRecipe.entries[memory.resource_id] },
-  };
-  const publishedRecipe = preserveSyncedPushRecipeEntries(selectedRecipe, sourceRecipe, comparison);
+  const publishedRecipe = recipeWithSelection(
+    sourceRecipe,
+    [localAhead, synced, storageAhead, memory],
+    recommended,
+  );
   assert.deepEqual(
     Object.keys(publishedRecipe.entries).sort(),
-    [synced.resource_id, memory.resource_id].sort(),
-    "unchecked synced sessions stay stored without appearing in the recommended action set",
+    [localAhead.resource_id, memory.resource_id].sort(),
+    "stored sessions outside the selection must not enter the capture recipe",
   );
 });
 
@@ -296,10 +303,11 @@ test("a group states its own name once, and counts its blocked rows rather than 
   const requirement = (
     name: string,
     blockedReason: string | null = null,
-  ): ProjectResourceDescriptor => ({
+  ): InventoryResource => ({
     ...memoryResource(name, blockedReason),
     resource_id: `codex:requirement:${name}`,
-    kind: "requirement" as const,
+    kind: { key: "requirement", version: 1 },
+    kind_label: "Requirement",
     category: "tools",
   });
   const html = renderToStaticMarkup(
@@ -339,11 +347,12 @@ test("a resource named by its own id states that id once, and says why once", ()
   // The shape the service returns for a recipe entry that no longer resolves
   // locally: the id is the only available name.
   const ghostId = "codex:session:687bc2c4-9612-313d-a3d2-6d29d1b003a0";
-  const ghost: ProjectResourceDescriptor = {
+  const ghost: InventoryResource = {
     ...memoryResource("ghost", "Selected for sync, but unavailable at the mapped paths on this machine"),
     resource_id: ghostId,
     display_name: ghostId,
-    kind: "requirement",
+    kind: { key: "requirement", version: 1 },
+    kind_label: "Requirement",
     category: "tools",
     description: null,
     logical_paths: [],
@@ -370,8 +379,56 @@ test("a resource named by its own id states that id once, and says why once", ()
     inventory,
     /\{resource\.resource_id !== resource\.display_name && \(\s*<><dt>Resource ID<\/dt><dd><code>\{resource\.resource_id\}<\/code><\/dd><\/>\s*\)\}/,
   );
-  assert.match(inventory, /<dt>Kind<\/dt><dd>\{kindLabel\(resource\.kind\)\}<\/dd>/);
-  assert.doesNotMatch(inventory, /providerLabel/);
+  assert.match(inventory, /<dt>Kind<\/dt><dd>\{resource\.kind_label\}<\/dd>/);
+  assert.match(inventory, /<dt>Apply<\/dt><dd>\{resource\.apply_policy_label\}<\/dd>/);
+  assert.doesNotMatch(inventory, /providerLabel|kindLabel\(|applyPolicyLabel\(/);
+});
+
+test("an unknown kind coordinate renders by its backend label and stays unselectable", () => {
+  // A resource whose contracts this build has never heard of arrives already
+  // decided by the backend: filed under tools, labelled by its raw coordinate,
+  // and not selectable. The row shows that label and offers no checkbox — the
+  // frontend compares no key of its own to find out.
+  const unknown: InventoryResource = {
+    ...memoryResource("future"),
+    resource_id: "codex:future:thing",
+    display_name: "Future thing",
+    kind: { key: "future_kind", version: 3 },
+    kind_label: "future_kind@3",
+    apply_policy: { key: "future_policy", version: 2 },
+    apply_policy_label: "future_policy@2",
+    category: "tools",
+    selectable: false,
+  };
+  const html = renderToStaticMarkup(
+    <ResourceInventory
+      resources={[unknown]}
+      selected={new Set([unknown.resource_id])}
+      onToggle={() => undefined}
+    />,
+  );
+
+  assert.match(html, /Future thing/);
+  assert.doesNotMatch(html, /type="checkbox"|sync-resource-row-selectable/);
+  // The fold is internal state, so static markup cannot open it: pin at the
+  // source that its Kind and Apply readouts are the DTO's labels, verbatim.
+  const row = readFileSync("src/components/project-sync/ResourceInventory.tsx", "utf8");
+  assert.match(row, /<dt>Kind<\/dt><dd>\{resource\.kind_label\}<\/dd>\s*<dt>Apply<\/dt><dd>\{resource\.apply_policy_label\}<\/dd>/);
+  // The recipe rejects it too, for the same backend-supplied reason.
+  const recipe = recipeWithSelection(
+    { schema_version: 1, revision: 1, entries: {} },
+    [unknown, memoryResource("present")],
+    new Set([unknown.resource_id, "codex:memory:present"]),
+  );
+  assert.deepEqual(Object.keys(recipe.entries), ["codex:memory:present"]);
+  assert.deepEqual(recipe.entries["codex:memory:present"].apply_policy, { key: "safe_file", version: 1 });
+
+  // The source keeps no vocabulary of kinds or policies to fall back on.
+  const model = readFileSync("src/components/project-sync/model.ts", "utf8");
+  const inventory = readFileSync("src/components/project-sync/ResourceInventory.tsx", "utf8");
+  for (const source of [model, inventory]) {
+    assert.doesNotMatch(source, /\bKIND_LABELS\b|CATEGORY_BY_KIND|APPLY_POLICY_LABELS|kind\.key|apply_policy\.key|"requirement"|"never"/);
+  }
 });
 
 test("the push step renders the requirements group without a second disclosure", () => {

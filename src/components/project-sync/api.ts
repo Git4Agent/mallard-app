@@ -10,15 +10,14 @@ import type {
   BundleReadiness,
   BundleRecipe,
   BundleSnapshotSummary,
-  CodexAppRestartResult,
-  CodexConversationPathAudit,
-  CodexConversationPathRepairResult,
   ConnectProjectBundleRequest,
   CreateSetupDraftResult,
   HostIdentityStatus,
   LocalProjectRegistration,
   LocalStateSummary,
   LocalStateWipeResult,
+  MaintenanceActionRequest,
+  MaintenanceActionResult,
   ProjectActivity,
   ProjectBinding,
   ProjectDetail,
@@ -39,7 +38,7 @@ import type {
   PushDestinationStatus,
   PushReviewContext,
   ResourceInventory,
-  RestorePlan,
+  PullReview,
   RestoreResult,
   SaveProjectBindingRequest,
   SaveProjectLinkRequest,
@@ -47,14 +46,13 @@ import type {
   SetupDraftList,
   SessionEventDetail,
   SiblingBundleStatus,
-  StorageConfig,
+  CommitStorageDraftResult,
+  StorageProviderDescriptor,
+  StorageProviderKey,
   StorageSetupDraft,
-  StorageSetupDraftDetail,
   StorageSetupDraftList,
-  StorageSetupDraftPayload,
-  TestR2StorageResult,
-  UpsertR2StorageRequest,
-  UpsertR2StorageResult,
+  TestStorageDraftResult,
+  UpdateStorageSetupDraftRequest,
   StorageDataClearResult,
   SyncConfig,
   ThreadSyncComparison,
@@ -157,31 +155,46 @@ export const projectSyncApi = {
   getConfig: () =>
     invoke<SyncConfig>("get_project_sync_config"),
 
-  saveConfig: (config: SyncConfig) =>
-    invoke<SyncConfig>("save_project_sync_config", { config }),
+  /** Every compiled storage provider's safe descriptor, in display order. */
+  listStorageProviders: () =>
+    invoke<StorageProviderDescriptor[]>("list_storage_providers"),
 
-  upsertR2Storage: (request: UpsertR2StorageRequest) =>
-    invoke<UpsertR2StorageResult>("upsert_r2_storage", { request }),
+  renameStorage: (storageId: string, name: string, expectedConfigRevision: number) =>
+    invoke<SyncConfig>("rename_storage", { storageId, name, expectedConfigRevision }),
 
-  testR2Storage: (request: UpsertR2StorageRequest) =>
-    invoke<TestR2StorageResult>("test_r2_storage", { request }),
+  removeStorage: (storageId: string, expectedConfigRevision: number) =>
+    invoke<SyncConfig>("remove_storage", { storageId, expectedConfigRevision }),
 
-  getMallardCliPath: () =>
-    invoke<string>("get_mallard_cli_path"),
+  /** The declared setup assistant's instruction for one exact draft. */
+  getStorageSetupAssistantInstruction: (
+    storageProvider: StorageProviderKey,
+    draftId: string,
+    expectedRevision: number,
+  ) => invoke<string>("get_storage_setup_assistant_instruction", {
+    storageProvider,
+    draftId,
+    expectedRevision,
+  }),
 
-  /** Open a terminal window running the provider's agent CLI with the R2
-   *  setup instruction as its prompt. */
-  launchR2AgentSetup: (provider: ProviderKey, instruction: string) =>
-    invoke<void>("launch_r2_agent_setup", { provider, instruction }),
+  /** Open a terminal window running the agent provider's CLI with the
+   *  storage provider's setup-assistant instruction as its prompt. */
+  launchStorageSetupAssistant: (
+    storageProvider: StorageProviderKey,
+    agentProvider: ProviderKey,
+    draftId: string,
+    expectedRevision: number,
+  ) => invoke<void>("launch_storage_setup_assistant", {
+    storageProvider,
+    agentProvider,
+    draftId,
+    expectedRevision,
+  }),
 
   getHostIdentityStatus: () =>
     invoke<HostIdentityStatus>("get_host_identity_status"),
 
   listRemoteBundleSnapshots: (storageId: string) =>
     invoke<BundleSnapshotSummary[]>("list_remote_bundle_snapshots", { storageId }),
-
-  listPendingStorageBundleSnapshots: (storage: StorageConfig) =>
-    invoke<BundleSnapshotSummary[]>("list_pending_storage_bundle_snapshots", { storage }),
 
   getSiblingBundleStatus: (localProjectId: string, storageId: string) =>
     invoke<SiblingBundleStatus>("get_sibling_bundle_status", { localProjectId, storageId }),
@@ -219,8 +232,6 @@ export const projectSyncApi = {
     projectContentReviewToken?: string | null,
     projectContentRemovalIds: string[] = [],
     acknowledgedWarningDigests: string[] = [],
-    conversationPushPlanId?: string | null,
-    approvedConversationActionIds: string[] = [],
   ) => invoke<ProjectOperationResult>("push_bundle", {
     localProjectId,
     storageId,
@@ -228,15 +239,12 @@ export const projectSyncApi = {
     projectContentReviewToken: projectContentReviewToken ?? null,
     projectContentRemovalIds,
     acknowledgedWarningDigests,
-    conversationPushPlanId: conversationPushPlanId ?? null,
-    approvedConversationActionIds,
   }),
 
-  auditCodexConversationPaths: (localProjectId: string) =>
-    invoke<CodexConversationPathAudit>("audit_codex_conversation_paths", { localProjectId }),
-
-  repairCodexConversationPaths: (localProjectId: string) =>
-    invoke<CodexConversationPathRepairResult>("repair_codex_conversation_paths", { localProjectId }),
+  /** Run one declared action. The backend refuses an action the provider
+   *  does not declare and a confirming action the user has not confirmed. */
+  executeProviderMaintenanceAction: (request: MaintenanceActionRequest) =>
+    invoke<MaintenanceActionResult>("execute_provider_maintenance_action", { request }),
 
   listBindings: () =>
     invoke<ProjectBinding[]>("list_project_bindings"),
@@ -245,30 +253,18 @@ export const projectSyncApi = {
     invoke<ProjectBinding>("save_project_binding", { request }),
 
   planRestore: (storageId: string, bundleId: string, binding: ProjectBinding) =>
-    invoke<RestorePlan>("plan_bundle_restore", { storageId, bundleId, binding }),
+    invoke<PullReview>("plan_bundle_restore", { storageId, bundleId, binding }),
 
   applyRestore: (
-    planId: string,
+    review: PullReview,
     approvedActionIds: string[],
   ) => invoke<RestoreResult>("apply_bundle_restore", {
-    planId,
+    review,
     approvedActionIds,
   }),
 
-  restartCodexAppAfterPull: (
-    operationId: string,
-    appKind: "codex" | "codex_plus_plus",
-    activeChatsComplete: boolean,
-  ) => invoke<CodexAppRestartResult>("restart_codex_app_after_pull", {
-    request: {
-      operation_id: operationId,
-      app_kind: appKind,
-      active_chats_complete: activeChatsComplete,
-    },
-  }),
-
-  getRestoreReadiness: (restorePlanId: string) =>
-    invoke<BundleReadiness>("get_restore_readiness", { restorePlanId }),
+  getRestoreReadiness: (review: PullReview) =>
+    invoke<BundleReadiness>("get_restore_readiness", { review }),
 
   listSetupDrafts: () =>
     invoke<SetupDraftList>("list_setup_drafts"),
@@ -294,19 +290,31 @@ export const projectSyncApi = {
   listStorageSetupDrafts: () =>
     invoke<StorageSetupDraftList>("list_storage_setup_drafts"),
 
-  createStorageSetupDraft: (storage: StorageSetupDraftPayload) =>
-    invoke<StorageSetupDraft>("create_storage_setup_draft", { storage }),
+  createStorageSetupDraft: (provider: StorageProviderKey) =>
+    invoke<StorageSetupDraft>("create_storage_setup_draft", { provider }),
+
+  createStorageEditDraft: (storageId: string) =>
+    invoke<StorageSetupDraft>("create_storage_edit_draft", { storageId }),
 
   getStorageSetupDraft: (draftId: string) =>
-    invoke<StorageSetupDraftDetail | null>("get_storage_setup_draft", { draftId }),
+    invoke<StorageSetupDraft | null>("get_storage_setup_draft", { draftId }),
 
-  updateStorageSetupDraft: (draftId: string, revision: number, storage: StorageSetupDraftPayload) =>
-    invoke<StorageSetupDraft>("update_storage_setup_draft", {
-      request: { draft_id: draftId, revision, storage },
-    }),
+  updateStorageSetupDraft: (request: UpdateStorageSetupDraftRequest) =>
+    invoke<StorageSetupDraft>("update_storage_setup_draft", { request }),
 
   discardStorageSetupDraft: (draftId: string) =>
     invoke<boolean>("discard_storage_setup_draft", { draftId }),
+
+  testStorageSetupDraft: (draftId: string, expectedRevision: number) =>
+    invoke<TestStorageDraftResult>("test_storage_setup_draft", { draftId, expectedRevision }),
+
+  commitStorageSetupDraft: (
+    draftId: string,
+    expectedDraftRevision: number,
+  ) => invoke<CommitStorageDraftResult>("commit_storage_setup_draft", {
+    draftId,
+    expectedDraftRevision,
+  }),
 
   getProjectActivity: (
     localProjectId: string,

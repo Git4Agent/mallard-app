@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   BundleFetchProgress,
-  BundleRecipe,
   LocalProjectSummary,
   ProjectBinding,
   ProjectContentEntry,
   ProjectContentInventory,
-  ProjectResourceDescriptor,
+  InventoryResource,
   ThreadSyncComparison,
   ThreadSyncEntry,
 } from "../../types";
@@ -22,9 +21,9 @@ import ResourceInventory from "./ResourceInventory";
 import SyncReviewTabs from "../sync-review/SyncReviewTabs";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import { type SyncReviewStep, historyStepLabel, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
-import { categoryFor, STORAGE_BLOCKING_STATES } from "./model";
+import { STORAGE_BLOCKING_STATES } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
-import { isCaptureBudgetHold, isPushReviewDecision } from "../sync-review/pullReviewStatus";
+import { isPushReviewDecision } from "../sync-review/pullReviewStatus";
 import { isIrrecoverableSyncError } from "./syncError";
 import { formatBytes } from "../../format";
 
@@ -36,7 +35,7 @@ export interface PushReviewBlocker {
 }
 
 interface Props {
-  resources: ProjectResourceDescriptor[];
+  resources: InventoryResource[];
   selected: Set<string>;
   projectDefaults: Set<string>;
   busy: boolean;
@@ -54,6 +53,10 @@ interface Props {
   projectContentLoading?: boolean;
   projectContentRemovals?: ReadonlySet<string>;
   acknowledgedWarningDigests?: ReadonlySet<string>;
+  /** Owned above the panel: the path bar's Push publishes this same review,
+   *  so its refusal has to see the acknowledgement too. */
+  deletionApproved?: boolean;
+  onDeletionApprovedChange?: (approved: boolean) => void;
   /** Live upload progress while the push publishes; renders in the footer button. */
   fetchProgress?: BundleFetchProgress | null;
   showProjectFiles?: boolean;
@@ -70,15 +73,15 @@ interface Props {
   onResetMetadata?: () => void;
 }
 
-function countSelected(items: ProjectResourceDescriptor[], selected: ReadonlySet<string>): number {
+function countSelected(items: InventoryResource[], selected: ReadonlySet<string>): number {
   return items.filter((item) => selected.has(item.resource_id)).length;
 }
 
-function groupForStep(step: SyncReviewStep, resources: ProjectResourceDescriptor[]): ProjectResourceDescriptor[] {
+function groupForStep(step: SyncReviewStep, resources: InventoryResource[]): InventoryResource[] {
   // The history step hosts every non-file resource: sessions in the list and
   // the tools/requirements rows at the bottom of the same panel.
-  if (step === "project_files") return resources.filter((resource) => categoryFor(resource) === "project_files");
-  return resources.filter((resource) => categoryFor(resource) !== "project_files");
+  if (step === "project_files") return resources.filter((resource) => resource.category === "project_files");
+  return resources.filter((resource) => resource.category !== "project_files");
 }
 
 function isLocalOutstandingProjectContent(entry: ProjectContentEntry): boolean {
@@ -212,24 +215,8 @@ export function pushReviewBlockers(
   return blockers;
 }
 
-export function pushReviewBlockingCount(
-  selected: ReadonlySet<string>,
-  threadComparison?: ThreadSyncComparison | null,
-  projectContentInventory?: ProjectContentInventory | null,
-  acknowledgedWarningDigests: ReadonlySet<string> = new Set(),
-  projectContentRemovals: ReadonlySet<string> = new Set(),
-): number {
-  return pushReviewBlockers(
-    selected,
-    threadComparison,
-    projectContentInventory,
-    acknowledgedWarningDigests,
-    projectContentRemovals,
-  ).length;
-}
-
 export function pushSelectableResourceIds(
-  resources: ProjectResourceDescriptor[],
+  resources: InventoryResource[],
   threadComparison?: ThreadSyncComparison | null,
   projectContentInventory?: ProjectContentInventory | null,
 ): Set<string> {
@@ -247,7 +234,7 @@ export function pushSelectableResourceIds(
   return new Set(resources
     .filter((resource) => (
       !resource.blocked_reason
-      && resource.apply_policy !== "never"
+      && resource.selectable
       && !unselectableIds.has(resource.resource_id)
     ))
     .map((resource) => resource.resource_id));
@@ -255,7 +242,7 @@ export function pushSelectableResourceIds(
 
 export function sanitizePushSelection(
   selected: ReadonlySet<string>,
-  resources: ProjectResourceDescriptor[],
+  resources: InventoryResource[],
   threadComparison?: ThreadSyncComparison | null,
   projectContentInventory?: ProjectContentInventory | null,
 ): Set<string> {
@@ -269,7 +256,7 @@ export function sanitizePushSelection(
 
 export function recommendedPushSelection(
   selected: ReadonlySet<string>,
-  resources: ProjectResourceDescriptor[],
+  resources: InventoryResource[],
   threadComparison?: ThreadSyncComparison | null,
   projectContentInventory?: ProjectContentInventory | null,
 ): Set<string> {
@@ -282,7 +269,7 @@ export function recommendedPushSelection(
   if (!threadComparison) return recommended;
 
   const comparisonByResourceId = new Map(threadComparison.entries.map((entry) => [entry.resource_id, entry]));
-  const conversations = resources.filter((resource) => categoryFor(resource) === "conversations");
+  const conversations = resources.filter((resource) => resource.category === "conversations");
 
   for (const resource of conversations) {
     const comparison = comparisonByResourceId.get(resource.resource_id);
@@ -298,24 +285,6 @@ export function recommendedPushSelection(
   }
 
   return recommended;
-}
-
-export function preserveSyncedPushRecipeEntries(
-  recipe: BundleRecipe,
-  sourceRecipe: BundleRecipe,
-  threadComparison?: ThreadSyncComparison | null,
-): BundleRecipe {
-  const syncedResourceIds = new Set((threadComparison?.entries ?? [])
-    .filter((entry) => entry.state === "synced")
-    .map((entry) => entry.resource_id));
-  if (syncedResourceIds.size === 0) return recipe;
-
-  const entries = { ...recipe.entries };
-  for (const resourceId of syncedResourceIds) {
-    const sourceEntry = sourceRecipe.entries[resourceId];
-    if (sourceEntry) entries[resourceId] = sourceEntry;
-  }
-  return { ...recipe, entries };
 }
 
 export function requiredProjectContentDirectoryIds(
@@ -395,33 +364,163 @@ export function pushBudgetTotal(
   return { sessions, reserved: budget.reserved_bytes, projectFiles, total, limit: budget.limit_bytes };
 }
 
-function formatDay(seconds: number): string {
-  return new Date(seconds * 1_000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+/** Why Push must refuse, or null when it may proceed.
+ *
+ *  Both buttons that publish a review read this one rule. They had a rule
+ *  each before, and only the footer's was complete: the path bar's Push
+ *  publishes the open review rather than opening one, and its own condition
+ *  knew nothing about the capture budget or the project-file deletion
+ *  acknowledgement — so a review the footer refused, over the limit or with
+ *  unapproved deletions, could still be pushed from the bar above it. The
+ *  string is both buttons' title, so the refusal is worded once too. */
+export function pushReviewDisabledReason({
+  selected,
+  threadComparison = null,
+  projectContentInventory = null,
+  acknowledgedWarningDigests = new Set<string>(),
+  projectContentRemovals = new Set<string>(),
+  deletionApproved,
+  projectContentLoading = false,
+}: {
+  /** Sanitized: `sanitizePushSelection`, which is what the push carries. */
+  selected: ReadonlySet<string>;
+  threadComparison?: ThreadSyncComparison | null;
+  projectContentInventory?: ProjectContentInventory | null;
+  acknowledgedWarningDigests?: ReadonlySet<string>;
+  projectContentRemovals?: ReadonlySet<string>;
+  deletionApproved: boolean;
+  projectContentLoading?: boolean;
+}): string | null {
+  /* First: while the scan is running every judgement below it is provisional,
+     including the size of the push. */
+  if (projectContentLoading) return "Project files are still being scanned";
+  const budget = pushBudgetTotal(selected, threadComparison, projectContentInventory);
+  if (budget && budget.total > budget.limit) return pushBudgetSentence(budget);
+  const blockers = pushReviewBlockers(
+    selected,
+    threadComparison,
+    projectContentInventory,
+    acknowledgedWarningDigests,
+    projectContentRemovals,
+  );
+  if (blockers.some((blocker) => blocker.kind !== "storage")) {
+    return "Exclude the items that can't be captured";
+  }
+  if (blockers.length > 0) return "Resolve the held items above before pushing";
+  const impact = pushProjectFileCommitImpact(
+    projectContentInventory,
+    selected,
+    projectContentRemovals,
+  );
+  if (projectFileDeletionCount(impact) > 0 && !deletionApproved) {
+    return "Approve the selected project file deletions";
+  }
+  if (selected.size === 0 && projectContentRemovals.size === 0) return "Nothing is selected";
+  return null;
 }
 
-/** The footer's push meter: one sentence and a 4px bar in the sentence slot.
- *  Live with the selection, which is why it lives beside the button and not
- *  in the banner zone above the list. */
-function PushBudgetMeter({ total, overSentence }: {
-  total: NonNullable<ReturnType<typeof pushBudgetTotal>>;
-  overSentence: string | null;
+type PushBudget = NonNullable<ReturnType<typeof pushBudgetTotal>>;
+
+/** What the meter says in one line: the size while it fits, the overshoot and
+ *  the way out past the limit. The over sentence is also the Push button's
+ *  title, so the refusal and its reason are worded once. */
+function pushBudgetSentence(total: PushBudget): string {
+  return total.total > total.limit
+    ? `${formatBytes(total.total - total.limit)} over the ${formatBytes(total.limit)} push limit — exclude sessions or files to push.`
+    : `This push · ${formatBytes(total.total)} of ${formatBytes(total.limit)}`;
+}
+
+function pushBudgetBreakdown(total: PushBudget): string {
+  return `Sessions ${formatBytes(total.sessions)} · Requirements ${formatBytes(total.reserved)} · Project files ${formatBytes(total.projectFiles)}`;
+}
+
+/** `424 MB / 512 MB` while it fits, the overshoot alone once it does not —
+ *  `short` drops the trailing "over 512 MB" where the sentence beside it has
+ *  already named the limit. Carries the meter semantics for both instances. */
+function PushBudgetFigure({ total, short = false, label }: {
+  total: PushBudget;
+  short?: boolean;
+  label?: string;
 }) {
-  const sentence = overSentence ?? `This push · ${formatBytes(total.total)} of ${formatBytes(total.limit)}`;
-  const breakdown = `Sessions ${formatBytes(total.sessions)} · Requirements ${formatBytes(total.reserved)} · Project files ${formatBytes(total.projectFiles)}`;
+  const over = total.total - total.limit;
   return (
-    <span className={`sync-push-budget${overSentence ? " over" : ""}`} role="status" title={breakdown}>
-      <small>{sentence}</small>
-      <span
-        className="sync-push-budget-bar"
-        role="meter"
-        aria-valuemin={0}
-        aria-valuemax={total.limit}
-        aria-valuenow={Math.min(total.total, total.limit)}
-        aria-valuetext={sentence}
-      >
-        <i style={{ width: `${Math.min(100, (total.total / total.limit) * 100)}%` }} />
-      </span>
+    <span
+      className={`sync-push-budget-figure${over > 0 ? " over" : ""}`}
+      role="meter"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={total.limit}
+      aria-valuenow={Math.min(total.total, total.limit)}
+      aria-valuetext={pushBudgetSentence(total)}
+    >
+      {over > 0
+        ? <><b>+{formatBytes(over)}</b>{short ? "" : ` over ${formatBytes(total.limit)}`}</>
+        : <><b>{formatBytes(total.total)}</b> / {formatBytes(total.limit)}</>}
     </span>
+  );
+}
+
+/** The bar under the header's figure. Scaled to max(total, limit): while the
+ *  push fits, the track's right end IS the limit; past it the limit becomes a
+ *  tick the fill visibly runs beyond, so the overshoot reads as a distance and
+ *  not only as a number.
+ *
+ *  One fill, not a segment per source. Sessions, requirements and project
+ *  files were drawn in three tones first, and the palette cannot carry them at
+ *  6px: --text-3 against --thread-status-local measures 1.05:1 on cream, so
+ *  the requirements segment simply disappeared into the sessions one. The
+ *  breakdown stays where it has always been — the title on both instances.
+ *  Decoration: the figure beside it is the meter. */
+function PushBudgetTrack({ total }: { total: PushBudget }) {
+  const scale = Math.max(total.total, total.limit);
+  const over = total.total > total.limit;
+  return (
+    <span className={`sync-push-budget-track${over ? " over" : ""}`} aria-hidden="true">
+      <i style={{ width: `${(total.total / scale) * 100}%` }} />
+      {over && <b style={{ left: `${(total.limit / scale) * 100}%` }} />}
+    </span>
+  );
+}
+
+/** The header's glance: the same measurement as the footer gauge, in the one
+ *  other zone of the review that does not scroll away, so what this push
+ *  carries is on screen at the top of a long list as well as at the button.
+ *  It is not a live region — the footer's is, and two would read every tick
+ *  out twice. */
+function PushBudgetGlance({ total }: { total: PushBudget }) {
+  return (
+    <div className="sync-push-budget-glance" title={pushBudgetBreakdown(total)}>
+      <PushBudgetTrack total={total} />
+      <PushBudgetFigure total={total} short label="Push size" />
+    </div>
+  );
+}
+
+/** The footer gauge: a pill the height of the button that fills left to right
+ *  behind its own figure, set flush against Push so the quantity and the act
+ *  that spends it read as one object. Live with the selection, which is why it
+ *  sits beside the button and not in the banner zone above the list. */
+function PushBudgetGauge({ total }: { total: PushBudget }) {
+  const over = total.total > total.limit;
+  return (
+    <div
+      className={`sync-push-budget-gauge${over ? " over" : ""}`}
+      role="status"
+      title={pushBudgetBreakdown(total)}
+    >
+      {/* Past the limit there is nothing left to fill, and painting the danger
+          ink as a wash under its own figure took that figure to 3.4:1 on the
+          light theme. The plate and the ring carry the state instead; how far
+          over it went is the header track's job. */}
+      {!over && (
+        <span
+          className="sync-push-budget-fill"
+          style={{ width: `${(total.total / total.limit) * 100}%` }}
+          aria-hidden="true"
+        />
+      )}
+      <PushBudgetFigure total={total} short />
+    </div>
   );
 }
 
@@ -443,6 +542,8 @@ export default function PushResourceWorkspace({
   projectContentLoading = false,
   projectContentRemovals = new Set(),
   acknowledgedWarningDigests = new Set(),
+  deletionApproved = false,
+  onDeletionApprovedChange,
   fetchProgress = null,
   showProjectFiles = false,
   activeStep: controlledActiveStep,
@@ -475,15 +576,15 @@ export default function PushResourceWorkspace({
   }, [busy, onClose]);
 
   const conversations = useMemo(
-    () => resources.filter((resource) => categoryFor(resource) === "conversations"),
+    () => resources.filter((resource) => resource.category === "conversations"),
     [resources],
   );
   const projectFiles = useMemo(
-    () => resources.filter((resource) => categoryFor(resource) === "project_files"),
+    () => resources.filter((resource) => resource.category === "project_files"),
     [resources],
   );
   const other = useMemo(
-    () => resources.filter((resource) => categoryFor(resource) === "tools"),
+    () => resources.filter((resource) => resource.category === "tools"),
     [resources],
   );
   const visibleConversationResourceIds = useMemo(
@@ -491,7 +592,7 @@ export default function PushResourceWorkspace({
       .filter((entry) => (
         entry.local_present
         && (entry.state === "local_only" || entry.state === "local_ahead")
-        && (isPushReviewDecision(entry.push_decision) || isCaptureBudgetHold(entry.push_decision))
+        && isPushReviewDecision(entry.push_decision)
       ))
       .map((entry) => entry.resource_id)),
     [threadComparison],
@@ -536,18 +637,11 @@ export default function PushResourceWorkspace({
     ),
     [effectiveSelected, projectContentInventory, projectContentRemovals],
   );
-  const deletionSignature = useMemo(
-    () => [...projectContentRemovals].sort().join("\n"),
-    [projectContentRemovals],
-  );
-  const [deletionApproved, setDeletionApproved] = useState(false);
-  useEffect(() => setDeletionApproved(false), [deletionSignature]);
 
   const counts = {
     history: countSelected(visibleConversations, effectiveSelected) + countSelected(other, effectiveSelected),
     project_files: countSelected(visibleProjectFiles, effectiveSelected),
   };
-  const visibleSelectedCount = counts.history + counts.project_files;
   const blockers = pushReviewBlockers(
     effectiveSelected,
     threadComparison,
@@ -613,29 +707,6 @@ export default function PushResourceWorkspace({
         : undefined,
     });
   }
-  /* Rows the review could not fit into this push stay listed, in their
-     place, unselectable; this banner says what the push carries and that the
-     rest waits. Nothing is remembered between pushes, so it never counts
-     rounds or pushes still to come — "push again" is the whole instruction. */
-  const captureBudget = threadComparison?.capture_budget ?? null;
-  if (captureBudget && captureBudget.held_count > 0) {
-    const admitted = (threadComparison?.entries ?? [])
-      .filter((entry) => entry.local_present && isPushReviewDecision(entry.push_decision));
-    const oldestAdmitted = admitted
-      .map((entry) => entry.local_updated_at ?? null)
-      .filter((value): value is number => value != null)
-      .reduce<number | null>((min, value) => (min == null || value < min ? value : min), null);
-    const held = captureBudget.held_count;
-    banners.push({
-      key: "capture-budget",
-      severity: "warning",
-      title: "Too much to push at once",
-      message: `This push carries the newest ${admitted.length} session${admitted.length === 1 ? "" : "s"} `
-        + `(${formatBytes(captureBudget.admitted_bytes)})${oldestAdmitted != null ? `, back to ${formatDay(oldestAdmitted)}` : ""}. `
-        + `The ${held} older session${held === 1 ? "" : "s"} (${formatBytes(captureBudget.held_bytes)}) `
-        + `${held === 1 ? "doesn't" : "don't"} fit — push again after this one.`,
-    });
-  }
   /* No comparison means no row can be selected: every session shows its
      fallback status and the counts read 0/0. That is a broken review, not an
      empty one, so it says why at the top and offers the repair that clears
@@ -666,24 +737,23 @@ export default function PushResourceWorkspace({
   const localBlockerSentence = localBlockingCount > 0
     ? `${localBlockingCount} selected item${localBlockingCount === 1 ? "" : "s"} can't be captured — exclude ${localBlockingCount === 1 ? "it" : "them"} to push.`
     : null;
-  // The push meter: selection-driven, so it reports in the footer beside the
-  // button it can refuse. Once every admitted session fits by construction,
-  // only project files or requirements can carry the total past the limit.
+  // Every eligible session remains selectable. Only the aggregate byte
+  // ceiling can refuse Apply.
   const budgetTotal = pushBudgetTotal(effectiveSelected, threadComparison, projectContentInventory);
   const overLimitSentence = budgetTotal && budgetTotal.total > budgetTotal.limit
-    ? `${formatBytes(budgetTotal.total - budgetTotal.limit)} over the ${formatBytes(budgetTotal.limit)} push limit — exclude sessions or files to push.`
+    ? pushBudgetSentence(budgetTotal)
     : null;
-  const pushDisabledReason = overLimitSentence != null
-    ? overLimitSentence
-    : localBlockingCount > 0
-    ? "Exclude the items that can't be captured"
-    : blockingCount > 0
-      ? "Resolve the held items above before pushing"
-      : projectFileDeletionCount(projectFileImpact) > 0 && !deletionApproved
-        ? "Approve the selected project file deletions"
-      : visibleSelectedCount === 0 && projectContentRemovals.size === 0
-        ? "Nothing is selected"
-        : null;
+  /* Not recomputed here: the path bar's Push publishes this same review, and
+     the two conditions diverged for as long as each owned its own. */
+  const pushDisabledReason = pushReviewDisabledReason({
+    selected: effectiveSelected,
+    threadComparison,
+    projectContentInventory,
+    acknowledgedWarningDigests,
+    projectContentRemovals,
+    deletionApproved,
+    projectContentLoading,
+  });
 
   const commitSelection = (next: Set<string>) => {
     const safeNext = includeRequiredProjectContentDirectories(
@@ -766,6 +836,7 @@ export default function PushResourceWorkspace({
         <div className="sync-sync-review-title">
           <h2 id="sync-push-resource-title">Push review</h2>
         </div>
+        {budgetTotal && <PushBudgetGlance total={budgetTotal} />}
         <SyncReviewSelectionBar
           count={countSelected(currentGroup, effectiveSelected)}
           total={currentGroup.length}
@@ -917,14 +988,20 @@ export default function PushResourceWorkspace({
       </div>
 
       <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">
+        {overLimitSentence && (
+          /* The refusal takes a row of its own above the button cluster, where
+             the gauge that caused it and the button it stops both sit. It does
+             not announce: the gauge beside it is the status region, and its
+             own text already changed to the overshoot. */
+          <p className="sync-push-budget-sentence">{overLimitSentence}</p>
+        )}
         <ProjectFileCommitImpact
           counts={projectFileImpact}
           deletionTarget="storage"
           deletionApproved={deletionApproved}
           disabled={busy}
-          onDeletionApprovedChange={setDeletionApproved}
+          onDeletionApprovedChange={(approved) => onDeletionApprovedChange?.(approved)}
         />
-        {budgetTotal && <PushBudgetMeter total={budgetTotal} overSentence={overLimitSentence} />}
         {localBlockerSentence && (
           /* Selection-driven: ticking a row that carries an uncaptured warning
              is what makes this appear, and it appears at the same moment the
@@ -961,6 +1038,7 @@ export default function PushResourceWorkspace({
             {activeStep === "history" && <Icon name="chevron-right" size={14} />}
           </button>
         )}
+        {budgetTotal && <PushBudgetGauge total={budgetTotal} />}
         <button
           type="button"
           className="btn btn-primary sync-pull-apply-button"

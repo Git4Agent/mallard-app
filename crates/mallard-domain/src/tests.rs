@@ -101,6 +101,43 @@ fn ids_fail_closed_during_deserialization() {
 }
 
 #[test]
+fn resource_and_conversation_titles_preserve_control_characters() {
+    let parts = sealed_provider_scope("codex", "title-controls");
+    let mut resource = parts.scope.resources.values().next().unwrap().clone();
+    let mut thread = parts.scope.conversations[&parts.thread_id].clone();
+    let controls: String = ('\0'..='\u{009f}').filter(|ch| ch.is_control()).collect();
+
+    for title in [controls.as_str(), " \t\r\n", "标题\u{202e}"] {
+        resource.display_name = title.to_string();
+        resource.validate().unwrap();
+        let encoded = serde_json::to_vec(&resource).unwrap();
+        let decoded: ResourceDescriptor = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.display_name, title);
+
+        thread.display_title = Some(title.to_string());
+        thread.validate().unwrap();
+        let encoded = serde_json::to_vec(&thread).unwrap();
+        let decoded: ConversationThread = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.display_title.as_deref(), Some(title));
+    }
+}
+
+#[test]
+fn title_bounds_do_not_relax_other_display_metadata() {
+    for title in ["a".repeat(1_024), "é".repeat(512)] {
+        validate_title("title", &title).unwrap();
+    }
+    for title in [String::new(), "a".repeat(1_025), "é".repeat(513)] {
+        assert!(validate_title("title", &title).is_err());
+    }
+
+    assert!(validate_display_text("storage name", "Storage\u{0002}", false).is_err());
+    assert!(validate_display_text("codec", "codex.lineage.v1\u{0013}", false).is_err());
+    assert!(validate_provider_thread_id("thread id", "thread\u{0002}").is_err());
+    assert!(validate_absolute_clean_path("project root", "/project\u{0013}").is_err());
+}
+
+#[test]
 fn provider_keys_are_a_bounded_lowercase_namespace() {
     for valid in ["codex", "claude", "a", "prov1", "my-agent", "co.dex", "a_b"] {
         assert!(ProviderKey::parse(valid).is_ok(), "{valid}");
@@ -267,7 +304,7 @@ fn machine_local_recipes_reject_portable_conversation_identities() {
         portable_id.clone(),
         RecipeEntry {
             resource_id: portable_id.clone(),
-            apply_policy: ApplyPolicy::SafeFile,
+            apply_policy: portable::contracts::safe_file(),
             required: false,
         },
     );
@@ -285,7 +322,7 @@ fn machine_local_recipes_reject_portable_conversation_identities() {
         local_session_id.clone(),
         RecipeEntry {
             resource_id: local_session_id,
-            apply_policy: ApplyPolicy::SafeFile,
+            apply_policy: portable::contracts::safe_file(),
             required: false,
         },
     );
@@ -404,15 +441,15 @@ fn sample_storage() -> StorageConfig {
     StorageConfig {
         id: StorageId::parse("personal").unwrap(),
         name: "Personal".to_string(),
-        kind: StorageKind::Local,
-        bucket: String::new(),
-        access_key_id: String::new(),
-        secret_access_key: String::new(),
-        account_id: String::new(),
-        s3_endpoint: String::new(),
-        region: String::new(),
-        local_dir: "/tmp/project-sync-store".to_string(),
-        supports_conditional_writes: None,
+        provider: StorageProviderKey::parse("local").unwrap(),
+        provider_config: StorageProviderConfig::new(
+            1,
+            BoundedConfigObject::from_json(&serde_json::json!({
+                "directory": "/tmp/project-sync-store"
+            }))
+            .unwrap(),
+            SecretMap::empty(),
+        ),
     }
 }
 
@@ -515,11 +552,6 @@ fn baseline_contracts_are_all_schema_one() {
         ("machine projects", MACHINE_PROJECT_SCHEMA),
         ("host identity", HOST_IDENTITY_SCHEMA),
         ("conversation bindings", CONVERSATION_BINDINGS_SCHEMA),
-        (
-            "conversation sync journal",
-            CONVERSATION_SYNC_JOURNAL_SCHEMA,
-        ),
-        ("conversation push plan", PUSH_PLAN_SCHEMA),
         ("bundle", BUNDLE_SCHEMA),
         ("recipe", RECIPE_SCHEMA),
         ("restore plan", RESTORE_PLAN_SCHEMA),
@@ -575,6 +607,7 @@ fn active_bindings_share_a_checkout_only_through_distinct_provider_configs() {
         display_name: id.to_string(),
         path: path.to_string(),
         canonical_path: path.to_string(),
+        provider_config: AgentProviderConfig::version_1(),
         revision: 0,
         created_at: 1,
         updated_at: 1,
@@ -643,6 +676,7 @@ fn bindings_reject_mismatched_profile_provider_keys() {
             display_name: "Claude".to_string(),
             path: "/home/user/.claude".to_string(),
             canonical_path: "/home/user/.claude".to_string(),
+            provider_config: AgentProviderConfig::version_1(),
             revision: 0,
             created_at: 1,
             updated_at: 1,
@@ -681,19 +715,17 @@ fn project_content_descriptor(entry_type: &str, relative_path: &str) -> Resource
     ResourceDescriptor {
         resource_id,
         kind: match entry_type {
-            "file" => ResourceKind::ProjectContentFile,
-            "dir" => ResourceKind::ProjectContentDirectory,
+            "file" => portable::contracts::project_content_file(),
+            "dir" => portable::contracts::project_content_directory(),
             _ => panic!("unsupported test entry type"),
         },
         provider: None,
         provider_resource_type: None,
         display_name: relative_path.to_string(),
-        provenance: Provenance::ProjectLocal {
-            relative_path: relative_path.to_string(),
-        },
-        apply_policy: ApplyPolicy::ExplicitReview,
+        provenance: portable::contracts::provenance_project_local(relative_path).unwrap(),
+        apply_policy: portable::contracts::explicit_review(),
         codec_version: 1,
-        metadata: BTreeMap::new(),
+        attributes: BoundedPortableObject::empty(),
     }
 }
 
@@ -716,7 +748,7 @@ fn project_scope_content() -> ProjectScopeContent {
             resource_id.clone(),
             RecipeEntry {
                 resource_id: resource_id.clone(),
-                apply_policy: ApplyPolicy::ExplicitReview,
+                apply_policy: portable::contracts::explicit_review(),
                 required: relative_path != "docs/empty",
             },
         );
@@ -736,7 +768,7 @@ fn project_scope_content() -> ProjectScopeContent {
         resource_id.clone(),
         RecipeEntry {
             resource_id: resource_id.clone(),
-            apply_policy: ApplyPolicy::ExplicitReview,
+            apply_policy: portable::contracts::explicit_review(),
             required: false,
         },
     );
@@ -868,14 +900,14 @@ fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderSco
     };
     let descriptor = ResourceDescriptor {
         resource_id: resource.clone(),
-        kind: ResourceKind::Conversation,
+        kind: portable::contracts::conversation(),
         provider: Some(key.clone()),
         provider_resource_type: Some(ResourceTypeKey::parse("session").unwrap()),
         display_name: "Conversation".to_string(),
-        provenance: Provenance::Unknown,
-        apply_policy: ApplyPolicy::SafeFile,
+        provenance: portable::contracts::provenance_unknown(),
+        apply_policy: portable::contracts::safe_file(),
         codec_version: 1,
-        metadata: BTreeMap::new(),
+        attributes: BoundedPortableObject::empty(),
     };
     let recipe = BundleRecipe {
         schema_version: RECIPE_SCHEMA,
@@ -884,7 +916,7 @@ fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderSco
             resource.clone(),
             RecipeEntry {
                 resource_id: resource.clone(),
-                apply_policy: ApplyPolicy::SafeFile,
+                apply_policy: portable::contracts::safe_file(),
                 required: false,
             },
         )]),
@@ -983,8 +1015,9 @@ fn wire_path_map_stamp_is_required_for_claude_and_forbidden_elsewhere() {
         }
     }
     reseal(&mut manifest);
+    manifest.validate().unwrap();
     assert!(manifest
-        .validate()
+        .resolve_all(&portable::test_resolver::Version1Resolver)
         .unwrap_err()
         .contains("wire path-map stamp"));
 
@@ -1002,7 +1035,11 @@ fn wire_path_map_stamp_is_required_for_claude_and_forbidden_elsewhere() {
         }
     }
     reseal(&mut manifest);
-    assert!(manifest.validate().unwrap_err().contains("in-band"));
+    manifest.validate().unwrap();
+    assert!(manifest
+        .resolve_all(&portable::test_resolver::Version1Resolver)
+        .unwrap_err()
+        .contains("in-band"));
 }
 
 #[test]
@@ -1119,14 +1156,14 @@ fn duplicate_threads_across_scopes_are_rejected() {
     };
     let descriptor = ResourceDescriptor {
         resource_id: resource.clone(),
-        kind: ResourceKind::Conversation,
+        kind: portable::contracts::conversation(),
         provider: Some(claude_key.clone()),
         provider_resource_type: None,
         display_name: "Conversation".to_string(),
-        provenance: Provenance::Unknown,
-        apply_policy: ApplyPolicy::SafeFile,
+        provenance: portable::contracts::provenance_unknown(),
+        apply_policy: portable::contracts::safe_file(),
         codec_version: 1,
-        metadata: BTreeMap::new(),
+        attributes: BoundedPortableObject::empty(),
     };
     let recipe = BundleRecipe {
         schema_version: RECIPE_SCHEMA,
@@ -1135,7 +1172,7 @@ fn duplicate_threads_across_scopes_are_rejected() {
             resource.clone(),
             RecipeEntry {
                 resource_id: resource.clone(),
-                apply_policy: ApplyPolicy::SafeFile,
+                apply_policy: portable::contracts::safe_file(),
                 required: false,
             },
         )]),
@@ -1238,7 +1275,7 @@ fn recipe_key_is_identity_and_digest_is_only_version_metadata() {
         id.clone(),
         RecipeEntry {
             resource_id: id,
-            apply_policy: ApplyPolicy::ExplicitReview,
+            apply_policy: portable::contracts::explicit_review(),
             required: false,
         },
     );
@@ -1274,8 +1311,9 @@ fn project_content_manifest_validates_exact_tree_identity() {
             .compute_content_sha256(&SyncScopeKey::Project)
             .unwrap();
     }
+    missing_ancestor.validate().unwrap();
     assert!(missing_ancestor
-        .validate()
+        .resolve_all(&portable::test_resolver::Version1Resolver)
         .unwrap_err()
         .contains("lacks directory entry"));
 
@@ -1289,8 +1327,9 @@ fn project_content_manifest_validates_exact_tree_identity() {
             .compute_content_sha256(&SyncScopeKey::Project)
             .unwrap();
     }
+    orphan.validate().unwrap();
     assert!(orphan
-        .validate()
+        .resolve_all(&portable::test_resolver::Version1Resolver)
         .unwrap_err()
         .contains("must own exactly one file"));
 }
@@ -1308,16 +1347,14 @@ fn project_content_tombstones_are_typed_and_path_bound() {
         scope.resources.remove(&entry.resource_id);
         scope.recipe.entries.remove(&entry.resource_id);
         let tombstone = Tombstone {
-            target: TombstoneTarget::ProjectContentFile {
-                resource_id: entry.resource_id,
-                logical_path: path,
-            },
+            target: portable::contracts::tombstone_project_content_file(&entry.resource_id, &path)
+                .unwrap(),
             last_sha256: Some(entry.sha256),
             deleted_at: 2,
         };
         scope
             .tombstones
-            .insert(tombstone.canonical_key(), tombstone);
+            .insert(tombstone.structural_key(), tombstone);
         scope.content_sha256 = scope
             .compute_content_sha256(&SyncScopeKey::Project)
             .unwrap();
@@ -1328,21 +1365,23 @@ fn project_content_tombstones_are_typed_and_path_bound() {
     {
         let scope = manifest.scopes.get_mut(&SyncScopeKey::Project).unwrap();
         let tombstone = Tombstone {
-            target: TombstoneTarget::ConversationThread {
-                thread_id: CloudThreadId::parse("cloudthread-a").unwrap(),
-            },
+            target: portable::contracts::tombstone_conversation_thread(
+                &CloudThreadId::parse("cloudthread-a").unwrap(),
+            )
+            .unwrap(),
             last_sha256: Some("a".repeat(64)),
             deleted_at: 2,
         };
         scope
             .tombstones
-            .insert(tombstone.canonical_key(), tombstone);
+            .insert(tombstone.structural_key(), tombstone);
         scope.content_sha256 = scope
             .compute_content_sha256(&SyncScopeKey::Project)
             .unwrap();
     }
+    manifest.validate().unwrap();
     assert!(manifest
-        .validate()
+        .resolve_all(&portable::test_resolver::Version1Resolver)
         .unwrap_err()
         .contains("cannot tombstone conversation thread"));
 }
@@ -1605,42 +1644,6 @@ fn push_action(
             expires_at: 10,
         },
     }
-}
-
-#[test]
-fn push_plans_carry_per_provider_pins() {
-    let plan = ConversationPushPlan {
-        schema_version: PUSH_PLAN_SCHEMA,
-        plan_id: PlanId::parse("plan-1").unwrap(),
-        storage_id: StorageId::parse("personal").unwrap(),
-        bundle_id: bundle_id(),
-        host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
-        replica_id: ReplicaId::parse("replica-a").unwrap(),
-        local_project_id: LocalProjectId::parse("project-a").unwrap(),
-        expected_host_identity_revision: 3,
-        expected_project_binding_revision: 2,
-        expected_bindings_document_revision: 4,
-        revision: 0,
-        commit_id: "absent".to_string(),
-        manifest_sha256: "0".repeat(64),
-        created_at: 1,
-        expires_at: 10,
-        actions: vec![
-            push_action("action-codex", "codex", "profile-codex", "1111"),
-            push_action("action-claude", "claude", "profile-claude", "2222"),
-        ],
-    };
-    plan.validate().unwrap();
-
-    // Two different scope pins for the same provider cannot coexist.
-    let mut conflicting = plan.clone();
-    conflicting.actions[1] = push_action("action-codex-2", "codex", "profile-codex", "3333");
-    conflicting.actions[1].pins.revision.scope_revision = 5;
-    conflicting.actions[1].pins.revision.scope_sha256 = "b".repeat(64);
-    assert!(conflicting
-        .validate()
-        .unwrap_err()
-        .contains("two scope states"));
 }
 
 // --- Portable tail codec v1 -------------------------------------------------
@@ -2424,6 +2427,7 @@ fn conversation_checkpoints_validate_layout_witness_and_mapping() {
 #[test]
 fn conversation_bindings_carry_validated_layouts() {
     let binding = LocalConversationBinding {
+        path_origins_ref: None,
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         replica_id: ReplicaId::parse("replica-a").unwrap(),
         local_project_id: LocalProjectId::parse("project-a").unwrap(),
@@ -2546,6 +2550,7 @@ fn preserved_provenance_validates_on_every_carrier() {
     // Binding-level: the local carrier is type-distinct from the cloud-space
     // provenance, so only the ordinal rule applies.
     let binding = LocalConversationBinding {
+        path_origins_ref: None,
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         replica_id: ReplicaId::parse("replica-a").unwrap(),
         local_project_id: LocalProjectId::parse("project-a").unwrap(),
@@ -2601,8 +2606,8 @@ fn preserved_provenance_validates_on_every_carrier() {
 }
 
 #[test]
-fn journal_index_rows_pair_with_the_index_fragment_role() {
-    let fragment = ConversationJournalTarget {
+fn apply_index_rows_pair_with_the_index_fragment_role() {
+    let fragment = ConversationApplyTarget {
         target_path: "/home/user/.codex/session_index.jsonl".to_string(),
         role: ConversationFileRole::ProviderIndexFragment,
         expected: TargetExpectation::Absent,
@@ -2613,8 +2618,6 @@ fn journal_index_rows_pair_with_the_index_fragment_role() {
             "0199a1b2-0000-7000-8000-000000000001".to_string(),
             "0199a1b2-0000-7000-8000-000000000002".to_string(),
         ],
-        commit_started: false,
-        committed: false,
     };
     fragment.validate().unwrap();
 
@@ -2663,10 +2666,10 @@ fn cloud_anchor() -> ConversationCloudAnchor {
     }
 }
 
-fn publication_operation(chain: &[CanonicalConversationMessage]) -> ConversationSyncOperation {
+fn publication_operation(chain: &[CanonicalConversationMessage]) -> ConversationApplyOperation {
     let before = whole_tail_over(&chain[..4]);
     let after = whole_tail_over(chain);
-    ConversationSyncOperation {
+    ConversationApplyOperation {
         operation_id: ConversationOperationId::parse("op-1").unwrap(),
         plan_id: Some(PlanId::parse("plan-1").unwrap()),
         plan_action_id: Some(ActionId::parse("action-1").unwrap()),
@@ -2678,25 +2681,14 @@ fn publication_operation(chain: &[CanonicalConversationMessage]) -> Conversation
         provider: provider("codex"),
         thread_id: ThreadId::parse("thread-1").unwrap(),
         cloud_thread_id: CloudThreadId::parse("cloudthread-1").unwrap(),
-        operation: ConversationSyncOperationKind::CloudPublication(
-            ConversationPublicationOperation {
-                phase: PushJournalPhase::CandidateUploaded,
-                candidate_commit_id: "commit-4".to_string(),
-                candidate_manifest_sha256: "f".repeat(64),
-                artifact_sha256: "a".repeat(64),
-                tail_before: Some(before),
-                tail_after: after,
-                planned_relation: TailClassification::LocalOutstanding,
-                sync_config_before: SyncConfig::default(),
-                sync_config_after: SyncConfig::default(),
-                bindings_before: ConversationBindings::empty(
-                    HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
-                ),
-                bindings_after: ConversationBindings::empty(
-                    HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
-                ),
-            },
-        ),
+        operation: ConversationApplyKind::CloudPublication(ConversationPublicationApply {
+            candidate_commit_id: "commit-4".to_string(),
+            candidate_manifest_sha256: "f".repeat(64),
+            artifact_sha256: "a".repeat(64),
+            tail_before: Some(before),
+            tail_after: after,
+            planned_relation: TailClassification::LocalOutstanding,
+        }),
         provider_thread_id: Some("0199a1b2-0000-7000-8000-000000000001".to_string()),
         materialization_state: ConversationMaterializationState::Resumable,
         expected_host_identity_revision: 1,
@@ -2711,23 +2703,21 @@ fn publication_operation(chain: &[CanonicalConversationMessage]) -> Conversation
 }
 
 #[test]
-fn journal_operations_validate_phase_payloads() {
+fn apply_operations_validate_payloads() {
     let chain = tail_chain();
     let operation = publication_operation(&chain);
     operation.validate().unwrap();
     assert_eq!(operation.direction(), ConversationPlanDirection::Push);
-    assert!(!operation.is_terminal());
 
     // CreateCloud has no accepted-before value; LocalOutstanding requires one.
     let mut create_with_before = operation.clone();
-    if let ConversationSyncOperationKind::CloudPublication(publication) =
-        &mut create_with_before.operation
+    if let ConversationApplyKind::CloudPublication(publication) = &mut create_with_before.operation
     {
         publication.planned_relation = TailClassification::MissingCloud;
     }
     assert!(create_with_before.validate().is_err());
     let mut outstanding_without_before = operation.clone();
-    if let ConversationSyncOperationKind::CloudPublication(publication) =
+    if let ConversationApplyKind::CloudPublication(publication) =
         &mut outstanding_without_before.operation
     {
         publication.tail_before = None;
@@ -2736,9 +2726,7 @@ fn journal_operations_validate_phase_payloads() {
 
     // A publication that moves the layout is rejected outright.
     let mut moved_layout = operation.clone();
-    if let ConversationSyncOperationKind::CloudPublication(publication) =
-        &mut moved_layout.operation
-    {
+    if let ConversationApplyKind::CloudPublication(publication) = &mut moved_layout.operation {
         publication.tail_before = Some(
             compute_portable_conversation_tail(TailPartitionKind::FixedPaginatedTail, 3, &chain)
                 .unwrap(),
@@ -2751,7 +2739,7 @@ fn journal_operations_validate_phase_payloads() {
 
     // Push reserves no provider targets.
     let mut with_targets = operation.clone();
-    with_targets.targets.push(ConversationJournalTarget {
+    with_targets.targets.push(ConversationApplyTarget {
         target_path: "/home/user/.codex/sessions/new.jsonl".to_string(),
         role: ConversationFileRole::Transcript,
         expected: TargetExpectation::Absent,
@@ -2759,16 +2747,12 @@ fn journal_operations_validate_phase_payloads() {
         backup_path: None,
         staged_sha256: None,
         index_rows: vec![],
-        commit_started: false,
-        committed: false,
     });
     assert!(with_targets.validate().is_err());
 
     // A non-publishing relation can never reach a publication journal.
     let mut wrong_relation = operation.clone();
-    if let ConversationSyncOperationKind::CloudPublication(publication) =
-        &mut wrong_relation.operation
-    {
+    if let ConversationApplyKind::CloudPublication(publication) = &mut wrong_relation.operation {
         publication.planned_relation = TailClassification::Divergent;
     }
     assert!(wrong_relation.validate().is_err());
@@ -2776,14 +2760,13 @@ fn journal_operations_validate_phase_payloads() {
     // Materialization: keep-both exactly for Divergent, never self-preserving.
     let host = HostId::parse("00112233445566778899aabbccddeeff").unwrap();
     let mut materialization = operation.clone();
-    materialization.operation = ConversationSyncOperationKind::ProviderMaterialization(
-        ConversationMaterializationOperation {
-            phase: PullJournalPhase::TargetStaged,
+    materialization.operation =
+        ConversationApplyKind::ProviderMaterialization(ConversationMaterializationApply {
             planned_relation: TailClassification::Divergent,
             accepted_tail_after: whole_tail_over(&chain),
             pinned_lineage_digest: "a".repeat(64),
             pinned_semantic_digest: "b".repeat(64),
-            keep_both: Some(KeepBothJournal {
+            keep_both: Some(KeepBothApply {
                 preserved_thread_id: ThreadId::parse("thread-preserved").unwrap(),
                 remote_provider_thread_id: "0199a1b2-0000-7000-8000-000000000002".to_string(),
                 preserved: PreservedProvenance {
@@ -2792,19 +2775,15 @@ fn journal_operations_validate_phase_payloads() {
                 },
                 preserved_display_title: "Conversation (Preserved 1 · Machine A)".to_string(),
             }),
-            sync_config_before: SyncConfig::default(),
+            expected_config_revision: 0,
             sync_config_after: SyncConfig::default(),
-            bindings_before: ConversationBindings::empty(host.clone()),
             bindings_after: ConversationBindings::empty(host),
-        },
-    );
+        });
     materialization.validate().unwrap();
     assert_eq!(materialization.direction(), ConversationPlanDirection::Pull);
 
     let mut self_preserving = materialization.clone();
-    if let ConversationSyncOperationKind::ProviderMaterialization(pull) =
-        &mut self_preserving.operation
-    {
+    if let ConversationApplyKind::ProviderMaterialization(pull) = &mut self_preserving.operation {
         pull.keep_both.as_mut().unwrap().preserved_thread_id = ThreadId::parse("thread-1").unwrap();
     }
     assert!(self_preserving
@@ -2814,7 +2793,7 @@ fn journal_operations_validate_phase_payloads() {
 
     // The minted provenance must name the operation's own cloud thread.
     let mut mismatched_provenance = materialization.clone();
-    if let ConversationSyncOperationKind::ProviderMaterialization(pull) =
+    if let ConversationApplyKind::ProviderMaterialization(pull) =
         &mut mismatched_provenance.operation
     {
         pull.keep_both.as_mut().unwrap().preserved.preserved_from =
@@ -2826,7 +2805,7 @@ fn journal_operations_validate_phase_payloads() {
         .contains("must name the operation's cloud thread"));
 
     let mut keep_both_without_divergence = materialization.clone();
-    if let ConversationSyncOperationKind::ProviderMaterialization(pull) =
+    if let ConversationApplyKind::ProviderMaterialization(pull) =
         &mut keep_both_without_divergence.operation
     {
         pull.planned_relation = TailClassification::CloudOutstanding;
@@ -2834,20 +2813,11 @@ fn journal_operations_validate_phase_payloads() {
     assert!(keep_both_without_divergence.validate().is_err());
 
     let mut sync_relation = materialization.clone();
-    if let ConversationSyncOperationKind::ProviderMaterialization(pull) =
-        &mut sync_relation.operation
-    {
+    if let ConversationApplyKind::ProviderMaterialization(pull) = &mut sync_relation.operation {
         pull.planned_relation = TailClassification::Sync(SyncCurrency::Current);
         pull.keep_both = None;
     }
     assert!(sync_relation.validate().is_err());
-
-    // Phase terminality is typed per direction.
-    assert!(PushJournalPhase::AbortedCasLost.is_terminal());
-    assert!(PushJournalPhase::RecoveryBlockedCorruption.is_blocked());
-    assert!(!PullJournalPhase::ProviderCommitted.is_terminal());
-    assert!(PullJournalPhase::AbortedProviderCollision.is_terminal());
-    assert!(PullJournalPhase::RecoveryBlockedCorruption.is_blocked());
 }
 
 // --- Plan action rules -------------------------------------------------------
@@ -2997,8 +2967,9 @@ fn codex_threads_require_an_end_aligned_portable_tail() {
         .portable_tail = None;
     absent.content_sha256 = absent.compute_content_sha256(&scope_key).unwrap();
     let manifest = scoped_manifest(BTreeMap::from([(scope_key.clone(), absent)]));
+    manifest.validate().unwrap();
     assert!(manifest
-        .validate()
+        .resolve_all(&portable::test_resolver::Version1Resolver)
         .unwrap_err()
         .contains("requires a portable tail"));
 
@@ -3028,8 +2999,9 @@ fn codex_threads_require_an_end_aligned_portable_tail() {
         .codec = "claude.lineage.v1".to_string();
     foreign_codec.content_sha256 = foreign_codec.compute_content_sha256(&scope_key).unwrap();
     let manifest = scoped_manifest(BTreeMap::from([(scope_key, foreign_codec)]));
+    manifest.validate().unwrap();
     assert!(manifest
-        .validate()
+        .resolve_all(&portable::test_resolver::Version1Resolver)
         .unwrap_err()
         .contains("unknown codex portable tail wire codec"));
 }
@@ -3054,6 +3026,7 @@ fn reshaped_documents_reject_unknown_and_retired_keys() {
 
     // An unknown binding key fails closed without explicit enumeration.
     let binding = LocalConversationBinding {
+        path_origins_ref: None,
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         replica_id: ReplicaId::parse("replica-a").unwrap(),
         local_project_id: LocalProjectId::parse("project-a").unwrap(),
@@ -3112,7 +3085,7 @@ fn reshaped_documents_reject_unknown_and_retired_keys() {
         .as_object_mut()
         .unwrap()
         .insert("binding_forked_from".to_string(), serde_json::json!(null));
-    assert!(serde_json::from_value::<ConversationSyncOperation>(value).is_err());
+    assert!(serde_json::from_value::<ConversationApplyOperation>(value).is_err());
 }
 
 // --- Cloud thread id decoupling ------------------------------------------------
@@ -3158,6 +3131,7 @@ fn documents_fail_closed_on_missing_identity_keys() {
     // `#[serde(default)]`; the presence-requiring deserializer is what makes
     // these keys mandatory. The fixtures omit the required identity keys.
     let binding = LocalConversationBinding {
+        path_origins_ref: None,
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         replica_id: ReplicaId::parse("replica-a").unwrap(),
         local_project_id: LocalProjectId::parse("project-a").unwrap(),
@@ -3225,7 +3199,7 @@ fn documents_fail_closed_on_missing_identity_keys() {
     let operation = publication_operation(&tail_chain());
     let mut value = serde_json::to_value(&operation).unwrap();
     value.as_object_mut().unwrap().remove("cloud_thread_id");
-    assert!(serde_json::from_value::<ConversationSyncOperation>(value).is_err());
+    assert!(serde_json::from_value::<ConversationApplyOperation>(value).is_err());
 
     // Review rows carry the same present-on-wire pair.
     let row = ConversationReviewRow {
@@ -3248,6 +3222,7 @@ fn documents_fail_closed_on_missing_identity_keys() {
 fn bindings_reject_duplicate_cloud_claims_per_scope() {
     let host = HostId::parse("00112233445566778899aabbccddeeff").unwrap();
     let row = |thread: &str, replica: &str, cloud: Option<&str>| LocalConversationBinding {
+        path_origins_ref: None,
         host_id: host.clone(),
         replica_id: ReplicaId::parse(replica).unwrap(),
         local_project_id: LocalProjectId::parse("project-a").unwrap(),
@@ -3290,92 +3265,19 @@ fn bindings_reject_duplicate_cloud_claims_per_scope() {
 }
 
 #[test]
-fn journal_documents_enforce_per_space_pending_uniqueness() {
-    let chain = tail_chain();
-    let base = publication_operation(&chain);
-    let mut journal = ConversationSyncJournal::empty();
-
-    // Two operations for one local thread (same provider) are rejected.
-    let mut second = base.clone();
-    second.operation_id = ConversationOperationId::parse("op-2").unwrap();
-    second.plan_action_id = Some(ActionId::parse("action-2").unwrap());
-    second.cloud_thread_id = CloudThreadId::parse("cloudthread-2").unwrap();
-    journal.operations = vec![base.clone(), second.clone()];
-    assert!(journal
-        .validate()
-        .unwrap_err()
-        .contains("two operations for thread"));
-
-    // Two operations for one cloud thread are rejected even across distinct
-    // local threads — the retried-CreateLocal correlation.
-    second.thread_id = ThreadId::parse("thread-2").unwrap();
-    second.cloud_thread_id = base.cloud_thread_id.clone();
-    journal.operations = vec![base.clone(), second.clone()];
-    assert!(journal
-        .validate()
-        .unwrap_err()
-        .contains("two operations for cloud thread"));
-
-    // Two operations for one (plan, action) pair are rejected.
-    second.cloud_thread_id = CloudThreadId::parse("cloudthread-2").unwrap();
-    second.plan_action_id = base.plan_action_id.clone();
-    journal.operations = vec![base.clone(), second.clone()];
-    assert!(journal.validate().unwrap_err().contains("one plan action"));
-
-    // Fully distinct identities coexist.
-    second.plan_action_id = Some(ActionId::parse("action-2").unwrap());
-    journal.operations = vec![base, second];
-    journal.validate().unwrap();
-}
-
-#[test]
-fn push_plans_reject_duplicate_cloud_claims() {
-    // Two mapped CreateClouds claiming one cloud thread cannot enter one
-    // reviewed plan document.
-    let plan = ConversationPushPlan {
-        schema_version: PUSH_PLAN_SCHEMA,
-        plan_id: PlanId::parse("plan-1").unwrap(),
-        storage_id: StorageId::parse("personal").unwrap(),
-        bundle_id: bundle_id(),
-        host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
-        replica_id: ReplicaId::parse("replica-a").unwrap(),
-        local_project_id: LocalProjectId::parse("project-a").unwrap(),
-        expected_host_identity_revision: 3,
-        expected_project_binding_revision: 2,
-        expected_bindings_document_revision: 4,
-        revision: 0,
-        commit_id: "absent".to_string(),
-        manifest_sha256: "0".repeat(64),
-        created_at: 1,
-        expires_at: 10,
-        actions: vec![
-            {
-                let mut action = push_action("action-1", "codex", "profile-codex", "1");
-                action.cloud_thread_id = Some(CloudThreadId::parse("cloudthread-shared").unwrap());
-                action
-            },
-            {
-                let mut action = push_action("action-2", "codex", "profile-codex", "2");
-                action.cloud_thread_id = Some(CloudThreadId::parse("cloudthread-shared").unwrap());
-                action
-            },
-        ],
-    };
-    assert!(plan
-        .validate()
-        .unwrap_err()
-        .contains("claims one cloud thread twice"));
-}
-
-#[test]
-fn storage_setup_draft_validate_bounds_credentials_and_half_edited_fields() {
+fn storage_setup_draft_validate_bounds_half_edited_fields_without_echoing_values() {
     let draft = StorageSetupDraft {
         schema: STORAGE_SETUP_DRAFT_SCHEMA,
         draft_id: StorageSetupDraftId::parse("storagedraft-0123456789abcdef01234567").unwrap(),
+        source: StorageSetupDraftSource::New,
         storage: StorageConfig {
             name: String::new(),
-            kind: StorageKind::S3,
-            local_dir: String::new(),
+            provider: StorageProviderKey::parse("r2").unwrap(),
+            provider_config: StorageProviderConfig::new(
+                1,
+                BoundedConfigObject::empty(),
+                SecretMap::empty(),
+            ),
             ..sample_storage()
         },
         revision: 0,
@@ -3383,7 +3285,7 @@ fn storage_setup_draft_validate_bounds_credentials_and_half_edited_fields() {
         updated_at: 1,
     };
     // An all-empty half-edited form is a valid draft; strictness waits for
-    // the verified upsert.
+    // the adapter's structural validation and the commit transaction.
     draft.validate().unwrap();
 
     let mut wrong_schema = draft.clone();
@@ -3393,23 +3295,31 @@ fn storage_setup_draft_validate_bounds_credentials_and_half_edited_fields() {
         .unwrap_err()
         .contains("unsupported storage setup draft schema"));
 
-    // The two credential fields are bounded, unlike the project draft's
-    // pending storage — and the error never echoes the value.
-    for oversized in [
-        |storage: &mut StorageConfig| storage.access_key_id = "a".repeat(4_097),
-        |storage: &mut StorageConfig| storage.secret_access_key = "a".repeat(4_097),
-        |storage: &mut StorageConfig| storage.bucket = "control\u{7}".to_string(),
-    ] {
-        let mut invalid = draft.clone();
-        oversized(&mut invalid.storage);
-        let error = invalid.validate().unwrap_err();
-        assert_eq!(error, "invalid storage draft field");
-    }
+    let mut unversioned = draft.clone();
+    unversioned.storage.provider_config.version = 0;
+    assert!(unversioned
+        .validate()
+        .unwrap_err()
+        .contains("config version must be positive"));
 
-    let mut secret_control = draft.clone();
-    secret_control.storage.secret_access_key = "shown-once\u{1b}".to_string();
-    let error = secret_control.validate().unwrap_err();
+    let mut control_name = draft.clone();
+    control_name.storage.name = "shown-once\u{1b}".to_string();
+    let error = control_name.validate().unwrap_err();
     assert!(!error.contains("shown-once"));
+
+    // Secrets are bounded by type: a control character never parses, and
+    // the persisted shape rejects unknown fields.
+    assert!(SecretValue::parse("shown-once\u{1b}").is_err());
+    let mut value = serde_json::to_value(&draft).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("secret_access_key".to_string(), serde_json::json!("x"));
+    assert!(serde_json::from_value::<StorageSetupDraft>(value).is_err());
+
+    let mut missing_source = serde_json::to_value(&draft).unwrap();
+    missing_source.as_object_mut().unwrap().remove("source");
+    assert!(serde_json::from_value::<StorageSetupDraft>(missing_source).is_err());
 
     let mut backwards = draft.clone();
     backwards.created_at = 2;

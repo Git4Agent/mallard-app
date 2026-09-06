@@ -15,7 +15,7 @@ use aws_sdk_s3::{Client as S3Client, Config as S3Config};
 use aws_smithy_http_client::{tls, Builder as HttpClientBuilder};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -26,11 +26,9 @@ use tokio::time::{sleep, timeout};
 
 use super::{
     CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix,
-    ObjectStore, StageOutcome, StoreListPage, StoredMetadata, VerifiedBody,
+    ObjectStore, StageOutcome, StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody,
 };
-use mallard_domain::{
-    self as domain, hex_lower, sha256_hex as sha256_bytes, StorageConfig, StorageKind,
-};
+use mallard_domain::{self as domain, hex_lower, sha256_hex as sha256_bytes};
 
 const MAX_LIST_PAGE: usize = 10_000;
 const S3_MAX_KEYS: usize = 1_000;
@@ -150,35 +148,12 @@ pub struct S3ObjectStore {
 }
 
 impl S3ObjectStore {
-    /// Build a store using the application's existing S3/R2 client
-    /// configuration path.  An explicitly unsupported conditional-write
-    /// capability is rejected: project bundles publish mutable heads only by CAS.
-    pub fn from_config(config: &StorageConfig, runtime: Handle) -> Result<Self, String> {
-        config.validate()?;
-        if config.kind != StorageKind::S3 {
-            return Err(format!(
-                "storage '{}' is not an S3-compatible storage",
-                config.id
-            ));
-        }
-        if config.supports_conditional_writes == Some(false) {
-            return Err(format!(
-                "storage '{}' does not support the conditional writes required by project bundles",
-                config.id
-            ));
-        }
-
-        let client = make_s3_client(config)?;
-        Self::from_client(client, config.bucket.clone(), runtime)
-    }
-
-    /// Convenience constructor for callers already running in a Tokio
-    /// context.  Capture the handle before moving the engine operation into
-    /// `spawn_blocking`.
-    pub fn from_current_runtime(config: &StorageConfig) -> Result<Self, String> {
-        let runtime = Handle::try_current()
-            .map_err(|_| "creating an S3 bundle store requires a Tokio runtime".to_string())?;
-        Self::from_config(config, runtime)
+    /// Build a store from one S3-compatible connection. The storage adapter
+    /// that owns the typed settings supplies every part; this transport
+    /// never reads a provider configuration record itself.
+    pub fn from_connection(connection: &S3Connection<'_>, runtime: Handle) -> Result<Self, String> {
+        let client = make_s3_client(connection)?;
+        Self::from_client(client, connection.bucket.to_string(), runtime)
     }
 
     /// Construct from an already configured client.  This is useful for
@@ -474,25 +449,32 @@ impl S3ObjectStore {
         Ok(Some(etag))
     }
 
+    /// Remove only this setup's unique probe key. R2 does not support
+    /// conditional DeleteObject, so cleanup verifies absence after each
+    /// bounded unconditional attempt.
     async fn cleanup_probe_async(&self, key: &str) -> bool {
-        let delete = self
-            .client
-            .delete_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send();
-        let _ = timeout(self.request_timeout, delete).await;
+        for _ in 0..3 {
+            let delete = self
+                .client
+                .delete_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send();
+            let _ = timeout(self.request_timeout, delete).await;
 
-        let head = self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send();
-        match timeout(self.request_timeout, head).await {
-            Ok(Err(error)) if sdk_status(&error) == Some(404) => true,
-            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => false,
+            let head = self
+                .client
+                .head_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send();
+            match timeout(self.request_timeout, head).await {
+                Ok(Err(error)) if sdk_status(&error) == Some(404) => return true,
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) | Err(_) => return false,
+            }
         }
+        false
     }
 
     async fn get_response(
@@ -795,57 +777,6 @@ impl S3ObjectStore {
         }
     }
 
-    async fn delete_async(&self, key: &ObjectKey) -> Result<(), String> {
-        let request = self
-            .client
-            .delete_object()
-            .bucket(&self.bucket)
-            .key(key.as_str())
-            .send();
-        match timeout(self.request_timeout, request).await {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(error)) if sdk_status(&error) == Some(404) => Ok(()),
-            Ok(Err(error)) if ambiguous_sdk_error(&error) => {
-                self.resolve_ambiguous_delete(key, &error.to_string()).await
-            }
-            Ok(Err(error)) => Err(format!("S3 delete '{}': {}", key, error)),
-            Err(_) => {
-                self.resolve_ambiguous_delete(
-                    key,
-                    &format!(
-                        "request timed out after {} ms",
-                        self.request_timeout.as_millis()
-                    ),
-                )
-                .await
-            }
-        }
-    }
-
-    async fn resolve_ambiguous_delete(&self, key: &ObjectKey, cause: &str) -> Result<(), String> {
-        let request = self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(key.as_str())
-            .send();
-        match timeout(self.request_timeout, request).await {
-            Ok(Err(error)) if sdk_status(&error) == Some(404) => Ok(()),
-            Ok(Ok(_)) => Err(format!(
-                "S3 delete '{}' was ambiguous ({}) and the object is still present",
-                key, cause
-            )),
-            Ok(Err(error)) => Err(format!(
-                "S3 delete '{}' was ambiguous ({}); resolution read failed: {}",
-                key, cause, error
-            )),
-            Err(_) => Err(format!(
-                "S3 delete '{}' was ambiguous ({}); resolution read timed out",
-                key, cause
-            )),
-        }
-    }
-
     async fn list_async(
         &self,
         prefix: &ObjectPrefix,
@@ -853,7 +784,7 @@ impl S3ObjectStore {
         limit: usize,
     ) -> Result<StoreListPage, String> {
         let target = limit + 1;
-        let mut keys = BTreeSet::new();
+        let mut keys = BTreeMap::new();
         let mut continuation: Option<String> = None;
         let mut start_after = cursor.map(str::to_string);
         let mut request_count = 0_usize;
@@ -910,7 +841,16 @@ impl S3ObjectStore {
                 }
                 let key = ObjectKey::parse(raw_key.to_string())?;
                 if cursor.is_none_or(|cursor| key.as_str() > cursor) {
-                    keys.insert(key);
+                    let etag = object
+                        .e_tag()
+                        .ok_or_else(|| {
+                            format!(
+                                "S3 list '{}' returned an object without a revision",
+                                prefix.as_str()
+                            )
+                        })
+                        .and_then(|etag| validated_service_etag(etag, key.as_str()))?;
+                    keys.insert(key, etag);
                 }
             }
 
@@ -947,15 +887,23 @@ impl S3ObjectStore {
         }
 
         let has_more = keys.len() > limit;
-        let mut keys = keys.into_iter().take(limit).collect::<Vec<_>>();
-        keys.sort();
+        let entries = keys
+            .into_iter()
+            .take(limit)
+            .map(|(key, etag)| StoreListEntry { key, etag })
+            .collect::<Vec<_>>();
         let next_cursor = has_more.then(|| {
-            keys.last()
+            entries
+                .last()
                 .expect("a nonzero list limit with more results has a last key")
+                .key
                 .as_str()
                 .to_string()
         });
-        Ok(StoreListPage { keys, next_cursor })
+        Ok(StoreListPage {
+            entries,
+            next_cursor,
+        })
     }
 }
 
@@ -1164,8 +1112,25 @@ impl ObjectStore for S3ObjectStore {
         )
     }
 
-    fn delete(&self, key: &ObjectKey) -> Result<(), String> {
-        self.run("delete", self.delete_async(key))
+    fn clear_managed_data(&self) -> Result<super::ManagedStorageClearResult, String> {
+        super::clear_managed_data_with(self, |entry| {
+            // Only the clear loop can reach this unconditional delete. It
+            // validates the marker and both exact managed namespace boundaries.
+            self.run("storage clear delete", async {
+                timeout(
+                    self.request_timeout,
+                    self.client
+                        .delete_object()
+                        .bucket(&self.bucket)
+                        .key(entry.key.as_str())
+                        .send(),
+                )
+                .await
+                .map_err(|_| "storage clear delete timed out".to_string())?
+                .map_err(|_| "storage clear delete failed".to_string())?;
+                Ok(super::DeleteOutcome::Deleted)
+            })
+        })
     }
 
     fn list(
@@ -1207,7 +1172,7 @@ enum ProbePutAttempt {
 }
 
 fn setup_probe_key(setup_id: &str) -> Result<String, ()> {
-    let Some(suffix) = setup_id.strip_prefix("r2setup-") else {
+    let Some(suffix) = setup_id.strip_prefix("setup-") else {
         return Err(());
     };
     if suffix.len() != 24
@@ -1274,39 +1239,45 @@ fn raw_key_is_under_prefix(key: &str, prefix: &ObjectPrefix) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-fn make_s3_client(config: &StorageConfig) -> Result<S3Client, String> {
-    if config.bucket.is_empty() {
+/// The exact parts one S3-compatible transport needs. The secret is borrowed
+/// for the duration of client construction only.
+pub struct S3Connection<'a> {
+    pub endpoint: &'a str,
+    pub region: &'a str,
+    pub bucket: &'a str,
+    pub access_key_id: &'a str,
+    pub secret_access_key: &'a str,
+}
+
+fn make_s3_client(connection: &S3Connection<'_>) -> Result<S3Client, String> {
+    if connection.bucket.is_empty() {
         return Err("Bucket is not configured".to_string());
     }
-    if config.access_key_id.is_empty() {
-        return Err("R2 Access Key ID is not configured".to_string());
+    if connection.access_key_id.is_empty() {
+        return Err("Access Key ID is not configured".to_string());
     }
-    if config.secret_access_key.is_empty() {
-        return Err("R2 Secret Access Key is not configured".to_string());
+    if connection.secret_access_key.is_empty() {
+        return Err("Secret Access Key is not configured".to_string());
     }
-    let endpoint = if !config.s3_endpoint.is_empty() {
-        config.s3_endpoint.clone()
-    } else if !config.account_id.is_empty() {
-        format!("https://{}.r2.cloudflarestorage.com", config.account_id)
-    } else {
+    if connection.endpoint.is_empty() {
         return Err("Endpoint is not configured".to_string());
-    };
+    }
     let credentials = Credentials::new(
-        &config.access_key_id,
-        &config.secret_access_key,
+        connection.access_key_id,
+        connection.secret_access_key,
         None,
         None,
         "mallard-project-sync",
     );
-    let region = if config.region.is_empty() {
+    let region = if connection.region.is_empty() {
         "auto".to_string()
     } else {
-        config.region.clone()
+        connection.region.to_string()
     };
     let sdk_config = S3Config::builder()
         .credentials_provider(credentials)
         .region(Region::new(region))
-        .endpoint_url(endpoint)
+        .endpoint_url(connection.endpoint.to_string())
         .force_path_style(true)
         .behavior_version_latest()
         .http_client(
@@ -1398,7 +1369,9 @@ mod tests {
         objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
         get_behaviors: Arc<Mutex<BTreeMap<String, GetBehavior>>>,
         honor_conditions: Arc<AtomicBool>,
+        conditional_delete_requests: Arc<AtomicUsize>,
         fail_delete: Arc<AtomicBool>,
+        delete_successes_left: Arc<AtomicUsize>,
         list_authorization_failures: Arc<AtomicUsize>,
         server: tokio::task::JoinHandle<()>,
     }
@@ -1467,12 +1440,16 @@ mod tests {
             let objects = Arc::new(Mutex::new(BTreeMap::new()));
             let get_behaviors = Arc::new(Mutex::new(BTreeMap::new()));
             let honor_conditions = Arc::new(AtomicBool::new(true));
+            let conditional_delete_requests = Arc::new(AtomicUsize::new(0));
             let fail_delete = Arc::new(AtomicBool::new(false));
+            let delete_successes_left = Arc::new(AtomicUsize::new(usize::MAX));
             let list_authorization_failures = Arc::new(AtomicUsize::new(0));
             let server_objects = objects.clone();
             let server_get_behaviors = get_behaviors.clone();
             let server_honor_conditions = honor_conditions.clone();
+            let server_conditional_delete_requests = conditional_delete_requests.clone();
             let server_fail_delete = fail_delete.clone();
+            let server_delete_successes_left = delete_successes_left.clone();
             let server_list_authorization_failures = list_authorization_failures.clone();
             let server = tokio::spawn(async move {
                 loop {
@@ -1482,7 +1459,9 @@ mod tests {
                     let objects = server_objects.clone();
                     let get_behaviors = server_get_behaviors.clone();
                     let honor_conditions = server_honor_conditions.clone();
+                    let conditional_delete_requests = server_conditional_delete_requests.clone();
                     let fail_delete = server_fail_delete.clone();
+                    let delete_successes_left = server_delete_successes_left.clone();
                     let list_authorization_failures = server_list_authorization_failures.clone();
                     tokio::spawn(async move {
                         let service = service_fn(move |request| {
@@ -1491,7 +1470,9 @@ mod tests {
                                 objects.clone(),
                                 get_behaviors.clone(),
                                 honor_conditions.clone(),
+                                conditional_delete_requests.clone(),
                                 fail_delete.clone(),
+                                delete_successes_left.clone(),
                                 list_authorization_failures.clone(),
                             )
                         });
@@ -1506,7 +1487,9 @@ mod tests {
                 objects,
                 get_behaviors,
                 honor_conditions,
+                conditional_delete_requests,
                 fail_delete,
+                delete_successes_left,
                 list_authorization_failures,
                 server,
             }
@@ -1746,23 +1729,121 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn exact_object_delete_is_idempotent() {
+    async fn r2_store_refuses_conditional_delete_without_a_remote_request() {
         let server = TestS3::start().await;
         let key = test_upload_key("delete-me");
         server.seed(key.as_str().to_string(), b"value".to_vec());
         let store = server.store();
-        let first_store = store.clone();
-        let first_key = key.clone();
 
-        blocking(move || first_store.delete(&first_key))
-            .await
-            .unwrap();
-        assert!(!server
+        assert!(!store.supports_conditional_delete());
+        let store_for_delete = store.clone();
+        let key_for_delete = key.clone();
+        let error =
+            blocking(move || store_for_delete.delete(&key_for_delete, &sha256_bytes(b"value")))
+                .await
+                .unwrap_err();
+        assert_eq!(
+            error,
+            "conditional object deletion is not supported by this storage"
+        );
+        assert!(server
             .objects
             .lock()
             .expect("test S3 lock")
             .contains_key(key.as_str()));
-        blocking(move || store.delete(&key)).await.unwrap();
+        assert_eq!(server.conditional_delete_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn r2_clear_pages_preserves_marker_and_namespace_neighbors() {
+        let server = TestS3::start().await;
+        let marker = serde_json::to_vec(&super::super::StorageMarker::current()).unwrap();
+        server.seed(super::super::STORAGE_MARKER_KEY.to_string(), marker.clone());
+        for index in 0..1_005 {
+            server.seed(
+                format!(".mallard/v1/repositories/{index:032x}/_head.json"),
+                b"repo".to_vec(),
+            );
+        }
+        let library = ".mallard/v1/library/library-22222222222222222222222222222222/_head.json";
+        server.seed(library.to_string(), b"library".to_vec());
+        let retained = [
+            "unrelated.txt",
+            ".mallard/v1/repositories-old/keep",
+            ".mallard/v1/library-old/keep",
+            ".mallard/v2/repositories/keep",
+        ];
+        for key in &retained {
+            server.seed(key.to_string(), b"keep".to_vec());
+        }
+        let store = server.store();
+        let result = blocking(move || super::super::clear_managed_storage_data(&store))
+            .await
+            .unwrap();
+        assert_eq!(result.repository_objects_deleted, 1_005);
+        assert_eq!(result.library_objects_deleted, 1);
+        let objects = server.objects.lock().unwrap();
+        assert_eq!(objects.len(), 5);
+        assert_eq!(objects[super::super::STORAGE_MARKER_KEY], marker);
+        for key in &retained {
+            assert_eq!(objects[*key], b"keep");
+        }
+        assert_eq!(server.conditional_delete_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn r2_clear_partial_failure_can_retry_remaining_objects() {
+        let server = TestS3::start().await;
+        let repo = test_upload_key("clear-repo");
+        let library = ".mallard/v1/library/library-22222222222222222222222222222222/_head.json";
+        server.seed(repo.as_str().to_string(), b"repo".to_vec());
+        server.seed(library.to_string(), b"library".to_vec());
+        server.delete_successes_left.store(1, Ordering::SeqCst);
+        let store = server.store();
+        let error = blocking(move || super::super::clear_managed_storage_data(&store))
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("Some data was deleted (1 objects confirmed)"),
+            "{error}"
+        );
+        assert!(error.contains("retry Clear storage data"));
+        assert!(!server.objects.lock().unwrap().contains_key(repo.as_str()));
+        assert!(server.objects.lock().unwrap().contains_key(library));
+        server
+            .delete_successes_left
+            .store(usize::MAX, Ordering::SeqCst);
+        let store = server.store();
+        let result = blocking(move || super::super::clear_managed_storage_data(&store))
+            .await
+            .unwrap();
+        assert_eq!(result.repository_objects_deleted, 0);
+        assert_eq!(result.library_objects_deleted, 1);
+        let store = server.store();
+        assert_eq!(
+            blocking(move || super::super::clear_managed_storage_data(&store))
+                .await
+                .unwrap(),
+            super::super::ManagedStorageClearResult::default()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn r2_clear_rejects_invalid_marker_before_deletion() {
+        let server = TestS3::start().await;
+        let key = test_upload_key("keep-repo");
+        server.seed(key.as_str().to_string(), b"repo".to_vec());
+        server.seed(
+            super::super::STORAGE_MARKER_KEY.to_string(),
+            br#"{"format":"mallard-storage","layout_version":2}"#.to_vec(),
+        );
+        let before = server.objects.lock().unwrap().clone();
+        let store = server.store();
+        let error = blocking(move || super::super::clear_managed_storage_data(&store))
+            .await
+            .unwrap_err();
+        assert!(error.contains("layout version 2"));
+        assert_eq!(*server.objects.lock().unwrap(), before);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2064,7 +2145,7 @@ mod tests {
         let first = blocking(move || store_for_first.list(&prefix_for_first, None, 1_001))
             .await
             .unwrap();
-        assert_eq!(first.keys.len(), 1_001);
+        assert_eq!(first.entries.len(), 1_001);
         let cursor = first.next_cursor.expect("more than 1001 objects");
 
         let store_for_second = store.clone();
@@ -2073,12 +2154,13 @@ mod tests {
             blocking(move || store_for_second.list(&prefix_for_second, Some(&cursor), 1_001))
                 .await
                 .unwrap();
-        assert_eq!(second.keys.len(), 4);
+        assert_eq!(second.entries.len(), 4);
         assert!(second.next_cursor.is_none());
         assert!(second
-            .keys
+            .entries
             .windows(2)
-            .all(|pair| pair[0].as_str() < pair[1].as_str()));
+            .all(|pair| pair[0].key.as_str() < pair[1].key.as_str()));
+        assert!(second.entries.iter().all(|entry| entry.etag.len() == 64));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2086,11 +2168,11 @@ mod tests {
         let server = TestS3::start().await;
         let store = server.store();
         let receipt =
-            blocking(move || store.probe_r2_capabilities("r2setup-0123456789abcdef01234567"))
+            blocking(move || store.probe_r2_capabilities("setup-0123456789abcdef01234567"))
                 .await
                 .unwrap();
 
-        assert_eq!(receipt.setup_id(), "r2setup-0123456789abcdef01234567");
+        assert_eq!(receipt.setup_id(), "setup-0123456789abcdef01234567");
         assert!(server.objects.lock().expect("test S3 lock").is_empty());
     }
 
@@ -2100,11 +2182,11 @@ mod tests {
         server.fail_list_authorization(2);
         let store = server.store();
         let receipt =
-            blocking(move || store.probe_r2_capabilities("r2setup-0923456789abcdef01234567"))
+            blocking(move || store.probe_r2_capabilities("setup-0923456789abcdef01234567"))
                 .await
                 .unwrap();
 
-        assert_eq!(receipt.setup_id(), "r2setup-0923456789abcdef01234567");
+        assert_eq!(receipt.setup_id(), "setup-0923456789abcdef01234567");
         assert_eq!(server.list_authorization_failures.load(Ordering::SeqCst), 0);
         assert!(server.objects.lock().expect("test S3 lock").is_empty());
     }
@@ -2114,10 +2196,9 @@ mod tests {
         let server = TestS3::start().await;
         server.ignore_conditions();
         let store = server.store();
-        let error =
-            blocking(move || store.probe_r2_capabilities("r2setup-1123456789abcdef01234567"))
-                .await
-                .unwrap_err();
+        let error = blocking(move || store.probe_r2_capabilities("setup-1123456789abcdef01234567"))
+            .await
+            .unwrap_err();
 
         assert_eq!(error.kind(), R2CapabilityProbeErrorKind::Remote);
         assert_eq!(
@@ -2128,19 +2209,32 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn r2_capability_probe_uses_unconditional_delete_only_for_cleanup() {
+        let server = TestS3::start().await;
+        let store = server.store();
+        let receipt =
+            blocking(move || store.probe_r2_capabilities("setup-5123456789abcdef01234567"))
+                .await
+                .unwrap();
+
+        assert_eq!(receipt.setup_id(), "setup-5123456789abcdef01234567");
+        assert_eq!(server.conditional_delete_requests.load(Ordering::SeqCst), 0);
+        assert!(server.objects.lock().expect("test S3 lock").is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn r2_capability_probe_reports_only_a_setup_id_when_cleanup_fails() {
         let server = TestS3::start().await;
         server.fail_delete();
         let store = server.store();
-        let error =
-            blocking(move || store.probe_r2_capabilities("r2setup-2123456789abcdef01234567"))
-                .await
-                .unwrap_err();
+        let error = blocking(move || store.probe_r2_capabilities("setup-2123456789abcdef01234567"))
+            .await
+            .unwrap_err();
 
         assert_eq!(error.kind(), R2CapabilityProbeErrorKind::CleanupRequired);
-        assert_eq!(error.setup_id(), "r2setup-2123456789abcdef01234567");
+        assert_eq!(error.setup_id(), "setup-2123456789abcdef01234567");
         let display = error.to_string();
-        assert!(display.contains("r2setup-2123456789abcdef01234567"));
+        assert!(display.contains("setup-2123456789abcdef01234567"));
         assert!(!display.contains(R2_SETUP_PROBE_PREFIX));
         assert_eq!(server.objects.lock().expect("test S3 lock").len(), 1);
     }
@@ -2148,9 +2242,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn r2_probe_reconciliation_deletes_only_the_journaled_setup_key() {
         let server = TestS3::start().await;
-        let setup_id = "r2setup-3123456789abcdef01234567";
+        let setup_id = "setup-3123456789abcdef01234567";
         let probe_key = setup_probe_key(setup_id).unwrap();
-        let unrelated = ".mallard/v1/_setup_probes/r2setup-4123456789abcdef01234567";
+        let unrelated = ".mallard/v1/_setup_probes/setup-4123456789abcdef01234567";
         server.seed(probe_key, b"stale probe".to_vec());
         server.seed(unrelated.to_string(), b"keep".to_vec());
         server.fail_list_authorization(2);
@@ -2207,7 +2301,9 @@ mod tests {
         objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
         get_behaviors: Arc<Mutex<BTreeMap<String, GetBehavior>>>,
         honor_conditions: Arc<AtomicBool>,
+        conditional_delete_requests: Arc<AtomicUsize>,
         fail_delete: Arc<AtomicBool>,
+        delete_successes_left: Arc<AtomicUsize>,
         list_authorization_failures: Arc<AtomicUsize>,
     ) -> Result<Response<TestBody>, Infallible> {
         let method = request.method().clone();
@@ -2285,8 +2381,19 @@ mod tests {
                 None => xml_error(StatusCode::NOT_FOUND, "NoSuchKey"),
             }),
             Method::DELETE => {
+                if if_match.is_some() {
+                    conditional_delete_requests.fetch_add(1, Ordering::SeqCst);
+                }
                 if fail_delete.load(Ordering::SeqCst) {
                     return Ok(xml_error(StatusCode::INTERNAL_SERVER_ERROR, "DeleteFailed"));
+                }
+                if delete_successes_left
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                        left.checked_sub(1)
+                    })
+                    .is_err()
+                {
+                    return Ok(xml_error(StatusCode::FORBIDDEN, "AccessDenied"));
                 }
                 objects.remove(key);
                 Ok(object_response(StatusCode::NO_CONTENT, Vec::new(), None))

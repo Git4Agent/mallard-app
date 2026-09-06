@@ -70,13 +70,35 @@ const CONTEXT_ONLY_EVENTS: [&str; 8] = [
 /// `output_root_thread_id` is the final provider identity of the standalone
 /// root. Original records come back unchanged and in order, with projection
 /// and implicit-turn records inserted at the positions the frozen adapter
-/// selects.
+/// selects. `check_inserted` checks each new record before it enters the
+/// output. Preserved records and adopted projections do not invoke it.
 pub fn complete_paginated_item_projection(
     records: Vec<Value>,
     output_root_thread_id: &str,
+    check_inserted: &mut dyn FnMut(&Value) -> Result<(), String>,
 ) -> Result<Vec<Value>, String> {
-    let mut projector = Projector::new(&records, output_root_thread_id)?;
+    Ok(
+        project_with_sources(records, output_root_thread_id, check_inserted)?
+            .into_iter()
+            .map(|record| record.value)
+            .collect(),
+    )
+}
+
+pub(crate) struct ProjectedRecord {
+    pub value: Value,
+    pub source_index: Option<usize>,
+    pub derived: bool,
+}
+
+pub(crate) fn project_with_sources(
+    records: Vec<Value>,
+    output_root_thread_id: &str,
+    check_inserted: &mut dyn FnMut(&Value) -> Result<(), String>,
+) -> Result<Vec<ProjectedRecord>, String> {
+    let mut projector = Projector::new(&records, output_root_thread_id, check_inserted)?;
     for index in 0..records.len() {
+        projector.current_source = index;
         projector.process(&records, index)?;
     }
     projector.finish()
@@ -90,7 +112,10 @@ pub fn verify_projection_fixpoint(
     records: &[Value],
     output_root_thread_id: &str,
 ) -> Result<(), String> {
-    let reprojected = complete_paginated_item_projection(records.to_vec(), output_root_thread_id)?;
+    let reprojected =
+        complete_paginated_item_projection(records.to_vec(), output_root_thread_id, &mut |_| {
+            Ok(())
+        })?;
     if reprojected.len() != records.len() {
         return Err(format!(
             "paginated projection is not a fixpoint: {} records reprojected to {}",
@@ -128,7 +153,11 @@ struct ReasoningRun {
 
 struct Projector<'a> {
     output_root_thread_id: &'a str,
+    check_inserted: &'a mut dyn FnMut(&Value) -> Result<(), String>,
     output: Vec<Value>,
+    output_sources: Vec<Option<usize>>,
+    redundant_sources: BTreeSet<usize>,
+    current_source: usize,
     active_turn: Option<ActiveTurn>,
     known_turn_ids: BTreeSet<String>,
     run: Option<ReasoningRun>,
@@ -144,7 +173,11 @@ struct Projector<'a> {
 }
 
 impl<'a> Projector<'a> {
-    fn new(records: &[Value], output_root_thread_id: &'a str) -> Result<Self, String> {
+    fn new(
+        records: &[Value],
+        output_root_thread_id: &'a str,
+        check_inserted: &'a mut dyn FnMut(&Value) -> Result<(), String>,
+    ) -> Result<Self, String> {
         let mut used_item_ids = BTreeSet::new();
         let mut hook_prompts = BTreeMap::new();
         for (index, record) in records.iter().enumerate() {
@@ -205,7 +238,11 @@ impl<'a> Projector<'a> {
         }
         Ok(Self {
             output_root_thread_id,
+            check_inserted,
             output: Vec::with_capacity(records.len()),
+            output_sources: Vec::with_capacity(records.len()),
+            redundant_sources: BTreeSet::new(),
+            current_source: 0,
             active_turn: None,
             known_turn_ids: BTreeSet::new(),
             run: None,
@@ -228,12 +265,14 @@ impl<'a> Projector<'a> {
             .ok_or_else(|| "Codex rollout record has no type".to_string())?
             .to_string();
         if outer != "event_msg" {
-            self.output.push(record.clone());
             if outer == "response_item" {
                 if let Some(hook) = self.hook_prompts.get(&index).cloned() {
                     let timestamp = record_timestamp(record, "hook prompt response item")?;
                     self.flush_reasoning()?;
                     self.ensure_turn(&timestamp, index)?;
+                    // A synthetic start must precede its source message.
+                    // Otherwise reprojection opens a second implicit turn.
+                    self.push_source(record.clone());
                     let generated = hook.item_id.is_none();
                     let item = hook_prompt_item(hook.item_id, &hook.fragments);
                     self.adopt_or_emit(
@@ -244,8 +283,10 @@ impl<'a> Projector<'a> {
                         item,
                         IdIsGenerated(generated),
                     )?;
+                    return Ok(());
                 }
             }
+            self.push_source(record.clone());
             return Ok(());
         }
         let payload = record
@@ -272,7 +313,7 @@ impl<'a> Projector<'a> {
                     explicit: true,
                     saw_user: false,
                 });
-                self.output.push(record.clone());
+                self.push_source(record.clone());
             }
             "task_complete" | "turn_complete" => {
                 self.flush_reasoning()?;
@@ -284,7 +325,7 @@ impl<'a> Projector<'a> {
                 {
                     self.active_turn = None;
                 }
-                self.output.push(record.clone());
+                self.push_source(record.clone());
             }
             "turn_aborted" | "task_aborted" => {
                 self.flush_reasoning()?;
@@ -303,20 +344,22 @@ impl<'a> Projector<'a> {
                     // association without mutating the original record.
                     None => self.active_turn = None,
                 }
-                self.output.push(record.clone());
+                self.push_source(record.clone());
             }
             "item_completed" => {
                 let normalized = self.normalize_current_item_record(record)?;
                 if self.adopted_candidate_index.take() == Some(index) {
-                    self.output.push(normalized);
+                    self.redundant_sources.insert(index);
+                    self.push_source(normalized);
                     return Ok(());
                 }
                 if self.adopt_reasoning_projection(&normalized, index)? {
-                    self.output.push(normalized);
+                    self.redundant_sources.insert(index);
+                    self.push_source(normalized);
                     return Ok(());
                 }
                 self.flush_reasoning()?;
-                self.output.push(normalized);
+                self.push_source(normalized);
             }
             "user_message" => {
                 self.flush_reasoning()?;
@@ -333,7 +376,7 @@ impl<'a> Projector<'a> {
                     turn.saw_user = true;
                 }
                 let item_body = user_message_item_body(payload)?;
-                self.output.push(record.clone());
+                self.push_source(record.clone());
                 self.adopt_or_emit(
                     records,
                     index,
@@ -351,14 +394,14 @@ impl<'a> Projector<'a> {
                 if message.is_empty() {
                     // Upstream skips empty agent messages without touching
                     // reasoning state; the original record still travels.
-                    self.output.push(record.clone());
+                    self.push_source(record.clone());
                     return Ok(());
                 }
                 self.flush_reasoning()?;
                 let timestamp = record_timestamp(record, &event_type)?;
                 self.ensure_turn(&timestamp, index)?;
                 let item_body = agent_message_item_body(payload, message);
-                self.output.push(record.clone());
+                self.push_source(record.clone());
                 self.adopt_or_emit(
                     records,
                     index,
@@ -376,11 +419,11 @@ impl<'a> Projector<'a> {
                     .ok_or_else(|| format!("Codex {event_type} event has no text"))?
                     .to_string();
                 if text.is_empty() {
-                    self.output.push(record.clone());
+                    self.push_source(record.clone());
                     return Ok(());
                 }
                 self.ensure_turn(&timestamp, index)?;
-                self.output.push(record.clone());
+                self.push_source(record.clone());
                 let turn_id = self
                     .active_turn
                     .as_ref()
@@ -507,7 +550,7 @@ impl<'a> Projector<'a> {
                 )?;
             }
             other if CONTEXT_ONLY_EVENTS.contains(&other) => {
-                self.output.push(record.clone());
+                self.push_source(record.clone());
             }
             other => {
                 return Err(format!(
@@ -566,7 +609,7 @@ impl<'a> Projector<'a> {
                 .map(|turn| turn.id.clone())
                 .ok_or_else(|| "Codex display completion has no active turn".to_string())?,
         };
-        self.output.push(record.clone());
+        self.push_source(record.clone());
         self.adopt_or_emit(
             records,
             index,
@@ -618,8 +661,7 @@ impl<'a> Projector<'a> {
         };
         let projection =
             self.projection_record(timestamp, &turn_id, &item_body, &id, completed_at_ms);
-        self.output.push(projection);
-        Ok(())
+        self.insert_record(self.output.len(), projection)
     }
 
     /// When `candidate` equals the exact projection this completion needs —
@@ -817,7 +859,19 @@ impl<'a> Projector<'a> {
             &id,
             completed_at_ms,
         );
-        self.output.insert(run.last_output_index + 1, projection);
+        self.insert_record(run.last_output_index + 1, projection)
+    }
+
+    fn push_source(&mut self, record: Value) {
+        self.output.push(record);
+        self.output_sources.push(Some(self.current_source));
+    }
+
+    fn insert_record(&mut self, index: usize, record: Value) -> Result<(), String> {
+        (self.check_inserted)(&record)
+            .map_err(|error| format!("inserted record {}: {error}", index + 1))?;
+        self.output.insert(index, record);
+        self.output_sources.insert(index, None);
         Ok(())
     }
 
@@ -837,7 +891,7 @@ impl<'a> Projector<'a> {
         );
         payload.insert("turn_id".to_string(), Value::String(turn_id.clone()));
         payload.insert("started_at".to_string(), Value::from(started_at));
-        self.output.push(event_record(timestamp, payload));
+        self.insert_record(self.output.len(), event_record(timestamp, payload))?;
         self.known_turn_ids.insert(turn_id.clone());
         self.active_turn = Some(ActiveTurn {
             id: turn_id,
@@ -864,8 +918,7 @@ impl<'a> Projector<'a> {
         );
         payload.insert("turn_id".to_string(), Value::String(turn_id));
         payload.insert("completed_at".to_string(), Value::from(completed_at));
-        self.output.push(event_record(timestamp, payload));
-        Ok(())
+        self.insert_record(self.output.len(), event_record(timestamp, payload))
     }
 
     fn allocate_item_id(&mut self) -> String {
@@ -879,7 +932,7 @@ impl<'a> Projector<'a> {
         }
     }
 
-    fn finish(mut self) -> Result<Vec<Value>, String> {
+    fn finish(mut self) -> Result<Vec<ProjectedRecord>, String> {
         self.flush_reasoning()?;
         if self.active_turn.as_ref().is_some_and(|turn| !turn.explicit) {
             let timestamp = self.last_timestamp.clone().ok_or_else(|| {
@@ -887,7 +940,20 @@ impl<'a> Projector<'a> {
             })?;
             self.finish_implicit_turn(&timestamp)?;
         }
-        Ok(self.output)
+        Ok(self
+            .output
+            .into_iter()
+            .zip(self.output_sources)
+            .map(|(value, source_index)| {
+                let derived =
+                    source_index.is_none_or(|index| self.redundant_sources.contains(&index));
+                ProjectedRecord {
+                    value,
+                    source_index,
+                    derived,
+                }
+            })
+            .collect())
     }
 }
 
@@ -1577,11 +1643,73 @@ mod tests {
     const OUT: &str = "output-thread";
 
     fn project(records: Vec<Value>) -> Vec<Value> {
-        complete_paginated_item_projection(records, OUT).unwrap()
+        complete_paginated_item_projection(records, OUT, &mut |_| Ok(())).unwrap()
+    }
+
+    #[test]
+    fn inserted_checks_cover_emitters_and_skip_adopted_records() {
+        let mut redactor = crate::credential_redaction::shared().begin_run();
+        let source = vec![
+            reasoning("2026-08-12T10:01:00Z", "Check the result."),
+            agent("The result is ready."),
+        ]
+        .into_iter()
+        .map(|record| redactor.redact_record_gated(&record).unwrap())
+        .collect::<Vec<_>>();
+        let mut inserted = Vec::new();
+        let output = complete_paginated_item_projection(source.clone(), OUT, &mut |record| {
+            redactor.verify_wire_value(record)?;
+            inserted.push(record.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(inserted.len(), 4);
+        assert_eq!(payload_type(&inserted[0]), "task_started");
+        assert_eq!(inserted[1]["payload"]["item"]["type"], "Reasoning");
+        assert_eq!(inserted[2]["payload"]["item"]["type"], "AgentMessage");
+        assert_eq!(payload_type(&inserted[3]), "task_complete");
+        for record in &inserted {
+            assert!(output.contains(record));
+        }
+
+        // Each emission site must propagate a failed construction check.
+        for reject_at in 0..inserted.len() {
+            let mut calls = 0;
+            let error = complete_paginated_item_projection(source.clone(), OUT, &mut |_| {
+                let reject = calls == reject_at;
+                calls += 1;
+                if reject {
+                    Err("rejected fixture".to_string())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+            assert!(error.contains("rejected fixture"), "{error}");
+            assert_eq!(calls, reject_at + 1);
+        }
+
+        // Existing projections are adopted. Their excluded thread_id may
+        // change without another credential check or a change to their text.
+        let new_root = format!("sk-proj-{}", "a".repeat(24));
+        let adopted = complete_paginated_item_projection(output.clone(), &new_root, &mut |_| {
+            Err("an adopted record must not invoke the insertion check".to_string())
+        })
+        .unwrap();
+        assert_eq!(adopted.len(), output.len());
+        for (before, after) in output.iter().zip(&adopted) {
+            let mut expected = before.clone();
+            if payload_type(before) == "item_completed" {
+                expected["payload"]["thread_id"] = json!(new_root);
+            }
+            assert_eq!(&expected, after);
+            redactor.verify_wire_value(after).unwrap();
+        }
+        verify_projection_fixpoint(&adopted, &new_root).unwrap();
     }
 
     fn project_err(records: Vec<Value>) -> String {
-        complete_paginated_item_projection(records, OUT).unwrap_err()
+        complete_paginated_item_projection(records, OUT, &mut |_| Ok(())).unwrap_err()
     }
 
     fn event(timestamp: &str, payload: Value) -> Value {
@@ -2223,9 +2351,12 @@ mod tests {
             ),
             complete("turn-1"),
         ];
-        let output = complete_paginated_item_projection(source, "fresh-root").unwrap();
+        let output =
+            complete_paginated_item_projection(source, "fresh-root", &mut |_| Ok(())).unwrap();
         verify_projection_fixpoint(&output, "fresh-root").unwrap();
-        let reprojected = complete_paginated_item_projection(output.clone(), "fresh-root").unwrap();
+        let reprojected =
+            complete_paginated_item_projection(output.clone(), "fresh-root", &mut |_| Ok(()))
+                .unwrap();
         assert_eq!(output, reprojected);
         for record in items(&output) {
             assert_eq!(record["payload"]["thread_id"], json!("fresh-root"));

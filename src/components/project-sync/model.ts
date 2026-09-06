@@ -1,11 +1,16 @@
 import type {
   BundleRecipe,
+  InventoryResource,
+  MaintenanceActionDescriptor,
+  ProjectContentEntry,
   ProjectResourceCategory,
-  ProjectResourceDescriptor,
-  ProjectResourceKind,
+  ProviderDescriptor,
   ProviderKey,
   ResourceInventory,
+  StorageProviderDescriptor,
+  StorageProviderKey,
 } from "../../types";
+import { iconNameFromHint, type IconName } from "../Icons";
 
 /** A rename either landed, or failed with something to say, or was superseded
  *  by a host-identity change (`message: null`) and has nothing to report. */
@@ -59,25 +64,6 @@ export const RESOURCE_GROUPS: Array<{
   { id: "tools", label: "Requirements", description: "Environment requirements this backup expects on each machine" },
 ];
 
-/* Wire enums never reach the screen raw: a resource's kind and apply policy
-   are backend vocabulary ("manual_only", "explicit_review"), and the field
-   that tells a user what will happen to their file must say so in words. */
-const KIND_LABELS: Record<ProjectResourceKind, string> = {
-  conversation: "Session",
-  provider_state: "Provider state",
-  project_content_file: "Project file",
-  project_content_directory: "Project folder",
-  requirement: "Requirement",
-};
-
-const APPLY_POLICY_LABELS: Record<string, string> = {
-  safe_file: "Applied when safe",
-  merge: "Merged on Pull",
-  explicit_review: "Applied after review",
-  manual_only: "Manual apply only",
-  never: "Never applied",
-};
-
 /** The file rows' Kind readout, Finder's vocabulary for the common suspects.
  * An unknown extension stays honest and terse: the extension, uppercased. */
 const FILE_KIND_LABELS: Record<string, string> = {
@@ -119,28 +105,33 @@ export function fileKindLabel(name: string): string {
   return FILE_KIND_LABELS[extension] ?? extension.toUpperCase();
 }
 
-export function kindLabel(kind: ProjectResourceKind): string {
-  return KIND_LABELS[kind];
-}
-
-export function applyPolicyLabel(policy: string): string {
-  return APPLY_POLICY_LABELS[policy] ?? policy;
-}
-
-const CATEGORY_BY_KIND: Record<ProjectResourceKind, ProjectResourceCategory> = {
-  conversation: "conversations",
-  provider_state: "conversations",
-  project_content_file: "project_files",
-  project_content_directory: "project_files",
-  requirement: "tools",
-};
-
-export function categoryFor(resource: ProjectResourceDescriptor): ProjectResourceCategory {
-  return resource.category ?? CATEGORY_BY_KIND[resource.kind];
-}
-
-export function inventoryResources(inventory: ResourceInventory | null): ProjectResourceDescriptor[] {
+export function inventoryResources(inventory: ResourceInventory | null): InventoryResource[] {
   return inventory?.resources ?? [];
+}
+
+/**
+ * The review row the Push chooser lists for one scanned project entry. The
+ * entry carries the bare portable descriptor; the scan files it under
+ * Project files, and the Files page renders it from the entry itself, so its
+ * presentation is the inventory's own row when the inventory has one and the
+ * Files review's vocabulary otherwise. It is selectable unless the scan
+ * blocked it: the backend built the descriptor from its registered contracts.
+ */
+export function projectContentReviewRow(
+  entry: ProjectContentEntry,
+  known?: InventoryResource,
+): InventoryResource {
+  return {
+    ...entry.descriptor,
+    category: "project_files",
+    kind_label: known?.kind_label ?? (entry.entry_type === "directory" ? "Project folder" : "Project file"),
+    apply_policy_label: known?.apply_policy_label ?? "Explicit review",
+    selectable: known?.selectable ?? true,
+    logical_paths: [entry.logical_path],
+    default_selected: entry.selected_in_recipe || entry.selected_after_scan,
+    blocked_reason: entry.blocked_reason,
+    description: entry.relative_path,
+  };
 }
 
 export function recipeSelection(recipe: BundleRecipe): Set<string> {
@@ -149,7 +140,7 @@ export function recipeSelection(recipe: BundleRecipe): Set<string> {
 
 export function recipeWithSelection(
   recipe: BundleRecipe,
-  resources: ProjectResourceDescriptor[],
+  resources: InventoryResource[],
   selected: Set<string>,
 ): BundleRecipe {
   return {
@@ -158,14 +149,38 @@ export function recipeWithSelection(
       .filter((resource) => (
         selected.has(resource.resource_id)
         && !resource.blocked_reason
-        && resource.apply_policy !== "never"
+        && resource.selectable
       ))
       .map((resource) => [resource.resource_id, recipe.entries[resource.resource_id] ?? {
         resource_id: resource.resource_id,
+        // Copied verbatim: the backend aligns recipe policies to the descriptor.
         apply_policy: resource.apply_policy,
         required: false,
       }])),
   };
+}
+
+/** The doors of an empty Storages list: one per provider the build ships,
+ *  in the backend's order. A draft is bound to its provider from the moment
+ *  it exists, so the door is the choice the picker would otherwise ask for.
+ *  Descriptors are per config version; the door is per provider. */
+export interface StorageDoor {
+  key: StorageProviderKey;
+  icon: IconName;
+  label: string;
+}
+
+export function storageDoors(providers: readonly StorageProviderDescriptor[]): StorageDoor[] {
+  const doors: StorageDoor[] = [];
+  for (const provider of providers) {
+    if (doors.some((door) => door.key === provider.key)) continue;
+    doors.push({
+      key: provider.key,
+      icon: iconNameFromHint(provider.icon, "drive"),
+      label: provider.display_name,
+    });
+  }
+  return doors;
 }
 
 export function compactProjectPath(path?: string | null): string {
@@ -191,4 +206,16 @@ export function formatRelativeTime(epoch?: number): string {
   if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m ago`;
   if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h ago`;
   return new Date(milliseconds).toLocaleDateString();
+}
+
+/** Find one declared maintenance action by its stable ID. */
+export function maintenanceActionFor(
+  providers: ProviderDescriptor[],
+  provider: ProviderKey,
+  actionId: string | null | undefined,
+): MaintenanceActionDescriptor | undefined {
+  if (!actionId) return undefined;
+  return providers
+    .find((candidate) => candidate.key === provider)
+    ?.maintenance_actions.find((action) => action.action_id === actionId);
 }

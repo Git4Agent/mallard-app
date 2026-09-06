@@ -17,17 +17,20 @@ pub use local_store::LocalObjectStore;
 pub use marker::{ensure_storage_marker, StorageMarker};
 pub(crate) use object_store::sha256_reader;
 pub use object_store::{
-    CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome, ObjectStore, StageOutcome,
-    StoreListPage, StoredMetadata, VerifiedBody, VerifiedBodyReader,
+    CasExpectation, CasOutcome, DeleteOutcome, ExpectedObject, ImmutablePutOutcome, ObjectStore,
+    StageOutcome, StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody, VerifiedBodyReader,
 };
 pub use s3_store::{
     R2CapabilityProbeError, R2CapabilityProbeErrorKind, R2CapabilityProbeReceipt,
-    R2CapabilityProbeStage, S3ObjectStore,
+    R2CapabilityProbeStage, S3Connection, S3ObjectStore,
 };
 
-use mallard_domain::{BundleId, StorageConfig, StorageKind};
+use crate::storage_providers::StorageProviderRegistry;
+use mallard_domain::{BundleId, StorageConfig};
 use serde::Deserialize;
 use std::io::{BufReader, Read};
+use std::sync::Arc;
+use tokio::runtime::Handle;
 
 pub const MALLARD_ROOT: &str = ".mallard";
 pub const STORAGE_MARKER_KEY: &str = ".mallard/_storage.json";
@@ -121,41 +124,73 @@ impl ObjectPrefix {
 pub fn clear_managed_storage_data<S: ObjectStore + ?Sized>(
     store: &S,
 ) -> Result<ManagedStorageClearResult, String> {
-    ensure_storage_marker(store)?;
-    let repository_objects_deleted = clear_managed_prefix(store, REPOSITORY_PREFIX, 0)?;
-    let library_objects_deleted =
-        clear_managed_prefix(store, LIBRARY_PREFIX, repository_objects_deleted)?;
-    let result = ManagedStorageClearResult {
-        repository_objects_deleted,
-        library_objects_deleted,
-    };
-    Ok(result)
+    store.clear_managed_data()
 }
 
-fn clear_managed_prefix<S: ObjectStore + ?Sized>(
+/// The only shared storage-clear loop. The delete callback is private to this
+/// module and its transports; it cannot be used by normal object operations.
+fn clear_managed_data_with<S: ObjectStore + ?Sized>(
     store: &S,
-    raw_prefix: &str,
-    already_deleted: u64,
-) -> Result<u64, String> {
-    let prefix = ObjectPrefix::parse(raw_prefix)?;
+    delete: impl Fn(&StoreListEntry) -> Result<DeleteOutcome, String>,
+) -> Result<ManagedStorageClearResult, String> {
+    ensure_storage_marker(store)?;
     let mut deleted = 0_u64;
-    loop {
-        let page = store.list(&prefix, None, STORAGE_CLEAR_PAGE_SIZE)?;
-        if page.keys.is_empty() {
-            break;
-        }
-        for key in page.keys {
-            if already_deleted.saturating_add(deleted) >= MAX_STORAGE_CLEAR_OBJECTS {
-                return Err(format!(
-                    "storage clear exceeds the {}-object safety limit",
-                    MAX_STORAGE_CLEAR_OBJECTS
-                ));
+    let mut attempted = 0_u64;
+    let mut clear_prefix = |raw_prefix: &str| -> Result<u64, String> {
+        let prefix = ObjectPrefix::parse(raw_prefix)?;
+        let before = deleted;
+        loop {
+            let page = store.list(&prefix, None, STORAGE_CLEAR_PAGE_SIZE)?;
+            if page.entries.is_empty() {
+                break;
             }
-            store.delete(&key)?;
-            deleted = deleted.saturating_add(1);
+            for entry in page.entries {
+                // Check the boundary again before deletion, even if a transport
+                // returns a valid key from the wrong namespace.
+                if !entry
+                    .key
+                    .as_str()
+                    .strip_prefix(raw_prefix)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                {
+                    return Err("storage clear listing crossed a namespace boundary".to_string());
+                }
+                if attempted >= MAX_STORAGE_CLEAR_OBJECTS {
+                    return Err(format!(
+                        "storage clear exceeds the {}-object safety limit",
+                        MAX_STORAGE_CLEAR_OBJECTS
+                    ));
+                }
+                attempted += 1;
+                match delete(&entry)? {
+                    DeleteOutcome::Deleted => deleted += 1,
+                    DeleteOutcome::Missing => {}
+                    DeleteOutcome::Conflict { .. } => {
+                        return Err("an object changed during storage clear".to_string());
+                    }
+                }
+            }
         }
-    }
-    Ok(deleted)
+        Ok(deleted - before)
+    };
+    let result = (|| {
+        let repository_objects_deleted = clear_prefix(REPOSITORY_PREFIX)?;
+        let library_objects_deleted = clear_prefix(LIBRARY_PREFIX)?;
+        Ok(ManagedStorageClearResult {
+            repository_objects_deleted,
+            library_objects_deleted,
+        })
+    })();
+    result.map_err(|error: String| {
+        let progress = if deleted > 0 {
+            format!("Some data was deleted ({} objects confirmed).", deleted)
+        } else if attempted > 0 {
+            "Some data may have been deleted.".to_string()
+        } else {
+            "No objects were deleted.".to_string()
+        };
+        format!("Storage clear stopped. {progress} Local sync metadata was not reset. Stop sync on all machines, then retry Clear storage data. {error}")
+    })
 }
 
 pub(crate) fn validate_store_path(value: &str, minimum_components: usize) -> Result<(), String> {
@@ -269,19 +304,28 @@ pub(crate) fn parse_json_reader<T: for<'de> Deserialize<'de>>(
         .map_err(|error| format!("parse {}: {}", label, error))
 }
 
-/// Runtime dispatch between the two configured store kinds. Both storage
-/// protocols build their engines over this from one [`StorageConfig`].
-pub enum ConfiguredObjectStore {
-    Local(LocalObjectStore),
-    S3(S3ObjectStore),
+pub struct ConfiguredObjectStore {
+    inner: Arc<dyn ObjectStore>,
 }
 
 impl ConfiguredObjectStore {
+    /// Open through the production storage registry.
     pub fn from_config(config: &StorageConfig) -> Result<Self, String> {
-        match config.kind {
-            StorageKind::Local => Ok(Self::Local(LocalObjectStore::open(&config.local_dir)?)),
-            StorageKind::S3 => Ok(Self::S3(S3ObjectStore::from_current_runtime(config)?)),
-        }
+        Self::open_with(StorageProviderRegistry::production(), config)
+    }
+
+    /// Open through an explicit registry (tests register extra providers).
+    pub fn open_with(
+        registry: &StorageProviderRegistry,
+        config: &StorageConfig,
+    ) -> Result<Self, String> {
+        config.validate()?;
+        let adapter = registry.require(&config.provider, config.provider_config.version)?;
+        adapter
+            .validate_config(&config.provider_config)
+            .map_err(|error| error.to_string())?;
+        let inner = adapter.open(&config.provider_config, Handle::try_current().ok())?;
+        Ok(Self { inner })
     }
 }
 
@@ -291,10 +335,7 @@ impl ObjectStore for ConfiguredObjectStore {
         key: &ObjectKey,
         max_bytes: u64,
     ) -> Result<Option<StoredMetadata>, String> {
-        match self {
-            Self::Local(store) => store.get_metadata(key, max_bytes),
-            Self::S3(store) => store.get_metadata(key, max_bytes),
-        }
+        self.inner.get_metadata(key, max_bytes)
     }
 
     fn get_metadata_many(
@@ -302,10 +343,7 @@ impl ObjectStore for ConfiguredObjectStore {
         keys: &[ObjectKey],
         max_bytes: u64,
     ) -> Result<Vec<Option<StoredMetadata>>, String> {
-        match self {
-            Self::Local(store) => store.get_metadata_many(keys, max_bytes),
-            Self::S3(store) => store.get_metadata_many(keys, max_bytes),
-        }
+        self.inner.get_metadata_many(keys, max_bytes)
     }
 
     fn stage_verified(
@@ -313,37 +351,25 @@ impl ObjectStore for ConfiguredObjectStore {
         key: &ObjectKey,
         expected: &ExpectedObject,
     ) -> Result<StageOutcome, String> {
-        match self {
-            Self::Local(store) => store.stage_verified(key, expected),
-            Self::S3(store) => store.stage_verified(key, expected),
-        }
+        self.inner.stage_verified(key, expected)
     }
 
     fn stage_many_verified(
         &self,
         requests: &[(ObjectKey, ExpectedObject)],
     ) -> Result<Vec<StageOutcome>, String> {
-        match self {
-            Self::Local(store) => store.stage_many_verified(requests),
-            Self::S3(store) => store.stage_many_verified(requests),
-        }
+        self.inner.stage_many_verified(requests)
     }
 
     fn put_immutable(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
-        match self {
-            Self::Local(store) => store.put_immutable(key, bytes),
-            Self::S3(store) => store.put_immutable(key, bytes),
-        }
+        self.inner.put_immutable(key, bytes)
     }
 
     fn put_many(
         &self,
         objects: Vec<(ObjectKey, bytes::Bytes)>,
     ) -> Result<Vec<ImmutablePutOutcome>, String> {
-        match self {
-            Self::Local(store) => store.put_many(objects),
-            Self::S3(store) => store.put_many(objects),
-        }
+        self.inner.put_many(objects)
     }
 
     fn compare_and_swap(
@@ -352,17 +378,19 @@ impl ObjectStore for ConfiguredObjectStore {
         expectation: &CasExpectation,
         bytes: &[u8],
     ) -> Result<CasOutcome, String> {
-        match self {
-            Self::Local(store) => store.compare_and_swap(key, expectation, bytes),
-            Self::S3(store) => store.compare_and_swap(key, expectation, bytes),
-        }
+        self.inner.compare_and_swap(key, expectation, bytes)
     }
 
-    fn delete(&self, key: &ObjectKey) -> Result<(), String> {
-        match self {
-            Self::Local(store) => store.delete(key),
-            Self::S3(store) => store.delete(key),
-        }
+    fn supports_conditional_delete(&self) -> bool {
+        self.inner.supports_conditional_delete()
+    }
+
+    fn delete(&self, key: &ObjectKey, expected_etag: &str) -> Result<DeleteOutcome, String> {
+        self.inner.delete(key, expected_etag)
+    }
+
+    fn clear_managed_data(&self) -> Result<ManagedStorageClearResult, String> {
+        self.inner.clear_managed_data()
     }
 
     fn list(
@@ -371,17 +399,11 @@ impl ObjectStore for ConfiguredObjectStore {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<StoreListPage, String> {
-        match self {
-            Self::Local(store) => store.list(prefix, cursor, limit),
-            Self::S3(store) => store.list(prefix, cursor, limit),
-        }
+        self.inner.list(prefix, cursor, limit)
     }
 
     fn local_root(&self) -> Option<&std::path::Path> {
-        match self {
-            Self::Local(store) => store.local_root(),
-            Self::S3(store) => store.local_root(),
-        }
+        self.inner.local_root()
     }
 }
 
@@ -461,6 +483,34 @@ mod tests {
         assert!(ObjectKey::parse(".mallard/v1/repositories/deadbeef").is_err());
         // Nothing outside the two versioned namespaces parses.
         assert!(ObjectKey::parse(".mallard/v1/other/_head.json").is_err());
+    }
+
+    #[test]
+    fn configured_store_validates_the_complete_provider_config_before_opening() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("storage");
+        let mut config = crate::storage_providers::local::local_storage_config(
+            mallard_domain::StorageId::parse("storage-invalid").unwrap(),
+            "Invalid",
+            &root,
+        );
+        config
+            .provider_config
+            .secrets
+            .insert(
+                mallard_domain::SecretKey::parse("unexpected").unwrap(),
+                mallard_domain::SecretValue::parse("secret-canary").unwrap(),
+            )
+            .unwrap();
+        assert!(config.validate().is_ok());
+
+        let error =
+            ConfiguredObjectStore::open_with(StorageProviderRegistry::production(), &config)
+                .err()
+                .expect("the provider-invalid configuration must be rejected");
+
+        assert_eq!(error, "A local folder storage has no secrets.");
+        assert!(!root.exists());
     }
 
     #[test]

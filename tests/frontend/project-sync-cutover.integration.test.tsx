@@ -10,17 +10,6 @@ import {
 import { expandHomePath } from "../../src/profilePath";
 import { PROJECT_SYNC_SCHEMA } from "../../src/types";
 import {
-  MIN_PANE_HEIGHT,
-  SECTION_DIVIDER_NET,
-  SECTION_DIVIDERS_HEIGHT,
-  sectionGridRows,
-  shareDragged,
-  storageHeightRange,
-  shareHolding,
-  shareHoldingCatalog,
-  type SectionId,
-} from "../../src/components/project-sync/ProjectSidebar";
-import {
   profilePathHint,
   type ProfilePathProbeState,
 } from "../../src/components/project-sync/ProjectSetupWorkspace";
@@ -211,13 +200,16 @@ test("top-level navigation opens stable index pages", () => {
   const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
 
-  assert.match(sidebar, /> Projects[\s\S]*?onClick=\{onOpenCatalogIndex\}/);
+  // The strip names each root once, in rail order, and each tab carries the
+  // destination in its own accessible name because it draws no text.
+  assert.match(sidebar, /aria-label="Projects"[\s\S]*?aria-label="Catalog"[\s\S]*?aria-label="Storages"/);
   assert.match(sidebar, /onClick=\{onOpenProjects\}/);
+  assert.match(sidebar, /onClick=\{onOpenCatalogIndex\}/);
   assert.match(sidebar, /onClick=\{onOpenStorageIndex\}/);
   assert.doesNotMatch(sidebar, /primaryStorageId|onOpenCatalogMenu/);
 
-  assert.match(shell, /const openProjectsIndex = \(\) => \{[\s\S]*?setActiveProjectId\(null\);/);
-  assert.match(shell, /const openCatalogIndex = \(\) => \{[\s\S]*?setCatalogIndexOpen\(true\);/);
+  assert.match(shell, /const openProjectsIndex = async \(\) => \{[\s\S]*?setActiveProjectId\(null\);/);
+  assert.match(shell, /const openCatalogIndex = async \(\) => \{[\s\S]*?setCatalogIndexOpen\(true\);/);
   assert.match(shell, /catalogIndexOpen \? \(\s*<CatalogIndexPage/);
   assert.match(shell, /storageIndexOpen \? \(\s*<StorageIndexPage/);
   assert.doesNotMatch(shell, /const openCatalogMenu/);
@@ -356,7 +348,7 @@ test("the shell verifies host identity and relies on backend auto-registration",
   assert.doesNotMatch(workspace, /Host settings/);
 });
 
-test("startup overlaps independent reads and defers conversation path audits", () => {
+test("startup overlaps independent reads", () => {
   const source = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const loadShell = source.slice(
     source.indexOf("  const loadShell = async"),
@@ -372,9 +364,6 @@ test("startup overlaps independent reads and defers conversation path audits", (
     "await projectSyncApi.getHostIdentityStatus()",
   );
   const shellReady = loadShell.indexOf("setHostIdentityShellReady(true)");
-  const deferredAudit = loadShell.indexOf(
-    "void loadConversationPathAudits(nextBindings, requestId)",
-  );
 
   assert.ok(configRead >= 0 && configRead < recovery);
   assert.ok(recovery < projectReads);
@@ -400,8 +389,8 @@ test("startup overlaps independent reads and defers conversation path audits", (
     assert.ok(index > providerReads && index < firstBatchWait, `${request} must start in providerReads`);
   }
 
-  assert.doesNotMatch(loadShell, /await loadConversationPathAudits/);
-  assert.ok(shellReady >= 0 && shellReady < deferredAudit);
+  assert.ok(shellReady >= 0);
+  assert.doesNotMatch(loadShell, /PreSync|preSync/);
 });
 
 test("the startup screen communicates minimal, staged loading progress", () => {
@@ -454,15 +443,10 @@ test("host-scoped workflows keep their originating epoch across async continuati
   capturesBefore(discardDraft, "await confirm(");
   assert.match(discardDraft, /await projectSyncApi\.discardSetupDraft\(draftId\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return;/);
 
-  const linkStorage = section(workspace, "linkStorage", "repairConversationPaths");
+  const linkStorage = section(workspace, "linkStorage", "openPushChooser");
   capturesBefore(linkStorage, "await projectSyncApi.listRemoteBundleSnapshots");
   assert.match(linkStorage, /saveStorageLink\(projectId, storageId, workflowEpoch\)/);
   assert.match(linkStorage, /hostWorkflowEpoch\.current === workflowEpoch\) setBusy\(false\)/);
-
-  const repairPaths = section(workspace, "repairConversationPaths", "openPushChooser");
-  capturesBefore(repairPaths, "await confirm(");
-  assert.match(repairPaths, /await projectSyncApi\.repairCodexConversationPaths\(projectId\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return;/);
-  assert.match(repairPaths, /activeStorageByProject\[projectId\],[\s\S]*workflowEpoch,[\s\S]*\);/);
 
   const renameProject = section(workspace, "renameProject", "planRestore");
   capturesBefore(renameProject, "await projectSyncApi.renameProject");
@@ -483,10 +467,13 @@ test("host-scoped workflows keep their originating epoch across async continuati
   assert.match(unlinkStorage, /await projectSyncApi\.removeLink\(projectId, storageId\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return;/);
   assert.match(unlinkStorage, /loadProjectData\(projectId, nextConfig, nextStorageId, workflowEpoch\)/);
 
-  const saveStorage = section(workspace, "saveStorageConfig", "saveInlineStorage");
-  assert.match(saveStorage, /workflowEpoch = hostWorkflowEpoch\.current/);
-  assert.match(saveStorage, /await projectSyncApi\.getConfig\(\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return false;/);
-  assert.match(saveStorage, /await projectSyncApi\.saveConfig\(update\(current\)\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return false;/);
+  // Storage writes are focused commands. A draft commit re-reads the config
+  // it changed, and a rename adopts the config the backend returns.
+  const commitStorage = section(workspace, "commitStorageDraft", "renameStorage");
+  assert.match(commitStorage, /const workflowEpoch = hostWorkflowEpoch\.current;/);
+  assert.match(commitStorage, /await projectSyncApi\.getConfig\(\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return null;/);
+  const renameStorage = section(workspace, "renameStorage", "clearStorageData");
+  assert.match(renameStorage, /await projectSyncApi\.renameStorage\(storageId, name, configRef\.current\.revision\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return false;/);
 
   const clearStorage = section(workspace, "clearStorageData", "removeStorage");
   capturesBefore(clearStorage, "await confirm(");
@@ -495,7 +482,7 @@ test("host-scoped workflows keep their originating epoch across async continuati
 
   const removeStorage = section(workspace, "removeStorage", "openNewStorageConfiguration");
   capturesBefore(removeStorage, "await confirm(");
-  assert.match(removeStorage, /Stored files were not deleted\.`, workflowEpoch\)/);
+  assert.match(removeStorage, /await projectSyncApi\.removeStorage\(storageId, configRef\.current\.revision\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return;/);
 
   assert.match(workspace, /workflowEpoch=\{hostWorkflowEpoch\.current\}/);
   assert.match(workspace, /isWorkflowCurrent=\{\(workflowEpoch\) => \([\s\S]*hostWorkflowEpoch\.current === workflowEpoch/);
@@ -545,6 +532,8 @@ test("refocus reconciles external changes narrowly and the full reload lives in 
   assert.doesNotMatch(sidebar, /onRefresh|Refresh projects/);
   assert.match(workspace, /Reload app data/);
   assert.match(workspace, /className="sync-titlebar-actions"/);
+  assert.match(workspace, /workspaceTitle === "Projects" \? null : \(\s*<button[\s\S]*?className="sync-theme-button"/);
+  assert.match(workspace, /<PathBarMenu\s+id="sync-app-actions-menu"\s+groups=\{appActions\}/);
 
   // Refocus reconcile only fires after the window was away, and stays narrower than
   // refresh(): project list, repository kinds, and active detail — no audits, profiles,
@@ -557,91 +546,45 @@ test("refocus reconciles external changes narrowly and the full reload lives in 
   assert.match(reconcile, /listProjects\(\)/);
   assert.match(reconcile, /listProjectRepositoryKinds\(\)/);
   assert.match(reconcile, /getProject\(activeProjectId\)/);
-  assert.doesNotMatch(reconcile, /auditCodexConversationPaths|listProviderProfiles|listBindings|getReadiness|getInventory|setLoading/);
+  assert.doesNotMatch(reconcile, /executeProviderMaintenanceAction|listProviderProfiles|listBindings|getReadiness|getInventory|setLoading/);
   assert.match(reconcile, /shellRequest\.current !== shellRequestId/);
   assert.match(reconcile, /hostWorkflowEpoch\.current !== workflowEpoch/);
   assert.match(reconcile, /await refresh\(workflowEpoch\)/);
   assert.match(workspace, /Date\.now\(\) - blurredAt >= FOCUS_RECONCILE_MIN_AWAY_MS/);
 });
 
-// Each handle must move the one gutter it borders. The panes below the head and
-// above Storages are sized by share, so any change to the box they divide slides
-// their gutters unless the share is re-solved against the new box.
-test("every sidebar handle moves its own gutter and no other", () => {
-  const BOX = 700;
-  const STORAGE = 175;
-  const elastic = BOX - SECTION_DIVIDERS_HEIGHT - STORAGE;
-  const projects = 210;
-  const catalog = elastic - projects;
+/* The sidebar is one fixed head over one elastic list, so what it demands of a
+   window is a constant rather than a sum of pane floors. Three tiles parted by
+   the frame gutter, and only the middle one grows — which is what has to hold
+   for the 800x560 floor in tauri.conf.json to fit at all. It replaced a
+   three-pane split that asked for 694px there and got 544. */
+test("the sidebar fits the smallest window it can be opened at", () => {
+  const css = readFileSync("src/App.css", "utf8");
+  const config = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8")) as {
+    app: { windows: { minHeight: number }[] };
+  };
 
-  // Head handle: the box shrinks by what the head takes, and Catalog must come
-  // out of it unchanged — Projects, the pane it borders, absorbs the whole move.
-  const shrunkBox = BOX - 60;
-  const heldShare = shareHoldingCatalog(catalog, shrunkBox, STORAGE);
-  const shrunkElastic = shrunkBox - SECTION_DIVIDERS_HEIGHT - STORAGE;
-  assert.ok(Math.abs((1 - heldShare) * shrunkElastic - catalog) < 0.5, "Catalog holds its pixels");
-  assert.ok(Math.abs(heldShare * shrunkElastic - (projects - 60)) < 0.5, "Projects absorbs the change");
+  // No handle and no stored height: the same three rows at every window size.
+  assert.match(css, /\.sync-sidebar-head \{[^}]*height: 148px;[^}]*flex: 0 0 148px;/);
+  // The rail takes what is left and its own list scrolls, so the window's
+  // height reaches the rows instead of a tray wrapped around them.
+  assert.match(css, /\.sync-sidebar-rail \{[^}]*min-height: 0;[^}]*flex: 1;/);
+  assert.match(css, /\.sidebar-rail-list \{[^}]*flex: 1;[^}]*overflow-y: auto;/);
 
-  // Storages handle: the elastic space shrinks as Storages grows, and Projects is
-  // the pane that must not move.
-  const grown = STORAGE + 40;
-  const share = shareHolding(projects, BOX, grown);
-  const grownElastic = BOX - SECTION_DIVIDERS_HEIGHT - grown;
-  assert.ok(Math.abs(share * grownElastic - projects) < 0.5, "Projects holds its pixels");
-  assert.ok(Math.abs((1 - share) * grownElastic - (catalog - 40)) < 0.5, "Catalog absorbs the change");
-});
+  const GUTTER = 8;  // --retro-gutter: the frame, and the seam between tiles
+  const HEAD = 148;  // 42 drag strip + 56 wordmark + 46 tab strip + 4 border
+  const MARK = 44;   // .sync-sidebar-product-mark min-height
+  const minHeight = config.app.windows[0].minHeight;
+  assert.equal(minHeight, 560);
+  const list = minHeight - (2 * GUTTER + HEAD + 2 * GUTTER + MARK);
+  assert.equal(list, 336, "the rail's height at the window floor");
 
-test("the Storages pane floors at the same height as the panes above it", () => {
-  const [min, max] = storageHeightRange(700, 210);
-  assert.equal(min, MIN_PANE_HEIGHT);
-  assert.equal(max, 700 - SECTION_DIVIDERS_HEIGHT - 210 - MIN_PANE_HEIGHT);
-});
-
-/* The share drag is relative to the grab point on the elastic scale. Mapped
-   against the whole box it snapped to the pointer's absolute position on
-   grab — jumping by however much of the box the Storages row had taken — and
-   then tracked under 1:1. */
-test("the share drag tracks the pointer without a grab jump", () => {
-  // Zero travel keeps the split exactly where the panes sit: grabbing the
-  // handle must not move it, whatever height Storages holds.
-  assert.equal(shareDragged(210, 140, 0), 210 / 350);
-  // Travel moves the boundary pixel for pixel across the two panes it splits.
-  assert.equal(shareDragged(210, 140, 35), 245 / 350);
-  assert.equal(shareDragged(210, 140, -35), 0.5);
-  // Clamped by the same floors as every other share path.
-  assert.equal(shareDragged(340, 10, 200), 0.8);
-  assert.equal(shareDragged(10, 340, -200), 0.2);
-});
-
-test("collapsed sections drop to their headings and leave the split intact", () => {
-  const open = new Set<SectionId>();
-  // The untouched layout is exactly what shipped before sections collapsed:
-  // two share-sized rows and a content-sized Storages row, or its pin.
-  assert.equal(
-    sectionGridRows(0.56, null, open),
-    `minmax(96px, ${0.56 * 100}fr) ${SECTION_DIVIDER_NET}px minmax(96px, ${100 - 0.56 * 100}fr) ${SECTION_DIVIDER_NET}px fit-content(40%)`,
-  );
-  assert.equal(
-    sectionGridRows(0.56, 210, open),
-    `minmax(96px, ${0.56 * 100}fr) ${SECTION_DIVIDER_NET}px minmax(96px, ${100 - 0.56 * 100}fr) ${SECTION_DIVIDER_NET}px 210px`,
-  );
-  // A collapsed row is min-content — the heading — never the 96px list floor,
-  // and the share and pin ride through untouched so reopening restores the
-  // exact prior split.
-  assert.equal(
-    sectionGridRows(0.56, 210, new Set<SectionId>(["catalog"])),
-    `minmax(96px, ${0.56 * 100}fr) ${SECTION_DIVIDER_NET}px min-content ${SECTION_DIVIDER_NET}px 210px`,
-  );
-  // With both share-sized panes closed the Storages row inherits the elastic
-  // factor over its own pin: the leftover space always belongs to someone.
-  assert.equal(
-    sectionGridRows(0.56, 210, new Set<SectionId>(["projects", "catalog"])),
-    `min-content ${SECTION_DIVIDER_NET}px min-content ${SECTION_DIVIDER_NET}px minmax(96px, 1fr)`,
-  );
-  assert.equal(
-    sectionGridRows(0.56, null, new Set<SectionId>(["projects", "catalog", "storages"])),
-    `min-content ${SECTION_DIVIDER_NET}px min-content ${SECTION_DIVIDER_NET}px min-content`,
-  );
+  // Nothing is drag-sized or remembered between launches any more: the panes,
+  // their floors, the handles between them, and the keys that stored the split.
+  assert.doesNotMatch(css, /sidebar-split-pane|sidebar-section-divider|sidebar-settings-sections/);
+  const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
+  assert.doesNotMatch(sidebar, /projectShare|storageHeight|collapsedSections|MIN_PANE_HEIGHT/);
+  assert.doesNotMatch(sidebar, /mallard\.sidebar-section/);
 });
 
 test("custom profile paths resolve this user's home", () => {
@@ -776,4 +719,32 @@ test("only the log folder is opened with openPath; everything else reveals", () 
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   assert.match(workspace, /void revealItemInDir\(path\)\.catch\(/);
   assert.doesNotMatch(workspace, /void revealItemInDir\([^)]*\);(?!\s*\/\/)/);
+});
+
+test("the empty storage slot is named, not marked as a fault", () => {
+  const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
+  const band = setupWorkspace.slice(
+    setupWorkspace.indexOf("<div><strong>Storage</strong></div>"),
+    setupWorkspace.indexOf("{storageSection?.message && storageSection.state === \"blocked\""),
+  );
+  assert.ok(band.length > 0, "missing the Storage band");
+
+  // "Local only" was a mode standing among proper nouns, so the row read as
+  // two answers to two different questions. The slot is named the way the
+  // rest of the app names it — the projects landing card says "No storage
+  // linked", the catalog crumb "No storage" — and `yet` carries the fact that
+  // Link storage… is on the project's own menu afterwards.
+  assert.match(band, /<span className="setup-pill-label">None yet<\/span>/);
+  assert.doesNotMatch(setupWorkspace, /Local only/);
+
+  // The glyph still says where the sessions live, which is why the label does
+  // not have to.
+  assert.match(band, /<Icon name="computer" size=\{12\} \/>\s*<span className="setup-pill-label">None yet/);
+
+  // A section message prints only when the state is `blocked`, so an
+  // `attention` badge here could never say what it wanted — and `attention`
+  // on this section means only "no storage linked", which the row states as
+  // its own answer. A badge on the safe choice is a fault marker with no
+  // fault behind it.
+  assert.match(band, /storageSection\?\.state === "blocked" \? sectionBadge\(storageSection\) : null/);
 });

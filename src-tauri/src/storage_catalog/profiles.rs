@@ -1,73 +1,72 @@
-//! Catalog profile resolution: `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and the OS
-//! user's fixed `$HOME/.agents/skills` root.
+//! Catalog profile resolution: the selected provider home, canonicalized, and
+//! the machine-local target roots its registered adapter exposes for it.
 //!
-//! Every inventory, plan, and apply re-resolves the selected profiles from
-//! their records, canonicalizes each permitted global path, and rejects
-//! unsafe shapes. No project binding, checkout, working directory, or
-//! repository search ever discovers a skill root here. Canonically equal or
-//! nested active skill roots fail with `overlapping_skill_roots` before any
-//! inventory runs, so one physical directory can never carry two portable
-//! root-class identities.
+//! Every inventory, plan, and apply re-resolves the selected profile from its
+//! record, canonicalizes the home, asks the adapter for the target roots, and
+//! rejects unsafe shapes. No project binding, checkout, working directory, or
+//! repository search ever discovers a root here. Canonically equal or nested
+//! roots declared by one capability fail with `overlapping_targets` before
+//! any inventory runs, so one physical directory can never carry two
+//! portable root-class identities.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use mallard_infrastructure::providers::{claude, codex, ProviderRegistry};
-
+use super::adapters::{CatalogProviderAdapter, ResolvedCatalogTarget};
 use super::domain::{
-    AgentSkillScope, CatalogBlocker, CatalogProfilePin, CatalogProfilesDocument,
-    CatalogSkillRootPin, LocalCatalogProfileId, ProviderKey,
+    CatalogBlocker, CatalogProfilePin, CatalogProfilesDocument, CatalogTargetKey, CatalogTargetPin,
+    LocalCatalogProfileId, ProviderKey,
 };
+use super::registry::{CatalogCapability, CatalogRegistry};
 
 #[derive(Clone, Debug)]
 pub struct ResolvedCatalogProfile {
     pub profile_id: LocalCatalogProfileId,
-    pub provider_key: ProviderKey,
+    pub provider: ProviderKey,
     pub revision: u64,
     pub canonical_home: PathBuf,
 }
 
-/// One active skill root with its portable scope class.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResolvedSkillRoot {
-    pub scope: AgentSkillScope,
-    pub canonical_root: PathBuf,
-}
-
-/// The complete resolved view of one selected Library provider profile.
+/// The complete resolved view of one selected Library provider profile: the
+/// canonical home and every target root the adapter exposes for it.
 #[derive(Clone, Debug)]
 pub struct ResolvedCatalogContext {
     pub profile: ResolvedCatalogProfile,
-    pub skill_roots: Vec<ResolvedSkillRoot>,
+    pub targets: Vec<ResolvedCatalogTarget>,
 }
 
 impl ResolvedCatalogContext {
-    pub fn profile(&self, provider: ProviderKey) -> Option<&ResolvedCatalogProfile> {
-        (self.profile.provider_key == provider).then_some(&self.profile)
+    pub fn target(&self, key: &CatalogTargetKey) -> Option<&ResolvedCatalogTarget> {
+        self.targets.iter().find(|target| &target.target == key)
     }
 
-    pub fn skill_root(&self, scope: AgentSkillScope) -> Option<&Path> {
-        self.skill_roots
+    /// The resolved roots one capability may operate on, in the capability's
+    /// declared order. A declared target the adapter did not resolve for
+    /// this home (a shared root that belongs to another profile) is absent.
+    pub fn targets_for(&self, capability: &CatalogCapability) -> Vec<&ResolvedCatalogTarget> {
+        capability
+            .descriptor
+            .targets
             .iter()
-            .find(|root| root.scope == scope)
-            .map(|root| root.canonical_root.as_path())
+            .filter_map(|key| self.target(key))
+            .collect()
     }
 
     pub fn profile_pins(&self) -> Vec<CatalogProfilePin> {
         vec![CatalogProfilePin {
             profile_id: self.profile.profile_id.clone(),
-            provider_key: self.profile.provider_key,
+            provider: self.profile.provider.clone(),
             revision: self.profile.revision,
             canonical_home: self.profile.canonical_home.to_string_lossy().to_string(),
         }]
     }
 
-    pub fn skill_root_pins(&self) -> Vec<CatalogSkillRootPin> {
-        self.skill_roots
+    pub fn target_pins(&self) -> Vec<CatalogTargetPin> {
+        self.targets
             .iter()
-            .map(|root| CatalogSkillRootPin {
-                scope: root.scope,
-                canonical_root: root.canonical_root.to_string_lossy().to_string(),
+            .map(|target| CatalogTargetPin {
+                target: target.target.clone(),
+                canonical_root: target.canonical_root.to_string_lossy().to_string(),
             })
             .collect()
     }
@@ -76,16 +75,16 @@ impl ResolvedCatalogContext {
     pub fn verify_pins(
         &self,
         profile_pins: &[CatalogProfilePin],
-        skill_root_pins: &[CatalogSkillRootPin],
+        target_pins: &[CatalogTargetPin],
     ) -> Result<(), String> {
         if self.profile_pins() != profile_pins {
             return Err(
                 "catalog profiles changed after review; refresh and review again".to_string(),
             );
         }
-        if self.skill_root_pins() != skill_root_pins {
+        if self.target_pins() != target_pins {
             return Err(
-                "catalog skill roots changed after review; refresh and review again".to_string(),
+                "catalog target roots changed after review; refresh and review again".to_string(),
             );
         }
         Ok(())
@@ -95,7 +94,7 @@ impl ResolvedCatalogContext {
 /// Canonicalize a possibly not-yet-created path: resolve the deepest existing
 /// ancestor and re-append the remaining components, rejecting symlinked
 /// ancestors so a link can never smuggle a root elsewhere.
-fn prospective_canonical(path: &Path) -> Result<PathBuf, String> {
+pub fn prospective_canonical(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err(format!("'{}' must be absolute", path.display()));
     }
@@ -103,12 +102,10 @@ fn prospective_canonical(path: &Path) -> Result<PathBuf, String> {
     let mut cursor = path.to_path_buf();
     loop {
         match fs::symlink_metadata(&cursor) {
-            Ok(meta) => {
-                if meta.file_type().is_symlink() {
-                    // The final component may itself be a symlinked home;
-                    // canonicalize resolves it. Symlinks are only rejected as
-                    // *missing-ancestor* traversal below.
-                }
+            Ok(_) => {
+                // The final component may itself be a symlinked home;
+                // canonicalize resolves it. Symlinks are only rejected as
+                // missing-ancestor traversal below.
                 let mut resolved = fs::canonicalize(&cursor)
                     .map_err(|error| format!("resolve '{}': {}", cursor.display(), error))?;
                 for component in missing.iter().rev() {
@@ -136,20 +133,18 @@ fn prospective_canonical(path: &Path) -> Result<PathBuf, String> {
 fn resolve_profile(
     document: &CatalogProfilesDocument,
     profile_id: &LocalCatalogProfileId,
-    expected_provider: ProviderKey,
+    expected_provider: &ProviderKey,
 ) -> Result<ResolvedCatalogProfile, CatalogBlocker> {
     let Some(profile) = document.profile(profile_id) else {
         return Err(CatalogBlocker::ProfileUnavailable {
             detail: format!("catalog profile '{}' does not exist", profile_id),
         });
     };
-    if profile.provider_key != expected_provider {
+    if &profile.provider != expected_provider {
         return Err(CatalogBlocker::ProfileUnavailable {
             detail: format!(
                 "catalog profile '{}' is a {} profile, not {}",
-                profile_id,
-                profile.provider_key.as_str(),
-                expected_provider.as_str()
+                profile_id, profile.provider, expected_provider
             ),
         });
     }
@@ -180,7 +175,7 @@ fn resolve_profile(
         })?;
     Ok(ResolvedCatalogProfile {
         profile_id: profile.profile_id.clone(),
-        provider_key: profile.provider_key,
+        provider: profile.provider.clone(),
         revision: profile.revision,
         canonical_home,
     })
@@ -190,89 +185,65 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
-/// The provider registry is the source of truth for the default home names.
+/// The adapter descriptor is the source of truth for the default home name.
 /// Catalog profiles remain catalog-owned; this only resolves the same local
-/// directories that project setup presents by default.
-pub(super) fn default_profile_home(provider: ProviderKey, os_user_home: &Path) -> Option<PathBuf> {
-    let infrastructure_key = match provider {
-        ProviderKey::Codex => codex::provider_key(),
-        ProviderKey::Claude => claude::provider_key(),
-    };
-    ProviderRegistry::production()
-        .get(&infrastructure_key)
-        .and_then(|adapter| adapter.descriptor().default_profile_directory)
+/// directory that project setup presents by default.
+pub(super) fn default_profile_home(
+    adapter: &dyn CatalogProviderAdapter,
+    os_user_home: &Path,
+) -> Option<PathBuf> {
+    adapter
+        .descriptor()
+        .default_profile_directory
         .map(|directory| os_user_home.join(directory))
 }
 
-/// True when this profile's canonical home is the provider's default
-/// `$HOME/.codex`. The directory name comes from the provider descriptor, so
-/// this cannot drift from what the Codex adapter actually calls home.
-fn is_default_codex_home(canonical_home: &Path, os_user_home: &Path) -> bool {
-    let Some(default_home) = default_profile_home(ProviderKey::Codex, os_user_home) else {
-        return false;
-    };
-    prospective_canonical(&default_home).is_ok_and(|default_home| default_home == canonical_home)
-}
-
-/// Resolve exactly one provider profile for a scope or registration. Codex
-/// receives its own home skill root — plus the machine-global
-/// `$HOME/.agents/skills` root when it is the default `~/.codex` config —
-/// while Claude receives only its own user-global root. This is the
+/// Resolve exactly one provider profile for a scope: the canonical home plus
+/// every target root the registered adapter exposes for it. This is the
 /// production shape for catalog resources and never scans a project
 /// directory.
 pub fn resolve_profile_context(
+    registry: &CatalogRegistry,
     profiles: &CatalogProfilesDocument,
     profile_id: &LocalCatalogProfileId,
-    provider: ProviderKey,
+    provider: &ProviderKey,
     os_user_home: &Path,
 ) -> Result<ResolvedCatalogContext, CatalogBlocker> {
+    let adapter =
+        registry
+            .provider(provider)
+            .ok_or_else(|| CatalogBlocker::UnsupportedProvider {
+                provider: provider.to_string(),
+            })?;
     let profile = resolve_profile(profiles, profile_id, provider)?;
-    let mut skill_roots = Vec::new();
-    match provider {
-        ProviderKey::Codex => {
-            skill_roots.push(ResolvedSkillRoot {
-                scope: AgentSkillScope::CodexHome,
-                canonical_root: prospective_canonical(&profile.canonical_home.join("skills"))
-                    .map_err(|detail| CatalogBlocker::ProfileUnavailable { detail })?,
-            });
-            // The shared root belongs to the default `~/.codex` config only.
-            // A second Codex config sees just its own root, so the same
-            // shared directory can never be registered under two profiles.
-            if is_default_codex_home(&profile.canonical_home, os_user_home) {
-                skill_roots.push(ResolvedSkillRoot {
-                    scope: AgentSkillScope::CodexSharedUser,
-                    canonical_root: prospective_canonical(
-                        &os_user_home.join(".agents").join("skills"),
-                    )
-                    .map_err(|detail| CatalogBlocker::ProfileUnavailable { detail })?,
+    let targets = adapter.resolve_targets(&profile.canonical_home, os_user_home)?;
+    let context = ResolvedCatalogContext { profile, targets };
+    // Two roots one capability may scan must never coincide or nest, so one
+    // physical directory can never carry two portable root-class identities.
+    for capability in registry
+        .capabilities()
+        .filter(|capability| capability.provider() == provider)
+    {
+        let roots: Vec<&Path> = context
+            .targets_for(capability)
+            .iter()
+            .map(|target| target.canonical_root.as_path())
+            .collect();
+        for (index, left) in roots.iter().enumerate() {
+            if roots[index + 1..]
+                .iter()
+                .any(|right| paths_overlap(left, right))
+            {
+                return Err(CatalogBlocker::OverlappingTargets {
+                    roots: roots
+                        .iter()
+                        .map(|root| root.to_string_lossy().to_string())
+                        .collect(),
                 });
             }
         }
-        ProviderKey::Claude => {
-            skill_roots.push(ResolvedSkillRoot {
-                scope: AgentSkillScope::ClaudeUser,
-                canonical_root: prospective_canonical(&profile.canonical_home.join("skills"))
-                    .map_err(|detail| CatalogBlocker::ProfileUnavailable { detail })?,
-            });
-        }
     }
-    if skill_roots.len() == 2
-        && paths_overlap(
-            &skill_roots[0].canonical_root,
-            &skill_roots[1].canonical_root,
-        )
-    {
-        return Err(CatalogBlocker::OverlappingSkillRoots {
-            roots: skill_roots
-                .iter()
-                .map(|root| root.canonical_root.to_string_lossy().to_string())
-                .collect(),
-        });
-    }
-    Ok(ResolvedCatalogContext {
-        profile,
-        skill_roots,
-    })
+    Ok(context)
 }
 
 /// Validate a profile home path for creation: absolute, clean components, and
@@ -297,18 +268,27 @@ pub fn validate_new_profile_home(mallard_root: &Path, home: &str) -> Result<Path
 
 #[cfg(test)]
 mod tests {
-    use super::super::domain::LocalCatalogProfile;
+    use super::super::domain::{CatalogCoordinate, CatalogProviderConfig, LocalCatalogProfile};
+    use super::super::registry::test_support;
     use super::*;
 
-    fn profile(provider: ProviderKey, home: &Path) -> (LocalCatalogProfileId, LocalCatalogProfile) {
+    fn provider(key: &str) -> ProviderKey {
+        ProviderKey::parse(key).unwrap()
+    }
+
+    fn profile(
+        provider: &ProviderKey,
+        home: &Path,
+    ) -> (LocalCatalogProfileId, LocalCatalogProfile) {
         let profile_id = LocalCatalogProfileId::generate().unwrap();
         (
             profile_id.clone(),
             LocalCatalogProfile {
                 profile_id,
-                provider_key: provider,
-                display_name: provider.display_label().to_string(),
+                provider: provider.clone(),
+                display_name: provider.to_string(),
                 configured_home: home.to_string_lossy().to_string(),
+                provider_config: CatalogProviderConfig::version_1(),
                 revision: 1,
                 created_at: 1,
                 updated_at: 1,
@@ -316,26 +296,41 @@ mod tests {
         )
     }
 
+    fn document(profile: LocalCatalogProfile) -> CatalogProfilesDocument {
+        CatalogProfilesDocument {
+            schema: 1,
+            revision: 1,
+            profiles: vec![profile],
+        }
+    }
+
+    fn target_keys(context: &ResolvedCatalogContext) -> Vec<String> {
+        context
+            .targets
+            .iter()
+            .map(|target| target.target.to_string())
+            .collect()
+    }
+
     #[test]
-    fn claude_profiles_resolve_only_the_claude_user_root() {
+    fn claude_profiles_resolve_only_their_own_roots() {
         let temp = tempfile::tempdir().unwrap();
         let claude_home = temp.path().join("claude");
         std::fs::create_dir_all(&claude_home).unwrap();
-        let (claude_id, claude_profile) = profile(ProviderKey::Claude, &claude_home);
-        let document = CatalogProfilesDocument {
-            schema: 1,
-            revision: 1,
-            profiles: vec![claude_profile],
-        };
+        let (claude_id, claude_profile) = profile(&provider("claude"), &claude_home);
         let context = resolve_profile_context(
-            &document,
+            &CatalogRegistry::production(),
+            &document(claude_profile),
             &claude_id,
-            ProviderKey::Claude,
+            &provider("claude"),
             &temp.path().join("user-home"),
         )
         .unwrap();
-        assert_eq!(context.skill_roots.len(), 1);
-        assert_eq!(context.skill_roots[0].scope, AgentSkillScope::ClaudeUser);
+        assert_eq!(
+            target_keys(&context),
+            vec!["provider-home.skills", "user.plugins"]
+        );
+        assert_eq!(context.targets[0].root_class, "provider-home");
     }
 
     #[test]
@@ -344,23 +339,44 @@ mod tests {
         let user_home = temp.path().join("user-home");
         let codex_home = user_home.join(".codex");
         std::fs::create_dir_all(&codex_home).unwrap();
-        let (codex_id, codex_profile) = profile(ProviderKey::Codex, &codex_home);
-        let document = CatalogProfilesDocument {
-            schema: 1,
-            revision: 1,
-            profiles: vec![codex_profile],
-        };
-        let context =
-            resolve_profile_context(&document, &codex_id, ProviderKey::Codex, &user_home).unwrap();
-        let scopes: Vec<_> = context.skill_roots.iter().map(|root| root.scope).collect();
+        let (codex_id, codex_profile) = profile(&provider("codex"), &codex_home);
+        let registry = CatalogRegistry::production();
+        let context = resolve_profile_context(
+            &registry,
+            &document(codex_profile),
+            &codex_id,
+            &provider("codex"),
+            &user_home,
+        )
+        .unwrap();
         assert_eq!(
-            scopes,
-            vec![AgentSkillScope::CodexHome, AgentSkillScope::CodexSharedUser]
+            target_keys(&context),
+            vec![
+                "provider-home.skills",
+                "shared-user.skills",
+                "user.plugins",
+                "desktop.pets"
+            ]
         );
         assert!(context
-            .skill_root(AgentSkillScope::CodexSharedUser)
+            .target(&CatalogTargetKey::parse("shared-user.skills").unwrap())
             .unwrap()
+            .canonical_root
             .ends_with(".agents/skills"));
+
+        // A capability sees exactly its declared roots, in declared order.
+        let skills = registry
+            .capability(
+                &CatalogCoordinate::new("codex", "agent_skill", "agentskills.io.skill", 1).unwrap(),
+            )
+            .unwrap();
+        let roots: Vec<&str> = context
+            .targets_for(&skills)
+            .iter()
+            .map(|target| target.root_class.as_str())
+            .collect();
+        assert_eq!(roots, vec!["provider-home", "shared-user"]);
+        assert_eq!(context.target_pins().len(), 4);
     }
 
     #[test]
@@ -369,21 +385,24 @@ mod tests {
         let user_home = temp.path().join("user-home");
         let conf2_home = user_home.join("codex-conf2");
         std::fs::create_dir_all(&conf2_home).unwrap();
-        let (conf2_id, conf2_profile) = profile(ProviderKey::Codex, &conf2_home);
-        let document = CatalogProfilesDocument {
-            schema: 1,
-            revision: 1,
-            profiles: vec![conf2_profile],
-        };
-        let context =
-            resolve_profile_context(&document, &conf2_id, ProviderKey::Codex, &user_home).unwrap();
-        let scopes: Vec<_> = context.skill_roots.iter().map(|root| root.scope).collect();
-        assert_eq!(scopes, vec![AgentSkillScope::CodexHome]);
+        let (conf2_id, conf2_profile) = profile(&provider("codex"), &conf2_home);
+        let context = resolve_profile_context(
+            &CatalogRegistry::production(),
+            &document(conf2_profile),
+            &conf2_id,
+            &provider("codex"),
+            &user_home,
+        )
+        .unwrap();
+        assert_eq!(
+            target_keys(&context),
+            vec!["provider-home.skills", "user.plugins", "desktop.pets"]
+        );
     }
 
     #[cfg(unix)]
     #[test]
-    fn equal_or_nested_active_skill_roots_block_before_inventory() {
+    fn equal_or_nested_active_roots_block_before_inventory() {
         let temp = tempfile::tempdir().unwrap();
         // `~/.codex` as a symlink to `~/.agents` makes the default Codex-home
         // skills root equal to the shared-user root: one physical directory,
@@ -391,32 +410,65 @@ mod tests {
         let user_home = temp.path().join("user-home");
         std::fs::create_dir_all(user_home.join(".agents")).unwrap();
         std::os::unix::fs::symlink(user_home.join(".agents"), user_home.join(".codex")).unwrap();
-        let (codex_id, codex_profile) = profile(ProviderKey::Codex, &user_home.join(".codex"));
-        let document = CatalogProfilesDocument {
-            schema: 1,
-            revision: 1,
-            profiles: vec![codex_profile],
-        };
-        let error = resolve_profile_context(&document, &codex_id, ProviderKey::Codex, &user_home)
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            CatalogBlocker::OverlappingSkillRoots { .. }
-        ));
-        assert!(error.to_string().contains("overlapping_skill_roots"));
+        let (codex_id, codex_profile) = profile(&provider("codex"), &user_home.join(".codex"));
+        let error = resolve_profile_context(
+            &CatalogRegistry::production(),
+            &document(codex_profile),
+            &codex_id,
+            &provider("codex"),
+            &user_home,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CatalogBlocker::OverlappingTargets { .. }));
+        assert!(error.to_string().contains("overlapping_targets"));
     }
 
     #[test]
-    fn missing_profile_homes_fail_as_typed_blockers() {
+    fn missing_profile_homes_and_unknown_providers_fail_as_typed_blockers() {
         let temp = tempfile::tempdir().unwrap();
-        let (codex_id, codex_profile) = profile(ProviderKey::Codex, &temp.path().join("missing"));
-        let document = CatalogProfilesDocument {
-            schema: 1,
-            revision: 1,
-            profiles: vec![codex_profile],
-        };
-        let error = resolve_profile_context(&document, &codex_id, ProviderKey::Codex, temp.path())
-            .unwrap_err();
+        let (codex_id, codex_profile) = profile(&provider("codex"), &temp.path().join("missing"));
+        let document = document(codex_profile);
+        let error = resolve_profile_context(
+            &CatalogRegistry::production(),
+            &document,
+            &codex_id,
+            &provider("codex"),
+            temp.path(),
+        )
+        .unwrap_err();
         assert!(matches!(error, CatalogBlocker::ProfileUnavailable { .. }));
+
+        // A provider this build does not register cannot resolve at all,
+        // even though its profile record is structurally fine.
+        let error = resolve_profile_context(
+            &CatalogRegistry::production(),
+            &document,
+            &codex_id,
+            &provider("cursor"),
+            temp.path(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, CatalogBlocker::UnsupportedProvider { .. }));
+    }
+
+    #[test]
+    fn the_test_provider_resolves_its_own_target_through_the_same_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("testprov-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (profile_id, record) = profile(&test_support::provider_key(), &home);
+        let context = resolve_profile_context(
+            &CatalogRegistry::with_test_capability(),
+            &document(record),
+            &profile_id,
+            &test_support::provider_key(),
+            temp.path(),
+        )
+        .unwrap();
+        assert_eq!(target_keys(&context), vec![test_support::TARGET]);
+        assert!(context.targets[0].canonical_root.ends_with("notes"));
+        assert!(CatalogRegistry::production()
+            .provider(&test_support::provider_key())
+            .is_none());
     }
 }
