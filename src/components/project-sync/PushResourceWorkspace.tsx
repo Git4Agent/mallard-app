@@ -35,6 +35,7 @@ export interface PushReviewBlocker {
 }
 
 interface Props {
+  credentialRedactionEnabled: boolean;
   resources: InventoryResource[];
   selected: Set<string>;
   projectDefaults: Set<string>;
@@ -268,20 +269,28 @@ export function recommendedPushSelection(
   const recommended = new Set([...selected].filter((resourceId) => selectableIds.has(resourceId)));
   if (!threadComparison) return recommended;
 
-  const comparisonByResourceId = new Map(threadComparison.entries.map((entry) => [entry.resource_id, entry]));
-  const conversations = resources.filter((resource) => resource.category === "conversations");
+  const conversationIds = new Set(resources
+    .filter((resource) => resource.category === "conversations")
+    .map((resource) => resource.resource_id));
+  const conversations = threadComparison.entries
+    .filter((entry) => conversationIds.has(entry.resource_id))
+    .sort((left, right) => (
+      (right.local_updated_at ?? 0) - (left.local_updated_at ?? 0)
+      || (left.provider < right.provider ? -1 : left.provider > right.provider ? 1 : 0)
+      || (left.resource_id < right.resource_id ? -1 : left.resource_id > right.resource_id ? 1 : 0)
+    ));
 
-  for (const resource of conversations) {
-    const comparison = comparisonByResourceId.get(resource.resource_id);
-    if (!comparison) continue;
-    if (
-      comparison.push_decision.selectable
-      && selectableIds.has(resource.resource_id)
-    ) {
-      recommended.add(resource.resource_id);
-    } else {
-      recommended.delete(resource.resource_id);
-    }
+  // Rebuild session defaults so a saved selection cannot exceed the budget.
+  // Reserve the same fixed content that the review meter counts.
+  for (const entry of conversations) recommended.delete(entry.resource_id);
+  const fixedBudget = pushBudgetTotal(recommended, threadComparison, projectContentInventory);
+  let remainingBytes = fixedBudget ? fixedBudget.limit - fixedBudget.total : Infinity;
+  for (const entry of conversations) {
+    if (!selectableIds.has(entry.resource_id)) continue;
+    const bytes = entry.capture_bytes ?? 0;
+    if (bytes > remainingBytes) continue;
+    recommended.add(entry.resource_id);
+    remainingBytes -= bytes;
   }
 
   return recommended;
@@ -525,6 +534,7 @@ function PushBudgetGauge({ total }: { total: PushBudget }) {
 }
 
 export default function PushResourceWorkspace({
+  credentialRedactionEnabled,
   resources,
   selected,
   projectDefaults,
@@ -591,7 +601,6 @@ export default function PushResourceWorkspace({
     () => new Set((threadComparison?.entries ?? [])
       .filter((entry) => (
         entry.local_present
-        && (entry.state === "local_only" || entry.state === "local_ahead")
         && isPushReviewDecision(entry.push_decision)
       ))
       .map((entry) => entry.resource_id)),
@@ -711,6 +720,13 @@ export default function PushResourceWorkspace({
      fallback status and the counts read 0/0. That is a broken review, not an
      empty one, so it says why at the top and offers the repair that clears
      stale sync metadata — the usual cause after a storage reset. */
+  if (!credentialRedactionEnabled) {
+    banners.push({
+      key: "credential-redaction",
+      severity: "warning",
+      message: "Exported content can include API keys, tokens, and passwords.",
+    });
+  }
   if (threadComparisonError) {
     banners.push({
       key: "comparison-failed",
@@ -835,6 +851,7 @@ export default function PushResourceWorkspace({
       <header className="sync-inline-action-header sync-push-resource-header sync-sync-review-header">
         <div className="sync-sync-review-title">
           <h2 id="sync-push-resource-title">Push review</h2>
+          <span className="sync-settings-flag">Credential redaction: {credentialRedactionEnabled ? "On" : "Off"}</span>
         </div>
         {budgetTotal && <PushBudgetGlance total={budgetTotal} />}
         <SyncReviewSelectionBar

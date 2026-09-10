@@ -1344,7 +1344,6 @@ fn ambiguous_sdk_error<E>(error: &SdkError<E>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bundle_engine::BundleEngine;
     use aws_sdk_s3::config::{Credentials, Region};
     use aws_sdk_s3::Config as S3Config;
     use aws_smithy_http_client::{tls, Builder as HttpClientBuilder};
@@ -1354,7 +1353,6 @@ mod tests {
     use hyper::service::service_fn;
     use hyper::{Method, Request, Response, StatusCode};
     use hyper_util::rt::TokioIo;
-    use mallard_domain::StorageId;
     use std::collections::{BTreeMap, VecDeque};
     use std::convert::Infallible;
     use std::pin::Pin;
@@ -1573,10 +1571,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn engine_initializes_the_mallard_storage_marker_once() {
+    async fn storage_marker_is_created_once_and_revalidated() {
         let server = TestS3::start().await;
         let store = server.store();
-        blocking(move || BundleEngine::open(store, StorageId::parse("storage-r2").unwrap()))
+        blocking(move || super::super::ensure_storage_marker(&store))
             .await
             .unwrap();
 
@@ -1596,7 +1594,7 @@ mod tests {
         );
 
         let store = server.store();
-        blocking(move || BundleEngine::open(store, StorageId::parse("storage-r2").unwrap()))
+        blocking(move || super::super::ensure_storage_marker(&store))
             .await
             .unwrap();
         assert_eq!(

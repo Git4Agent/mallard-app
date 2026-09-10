@@ -1,13 +1,14 @@
 use serde::Serialize;
 use std::io::Write;
 
-use crate::backend::{StorageSummary, VerifyOutcome};
+use crate::backend::{SetupOutcome, StorageSummary, VerifyOutcome};
 use crate::error::CliError;
 
 #[derive(Serialize)]
 struct JsonSetup {
     schema: u32,
     status: &'static str,
+    reconnected: bool,
 }
 
 #[derive(Serialize)]
@@ -37,19 +38,29 @@ struct JsonError<'a> {
     setup_id: Option<&'a str>,
 }
 
-pub(crate) fn setup(writer: &mut dyn Write, json: bool) -> std::io::Result<()> {
+pub(crate) fn setup(
+    writer: &mut dyn Write,
+    json: bool,
+    outcome: &SetupOutcome,
+) -> std::io::Result<()> {
     if json {
         write_json(
             writer,
             &JsonSetup {
                 schema: 1,
                 status: "draft_ready",
+                reconnected: outcome.reconnected,
             },
+        )
+    } else if outcome.reconnected {
+        writeln!(
+            writer,
+            "Access regained for the existing storage. Review the connection in Mallard, optionally test it, then select Save changes."
         )
     } else {
         writeln!(
             writer,
-            "R2 settings are ready for review in Mallard. Review or edit them, optionally test the connection, then click Finish setup."
+            "Storage settings are ready for review in Mallard. Review the connection, optionally test it, then select Finish setup."
         )
     }
 }

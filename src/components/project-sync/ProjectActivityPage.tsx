@@ -26,7 +26,7 @@ import { writeClipboardText } from "../sync-review/clipboard";
 import TopLayer from "../sync-review/TopLayer";
 import { useDebugPopoverPlacement } from "../sync-review/debugPopoverPlacement";
 import {
-  isPullReviewStatus,
+  isPullReviewRow,
   isPushReviewRow,
 } from "../sync-review/pullReviewStatus";
 import { formatCompactNumber, formatSessionDetailTimestamp, type OpenSessionDetailRequest } from "./session-detail/sessionDetailModel";
@@ -491,7 +491,7 @@ export function sessionSyncPresentation(
   });
   switch (entry.state) {
     case "synced":
-      return { status: "synced", className: "synced", label: `Up to date here and in ${storageName}.` };
+      return { status: "synced", className: "synced", label: entry.status_detail ?? `Up to date here and in ${storageName}.` };
     case "local_only":
       if (entry.push_decision?.action === "blocked") return blocked("push");
       return { status: "local-outstanding", className: "local", label: `Only on this computer. Push to save it in ${storageName}.` };
@@ -1113,6 +1113,12 @@ export function syncHoldDetail(
   }
   const decision = mode === "push" ? entry.push_decision : entry.pull_decision;
   if (!decision) return null;
+  if (mode === "push" && entry.state === "synced" && decision.action === "publish") {
+    return entry.status_detail ?? "Export settings changed";
+  }
+  if (mode === "pull" && decision.action === "keep_both" && decision.blocked_reason) {
+    return decision.blocked_reason;
+  }
   if (decision.action === "blocked") {
     switch (decision.blocker) {
       case "codec_unsupported":
@@ -1164,6 +1170,18 @@ function ReviewSyncIndicator({ entry, storageName, label, detail }: {
 function actionTitle(action: SessionActionDescriptor, busy = false): string {
   if (!action.enabled) return action.disabled_reason ?? action.label;
   return busy ? `${action.label}…` : action.label;
+}
+
+function ChildOmissionIcon() {
+  const tooltipId = useId();
+  return (
+    <span className="sync-child-omission" tabIndex={0} aria-label="Child rollouts excluded" aria-describedby={tooltipId}>
+      <Icon name="info" size={14} />
+      <span id={tooltipId} role="tooltip" className="sync-child-omission-tooltip">
+        Child conversations are excluded from this Push. Pull restores the children stored in the cloud.
+      </span>
+    </span>
+  );
 }
 
 function SessionCard({
@@ -1256,6 +1274,7 @@ function SessionCard({
           ) : (
             <strong title={visibleTitle === fullTitle ? undefined : fullTitle}>{visibleTitle}</strong>
           )}
+          {selectionMode === "push" && syncEntry?.subagent_selection?.omitted && <ChildOmissionIcon />}
           {session.preserved && (
             <span
               className="sync-history-preserved-badge"
@@ -1263,6 +1282,9 @@ function SessionCard({
             >
               Preserved {session.preserved.ordinal}
             </span>
+          )}
+          {selectionMode === "push" && syncEntry?.state === "synced" && syncEntry.push_decision.action === "publish" && (
+            <span className="sync-history-branch-state history-only">{syncEntry.status_detail ?? "Export settings changed"}</span>
           )}
           {selectionMode === "pull" && pullOperationChip(syncEntry) && (
             <span className="sync-history-branch-state history-only" title={holdDetail ?? reviewStateLabel ?? undefined}>
@@ -1436,6 +1458,9 @@ function SyncEntryCard({
             <ProviderMark provider={entry.provider} displayName={entry.provider_display_name} />
           </span>
           <strong title={title === fullTitle ? undefined : fullTitle}>{title}</strong>
+          {selectionMode === "push" && entry.state === "synced" && entry.push_decision.action === "publish" && (
+            <span className="sync-history-branch-state history-only">{entry.status_detail ?? "Export settings changed"}</span>
+          )}
           {selectionMode === "pull" && pullOperationChip(entry) && (
             <span className="sync-history-branch-state history-only" title={holdDetail ?? reviewStateLabel ?? undefined}>
               {pullOperationChip(entry)}
@@ -1561,7 +1586,7 @@ export function ProjectChatHistoryContent({
       if (!entry) return false;
       const status = sessionSyncPresentation(entry, "storage").status;
       return selectionMode === "pull"
-        ? isPullReviewStatus(status)
+        ? isPullReviewRow(status, entry.pull_decision)
         : isPushReviewRow(status, entry.push_decision);
     });
   }, [allSessions, selectionMode, syncIndex]);
@@ -1633,7 +1658,7 @@ export function ProjectChatHistoryContent({
     return (comparison?.entries ?? []).filter((entry) => (
       (entry.local_present || entry.storage_present)
       && (selectionMode === "pull"
-        ? isPullReviewStatus(sessionSyncPresentation(entry, "storage").status)
+        ? isPullReviewRow(sessionSyncPresentation(entry, "storage").status, entry.pull_decision)
         : isPushReviewRow(sessionSyncPresentation(entry, "storage").status, entry.push_decision))
       && !renderedSyncEntryIds.has(entry.resource_id)
     ));

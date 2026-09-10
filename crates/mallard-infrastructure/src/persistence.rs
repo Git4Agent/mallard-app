@@ -286,7 +286,7 @@ impl LockedConversationPull<'_> {
     }
 }
 
-struct PersistenceGuard {
+pub(crate) struct PersistenceGuard {
     _process: std::sync::MutexGuard<'static, ()>,
     _file: fs::File,
 }
@@ -1331,6 +1331,7 @@ impl LocalStateRepository {
                 .filter_map(|checkpoint| {
                     checkpoint.accepted.take().map(|_| {
                         checkpoint.accepted_local_tail = None;
+                        checkpoint.accepted_subagents.clear();
                         checkpoint.generation = checkpoint.generation.saturating_add(1);
                     })
                 })
@@ -2576,7 +2577,7 @@ impl LocalStateRepository {
         ensure_no_symlinks(&self.root, &self.root).map(|_| ())
     }
 
-    fn ensure_directory(&self, directory: &Path) -> Result<(), String> {
+    pub(crate) fn ensure_directory(&self, directory: &Path) -> Result<(), String> {
         let relative = directory.strip_prefix(&self.root).map_err(|_| {
             format!(
                 "Mallard state path '{}' escapes '{}'",
@@ -2725,7 +2726,7 @@ fn walk_local_state(dir: &Path) -> Result<(u64, u64), String> {
     Ok((files, bytes))
 }
 
-fn persistence_guard(root: &Path) -> Result<PersistenceGuard, String> {
+pub(crate) fn persistence_guard(root: &Path) -> Result<PersistenceGuard, String> {
     let process = PERSISTENCE_LOCK
         .lock()
         .map_err(|_| "project-sync persistence lock is poisoned".to_string())?;
@@ -2982,7 +2983,7 @@ fn write_json_atomic_compact<T: Serialize>(
     write_bytes_atomic(root, path, &bytes, max_bytes)
 }
 
-fn write_bytes_atomic(
+pub(crate) fn write_bytes_atomic(
     root: &Path,
     path: &Path,
     bytes: &[u8],
@@ -3532,6 +3533,8 @@ mod tests {
         let thread_id = ThreadId::parse("thread-activity").unwrap();
         repo.mutate_conversation_bindings(|bindings| {
             bindings.bindings.push(LocalConversationBinding {
+                installed_end: None,
+                installed_subagents: Default::default(),
                 path_origins_ref: None,
                 host_id: identity.host_id.clone(),
                 replica_id: replica_id.clone(),
@@ -3672,6 +3675,8 @@ mod tests {
         .unwrap();
         repo.mutate_conversation_bindings(|bindings| {
             bindings.bindings.push(LocalConversationBinding {
+                installed_end: None,
+                installed_subagents: Default::default(),
                 path_origins_ref: None,
                 host_id: identity.host_id.clone(),
                 replica_id: replica_id.clone(),
@@ -3760,6 +3765,10 @@ mod tests {
 
     #[test]
     fn storage_clear_keeps_local_conversation_preservation_provenance() {
+        use mallard_domain::{
+            AcceptedSubagentState, InstalledSubagent, SubagentContentState, SubagentKey,
+        };
+
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let identity = repo.load_or_create_host_identity().unwrap();
@@ -3777,6 +3786,8 @@ mod tests {
             }],
         )
         .unwrap();
+        let child_key = SubagentKey::parse("start-child").unwrap();
+        let child_state = SubagentContentState::from_tail(&observed_tail).unwrap();
         repo.mutate_config(|config| {
             config.storages.push(local_storage_config(
                 storage_id.clone(),
@@ -3811,6 +3822,13 @@ mod tests {
                     BTreeMap::from([(
                         logical_thread_id.clone(),
                         ConversationCheckpoint {
+                            accepted_subagents: BTreeMap::from([(
+                                child_key.clone(),
+                                AcceptedSubagentState {
+                                    local: child_state.clone(),
+                                    normalized: child_state.clone(),
+                                },
+                            )]),
                             generation: 5,
                             accepted: Some(AcceptedConversationVersion {
                                 artifact_sha256: "a".repeat(64),
@@ -3838,6 +3856,14 @@ mod tests {
         .unwrap();
         repo.mutate_conversation_bindings(|bindings| {
             bindings.bindings.push(LocalConversationBinding {
+                installed_end: Some(128),
+                installed_subagents: BTreeMap::from([(
+                    child_key,
+                    InstalledSubagent {
+                        provider_thread_id: "provider-child-preserved".to_string(),
+                        installed_end: 64,
+                    },
+                )]),
                 path_origins_ref: None,
                 host_id: identity.host_id.clone(),
                 replica_id: replica_id.clone(),
@@ -3888,6 +3914,7 @@ mod tests {
 
         let expected_config_revision = repo.load_config().unwrap().revision;
         let config_before = repo.load_config().unwrap();
+        let bindings_before = repo.load_conversation_bindings().unwrap();
         let materializations_before = repo.load_materializations().unwrap();
         let stale = repo
             .clear_storage_data(
@@ -3908,7 +3935,7 @@ mod tests {
                 },
             )
             .unwrap_err();
-        assert!(failed.contains("Some data was deleted"));
+        assert!(failed.contains("Some data was deleted"), "{failed}");
         assert_eq!(repo.load_config().unwrap(), config_before);
         assert_eq!(
             repo.load_materializations().unwrap(),
@@ -3925,6 +3952,7 @@ mod tests {
         assert_eq!(result.conversation_acceptances_removed, 1);
         assert!(repo.load_materializations().unwrap().records.is_empty());
         let bindings = repo.load_conversation_bindings().unwrap();
+        assert_eq!(bindings, bindings_before);
         assert_eq!(bindings.bindings.len(), 1);
         assert_eq!(
             bindings.bindings[0].preserved,
@@ -3945,6 +3973,7 @@ mod tests {
         assert_eq!(checkpoint.generation, 6);
         assert!(checkpoint.accepted.is_none());
         assert!(checkpoint.accepted_local_tail.is_none());
+        assert!(checkpoint.accepted_subagents.is_empty());
         assert_eq!(checkpoint.observed_tail, observed_tail);
         assert!(matches!(
             checkpoint.physical,
@@ -4029,6 +4058,8 @@ mod tests {
             let replica_id = install_bound_project(&repo, &temp, &identity);
             repo.mutate_conversation_bindings(|conversations| {
                 conversations.bindings.push(LocalConversationBinding {
+                    installed_end: None,
+                    installed_subagents: Default::default(),
                     path_origins_ref: None,
                     host_id: identity.host_id.clone(),
                     replica_id: replica_id.clone(),
@@ -4135,6 +4166,8 @@ mod tests {
         .unwrap();
         repo.mutate_conversation_bindings(|conversations| {
             conversations.bindings.push(LocalConversationBinding {
+                installed_end: None,
+                installed_subagents: Default::default(),
                 path_origins_ref: None,
                 host_id: identity.host_id.clone(),
                 replica_id: replica_id.clone(),
@@ -4880,6 +4913,8 @@ mod tests {
         let identity = repo.load_or_create_host_identity().unwrap();
         let replica_id = install_bound_project(repo, temp, &identity);
         let mut binding = LocalConversationBinding {
+            installed_end: None,
+            installed_subagents: Default::default(),
             host_id: identity.host_id,
             replica_id,
             local_project_id: LocalProjectId::parse("project-a").unwrap(),

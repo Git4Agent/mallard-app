@@ -10,36 +10,13 @@ use super::traits::{
 use mallard_domain::portable::contracts;
 use mallard_domain::{
     validate_sha256, ApplyPolicyCoordinate, ApplyPolicyPrimitive, BoundedPortableObject,
-    BoundedValue, CloudThreadId, LogicalPath, ProvenanceKindKey, ProvenancePrimitive, ResourceId,
+    CloudThreadId, LogicalPath, ProvenanceKindKey, ProvenancePrimitive, ResourceId,
     ResourceKindCoordinate, ResourceKindPrimitive, TombstoneTargetKindKey,
     TombstoneTargetPrimitive,
 };
 use serde::Deserialize;
 use std::path::{Component, Path};
 use std::sync::Arc;
-
-/// Credential material is excluded from portable data by policy: every
-/// string value runs through the shared credential-shape detector. A match
-/// rejects the record. This is a warning aid, not proof of safety.
-pub fn reject_credential_shapes(object: &BoundedPortableObject) -> Result<(), String> {
-    fn visit(value: &BoundedValue) -> Result<(), String> {
-        match value {
-            BoundedValue::String(text) => {
-                if crate::credential_redaction::shared()
-                    .redact_str(text)
-                    .is_some()
-                {
-                    return Err("portable object contains credential-shaped text".to_string());
-                }
-                Ok(())
-            }
-            BoundedValue::Array(items) => items.iter().try_for_each(visit),
-            BoundedValue::Object(fields) => fields.values().try_for_each(visit),
-            BoundedValue::Null | BoundedValue::Bool(_) | BoundedValue::Number(_) => Ok(()),
-        }
-    }
-    object.iter().try_for_each(|(_, value)| visit(value))
-}
 
 fn validate_optional_digest(digest: &Option<String>) -> Result<(), String> {
     if let Some(digest) = digest {
@@ -95,7 +72,6 @@ impl ResourceKindAdapter for SimpleKind {
     }
 
     fn validate_attributes(&self, attributes: &BoundedPortableObject) -> Result<(), String> {
-        reject_credential_shapes(attributes)?;
         match self.entry_type {
             Some(expected) => {
                 let typed: ProjectContentAttributesV1 = attributes.decode()?;
@@ -171,7 +147,6 @@ impl ProvenanceCodec for ProjectLocalProvenance {
     }
 
     fn decode(&self, fields: &BoundedPortableObject) -> Result<ProvenancePrimitive, String> {
-        reject_credential_shapes(fields)?;
         let typed: ProjectLocalProvenanceV1 = fields.decode()?;
         let path = Path::new(&typed.relative_path);
         if typed.relative_path.is_empty()
@@ -251,7 +226,6 @@ impl TombstoneTargetCodec for TombstoneCodec {
     }
 
     fn decode(&self, identity: &BoundedPortableObject) -> Result<TombstoneTargetPrimitive, String> {
-        reject_credential_shapes(identity)?;
         if self.thread {
             let typed: ThreadIdentityV1 = identity.decode()?;
             return Ok(TombstoneTargetPrimitive::ConversationThread {

@@ -1,6 +1,6 @@
 # Mallard Current Technical Report
 
-**Implementation date:** 2026-09-03
+**Implementation date:** 2026-09-08
 **Application version:** 0.1.2
 **Scope:** the active implementation only. This report does not describe
 superseded formats, migrations, or compatibility behavior.
@@ -139,6 +139,45 @@ interface ProjectContentPreferences {
 They are stored on the project/storage link and never uploaded. They record
 exact entries intentionally left unchecked after a successful Push so later
 scans do not select them again automatically.
+
+### Owned child state
+
+The selected main task owns one sync operation. Included children have no
+separate resource row, binding, checkpoint, or revision.
+
+| Location | Required fields | Purpose |
+| --- | --- | --- |
+| Cloud task `files` | `SubagentTranscript { child_key, normalized }` | Declare child objects and each child's normalized content state. |
+| Main local binding | `installed_end`, `installed_subagents` | Store the Pull installation cutoff and child key → native ID/cutoff map. |
+| Main per-storage checkpoint | `accepted_subagents` | Store each child's accepted local and normalized state together. |
+| Temporary Push review | `subagent_selection` | Fix child keys, omission choice, and estimated bytes. |
+
+A child content state contains `message_count` and `sha256`. It uses the
+shared `mallard-subagent-tail-v1` / `mallard-subagent-tail-wire-v1` labels
+and the existing whole-thread comparator. The object byte hash stays
+separate. Raw creation IDs form owner-scoped keys; no child-key hash or
+aggregate tree hash is added. No mode field or Mallard boundary enters a
+portable rollout.
+
+Codex Pull allocates a fresh native ID for the main and each listed child. It maps
+included structural references and retains omitted native references. The
+binding map recovers installed membership. Discovery scans past each
+installation cutoff for new children and checks authoritative parent metadata.
+Claude supports direct children only. A parent tool-result record supplies the
+child key and agent ID. Each child record must match its parent session ID,
+filename agent ID, and native sidechain flag. Child lookup uses the exact parent
+directory. Claude Pull keeps the agent ID and allocates a new parent ID for
+Create local or Keep both. An update retains the installed identities.
+
+Missing accepted local children keep comparison Unknown and block Push. Pull
+can offer Keep both when the main, other children, and cloud evidence are valid.
+Temporary review pins retain the missing-key set and recheck it at Apply. The
+existing binding and checkpoint maps hold all durable child state.
+
+Missing fields are rejected under schema 1. There is no migration or legacy
+execution path. Full details and measured limits are in the
+[Codex verification](docs/CODEX_OWNED_SUBAGENT_SYNC_VERIFICATION.md) and
+[Claude verification](docs/CLAUDE_OWNED_SUBAGENT_SYNC_VERIFICATION.md).
 
 ## 5. Portable storage and schema-1 metadata
 

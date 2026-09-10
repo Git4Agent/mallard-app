@@ -1,0 +1,154 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="824" viewBox="0 0 1200 824" role="img" aria-labelledby="title description"><title id="title">Mallard storage icon choices</title><desc id="description">Three SVG icon sets: A Pixel system, B Soft outline, and C Provider marks. C is recommended for mixed storage lists. Plan and mock only.</desc><defs><symbol xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" id="brand-cloudflare" fill="currentColor"><path d="M16.5088 16.8447c.1475-.5068.0908-.9707-.1553-1.3154-.2246-.3164-.6045-.499-1.0615-.5205l-8.6592-.1123a.1559.1559 0 0 1-.1333-.0713c-.0283-.042-.0351-.0986-.021-.1553.0278-.084.1123-.1484.2036-.1562l8.7359-.1123c1.0351-.0489 2.1601-.8868 2.5537-1.9136l.499-1.3013c.0215-.0561.0293-.1128.0147-.168-.5625-2.5463-2.835-4.4453-5.5499-4.4453-2.5039 0-4.6284 1.6177-5.3876 3.8614-.4927-.3658-1.1187-.5625-1.794-.499-1.2026.119-2.1665 1.083-2.2861 2.2856-.0283.31-.0069.6128.0635.894C1.5683 13.171 0 14.7754 0 16.752c0 .1748.0142.3515.0352.5273.0141.083.0844.1475.1689.1475h15.9814c.0909 0 .1758-.0645.2032-.1553l.12-.4268zm2.7568-5.5634c-.0771 0-.1611 0-.2383.0112-.0566 0-.1054.0415-.127.0976l-.3378 1.1744c-.1475.5068-.0918.9707.1543 1.3164.2256.3164.6055.498 1.0625.5195l1.8437.1133c.0557 0 .1055.0263.1329.0703.0283.043.0351.1074.0214.1562-.0283.084-.1132.1485-.204.1553l-1.921.1123c-1.041.0488-2.1582.8867-2.5527 1.914l-.1406.3585c-.0283.0713.0215.1416.0986.1416h6.5977c.0771 0 .1474-.0489.169-.126.1122-.4082.1757-.837.1757-1.2803 0-2.6025-2.125-4.727-4.7344-4.727" /></symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" id="brand-dropbox" fill="currentColor"><path d="M6 1.807L0 5.629l6 3.822 6.001-3.822L6 1.807zM18 1.807l-6 3.822 6 3.822 6-3.822-6-3.822zM0 13.274l6 3.822 6.001-3.822L6 9.452l-6 3.822zM18 9.452l-6 3.822 6 3.822 6-3.822-6-3.822zM6 18.371l6.001 3.822 6-3.822-6-3.822L6 18.371z" /></symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="outline-cloud">
+  <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+</symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="outline-folder">
+  <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+</symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="outline-hard-drive">
+  <path d="M10 16h.01" />
+  <path d="M2.212 11.577a2 2 0 0 0-.212.896V18a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.527a2 2 0 0 0-.212-.896L18.55 5.11A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+  <path d="M21.946 12.013H2.054" />
+  <path d="M6 16h.01" />
+</symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" id="pixel-cloud" shape-rendering="crispEdges">
+  <path d="M22 10h-4v2h4v-2Zm2 2h-2v6h2v-6Zm-2 6H2v2h20v-2ZM2 12H0v6h2v-6Zm2-2H2v2h2v-2Zm4-2H4v2h4V8Zm8-4h-6v2h6V4Zm-6 2H8v2h2V6Zm0 4H8v2h2v-2Zm8-4h-2v2h2V6Z" />
+  <path d="M20 8h-2v4h2V8Zm-2 4h-2v2h2v-2Z" />
+</symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" id="pixel-folder" shape-rendering="crispEdges">
+  <path d="M4 4h6v2H4zm0 14h16v2H4zM20 8h2v10h-2zM2 6h2v12H2zm8 0h10v2H10z" />
+</symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" id="pixel-server" shape-rendering="crispEdges">
+  <path d="M6 7h4v2H6zm0 8h4v2H6zM2 5h2v14H2zm18 0h2v14h-2zM4 19h16v2H4zM4 3h16v2H4zm0 8h16v2H4z" />
+</symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" id="current-drive" shape-rendering="crispEdges"><path d="M3 2h18v2H3ZM3 7h18v2H3ZM1 4h2v3H1ZM21 4h2v3h-2ZM19 9h2v11h-2ZM3 9h2v11H3ZM5 20h14v2H5ZM9 11h6v2H9Z" /></symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" id="current-cloud" shape-rendering="crispEdges"><path d="M22 12v-1h-2V9h-1V8h-1V7h-3v1h-1V6h-1V5H8v1H7v1H6v1H5v3H2v1H1v5h1v1h1v1h2v1h14v-1h2v-1h1v-1h1v-5h-1Zm0 4h-1v1h-1v1h-2v1H6v-1H4v-1H3v-1H2v-3h1v-1h3V9h1V8h1V7h1V6h3v1h1v2h3V8h1v1h1v1h1v2h2v1h1v3Z" /></symbol></defs><rect width="1200" height="824" fill="#fefbf6"/>
+<text x="38" y="32" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="600">MALLARD / STORAGE / DESIGN STUDY</text>
+<text x="38" y="79" fill="#1e1817" font-family="Arial, sans-serif" font-size="32" font-weight="600">Storage icon choices</text>
+<text x="38" y="105" fill="#6f6159" font-family="Arial, sans-serif" font-size="14" font-weight="400">Source SVGs. Same list. Three visual directions.</text>
+<text x="1000" y="42" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="600">PLAN AND MOCK ONLY</text>
+<rect x="38" y="126" width="1124" height="1" rx="0" fill="#d8cec4" stroke="none"/>
+<text x="38" y="157" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="600">CURRENT</text>
+<use href="#current-drive" x="126" y="140" width="20" height="20" color="#6f6159"/>
+<text x="155" y="156" fill="#6f6159" font-family="Arial, sans-serif" font-size="12" font-weight="400">Storages / Local</text>
+<use href="#current-cloud" x="293" y="140" width="20" height="20" color="#6f6159"/>
+<text x="322" y="156" fill="#6f6159" font-family="Arial, sans-serif" font-size="12" font-weight="400">R2</text>
+<use href="#current-cloud" x="383" y="140" width="20" height="20" color="#6f6159"/>
+<text x="411" y="156" fill="#6f6159" font-family="Arial, sans-serif" font-size="12" font-weight="400">Dropbox</text>
+<text x="686" y="156" fill="#6f6159" font-family="Arial, sans-serif" font-size="12" font-weight="400">Archive-shaped drive; one cloud for two providers.</text>
+<rect x="38" y="187" width="356" height="2" rx="0" fill="#d8cec4" stroke="none"/>
+<text x="38" y="221" fill="#6f6159" font-family="Arial, sans-serif" font-size="13" font-weight="700">A</text>
+<text x="64" y="222" fill="#1e1817" font-family="Arial, sans-serif" font-size="22" font-weight="600">Pixel system</text>
+<text x="38" y="248" fill="#6f6159" font-family="Arial, sans-serif" font-size="12" font-weight="400">Keep Mallard’s pixel style</text>
+<use href="#pixel-server" x="55" y="278" width="48" height="48" color="#1e1817"/>
+<text x="59" y="348" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Storages</text>
+<use href="#pixel-folder" x="142" y="278" width="48" height="48" color="#1e1817"/>
+<text x="142" y="348" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Local folder</text>
+<use href="#pixel-cloud" x="229" y="278" width="48" height="48" color="#1e1817"/>
+<text x="233" y="348" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">R2</text>
+<use href="#pixel-cloud" x="316" y="278" width="48" height="48" color="#1e1817"/>
+<text x="320" y="348" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Dropbox</text>
+<text x="38" y="382" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="600">IN THE STORAGE LIST · 24 PX</text>
+<rect x="38" y="398" width="356" height="207" rx="8" fill="#fdf9f4" stroke="#d8cec4"/>
+<rect x="48" y="408" width="336" height="38" rx="5" fill="#f0e3d5" stroke="none"/>
+<use href="#pixel-server" x="61" y="415" width="24" height="24" color="#1e1817"/>
+<text x="97" y="434" fill="#1e1817" font-family="Arial, sans-serif" font-size="15" font-weight="600">Storages</text>
+<use href="#pixel-folder" x="62" y="461" width="24" height="24" color="#1e1817"/>
+<text x="99" y="471" fill="#1e1817" font-family="Arial, sans-serif" font-size="12" font-weight="600">Team folder</text>
+<text x="99" y="487" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Local folder</text>
+<use href="#pixel-cloud" x="62" y="509" width="24" height="24" color="#1e1817"/>
+<text x="99" y="519" fill="#1e1817" font-family="Arial, sans-serif" font-size="12" font-weight="600">Design R2</text>
+<text x="99" y="535" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Cloudflare R2</text>
+<use href="#pixel-cloud" x="62" y="557" width="24" height="24" color="#1e1817"/>
+<text x="99" y="567" fill="#1e1817" font-family="Arial, sans-serif" font-size="12" font-weight="600">Team Dropbox</text>
+<text x="99" y="583" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Dropbox</text>
+<text x="38" y="640" fill="#6f6159" font-family="Arial, sans-serif" font-size="11" font-weight="400">Storage at</text>
+<use href="#pixel-server" x="156" y="622.0" width="12" height="12" color="#1e1817"/>
+<text x="155" y="659" fill="#6f6159" font-family="Arial, sans-serif" font-size="9" font-weight="400">12px</text>
+<use href="#pixel-server" x="210" y="620.0" width="16" height="16" color="#1e1817"/>
+<text x="209" y="659" fill="#6f6159" font-family="Arial, sans-serif" font-size="9" font-weight="400">16px</text>
+<use href="#pixel-server" x="264" y="618.0" width="20" height="20" color="#1e1817"/>
+<text x="263" y="659" fill="#6f6159" font-family="Arial, sans-serif" font-size="9" font-weight="400">20px</text>
+<use href="#pixel-server" x="318" y="616.0" width="24" height="24" color="#1e1817"/>
+<text x="317" y="659" fill="#6f6159" font-family="Arial, sans-serif" font-size="9" font-weight="400">24px</text>
+<text x="38" y="695" fill="#1e1817" font-family="Arial, sans-serif" font-size="12" font-weight="400">Fits the current icon family.</text>
+<text x="38" y="715" fill="#6f6159" font-family="Arial, sans-serif" font-size="12" font-weight="400">R2 and Dropbox need their text labels.</text>
+<rect x="422" y="187" width="356" height="2" rx="0" fill="#d8cec4" stroke="none"/>
+<text x="422" y="221" fill="#6f6159" font-family="Arial, sans-serif" font-size="13" font-weight="700">B</text>
+<text x="448" y="222" fill="#1e1817" font-family="Arial, sans-serif" font-size="22" font-weight="600">Soft outline</text>
+<text x="422" y="248" fill="#6f6159" font-family="Arial, sans-serif" font-size="12" font-weight="400">Use smooth vector outlines</text>
+<use href="#outline-hard-drive" x="439" y="278" width="48" height="48" color="#1e1817"/>
+<text x="443" y="348" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Storages</text>
+<use href="#outline-folder" x="526" y="278" width="48" height="48" color="#1e1817"/>
+<text x="526" y="348" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Local folder</text>
+<use href="#outline-cloud" x="613" y="278" width="48" height="48" color="#1e1817"/>
+<text x="617" y="348" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">R2</text>
+<use href="#outline-cloud" x="700" y="278" width="48" height="48" color="#1e1817"/>
+<text x="704" y="348" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Dropbox</text>
+<text x="422" y="382" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="600">IN THE STORAGE LIST · 24 PX</text>
+<rect x="422" y="398" width="356" height="207" rx="8" fill="#fdf9f4" stroke="#d8cec4"/>
+<rect x="432" y="408" width="336" height="38" rx="5" fill="#f0e3d5" stroke="none"/>
+<use href="#outline-hard-drive" x="445" y="415" width="24" height="24" color="#1e1817"/>
+<text x="481" y="434" fill="#1e1817" font-family="Arial, sans-serif" font-size="15" font-weight="600">Storages</text>
+<use href="#outline-folder" x="446" y="461" width="24" height="24" color="#1e1817"/>
+<text x="483" y="471" fill="#1e1817" font-family="Arial, sans-serif" font-size="12" font-weight="600">Team folder</text>
+<text x="483" y="487" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Local folder</text>
+<use href="#outline-cloud" x="446" y="509" width="24" height="24" color="#1e1817"/>
+<text x="483" y="519" fill="#1e1817" font-family="Arial, sans-serif" font-size="12" font-weight="600">Design R2</text>
+<text x="483" y="535" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Cloudflare R2</text>
+<use href="#outline-cloud" x="446" y="557" width="24" height="24" color="#1e1817"/>
+<text x="483" y="567" fill="#1e1817" font-family="Arial, sans-serif" font-size="12" font-weight="600">Team Dropbox</text>
+<text x="483" y="583" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Dropbox</text>
+<text x="422" y="640" fill="#6f6159" font-family="Arial, sans-serif" font-size="11" font-weight="400">Storage at</text>
+<use href="#outline-hard-drive" x="540" y="622.0" width="12" height="12" color="#1e1817"/>
+<text x="539" y="659" fill="#6f6159" font-family="Arial, sans-serif" font-size="9" font-weight="400">12px</text>
+<use href="#outline-hard-drive" x="594" y="620.0" width="16" height="16" color="#1e1817"/>
+<text x="593" y="659" fill="#6f6159" font-family="Arial, sans-serif" font-size="9" font-weight="400">16px</text>
+<use href="#outline-hard-drive" x="648" y="618.0" width="20" height="20" color="#1e1817"/>
+<text x="647" y="659" fill="#6f6159" font-family="Arial, sans-serif" font-size="9" font-weight="400">20px</text>
+<use href="#outline-hard-drive" x="702" y="616.0" width="24" height="24" color="#1e1817"/>
+<text x="701" y="659" fill="#6f6159" font-family="Arial, sans-serif" font-size="9" font-weight="400">24px</text>
+<text x="422" y="695" fill="#1e1817" font-family="Arial, sans-serif" font-size="12" font-weight="400">Smooth at small sizes.</text>
+<text x="422" y="715" fill="#6f6159" font-family="Arial, sans-serif" font-size="12" font-weight="400">Changes the style beside other app icons.</text>
+<rect x="806" y="187" width="356" height="2" rx="0" fill="#8a6347" stroke="none"/>
+<text x="806" y="221" fill="#8a6347" font-family="Arial, sans-serif" font-size="13" font-weight="700">C</text>
+<text x="832" y="222" fill="#1e1817" font-family="Arial, sans-serif" font-size="22" font-weight="600">Provider marks</text>
+<text x="806" y="248" fill="#6f6159" font-family="Arial, sans-serif" font-size="12" font-weight="400">Keep the pixel shell; identify providers</text>
+<use href="#pixel-server" x="823" y="278" width="48" height="48" color="#1e1817"/>
+<text x="827" y="348" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Storages</text>
+<use href="#pixel-folder" x="910" y="278" width="48" height="48" color="#1e1817"/>
+<text x="910" y="348" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Local folder</text>
+<use href="#brand-cloudflare" x="997" y="278" width="48" height="48" color="#1e1817"/>
+<text x="1001" y="348" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">R2</text>
+<use href="#brand-dropbox" x="1084" y="278" width="48" height="48" color="#1e1817"/>
+<text x="1088" y="348" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Dropbox</text>
+<text x="806" y="382" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="600">IN THE STORAGE LIST · 24 PX</text>
+<rect x="806" y="398" width="356" height="207" rx="8" fill="#fdf9f4" stroke="#d8cec4"/>
+<rect x="816" y="408" width="336" height="38" rx="5" fill="#f0e3d5" stroke="none"/>
+<use href="#pixel-server" x="829" y="415" width="24" height="24" color="#1e1817"/>
+<text x="865" y="434" fill="#1e1817" font-family="Arial, sans-serif" font-size="15" font-weight="600">Storages</text>
+<use href="#pixel-folder" x="830" y="461" width="24" height="24" color="#1e1817"/>
+<text x="867" y="471" fill="#1e1817" font-family="Arial, sans-serif" font-size="12" font-weight="600">Team folder</text>
+<text x="867" y="487" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Local folder</text>
+<use href="#brand-cloudflare" x="830" y="509" width="24" height="24" color="#1e1817"/>
+<text x="867" y="519" fill="#1e1817" font-family="Arial, sans-serif" font-size="12" font-weight="600">Design R2</text>
+<text x="867" y="535" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Cloudflare R2</text>
+<use href="#brand-dropbox" x="830" y="557" width="24" height="24" color="#1e1817"/>
+<text x="867" y="567" fill="#1e1817" font-family="Arial, sans-serif" font-size="12" font-weight="600">Team Dropbox</text>
+<text x="867" y="583" fill="#6f6159" font-family="Arial, sans-serif" font-size="10" font-weight="400">Dropbox</text>
+<text x="806" y="640" fill="#6f6159" font-family="Arial, sans-serif" font-size="11" font-weight="400">Storage at</text>
+<use href="#pixel-server" x="924" y="622.0" width="12" height="12" color="#1e1817"/>
+<text x="923" y="659" fill="#6f6159" font-family="Arial, sans-serif" font-size="9" font-weight="400">12px</text>
+<use href="#pixel-server" x="978" y="620.0" width="16" height="16" color="#1e1817"/>
+<text x="977" y="659" fill="#6f6159" font-family="Arial, sans-serif" font-size="9" font-weight="400">16px</text>
+<use href="#pixel-server" x="1032" y="618.0" width="20" height="20" color="#1e1817"/>
+<text x="1031" y="659" fill="#6f6159" font-family="Arial, sans-serif" font-size="9" font-weight="400">20px</text>
+<use href="#pixel-server" x="1086" y="616.0" width="24" height="24" color="#1e1817"/>
+<text x="1085" y="659" fill="#6f6159" font-family="Arial, sans-serif" font-size="9" font-weight="400">24px</text>
+<text x="806" y="695" fill="#1e1817" font-family="Arial, sans-serif" font-size="12" font-weight="400">Distinct shapes for R2 and Dropbox.</text>
+<text x="806" y="715" fill="#6f6159" font-family="Arial, sans-serif" font-size="12" font-weight="400">Recommended for mixed storage lists.</text>
+<rect x="38" y="746" width="1124" height="1" rx="0" fill="#d8cec4" stroke="none"/>
+<text x="38" y="774" fill="#6f6159" font-family="Arial, sans-serif" font-size="11" font-weight="400">Guidance: Apple HIG · Material Symbols · Microsoft · WCAG 1.4.11</text>
+<text x="38" y="796" fill="#6f6159" font-family="Arial, sans-serif" font-size="11" font-weight="400">Geometry: Pixelarticons · Lucide · Simple Icons. Provider marks shown as a monochrome study.</text>
+</svg>

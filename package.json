@@ -13,7 +13,7 @@
     "test:frontend-integration": "npm run typecheck:frontend-tests && node scripts/run-frontend-integration-tests.mjs",
     "test:release-config": "node --test tests/release-config.test.mjs",
     "test:aimock-servers": "node --test scripts/live-codex-aimock-server.test.mjs scripts/live-claude-aimock-server.test.mjs",
-    "test:backend-integration": "cargo test --workspace --all-targets && npm run test:aimock-servers",
+    "test:backend-integration": "cargo test --workspace --all-targets && npm run test:aimock-servers && npm run test:mixed-aimock-harness",
     "test:storage-catalog-e2e": "cargo test --manifest-path src-tauri/Cargo.toml --test storage_catalog_e2e",
     "test:cli": "cargo test -p mallard-cli",
     "test:live-claude-aimock-e2e": "node scripts/run-live-claude-aimock-e2e.mjs",
@@ -21,7 +21,12 @@
     "test:live-codex-aimock-e2e": "node scripts/run-live-codex-aimock-e2e.mjs",
     "test:live-codex-e2e": "node scripts/run-live-codex-e2e.mjs",
     "test:integration": "npm run test:frontend-integration && npm run test:release-config && npm run test:backend-integration",
-    "tauri": "node scripts/tauri-build.mjs"
+    "tauri": "node scripts/tauri-build.mjs",
+    "test:mixed-aimock-harness": "node --test scripts/mixed-aimock.test.mjs",
+    "test:mixed-aimock-e2e": "node scripts/run-mixed-aimock-e2e.mjs",
+    "bench:mixed-aimock-e2e": "node scripts/run-mixed-aimock-e2e.mjs --benchmark",
+    "test:mixed-aimock-e2e-xlarge": "node scripts/run-mixed-aimock-e2e.mjs --profile=xlarge",
+    "bench:mixed-aimock-e2e-xlarge": "node scripts/run-mixed-aimock-e2e.mjs --profile=xlarge --benchmark"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

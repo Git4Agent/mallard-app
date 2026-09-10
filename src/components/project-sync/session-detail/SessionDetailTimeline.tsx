@@ -32,6 +32,8 @@ interface Props {
   /** False when the session holds no events at all, so the empty state can
    *  stop blaming filters that do not exist. */
   hasFilterToggles: boolean;
+  /** Opens an agent's transcript as its own session page. */
+  onOpenSession?: (resourceId: string) => void;
 }
 
 export default function SessionDetailTimeline({
@@ -53,6 +55,7 @@ export default function SessionDetailTimeline({
   projectRoot,
   repositoryUrl,
   hasFilterToggles,
+  onOpenSession,
 }: Props) {
   const days = groupSessionEventsByDay(events);
   const spans = sessionTurnSpans(events);
@@ -124,12 +127,17 @@ export default function SessionDetailTimeline({
               return (
                 <li
                   key={event.event_id}
-                  className={event.kind === "tool_call" ? "session-detail-row-tool" : undefined}
+                  className={event.kind === "tool_call"
+                    ? "session-detail-row-tool"
+                    : event.kind === "agent_call"
+                      ? "session-detail-row-agent"
+                      : undefined}
                 >
                   {gap && (
                     <div className="session-detail-event-gap"><span>{gap}</span></div>
                   )}
                   <SessionDetailEvent
+                    onOpenSession={onOpenSession}
                     event={event}
                     provider={provider}
                     providerDisplayName={providerDisplayName}

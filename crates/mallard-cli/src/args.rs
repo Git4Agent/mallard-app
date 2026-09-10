@@ -36,6 +36,8 @@ pub(crate) enum StorageCommand {
     List,
     /// Manage Cloudflare R2 storage.
     R2(R2Args),
+    /// Manage Dropbox storage.
+    Dropbox(DropboxArgs),
     /// Verify an existing storage's required remote capabilities.
     Verify(VerifyArgs),
 }
@@ -49,11 +51,23 @@ pub(crate) struct R2Args {
 #[derive(Subcommand)]
 pub(crate) enum R2Command {
     /// Fill an open R2 setup draft through browser authorization.
-    Setup(SetupR2Args),
+    Setup(SetupStorageArgs),
 }
 
 #[derive(Args)]
-pub(crate) struct SetupR2Args {
+pub(crate) struct DropboxArgs {
+    #[command(subcommand)]
+    pub command: DropboxCommand,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum DropboxCommand {
+    /// Fill an open Dropbox draft or reconnect its namespace through browser consent.
+    Setup(SetupStorageArgs),
+}
+
+#[derive(Args)]
+pub(crate) struct SetupStorageArgs {
     /// Exact open Mallard storage setup draft to fill.
     #[arg(long)]
     pub draft_id: String,

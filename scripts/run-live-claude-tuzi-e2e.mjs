@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const connectionPath = join(projectRoot, ".env.local");
 const liveGate = "MALLARD_RUN_LIVE_CLAUDE_TUZI_E2E";
-const requiredClaudeVersion = "2.1.260";
+const requiredClaudeVersion = "2.1.266";
 const requiredModel = "claude-sonnet-5";
 const minimumNodeVersion = [20, 15, 0];
 const maximumConnectionBytes = 4_096;

@@ -32,6 +32,7 @@ pub enum StorageFieldKind {
 pub struct StorageFieldDescriptor {
     pub field_id: FieldKey,
     pub label: String,
+    pub immutable_on_edit: bool,
     pub kind: StorageFieldKind,
     pub required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,6 +88,10 @@ pub struct StorageSecretDescriptor {
 pub struct StorageSetupAssistantDescriptor {
     pub label: String,
     pub description: String,
+    /// Presence of this credential selects the managed setup route.
+    /// When present, the editor uses this declared secret field for review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_secret_id: Option<SecretKey>,
 }
 
 /// Storage-wide clear is separate from normal revision-checked deletion.
@@ -151,6 +156,9 @@ pub struct StorageSetupAssistantContext<'a> {
     pub cli_path: &'a str,
     pub draft_id: &'a str,
     pub draft_revision: u64,
+    /// The draft edits a storage that already exists: the assistant regains
+    /// access to the same destination rather than creating one.
+    pub reconnect: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,46 +169,47 @@ pub enum StorageAdapterErrorKind {
     Internal,
 }
 
-/// A typed, sanitized adapter error. Messages are fixed text; settings,
-/// secrets, destinations, SDK output, and filesystem values are never
-/// retained.
+/// A typed, sanitized adapter error. Messages are fixed text, at most
+/// extended with allowlisted connection evidence (a route literal, a
+/// status, a fixed error identifier, a request ID); settings, secrets,
+/// destinations, SDK output, and filesystem values are never retained.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageAdapterError {
     kind: StorageAdapterErrorKind,
     code: &'static str,
-    message: &'static str,
+    message: String,
 }
 
 impl StorageAdapterError {
-    pub fn invalid(code: &'static str, message: &'static str) -> Self {
+    pub fn invalid(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             kind: StorageAdapterErrorKind::Invalid,
             code,
-            message,
+            message: message.into(),
         }
     }
 
-    pub fn remote(code: &'static str, message: &'static str) -> Self {
+    pub fn remote(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             kind: StorageAdapterErrorKind::Remote,
             code,
-            message,
+            message: message.into(),
         }
     }
 
-    pub fn cleanup_required(code: &'static str, message: &'static str) -> Self {
+    pub fn cleanup_required(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             kind: StorageAdapterErrorKind::CleanupRequired,
             code,
-            message,
+            message: message.into(),
         }
     }
 
-    pub fn internal(code: &'static str, message: &'static str) -> Self {
+    pub fn internal(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             kind: StorageAdapterErrorKind::Internal,
             code,
-            message,
+            message: message.into(),
         }
     }
 
@@ -212,18 +221,24 @@ impl StorageAdapterError {
         self.code
     }
 
-    pub fn message(&self) -> &'static str {
-        self.message
+    pub fn message(&self) -> &str {
+        &self.message
     }
 }
 
 impl fmt::Display for StorageAdapterError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.message)
+        formatter.write_str(&self.message)
     }
 }
 
 impl std::error::Error for StorageAdapterError {}
+
+/// The adapter must save recovery data before a remote mutation.
+pub trait StorageProbeJournal {
+    fn recovery(&self) -> &BoundedConfigObject;
+    fn checkpoint(&mut self, recovery: BoundedConfigObject) -> Result<(), String>;
+}
 
 pub trait StorageProviderAdapter: Send + Sync {
     fn descriptor(&self) -> StorageProviderDescriptor;
@@ -262,6 +277,7 @@ pub trait StorageProviderAdapter: Send + Sync {
         config: &StorageProviderConfig,
         setup_id: &str,
         runtime: &Handle,
+        journal: &mut dyn StorageProbeJournal,
     ) -> Result<(), StorageAdapterError>;
 
     /// Remove the residue of one interrupted probe.
@@ -270,6 +286,7 @@ pub trait StorageProviderAdapter: Send + Sync {
         config: &StorageProviderConfig,
         setup_id: &str,
         runtime: &Handle,
+        journal: &mut dyn StorageProbeJournal,
     ) -> Result<(), StorageAdapterError>;
 
     /// Render the declared setup assistant's instruction for one exact draft.

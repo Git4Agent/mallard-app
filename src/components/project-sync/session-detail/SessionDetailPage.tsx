@@ -47,6 +47,8 @@ export type SessionHeaderModel =
     active: boolean;
     refreshing: boolean;
     onRefresh: () => void;
+    /** Set on an agent's page: the parent session the crumb trail returns to. */
+    parent?: { resourceId: string; title: string } | null;
   }
   /* A failed load is reported, not left as null: null means "still opening",
      and a crumb reading "Opening session…" forever beside a body that says
@@ -64,6 +66,9 @@ interface Props {
    * more on unmount so the crumb never outlives the page.
    */
   onHeaderChange: (header: SessionHeaderModel | null) => void;
+  /** Opens another session page in this workspace — an agent's transcript,
+   *  or the parent an agent page came from. */
+  onOpenSession?: (resourceId: string) => void;
 }
 
 function mergeWarnings(...groups: SessionDetailWarning[][]): SessionDetailWarning[] {
@@ -104,6 +109,7 @@ export default function SessionDetailPage({
   resourceId,
   occurrenceKey,
   onHeaderChange,
+  onOpenSession,
 }: Props) {
   const [detail, setDetail] = useState<ProjectSessionDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(true);
@@ -186,6 +192,9 @@ export default function SessionDetailPage({
       active: detail.is_active,
       refreshing: detailLoading,
       onRefresh: refreshSession,
+      parent: detail.agent
+        ? { resourceId: detail.agent.parent_resource_id, title: detail.agent.parent_title }
+        : null,
     } : detailError && !detailLoading ? { state: "failed" } : null);
   }, [detail, detailError, detailLoading, onHeaderChange, refreshSession]);
 
@@ -485,6 +494,7 @@ export default function SessionDetailPage({
             projectRoot={projectRoot}
             repositoryUrl={detail.github_repository_url}
             hasFilterToggles={sessionDetailFilterToggles(detail.event_counts).length > 0}
+            onOpenSession={onOpenSession}
           />
         </div>
       )}

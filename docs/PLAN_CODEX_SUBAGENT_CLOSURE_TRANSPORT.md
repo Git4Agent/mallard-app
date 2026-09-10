@@ -1,6 +1,8 @@
 # Plan: Codex subagent closure transport — Push/Pull follow-up
 
-- Status: Proposed
+- Status: Superseded on 2026-09-07 by
+  [PLAN_CODEX_OWNED_SUBAGENT_SYNC.md](PLAN_CODEX_OWNED_SUBAGENT_SYNC.md).
+  Historical proposal; not an implementation authority.
 - Date: August 11, 2026
 - Follows:
   [PLAN_PORTABLE_TAIL_CONFLICT_RESOLVER_BACKEND.md](PLAN_PORTABLE_TAIL_CONFLICT_RESOLVER_BACKEND.md)
@@ -20,6 +22,14 @@
   without subagent entries reads as an empty closure
 
 ## 0. Product posture
+
+The following posture is superseded. The owned-child plan makes included
+children required comparison evidence and can block the affected parent on
+missing required evidence or fail its Push on a source change after Apply
+capture. A known unsupported child selects main-only source scope; this is
+not a stored mode. Pull restores exactly the manifest-listed files. The plan
+also replaces additive compatibility with a clean schema-1 cutover. The text
+below records the earlier decision.
 
 Subagent rollouts are best-effort snapshot payload. The parent conversation
 remains the only synced resource; its tail, classifier evidence, relations,

@@ -81,6 +81,7 @@ pub enum ConversationRevisionPin {
 pub enum ConversationTailPin {
     AcceptedTail,
     AcceptedLocalTail,
+    Subagents,
     LocalTail,
     CloudTail,
     CheckpointGeneration,
@@ -97,6 +98,7 @@ pub enum ConversationTargetPin {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConversationStalePin {
+    Redaction,
     Expired,
     Context(ConversationContextPin),
     Revision(ConversationRevisionPin),
@@ -125,6 +127,11 @@ pub fn validate_conversation_action_pins(
 
     if current.now > action.pins.expires_at {
         return Err(ConversationStalePin::Expired);
+    }
+    if current.pins.credential_redaction_enabled != action.pins.credential_redaction_enabled
+        || current.pins.export_settings_changed != action.pins.export_settings_changed
+    {
+        return Err(ConversationStalePin::Redaction);
     }
     let planned_context = &action.pins.context;
     let current_context = &current.pins.context;
@@ -200,6 +207,12 @@ pub fn validate_conversation_action_pins(
     }
     if current_tail.semantic_digest != planned_tail.semantic_digest {
         return Err(ConversationStalePin::Tail(Tail::SemanticDigest));
+    }
+    if current_tail.subagents != planned_tail.subagents
+        || current_tail.missing_local_subagents != planned_tail.missing_local_subagents
+        || current_tail.subagents_omitted != planned_tail.subagents_omitted
+    {
+        return Err(ConversationStalePin::Tail(Tail::Subagents));
     }
     if current_tail.raw_range != planned_tail.raw_range {
         return Err(ConversationStalePin::Tail(Tail::RawRange));
@@ -465,5 +478,51 @@ mod tests {
             ConversationCapabilities::default(),
         );
         assert!(keep_both.selectable);
+    }
+    #[test]
+    fn mode_change_publishes_only_current_capturable_bound_sessions() {
+        use ConversationReviewAction as Action;
+        let changed = ConversationCapabilities {
+            export_settings_changed: true,
+            ..Default::default()
+        };
+        let current = TailClassification::Sync(SyncCurrency::Current);
+        let decision = |relation, capabilities| {
+            default_conversation_decision(ConversationPlanDirection::Push, relation, capabilities)
+                .action
+        };
+        assert_eq!(decision(current, changed), Action::Publish);
+        assert_eq!(
+            decision(current, ConversationCapabilities::default()),
+            Action::NoChanges
+        );
+        assert_eq!(
+            decision(
+                current,
+                ConversationCapabilities {
+                    local_safely_capturable: false,
+                    ..changed
+                }
+            ),
+            Action::Blocked
+        );
+        assert_eq!(
+            decision(
+                current,
+                ConversationCapabilities {
+                    binding: BindingResolution::Missing,
+                    ..changed
+                }
+            ),
+            Action::Blocked
+        );
+        assert_eq!(
+            decision(TailClassification::CloudOutstanding, changed),
+            Action::RequirePull
+        );
+        assert_eq!(
+            decision(TailClassification::Sync(SyncCurrency::Advanced), changed),
+            Action::RequirePullMetadata
+        );
     }
 }

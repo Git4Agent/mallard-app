@@ -499,6 +499,8 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
         .repo_fresh
         .mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
+                installed_end: None,
+                installed_subagents: Default::default(),
                 path_origins_ref: None,
                 host_id: scope.host_id.clone(),
                 replica_id: scope.replica_id.clone(),
@@ -516,6 +518,8 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
                 updated_at: 20,
             });
             document.bindings.push(LocalConversationBinding {
+                installed_end: None,
+                installed_subagents: Default::default(),
                 path_origins_ref: None,
                 host_id: scope.host_id.clone(),
                 replica_id: scope.replica_id.clone(),
@@ -597,7 +601,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
     let binding = machine.active_for(&scope.project_id).unwrap();
     let engine = world.engine();
     let snapshot = engine.inspect(&world.bundle_id).unwrap();
-    let mut bytes = engine.byte_source(&snapshot, None, None);
+    let mut bytes = engine.byte_source(&snapshot, None);
     let entries = crate::project_sync::service::thread_entries(
         &world.repo_fresh,
         &snapshot,
@@ -783,6 +787,8 @@ fn install_active_branch(
     repository
         .mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
+                installed_end: None,
+                installed_subagents: Default::default(),
                 path_origins_ref: None,
                 host_id: scope.host_id.clone(),
                 replica_id: scope.replica_id.clone(),
@@ -874,6 +880,7 @@ fn publish_bound_thread(
         thread_id: bound_thread_id.clone(),
         cloud_thread_id: cloud_thread_id.clone(),
         operation: ConversationApplyKind::CloudPublication(ConversationPublicationApply {
+            export_settings_changed: false,
             candidate_commit_id: current.head.commit_id,
             candidate_manifest_sha256: current.head.manifest_sha256,
             artifact_sha256: sha256(local_transcript),
@@ -1004,6 +1011,7 @@ fn materialize_thread(
             && binding.thread_id == *thread_id
     }) {
         Some(row) => {
+            row.installed_end = Some(rewritten.len() as u64);
             row.provider_thread_id = Some(destination_thread_id.to_string());
             row.cloud_thread_id = Some(cloud_thread_id.clone());
             row.root_tail_layout = Some(whole_thread_layout());
@@ -1012,6 +1020,8 @@ fn materialize_thread(
             row.updated_at = updated_at;
         }
         None => bindings_after.bindings.push(LocalConversationBinding {
+            installed_end: Some(rewritten.len() as u64),
+            installed_subagents: Default::default(),
             path_origins_ref: None,
             host_id: scope.host_id.clone(),
             replica_id: scope.replica_id.clone(),
@@ -1077,6 +1087,7 @@ fn materialize_thread(
         updated_at,
     };
     let request = ConversationMaterializationRequest {
+        subagents: vec![],
         transcript: mallard_infrastructure::verified_transcript::VerifiedTranscript::analyze(
             &mallard_infrastructure::providers::codex::CodexAdapter::new(),
             rewritten.clone().into(),

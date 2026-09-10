@@ -40,7 +40,7 @@ pub(crate) fn open_no_follow(path: &Path) -> Result<fs::File, String> {
 }
 
 /// Machine-local identity of the exact captured file. Never portable.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SourceStamp {
     len: u64,
     modified: std::time::SystemTime,
@@ -49,6 +49,28 @@ pub struct SourceStamp {
 }
 
 impl SourceStamp {
+    pub fn mtime_secs(&self) -> u64 {
+        self.modified.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+    }
+
+    pub fn read(path: &Path) -> Result<Self, String> {
+        Self::from_metadata(
+            &open_no_follow(path)?
+                .metadata()
+                .map_err(|error| error.to_string())?,
+        )
+    }
+    pub fn same_file(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        {
+            self.identity.0 == other.identity.0 && self.identity.1 == other.identity.1
+        }
+        #[cfg(not(unix))]
+        {
+            self.len <= other.len
+        }
+    }
+
     fn from_metadata(meta: &fs::Metadata) -> Result<Self, String> {
         if !meta.is_file() {
             return Err("session transcript is not a regular file".to_string());

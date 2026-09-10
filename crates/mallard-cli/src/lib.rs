@@ -1,10 +1,11 @@
 mod args;
 mod backend;
+mod dropbox_browser_setup;
 mod error;
 mod output;
 mod r2_browser_setup;
 
-use args::{Cli, Command, R2Command, StorageCommand};
+use args::{Cli, Command, DropboxCommand, R2Command, StorageCommand};
 use backend::{ProductionBackend, SetupInput, StorageBackend};
 use clap::{error::ErrorKind, Parser};
 use std::ffi::OsString;
@@ -99,7 +100,16 @@ fn execute(
                         draft_id: args.draft_id,
                         expected_revision: args.expected_revision,
                     })
-                    .and_then(|()| write_result(output::setup(stdout, cli.json))),
+                    .and_then(|outcome| write_result(output::setup(stdout, cli.json, &outcome))),
+            },
+            StorageCommand::Dropbox(dropbox) => match dropbox.command {
+                DropboxCommand::Setup(args) => backend
+                    .setup_dropbox(SetupInput {
+                        name: args.name,
+                        draft_id: args.draft_id,
+                        expected_revision: args.expected_revision,
+                    })
+                    .and_then(|outcome| write_result(output::setup(stdout, cli.json, &outcome))),
             },
         },
     };
@@ -120,12 +130,18 @@ fn write_result(result: io::Result<()>) -> Result<(), error::CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{StorageSummary, VerifyOutcome};
+    use crate::backend::{SetupOutcome, StorageSummary, VerifyOutcome};
     use crate::error::CliError;
 
     struct FakeBackend;
 
     impl StorageBackend for FakeBackend {
+        /// The fake treats the draft at revision 2 as an existing storage.
+        fn setup_dropbox(&self, input: SetupInput) -> Result<SetupOutcome, error::CliError> {
+            Ok(SetupOutcome {
+                reconnected: input.expected_revision == 2,
+            })
+        }
         fn list(&self) -> Result<Vec<StorageSummary>, CliError> {
             Ok(vec![StorageSummary {
                 storage_id: "storage-safe".to_string(),
@@ -135,8 +151,8 @@ mod tests {
             }])
         }
 
-        fn setup(&self, _input: SetupInput) -> Result<(), CliError> {
-            Ok(())
+        fn setup(&self, _input: SetupInput) -> Result<SetupOutcome, CliError> {
+            Ok(SetupOutcome { reconnected: false })
         }
 
         fn verify(&self, storage_id: &str) -> Result<VerifyOutcome, CliError> {
@@ -176,9 +192,101 @@ mod tests {
         assert!(stderr.is_empty());
         assert_eq!(
             String::from_utf8(stdout).unwrap(),
-            "{\"schema\":1,\"status\":\"draft_ready\"}\n"
+            "{\"schema\":1,\"status\":\"draft_ready\",\"reconnected\":false}\n"
         );
         assert!(!String::from_utf8_lossy(&stderr).contains(name));
+    }
+
+    #[test]
+    fn dropbox_command_requires_exact_draft_and_no_app_key_or_token_argument() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            run(
+                [
+                    "mallard-cli",
+                    "storage",
+                    "dropbox",
+                    "setup",
+                    "--name",
+                    "Dropbox storage 1",
+                    "--draft-id",
+                    "storagedraft-111111111111111111111111",
+                    "--expected-revision",
+                    "1",
+                    "--json"
+                ],
+                &FakeBackend,
+                &mut stdout,
+                &mut stderr
+            ),
+            EXIT_SUCCESS
+        );
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            "{\"schema\":1,\"status\":\"draft_ready\",\"reconnected\":false}\n"
+        );
+        // Regaining access for an existing storage says so, in both forms,
+        // and hands the user Save changes rather than Finish setup.
+        for (json, expected) in [
+            (
+                true,
+                "{\"schema\":1,\"status\":\"draft_ready\",\"reconnected\":true}\n".to_string(),
+            ),
+            (
+                false,
+                "Access regained for the existing storage. Review the connection in Mallard, optionally test it, then select Save changes.\n".to_string(),
+            ),
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut arguments = vec![
+                "mallard-cli",
+                "storage",
+                "dropbox",
+                "setup",
+                "--name",
+                "Dropbox storage 1",
+                "--draft-id",
+                "storagedraft-111111111111111111111111",
+                "--expected-revision",
+                "2",
+            ];
+            if json {
+                arguments.push("--json");
+            }
+            assert_eq!(
+                run(arguments, &FakeBackend, &mut stdout, &mut stderr),
+                EXIT_SUCCESS
+            );
+            assert_eq!(String::from_utf8(stdout).unwrap(), expected);
+        }
+        for argument in [
+            "--access-token",
+            "--refresh-token",
+            "--app-key",
+            "--namespace-id",
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            assert_eq!(
+                run(
+                    [
+                        "mallard-cli",
+                        "storage",
+                        "dropbox",
+                        "setup",
+                        argument,
+                        "secret-canary"
+                    ],
+                    &FakeBackend,
+                    &mut stdout,
+                    &mut stderr
+                ),
+                EXIT_INVALID_INPUT
+            );
+            assert!(!String::from_utf8(stderr).unwrap().contains("secret-canary"));
+        }
     }
 
     #[test]

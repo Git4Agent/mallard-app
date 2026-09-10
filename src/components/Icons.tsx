@@ -51,6 +51,7 @@ export type IconName =
   | "settings"
   | "sidebar-collapse"
   | "sidebar-expand"
+  | "storage"
   | "sun"
   | "token"
   | "tool"
@@ -288,6 +289,14 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           fill="currentColor"
           stroke="none"
           d="M3 2h18v2H3ZM3 7h18v2H3ZM1 4h2v3H1ZM21 4h2v3h-2ZM19 9h2v11h-2ZM3 9h2v11H3ZM5 20h14v2H5ZM9 11h6v2H9Z"
+        />
+      )}
+      {name === "storage" && (
+        <path
+          className="icon-pixel-fill icon-pixelarticons"
+          fill="currentColor"
+          stroke="none"
+          d="M6 7h4v2H6zm0 8h4v2H6zM2 5h2v14H2zm18 0h2v14h-2zM4 19h16v2H4zM4 3h16v2H4zm0 8h16v2H4z"
         />
       )}
       {name === "edit" && (

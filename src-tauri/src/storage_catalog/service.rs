@@ -72,9 +72,9 @@ fn engine_for(
     storage: &StorageConfig,
 ) -> Result<LibraryResourceEngine<ConfiguredObjectStore>, String> {
     storage.validate()?;
-    Ok(LibraryResourceEngine::new(
-        ConfiguredObjectStore::from_config(storage)?,
-    ))
+    Ok(LibraryResourceEngine::new(ConfiguredObjectStore::shared(
+        storage,
+    )?))
 }
 
 /// Machine-local, digest-keyed, and disposable: wiping `~/.mallard` wipes it,
@@ -184,10 +184,9 @@ pub struct CatalogScopeRowDto {
     /// The digest the comparison used: the local capture's when one exists,
     /// otherwise the stored version's. `None` when neither side is captured.
     pub content_sha256: Option<String>,
-    /// A small PNG preview as a data URI, derived from this Mac's capture by
-    /// the codec and cached by digest. `None` when the format has no
-    /// preview or nothing local can be drawn — stored-only rows fetch theirs
-    /// lazily through `get_catalog_resource_preview`.
+    /// A small PNG preview as a data URI, derived from local capture or read
+    /// from the digest cache using the verified stored resource. Stored-only
+    /// cache misses fetch lazily through `get_catalog_resource_preview`.
     pub preview_png: Option<String>,
     /// The codec's one-line description from the descriptor, when the
     /// format has one.
@@ -1187,6 +1186,19 @@ fn list_catalog_scope_resources_with_repositories(
             blocker: None,
         };
         decorate_local_preview(&mut row, &workspace.capability, local, user_home);
+        if local.is_none() {
+            // The scope listing already verified this manifest. Read cached
+            // artwork here so each card avoids another head and manifest read.
+            // A cache miss stays lazy and must not fetch payloads in the list.
+            row.preview_png = remote_resource.and_then(|resource| {
+                codec
+                    .preview(resource, &preview_cache_dir(user_home), &|_, _| {
+                        Err("the stored preview is not cached".to_string())
+                    })
+                    .ok()
+                    .flatten()
+            });
+        }
         rows.push(row);
     }
 
@@ -1251,9 +1263,8 @@ fn list_catalog_scope_resources_with_repositories(
 /// A local row's preview comes from the codec over the bytes capture already
 /// holds, derived once per digest and cached. Previews are decoration, so a
 /// failed derivation leaves the row without one rather than failing the
-/// page; the card draws the kind glyph instead. Stored-only rows are left to
-/// `get_catalog_resource_preview`, fetched lazily so no storage round-trip ever
-/// sits in the list's own path.
+/// page; the card draws the kind glyph instead. Stored-only cache misses use
+/// `get_catalog_resource_preview`, so payload fetches stay out of the list.
 fn decorate_local_preview(
     row: &mut CatalogScopeRowDto,
     capability: &CatalogCapability,
@@ -1438,6 +1449,7 @@ fn link_catalog_scope_storage_with_repositories(
     user_home: &Path,
     now: u64,
 ) -> Result<CatalogScopeLinkOutcomeDto, String> {
+    let _operation = state.acquire_host_operation()?;
     let workspace = resolve_scope_workspace(
         registry,
         state,
@@ -3612,6 +3624,8 @@ mod tests {
             2,
         )
         .unwrap();
+        let uncached = page(&fixture, &row.scope.scope_id, Some(&fixture.storage.id)).unwrap();
+        assert!(uncached.rows[0].preview_png.is_none());
         let first = get_catalog_resource_preview_with_repositories(
             &fixture.registry,
             &fixture.state,
@@ -3643,6 +3657,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(second, first);
+
+        // A refreshed scope page supplies the cached image from its verified
+        // manifest. The UI then skips the per-card preview request entirely.
+        let cached = page(&fixture, &row.scope.scope_id, Some(&fixture.storage.id)).unwrap();
+        assert!(!cached.rows[0].local_present);
+        assert!(cached.rows[0].remote_present);
+        assert_eq!(cached.rows[0].preview_png.as_deref(), Some(first.as_str()));
 
         // A skills scope has no preview to serve.
         let skills = skill_scope(&fixture);

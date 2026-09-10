@@ -1,6 +1,6 @@
 # Plan: Mixed Claude and Codex E2E Test and Performance Checks
 
-Status: proposed. This document does not implement or schedule a test.
+Status: implemented as `mixed-aimock-e2e-xlarge`. Use [the xlarge test procedure](MIXED_PROVIDER_AIMOCK_E2E_XLARGE.md) for commands and implemented coverage. The dedicated runner and first reviewed baseline still require qualification. This file retains the original design scope.
 Date: 2026-09-06.
 
 ## 1. Required result
@@ -436,7 +436,7 @@ MALLARD_RUN_LIVE_CODEX_AIMOCK_E2E=1 npm run test:live-codex-aimock-e2e
 MALLARD_RUN_LIVE_CLAUDE_AIMOCK_E2E=1 npm run test:live-claude-aimock-e2e
 ```
 
-Proposed new commands below are **not implemented**. Both use one new runner
+The new commands below are implemented. Both use one new runner
 and the same scenario code. The benchmark command also runs correctness checks.
 The runner owns gates, isolated homes, mock batches, and cleanup.
 
@@ -476,8 +476,9 @@ Start with a 90-minute job watchdog and bounded per-process timeouts. This is
 a hang limit, not a performance target. Record whole-job duration during
 calibration and set a separate reviewed limit once measurements exist.
 
-No scheduler, notification, CI job, or local automation is created by this
-document.
+The implementation adds `.github/workflows/mixed-aimock-e2e.yml`. Scheduled
+runs require that workflow on the default branch, a configured dedicated
+runner, and a reviewed baseline. No local app automation is created.
 
 ## 10. Implementation order and completion checks
 

@@ -129,6 +129,7 @@ impl StorageProviderAdapter for LocalFolderAdapter {
             icon: "drive".to_string(),
             clear_mode: super::traits::StorageClearMode::RevisionChecked,
             fields: vec![StorageFieldDescriptor {
+                immutable_on_edit: false,
                 field_id: FieldKey::parse("directory").expect("static field key"),
                 label: "Location path".to_string(),
                 kind: StorageFieldKind::Directory,
@@ -207,6 +208,7 @@ impl StorageProviderAdapter for LocalFolderAdapter {
         config: &StorageProviderConfig,
         _setup_id: &str,
         _runtime: &Handle,
+        _journal: &mut dyn super::traits::StorageProbeJournal,
     ) -> Result<(), StorageAdapterError> {
         let typed = decode(config)?;
         let metadata = std::fs::metadata(&typed.directory).map_err(|_| {
@@ -235,6 +237,7 @@ impl StorageProviderAdapter for LocalFolderAdapter {
         _config: &StorageProviderConfig,
         _setup_id: &str,
         _runtime: &Handle,
+        _journal: &mut dyn super::traits::StorageProbeJournal,
     ) -> Result<(), StorageAdapterError> {
         Ok(())
     }
@@ -349,13 +352,23 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let config = local_provider_config(&temp.path().to_string_lossy()).unwrap();
         adapter
-            .probe(&config, "setup-0123456789abcdef01234567", runtime.handle())
+            .probe(
+                &config,
+                "setup-0123456789abcdef01234567",
+                runtime.handle(),
+                &mut crate::storage_setup_journal::MemoryProbeJournal::default(),
+            )
             .unwrap();
         assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
         let missing = local_provider_config(&temp.path().join("absent").to_string_lossy()).unwrap();
         assert_eq!(
             adapter
-                .probe(&missing, "setup-0123456789abcdef01234567", runtime.handle())
+                .probe(
+                    &missing,
+                    "setup-0123456789abcdef01234567",
+                    runtime.handle(),
+                    &mut crate::storage_setup_journal::MemoryProbeJournal::default()
+                )
                 .unwrap_err()
                 .code(),
             "local_directory_missing"

@@ -3375,6 +3375,8 @@ fn timeline_history_from_standalone(
         provider_session_id: provider_thread_id,
         project_root: &canonical_project_root,
         project_root_aliases: &project_root_aliases,
+        provider_home: &canonical_project_root,
+        child: None,
     };
     let index = adapter
         .build_timeline_index(&rollout, &context)
@@ -3417,6 +3419,7 @@ fn timeline_history_from_standalone(
                     included_tool_categories: BTreeSet::new(),
                     turn_id: None,
                 },
+                &context,
             )
             .map_err(|_| failure(14, history.len(), page_count, 0))?;
         let page_event_count = page.events.len();
@@ -5298,6 +5301,8 @@ fn assert_offline_path_timeline(
         provider_session_id: "offline-path-fixture",
         project_root,
         project_root_aliases: &[],
+        provider_home: project_root,
+        child: None,
     };
     let index = adapter
         .build_timeline_index(rollout, &context)
@@ -5345,6 +5350,7 @@ fn assert_offline_path_timeline(
                 ]),
                 turn_id: None,
             },
+            &context,
         )
         .expect("current Codex path fixture timeline did not load");
     assert_eq!(page.events.len(), 1);

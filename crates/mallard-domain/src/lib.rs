@@ -1802,6 +1802,10 @@ pub struct LocalConversationBinding {
     pub root_tail_layout: Option<RootTailLayout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
+    /// Local output byte cutoff from Pull. Native sources use explicit null.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub installed_end: Option<u64>,
+    pub installed_subagents: BTreeMap<SubagentKey, InstalledSubagent>,
     pub materialization_state: ConversationMaterializationState,
     pub revision: u64,
     pub created_at: u64,
@@ -1810,6 +1814,22 @@ pub struct LocalConversationBinding {
 
 impl LocalConversationBinding {
     pub fn validate(&self) -> Result<(), String> {
+        subagents::validate_subagent_map(&self.installed_subagents)?;
+        if self
+            .installed_end
+            .is_some_and(|end| end == 0 || end > MAX_CONVERSATION_FILE_BYTES)
+            || (self.installed_end.is_none() && !self.installed_subagents.is_empty())
+            || (self.installed_end.is_some() && self.provider_thread_id.is_none())
+        {
+            return Err("conversation binding has invalid installation cutoffs".to_string());
+        }
+        let mut child_ids = BTreeSet::new();
+        for child in self.installed_subagents.values() {
+            child.validate()?;
+            if !child_ids.insert(&child.provider_thread_id) {
+                return Err("duplicate installed child identity".into());
+            }
+        }
         if let Some(origins) = &self.path_origins_ref {
             origins.validate()?;
         }
@@ -1982,6 +2002,7 @@ impl ConversationBindings {
             .iter()
             .map(|binding| (binding.replica_id.clone(), binding))
             .collect::<BTreeMap<_, _>>();
+        let mut native_owners = BTreeSet::new();
         for binding in &self.bindings {
             let project_binding = replicas
                 .get(&binding.replica_id)
@@ -2001,6 +2022,38 @@ impl ConversationBindings {
             // A materialized cursor-provider task must carry its immutable
             // portable partition under that provider's local codec; a missing
             // or foreign layout is corruption, never a default.
+            let provider = &profiles[&binding.provider_profile_id].provider;
+            if !matches!(provider.as_str(), "codex" | "claude")
+                && (binding.installed_end.is_some() || !binding.installed_subagents.is_empty())
+            {
+                return Err("provider does not support child installation metadata".into());
+            }
+            if let Some(parent_id) = &binding.provider_thread_id {
+                if !native_owners.insert((
+                    binding.provider_profile_id.clone(),
+                    None,
+                    parent_id.clone(),
+                )) {
+                    return Err("provider thread ID is owned by multiple conversations".into());
+                }
+                for (key, child) in &binding.installed_subagents {
+                    let namespace = if provider.as_str() == "claude" {
+                        if key.owner().is_some() {
+                            return Err("Claude supports direct children only".into());
+                        }
+                        Some(parent_id.clone())
+                    } else {
+                        None
+                    };
+                    if !native_owners.insert((
+                        binding.provider_profile_id.clone(),
+                        namespace,
+                        child.provider_thread_id.clone(),
+                    )) {
+                        return Err("provider child ID is owned by multiple conversations".into());
+                    }
+                }
+            }
             if binding.provider_thread_id.is_some() {
                 let expected_layout_codec = profiles
                     .get(&binding.provider_profile_id)
@@ -2032,6 +2085,7 @@ pub fn fallback_origin_host_label(token: &OriginHostToken) -> String {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationPublicationApply {
+    pub export_settings_changed: bool,
     pub candidate_commit_id: String,
     pub candidate_manifest_sha256: String,
     pub artifact_sha256: String,
@@ -2053,7 +2107,11 @@ impl ConversationPublicationApply {
         validate_sha256("conversation candidate artifact", &self.artifact_sha256)?;
         self.tail_after.validate()?;
         match (self.planned_relation, &self.tail_before) {
-            (TailClassification::LocalOutstanding, Some(before)) => {
+            (TailClassification::LocalOutstanding, Some(before))
+            | (TailClassification::Sync(SyncCurrency::Current), Some(before))
+                if self.planned_relation == TailClassification::LocalOutstanding
+                    || self.export_settings_changed =>
+            {
                 before.validate()?;
                 if !before.layout().matches(&self.tail_after) {
                     return Err(
@@ -2110,6 +2168,7 @@ impl ConversationMaterializationApply {
             TailClassification::CloudOutstanding
                 | TailClassification::Divergent
                 | TailClassification::MissingLocal
+                | TailClassification::Unknown
         ) {
             return Err(
                 "conversation materialization has a non-materializing relation".to_string(),
@@ -2124,7 +2183,11 @@ impl ConversationMaterializationApply {
             "conversation materialization semantic pin",
             &self.pinned_semantic_digest,
         )?;
-        if (self.planned_relation == TailClassification::Divergent) != self.keep_both.is_some() {
+        if matches!(
+            self.planned_relation,
+            TailClassification::Divergent | TailClassification::Unknown
+        ) != self.keep_both.is_some()
+        {
             return Err(
                 "conversation keep-both state disagrees with its planned relation".to_string(),
             );
@@ -2626,13 +2689,22 @@ impl ConversationLineageStatus {
 pub enum ConversationFileRole {
     Transcript,
     ProviderIndexFragment,
-    Sidecar { sidecar_kind: String },
+    Sidecar {
+        sidecar_kind: String,
+    },
+    SubagentTranscript {
+        child_key: SubagentKey,
+        normalized: SubagentContentState,
+    },
 }
 
 impl ConversationFileRole {
     fn validate(&self) -> Result<(), String> {
         if let Self::Sidecar { sidecar_kind } = self {
             validate_display_text("conversation sidecar kind", sidecar_kind, false)?;
+        }
+        if let Self::SubagentTranscript { normalized, .. } = self {
+            normalized.validate()?;
         }
         Ok(())
     }
@@ -2701,12 +2773,9 @@ impl SessionPresentation {
     }
 }
 
-/// The redaction ruleset stamp a conversation thread's wire bytes were
-/// produced under: the compiled-in codec name plus the content fingerprint
-/// of its rule table. Stamped at every push beside `portable_tail`; push
-/// and pull both require an exact match with the running binary's ruleset —
-/// a mismatch is the typed `redaction_ruleset_mismatch` blocker, never a
-/// silent re-encode under different rules.
+/// The selected wire mode. On uses the compiled ruleset fingerprint; Off uses
+/// its explicit codec and 64-zero sentinel. Infrastructure accepts only the
+/// supported pairs. Missing or unknown stamps never imply Off.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationWireRedaction {
@@ -2801,6 +2870,8 @@ pub struct ConversationThread {
     /// have not adopted the codec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portable_tail: Option<PortableConversationTail>,
+    /// Child export policy, including exports with an empty child inventory.
+    pub wire_children: ConversationWireChildren,
     /// The redaction ruleset that produced the stored wire bytes. Required
     /// whenever the provider publishes a wire-form transcript (codex and
     /// claude); the encoder lives in the infrastructure crate's
@@ -2859,6 +2930,7 @@ impl ConversationThread {
         }
         let mut paths = BTreeSet::new();
         let mut transcript_count = 0_usize;
+        let mut child_keys = BTreeMap::new();
         let canonical_transcript =
             cloud_conversation_transcript_path(&self.provider, &self.thread_id)?;
         let canonical_prefix = format!(
@@ -2869,6 +2941,23 @@ impl ConversationThread {
         let sidecar_prefix = format!("{}sidecars/", canonical_prefix);
         for file in &self.files {
             file.role.validate()?;
+            if let ConversationFileRole::SubagentTranscript { child_key, .. } = &file.role {
+                if self.wire_children == ConversationWireChildren::Off {
+                    return Err("Off child stamp requires an empty child inventory".into());
+                }
+                if !matches!(self.provider.as_str(), "codex" | "claude")
+                    || (self.provider.as_str() == "claude" && child_key.owner().is_some())
+                    || file.logical_path
+                        != cloud_subagent_transcript_path(
+                            &self.provider,
+                            &self.thread_id,
+                            child_key,
+                        )?
+                    || child_keys.insert(child_key.clone(), ()).is_some()
+                {
+                    return Err("invalid subagent file inventory".to_string());
+                }
+            }
             if file.role == ConversationFileRole::Transcript {
                 transcript_count += 1;
                 if file.logical_path != canonical_transcript {
@@ -2900,6 +2989,7 @@ impl ConversationThread {
                 ));
             }
         }
+        subagents::validate_subagent_map(&child_keys)?;
         if transcript_count != 1 {
             return Err(format!(
                 "conversation thread '{}' must own exactly one transcript",
@@ -3212,6 +3302,11 @@ impl ConversationRevisionPins {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationTailPins {
+    pub subagents: BTreeMap<SubagentKey, SubagentTailPins>,
+    /// Review-only proof of confirmed missing accepted native files.
+    pub missing_local_subagents: BTreeSet<SubagentKey>,
+    /// Temporary source scope for Compare and Push; never cloud metadata.
+    pub subagents_omitted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted: Option<PortableConversationTail>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3243,7 +3338,76 @@ impl ConversationTailPins {
             side(&self.cloud),
         )
         .map_err(|blocker| format!("conversation plan tail evidence is invalid: {blocker:?}"))?;
-        Ok(compare_conversation_tail(&evidence))
+        subagents::validate_subagent_map(&self.subagents)?;
+        if !self.missing_local_subagents.is_empty() {
+            self.validate_missing_child_recovery()?;
+            return Ok(TailClassification::Unknown);
+        }
+        if self.subagents_omitted && !self.subagents.is_empty() {
+            return Err("omitted child scope carries child comparison evidence".to_string());
+        }
+        let mut invalid = None;
+        let children = self
+            .subagents
+            .values()
+            .map(|pins| match compare_subagent_tail(pins) {
+                Ok(relation) => relation,
+                Err(blocker) => {
+                    invalid = Some(blocker);
+                    TailClassification::Unknown
+                }
+            });
+        let relation = fold_conversation_relations(compare_conversation_tail(&evidence), children);
+        match invalid {
+            Some(blocker) => Err(format!(
+                "conversation child evidence is invalid: {blocker:?}"
+            )),
+            None => Ok(relation),
+        }
+    }
+
+    pub fn validate_missing_child_recovery(&self) -> Result<(), String> {
+        if self.subagents_omitted
+            || self.missing_local_subagents.is_empty()
+            || self.local.is_none()
+            || self.cloud.is_none()
+            || self.accepted.is_none()
+            || self.accepted_local.is_none()
+        {
+            return Err("missing-child recovery lacks parent evidence".into());
+        }
+        VerifiedTailEvidence::new(
+            TailSideEvidence::Present(self.accepted.clone().unwrap()),
+            TailSideEvidence::Present(self.accepted_local.clone().unwrap()),
+            TailSideEvidence::Present(self.local.clone().unwrap()),
+            TailSideEvidence::Present(self.cloud.clone().unwrap()),
+        )
+        .map_err(|_| "missing-child recovery has invalid parent evidence")?;
+        subagents::validate_subagent_map(&self.subagents)?;
+        for key in &self.missing_local_subagents {
+            let pins = self
+                .subagents
+                .get(key)
+                .ok_or("missing child has no evidence")?;
+            let accepted = pins
+                .accepted
+                .as_ref()
+                .ok_or("missing child was not accepted")?;
+            accepted.validate()?;
+            pins.cloud
+                .as_ref()
+                .ok_or("missing child is absent from cloud")?
+                .validate()?;
+            if pins.local.is_some() {
+                return Err("recovery child is present locally".into());
+            }
+        }
+        for (key, pins) in &self.subagents {
+            if !self.missing_local_subagents.contains(key) {
+                compare_subagent_tail(pins).map_err(|_| "other child evidence is invalid")?;
+            }
+        }
+        Ok(())
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -3297,6 +3461,9 @@ impl ConversationTargetPins {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationActionPins {
+    pub subagent_selection: SubagentSelection,
+    pub credential_redaction_enabled: bool,
+    pub export_settings_changed: bool,
     pub context: ConversationContextPins,
     pub revision: ConversationRevisionPins,
     pub tail: ConversationTailPins,
@@ -3307,6 +3474,7 @@ pub struct ConversationActionPins {
 
 impl ConversationActionPins {
     fn validate(&self) -> Result<(), String> {
+        self.subagent_selection.validate()?;
         self.revision.validate()?;
         self.tail.validate()?;
         self.target.validate()?;
@@ -3344,7 +3512,14 @@ impl ConversationPlanAction {
     pub fn validate(&self) -> Result<(), String> {
         self.pins.validate()?;
         let relation = self.pins.tail.classification()?;
-        if !self.action.matches_relation(relation) {
+        if !self.action.matches_relation(relation)
+            && !(self.action == ConversationPlanActionType::Publish
+                && relation == TailClassification::Sync(SyncCurrency::Current)
+                && self.pins.export_settings_changed)
+            && !(self.action == ConversationPlanActionType::KeepBoth
+                && relation == TailClassification::Unknown
+                && self.pins.tail.validate_missing_child_recovery().is_ok())
+        {
             return Err("conversation plan action disagrees with its tail evidence".to_string());
         }
         // Identity-presence matrix: the local id is absent exactly when apply
@@ -3394,6 +3569,7 @@ impl ConversationPlanAction {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationReviewRow {
+    pub stored_without_credential_redaction: bool,
     pub provider: ProviderKey,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub thread_id: Option<ThreadId>,
@@ -5555,6 +5731,7 @@ pub mod keys;
 pub mod portable;
 pub mod provider_config;
 pub mod secrets;
+mod subagents;
 
 pub use bounded::{BoundedConfigObject, BoundedPortableObject, BoundedValue};
 pub use keys::{
@@ -5584,8 +5761,13 @@ pub use conversation_tail::{
     CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1, PORTABLE_TAIL_CODEC_V1, PORTABLE_TAIL_CODEC_WIRE_V1,
 };
 pub use conversation_tail_relation::{
-    compare_conversation_tail, SyncCurrency, TailClassification, TailEvidenceBlocker,
-    TailSideEvidence, VerifiedTailEvidence,
+    compare_conversation_tail, compare_subagent_tail, fold_conversation_relations, SyncCurrency,
+    TailClassification, TailEvidenceBlocker, TailSideEvidence, VerifiedTailEvidence,
+};
+pub use subagents::{
+    cloud_subagent_transcript_path, AcceptedSubagentState, InstalledSubagent, SubagentContentState,
+    SubagentKey, SubagentSelection, SubagentTailPins, ConversationWireChildren, SUBAGENT_TAIL_CODEC_V1,
+    SUBAGENT_TAIL_CODEC_WIRE_V1,
 };
 
 #[cfg(test)]

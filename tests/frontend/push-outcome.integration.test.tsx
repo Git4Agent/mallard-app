@@ -26,6 +26,7 @@ function entry(id: string, title: string, overrides: Partial<ThreadSyncEntry> = 
     local_present: true,
     storage_present: false,
     compared_against_storage: true,
+    subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
     provider_thread_id: id,
     push_decision: decision("create_cloud", true),
     pull_decision: decision("report_local_only", false),

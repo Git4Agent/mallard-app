@@ -24,3 +24,6 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 url = "2"
 zeroize = "1"
+
+[dev-dependencies]
+mallard-infrastructure = { path = "../mallard-infrastructure", features = ["test-support"] }

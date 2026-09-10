@@ -4,12 +4,15 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  connectionDetail,
+  connectionSuspends,
   draftSettingsFromForm,
   fieldsSet,
   findStorageProvider,
   formFromDraft,
   secretOperationsFromForm,
   secretPresenceOf,
+  storageConnectionIssue,
   storageDraftReady,
   storageSubtitle,
   storageSubtitleIsPath,
@@ -39,6 +42,7 @@ import { iconNameFromHint } from "../../src/components/Icons";
 import { storageAccessErrorMessage } from "../../src/storageError";
 import type {
   RemoteBundleSummary,
+  StorageConnectionHealth,
   StorageProviderDescriptor,
   StorageSetupDraft,
   StorageSummary,
@@ -639,7 +643,7 @@ test("the Storages index, empty, is the filled page ghosted: one door per provid
     />,
   );
   assert.equal((unanswered.match(/class="landing-picker-door"/g) ?? []).length, 1);
-  assert.match(unanswered, /class="landing-picker-door" aria-label="Add storage"[\s\S]*?data-icon="drive"/);
+  assert.match(unanswered, /class="landing-picker-door" aria-label="Add storage"[\s\S]*?data-icon="storage"/);
 
   // A draft alone is content: the empty state yields to its row, and a draft
   // without a descriptor in this build still draws a mark.
@@ -1025,4 +1029,218 @@ test("the existing clear menu supports both clear modes and hides unavailable st
   assert.equal(visible(false, cloudProvider), false);
   assert.equal(visible(true, undefined), false);
   assert.match(source, /supportsManagedClear \? \[\{\s*id: "clear",\s*label: "Clear storage data…"/);
+});
+
+const dropboxProvider: StorageProviderDescriptor = {
+    key: "dropbox", config_version: 1, display_name: "Dropbox", description: "Shared namespace",
+    display_rank: 30, icon: "cloud", clear_mode: "revision_checked", default_name: "Dropbox storage",
+    fields: [{ field_id: "namespace_id", label: "Namespace ID", kind: "text", required: true, immutable_on_edit: true }],
+    secrets: [
+      { secret_id: "access_token", label: "Access token", required: true },
+      { secret_id: "refresh_token", label: "Refresh token", required: true },
+    ],
+    setup_assistant: { label: "Set up with an agent", description: "Approve Dropbox access. The agent creates a Mallard shared folder.", managed_secret_id: "refresh_token" },
+    setup_guide_url: "https://www.dropbox.com/developers/reference/auth-types",
+    manual_setup_hint: "Use an existing shared or team namespace.",
+};
+
+test("Dropbox setup uses the R2 agent route and keeps two manual connection fields", () => {
+  const descriptor = dropboxProvider;
+  const form = { name: "Dropbox storage 1", settings: { namespace_id: "shared-42" }, typedSecrets: {} };
+  const render = (editsExisting: boolean) => renderToStaticMarkup(
+    <StorageEditor descriptor={descriptor} form={form} secretPresence={{ access_token: true }}
+      disabled={false} editsExisting={editsExisting} onChange={() => {}}
+      agentSlot={<button type="button">Run with Codex</button>} />,
+  );
+  const fresh = render(false);
+  assert.match(fresh, /Namespace ID/);
+  assert.match(fresh, /Access token/);
+  assert.doesNotMatch(fresh, /Refresh token/);
+  assert.match(fresh, /Setup guide/);
+  assert.match(fresh, /Use an existing shared or team namespace/);
+  assert.match(fresh, /Set up with an agent/);
+  assert.match(fresh, /Run with Codex/);
+  assert.doesNotMatch(fresh, /readOnly/);
+  assert.equal(fieldsSet(descriptor, form, { access_token: true }).total, 2);
+  assert.equal(storageDraftReady(descriptor, form, { access_token: true }), true);
+  const edited = render(true);
+  assert.match(edited, /readOnly=""[^>]*value="shared-42"/);
+  assert.doesNotMatch(edited, /type="password"[^>]*readOnly/);
+});
+
+test("Dropbox OAuth credentials use the same review and replacement field as R2", () => {
+  const draft = cloudDraft({ provider: "dropbox", provider_label: "Dropbox", name: "Dropbox storage 1",
+    settings: { namespace_id: "shared-42" },
+    secrets: [{ secret_id: "access_token", present: false }, { secret_id: "refresh_token", present: true, value: "refresh-review-canary" }],
+  });
+  const form = formFromDraft(dropboxProvider, draft);
+  const presence = secretPresenceOf(draft);
+  assert.deepEqual(form.typedSecrets, { refresh_token: "refresh-review-canary" });
+  assert.deepEqual(secretOperationsFromForm(form, presence), {});
+  assert.equal(storageDraftReady(dropboxProvider, form, presence), true);
+  assert.deepEqual(fieldsSet(dropboxProvider, form, presence), { set: 2, total: 2 });
+  assert.equal(storageDraftReady(dropboxProvider, { ...form, settings: {} }, presence), false);
+  assert.equal(storageDraftReady(dropboxProvider, { ...form, typedSecrets: {} }, {}), false);
+  for (const editsExisting of [false, true]) {
+    const editorForm = editsExisting ? formFromDraft(dropboxProvider, {
+      ...draft, secrets: draft.secrets.map(({ secret_id, present }) => ({ secret_id, present })),
+    }) : form;
+    const html = renderToStaticMarkup(<StorageEditor descriptor={dropboxProvider} form={editorForm} secretPresence={presence}
+      disabled={false} editsExisting={editsExisting} onChange={() => {}}
+      agentSlot={<button type="button">Run with Codex</button>} />);
+    // Presence alone never says "Connected": that word waits for an
+    // observed success on the transport.
+    assert.match(html, /Access renews automatically\. Test the connection to verify it/);
+    assert.doesNotMatch(html, /Connected\./);
+    assert.match(html, /readOnly=""[^>]*value="shared-42"/);
+    assert.match(html, /Run with Codex/);
+    assert.match(html, /Refresh token/);
+    assert.doesNotMatch(html, /Access token/);
+    const credentialInput = html.match(/<input type="password"[^>]*>/)?.[0] ?? "";
+    assert.match(credentialInput, /placeholder="Stored — type to replace"/);
+    assert.match(credentialInput, editsExisting ? /value=""/ : /value="refresh-review-canary"/);
+    assert.doesNotMatch(credentialInput, /readOnly|required=""/);
+    assert.match(html, /sync-secret-reveal[^>]*>Show<\/button>/);
+    assert.doesNotMatch(html, />Stored<|Manual setup/);
+  }
+  assert.deepEqual(secretOperationsFromForm(form, presence), {}, "viewing a saved token does not replace it");
+  assert.deepEqual(secretOperationsFromForm({ ...form, typedSecrets: { refresh_token: "replacement-canary" } }, presence), {
+    refresh_token: { op: "replace", value: "replacement-canary" },
+  });
+});
+
+test("the guide row and credential field say what the transport last observed", () => {
+  const draft = cloudDraft({ provider: "dropbox", provider_label: "Dropbox", name: "Dropbox storage 1",
+    settings: { namespace_id: "shared-42" }, edits_existing: true,
+    secrets: [{ secret_id: "access_token", present: false }, { secret_id: "refresh_token", present: true }],
+  });
+  const form = formFromDraft(dropboxProvider, draft);
+  const presence = secretPresenceOf(draft);
+  const render = (connection: StorageConnectionHealth | null) => renderToStaticMarkup(
+    <StorageEditor descriptor={dropboxProvider} form={form} secretPresence={presence}
+      disabled={false} editsExisting onChange={() => {}} connection={connection}
+      agentSlot={<button type="button">Reconnect with Codex</button>} />,
+  );
+  const unknown = render(null);
+  assert.match(unknown, /role="note"/);
+  assert.match(unknown, /Access renews automatically\. Test the connection to verify it, or use the agent to reconnect\./);
+  assert.doesNotMatch(unknown, /Connected\./);
+  assert.match(unknown, /placeholder="Stored — type to replace"/);
+
+  const connected = render({ state: "connected", code: "connected", message: "Connected.", observed_at: 1 });
+  assert.match(connected, /data-icon="check-circle"/);
+  assert.match(connected, /Connected\. Access renews automatically\./);
+
+  const refused = render({
+    state: "reconnect_required", code: "dropbox_reconnect_required", observed_at: 2,
+    message: "Dropbox rejected the saved authorization. Reconnect Dropbox to restore access.",
+    evidence: { endpoint: "oauth2/token", http_status: 400, error_tag: "invalid_grant", request_id: "req-1" },
+  });
+  assert.match(refused, /role="alert"/);
+  assert.match(refused, /data-icon="alert-triangle"/);
+  assert.match(refused, /storage-setup-guide-error">Dropbox rejected the saved authorization\. Reconnect Dropbox to restore access\.</);
+  assert.match(refused, /placeholder="Rejected by Dropbox — paste a replacement"/);
+  assert.match(refused, /Reconnect with Codex/);
+  assert.doesNotMatch(refused, /Connected|req-1/);
+
+  const expired = render({ state: "token_expired", code: "dropbox_token_expired", message: "The Dropbox access token expired.", observed_at: 3 });
+  assert.match(expired, /placeholder="Expired — paste a replacement"/);
+  // A temporary failure suspends nothing and changes no copy.
+  const unreachable = render({ state: "unreachable", code: "dropbox_request_failed", message: "Dropbox could not be reached.", observed_at: 4 });
+  assert.match(unreachable, /role="note"/);
+  assert.doesNotMatch(unreachable, /could not be reached/);
+});
+
+test("connection helpers name the provider and print only allowlisted facts", () => {
+  const health = (state: StorageConnectionHealth["state"]): StorageConnectionHealth => (
+    { state, code: "code", message: "Message.", observed_at: 1 }
+  );
+  assert.equal(connectionSuspends(undefined), false);
+  assert.equal(connectionSuspends(health("connected")), false);
+  assert.equal(connectionSuspends(health("unreachable")), false);
+  for (const state of ["reconnect_required", "token_expired", "permission_denied"] as const) {
+    assert.equal(connectionSuspends(health(state)), true);
+  }
+  assert.equal(storageConnectionIssue(cloudSummary()), null);
+  assert.equal(storageConnectionIssue(cloudSummary({ connection: health("connected") })), null);
+  assert.equal(storageConnectionIssue(cloudSummary({ connection: health("unreachable") })), null);
+  assert.equal(storageConnectionIssue(cloudSummary({ connection: health("reconnect_required") })), "Cloud A needs reconnection");
+  assert.equal(storageConnectionIssue(cloudSummary({ connection: health("token_expired") })), "Cloud A needs reconnection");
+  assert.equal(storageConnectionIssue(cloudSummary({ connection: health("permission_denied") })), "Cloud A denied access");
+  assert.equal(connectionDetail(health("reconnect_required")), "Message.");
+  assert.equal(
+    connectionDetail({ ...health("reconnect_required"), evidence: { endpoint: "oauth2/token", http_status: 400, error_tag: "invalid_grant", request_id: "req-1" } }),
+    "Message. (oauth2/token, HTTP 400, invalid_grant, request req-1)",
+  );
+  assert.equal(
+    connectionDetail({ ...health("unreachable"), evidence: { endpoint: "files/download" } }),
+    "Message. (files/download, no response)",
+  );
+});
+
+test("a refused credential badges the index and the rail and leads to the settings", () => {
+  const refused = cloudSummary({
+    storage_id: "storage-refused", name: "Refused storage",
+    connection: { state: "reconnect_required", code: "dropbox_reconnect_required", message: "Rejected.", observed_at: 1 },
+  });
+  const index = renderToStaticMarkup(
+    <StorageIndexPage
+      storages={[refused, cloudSummary()]}
+      links={[]}
+      storageIssues={{ "storage-refused": "Listing failed", "storage-cloud": "Bucket unreachable" }}
+      drafts={[]}
+      storageProviders={[cloudProvider]}
+      busy={false}
+      appActions={[]}
+      onOpenStorage={() => undefined}
+      onOpenStorageDraft={() => undefined}
+      onAddStorage={() => undefined}
+    />,
+  );
+  // The credential comes before the listing failure it caused, and the
+  // chip's one word says what to do.
+  assert.match(index, /aria-label="Open Refused storage\. Storage issue: Cloud A needs reconnection"/);
+  assert.match(index, /aria-label="Open Cloud storage\. Storage issue: Bucket unreachable"/);
+  assert.match(index, /<span>Reconnect<\/span>/);
+  assert.match(index, /<span>Issue<\/span>/);
+  const rail = renderToStaticMarkup(
+    <ProjectSidebar
+      projects={[]} drafts={[]} activeDraftId={null}
+      storages={[refused]} storageDrafts={[]} storageProviders={[cloudProvider]}
+      storageUsage={{}} storageIssues={{ "storage-refused": "Listing failed" }}
+      activeProjectId={null} activeStorageId={null}
+      catalogScopes={[]} activeCatalogScopeId={null} addingCatalogScope={false}
+      catalogIndexOpen={false} storageIndexOpen settingsOpen={false}
+      loading={false} busy={false} activityOpen={false} unreadLogs={0}
+      onOpenProjects={() => undefined} onSelectProject={() => undefined} onRemoveProject={() => undefined}
+      onSelectDraft={() => undefined} onDiscardDraft={() => undefined} onToggleActivity={() => undefined}
+      onAddProject={() => undefined} onOpenStorage={() => undefined} onOpenStorageDraft={() => undefined}
+      onDiscardStorageDraft={() => undefined} onRemoveStorage={() => undefined} onAddStorage={() => undefined}
+      onOpenCatalogIndex={() => undefined} onOpenCatalogScope={() => undefined} onAddCatalogScope={() => undefined}
+      onRemoveCatalogScope={() => undefined} onOpenStorageIndex={() => undefined} onOpenSettings={() => undefined}
+    />,
+  );
+  assert.match(rail, /aria-label="Open Refused storage\. Storage issue: Cloud A needs reconnection"[\s\S]*?sync-sidebar-storage-warning/);
+  // Static markup cannot click; the sources pin where each door leads and
+  // what the agent verb and the failure notice offer.
+  for (const path of ["src/components/project-sync/StorageIndexPage.tsx", "src/components/project-sync/ProjectSidebar.tsx"]) {
+    assert.match(readFileSync(path, "utf8"), /onOpenStorage\(storage\.storage_id, connectionSuspends\(storage\.connection\)\)/);
+  }
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /const agentVerb = creatingStorage \? "Run with" : "Reconnect with";/);
+  assert.match(workspace, /connectionSuspends\(storage\.connection\) \? \([\s\S]*?onClick=\{\(\) => onOpenStorage\(storage\.storage_id, true\)\}[\s\S]*?Reconnect \{storage\.provider_label\}/);
+  assert.match(workspace, /key: "storage-connection",[\s\S]*?message: connectionDetail\(storageConnection\)/);
+  assert.match(workspace, /connection=\{creatingStorage \? null : storageConnection\}/);
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  assert.match(shell, /listen<StorageConnectionChangedEvent>\(\s*"project-sync-storage-connection-changed"/);
+});
+
+test("Dropbox agent watcher adopts only a complete exact draft with managed credentials", () => {
+  const start = cloudDraft({ provider: "dropbox", provider_label: "Dropbox", name: "Dropbox storage 1", settings: {}, secrets: [], revision: 1 });
+  const marker = createAgentSetupMarker(start, start.name);
+  const ready = { ...start, revision: 2, settings: { namespace_id: "shared-42" }, secrets: [{ secret_id: "refresh_token", present: true }] };
+  assert.equal(reconcileAgentSetup(marker, dropboxProvider, [ready]).kind, "adopt");
+  assert.equal(reconcileAgentSetup(marker, dropboxProvider, [{ ...ready, secrets: [] }]).kind, "preserve");
+  assert.equal(reconcileAgentSetup(marker, dropboxProvider, [{ ...ready, draft_id: "another-draft" }]).kind, "preserve");
+  assert.equal(reconcileAgentSetup(marker, dropboxProvider, [{ ...ready, revision: 1 }]).kind, "preserve");
 });

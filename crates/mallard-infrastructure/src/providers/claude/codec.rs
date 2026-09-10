@@ -40,8 +40,7 @@
 use crate::conversation_codec::{canonical_json, CodecLineage, CodecUnknownReason};
 use crate::providers::traits::SessionAnalysis;
 use mallard_domain::{
-    conversation_chain_digests, sha256_hex, validate_conversation_chain,
-    CanonicalConversationMessage, MessageId,
+    conversation_chain_digests, sha256_hex, CanonicalConversationMessage, MessageId,
 };
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,6 +49,57 @@ pub const CLAUDE_LINEAGE_CODEC_KEY: &str = "claude.lineage.v1";
 pub const CLAUDE_CODEC_VERSION: u32 = 1;
 
 pub(crate) const MAX_CLAUDE_RECORDS: usize = 100_000;
+
+/// Borrowed admission context. Main parsing never admits native sidechains.
+#[derive(Clone, Copy, Default)]
+pub(crate) enum ClaudeRecordContext<'a> {
+    #[default]
+    Main,
+    Child {
+        session_id: &'a str,
+        agent_id: &'a str,
+    },
+}
+
+impl ClaudeRecordContext<'_> {
+    pub(crate) fn validate(self, value: &Value) -> Result<(), CodecUnknownReason> {
+        if let Self::Child {
+            session_id,
+            agent_id,
+        } = self
+        {
+            if value.get("sessionId").and_then(Value::as_str) != Some(session_id)
+                || value.get("agentId").and_then(Value::as_str) != Some(agent_id)
+                || value.get("isSidechain").and_then(Value::as_bool) != Some(true)
+            {
+                return Err(CodecUnknownReason::InvalidChildIdentity);
+            }
+            if has_child_reference(value) {
+                return Err(CodecUnknownReason::UnsupportedChildReference);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Presence only: child parsing does not extract references or follow files.
+pub(crate) fn has_child_reference(value: &Value) -> bool {
+    value
+        .get("toolUseResult")
+        .is_some_and(|result| result.get("agentId").is_some())
+        || value
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    block.get("type").and_then(Value::as_str) == Some("tool_use")
+                        && matches!(
+                            block.get("name").and_then(Value::as_str),
+                            Some("Agent" | "Task" | "SendMessage")
+                        )
+                })
+            })
+}
 
 /// One parsed line, classified for chain derivation.
 pub(crate) enum ClaudeRecordClass {
@@ -63,10 +113,11 @@ pub(crate) enum ClaudeRecordClass {
 
 /// Classify one record object under the chain rules shared by the one-shot
 /// analyzer and the incremental tail feeder.
-pub(crate) fn classify_claude_record(
+pub(crate) fn classify_claude_record_in_context(
     object: &Map<String, Value>,
+    context: ClaudeRecordContext<'_>,
 ) -> Result<ClaudeRecordClass, CodecUnknownReason> {
-    if !is_chain_record(object) {
+    if !is_chain_record_in_context(object, context) {
         return Ok(ClaudeRecordClass::NotChain);
     }
     let Some(uuid) = object.get("uuid").and_then(Value::as_str) else {
@@ -741,6 +792,14 @@ pub(crate) fn analyze_claude_records(
     bytes: &[u8],
     input: impl Iterator<Item = Result<Value, serde_json::Error>>,
 ) -> SessionAnalysis {
+    analyze_claude_records_in_context(bytes, input, ClaudeRecordContext::Main)
+}
+
+pub(crate) fn analyze_claude_records_in_context(
+    bytes: &[u8],
+    input: impl Iterator<Item = Result<Value, serde_json::Error>>,
+    context: ClaudeRecordContext<'_>,
+) -> SessionAnalysis {
     crate::sync_metrics::record_transcript_analysis(bytes.len() as u64);
     if bytes.iter().all(u8::is_ascii_whitespace) {
         return unknown(None, None, 0, CodecUnknownReason::Empty);
@@ -766,6 +825,10 @@ pub(crate) fn analyze_claude_records(
                 );
             }
         };
+        if let Err(reason) = context.validate(&value) {
+            let (session_id, cwd) = identity.observed_identity();
+            return unknown(session_id, cwd, record_count, reason);
+        }
         // The derivation sees only the projection: a projected-out row
         // contributes nothing — no identity fallback, no count, no uuid.
         let Some(value) = project_claude_record(value) else {
@@ -790,11 +853,16 @@ pub(crate) fn analyze_claude_records(
                 CodecUnknownReason::MalformedJson,
             );
         };
-        identity.observe(&value);
+        if let Some(mut parts) = identity_parts_from_value(&value) {
+            if matches!(context, ClaudeRecordContext::Child { .. }) {
+                parts.is_chain = is_chain_record_in_context(object, context);
+            }
+            identity.observe_parts(parts);
+        }
         if let Some(uuid) = object.get("uuid").and_then(Value::as_str) {
             all_uuids.insert(uuid.to_string());
         }
-        let (message_id, parent) = match classify_claude_record(object) {
+        let (message_id, parent) = match classify_claude_record_in_context(object, context) {
             Ok(ClaudeRecordClass::NotChain) => continue,
             Ok(ClaudeRecordClass::Chain { message_id, parent }) => (message_id, parent),
             Err(reason) => {
@@ -882,22 +950,21 @@ pub(crate) fn analyze_claude_records(
             semantic_fingerprint: records[position].fingerprint.clone(),
         })
         .collect();
-    if let Err(error) = validate_conversation_chain(&chain) {
-        // Linkage holds by construction; only a uuid re-visited by the walk
-        // (its own ancestry re-references it) can fail here.
-        let reason = if error.contains("duplicate") {
-            CodecUnknownReason::DuplicateMessageId
-        } else {
-            CodecUnknownReason::NonLinearParentage
-        };
-        return unknown(session_id, source_cwd, record_count, reason);
-    }
-    let (lineage_digest, semantic_digest) = conversation_chain_digests(&chain)
-        .expect("validated conversation chains always produce digests");
+    let (lineage_digest, semantic_digest) = match conversation_chain_digests(&chain) {
+        Ok(digests) => digests,
+        Err(error) => {
+            let reason = if error.contains("duplicate") {
+                CodecUnknownReason::DuplicateMessageId
+            } else {
+                CodecUnknownReason::NonLinearParentage
+            };
+            return unknown(session_id, source_cwd, record_count, reason);
+        }
+    };
     SessionAnalysis {
         source_provider_session_id: session_id,
         source_cwd,
-        is_internal_subagent: false,
+        is_internal_subagent: matches!(context, ClaudeRecordContext::Child { .. }),
         record_count,
         lineage: CodecLineage::Complete {
             chain,
@@ -911,6 +978,13 @@ pub(crate) fn analyze_claude_records(
 /// Claude's attachment records that bridge message ancestry. Sidechain
 /// (subagent) branches root their own parentage and remain excluded.
 pub(crate) fn is_chain_record(object: &Map<String, Value>) -> bool {
+    is_chain_record_in_context(object, ClaudeRecordContext::Main)
+}
+
+fn is_chain_record_in_context(
+    object: &Map<String, Value>,
+    context: ClaudeRecordContext<'_>,
+) -> bool {
     let record_type = object.get("type").and_then(Value::as_str);
     let durable = matches!(
         record_type,
@@ -920,7 +994,9 @@ pub(crate) fn is_chain_record(object: &Map<String, Value>) -> bool {
         .get("isSidechain")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    durable && !sidechain && object.contains_key("uuid")
+    durable
+        && sidechain == matches!(context, ClaudeRecordContext::Child { .. })
+        && object.contains_key("uuid")
 }
 
 fn unknown(

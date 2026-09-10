@@ -9,7 +9,7 @@ import { buildPullReviewItems, restoreActionIds } from "./pullReviewModel";
 
 export interface PullReviewApi {
   planRestore: (storageId: string, bundleId: string, binding: ProjectBinding) => Promise<PullReview>;
-  getRestoreReadiness: (review: PullReview) => Promise<BundleReadiness>;
+  getRestoreReadiness: (localProjectId: string, storageId: string) => Promise<BundleReadiness>;
 }
 
 export interface PullReviewRequest {
@@ -28,7 +28,7 @@ export interface StartedPullReview {
   support: Promise<PullReviewSupport>;
 }
 
-export type PullApplyPhase = "idle" | "restoring" | "verifying" | "complete";
+export type PullApplyPhase = "idle" | "restoring";
 
 export interface PullReviewSelection {
   resourceIds: string[];
@@ -40,7 +40,6 @@ export interface PullReviewApplyApi {
     review: PullReview,
     actionIds: string[],
   ) => Promise<RestoreResult>;
-  getRestoreReadiness: (review: PullReview) => Promise<BundleReadiness>;
 }
 
 export interface PullReviewApplyResult {
@@ -48,7 +47,6 @@ export interface PullReviewApplyResult {
   readiness: BundleReadiness | null;
   success: boolean;
   error: string | null;
-  failedPhase: "restoring" | "verifying" | null;
 }
 
 /** A review opens only when it contains storage-side or divergent work. */
@@ -90,42 +88,28 @@ export async function applyPullReview(
   onPhase: (phase: PullApplyPhase) => void,
 ): Promise<PullReviewApplyResult> {
   assertPullPlansAligned(restorePlan, selection);
-  let restoreResult: RestoreResult | null = null;
-  let readiness: BundleReadiness | null = null;
-  let executionError: string | null = null;
-  let failedPhase: PullReviewApplyResult["failedPhase"] = null;
-
   onPhase("restoring");
   try {
-    restoreResult = await api.applyRestore(
-      restorePlan,
-      selection.restoreActionIds,
-    );
+    const restoreResult = await api.applyRestore(restorePlan, selection.restoreActionIds);
+    const error = restoreResult.readiness_error
+      ? `Readiness verification failed: ${restoreResult.readiness_error}`
+      : null;
+    return {
+      restoreResult,
+      readiness: restoreResult.readiness,
+      success: restoreResult.success && error === null && restoreResult.readiness?.state === "ready",
+      error,
+    };
   } catch (reason) {
-    executionError = `Restore failed: ${errorMessage(reason)}`;
-    failedPhase = "restoring";
+    return {
+      restoreResult: null,
+      readiness: null,
+      success: false,
+      error: `Restore failed: ${errorMessage(reason)}`,
+    };
+  } finally {
+    onPhase("idle");
   }
-
-  onPhase("verifying");
-  try {
-    readiness = await api.getRestoreReadiness(restorePlan);
-  } catch (reason) {
-    const verificationError = `Readiness verification failed: ${errorMessage(reason)}`;
-    executionError = executionError ? `${executionError} ${verificationError}` : verificationError;
-    if (!failedPhase) failedPhase = "verifying";
-  }
-  const success =
-    executionError === null &&
-    (restoreResult?.success ?? true) &&
-    readiness?.state === "ready";
-  onPhase("complete");
-  return {
-    restoreResult,
-    readiness,
-    success,
-    error: executionError,
-    failedPhase,
-  };
 }
 
 /**
@@ -136,33 +120,21 @@ export async function beginPullReview(
   api: PullReviewApi,
   request: PullReviewRequest,
 ): Promise<StartedPullReview> {
-  const restorePlan = await preparePullReview(api, request);
+  const restorePlan = await api.planRestore(request.storageId, request.bundleId, request.binding);
   return {
     restorePlan,
-    support: loadPullReviewSupport(api, restorePlan),
+    support: loadPullReviewSupport(api, request.binding.local_project_id, request.storageId),
   };
-}
-
-/**
- * Load only the mutation review. This is deliberately separate from optional
- * supporting checks so a readiness error cannot hide a valid review or its
- * Apply button. Compare fetches the manifest itself; selected payloads remain
- * Apply-time work.
- */
-export async function preparePullReview(
-  api: PullReviewApi,
-  request: PullReviewRequest,
-): Promise<PullReview> {
-  return api.planRestore(request.storageId, request.bundleId, request.binding);
 }
 
 /** Load non-blocking context shown alongside an already-visible review. */
 export async function loadPullReviewSupport(
   api: PullReviewApi,
-  restorePlan: PullReview,
+  localProjectId: string,
+  storageId: string,
 ): Promise<PullReviewSupport> {
   try {
-    return { readiness: await api.getRestoreReadiness(restorePlan), errors: [] };
+    return { readiness: await api.getRestoreReadiness(localProjectId, storageId), errors: [] };
   } catch (reason) {
     return { readiness: null, errors: [`Readiness checks: ${errorMessage(reason)}`] };
   }

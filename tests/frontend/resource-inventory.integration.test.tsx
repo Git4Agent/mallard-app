@@ -90,6 +90,7 @@ function threadEntryBase(
   | "resource_id"
   | "display_name"
   | "compared_against_storage"
+  | "subagent_selection"
 > {
   return {
     provider: "codex",
@@ -100,6 +101,7 @@ function threadEntryBase(
     resource_id: resourceId,
     display_name: displayName,
     compared_against_storage: true,
+    subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
   };
 }
 
@@ -458,6 +460,7 @@ test("the push review is one screen: header actions, list, Push in the footer", 
   const resource = { ...memoryResource("review"), category: "tools" as const };
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
+      credentialRedactionEnabled={true}
       resources={[resource]}
       selected={new Set([resource.resource_id])}
       projectDefaults={new Set([resource.resource_id])}
@@ -494,6 +497,7 @@ test("an irrecoverable Push error replaces retry with the local-state reset", ()
   const resource = memoryResource("review");
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
+      credentialRedactionEnabled={true}
       resources={[resource]}
       selected={new Set([resource.resource_id])}
       projectDefaults={new Set([resource.resource_id])}
@@ -514,6 +518,7 @@ test("two steps render two plain tabs — never a Review tab", () => {
   const resource = memoryResource("review");
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
+      credentialRedactionEnabled={true}
       resources={[resource]}
       selected={new Set([resource.resource_id])}
       projectDefaults={new Set([resource.resource_id])}
@@ -625,6 +630,7 @@ test("held threads and storage blockers share one banner with one way forward", 
   };
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
+      credentialRedactionEnabled={true}
       resources={[held, pushable]}
       selected={new Set([pushable.resource_id])}
       projectDefaults={new Set([pushable.resource_id])}
@@ -663,6 +669,7 @@ test("held threads and storage blockers share one banner with one way forward", 
   // ticking a checkbox can never reflow the list underneath it.
   const deselected = renderToStaticMarkup(
     <PushResourceWorkspace
+      credentialRedactionEnabled={true}
       resources={[held, pushable]}
       selected={new Set()}
       projectDefaults={new Set([pushable.resource_id])}
@@ -733,6 +740,7 @@ test("the header count reserves its widest slot so ticking a row moves no icon",
   };
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
+      credentialRedactionEnabled={true}
       resources={rows}
       selected={new Set(rows.slice(0, 9).map((row) => row.resource_id))}
       projectDefaults={new Set()}
@@ -784,6 +792,7 @@ test("a selected item that cannot be captured reports in the footer, not above t
   };
   const render = (selected: Set<string>) => renderToStaticMarkup(
     <PushResourceWorkspace
+      credentialRedactionEnabled={true}
       resources={[broken]}
       selected={selected}
       projectDefaults={new Set()}

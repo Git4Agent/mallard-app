@@ -76,6 +76,7 @@ pub fn run() {
             let watcher = project_sync::config_watcher::ConfigWatcher::start(app.handle().clone())
                 .map_err(std::io::Error::other)?;
             app.manage(std::sync::Mutex::new(watcher));
+            project_sync::config_watcher::start_connection_forwarder(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

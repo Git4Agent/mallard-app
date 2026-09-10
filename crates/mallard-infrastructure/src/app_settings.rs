@@ -1,10 +1,10 @@
-//! App-wide tuning settings: the `~/.mallard/settings.json` document and the
-//! process-wide installed snapshot the hot paths read.
+//! App-wide settings: the `~/.mallard/settings.json` document and the
+//! process-wide tuning snapshot the hot paths read. Export settings are loaded per operation.
 //!
 //! The document follows the activity-log policy recipe — schema constant,
 //! hard-reject validation, atomic write, missing file means defaults — with
 //! one deliberate divergence: every field carries a serde default, so a
-//! partial or hand-edited file parses instead of failing. Installed values
+//! partial or hand-edited file parses instead of failing. Installed tuning values
 //! live in process-wide atomics; readers pay one relaxed load, and a process
 //! that never installs (tests, the CLI) runs on the documented defaults.
 
@@ -22,6 +22,10 @@ pub const DEFAULT_COMPARISON_WORKERS: u32 = 4;
 pub const DEFAULT_CLOUD_TRANSFER_CONCURRENCY: u32 = 6;
 const SETTINGS_FILE: &str = "settings.json";
 const MAX_SETTINGS_BYTES: u64 = 4 * 1024;
+
+fn default_enabled() -> bool {
+    true
+}
 
 fn default_schema() -> u32 {
     APP_SETTINGS_SCHEMA
@@ -45,6 +49,12 @@ fn default_cloud_transfer_concurrency() -> u32 {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AppSettings {
+    #[serde(default = "default_enabled")]
+    pub push_codex_children: bool,
+    #[serde(default = "default_enabled")]
+    pub push_claude_children: bool,
+    #[serde(default = "default_enabled")]
+    pub credential_redaction_enabled: bool,
     #[serde(default = "default_schema")]
     pub schema: u32,
     #[serde(default = "default_conversation_file_limit_bytes")]
@@ -61,6 +71,9 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             schema: APP_SETTINGS_SCHEMA,
+            push_codex_children: true,
+            push_claude_children: true,
+            credential_redaction_enabled: true,
             conversation_file_limit_bytes: default_conversation_file_limit_bytes(),
             timeline_preview_limit_bytes: DEFAULT_TIMELINE_PREVIEW_LIMIT_BYTES,
             comparison_workers: DEFAULT_COMPARISON_WORKERS,
@@ -70,6 +83,29 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    pub fn wire_children(
+        &self,
+        provider: &mallard_domain::ProviderKey,
+    ) -> mallard_domain::ConversationWireChildren {
+        let enabled = match provider.as_str() {
+            "codex" => self.push_codex_children,
+            "claude" => self.push_claude_children,
+            _ => false,
+        };
+        if enabled {
+            mallard_domain::ConversationWireChildren::On
+        } else {
+            mallard_domain::ConversationWireChildren::Off
+        }
+    }
+
+    pub fn tuning_differs(&self, other: &Self) -> bool {
+        self.conversation_file_limit_bytes != other.conversation_file_limit_bytes
+            || self.timeline_preview_limit_bytes != other.timeline_preview_limit_bytes
+            || self.comparison_workers != other.comparison_workers
+            || self.cloud_transfer_concurrency != other.cloud_transfer_concurrency
+    }
+
     /// The preview ceiling is load-bearing, not taste: page content budgets
     /// twice the preview, the page check runs before an event is added, and
     /// JSON escaping can double the bytes again — 2 MB is the largest value
@@ -345,6 +381,29 @@ mod tests {
                 ..AppSettings::default()
             }
         );
+    }
+
+    #[test]
+    fn child_switches_default_on_and_round_trip_independently() {
+        let (_temp, repo) = repository();
+        let defaults: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(defaults.push_codex_children && defaults.push_claude_children);
+        for (codex, claude) in [(false, true), (true, false), (false, false)] {
+            let settings = AppSettings {
+                push_codex_children: codex,
+                push_claude_children: claude,
+                ..defaults
+            };
+            save_app_settings(&repo, &settings).unwrap();
+            assert_eq!(load_app_settings(&repo).unwrap(), settings);
+            assert!(!settings.tuning_differs(&defaults));
+        }
+        for invalid in [
+            r#"{"push_codex_children":null}"#,
+            r#"{"push_claude_children":"on"}"#,
+        ] {
+            assert!(serde_json::from_str::<AppSettings>(invalid).is_err());
+        }
     }
 
     #[test]

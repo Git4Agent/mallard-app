@@ -157,12 +157,22 @@ struct ProfileWatch {
     overflowed: Arc<AtomicBool>,
     watched_session_roots: BTreeSet<PathBuf>,
     healthy: bool,
-    generation: u64,
     dirty_roots: BTreeSet<PathBuf>,
-    inventory_dirty: bool,
-    titles_dirty: bool,
-    /// Root paths named by the cached inventory, so an event on an unknown
-    /// JSONL path is classified as inventory work.
+    /// Membership epoch: every event that can change which sessions exist
+    /// (creation, removal, an unknown root, directory churn, a session tree
+    /// appearing under the home) advances it, and nothing ever resets it.
+    /// A cached inventory remembers the epoch it was walked under and is
+    /// served only while that epoch still matches, so one project's
+    /// rediscovery can never vouch for another project's cache on the
+    /// same home.
+    inventory_epoch: u64,
+    /// Title epoch: advanced when the adapter's title index is rewritten.
+    /// Each cached inventory refreshes its titles when its own stamp lags.
+    titles_epoch: u64,
+    /// JSONL roots whose existence the epoch already accounts for: every
+    /// path a cached inventory of this home has listed, plus every path
+    /// seen created while armed. An event on any other JSONL path is
+    /// membership work.
     known_roots: BTreeSet<PathBuf>,
     last_used: std::time::Instant,
 }
@@ -171,6 +181,11 @@ struct CachedInventory {
     request: CaptureRequest,
     discovery: Discovery,
     views: Vec<LocalSessionView>,
+    /// The profile epochs read under the drain that preceded the walk. An
+    /// event another operation drained while the walk ran advanced the
+    /// profile past these, leaving the entry stale on arrival.
+    inventory_epoch: u64,
+    titles_epoch: u64,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -197,6 +212,15 @@ pub(crate) struct ObservationQuery {
     pub(crate) thread_id: ThreadId,
     pub(crate) checkpoint_generation: Option<u64>,
     pub(crate) binding_revision: Option<u64>,
+}
+
+/// Push supplies the exact selected capture, independently of watcher events.
+pub(crate) struct PushObservationQuery<'a> {
+    pub(crate) observation: ObservationQuery,
+    pub(crate) source: &'a Path,
+    pub(crate) stamp: &'a mallard_infrastructure::jsonl_tail_io::SourceStamp,
+    pub(crate) provider_thread_id: &'a str,
+    pub(crate) layout: Option<&'a mallard_domain::RootTailLayout>,
 }
 
 /// One derived observation to retain for the next operation.
@@ -478,10 +502,9 @@ fn arm_profile(
         overflowed,
         watched_session_roots,
         healthy: true,
-        generation: 0,
         dirty_roots: BTreeSet::new(),
-        inventory_dirty: false,
-        titles_dirty: false,
+        inventory_epoch: 0,
+        titles_epoch: 0,
         known_roots: BTreeSet::new(),
         last_used: std::time::Instant::now(),
     })
@@ -509,7 +532,7 @@ impl ProfileWatch {
                 path.file_name().and_then(|name| name.to_str()) == Some(index)
                     && path.parent() == Some(self.canonical_home.as_path())
             }) {
-                self.titles_dirty = true;
+                self.titles_epoch = self.titles_epoch.wrapping_add(1);
                 continue;
             }
             let under_sessions = self
@@ -533,26 +556,31 @@ impl ProfileWatch {
                         .and_then(|name| name.to_str())
                         .is_some_and(|name| session_root_names(&self.provider).contains(&name))
                 {
-                    self.inventory_dirty = true;
-                    self.generation = self.generation.wrapping_add(1);
+                    self.inventory_epoch = self.inventory_epoch.wrapping_add(1);
                 }
                 continue;
             }
             let is_jsonl = path.extension().and_then(|ext| ext.to_str()) == Some("jsonl");
             if is_jsonl {
-                self.generation = self.generation.wrapping_add(1);
                 self.dirty_roots.insert(path.to_path_buf());
                 let membership_change =
                     matches!(event.kind, EventKind::Create(_) | EventKind::Remove(_))
                         || !self.known_roots.contains(path);
                 if membership_change {
-                    self.inventory_dirty = true;
+                    self.inventory_epoch = self.inventory_epoch.wrapping_add(1);
+                }
+                // The epoch now accounts for this root's existence: later
+                // appends are content work even before the owning project
+                // rediscovers it. A removed root is unknown again.
+                if matches!(event.kind, EventKind::Remove(_)) {
+                    self.known_roots.remove(path);
+                } else {
+                    self.known_roots.insert(path.to_path_buf());
                 }
             } else {
                 // Directory churn or non-transcript files inside the
                 // session trees are membership work.
-                self.inventory_dirty = true;
-                self.generation = self.generation.wrapping_add(1);
+                self.inventory_epoch = self.inventory_epoch.wrapping_add(1);
             }
         }
         if self.dirty_roots.len() > MAX_DIRTY_ROOTS {
@@ -753,40 +781,43 @@ impl SessionWatchService {
             None => false,
         };
 
+        // The epochs the walk runs under: read under the lock that follows
+        // the drain, after any stat-raced bump, and stamped on the entry the
+        // walk publishes. An event another operation drains while the walk
+        // runs advances the profile past this stamp, so that entry is stale
+        // on arrival instead of riding a flag cleared at publish.
+        let mut walk_epochs = None;
         if cacheable && healthy {
             let (provider, home) = cache_profile
                 .clone()
                 .expect("cacheable requires a provider profile");
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let key = (provider.clone(), home.clone(), local_project_id.clone());
-            let titles_dirty = inner
+            let witness = inner
                 .profiles
                 .get(&home)
-                .map(|profile| profile.titles_dirty)
-                .unwrap_or(false);
-            let inventory_clean = inner
-                .profiles
-                .get(&home)
-                .map(|profile| profile.healthy && !profile.inventory_dirty)
-                .unwrap_or(false);
-            if inventory_clean {
-                let dirty_roots = inner
-                    .profiles
-                    .get(&home)
-                    .map(|profile| profile.dirty_roots.clone())
-                    .unwrap_or_default();
-                let mut refreshed_titles = false;
+                .filter(|profile| profile.healthy)
+                .map(|profile| {
+                    (
+                        profile.inventory_epoch,
+                        profile.titles_epoch,
+                        profile.dirty_roots.clone(),
+                    )
+                });
+            if let Some((inventory_epoch, titles_epoch, dirty_roots)) = witness {
                 let mut stat_raced = false;
                 if let Some(cached) = inner.inventories.get_mut(&key) {
-                    if cached.request == *request {
-                        if titles_dirty && session_title_index(&provider).is_some() {
+                    if cached.request == *request && cached.inventory_epoch == inventory_epoch {
+                        if cached.titles_epoch != titles_epoch
+                            && session_title_index(&provider).is_some()
+                        {
                             let mut discovery = cached.discovery.clone();
                             AgentProviderRegistry::production()
                                 .require(&provider)?
                                 .refresh_session_titles(&mut discovery, &home)?;
                             cached.discovery = discovery;
                             cached.views = provider_capture::local_session_views(&cached.discovery);
-                            refreshed_titles = true;
+                            cached.titles_epoch = titles_epoch;
                         }
                         // A dirty root's presentation stamp refreshes with
                         // the observation that is about to re-read it; quiet
@@ -828,13 +859,7 @@ impl SessionWatchService {
                         }
                         if !stat_raced {
                             sync_metrics::record_inventory_reuse_hit(&home);
-                            let result = (cached.discovery.clone(), cached.views.clone());
-                            if refreshed_titles {
-                                if let Some(profile) = inner.profiles.get_mut(&home) {
-                                    profile.titles_dirty = false;
-                                }
-                            }
-                            return Ok(result);
+                            return Ok((cached.discovery.clone(), cached.views.clone()));
                         }
                     }
                 }
@@ -842,35 +867,41 @@ impl SessionWatchService {
                     // The dirty source vanished between its event and this
                     // operation: treat it as membership work and rediscover.
                     if let Some(profile) = inner.profiles.get_mut(&home) {
-                        profile.inventory_dirty = true;
+                        profile.inventory_epoch = profile.inventory_epoch.wrapping_add(1);
                     }
                 }
+                walk_epochs = inner
+                    .profiles
+                    .get(&home)
+                    .map(|profile| (profile.inventory_epoch, profile.titles_epoch));
             }
         }
 
         // Bounded discovery, then publish the fresh inventory under the
-        // already-drained dirty state: events that arrived during the walk
-        // are still queued and dirty the next operation.
+        // epochs read before the walk. Events that arrived during the walk
+        // are either still queued, so the next drain advances past this
+        // stamp, or were drained by another operation, which already did.
         let discovery = provider_capture::discover_full(registry, request)?;
         let views = provider_capture::local_session_views(&discovery);
-        if cacheable && healthy {
+        if let Some((inventory_epoch, titles_epoch)) = walk_epochs {
             let (provider, home) = cache_profile.expect("cacheable requires a provider profile");
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(profile) = inner.profiles.get_mut(&home) {
                 if profile.healthy {
-                    profile.inventory_dirty = false;
-                    profile.titles_dirty = false;
-                    profile.known_roots = views
-                        .iter()
-                        .filter(|view| view.provider == provider)
-                        .map(|view| view.source_path.clone())
-                        .collect();
+                    profile.known_roots.extend(
+                        views
+                            .iter()
+                            .filter(|view| view.provider == provider)
+                            .map(|view| view.source_path.clone()),
+                    );
                     inner.inventories.insert(
                         (provider, home, local_project_id.clone()),
                         CachedInventory {
                             request: request.clone(),
                             discovery: discovery.clone(),
                             views: views.clone(),
+                            inventory_epoch,
+                            titles_epoch,
                         },
                     );
                 }
@@ -881,6 +912,67 @@ impl SessionWatchService {
 
     /// Serve every queried observation the watcher proves clean. A served
     /// thread performs no filesystem work at all.
+    /// Untrusted starting cursors. The child observer revalidates every source.
+    pub(crate) fn subagent_cursors(
+        &self, home: &Path, state_root: &Path, project: &LocalProjectId, storage: &StorageId,
+        queries: &[(ThreadId, Option<u64>)],
+    ) -> BTreeMap<ThreadId, mallard_infrastructure::owned_subagents::TreeObservation> {
+        let Some(home) = canonical_home_of(home) else { return BTreeMap::new(); };
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        queries.iter().filter_map(|(thread, _revision)| {
+            let key = ObservationKey { canonical_home: home.clone(), local_project_id: project.clone(), storage_id: storage.clone(), thread_id: thread.clone() };
+            let tree = match inner.observations.get(&key) {
+                Some(cached) => cached.observation.subagents.clone(),
+                _ => inner.disk_entries(state_root).get(&key).and_then(|record| record.observation.subagents.clone()),
+            };
+            tree.map(|tree| (thread.clone(), tree))
+        }).collect()
+    }
+
+    /// Only live-process observations have the read-time evidence needed for
+    /// Push. Do not hydrate executable evidence from the presentation cache.
+    pub(crate) fn take_push_observations(
+        &self,
+        canonical_home: &Path,
+        local_project_id: &LocalProjectId,
+        storage_id: &StorageId,
+        queries: &[PushObservationQuery<'_>],
+    ) -> BTreeMap<ThreadId, LocalTailObservation> {
+        let mut served = BTreeMap::new();
+        let Some(home) = canonical_home_of(canonical_home) else {
+            return served;
+        };
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        for query in queries {
+            let key = ObservationKey {
+                canonical_home: home.clone(),
+                local_project_id: local_project_id.clone(),
+                storage_id: storage_id.clone(),
+                thread_id: query.observation.thread_id.clone(),
+            };
+            let Some(cached) = inner.observations.get(&key) else {
+                continue;
+            };
+            if cached.checkpoint_generation != query.observation.checkpoint_generation
+                || cached.binding_revision != query.observation.binding_revision
+                || !cached.observation.matches_push_capture(
+                    query.source,
+                    query.stamp,
+                    query.provider_thread_id,
+                    query.layout,
+                )
+            {
+                continue;
+            }
+            sync_metrics::record_observation_reuse_hit(&home);
+            served.insert(
+                query.observation.thread_id.clone(),
+                cached.observation.clone(),
+            );
+        }
+        served
+    }
+
     pub(crate) fn take_reusable_observations(
         &self,
         provider: &ProviderKey,
@@ -1624,7 +1716,7 @@ mod tests {
             let mut inner = service.inner.lock().unwrap();
             assert!(inner.ensure_profile(&codex_provider(), &canonical_home));
             let profile = inner.profiles.get(&canonical_home).unwrap();
-            assert!(!profile.inventory_dirty);
+            assert_eq!(profile.inventory_epoch, 0);
         }
         // A new rollout is membership work.
         std::fs::write(sessions.join("rollout-new.jsonl"), b"{}\n").unwrap();
@@ -1632,7 +1724,16 @@ mod tests {
             let mut inner = service.inner.lock().unwrap();
             assert!(inner.ensure_profile(&codex_provider(), &canonical_home));
             let profile = inner.profiles.get(&canonical_home).unwrap();
-            assert!(profile.inventory_dirty, "unknown rollout dirties inventory");
+            assert_eq!(
+                profile.inventory_epoch, 1,
+                "an unknown rollout advances the membership epoch"
+            );
+            assert!(
+                profile
+                    .known_roots
+                    .contains(&canonical_home.join("sessions/rollout-new.jsonl")),
+                "a created root is known from its event on"
+            );
         }
         // Removing the watched sessions root is a reliability signal: the
         // profile rebaselines and stays usable through the bounded path.
@@ -1650,5 +1751,147 @@ mod tests {
                 "rearm after recreation"
             );
         }
+    }
+
+    fn codex_rollout(home: &Path, id: &str, cwd: &Path) {
+        let cwd = serde_json::to_string(cwd.to_str().unwrap()).unwrap();
+        write(
+            &home.join(format!("sessions/2026/09/09/rollout-{id}.jsonl")),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":{cwd}}}}}\n"
+            )
+            .as_bytes(),
+        );
+    }
+
+    fn codex_request(home: &Path, project_root: &Path) -> CaptureRequest {
+        CaptureRequest {
+            project_root: project_root.to_path_buf(),
+            provider_homes: BTreeMap::from([(codex_provider(), home.to_path_buf())]),
+            include_project_content: false,
+            excluded_content_roots: Vec::new(),
+        }
+    }
+
+    fn provider_ids(views: &[LocalSessionView]) -> BTreeSet<String> {
+        views
+            .iter()
+            .map(|view| view.provider_thread_id.clone())
+            .collect()
+    }
+
+    /// Two projects on one home share the profile watch but own separate
+    /// inventories: the first project to walk past a membership change must
+    /// not vouch for the other project's cache.
+    #[test]
+    fn one_projects_rediscovery_never_cleans_another_projects_inventory() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        let project_a = temp.path().join("project-a");
+        let project_b = temp.path().join("project-b");
+        std::fs::create_dir_all(&project_a).unwrap();
+        std::fs::create_dir_all(&project_b).unwrap();
+        codex_rollout(&home, "thread-a", &project_a);
+        codex_rollout(&home, "thread-b", &project_b);
+        let registry = AgentProviderRegistry::production();
+        let id_a = LocalProjectId::parse("watch-project-a").unwrap();
+        let id_b = LocalProjectId::parse("watch-project-b").unwrap();
+        let request_a = codex_request(&home, &project_a);
+        let request_b = codex_request(&home, &project_b);
+        let service = service();
+        let (_, views_a) = service.discovery_for(registry, &id_a, &request_a).unwrap();
+        let (_, views_b) = service.discovery_for(registry, &id_b, &request_b).unwrap();
+        assert_eq!(
+            provider_ids(&views_a),
+            BTreeSet::from(["thread-a".to_string()])
+        );
+        assert_eq!(
+            provider_ids(&views_b),
+            BTreeSet::from(["thread-b".to_string()])
+        );
+
+        // A session appears for B. A walks first and must not clean B's entry.
+        codex_rollout(&home, "thread-b2", &project_b);
+        let metrics = sync_metrics::register_root(&canonical_home_of(&home).unwrap());
+        let before = metrics.snapshot();
+        let (_, views_a) = service.discovery_for(registry, &id_a, &request_a).unwrap();
+        assert_eq!(
+            provider_ids(&views_a),
+            BTreeSet::from(["thread-a".to_string()])
+        );
+        let (_, views_b) = service.discovery_for(registry, &id_b, &request_b).unwrap();
+        assert_eq!(
+            provider_ids(&views_b),
+            BTreeSet::from(["thread-b".to_string(), "thread-b2".to_string()]),
+            "B's next discovery lists the session that appeared after its walk"
+        );
+        let delta = metrics.snapshot().delta_since(&before);
+        assert_eq!(
+            delta.inventory_reuse_hits, 0,
+            "both projects walked past the membership change"
+        );
+
+        // Quiet again: both entries serve without filesystem work.
+        let before = metrics.snapshot();
+        service.discovery_for(registry, &id_a, &request_a).unwrap();
+        service.discovery_for(registry, &id_b, &request_b).unwrap();
+        let delta = metrics.snapshot().delta_since(&before);
+        assert_eq!(delta.inventory_reuse_hits, 2);
+        assert_eq!(delta.files_head_read, 0);
+        assert_eq!(delta.directories_visited, 0);
+    }
+
+    /// A rewritten title index refreshes each cached inventory on its own
+    /// stamp: the project that refreshes first never clears it for the rest.
+    #[test]
+    fn a_title_index_rewrite_refreshes_every_projects_cached_inventory() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        let project_a = temp.path().join("project-a");
+        let project_b = temp.path().join("project-b");
+        std::fs::create_dir_all(&project_a).unwrap();
+        std::fs::create_dir_all(&project_b).unwrap();
+        codex_rollout(&home, "thread-a", &project_a);
+        codex_rollout(&home, "thread-b", &project_b);
+        let index = |title_a: &str, title_b: &str| {
+            write(
+                &home.join("session_index.jsonl"),
+                format!(
+                    "{{\"id\":\"thread-a\",\"thread_name\":\"{title_a}\",\"updated_at\":\"2026-09-09T00:00:00Z\"}}\n\
+                     {{\"id\":\"thread-b\",\"thread_name\":\"{title_b}\",\"updated_at\":\"2026-09-09T00:00:00Z\"}}\n"
+                )
+                .as_bytes(),
+            );
+        };
+        index("A one", "B one");
+        let registry = AgentProviderRegistry::production();
+        let id_a = LocalProjectId::parse("watch-titles-a").unwrap();
+        let id_b = LocalProjectId::parse("watch-titles-b").unwrap();
+        let request_a = codex_request(&home, &project_a);
+        let request_b = codex_request(&home, &project_b);
+        let service = service();
+        let title_of = |views: &[LocalSessionView]| views[0].descriptor.display_name.clone();
+        let (_, views_a) = service.discovery_for(registry, &id_a, &request_a).unwrap();
+        let (_, views_b) = service.discovery_for(registry, &id_b, &request_b).unwrap();
+        assert_eq!(title_of(&views_a), "A one");
+        assert_eq!(title_of(&views_b), "B one");
+
+        index("A two", "B two");
+        let metrics = sync_metrics::register_root(&canonical_home_of(&home).unwrap());
+        let before = metrics.snapshot();
+        let (_, views_a) = service.discovery_for(registry, &id_a, &request_a).unwrap();
+        let (_, views_b) = service.discovery_for(registry, &id_b, &request_b).unwrap();
+        assert_eq!(title_of(&views_a), "A two");
+        assert_eq!(
+            title_of(&views_b),
+            "B two",
+            "B's titles refresh on B's own stamp"
+        );
+        let delta = metrics.snapshot().delta_since(&before);
+        assert_eq!(
+            delta.inventory_reuse_hits, 2,
+            "titles refresh over the cached inventories"
+        );
+        assert_eq!(delta.directories_visited, 0);
     }
 }

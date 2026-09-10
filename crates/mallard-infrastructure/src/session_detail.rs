@@ -10,16 +10,18 @@ use crate::app_settings::{
     timeline_tool_preview_bytes,
 };
 use crate::path_text_boundary::replace_sensitive_path_occurrences;
-use crate::persistence::{read_json_bounded, write_json_atomic, LocalStateRepository};
+use crate::persistence::{
+    persistence_guard, read_json_bounded, write_bytes_atomic, LocalStateRepository,
+};
 use crate::project_activity::{discover_github_repository_url, resolve_activity_project};
 use crate::provider_capture::{modified_secs, LocalSessionView};
 use crate::providers::traits::timeline_tool_detail_budgets;
 use crate::providers::{
-    AgentProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionCheckpoint,
-    SessionCount, SessionCountQuality, SessionDetailWarning, SessionEventCounts,
-    SessionEventDetail, SessionFileSummary, SessionTimelineContext, SessionTimelineEvent,
-    SessionTimelineEventKind, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
-    SessionToolCategory,
+    AgentProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionAgentPreview,
+    SessionCheckpoint, SessionChildIdentity, SessionCount, SessionCountQuality,
+    SessionDetailWarning, SessionEventCounts, SessionEventDetail, SessionFileSummary,
+    SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
+    SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCategory, AGENT_RESOURCE_SEGMENT,
 };
 use mallard_domain::{
     hex_lower, now_secs, parse_conversation_resource_id, sha256_hex, LocalProjectId,
@@ -119,6 +121,38 @@ pub struct ProjectSessionDetail {
     pub snapshot_id: String,
     #[serde(default)]
     pub warnings: Vec<SessionDetailWarning>,
+    /// Set when this session is a child transcript: the parent to return to
+    /// and the row the parent shows for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<SessionDetailAgent>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SessionDetailAgent {
+    pub parent_resource_id: String,
+    pub parent_title: String,
+    pub preview: SessionAgentPreview,
+}
+
+/// A child resource id is its parent's with one `/agent/<id>` segment per
+/// hop. This splits the root off and returns the hops in order.
+pub fn split_agent_resource_id(resource_id: &str) -> (&str, Vec<&str>) {
+    let mut parts = resource_id.split(AGENT_RESOURCE_SEGMENT);
+    let root = parts.next().unwrap_or_default();
+    (root, parts.collect())
+}
+
+/// The conversation resource a child page is reached through.
+pub fn root_conversation_resource_id(resource_id: &str) -> &str {
+    split_agent_resource_id(resource_id).0
+}
+
+fn valid_agent_hop(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -144,6 +178,7 @@ pub struct ProjectSessionTimelineRequest {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct TimelineCacheEntry {
+    schema: u32,
     resource_id: String,
     provider: ProviderKey,
     size: u64,
@@ -171,13 +206,6 @@ fn entry_matches_limits(
         && entry.conversation_limit_bytes == conversation_limit_bytes
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-struct TimelineCache {
-    schema: u32,
-    #[serde(default)]
-    entries: BTreeMap<String, TimelineCacheEntry>,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 struct TimelineCursor {
     schema: u32,
@@ -200,6 +228,111 @@ struct ResolvedLocalSession {
     file_size: u64,
     modified_nanos: u64,
     is_active: bool,
+    /// Set on a child transcript: whose child, and which one. The parent it
+    /// was reached through is resolved alongside it.
+    child: Option<SessionChildIdentity>,
+}
+
+impl ResolvedLocalSession {
+    fn timeline_context(&self) -> SessionTimelineContext<'_> {
+        SessionTimelineContext {
+            resource_id: &self.resource_id,
+            provider_session_id: &self.provider_session_id,
+            project_root: &self.project_root,
+            project_root_aliases: &self.project_root_aliases,
+            provider_home: &self.provider_home,
+            child: self.child.as_ref(),
+        }
+    }
+}
+
+/// The session a request names, plus the parent a child was reached
+/// through. A root session has no parent.
+struct ResolvedSession {
+    session: ResolvedLocalSession,
+    parent: Option<ResolvedLocalSession>,
+}
+
+/// Resolve a root conversation or a child transcript addressed through it.
+/// Every hop is proven the same way: the parent owns the child by the
+/// provider's own rule, and the child file is a regular, unlinked file under
+/// the provider home.
+fn resolve_session(
+    repository: &LocalStateRepository,
+    registry: &AgentProviderRegistry,
+    local_project_id: &LocalProjectId,
+    resource_id: &str,
+    views: &[LocalSessionView],
+) -> SessionDetailResult<ResolvedSession> {
+    ensure_identifier("resource id", resource_id)?;
+    let (root_id, hops) = split_agent_resource_id(resource_id);
+    if hops.iter().any(|hop| !valid_agent_hop(hop)) {
+        return Err(invalid_request("The agent resource ID is invalid."));
+    }
+    let mut session =
+        resolve_local_session(repository, registry, local_project_id, root_id, views)?;
+    let mut parent = None;
+    for hop in hops {
+        let adapter = registry.require(&session.provider).map_err(|_| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::NotFound,
+                "No registered provider can read this session.",
+            )
+        })?;
+        let child = SessionChildIdentity {
+            parent_provider_session_id: session.provider_session_id.clone(),
+            provider_agent_id: hop.to_string(),
+        };
+        let path = adapter
+            .locate_child_transcript(&session.provider_home, &session.transcript_path, &child)
+            .map_err(|_| {
+                SessionDetailError::new(
+                    SessionDetailErrorCode::OwnershipChanged,
+                    "The agent transcript could not be proven to belong to this session.",
+                )
+            })?
+            .ok_or_else(|| {
+                SessionDetailError::new(
+                    SessionDetailErrorCode::NotLocal,
+                    "This agent's transcript is not available locally.",
+                )
+            })?;
+        let canonical_path = fs::canonicalize(&path).map_err(|_| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::NotLocal,
+                "This agent's transcript is not available locally.",
+            )
+        })?;
+        if !canonical_path.starts_with(&session.provider_home) {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::OwnershipChanged,
+                "The agent transcript escaped its provider profile.",
+            ));
+        }
+        let metadata = fs::metadata(&canonical_path).map_err(|_| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::NotLocal,
+                "This agent's transcript is not available locally.",
+            )
+        })?;
+        let resource_id = crate::providers::agent_resource_id(&session.resource_id, hop);
+        let next = ResolvedLocalSession {
+            provider: session.provider.clone(),
+            resource_id,
+            project_root: session.project_root.clone(),
+            project_root_aliases: session.project_root_aliases.clone(),
+            provider_home: session.provider_home.clone(),
+            provider_session_id: hop.to_string(),
+            transcript_path: canonical_path,
+            display_name: hop.to_string(),
+            file_size: metadata.len(),
+            modified_nanos: modified_nanos(&metadata),
+            is_active: now_secs().saturating_sub(modified_secs(&metadata)) < 300,
+            child: Some(child),
+        };
+        parent = Some(std::mem::replace(&mut session, next));
+    }
+    Ok(ResolvedSession { session, parent })
 }
 
 enum CheckpointSupport {
@@ -479,6 +612,7 @@ fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetail
         ));
     }
     let mut ids = BTreeSet::new();
+    let mut ids_by_turn: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     let mut calls_by_turn: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     let mut summaries_by_turn = BTreeSet::new();
     let mut previous_ordinal = None;
@@ -530,8 +664,33 @@ fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetail
         if let Some(parent) = &event.parent_event_id {
             ensure_identifier("parent event id", parent)?;
         }
+        let is_call = matches!(
+            event.kind,
+            SessionTimelineEventKind::ToolCall | SessionTimelineEventKind::AgentCall
+        );
+        if event.agent.is_some() != (event.kind == SessionTimelineEventKind::AgentCall) {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider returned agent metadata on an invalid event.",
+            ));
+        }
+        if let Some(agent) = &event.agent {
+            if let Some(id) = &agent.provider_agent_id {
+                ensure_identifier("agent id", id)?;
+            }
+            if agent
+                .transcript
+                .as_ref()
+                .is_some_and(|pointer| pointer.len() > 1024 || !safe_relative_path(pointer))
+            {
+                return Err(SessionDetailError::new(
+                    SessionDetailErrorCode::ProviderError,
+                    "The provider returned an unsafe agent transcript pointer.",
+                ));
+            }
+        }
         if let Some(tool) = &event.tool {
-            if event.kind != SessionTimelineEventKind::ToolCall || event.turn_id.is_none() {
+            if !is_call || event.turn_id.is_none() {
                 return Err(SessionDetailError::new(
                     SessionDetailErrorCode::ProviderError,
                     "The provider returned tool metadata on an invalid event.",
@@ -560,7 +719,7 @@ fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetail
                 ));
             }
             let turn_id = event.turn_id.as_deref().expect("checked above");
-            if !calls_by_turn
+            if !ids_by_turn
                 .entry(turn_id)
                 .or_default()
                 .insert(tool.provider_call_id.as_str())
@@ -570,12 +729,35 @@ fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetail
                     "The provider returned a duplicate tool call for one turn.",
                 ));
             }
-        } else if event.kind == SessionTimelineEventKind::ToolCall {
+            // The per-turn summary counts tool calls; a delegation is not one.
+            if event.kind == SessionTimelineEventKind::ToolCall {
+                calls_by_turn
+                    .entry(turn_id)
+                    .or_default()
+                    .insert(tool.provider_call_id.as_str());
+            }
+        } else if is_call {
             return Err(SessionDetailError::new(
                 SessionDetailErrorCode::ProviderError,
                 "The provider returned a tool event without tool metadata.",
             ));
         }
+    }
+    let agent_calls = index
+        .events
+        .iter()
+        .filter(|event| event.kind == SessionTimelineEventKind::AgentCall)
+        .count() as u64;
+    if index
+        .counts
+        .agent_calls
+        .value
+        .is_some_and(|counted| counted != agent_calls)
+    {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "The agent call count did not match the indexed agent calls.",
+        ));
     }
     for event in &index.events {
         let Some(summary) = &event.turn_tool_summary else {
@@ -692,6 +874,34 @@ fn validate_page_slice(
                 ));
             }
         }
+        if event.agent.is_some() != (event.kind == SessionTimelineEventKind::AgentCall) {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider returned agent metadata on an invalid event.",
+            ));
+        }
+        if let Some(agent) = &event.agent {
+            if agent.label.is_empty()
+                || agent.label.len() > 1024
+                || agent
+                    .brief
+                    .as_ref()
+                    .is_some_and(|text| text.len() > timeline_tool_preview_bytes())
+                || agent
+                    .report
+                    .as_ref()
+                    .is_some_and(|text| text.len() > timeline_tool_preview_bytes())
+                || agent
+                    .transcript_resource_id
+                    .as_ref()
+                    .is_some_and(|id| ensure_identifier("agent resource id", id).is_err())
+            {
+                return Err(SessionDetailError::new(
+                    SessionDetailErrorCode::ProviderError,
+                    "The provider returned an oversized or unsafe agent preview.",
+                ));
+            }
+        }
         page_content_bytes = page_content_bytes
             .saturating_add(event.text.as_ref().map_or(0, String::len))
             .saturating_add(
@@ -707,6 +917,12 @@ fn validate_page_slice(
                     .as_ref()
                     .and_then(|tool| tool.result_preview.as_ref())
                     .map_or(0, String::len),
+            )
+            .saturating_add(
+                event
+                    .agent
+                    .as_ref()
+                    .map_or(0, crate::providers::claude::history::agent_preview_bytes),
             );
         if page_content_bytes > timeline_page_content_bytes() {
             return Err(SessionDetailError::new(
@@ -858,6 +1074,7 @@ fn resolve_local_session(
             file_size: metadata.len(),
             modified_nanos: modified_nanos(&metadata),
             is_active: now_secs().saturating_sub(modified_secs(&metadata)) < 300,
+            child: None,
         });
     }
     match matches.len() {
@@ -908,27 +1125,17 @@ fn cwd_belongs_to_project(cwd: &Path, project_root: &Path) -> bool {
 
 fn load_timeline_cache(
     repository: &LocalStateRepository,
-) -> (TimelineCache, Vec<SessionDetailWarning>) {
-    let path = repository.root().join("session_timeline_cache.json");
-    match read_json_bounded::<TimelineCache>(repository.root(), &path, MAX_TIMELINE_CACHE_BYTES) {
-        Ok(Some(cache))
-            if cache.schema == TIMELINE_CACHE_SCHEMA
-                && cache.entries.len() <= MAX_TIMELINE_CACHE_ENTRIES =>
-        {
-            (cache, Vec::new())
-        }
-        Ok(_) => (
-            TimelineCache {
-                schema: TIMELINE_CACHE_SCHEMA,
-                entries: BTreeMap::new(),
-            },
-            Vec::new(),
-        ),
+    key: &str,
+) -> (Option<TimelineCacheEntry>, Vec<SessionDetailWarning>) {
+    let path = repository
+        .root()
+        .join("session_timeline_cache")
+        .join(format!("{key}.json"));
+    match read_json_bounded::<TimelineCacheEntry>(repository.root(), &path, MAX_TIMELINE_CACHE_BYTES) {
+        Ok(Some(entry)) if entry.schema == TIMELINE_CACHE_SCHEMA => (Some(entry), Vec::new()),
+        Ok(_) => (None, Vec::new()),
         Err(_) => (
-            TimelineCache {
-                schema: TIMELINE_CACHE_SCHEMA,
-                entries: BTreeMap::new(),
-            },
+            None,
             vec![SessionDetailWarning {
                 code: "timeline_cache_ignored".to_string(),
                 message: "Mallard rebuilt its local timeline cache because the saved cache was outdated or unreadable."
@@ -937,6 +1144,65 @@ fn load_timeline_cache(
             }],
         ),
     }
+}
+
+fn write_timeline_cache(
+    repository: &LocalStateRepository,
+    key: &str,
+    entry: &TimelineCacheEntry,
+    max_bytes: u64,
+) -> Result<(), String> {
+    // Measure the exact bytes that will be written before evicting anything.
+    let bytes = serde_json::to_vec(entry).map_err(|error| error.to_string())?;
+    let incoming_bytes = bytes.len() as u64;
+    if incoming_bytes > max_bytes {
+        return Err("The session timeline cache entry exceeds the byte limit.".to_string());
+    }
+    // Serialize eviction and publication across sessions and processes.
+    let _guard = persistence_guard(repository.root())?;
+    let directory = repository.root().join("session_timeline_cache");
+    repository.ensure_directory(&directory)?;
+    let destination = directory.join(format!("{key}.json"));
+    let mut entries = Vec::new();
+    let mut total_bytes = incoming_bytes;
+    for (position, item) in fs::read_dir(&directory)
+        .map_err(|error| error.to_string())?
+        .enumerate()
+    {
+        if position >= MAX_TIMELINE_CACHE_ENTRIES {
+            return Err("The session timeline cache exceeds the entry limit.".to_string());
+        }
+        let item = item.map_err(|error| error.to_string())?;
+        let name = item.file_name();
+        let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+            continue;
+        };
+        if stem.len() != 64 || !stem.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        let path = item.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        if !metadata.file_type().is_file() {
+            return Err("The session timeline cache contains a non-regular file.".to_string());
+        }
+        // A replacement contributes only its new size to the budget.
+        if path == destination {
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(metadata.len());
+        entries.push((modified_nanos(&metadata), path, metadata.len()));
+    }
+    entries.sort_unstable();
+    let mut entry_count = entries.len() + 1;
+    for (_, path, size) in entries {
+        if total_bytes <= max_bytes && entry_count <= MAX_TIMELINE_CACHE_ENTRIES {
+            break;
+        }
+        fs::remove_file(path).map_err(|error| error.to_string())?;
+        total_bytes = total_bytes.saturating_sub(size);
+        entry_count -= 1;
+    }
+    write_bytes_atomic(repository.root(), &destination, &bytes, max_bytes)
 }
 
 fn refresh_file_state(session: &mut ResolvedLocalSession) -> SessionDetailResult<()> {
@@ -995,15 +1261,15 @@ fn load_or_build_index(
     let timeline_version = adapter.timeline_version();
     let lock = resource_lock(&session.resource_id);
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (mut cache, mut warnings) = load_timeline_cache(repository);
     let key = cache_key(session);
+    let (mut cached_entry, mut warnings) = load_timeline_cache(repository, &key);
 
     for attempt in 0..2 {
         refresh_file_state(session)?;
         let expected_size = session.file_size;
         let expected_nanos = session.modified_nanos;
         let current_snapshot_id = snapshot_id(session, timeline_version);
-        if let Some(entry) = cache.entries.get(&key).filter(|entry| {
+        if let Some(entry) = cached_entry.as_ref().filter(|entry| {
             entry.resource_id == session.resource_id
                 && entry.provider == session.provider
                 && entry.size == expected_size
@@ -1015,7 +1281,7 @@ fn load_or_build_index(
                     conversation_file_limit_bytes(),
                 )
                 && entry.summary.session_id == session.provider_session_id
-                && !entry.summary.is_internal_subagent
+                && entry.summary.is_internal_subagent == session.child.is_some()
                 && entry.index.parser_version == timeline_version
         }) {
             if validate_index(&entry.index, expected_size).is_ok() {
@@ -1029,17 +1295,11 @@ fn load_or_build_index(
                     continue;
                 }
             }
-            cache.entries.remove(&key);
+            cached_entry = None;
         }
 
-        let context = SessionTimelineContext {
-            resource_id: &session.resource_id,
-            provider_session_id: &session.provider_session_id,
-            project_root: &session.project_root,
-            project_root_aliases: &session.project_root_aliases,
-        };
         let index = adapter
-            .build_timeline_index(&session.transcript_path, &context)
+            .build_timeline_index(&session.transcript_path, &session.timeline_context())
             .map_err(|_| {
                 SessionDetailError::new(
                     SessionDetailErrorCode::ProviderError,
@@ -1065,6 +1325,7 @@ fn load_or_build_index(
             )));
         }
         let fresh_entry = TimelineCacheEntry {
+            schema: TIMELINE_CACHE_SCHEMA,
             resource_id: session.resource_id.clone(),
             provider: session.provider.clone(),
             size: expected_size,
@@ -1075,25 +1336,7 @@ fn load_or_build_index(
             summary: summary.clone(),
             index: index.clone(),
         };
-        cache.entries.insert(key.clone(), fresh_entry.clone());
-        if cache.entries.len() > MAX_TIMELINE_CACHE_ENTRIES {
-            cache.entries.clear();
-            cache.entries.insert(key.clone(), fresh_entry);
-            warnings.push(SessionDetailWarning {
-                code: "timeline_cache_reset".to_string(),
-                message: "Mallard reset an over-capacity local timeline cache.".to_string(),
-                severity: NoticeSeverity::Info,
-            });
-        }
-        cache.schema = TIMELINE_CACHE_SCHEMA;
-        if write_json_atomic(
-            repository.root(),
-            &repository.root().join("session_timeline_cache.json"),
-            &cache,
-            MAX_TIMELINE_CACHE_BYTES,
-        )
-        .is_err()
-        {
+        if write_timeline_cache(repository, &key, &fresh_entry, MAX_TIMELINE_CACHE_BYTES).is_err() {
             warnings.push(SessionDetailWarning {
                 code: "timeline_cache_write_failed".to_string(),
                 message: "Mallard could not update the local timeline cache.".to_string(),
@@ -1139,6 +1382,7 @@ fn checkpoint_event(
         text: None,
         tool: None,
         checkpoint: Some(checkpoint),
+        agent: None,
     }
 }
 
@@ -1368,15 +1612,19 @@ fn summarize_session(
             "No registered provider can read this session.",
         )
     })?;
-    let summary = adapter
-        .summarize_file(&session.transcript_path)
-        .map_err(|_| {
-            SessionDetailError::new(
-                SessionDetailErrorCode::ProviderError,
-                "The provider could not summarize this local session.",
-            )
-        })?;
-    if summary.session_id != session.provider_session_id || summary.is_internal_subagent {
+    let summary = match &session.child {
+        Some(child) => adapter.summarize_child_file(&session.transcript_path, child),
+        None => adapter.summarize_file(&session.transcript_path),
+    }
+    .map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "The provider could not summarize this local session.",
+        )
+    })?;
+    if summary.session_id != session.provider_session_id
+        || summary.is_internal_subagent != session.child.is_some()
+    {
         return Err(SessionDetailError::new(
             SessionDetailErrorCode::OwnershipChanged,
             "The local session identity changed while loading its details.",
@@ -1419,6 +1667,24 @@ fn sanitize_timeline_events(events: &mut [SessionTimelineEvent], session: &Resol
         if let Some(checkpoint) = event.checkpoint.as_mut() {
             checkpoint.subject = sanitize_boundary_text(&checkpoint.subject, session);
         }
+        if let Some(agent) = event.agent.as_mut() {
+            sanitize_agent_preview(agent, session);
+        }
+    }
+}
+
+fn sanitize_agent_preview(agent: &mut SessionAgentPreview, session: &ResolvedLocalSession) {
+    agent.label = sanitize_boundary_text(&agent.label, session);
+    for text in [
+        agent.task.as_mut(),
+        agent.role.as_mut(),
+        agent.brief.as_mut(),
+        agent.report.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        *text = sanitize_boundary_text(text, session);
     }
 }
 
@@ -1571,16 +1837,30 @@ pub fn get_project_session_detail(
     resource_id: &str,
     views: &[LocalSessionView],
 ) -> SessionDetailResult<ProjectSessionDetail> {
-    let mut session =
-        resolve_local_session(repository, registry, local_project_id, resource_id, views)?;
+    let ResolvedSession {
+        mut session,
+        parent,
+    } = resolve_session(repository, registry, local_project_id, resource_id, views)?;
     let (index, summary, snapshot_id, cache_warnings) =
         load_or_build_index(repository, registry, &mut session)?;
-    let checkpoint = checkpoint_support(
-        &session.project_root,
-        summary.branch.as_deref(),
-        summary.recorded_sha.as_deref(),
-        summary.ended_at,
-    )?;
+    // A child page is the parent's row opened: the parent's index (cached)
+    // holds the call, and the provider describes it the way the row does.
+    let agent = match parent {
+        Some(mut parent) => Some(describe_child(repository, registry, &mut parent, &session)?),
+        None => None,
+    };
+    // Checkpoints are the parent's; a child neither commits nor is a
+    // session to resume, so it offers no verbs either.
+    let checkpoint = if session.child.is_some() {
+        CheckpointSupport::Unsupported
+    } else {
+        checkpoint_support(
+            &session.project_root,
+            summary.branch.as_deref(),
+            summary.recorded_sha.as_deref(),
+            summary.ended_at,
+        )?
+    };
     let event_counts = with_checkpoint_count(index.counts.clone(), &checkpoint);
     let tokens = match summary.total_tokens {
         Some(value) => SessionCount {
@@ -1597,24 +1877,34 @@ pub fn get_project_session_detail(
             "This provider transcript does not expose a reliable token total.",
         ),
     };
-    let mut actions = registry
-        .require(&session.provider)
-        .map(|adapter| {
-            adapter.available_actions(&SessionActionContext {
-                provider_session_id: &session.provider_session_id,
-                is_local: true,
+    let mut actions = if session.child.is_some() {
+        Vec::new()
+    } else {
+        registry
+            .require(&session.provider)
+            .map(|adapter| {
+                adapter.available_actions(&SessionActionContext {
+                    provider_session_id: &session.provider_session_id,
+                    is_local: true,
+                })
             })
-        })
-        .unwrap_or_default();
+            .unwrap_or_default()
+    };
     sanitize_actions(&mut actions, &session)?;
     let mut warnings = timeline_warnings(&index, cache_warnings);
     sanitize_warnings(&mut warnings, &session);
     // The provider index title leads: keep-both preservation markers are
     // title renames in the provider's session index, which the transcript
     // summary never reflects. The transcript title covers unnamed sessions.
-    let title = (session.display_name != session.provider_session_id)
-        .then(|| session.display_name.clone())
-        .filter(|title| !title.trim().is_empty())
+    // A child is titled by the parent's row: the task it was given.
+    let title = agent
+        .as_ref()
+        .map(|agent| agent.preview.label.clone())
+        .or_else(|| {
+            (session.display_name != session.provider_session_id)
+                .then(|| session.display_name.clone())
+                .filter(|title| !title.trim().is_empty())
+        })
         .or_else(|| {
             summary
                 .title
@@ -1648,8 +1938,66 @@ pub fn get_project_session_detail(
             .flatten(),
         snapshot_id,
         warnings,
+        agent,
     };
     Ok(detail)
+}
+
+/// The parent's row for this child, read from the parent's cached index.
+fn describe_child(
+    repository: &LocalStateRepository,
+    registry: &AgentProviderRegistry,
+    parent: &mut ResolvedLocalSession,
+    child: &ResolvedLocalSession,
+) -> SessionDetailResult<SessionDetailAgent> {
+    let (index, parent_summary, _, _) = load_or_build_index(repository, registry, parent)?;
+    let entry = index
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == SessionTimelineEventKind::AgentCall
+                && event
+                    .agent
+                    .as_ref()
+                    .and_then(|agent| agent.provider_agent_id.as_deref())
+                    == Some(child.provider_session_id.as_str())
+        })
+        .ok_or_else(|| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::NotFound,
+                "The parent session does not record this agent.",
+            )
+        })?;
+    let adapter = registry.require(&parent.provider).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::NotFound,
+            "No registered provider can read this session.",
+        )
+    })?;
+    let mut preview = adapter
+        .describe_agent_call(&parent.transcript_path, entry, &parent.timeline_context())
+        .map_err(|_| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider could not describe this agent.",
+            )
+        })?;
+    sanitize_agent_preview(&mut preview, parent);
+    let parent_title = (parent.display_name != parent.provider_session_id)
+        .then(|| parent.display_name.clone())
+        .filter(|title| !title.trim().is_empty())
+        .or_else(|| {
+            parent_summary
+                .title
+                .clone()
+                .filter(|title| !title.trim().is_empty())
+        })
+        .unwrap_or_else(|| parent.display_name.clone());
+    Ok(SessionDetailAgent {
+        parent_resource_id: parent.resource_id.clone(),
+        parent_title: sanitize_boundary_text(&parent_title, parent),
+        preview,
+    })
 }
 
 /// Read one filtered, chronological page. The opaque cursor is bound to the
@@ -1667,8 +2015,10 @@ pub fn get_project_session_timeline_page(
     if let Some(turn_id) = &request.turn_id {
         ensure_identifier("turn id", turn_id)?;
     }
-    let mut session =
-        resolve_local_session(repository, registry, local_project_id, resource_id, views)?;
+    let ResolvedSession {
+        mut session,
+        parent: _,
+    } = resolve_session(repository, registry, local_project_id, resource_id, views)?;
     let (index, summary, current_snapshot_id, cache_warnings) =
         load_or_build_index(repository, registry, &mut session)?;
     if request.snapshot_id != current_snapshot_id {
@@ -1689,16 +2039,6 @@ pub fn get_project_session_timeline_page(
         cursor.next_index
     } else {
         0
-    };
-    let checkpoint = checkpoint_support(
-        &session.project_root,
-        summary.branch.as_deref(),
-        summary.recorded_sha.as_deref(),
-        summary.ended_at,
-    )?;
-    let checkpoint = match checkpoint {
-        CheckpointSupport::Supported(checkpoint) => checkpoint,
-        CheckpointSupport::Unsupported => None,
     };
     if start_index > index.events.len() {
         return Err(invalid_request("The timeline cursor position is invalid."));
@@ -1722,7 +2062,12 @@ pub fn get_project_session_timeline_page(
     };
     let mut slice = if start_index < index.events.len() {
         adapter
-            .read_timeline_page(&session.transcript_path, &index, &query)
+            .read_timeline_page(
+                &session.transcript_path,
+                &index,
+                &query,
+                &session.timeline_context(),
+            )
             .map_err(|_| {
                 SessionDetailError::new(
                     SessionDetailErrorCode::ProviderError,
@@ -1737,11 +2082,17 @@ pub fn get_project_session_timeline_page(
     };
     validate_slice_against_query(&slice, &index, &query)?;
     let checkpoint_requested = request.turn_id.is_none()
+        && session.child.is_none()
         && request
             .included_event_kinds
             .contains(&SessionTimelineEventKind::Checkpoint);
     if slice.next_index.is_none() && checkpoint_requested {
-        if let Some(checkpoint) = checkpoint {
+        if let CheckpointSupport::Supported(Some(checkpoint)) = checkpoint_support(
+            &session.project_root,
+            summary.branch.as_deref(),
+            summary.recorded_sha.as_deref(),
+            summary.ended_at,
+        )? {
             if slice.events.len() < limit {
                 slice.events.push(checkpoint_event(&index, checkpoint));
             } else {
@@ -1804,8 +2155,10 @@ pub fn get_project_session_event_detail(
 ) -> SessionDetailResult<SessionEventDetail> {
     ensure_identifier("snapshot id", snapshot_id_value)?;
     ensure_identifier("event id", event_id)?;
-    let mut session =
-        resolve_local_session(repository, registry, local_project_id, resource_id, views)?;
+    let ResolvedSession {
+        mut session,
+        parent: _,
+    } = resolve_session(repository, registry, local_project_id, resource_id, views)?;
     let (index, _, current_snapshot_id, _) =
         load_or_build_index(repository, registry, &mut session)?;
     if snapshot_id_value != current_snapshot_id {
@@ -1816,7 +2169,11 @@ pub fn get_project_session_event_detail(
         .iter()
         .find(|event| event.event_id == event_id)
         .ok_or_else(|| invalid_request("The timeline event does not exist."))?;
-    if indexed.kind != SessionTimelineEventKind::ToolCall || indexed.tool.is_none() {
+    if !matches!(
+        indexed.kind,
+        SessionTimelineEventKind::ToolCall | SessionTimelineEventKind::AgentCall
+    ) || indexed.tool.is_none()
+    {
         return Err(invalid_request(
             "Only tool-call events have expanded detail.",
         ));
@@ -1906,6 +2263,7 @@ mod tests {
             shell_calls: SessionCount::exact(0),
             reads: SessionCount::exact(0),
             other_tools: SessionCount::exact(0),
+            agent_calls: SessionCount::exact(0),
         }
     }
 
@@ -1936,6 +2294,7 @@ mod tests {
                     affected_paths: vec![path.to_string()],
                     result_source: None,
                 }),
+                agent: None,
             }],
             counts: counts(),
             warnings: Vec::new(),
@@ -1956,6 +2315,7 @@ mod tests {
             file_size: 0,
             modified_nanos: 0,
             is_active: false,
+            child: None,
         }
     }
 
@@ -1979,9 +2339,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tuning_stamps_gate_reuse_and_join_the_snapshot_identity() {
-        let stamped = TimelineCacheEntry {
+    fn cache_entry_fixture() -> TimelineCacheEntry {
+        TimelineCacheEntry {
+            schema: TIMELINE_CACHE_SCHEMA,
             resource_id: "codex:conversation:thread-1".to_string(),
             provider: ProviderKey::parse("codex").unwrap(),
             size: 4,
@@ -1991,7 +2351,127 @@ mod tests {
             conversation_limit_bytes: 100 * 1024 * 1024,
             summary: summary_fixture(),
             index: index_with_path("file"),
-        };
+        }
+    }
+
+    #[test]
+    fn timeline_cache_evicts_oldest_by_bytes_and_accounts_for_replacement() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(sandbox.path()).unwrap();
+        let entry = cache_entry_fixture();
+        let entry_bytes = serde_json::to_vec(&entry).unwrap().len() as u64;
+        let budget = entry_bytes * 2;
+        let directory = repository.root().join("session_timeline_cache");
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        let third = "c".repeat(64);
+        write_timeline_cache(&repository, &first, &entry, budget).unwrap();
+        write_timeline_cache(&repository, &second, &entry, budget).unwrap();
+        // Replacing a file of the same size at the byte limit needs no eviction.
+        write_timeline_cache(&repository, &second, &entry, budget).unwrap();
+        assert!(load_timeline_cache(&repository, &first).0.is_some());
+        fs::File::open(directory.join(format!("{first}.json")))
+            .unwrap()
+            .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+
+        write_timeline_cache(&repository, &third, &entry, budget).unwrap();
+        assert!(load_timeline_cache(&repository, &first).0.is_none());
+        assert!(load_timeline_cache(&repository, &second).0.is_some());
+        assert!(load_timeline_cache(&repository, &third).0.is_some());
+        let total_bytes: u64 = fs::read_dir(&directory)
+            .unwrap()
+            .map(|item| item.unwrap().metadata().unwrap().len())
+            .sum();
+        assert_eq!(total_bytes, budget);
+
+        // An entry that cannot fit must fail before it removes other entries.
+        let mut oversized = entry;
+        oversized.summary.title = Some("x".repeat(budget as usize));
+        assert!(write_timeline_cache(&repository, &third, &oversized, budget).is_err());
+        assert!(load_timeline_cache(&repository, &second).0.is_some());
+        assert!(load_timeline_cache(&repository, &third)
+            .0
+            .unwrap()
+            .summary
+            .title
+            .is_none());
+    }
+
+    #[test]
+    fn timeline_cache_reuses_index_and_summary_after_reaching_32_mib() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(sandbox.path()).unwrap();
+        let registry = AgentProviderRegistry::with_test_provider();
+        let mut session = sanitization_session();
+        session.provider = crate::providers::test_provider::provider_key();
+        session.provider_home = fs::canonicalize(sandbox.path()).unwrap();
+        session.transcript_path = session.provider_home.join("session.jsonl");
+        // Rebuilding this fixture cannot produce a valid session summary.
+        fs::write(&session.transcript_path, b"null").unwrap();
+        refresh_file_state(&mut session).unwrap();
+        assert!(summarize_session(&registry, &session).is_err());
+        let mut entry = cache_entry_fixture();
+        entry.provider = session.provider.clone();
+        entry.modified_nanos = session.modified_nanos;
+        entry.timeline_version = registry
+            .require(&session.provider)
+            .unwrap()
+            .timeline_version();
+        entry.index.parser_version = entry.timeline_version;
+        entry.preview_budget_bytes = timeline_message_preview_bytes() as u64;
+        entry.conversation_limit_bytes = conversation_file_limit_bytes();
+        entry.summary.title = Some("Cached summary".to_string());
+        let key = cache_key(&session);
+        let directory = repository.root().join("session_timeline_cache");
+        repository.ensure_directory(&directory).unwrap();
+        let old_path = directory.join(format!("{}.json", "a".repeat(64)));
+        fs::File::create(&old_path)
+            .unwrap()
+            .set_len(MAX_TIMELINE_CACHE_BYTES)
+            .unwrap();
+        write_timeline_cache(&repository, &key, &entry, MAX_TIMELINE_CACHE_BYTES).unwrap();
+        assert!(!old_path.exists());
+
+        // An unreadable neighboring cache must not affect this session's reads.
+        fs::write(&old_path, b"invalid JSON").unwrap();
+        for _ in 0..2 {
+            let (index, summary, _, warnings) =
+                load_or_build_index(&repository, &registry, &mut session).unwrap();
+            assert_eq!(index.events[0].event_id, "event-1");
+            assert_eq!(summary.title.as_deref(), Some("Cached summary"));
+            assert!(warnings.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeline_cache_rejects_symlink_directories_and_files() {
+        use std::os::unix::fs::symlink;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(sandbox.path()).unwrap();
+        let entry = cache_entry_fixture();
+        let key = "a".repeat(64);
+        let directory = repository.root().join("session_timeline_cache");
+        let outside = sandbox.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let target = outside.join(format!("{key}.json"));
+        fs::write(&target, b"unchanged").unwrap();
+        symlink(&outside, &directory).unwrap();
+        assert!(write_timeline_cache(&repository, &key, &entry, MAX_TIMELINE_CACHE_BYTES).is_err());
+        assert!(load_timeline_cache(&repository, &key).0.is_none());
+        fs::remove_file(&directory).unwrap();
+        fs::create_dir(&directory).unwrap();
+        symlink(&target, directory.join(format!("{key}.json"))).unwrap();
+        assert!(write_timeline_cache(&repository, &key, &entry, MAX_TIMELINE_CACHE_BYTES).is_err());
+        assert!(load_timeline_cache(&repository, &key).0.is_none());
+        assert_eq!(fs::read(&target).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn tuning_stamps_gate_reuse_and_join_the_snapshot_identity() {
+        let stamped = cache_entry_fixture();
         assert!(entry_matches_limits(
             &stamped,
             1024 * 1024,
@@ -2185,6 +2665,7 @@ mod tests {
                 affected_paths: vec!["src/main.rs".to_string()],
             }),
             checkpoint: None,
+            agent: None,
         };
         assert!(validate_page_slice(
             &SessionTimelinePageSlice {
@@ -2222,6 +2703,7 @@ mod tests {
             text: Some(text),
             tool: None,
             checkpoint: None,
+            agent: None,
         };
         let error = validate_page_slice(
             &SessionTimelinePageSlice {
@@ -2623,6 +3105,241 @@ mod tests {
         assert_eq!(
             parse_conversation_resource_id(claude.as_str()).unwrap().0,
             ProviderKey::parse("claude").unwrap()
+        );
+    }
+
+    #[test]
+    fn agent_transcripts_open_as_child_pages_through_their_parent() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(sandbox.path()).unwrap();
+        let provider_home = sandbox.path().join("test-provider-home");
+        let sessions_root = provider_home.join("sessions");
+        let project_root = sandbox.path().join("project");
+        fs::create_dir_all(sessions_root.join("session-1/subagents")).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+
+        let provider =
+            ProviderKey::parse(crate::providers::test_provider::TEST_PROVIDER_KEY).unwrap();
+        let profile_id = LocalProviderProfileId::parse("session-detail-profile").unwrap();
+        let local_project_id = LocalProjectId::parse("session-detail-project").unwrap();
+        let bundle_id = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let identity = repository.load_or_create_host_identity().unwrap();
+        let canonical_project_root = fs::canonicalize(&project_root).unwrap();
+        let canonical_provider_home = fs::canonicalize(&provider_home).unwrap();
+        let project_binding = ProjectBinding {
+            host_id: identity.host_id.clone(),
+            replica_id: ReplicaId::parse("session-detail-replica").unwrap(),
+            local_project_id: local_project_id.clone(),
+            bundle_id: bundle_id.clone(),
+            project_root: project_root.to_string_lossy().into_owned(),
+            canonical_project_root: canonical_project_root.to_string_lossy().into_owned(),
+            profile_ids: BTreeMap::from([(provider.clone(), profile_id.clone())]),
+            state: BindingState::Active,
+            revision: 0,
+            updated_at: 1,
+        };
+        repository
+            .mutate_config(|config| {
+                config.projects.push(LocalProjectRegistration {
+                    local_project_id: local_project_id.clone(),
+                    bundle_id: bundle_id.clone(),
+                    display_name: "Session Detail project".to_string(),
+                    local_alias: None,
+                    repository_fingerprint: None,
+                    recipe: BundleRecipe::default(),
+                    revision: 0,
+                    created_at: 1,
+                    updated_at: 1,
+                });
+                Ok(())
+            })
+            .unwrap();
+        repository
+            .mutate_bindings(|_, machine| {
+                machine.profiles.push(ProviderProfile {
+                    profile_id: profile_id.clone(),
+                    provider: provider.clone(),
+                    display_name: "Test Provider".to_string(),
+                    path: provider_home.to_string_lossy().into_owned(),
+                    canonical_path: canonical_provider_home.to_string_lossy().into_owned(),
+                    provider_config: mallard_domain::AgentProviderConfig::version_1(),
+                    revision: 0,
+                    created_at: 1,
+                    updated_at: 1,
+                });
+                machine.bindings.push(project_binding);
+                Ok(())
+            })
+            .unwrap();
+
+        let provider_session_id = "session-1";
+        let transcript = sessions_root.join("session-1.jsonl");
+        let child = sessions_root.join("session-1/subagents/agent-a1b2c3.jsonl");
+        let write = |path: &Path, records: Vec<serde_json::Value>| {
+            let mut bytes = Vec::new();
+            for record in records {
+                serde_json::to_writer(&mut bytes, &record).unwrap();
+                bytes.push(b'\n');
+            }
+            fs::write(path, bytes).unwrap();
+        };
+        write(
+            &transcript,
+            vec![
+                serde_json::json!({"type":"user","uuid":"u-1","sessionId":provider_session_id,"cwd":canonical_project_root,"timestamp":"2026-08-27T06:00:00Z","message":{"role":"user","content":"Research the term marking"}}),
+                serde_json::json!({"type":"assistant","uuid":"a-1","sessionId":provider_session_id,"cwd":canonical_project_root,"timestamp":"2026-08-27T06:00:05Z","message":{"id":"msg-1","role":"assistant","stop_reason":"tool_use","content":[
+                    {"type":"tool_use","id":"task-1","name":"Task","input":{"description":"Research term marking","subagent_type":"general-purpose","prompt":"Research how reading apps mark a target word."}}
+                ]}}),
+                serde_json::json!({"type":"user","uuid":"r-1","sessionId":provider_session_id,"cwd":canonical_project_root,"timestamp":"2026-08-27T06:00:09Z","toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"a1b2c3","description":"Research term marking","resolvedModel":"claude-opus-5"},"message":{"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"task-1","content":[{"type":"text","text":"Async agent launched."}]}
+                ]}}),
+                serde_json::json!({"type":"assistant","uuid":"a-2","sessionId":provider_session_id,"cwd":canonical_project_root,"timestamp":"2026-08-27T06:14:41Z","message":{"id":"msg-2","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"The reports agree."}]}}),
+            ],
+        );
+        write(
+            &child,
+            vec![
+                serde_json::json!({"type":"user","uuid":"c-1","parentUuid":null,"isSidechain":true,"sessionId":provider_session_id,"agentId":"a1b2c3","cwd":canonical_project_root,"timestamp":"2026-08-27T06:00:09Z","message":{"role":"user","content":"Research how reading apps mark a target word."}}),
+                serde_json::json!({"type":"assistant","uuid":"c-2","parentUuid":"c-1","isSidechain":true,"sessionId":provider_session_id,"agentId":"a1b2c3","cwd":canonical_project_root,"timestamp":"2026-08-27T06:10:36Z","message":{"id":"cm-1","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"I have enough. Here are the findings."}]}}),
+            ],
+        );
+
+        let transcript_metadata = fs::metadata(&transcript).unwrap();
+        let thread_id =
+            initial_conversation_thread_id(&bundle_id, &provider, provider_session_id).unwrap();
+        let resource_id = conversation_resource_id(&provider, &thread_id).unwrap();
+        let views = vec![LocalSessionView {
+            descriptor: crate::provider_capture::ResourceCandidate {
+                resource_id: resource_id.to_string(),
+                kind: mallard_domain::portable::contracts::conversation(),
+                provider: Some(provider.clone()),
+                provider_resource_type: Some("session".to_string()),
+                display_name: "Session one".to_string(),
+                apply_policy: mallard_domain::portable::contracts::safe_file(),
+                selected_by_default: true,
+                blocked_reason: None,
+                logical_paths: vec!["sessions/session-1.jsonl".to_string()],
+                project_content: None,
+            },
+            provider: provider.clone(),
+            provider_thread_id: provider_session_id.to_string(),
+            transcript_logical_path: "sessions/session-1.jsonl".to_string(),
+            source_path: transcript.clone(),
+            source_mtime: modified_secs(&transcript_metadata),
+            source_size: transcript_metadata.len(),
+            capture_bytes: transcript_metadata.len(),
+        }];
+        let registry = AgentProviderRegistry::with_test_provider();
+
+        let parent = get_project_session_detail(
+            &repository,
+            &registry,
+            &local_project_id,
+            resource_id.as_str(),
+            &views,
+        )
+        .unwrap();
+        assert_eq!(parent.event_counts.agent_calls.value, Some(1));
+        assert!(parent.agent.is_none());
+        let page = get_project_session_timeline_page(
+            &repository,
+            &registry,
+            &local_project_id,
+            resource_id.as_str(),
+            ProjectSessionTimelineRequest {
+                snapshot_id: parent.snapshot_id.clone(),
+                cursor: None,
+                limit: None,
+                included_event_kinds: BTreeSet::from([SessionTimelineEventKind::AgentCall]),
+                included_tool_categories: BTreeSet::new(),
+                turn_id: None,
+            },
+            &views,
+        )
+        .unwrap();
+        assert_eq!(page.events.len(), 1);
+        let row = page.events[0].agent.clone().unwrap();
+        let child_resource_id = format!("{resource_id}/agent/a1b2c3");
+        assert_eq!(
+            row.transcript_resource_id.as_deref(),
+            Some(child_resource_id.as_str())
+        );
+        assert_eq!(row.status, crate::providers::SessionAgentStatus::Completed);
+        // The row's report is the child's, and no provider path leaks in it.
+        assert_eq!(
+            row.report.as_deref(),
+            Some("I have enough. Here are the findings.")
+        );
+
+        let detail = get_project_session_detail(
+            &repository,
+            &registry,
+            &local_project_id,
+            &child_resource_id,
+            &views,
+        )
+        .unwrap();
+        assert_eq!(detail.resource_id, child_resource_id);
+        assert_eq!(detail.provider_session_id, "a1b2c3");
+        assert_eq!(detail.title, "Research term marking");
+        assert!(detail.actions.is_empty());
+        let agent = detail.agent.clone().unwrap();
+        assert_eq!(agent.parent_resource_id, resource_id.as_str());
+        assert_eq!(agent.parent_title, "Session one");
+        assert_eq!(agent.preview.role.as_deref(), Some("general-purpose"));
+        assert_eq!(detail.event_counts.prompts.value, Some(1));
+        assert_eq!(detail.event_counts.responses.value, Some(1));
+        let child_page = get_project_session_timeline_page(
+            &repository,
+            &registry,
+            &local_project_id,
+            &child_resource_id,
+            ProjectSessionTimelineRequest {
+                snapshot_id: detail.snapshot_id.clone(),
+                cursor: None,
+                limit: None,
+                included_event_kinds: BTreeSet::from([
+                    SessionTimelineEventKind::Prompt,
+                    SessionTimelineEventKind::Response,
+                    SessionTimelineEventKind::Checkpoint,
+                ]),
+                included_tool_categories: BTreeSet::new(),
+                turn_id: None,
+            },
+            &views,
+        )
+        .unwrap();
+        assert_eq!(child_page.events.len(), 2);
+        assert_eq!(
+            child_page.events[0].text.as_deref(),
+            Some("Research how reading apps mark a target word.")
+        );
+
+        // A hop the parent never recorded has no file: not local. A hop that
+        // is not an identity is refused before any file is touched.
+        assert_eq!(
+            get_project_session_detail(
+                &repository,
+                &registry,
+                &local_project_id,
+                &format!("{resource_id}/agent/missing1"),
+                &views,
+            )
+            .unwrap_err()
+            .code,
+            SessionDetailErrorCode::NotLocal
+        );
+        assert_eq!(
+            get_project_session_detail(
+                &repository,
+                &registry,
+                &local_project_id,
+                &format!("{resource_id}/agent/../escape"),
+                &views,
+            )
+            .unwrap_err()
+            .code,
+            SessionDetailErrorCode::InvalidRequest
         );
     }
 }

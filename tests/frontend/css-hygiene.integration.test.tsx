@@ -242,7 +242,7 @@ test("the session-detail inks read on an expanded tool row", () => {
   const scoped = scopedTokens(".session-detail-page");
   for (const theme of ["light", "dark"] as const) {
     const tokens = tokensFor(theme);
-    for (const ink of ["--session-detail-amber", "--session-detail-link", "--session-detail-you"]) {
+    for (const ink of ["--session-detail-amber", "--session-detail-link", "--session-detail-you", "--session-detail-agent", "--session-detail-live"]) {
       const expression = scoped.get(ink);
       assert.ok(expression, `${ink} is not declared on .session-detail-page`);
       const colour = mixSrgb(expression, tokens);

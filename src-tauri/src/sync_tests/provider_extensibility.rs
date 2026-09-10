@@ -114,7 +114,7 @@ fn third_provider_sessions_flow_through_common_discovery_and_capture() {
 
     let selected = BTreeSet::from([candidate.resource_id.clone()]);
     let captured =
-        provider_capture::capture_from_discovery(&registry, &request, &discovery, &selected)
+        provider_capture::capture_from_discovery(&registry, &request, &discovery, &selected, true)
             .unwrap();
     assert_eq!(captured.conversations.len(), 1);
     let conversation = captured.conversations.values().next().unwrap();

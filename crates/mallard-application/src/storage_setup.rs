@@ -14,6 +14,7 @@ use mallard_domain::{
 use mallard_infrastructure::persistence::{
     ConfigMutation, ConfigTransactionError, HostOperationGuard, LocalStateRepository,
 };
+use mallard_infrastructure::storage_core::{ConfiguredObjectStore, ConnectionHealth};
 use mallard_infrastructure::storage_providers::{
     StorageAdapterError, StorageAdapterErrorKind, StorageProviderAdapter,
     StorageProviderDescriptor, StorageProviderRegistry, StorageSetupAssistantContext,
@@ -156,8 +157,9 @@ impl fmt::Display for StorageSetupError {
 impl std::error::Error for StorageSetupError {}
 
 /// One configured storage as every listing shows it: identity, provider
-/// coordinate, availability under this build's registry, and the adapter's
-/// redacted summary. Never a secret, never a full provider config.
+/// coordinate, availability under this build's registry, the adapter's
+/// redacted summary, and what the open transport last observed about its
+/// credential. Never a secret, never a full provider config.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct StorageSummary {
     pub storage_id: StorageId,
@@ -168,6 +170,10 @@ pub struct StorageSummary {
     pub icon: String,
     pub available: bool,
     pub summary: Vec<StorageSummaryField>,
+    /// Runtime connection health from the process-shared store, absent
+    /// until a request has been made in this process. Never persisted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection: Option<ConnectionHealth>,
 }
 
 fn validated_registered_adapter<'a>(
@@ -219,6 +225,7 @@ pub fn storage_summary(
             .unwrap_or_else(|| "storage".to_string()),
         available: adapter.is_some(),
         summary,
+        connection: ConfiguredObjectStore::connection_health_for(storage),
     })
 }
 
@@ -364,7 +371,26 @@ pub fn get_storage_setup_draft(
         .map(|draft| {
             let mut summary = draft_summary(registry, &draft);
             if matches!(draft.source, StorageSetupDraftSource::New) {
+                // Only declared form secrets can be reviewed. Listings and
+                // edit drafts stay redacted, including OAuth credentials.
+                let reviewable = registry
+                    .get(
+                        &draft.storage.provider,
+                        draft.storage.provider_config.version,
+                    )
+                    .map(|adapter| {
+                        adapter
+                            .descriptor()
+                            .secrets
+                            .into_iter()
+                            .map(|secret| secret.secret_id)
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
                 for state in &mut summary.secrets {
+                    if !reviewable.contains(&state.secret_id) {
+                        continue;
+                    }
                     state.value = draft
                         .storage
                         .provider_config
@@ -508,12 +534,34 @@ pub fn update_storage_setup_draft(
             draft.storage.provider_config.version,
         )
         .map_err(|_| storage_unavailable())?;
-    let declared = adapter
-        .descriptor()
+    let descriptor = adapter.descriptor();
+    let managed_id = descriptor
+        .setup_assistant
+        .as_ref()
+        .and_then(|assistant| assistant.managed_secret_id.as_ref());
+    let managed = managed_id.is_some_and(|key| draft.storage.provider_config.secrets.contains(key));
+    let declared = descriptor
         .secrets
-        .into_iter()
-        .map(|secret| secret.secret_id)
+        .iter()
+        .filter(|secret| {
+            if managed {
+                Some(&secret.secret_id) == managed_id
+            } else {
+                Some(&secret.secret_id) != managed_id
+            }
+        })
+        .map(|secret| secret.secret_id.clone())
         .collect::<BTreeSet<_>>();
+    if managed {
+        if request.secrets.keys().any(|key| !declared.contains(key))
+            || request.settings != draft.storage.provider_config.settings
+        {
+            return Err(StorageSetupError::invalid(
+                "storage_managed_credentials_locked",
+                "This connection uses a refresh token. Replace that token or reconnect with the setup assistant. The namespace cannot change.",
+            ));
+        }
+    }
     for (key, operation) in request.secrets {
         if !declared.contains(&key) {
             return Err(StorageSetupError::invalid(
@@ -603,6 +651,7 @@ fn pin_draft<'a>(
     adapter
         .validate_config(&draft.storage.provider_config)
         .map_err(|error| StorageSetupError::from_adapter(error, None))?;
+    validate_immutable_fields(adapter, &config, &draft.storage)?;
     ensure_destination_available(registry, &config, &draft.storage)?;
     Ok(PinnedDraft {
         _operation: operation,
@@ -679,6 +728,7 @@ pub fn commit_storage_setup_draft(
             committed_draft
                 .validate_source(config)
                 .map_err(|_| storage_setup_draft_target_conflict())?;
+            validate_immutable_fields(pinned.adapter, config, &storage)?;
             ensure_destination_available(registry, config, &storage)?;
             let replaced = match &source {
                 StorageSetupDraftSource::New => {
@@ -767,6 +817,22 @@ pub fn remove_storage(
     expected_config_revision: u64,
     pre_remove: impl FnOnce(&StorageConfig) -> Result<(), String>,
 ) -> Result<u64, StorageSetupError> {
+    let _operation = acquire_setup_operation(repository)?;
+    let snapshot = repository
+        .load_config()
+        .map_err(|_| StorageSetupError::persistence())?;
+    if snapshot.revision != expected_config_revision {
+        return Err(revision_conflict());
+    }
+    let stored = snapshot
+        .storages
+        .iter()
+        .find(|s| &s.id == storage_id)
+        .ok_or_else(storage_not_found)?;
+    // Cross-document checks run under the host guard, outside either document lock.
+    pre_remove(stored)
+        .map_err(|message| StorageSetupError::invalid_text("storage_removal_rejected", message))?;
+    let removed_id = storage_id.clone();
     let storage_id = storage_id.clone();
     let (_, committed) = repository
         .transact_config(move |config| {
@@ -784,9 +850,6 @@ pub fn remove_storage(
                     "This storage is still linked to a project. Unlink it before removing the storage.",
                 ));
             }
-            pre_remove(&config.storages[index]).map_err(|message| {
-                StorageSetupError::invalid_text("storage_removal_rejected", message)
-            })?;
             config.storages.remove(index);
             Ok(ConfigMutation::Changed(()))
         })
@@ -794,6 +857,7 @@ pub fn remove_storage(
             ConfigTransactionError::Mutation(error) => error,
             ConfigTransactionError::Persistence(_) => StorageSetupError::persistence(),
         })?;
+    ConfiguredObjectStore::forget(&removed_id);
     Ok(committed.revision)
 }
 
@@ -872,6 +936,7 @@ pub fn storage_setup_assistant_instruction(
             cli_path,
             draft_id: draft.draft_id.as_str(),
             draft_revision: draft.revision,
+            reconnect: matches!(draft.source, StorageSetupDraftSource::Edit { .. }),
         })
         .map_err(|_| {
             StorageSetupError::invalid(
@@ -1183,9 +1248,23 @@ fn probe_journaled(
         facts,
     )?;
     let result = adapter
-        .probe(&pending.provider_config, setup_id.as_str(), runtime)
+        .probe(
+            &pending.provider_config,
+            setup_id.as_str(),
+            runtime,
+            &mut mallard_infrastructure::storage_setup_journal::ProbeJournal {
+                store: &journal,
+                entry: &mut entry,
+            },
+        )
         .map_err(|error| StorageSetupError::from_adapter(error, Some(setup_id.as_str())));
-    finish_probe_journal(&journal, &mut entry, result)
+    let result = finish_probe_journal(&journal, &mut entry, result);
+    if result.is_ok() {
+        // The probe proved the connection with a fresh transport; a shared
+        // store that recorded a rejection for this storage starts over.
+        ConfiguredObjectStore::forget(&pending.id);
+    }
+    result
 }
 
 fn start_probe_journal(
@@ -1210,6 +1289,7 @@ fn start_probe_journal(
         created_at: timestamp,
         updated_at: timestamp,
         facts,
+        recovery: BoundedConfigObject::empty(),
     };
     journal
         .save(&entry)
@@ -1261,9 +1341,18 @@ fn reconcile_journaled_probes(
         .find_matching(provider, facts)
         .map_err(|_| StorageSetupError::persistence())?;
     for mut entry in entries {
+        let setup_id = entry.setup_id.clone();
         let reconciled = candidates.iter().any(|config| {
             adapter
-                .reconcile_probe(config, entry.setup_id.as_str(), runtime)
+                .reconcile_probe(
+                    config,
+                    setup_id.as_str(),
+                    runtime,
+                    &mut mallard_infrastructure::storage_setup_journal::ProbeJournal {
+                        store: journal,
+                        entry: &mut entry,
+                    },
+                )
                 .is_ok()
         });
         if !reconciled {
@@ -1578,7 +1667,7 @@ mod tests {
         let error = create_storage_setup_draft(
             &repository,
             registry,
-            &StorageProviderKey::parse("dropbox").unwrap(),
+            &StorageProviderKey::parse("unregistered").unwrap(),
         )
         .unwrap_err();
         assert_eq!(error.code(), "storage_provider_unknown");
@@ -1588,7 +1677,7 @@ mod tests {
         let foreign = StorageConfig {
             id: StorageId::parse("storage-foreign").unwrap(),
             name: "Foreign".to_string(),
-            provider: StorageProviderKey::parse("dropbox").unwrap(),
+            provider: StorageProviderKey::parse("unregistered").unwrap(),
             provider_config: StorageProviderConfig::new(
                 1,
                 BoundedConfigObject::from_json(&serde_json::json!({"namespace_id": "ns"})).unwrap(),
@@ -1604,7 +1693,7 @@ mod tests {
         let listed = list_storages(&repository, registry).unwrap();
         assert_eq!(listed.len(), 1);
         assert!(!listed[0].available);
-        assert_eq!(listed[0].provider_label, "dropbox");
+        assert_eq!(listed[0].provider_label, "unregistered");
         assert!(listed[0].summary.is_empty());
         assert_eq!(
             create_storage_edit_draft(&repository, registry, &foreign.id)
@@ -2272,5 +2361,565 @@ mod tests {
             .code(),
             "storage_provider_unavailable"
         );
+    }
+}
+
+fn validate_immutable_fields(
+    adapter: &dyn StorageProviderAdapter,
+    config: &SyncConfig,
+    candidate: &StorageConfig,
+) -> Result<(), StorageSetupError> {
+    if let Some(current) = config.storages.iter().find(|s| s.id == candidate.id) {
+        let old = current.provider_config.settings.to_json();
+        let new = candidate.provider_config.settings.to_json();
+        for field in adapter
+            .descriptor()
+            .fields
+            .iter()
+            .filter(|f| f.immutable_on_edit)
+        {
+            if old.get(field.field_id.as_str()) != new.get(field.field_id.as_str()) {
+                return Err(StorageSetupError::invalid(
+                    "storage_destination_immutable",
+                    "This destination cannot change. Add a new storage connection.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod dropbox_tests {
+    use super::*;
+    use mallard_domain::{SecretMap, SecretValue};
+    use mallard_infrastructure::storage_providers::dropbox::{
+        provider_key, token_key, DropboxAdapter, DropboxSettingsV1,
+    };
+
+    #[test]
+    fn dropbox_agent_poc_prepares_only_the_exact_schema_one_draft() {
+        // Shared with the HTTP POC. All fixture credentials are synthetic.
+        let prepared_config: StorageProviderConfig = serde_json::from_str(include_str!(
+            "../../../poc/dropbox-agent-setup/mock-provider-config.json"
+        ))
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        let registry = StorageProviderRegistry::production();
+        let draft = create_storage_setup_draft(&repository, registry, &provider_key()).unwrap();
+        let draft = update_storage_setup_draft(
+            &repository,
+            registry,
+            UpdateStorageSetupDraftRequest {
+                draft_id: draft.draft_id,
+                revision: draft.revision,
+                name: "Dropbox POC".into(),
+                settings: BoundedConfigObject::empty(),
+                secrets: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            begin_storage_draft_operation(
+                &repository,
+                &draft.draft_id,
+                draft.revision + 1,
+                "Dropbox POC"
+            )
+            .unwrap_err()
+            .code(),
+            "storage_setup_draft_revision_conflict"
+        );
+        let operation = begin_storage_draft_operation(
+            &repository,
+            &draft.draft_id,
+            draft.revision,
+            "Dropbox POC",
+        )
+        .unwrap();
+        assert_eq!(operation.provider(), &provider_key());
+        let prepared = prepare_storage_draft_in_operation(
+            &operation,
+            &repository,
+            registry,
+            PreparedProviderConfig {
+                settings: prepared_config.settings.clone(),
+                secrets: prepared_config.secrets.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(prepared.draft_revision, draft.revision + 1);
+        let stored = repository
+            .load_storage_setup_draft(&draft.draft_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.storage.provider_config, prepared_config);
+        assert_eq!(stored.storage.provider_config.version, 1);
+        assert!(repository.load_config().unwrap().storages.is_empty());
+        assert!(DropboxAdapter.descriptor().setup_assistant.is_some());
+    }
+
+    fn storage(id: &str, namespace: &str, token: &str) -> StorageConfig {
+        let mut secrets = SecretMap::empty();
+        secrets
+            .insert(token_key(), SecretValue::parse(token).unwrap())
+            .unwrap();
+        StorageConfig {
+            id: StorageId::parse(id).unwrap(),
+            name: "Dropbox".into(),
+            provider: provider_key(),
+            provider_config: StorageProviderConfig::new(
+                1,
+                BoundedConfigObject::encode(&DropboxSettingsV1 {
+                    namespace_id: namespace.into(),
+                })
+                .unwrap(),
+                secrets,
+            ),
+        }
+    }
+    #[test]
+    fn destination_is_unique_and_namespace_is_immutable_but_token_can_rotate() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        let mut config = repository.load_config().unwrap();
+        let original = storage("storage-0123456789abcdef01234567", "shared", "token-a");
+        config.storages.push(original.clone());
+        let rotated = storage(original.id.as_str(), "shared", "token-b");
+        assert!(validate_immutable_fields(&DropboxAdapter, &config, &rotated).is_ok());
+        let moved = storage(original.id.as_str(), "different", "token-b");
+        assert_eq!(
+            validate_immutable_fields(&DropboxAdapter, &config, &moved)
+                .unwrap_err()
+                .code(),
+            "storage_destination_immutable"
+        );
+        let duplicate = storage("storage-aaaaaaaaaaaaaaaaaaaaaaaa", "shared", "token-b");
+        assert_eq!(
+            ensure_destination_available(
+                StorageProviderRegistry::production(),
+                &config,
+                &duplicate
+            )
+            .unwrap_err()
+            .code(),
+            "storage_destination_conflict"
+        );
+        assert!(ensure_destination_available(
+            StorageProviderRegistry::production(),
+            &config,
+            &rotated
+        )
+        .is_ok());
+    }
+    #[test]
+    fn dropbox_mock_setup_commit_token_rotation_and_namespace_rejection() {
+        use mallard_infrastructure::storage_core::dropbox_store::mock::MockDropboxServer;
+        let server = MockDropboxServer::new();
+        let registry = StorageProviderRegistry::from_adapters(vec![server.adapter()]).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        let draft = create_storage_setup_draft(&repository, &registry, &provider_key()).unwrap();
+        let settings = BoundedConfigObject::encode(&DropboxSettingsV1 {
+            namespace_id: "shared".into(),
+        })
+        .unwrap();
+        let draft = update_storage_setup_draft(
+            &repository,
+            &registry,
+            UpdateStorageSetupDraftRequest {
+                draft_id: draft.draft_id,
+                revision: draft.revision,
+                name: "Shared Dropbox".into(),
+                settings: settings.clone(),
+                secrets: BTreeMap::from([(
+                    token_key(),
+                    SecretOperation::Set {
+                        value: SecretValue::parse("test-token").unwrap(),
+                    },
+                )]),
+            },
+        )
+        .unwrap();
+        test_storage_setup_draft(
+            &repository,
+            &registry,
+            server.runtime(),
+            &draft.draft_id,
+            draft.revision,
+        )
+        .unwrap();
+        commit_storage_setup_draft(
+            &repository,
+            &registry,
+            server.runtime(),
+            &draft.draft_id,
+            draft.revision,
+            |_| Ok(()),
+        )
+        .unwrap();
+        let config = repository.load_config().unwrap();
+        let saved = &config.storages[0];
+        let identity = continuity_identity(&registry, saved).unwrap();
+        assert_eq!(config.schema, 1);
+        let edit = create_storage_edit_draft(&repository, &registry, &saved.id).unwrap();
+        let edit = update_storage_setup_draft(
+            &repository,
+            &registry,
+            UpdateStorageSetupDraftRequest {
+                draft_id: edit.draft_id,
+                revision: edit.revision,
+                name: "Renamed Dropbox".into(),
+                settings: settings.clone(),
+                secrets: BTreeMap::from([(
+                    token_key(),
+                    SecretOperation::Replace {
+                        value: SecretValue::parse("second-token").unwrap(),
+                    },
+                )]),
+            },
+        )
+        .unwrap();
+        commit_storage_setup_draft(
+            &repository,
+            &registry,
+            server.runtime(),
+            &edit.draft_id,
+            edit.revision,
+            |_| Ok(()),
+        )
+        .unwrap();
+        let current = repository.load_config().unwrap();
+        assert_eq!(current.storages[0].id, saved.id);
+        assert_eq!(
+            continuity_identity(&registry, &current.storages[0]).unwrap(),
+            identity
+        );
+        let edit = create_storage_edit_draft(&repository, &registry, &saved.id).unwrap();
+        let edit = update_storage_setup_draft(
+            &repository,
+            &registry,
+            UpdateStorageSetupDraftRequest {
+                draft_id: edit.draft_id,
+                revision: edit.revision,
+                name: "Moved Dropbox".into(),
+                settings: BoundedConfigObject::encode(&DropboxSettingsV1 {
+                    namespace_id: "other".into(),
+                })
+                .unwrap(),
+                secrets: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            test_storage_setup_draft(
+                &repository,
+                &registry,
+                server.runtime(),
+                &edit.draft_id,
+                edit.revision
+            )
+            .unwrap_err()
+            .code(),
+            "storage_destination_immutable"
+        );
+        assert!(StorageSetupJournalStore::new(&repository)
+            .list()
+            .unwrap()
+            .is_empty());
+        assert_eq!(server.probe_file_count(), 0);
+    }
+
+    #[test]
+    fn summary_carries_runtime_connection_health_and_a_successful_test_forgets_it() {
+        use mallard_infrastructure::storage_core::{
+            dropbox_store::mock::MockDropboxServer, ConnectionState, ObjectStore,
+        };
+        let server = MockDropboxServer::new();
+        let registry = StorageProviderRegistry::from_adapters(vec![server.adapter()]).unwrap();
+        // Shared stores open on the caller's runtime, as desktop commands do.
+        let _runtime = server.runtime().enter();
+        let temp = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        let draft = create_storage_setup_draft(&repository, &registry, &provider_key()).unwrap();
+        let draft = update_storage_setup_draft(
+            &repository,
+            &registry,
+            UpdateStorageSetupDraftRequest {
+                draft_id: draft.draft_id,
+                revision: draft.revision,
+                name: "Shared Dropbox".into(),
+                settings: BoundedConfigObject::encode(&DropboxSettingsV1 {
+                    namespace_id: "shared".into(),
+                })
+                .unwrap(),
+                secrets: BTreeMap::from([(
+                    token_key(),
+                    SecretOperation::Set {
+                        value: SecretValue::parse("test-token").unwrap(),
+                    },
+                )]),
+            },
+        )
+        .unwrap();
+        commit_storage_setup_draft(
+            &repository,
+            &registry,
+            server.runtime(),
+            &draft.draft_id,
+            draft.revision,
+            |_| Ok(()),
+        )
+        .unwrap();
+        let saved = repository.load_config().unwrap().storages[0].clone();
+        // Nothing has been asked in this process: the listing says nothing.
+        assert!(storage_summary(&registry, &saved)
+            .unwrap()
+            .connection
+            .is_none());
+        let store = ConfiguredObjectStore::share_with(&registry, &saved).unwrap();
+        assert_eq!(
+            storage_summary(&registry, &saved)
+                .unwrap()
+                .connection
+                .unwrap()
+                .state,
+            ConnectionState::Connected
+        );
+        server.set_auth_tag(Some("invalid_access_token"));
+        let key = mallard_infrastructure::storage_core::ObjectKey::parse(
+            ".mallard/v1/repositories/0123456789abcdef0123456789abcdef/_head.json",
+        )
+        .unwrap();
+        assert!(store.get_metadata(&key, 64).is_err());
+        let health = storage_summary(&registry, &saved)
+            .unwrap()
+            .connection
+            .unwrap();
+        assert_eq!(health.state, ConnectionState::ReconnectRequired);
+        assert_eq!(health.code, "dropbox_reconnect_required");
+        assert_eq!(health.evidence.unwrap().endpoint, "files/download");
+        // Test connection probes with a fresh transport and names the cause.
+        let edit = create_storage_edit_draft(&repository, &registry, &saved.id).unwrap();
+        let refused = test_storage_setup_draft(
+            &repository,
+            &registry,
+            server.runtime(),
+            &edit.draft_id,
+            edit.revision,
+        )
+        .unwrap_err();
+        assert_eq!(refused.code(), "dropbox_reconnect_required");
+        assert!(refused
+            .to_string()
+            .contains("(users/get_current_account, HTTP 401, invalid_access_token, request req-"));
+        assert_eq!(refused.kind(), StorageSetupErrorKind::RemoteFailure);
+        // A probe that succeeds forgets the suspended entry.
+        server.set_auth_tag(None);
+        test_storage_setup_draft(
+            &repository,
+            &registry,
+            server.runtime(),
+            &edit.draft_id,
+            edit.revision,
+        )
+        .unwrap();
+        assert!(storage_summary(&registry, &saved)
+            .unwrap()
+            .connection
+            .is_none());
+        assert_eq!(server.probe_file_count(), 0);
+    }
+
+    #[test]
+    fn managed_credential_lifecycle_survives_reload_and_recovers_by_reconnection() {
+        use mallard_infrastructure::dropbox_setup::mock::MockDropboxSetup;
+        use mallard_infrastructure::storage_core::{
+            dropbox_store::mock::MockDropboxServer, ConnectionState, ObjectKey, ObjectStore,
+        };
+        use mallard_infrastructure::storage_providers::dropbox::refresh_token_key;
+        let server = MockDropboxServer::new();
+        let oauth = MockDropboxSetup::new();
+        let registry =
+            StorageProviderRegistry::from_adapters(vec![server.adapter_with_refresh(&oauth)])
+                .unwrap();
+        let _runtime = server.runtime().enter();
+        let temp = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        let namespace = BoundedConfigObject::encode(&DropboxSettingsV1 {
+            namespace_id: "shared".into(),
+        })
+        .unwrap();
+        let prepared = |token: &str| {
+            let mut secrets = SecretMap::empty();
+            secrets
+                .insert(refresh_token_key(), SecretValue::parse(token).unwrap())
+                .unwrap();
+            PreparedProviderConfig {
+                settings: namespace.clone(),
+                secrets,
+            }
+        };
+        let key = ObjectKey::parse(
+            ".mallard/v1/repositories/0123456789abcdef0123456789abcdef/_head.json",
+        )
+        .unwrap();
+
+        // Setup: the CLI prepares the exact draft; the user finishes it.
+        let draft = create_storage_setup_draft(&repository, &registry, &provider_key()).unwrap();
+        let operation = begin_storage_draft_operation(
+            &repository,
+            &draft.draft_id,
+            draft.revision,
+            &draft.name,
+        )
+        .unwrap();
+        prepare_storage_draft_in_operation(
+            &operation,
+            &repository,
+            &registry,
+            prepared("refresh-canary"),
+        )
+        .unwrap();
+        drop(operation);
+        let draft = get_storage_setup_draft(&repository, &registry, &draft.draft_id)
+            .unwrap()
+            .unwrap();
+        commit_storage_setup_draft(
+            &repository,
+            &registry,
+            server.runtime(),
+            &draft.draft_id,
+            draft.revision,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            oauth.count("refresh"),
+            1,
+            "the probe's fresh transport refreshed once"
+        );
+        let saved = repository.load_config().unwrap().storages[0].clone();
+        let digest = saved.integrity_digest().unwrap();
+
+        // Restart: a fresh repository over the same directory reads the same
+        // credential, and one push renews access once and changes nothing.
+        let reloaded = LocalStateRepository::from_home_dir(temp.path())
+            .unwrap()
+            .load_config()
+            .unwrap()
+            .storages[0]
+            .clone();
+        assert_eq!(reloaded.integrity_digest().unwrap(), digest);
+        let store = ConfiguredObjectStore::share_with(&registry, &reloaded).unwrap();
+        store.put_immutable(&key, b"head").unwrap();
+        assert_eq!(oauth.count("refresh"), 2);
+        assert_eq!(
+            repository.load_config().unwrap().storages[0]
+                .integrity_digest()
+                .unwrap(),
+            digest
+        );
+        assert_eq!(
+            storage_summary(&registry, &reloaded)
+                .unwrap()
+                .connection
+                .unwrap()
+                .state,
+            ConnectionState::Connected
+        );
+
+        // Dropbox stops honouring the refresh token. A fresh transport learns
+        // it on its first read, keeps the evidence, and is not asked again.
+        ConfiguredObjectStore::forget(&reloaded.id);
+        oauth.state.lock().unwrap().deny_refresh = true;
+        let error = ConfiguredObjectStore::share_with(&registry, &reloaded)
+            .err()
+            .expect("a refused refresh fails the first open");
+        assert!(
+            error.starts_with("Dropbox rejected the saved authorization."),
+            "{error}"
+        );
+        assert!(error.contains("(oauth2/token, HTTP 400, invalid_grant, request req-refresh-1)"));
+        assert!(!error.contains("secret-canary") && !error.contains("refresh-canary"));
+        assert_eq!(oauth.count("refresh"), 3);
+        let health = storage_summary(&registry, &reloaded)
+            .unwrap()
+            .connection
+            .unwrap();
+        assert_eq!(health.state, ConnectionState::ReconnectRequired);
+        assert_eq!(health.code, "dropbox_reconnect_required");
+        let suspended = ConfiguredObjectStore::share_with(&registry, &reloaded).unwrap();
+        assert_eq!(suspended.get_metadata(&key, 64).unwrap_err(), error);
+        assert_eq!(oauth.count("refresh"), 3, "a suspended store sends nothing");
+
+        // Reconnection: the edit draft takes the token the CLI regained for
+        // the same namespace; Save changes probes it fresh and commits.
+        let edit = create_storage_edit_draft(&repository, &registry, &reloaded.id).unwrap();
+        let operation =
+            begin_storage_draft_operation(&repository, &edit.draft_id, edit.revision, &edit.name)
+                .unwrap();
+        oauth.state.lock().unwrap().deny_refresh = false;
+        prepare_storage_draft_in_operation(
+            &operation,
+            &repository,
+            &registry,
+            prepared("refresh-renewed"),
+        )
+        .unwrap();
+        drop(operation);
+        let edit = get_storage_setup_draft(&repository, &registry, &edit.draft_id)
+            .unwrap()
+            .unwrap();
+        assert!(edit.edits_existing);
+        assert!(edit.secrets.iter().all(|secret| secret.value.is_none()));
+        commit_storage_setup_draft(
+            &repository,
+            &registry,
+            server.runtime(),
+            &edit.draft_id,
+            edit.revision,
+            |_| Ok(()),
+        )
+        .unwrap();
+        let current = repository.load_config().unwrap().storages[0].clone();
+        assert_eq!(current.id, reloaded.id);
+        assert_ne!(current.integrity_digest().unwrap(), digest);
+        assert_eq!(
+            continuity_identity(&registry, &current).unwrap(),
+            continuity_identity(&registry, &reloaded).unwrap()
+        );
+        assert!(storage_summary(&registry, &current)
+            .unwrap()
+            .connection
+            .is_none());
+        let store = ConfiguredObjectStore::share_with(&registry, &current).unwrap();
+        assert_eq!(
+            store.get_metadata(&key, 64).unwrap().unwrap().bytes,
+            b"head"
+        );
+        assert_eq!(
+            storage_summary(&registry, &current)
+                .unwrap()
+                .connection
+                .unwrap()
+                .state,
+            ConnectionState::Connected
+        );
+    }
+
+    #[test]
+    fn removal_obeys_the_host_operation_guard() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        let _guard = repository.acquire_host_operation().unwrap();
+        assert!(remove_storage(
+            &repository,
+            &StorageId::parse("storage-0123456789abcdef01234567").unwrap(),
+            0,
+            |_| panic!("must not reach cross-document check")
+        )
+        .is_err());
     }
 }

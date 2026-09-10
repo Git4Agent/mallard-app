@@ -127,6 +127,7 @@ function entry(overrides: Partial<ThreadSyncEntry> & Pick<ThreadSyncEntry, "thre
     storage_present: false,
     cloud_thread_id: overrides.thread_id,
     compared_against_storage: true,
+    subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
     push_decision: decision("create_cloud", null, true),
     pull_decision: decision("report_local_only"),
     ...overrides,

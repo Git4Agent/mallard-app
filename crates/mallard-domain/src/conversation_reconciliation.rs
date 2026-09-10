@@ -26,6 +26,9 @@ pub enum ConversationOperationState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConversationCapabilities {
+    pub export_settings_changed: bool,
+    /// True only after validated parent/child pins and confirmed native absence.
+    pub missing_child_recovery: bool,
     pub binding: BindingResolution,
     pub local_safely_capturable: bool,
     /// The cloud lineage is readable and the destination codec can resume it.
@@ -40,6 +43,8 @@ pub struct ConversationCapabilities {
 impl Default for ConversationCapabilities {
     fn default() -> Self {
         Self {
+            export_settings_changed: false,
+            missing_child_recovery: false,
             binding: BindingResolution::Bound,
             local_safely_capturable: true,
             cloud_materializable: true,
@@ -162,9 +167,11 @@ pub fn default_conversation_decision(
 
     match direction {
         ConversationPlanDirection::Push => match relation {
-            Relation::Sync(SyncCurrency::Current) => decision(Action::NoChanges),
+            Relation::Sync(SyncCurrency::Current) if !capabilities.export_settings_changed => {
+                decision(Action::NoChanges)
+            }
             Relation::Sync(SyncCurrency::Advanced) => decision(Action::RequirePullMetadata),
-            Relation::LocalOutstanding => {
+            Relation::LocalOutstanding | Relation::Sync(SyncCurrency::Current) => {
                 if let Some(blocker) = binding_block() {
                     blocked(blocker)
                 } else if !capabilities.local_safely_capturable {
@@ -201,6 +208,11 @@ pub fn default_conversation_decision(
                 } else {
                     materializing_decision(Action::KeepBoth, capabilities)
                 }
+            }
+            Relation::Unknown
+                if capabilities.missing_child_recovery && capabilities.local_safely_capturable =>
+            {
+                materializing_decision(Action::KeepBoth, capabilities)
             }
             Relation::MissingLocal => materializing_decision(Action::CreateLocal, capabilities),
             Relation::MissingCloud => decision(Action::ReportLocalOnly),

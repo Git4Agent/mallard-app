@@ -79,6 +79,7 @@ impl<'de> Deserialize<'de> for StorageSetupId {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageSetupStage {
+    Provisioning,
     ProbeRunning,
     CleanupRequired,
 }
@@ -98,6 +99,7 @@ pub struct StorageSetupJournalEntry {
     pub created_at: u64,
     pub updated_at: u64,
     pub facts: BoundedConfigObject,
+    pub recovery: BoundedConfigObject,
 }
 
 impl StorageSetupJournalEntry {
@@ -123,9 +125,9 @@ impl StorageSetupJournalEntry {
             validate_error_code(error_code)?;
         }
         match (self.stage, self.error_code.is_some()) {
-            (StorageSetupStage::ProbeRunning, false)
+            (StorageSetupStage::Provisioning | StorageSetupStage::ProbeRunning, false)
             | (StorageSetupStage::CleanupRequired, true) => {}
-            (StorageSetupStage::ProbeRunning, true) => {
+            (StorageSetupStage::Provisioning | StorageSetupStage::ProbeRunning, true) => {
                 return Err("a running storage probe cannot have an error code".to_string())
             }
             (StorageSetupStage::CleanupRequired, false) => {
@@ -151,6 +153,12 @@ pub struct StorageSetupJournalStore {
 }
 
 impl StorageSetupJournalStore {
+    pub(crate) fn dropbox_provisioning(repository: &LocalStateRepository) -> Self {
+        Self {
+            root: repository.root().to_path_buf(),
+            directory: repository.root().join("dropbox_setup_journal"),
+        }
+    }
     pub fn new(repository: &LocalStateRepository) -> Self {
         Self {
             root: repository.root().to_path_buf(),
@@ -526,6 +534,7 @@ mod tests {
             created_at: 10,
             updated_at: 11,
             facts: facts("mallard-backup"),
+            recovery: BoundedConfigObject::empty(),
         }
     }
 
@@ -697,5 +706,34 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+}
+
+/// The journal writer for one probe. Destination facts never change.
+pub struct ProbeJournal<'a> {
+    pub store: &'a StorageSetupJournalStore,
+    pub entry: &'a mut StorageSetupJournalEntry,
+}
+impl crate::storage_providers::traits::StorageProbeJournal for ProbeJournal<'_> {
+    fn recovery(&self) -> &BoundedConfigObject {
+        &self.entry.recovery
+    }
+    fn checkpoint(&mut self, recovery: BoundedConfigObject) -> Result<(), String> {
+        self.entry.recovery = recovery;
+        self.entry.updated_at = self.entry.updated_at.saturating_add(1);
+        self.store.save(self.entry)
+    }
+}
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default)]
+pub struct MemoryProbeJournal(pub BoundedConfigObject);
+#[cfg(any(test, feature = "test-support"))]
+impl crate::storage_providers::traits::StorageProbeJournal for MemoryProbeJournal {
+    fn recovery(&self) -> &BoundedConfigObject {
+        &self.0
+    }
+    fn checkpoint(&mut self, recovery: BoundedConfigObject) -> Result<(), String> {
+        self.0 = recovery;
+        Ok(())
     }
 }

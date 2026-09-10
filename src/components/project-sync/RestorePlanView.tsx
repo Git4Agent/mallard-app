@@ -1,17 +1,14 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type {
-  BundleReadiness,
   LocalProjectSummary,
   ProjectBinding,
   PullReview,
-  RestoreResult,
 } from "../../types";
 import Icon from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import ProjectActivityPage from "./ProjectActivityPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
 import ProjectFileCommitImpact, {
-  projectFileDeletionCount,
   type ProjectFileCommitImpactCounts,
 } from "./ProjectFileCommitImpact";
 import SyncReviewTabs from "../sync-review/SyncReviewTabs";
@@ -26,12 +23,9 @@ import {
   buildPullReviewSelection,
   itemKindLabel,
   includeRequiredPullProjectDirectories,
-  pendingIds,
   recommendedPullSelection,
   requiredPullProjectDirectoryIds,
-  keepsLocalConversation,
   requiresApproval,
-  requiresManualResolution,
   restoreActionIds,
   type PullReviewItem,
 } from "./pullReviewModel";
@@ -42,13 +36,8 @@ interface Props {
   storageName?: string | null;
   plan: PullReview;
   binding: ProjectBinding;
-  readiness: BundleReadiness | null;
-  restoreResult: RestoreResult | null;
   phase: PullApplyPhase;
   supportLoading: boolean;
-  completedActionIds: ReadonlySet<string>;
-  completedResourceIds: ReadonlySet<string>;
-  failedResourceIds: ReadonlySet<string>;
   busy: boolean;
   error: string | null;
   onApply: (selection: PullReviewSelection) => void;
@@ -74,19 +63,8 @@ export interface PullReviewPrimary {
   apply: () => void;
 }
 
-export function pullSelectableResourceIds(
-  items: PullReviewItem[],
-  completedActionIds: ReadonlySet<string>,
-  completedResourceIds: ReadonlySet<string>,
-): Set<string> {
-  return new Set(items
-    .filter((item) => (
-      pendingIds(item, completedActionIds).length > 0
-      && !completedResourceIds.has(item.resourceId)
-      && !keepsLocalConversation(item)
-      && !requiresManualResolution(item)
-    ))
-    .map((item) => item.resourceId));
+export function pullSelectableResourceIds(items: PullReviewItem[]): Set<string> {
+  return new Set(items.filter((item) => restoreActionIds(item).length > 0).map((item) => item.resourceId));
 }
 
 export function pullProjectFileCommitImpact(
@@ -108,12 +86,6 @@ export function pullProjectFileCommitImpact(
         break;
       case "replace":
         counts.replace += 1;
-        break;
-      case "delete_file":
-        counts.deleteFile += 1;
-        break;
-      case "delete_directory":
-        counts.deleteDirectory += 1;
         break;
       default:
         break;
@@ -137,18 +109,12 @@ function itemOperationChip(item: PullReviewItem): string | null {
 function ItemList({
   items,
   selected,
-  completedActionIds,
-  completedResourceIds,
-  failedResourceIds,
   phase,
   disabled,
   onToggle,
 }: {
   items: PullReviewItem[];
   selected: ReadonlySet<string>;
-  completedActionIds: ReadonlySet<string>;
-  completedResourceIds: ReadonlySet<string>;
-  failedResourceIds: ReadonlySet<string>;
   phase: PullApplyPhase;
   disabled: boolean;
   onToggle: (resourceId: string) => void;
@@ -164,42 +130,21 @@ function ItemList({
   return (
     <div className="sync-pull-items" role="list">
       {items.map((item) => {
-        const pending = pendingIds(item, completedActionIds);
-        const completed = completedResourceIds.has(item.resourceId);
-        const failed = failedResourceIds.has(item.resourceId);
-        const keepLocalConversation = keepsLocalConversation(item);
-        const manualResolution = requiresManualResolution(item);
-        const blocked = keepLocalConversation || manualResolution || pending.length === 0 || completed;
-        const selectable = !blocked;
-        const checked = selected.has(item.resourceId) && !completed;
+        const selectable = restoreActionIds(item).length > 0;
+        const checked = selected.has(item.resourceId);
         const expanded = expandedItems.has(item.resourceId);
-        const activeRestore = phase === "restoring" && checked && restoreActionIds(item).some((id) => !completedActionIds.has(id));
-        const conversationAction = item.conversationReviewRows[0]?.action;
-        const status: string | null = conversationAction === "adopt_cloud_metadata"
-          ? checked ? "Mark synced" : "Not selected"
-          : conversationAction === "blocked"
-              ? "Can't sync"
-              : conversationAction === "keep_both" && checked
-                ? "Keep both"
-                : keepLocalConversation
-          ? "Keep local"
-          : manualResolution
-          ? "Resolve manually"
-          : completed
-            ? "Restored"
-            : failed
-              ? "Failed"
-              : activeRestore
-                ? "Restoring"
-                : requiresApproval(item) && !checked
-                  ? "Needs approval"
-                  : checked
-                    ? null
-                    : "Not selected";
+        const activeRestore = phase === "restoring" && checked;
+        const status = activeRestore
+          ? "Restoring"
+          : item.conversationReviewRows[0]?.action === "keep_both" && checked
+            ? "Keep both"
+            : requiresApproval(item) && !checked
+              ? "Needs approval"
+              : checked ? null : "Not selected";
         return (
           <div
             key={item.resourceId}
-            className={`sync-pull-item${selectable ? " sync-pull-item-selectable" : ""}${checked ? " selected" : ""}${completed ? " completed" : ""}${failed ? " failed" : ""}`}
+            className={`sync-pull-item${selectable ? " sync-pull-item-selectable" : ""}${checked ? " selected" : ""}`}
             role="listitem"
           >
             {selectable && (
@@ -225,7 +170,7 @@ function ItemList({
               </span>
               <span className="sync-pull-item-icon">
                 <Icon
-                  name={failed || manualResolution || keepLocalConversation ? "alert-triangle" : completed ? "check-circle" : "file"}
+                  name="file"
                   size={14}
                 />
               </span>
@@ -265,13 +210,8 @@ export default function RestorePlanView({
   storageName = "storage",
   plan,
   binding,
-  readiness,
-  restoreResult,
   phase,
   supportLoading,
-  completedActionIds,
-  completedResourceIds,
-  failedResourceIds,
   busy,
   error,
   onApply,
@@ -302,54 +242,17 @@ export default function RestorePlanView({
     () => pullProjectFileCommitImpact(projectContentItems, selected),
     [projectContentItems, selected],
   );
-  const deletionSignature = useMemo(
-    () => projectContentItems
-      .filter((item) => (
-        selected.has(item.resourceId)
-        && (item.projectContentOperation === "delete_file" || item.projectContentOperation === "delete_directory")
-      ))
-      .map((item) => item.resourceId)
-      .sort()
-      .join("\n"),
-    [projectContentItems, selected],
-  );
-  const [deletionApproved, setDeletionApproved] = useState(false);
-  useEffect(() => setDeletionApproved(false), [deletionSignature]);
-
   useEffect(() => {
     const currentIds = new Set(items.map((item) => item.resourceId));
     setSelected((current) => {
-      const next = new Set([...current].filter((resourceId) => (
-        currentIds.has(resourceId) && !completedResourceIds.has(resourceId)
-      )));
-      for (const item of items) {
-        if (failedResourceIds.has(item.resourceId)) next.add(item.resourceId);
-      }
+      const next = new Set([...current].filter((resourceId) => currentIds.has(resourceId)));
       return includeRequiredPullProjectDirectories(items, next);
     });
-  }, [items, completedResourceIds, failedResourceIds]);
+  }, [items]);
 
-  const selection = useMemo(
-    () => buildPullReviewSelection(
-      items,
-      selected,
-      completedActionIds,
-      completedResourceIds,
-    ),
-    [items, selected, completedActionIds, completedResourceIds],
-  );
-  const hasResult = phase === "complete" || restoreResult !== null;
+  const selection = useMemo(() => buildPullReviewSelection(items, selected), [items, selected]);
   const approvalItems = items.filter((item) => (
-    item.category !== "project_content"
-    && requiresApproval(item)
-    && !selected.has(item.resourceId)
-    && !completedResourceIds.has(item.resourceId)
-  ));
-  const manualItems = items.filter((item) => (
-    requiresManualResolution(item) && !completedResourceIds.has(item.resourceId)
-  ));
-  const keptLocalConversationItems = items.filter((item) => (
-    keepsLocalConversation(item) && !completedResourceIds.has(item.resourceId)
+    item.category !== "project_content" && requiresApproval(item) && !selected.has(item.resourceId)
   ));
 
   useEffect(() => {
@@ -361,20 +264,9 @@ export default function RestorePlanView({
   // a selection the user has not seen. The ItemList fallback is synchronous.
   const activityHistoryInUse = conversationItems.length > 0 && Boolean(project);
   const [reviewListReady, setReviewListReady] = useState(false);
-  const failureCount = restoreResult?.failed_actions?.length ?? 0;
-  const finalReady = hasResult && !error && failureCount === 0 && readiness?.state === "ready";
-  // The review closes the moment a result exists — the outcome is reported on
-  // the storage card — so the footer only ever offers the Pull itself. An
-  // empty selection is still a real Pull: the apply writes receipts and
-  // advances the reviewed baseline, which is what unblocks Push when the
-  // storage is ahead and the user wants none of its changes.
-  const primaryDisabledReason = busy
-    ? null
-    : activityHistoryInUse && !reviewListReady
-      ? "Loading storage changes…"
-      : projectFileDeletionCount(projectFileImpact) > 0 && !deletionApproved
-        ? "Approve the selected project file deletions"
-      : null;
+  const primaryDisabledReason = !busy && activityHistoryInUse && !reviewListReady
+    ? "Loading storage changes…"
+    : null;
 
   // The storage-card Pull button is the same control as the footer primary,
   // so it must run the same apply under the same gating — including the
@@ -414,7 +306,7 @@ export default function RestorePlanView({
     ? projectContentItems
     : [...conversationItems, ...otherItems];
   const pendingStepItems = stepItems.filter((item) => (
-    pendingIds(item, completedActionIds).length > 0 && !completedResourceIds.has(item.resourceId)
+    restoreActionIds(item).length > 0
   ));
   const pendingRecommendedCount = pendingStepItems.filter((item) => recommendedIds.has(item.resourceId)).length;
   const stepMatchesRecommended = pendingStepItems.every((item) => (
@@ -442,22 +334,22 @@ export default function RestorePlanView({
   for (const item of approvalItems) {
     if (itemKindLabel(item) === "Conversation") warningSteps.add("history");
   }
-  for (const item of manualItems) {
-    if (itemKindLabel(item) === "Conversation") warningSteps.add("history");
-  }
-  if (keptLocalConversationItems.length > 0) warningSteps.add("history");
   if (projectContentItems.length > 0 && !projectContentEligible) {
     warningSteps.add("project_files");
   }
-  const conversationIds = pullSelectableResourceIds(
-    conversationItems,
-    completedActionIds,
-    completedResourceIds,
-  );
-  const storageReplacedGate = !hasResult && plan.remote_continuity?.state === "replaced";
+  const conversationIds = pullSelectableResourceIds(conversationItems);
+  const storageReplacedGate = plan.remote_continuity?.state === "replaced";
   /* The banner zone that heads the review scroll. Both messages can be on
      screen at once, so they share one box at the loudest rung present. */
   const banners: NoticeItem[] = [];
+  if (plan.conversation_review.some((row) => row.stored_without_credential_redaction)) {
+    banners.push({
+      key: "stored-without-redaction",
+      severity: "warning",
+      title: "Stored without credential redaction",
+      message: "This review includes sessions that can contain API keys, tokens, and passwords.",
+    });
+  }
   if (storageReplacedGate) {
     banners.push({
       key: "storage-replaced",
@@ -473,7 +365,7 @@ export default function RestorePlanView({
         : undefined,
     });
   }
-  if (error && !hasResult) {
+  if (error) {
     banners.push({
       key: "pull-failed",
       severity: "danger",
@@ -495,7 +387,7 @@ export default function RestorePlanView({
      even the supporting-check failure lands after the plan is handed over), so
      an error that is present arrived after an action and stops the flow. One
      present error re-times the whole box. */
-  const bannerTiming: NoticeTiming = error && !hasResult
+  const bannerTiming: NoticeTiming = error
     ? { timing: "blocking" }
     : { timing: "standing", label: "Notes about this Pull review" };
   const projectContentRows: ProjectFileReviewRow[] = projectContentItems
@@ -511,7 +403,7 @@ export default function RestorePlanView({
         sourceMtime: action && "source_mtime" in action.kind ? action.kind.source_mtime : null,
         localPresent: Boolean(action?.expected_target_sha256 || action?.expected_target_mode != null),
         size: item.projectContentSize,
-        storagePresent: item.projectContentOperation !== "delete_file" && item.projectContentOperation !== "delete_directory",
+        storagePresent: true,
         operation: item.projectContentOperation ?? undefined,
         preservedCopyPath: item.projectContentPreservedCopy ?? undefined,
       };
@@ -536,9 +428,9 @@ export default function RestorePlanView({
           busy={busy}
           recommendedTitle={`Restore the recommended safe selection (${pendingRecommendedCount})`}
           recommendedAriaLabel={`Use recommended selection (${pendingRecommendedCount})`}
-          recommendedDisabled={finalReady || pendingStepItems.length === 0 || stepMatchesRecommended}
+          recommendedDisabled={pendingStepItems.length === 0 || stepMatchesRecommended}
           onRecommended={useRecommended}
-          clearDisabled={finalReady || selectedIn(stepItems) === 0}
+          clearDisabled={selectedIn(stepItems) === 0}
           onClear={clearStep}
           close={{ ariaLabel: `Close pull review for ${projectName}`, onClose: onBack }}
         />
@@ -580,7 +472,7 @@ export default function RestorePlanView({
                   selectionMode="pull"
                   selectedResourceIds={selected}
                   selectableResourceIds={conversationIds}
-                  selectionDisabled={busy || finalReady}
+                  selectionDisabled={busy}
                   onToggleResource={toggle}
                   onDropSelection={(resourceIds) => setSelected((current) => {
                     // Show less took these out of view. A tick you can no
@@ -590,18 +482,15 @@ export default function RestorePlanView({
                     return next;
                   })}
                   onUnlinkStorage={onUnlinkStorage}
-                  continuityActionBusy={busy || finalReady}
+                  continuityActionBusy={busy}
                   onReviewListReadyChange={setReviewListReady}
                 />
               ) : conversationItems.length > 0 ? (
                 <ItemList
                   items={conversationItems}
                   selected={selected}
-                  completedActionIds={completedActionIds}
-                  completedResourceIds={completedResourceIds}
-                  failedResourceIds={failedResourceIds}
                   phase={phase}
-                  disabled={busy || finalReady}
+                  disabled={busy}
                   onToggle={toggle}
                 />
               ) : items.length === 0 && !supportLoading ? (
@@ -615,7 +504,7 @@ export default function RestorePlanView({
                     <span><Icon name="settings" size={15} /><strong>Agent setup &amp; tools</strong></span>
                     <span>{selectedIn(otherItems)} selected<Icon name="chevron-right" size={13} /></span>
                   </summary>
-                  <ItemList items={otherItems} selected={selected} completedActionIds={completedActionIds} completedResourceIds={completedResourceIds} failedResourceIds={failedResourceIds} phase={phase} disabled={busy || finalReady} onToggle={toggle} />
+                  <ItemList items={otherItems} selected={selected} phase={phase} disabled={busy} onToggle={toggle} />
                   {supportLoading && <div className="sync-pull-support-loading"><Icon name="refresh" className="icon-spin" size={14} /> Checking readiness…</div>}
                 </details>
               )}
@@ -634,7 +523,7 @@ export default function RestorePlanView({
               rows={projectContentRows}
               selectedIds={selected}
               requiredIds={requiredProjectDirectories}
-              disabled={busy || finalReady}
+              disabled={busy}
               onToggle={toggle}
               onBulkToggle={(resourceIds, shouldSelect) => setSelected((current) => {
                 if (!projectContentEligible) return current;
@@ -655,9 +544,9 @@ export default function RestorePlanView({
         <ProjectFileCommitImpact
           counts={projectFileImpact}
           deletionTarget="local"
-          deletionApproved={deletionApproved}
+          deletionApproved={false}
           disabled={busy}
-          onDeletionApprovedChange={setDeletionApproved}
+          onDeletionApprovedChange={() => {}}
         />
         {busy && (
           /* Same contract as Push: no safe mid-write abort exists, so the
@@ -665,7 +554,7 @@ export default function RestorePlanView({
              And as on Push it announces, because it appears only once `busy`
              flips — the one explanation for the button going dead under the
              reader's focus and Escape no longer closing the review. */
-          <span role="status"><small>A running pull finishes or fails whole — it can’t be cancelled midway.</small></span>
+          <span role="status"><small>Pull cannot be cancelled while changes are being applied.</small></span>
         )}
         {showProjectFiles && (
           /* The step navigator, not a gate: Pull stays live on both steps —

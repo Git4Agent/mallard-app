@@ -106,6 +106,7 @@ function conversationRow(
   displayTitle: string | null = null,
 ): ConversationReviewRow {
   return {
+    stored_without_credential_redaction: false,
     provider: "codex",
     thread_id: localThreadId,
     cloud_thread_id: cloudThreadId,
@@ -121,6 +122,8 @@ function result(overrides: Partial<RestoreResult> = {}): RestoreResult {
   return {
     success: true,
     message: "Applied restore actions",
+    readiness: { bundle_id: binding.bundle_id, state: "ready", issues: [] },
+    readiness_error: null,
     plan_id: restorePlan.plan_id,
     reviewed_base_advanced: true,
     applied_action_ids: [],
@@ -135,6 +138,7 @@ function renderReview(
   plan: PullReview,
   error: string | null = null,
   onResetMetadata?: () => void,
+  phase: "idle" | "restoring" = "idle",
 ) {
   return renderToStaticMarkup(
     <RestorePlanView
@@ -142,13 +146,8 @@ function renderReview(
       storageName="Local storage 1"
       plan={plan}
       binding={binding}
-      readiness={null}
-      restoreResult={null}
-      phase="idle"
+      phase={phase}
       supportLoading={false}
-      completedActionIds={new Set()}
-      completedResourceIds={new Set()}
-      failedResourceIds={new Set()}
       busy={false}
       error={error}
       onApply={() => undefined}
@@ -207,14 +206,14 @@ test("keep-both is one reviewed action with no second resolution payload", () =>
   };
   const items = buildPullReviewItems(plan);
   const selected = new Set(items.map((item) => item.resourceId));
-  const selection = buildPullReviewSelection(items, selected, new Set(), new Set());
+  const selection = buildPullReviewSelection(items, selected);
 
   assert.deepEqual(selection, {
     resourceIds: [`codex:conversation:${localThreadId}`],
     restoreActionIds: ["conversation-keep-both"],
   });
   assert.deepEqual(
-    pullSelectableResourceIds(items, new Set(), new Set()),
+    pullSelectableResourceIds(items),
     selected,
   );
 
@@ -267,8 +266,6 @@ test("a mixed Pull starts empty and selecting one project file restores only tha
   const selection = buildPullReviewSelection(
     items,
     new Set(["file-ghost-story"]),
-    new Set(),
-    new Set(),
   );
   assert.deepEqual(selection, {
     resourceIds: ["file-ghost-story"],
@@ -300,7 +297,7 @@ test("blocked conversation evidence stays out of Pull review", () => {
   const items = buildPullReviewItems(plan);
 
   assert.deepEqual(items, []);
-  assert.deepEqual(pullSelectableResourceIds(items, new Set(), new Set()), new Set());
+  assert.deepEqual(pullSelectableResourceIds(items), new Set());
   const html = renderReview(plan);
   assert.doesNotMatch(html, /Can&#x27;t sync/);
   assert.match(html, /Nothing to pull/);
@@ -400,6 +397,7 @@ test("keep-both completion reports the independent session and the provider's af
 
 test("Pull reports 35 restored and 3 failed threads from Review selection IDs", async () => {
   const rows: ConversationReviewRow[] = Array.from({ length: 38 }, (_, index) => ({
+    stored_without_credential_redaction: false,
     provider: "codex",
     thread_id: null,
     cloud_thread_id: `cloudthread-fixture-${index}`,
@@ -417,13 +415,21 @@ test("Pull reports 35 restored and 3 failed threads from Review selection IDs", 
   const selection = buildPullReviewSelection(
     items,
     new Set(items.map((item) => item.resourceId)),
-    new Set(),
-    new Set(),
   );
   const failedRows = rows.slice(35);
   const completed = result({
     success: false,
     message: "Applied 35 actions; 3 require attention",
+    readiness: {
+        bundle_id: binding.bundle_id,
+        state: "blocked",
+        issues: [{
+          issue_id: "restore-project-data",
+          category: "project_files",
+          title: "3 project data changes were left unchanged",
+          severity: "error",
+        }],
+      },
     reviewed_base_advanced: false,
     applied_action_ids: rows.slice(0, 35).map((row) => row.action_id!),
     failed_actions: failedRows.map((row) => ({
@@ -437,18 +443,6 @@ test("Pull reports 35 restored and 3 failed threads from Review selection IDs", 
       assert.equal(review, plan);
       assert.deepEqual(new Set(actionIds), new Set(rows.map((row) => row.action_id)));
       return completed;
-    },
-    async getRestoreReadiness() {
-      return {
-        bundle_id: binding.bundle_id,
-        state: "blocked",
-        issues: [{
-          issue_id: "restore-project-data",
-          category: "project_files",
-          title: "3 project data changes were left unchanged",
-          severity: "error",
-        }],
-      };
     },
   }, plan, selection, () => undefined);
   const resourceByAction = pullActionResourceIds(plan);
@@ -646,20 +640,16 @@ test("readiness failure does not hide a valid mutation review", async () => {
   assert.match(renderReview(restorePlan, "Readiness checks: profile unavailable"), /sync-pull-apply-button/);
 });
 
-test("the Apply coordinator sends only approved action ids and verifies readiness", async () => {
+test("the Apply coordinator uses returned readiness without another request", async () => {
   const calls: unknown[][] = [];
   const phases: string[] = [];
   const ready: BundleReadiness = { bundle_id: binding.bundle_id, state: "ready", issues: [] };
-  const applied = result({ applied_action_ids: ["action-session"] });
+  const applied = result({ applied_action_ids: ["action-session"], readiness: ready });
 
   const appliedResult = await applyPullReview({
     async applyRestore(review, actionIds) {
       calls.push([review, actionIds]);
       return applied;
-    },
-    async getRestoreReadiness(review) {
-      calls.push([review]);
-      return ready;
     },
   }, restorePlan, {
     resourceIds: ["codex:session:thread-a"],
@@ -668,18 +658,14 @@ test("the Apply coordinator sends only approved action ids and verifies readines
 
   assert.deepEqual(calls, [
     [restorePlan, ["action-session"]],
-    [restorePlan],
   ]);
-  assert.deepEqual(phases, ["restoring", "verifying", "complete"]);
+  assert.deepEqual(phases, ["restoring", "idle"]);
   assert.equal(appliedResult.success, true);
 });
 
 test("the Apply coordinator rejects action ids outside the comparison", async () => {
   await assert.rejects(() => applyPullReview({
     async applyRestore() {
-      throw new Error("must not execute");
-    },
-    async getRestoreReadiness() {
       throw new Error("must not execute");
     },
   }, restorePlan, {
@@ -760,4 +746,61 @@ test("after-pull offers keep their order; available actions run and unavailable 
   assert.match(model, /result\.after_pull_actions\.map\(\(offer\) =>/);
   assert.doesNotMatch(model, /after_pull_actions\.find/);
   assert.doesNotMatch(model, /codex_app|restart_codex|app_kind/);
+});
+
+test("missing-child recovery names the child and remains selectable", () => {
+  const row = conversationRow("keep_both", "recover-child");
+  row.blocked_reason = "Missing local child: call1. Keep both restores the cloud copy and retains the local files.";
+  const items = buildPullReviewItems({ ...restorePlan, actions: [], conversation_review: [row] });
+  assert.equal(items[0].detail, row.blocked_reason);
+  assert.deepEqual(buildPullReviewSelection(items, new Set([items[0].resourceId])).restoreActionIds, ["recover-child"]);
+});
+
+
+test("Pull identifies content stored with redaction Off", () => {
+  const row = { ...conversationRow("create_local", "off-selection"), stored_without_credential_redaction: true };
+  const items = buildPullReviewItems({ ...restorePlan, conversation_review: [row] });
+  assert.ok(items.some((item) => item.detail.includes("Stored without credential redaction")));
+  assert.match(renderReview({ ...restorePlan, conversation_review: [row] }), /Stored without credential redaction/);
+});
+
+test("an Apply exception stays visible and leaves the review available for retry", async () => {
+  const phases: Array<"idle" | "restoring"> = [];
+  const applied = await applyPullReview({
+    async applyRestore() {
+      throw new Error("storage offline");
+    },
+  }, restorePlan, { resourceIds: [], restoreActionIds: [] }, (phase) => phases.push(phase));
+  assert.equal(applied.restoreResult, null);
+  assert.equal(applied.success, false);
+  assert.deepEqual(phases, ["restoring", "idle"]);
+  const html = renderReview(restorePlan, applied.error, undefined, phases[phases.length - 1]);
+  assert.match(html, /Restore failed: storage offline/);
+  assert.match(html, /class="btn btn-primary sync-pull-apply-button"/);
+  assert.doesNotMatch(html, /class="btn btn-primary sync-pull-apply-button"[^>]*disabled/);
+});
+
+test("readiness failure preserves the successful Apply result", async () => {
+  const applied = result({
+    applied_action_ids: ["action-session"],
+    readiness: null,
+    readiness_error: "profile unavailable",
+  });
+  const outcome = await applyPullReview({ applyRestore: async () => applied }, restorePlan, {
+    resourceIds: ["codex:session:thread-a"],
+    restoreActionIds: ["action-session"],
+  }, () => undefined);
+  assert.equal(outcome.restoreResult, applied);
+  assert.equal(outcome.success, false);
+  assert.match(outcome.error!, /Readiness verification failed: profile unavailable/);
+  const displayed = buildPullOutcome({
+    projectId: binding.local_project_id,
+    plan: restorePlan,
+    result: applied,
+    readiness: outcome.readiness,
+    error: outcome.error,
+    items: buildPullReviewItems(restorePlan),
+    completedResourceIds: new Set(["codex:session:thread-a"]),
+  });
+  assert.deepEqual(displayed.actions, [{ kind: "recheck", label: "Recheck" }]);
 });

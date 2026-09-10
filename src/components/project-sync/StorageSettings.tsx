@@ -2,6 +2,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useState, type ReactNode } from "react";
 import type {
   SecretOperation,
+  StorageConnectionHealth,
   StorageProviderDescriptor,
   StorageProviderKey,
   StorageSettings,
@@ -35,6 +36,14 @@ export interface StorageEditorForm {
 
 /** Which declared secrets the backend draft currently holds. */
 export type SecretPresence = Record<string, boolean>;
+
+export function hasManagedCredentials(
+  descriptor: Pick<StorageProviderDescriptor, "setup_assistant">,
+  presence: SecretPresence,
+): boolean {
+  const key = descriptor.setup_assistant?.managed_secret_id;
+  return !!key && !!presence[key];
+}
 
 export function findStorageProvider(
   providers: readonly StorageProviderDescriptor[],
@@ -122,27 +131,37 @@ function secretSet(
   return !!presence[secretId] || (form.typedSecrets[secretId] ?? "").length > 0;
 }
 
+function activeSecrets(
+  descriptor: Pick<StorageProviderDescriptor, "secrets" | "setup_assistant">,
+  presence: SecretPresence,
+) {
+  const managedId = descriptor.setup_assistant?.managed_secret_id;
+  return descriptor.secrets.filter((secret) => hasManagedCredentials(descriptor, presence)
+    ? secret.secret_id === managedId
+    : secret.secret_id !== managedId);
+}
+
 /** Test and Finish open once the name, every required field, and every
  *  required secret (stored or typed) are in. The backend validates again. */
 export function storageDraftReady(
-  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets">,
+  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets" | "setup_assistant">,
   form: StorageEditorForm,
   presence: SecretPresence,
 ): boolean {
   return form.name.trim().length > 0
     && descriptor.fields.every((field) => !field.required || fieldSet(form, field.field_id))
-    && descriptor.secrets.every((secret) => !secret.required || secretSet(form, presence, secret.secret_id));
+    && activeSecrets(descriptor, presence).every((secret) => !secret.required || secretSet(form, presence, secret.secret_id));
 }
 
 /** The tally under the form: required fields plus required secrets, and how
  *  many of them are set. */
 export function fieldsSet(
-  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets">,
+  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets" | "setup_assistant">,
   form: StorageEditorForm,
   presence: SecretPresence,
 ): { set: number; total: number } {
   const requiredFields = descriptor.fields.filter((field) => field.required);
-  const requiredSecrets = descriptor.secrets.filter((secret) => secret.required);
+  const requiredSecrets = activeSecrets(descriptor, presence).filter((secret) => secret.required);
   return {
     set: requiredFields.filter((field) => fieldSet(form, field.field_id)).length
       + requiredSecrets.filter((secret) => secretSet(form, presence, secret.secret_id)).length,
@@ -162,6 +181,45 @@ export function storageSubtitle(storage: Pick<StorageSummary, "summary" | "provi
 // menu says which one it is handing over so the stylesheet reads a class.
 export function storageSubtitleIsPath(storage: Pick<StorageSummary, "summary">): boolean {
   return storage.summary.some((field) => field.is_path);
+}
+
+/** A recorded state only a new credential or consent recovers. The backend
+ *  refuses every request to such a storage until then, so the UI leads to
+ *  its settings rather than offering a retry. */
+export function connectionSuspends(health: StorageConnectionHealth | null | undefined): boolean {
+  return health?.state === "reconnect_required"
+    || health?.state === "token_expired"
+    || health?.state === "permission_denied";
+}
+
+/** The one-line issue a listing shows for a suspended storage, naming the
+ *  provider by its descriptor label; nothing for any other state. */
+export function storageConnectionIssue(
+  storage: Pick<StorageSummary, "provider_label" | "connection">,
+): string | null {
+  switch (storage.connection?.state) {
+    case "reconnect_required":
+    case "token_expired":
+      return `${storage.provider_label} needs reconnection`;
+    case "permission_denied":
+      return `${storage.provider_label} denied access`;
+    default:
+      return null;
+  }
+}
+
+/** The message with its evidence, the way the backend prints it into a
+ *  failure: route, status, fixed error identifier, request ID. */
+export function connectionDetail(health: StorageConnectionHealth): string {
+  const evidence = health.evidence;
+  if (!evidence) return health.message;
+  const facts = [
+    evidence.endpoint,
+    typeof evidence.http_status === "number" ? `HTTP ${evidence.http_status}` : "no response",
+    evidence.error_tag ?? null,
+    evidence.request_id ? `request ${evidence.request_id}` : null,
+  ].filter((fact): fact is string => !!fact);
+  return `${health.message} (${facts.join(", ")})`;
 }
 
 /** The `?` beside a field: opens the declared documentation when the
@@ -251,6 +309,7 @@ export function StorageEditor({
   onRemove,
   primaryAction,
   agentSlot,
+  connection,
 }: {
   descriptor: StorageProviderDescriptor;
   /** Every provider this build offers, in the backend's order: the header's
@@ -273,6 +332,10 @@ export function StorageEditor({
   /** The workspace owns the assistant hand-off and its lifecycle; the editor
    *  only seats it, in the row the descriptor's assistant labels. */
   agentSlot?: ReactNode;
+  /** What the open transport last observed about an existing storage's
+   *  credential. The guide row and the credential field read it; a new
+   *  draft has none. */
+  connection?: StorageConnectionHealth | null;
 }) {
   const [secretVisible, setSecretVisible] = useState<Record<string, boolean>>({});
   const setName = (name: string) => onChange({ ...form, name });
@@ -295,7 +358,24 @@ export function StorageEditor({
   const folderFields = descriptor.fields.filter((field) => field.kind === "directory");
   const gridFields = descriptor.fields.filter((field) => field.kind !== "directory");
   const assistant = descriptor.setup_assistant ?? null;
+  const managed = hasManagedCredentials(descriptor, secretPresence);
   const credentialed = descriptor.secrets.length > 0 || assistant !== null;
+  const suspended = connectionSuspends(connection);
+  const observedConnected = connection?.state === "connected";
+  /* "Connected" is said only after an observed success; a stored credential
+     by itself proves nothing, and a refused one says so in the row. */
+  const guideCopy = suspended
+    ? connection!.message
+    : managed
+      ? observedConnected
+        ? "Connected. Access renews automatically."
+        : "Access renews automatically. Test the connection to verify it, or use the agent to reconnect."
+      : observedConnected
+        ? "Connected. You can review or update the connection values below."
+        : "Configured. You can review or update the connection values below.";
+  const replacementPlaceholder = connection?.state === "token_expired"
+    ? "Expired — paste a replacement"
+    : `Rejected by ${descriptor.display_name} — paste a replacement`;
 
   return (
     <article className="sync-storage-card">
@@ -348,6 +428,7 @@ export function StorageEditor({
               onChange={(event) => setSetting(field.field_id, event.target.value)}
               placeholder={field.placeholder ?? undefined}
               disabled={disabled}
+              readOnly={editsExisting && field.immutable_on_edit}
               required={field.required}
               spellCheck={false}
               autoCapitalize="none"
@@ -362,18 +443,18 @@ export function StorageEditor({
         </label>
       ))}
 
-      {!editsExisting && assistant && (
+      {!editsExisting && !managed && (assistant || descriptor.manual_setup_hint || descriptor.setup_guide_url) && (
         <>
           {/* The two routes are named lanes, not one run-on sentence: the
               agent lane carries the hand-off cluster and its lifecycle, the
               manual lane introduces the fields it sits above. Both take their
               words from the descriptor, never from a provider name. */}
-          <div className="storage-setup-route-row agent" role="note">
+          {assistant && <div className="storage-setup-route-row agent" role="note">
             <Icon name="terminal" size={13} />
             <span className="storage-setup-route-label">{assistant.label}</span>
             <span className="storage-setup-guide-copy">{assistant.description}</span>
             {agentSlot}
-          </div>
+          </div>}
           <div className="storage-setup-route-row" role="note">
             <Icon name="info" size={13} />
             <span className="storage-setup-route-label">Manual setup</span>
@@ -388,10 +469,10 @@ export function StorageEditor({
           </div>
         </>
       )}
-      {editsExisting && credentialed && (
-        <div className="storage-setup-guide" role="note">
-          <Icon name="check-circle" size={13} />
-          <span className="storage-setup-guide-copy">Configured. You can review or update the connection values below.</span>
+      {(managed || editsExisting && credentialed) && (
+        <div className="storage-setup-guide" role={suspended ? "alert" : "note"}>
+          <Icon name={suspended ? "alert-triangle" : "check-circle"} size={13} />
+          <span className={suspended ? "storage-setup-guide-error" : "storage-setup-guide-copy"}>{guideCopy}</span>
           {descriptor.setup_guide_url && (
             <button type="button" className="btn-link" onClick={() => void openExternalUrl(descriptor.setup_guide_url!)}>Setup guide</button>
           )}
@@ -415,6 +496,7 @@ export function StorageEditor({
                 onChange={(event) => setSetting(field.field_id, event.target.value)}
                 placeholder={field.placeholder ?? undefined}
                 disabled={disabled}
+                readOnly={(editsExisting || managed) && field.immutable_on_edit}
                 required={field.required}
                 spellCheck={false}
                 autoCapitalize="none"
@@ -423,7 +505,7 @@ export function StorageEditor({
               />
             </label>
           ))}
-          {descriptor.secrets.map((secret) => {
+          {activeSecrets(descriptor, secretPresence).map((secret) => {
             const present = !!secretPresence[secret.secret_id];
             const visible = !!secretVisible[secret.secret_id];
             return (
@@ -442,7 +524,9 @@ export function StorageEditor({
                     type={visible ? "text" : "password"}
                     value={form.typedSecrets[secret.secret_id] ?? ""}
                     onChange={(event) => setSecret(secret.secret_id, event.target.value)}
-                    placeholder={present ? "Stored — type to replace" : (secret.placeholder ?? undefined)}
+                    placeholder={present
+                      ? (suspended ? replacementPlaceholder : "Stored — type to replace")
+                      : (secret.placeholder ?? undefined)}
                     disabled={disabled}
                     required={secret.required && !present}
                     autoComplete="new-password"

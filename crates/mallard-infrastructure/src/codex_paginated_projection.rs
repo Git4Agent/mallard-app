@@ -17,6 +17,7 @@
 //! the `thread_id` inside a current `item_completed` envelope, which is
 //! normalized to the output root identity.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::DateTime;
@@ -78,24 +79,25 @@ pub fn complete_paginated_item_projection(
     check_inserted: &mut dyn FnMut(&Value) -> Result<(), String>,
 ) -> Result<Vec<Value>, String> {
     Ok(
-        project_with_sources(records, output_root_thread_id, check_inserted)?
+        project_with_sources(records.iter(), output_root_thread_id, check_inserted)?
             .into_iter()
-            .map(|record| record.value)
+            .map(|record| record.value.into_owned())
             .collect(),
     )
 }
 
-pub(crate) struct ProjectedRecord {
-    pub value: Value,
+pub(crate) struct ProjectedRecord<'r> {
+    pub value: Cow<'r, Value>,
     pub source_index: Option<usize>,
     pub derived: bool,
 }
 
-pub(crate) fn project_with_sources(
-    records: Vec<Value>,
+pub(crate) fn project_with_sources<'r>(
+    records: impl IntoIterator<Item = &'r Value>,
     output_root_thread_id: &str,
     check_inserted: &mut dyn FnMut(&Value) -> Result<(), String>,
-) -> Result<Vec<ProjectedRecord>, String> {
+) -> Result<Vec<ProjectedRecord<'r>>, String> {
+    let records: Vec<_> = records.into_iter().collect();
     let mut projector = Projector::new(&records, output_root_thread_id, check_inserted)?;
     for index in 0..records.len() {
         projector.current_source = index;
@@ -112,10 +114,7 @@ pub fn verify_projection_fixpoint(
     records: &[Value],
     output_root_thread_id: &str,
 ) -> Result<(), String> {
-    let reprojected =
-        complete_paginated_item_projection(records.to_vec(), output_root_thread_id, &mut |_| {
-            Ok(())
-        })?;
+    let reprojected = project_with_sources(records.iter(), output_root_thread_id, &mut |_| Ok(()))?;
     if reprojected.len() != records.len() {
         return Err(format!(
             "paginated projection is not a fixpoint: {} records reprojected to {}",
@@ -124,7 +123,7 @@ pub fn verify_projection_fixpoint(
         ));
     }
     for (index, (before, after)) in records.iter().zip(&reprojected).enumerate() {
-        if before != after {
+        if before != after.value.as_ref() {
             return Err(format!(
                 "paginated projection is not a fixpoint at record {index}"
             ));
@@ -151,10 +150,10 @@ struct ReasoningRun {
     last_timestamp: String,
 }
 
-struct Projector<'a> {
+struct Projector<'a, 'r> {
     output_root_thread_id: &'a str,
     check_inserted: &'a mut dyn FnMut(&Value) -> Result<(), String>,
-    output: Vec<Value>,
+    output: Vec<Cow<'r, Value>>,
     output_sources: Vec<Option<usize>>,
     redundant_sources: BTreeSet<usize>,
     current_source: usize,
@@ -172,9 +171,9 @@ struct Projector<'a> {
     last_timestamp: Option<String>,
 }
 
-impl<'a> Projector<'a> {
+impl<'a, 'r> Projector<'a, 'r> {
     fn new(
-        records: &[Value],
+        records: &[&'r Value],
         output_root_thread_id: &'a str,
         check_inserted: &'a mut dyn FnMut(&Value) -> Result<(), String>,
     ) -> Result<Self, String> {
@@ -254,8 +253,8 @@ impl<'a> Projector<'a> {
         })
     }
 
-    fn process(&mut self, records: &[Value], index: usize) -> Result<(), String> {
-        let record = &records[index];
+    fn process(&mut self, records: &[&'r Value], index: usize) -> Result<(), String> {
+        let record = records[index];
         if let Some(timestamp) = record.get("timestamp").and_then(Value::as_str) {
             self.last_timestamp = Some(timestamp.to_string());
         }
@@ -272,7 +271,7 @@ impl<'a> Projector<'a> {
                     self.ensure_turn(&timestamp, index)?;
                     // A synthetic start must precede its source message.
                     // Otherwise reprojection opens a second implicit turn.
-                    self.push_source(record.clone());
+                    self.push_source(Cow::Borrowed(record));
                     let generated = hook.item_id.is_none();
                     let item = hook_prompt_item(hook.item_id, &hook.fragments);
                     self.adopt_or_emit(
@@ -286,7 +285,7 @@ impl<'a> Projector<'a> {
                     return Ok(());
                 }
             }
-            self.push_source(record.clone());
+            self.push_source(Cow::Borrowed(record));
             return Ok(());
         }
         let payload = record
@@ -313,7 +312,7 @@ impl<'a> Projector<'a> {
                     explicit: true,
                     saw_user: false,
                 });
-                self.push_source(record.clone());
+                self.push_source(Cow::Borrowed(record));
             }
             "task_complete" | "turn_complete" => {
                 self.flush_reasoning()?;
@@ -325,7 +324,7 @@ impl<'a> Projector<'a> {
                 {
                     self.active_turn = None;
                 }
-                self.push_source(record.clone());
+                self.push_source(Cow::Borrowed(record));
             }
             "turn_aborted" | "task_aborted" => {
                 self.flush_reasoning()?;
@@ -344,22 +343,22 @@ impl<'a> Projector<'a> {
                     // association without mutating the original record.
                     None => self.active_turn = None,
                 }
-                self.push_source(record.clone());
+                self.push_source(Cow::Borrowed(record));
             }
             "item_completed" => {
                 let normalized = self.normalize_current_item_record(record)?;
                 if self.adopted_candidate_index.take() == Some(index) {
                     self.redundant_sources.insert(index);
-                    self.push_source(normalized);
+                    self.push_source(Cow::Owned(normalized));
                     return Ok(());
                 }
                 if self.adopt_reasoning_projection(&normalized, index)? {
                     self.redundant_sources.insert(index);
-                    self.push_source(normalized);
+                    self.push_source(Cow::Owned(normalized));
                     return Ok(());
                 }
                 self.flush_reasoning()?;
-                self.push_source(normalized);
+                self.push_source(Cow::Owned(normalized));
             }
             "user_message" => {
                 self.flush_reasoning()?;
@@ -376,7 +375,7 @@ impl<'a> Projector<'a> {
                     turn.saw_user = true;
                 }
                 let item_body = user_message_item_body(payload)?;
-                self.push_source(record.clone());
+                self.push_source(Cow::Borrowed(record));
                 self.adopt_or_emit(
                     records,
                     index,
@@ -394,14 +393,14 @@ impl<'a> Projector<'a> {
                 if message.is_empty() {
                     // Upstream skips empty agent messages without touching
                     // reasoning state; the original record still travels.
-                    self.push_source(record.clone());
+                    self.push_source(Cow::Borrowed(record));
                     return Ok(());
                 }
                 self.flush_reasoning()?;
                 let timestamp = record_timestamp(record, &event_type)?;
                 self.ensure_turn(&timestamp, index)?;
                 let item_body = agent_message_item_body(payload, message);
-                self.push_source(record.clone());
+                self.push_source(Cow::Borrowed(record));
                 self.adopt_or_emit(
                     records,
                     index,
@@ -419,11 +418,11 @@ impl<'a> Projector<'a> {
                     .ok_or_else(|| format!("Codex {event_type} event has no text"))?
                     .to_string();
                 if text.is_empty() {
-                    self.push_source(record.clone());
+                    self.push_source(Cow::Borrowed(record));
                     return Ok(());
                 }
                 self.ensure_turn(&timestamp, index)?;
-                self.push_source(record.clone());
+                self.push_source(Cow::Borrowed(record));
                 let turn_id = self
                     .active_turn
                     .as_ref()
@@ -550,7 +549,7 @@ impl<'a> Projector<'a> {
                 )?;
             }
             other if CONTEXT_ONLY_EVENTS.contains(&other) => {
-                self.push_source(record.clone());
+                self.push_source(Cow::Borrowed(record));
             }
             other => {
                 return Err(format!(
@@ -570,9 +569,9 @@ impl<'a> Projector<'a> {
     #[allow(clippy::too_many_arguments)]
     fn complete_with_turn_hint(
         &mut self,
-        records: &[Value],
+        records: &[&'r Value],
         index: usize,
-        record: &Value,
+        record: &'r Value,
         timestamp: &str,
         hint: Option<String>,
         item_body: ItemBody,
@@ -609,7 +608,7 @@ impl<'a> Projector<'a> {
                 .map(|turn| turn.id.clone())
                 .ok_or_else(|| "Codex display completion has no active turn".to_string())?,
         };
-        self.push_source(record.clone());
+        self.push_source(Cow::Borrowed(record));
         self.adopt_or_emit(
             records,
             index,
@@ -625,7 +624,7 @@ impl<'a> Projector<'a> {
     /// unrelated adjacent record simply means the completion is not covered.
     fn adopt_or_emit(
         &mut self,
-        records: &[Value],
+        records: &[&'r Value],
         index: usize,
         timestamp: &str,
         turn_id: Option<String>,
@@ -862,7 +861,7 @@ impl<'a> Projector<'a> {
         self.insert_record(run.last_output_index + 1, projection)
     }
 
-    fn push_source(&mut self, record: Value) {
+    fn push_source(&mut self, record: Cow<'r, Value>) {
         self.output.push(record);
         self.output_sources.push(Some(self.current_source));
     }
@@ -870,7 +869,7 @@ impl<'a> Projector<'a> {
     fn insert_record(&mut self, index: usize, record: Value) -> Result<(), String> {
         (self.check_inserted)(&record)
             .map_err(|error| format!("inserted record {}: {error}", index + 1))?;
-        self.output.insert(index, record);
+        self.output.insert(index, Cow::Owned(record));
         self.output_sources.insert(index, None);
         Ok(())
     }
@@ -932,7 +931,7 @@ impl<'a> Projector<'a> {
         }
     }
 
-    fn finish(mut self) -> Result<Vec<ProjectedRecord>, String> {
+    fn finish(mut self) -> Result<Vec<ProjectedRecord<'r>>, String> {
         self.flush_reasoning()?;
         if self.active_turn.as_ref().is_some_and(|turn| !turn.explicit) {
             let timestamp = self.last_timestamp.clone().ok_or_else(|| {

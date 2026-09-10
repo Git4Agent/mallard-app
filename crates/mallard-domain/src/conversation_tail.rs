@@ -539,6 +539,8 @@ pub fn conversation_prefix_witness(
 #[serde(deny_unknown_fields)]
 pub struct ConversationCheckpoint {
     pub generation: u64,
+    pub accepted_subagents:
+        std::collections::BTreeMap<crate::SubagentKey, crate::AcceptedSubagentState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted: Option<AcceptedConversationVersion>,
     /// The local-form twin of `accepted.portable_tail`, pinned atomically at
@@ -561,6 +563,13 @@ pub struct ConversationCheckpoint {
 
 impl ConversationCheckpoint {
     pub fn validate(&self) -> Result<(), String> {
+        crate::subagents::validate_subagent_map(&self.accepted_subagents)?;
+        if self.accepted.is_none() && !self.accepted_subagents.is_empty() {
+            return Err("child acceptance requires accepted parent evidence".to_string());
+        }
+        for child in self.accepted_subagents.values() {
+            child.validate()?;
+        }
         self.observed_tail.validate()?;
         if self.accepted.is_some() != self.accepted_local_tail.is_some() {
             return Err(

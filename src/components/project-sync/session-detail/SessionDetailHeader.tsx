@@ -41,6 +41,9 @@ export default function SessionDetailHeader({
   const start = formatSessionStart(detail.started_at);
   const length = formatSessionDuration(detail.started_at, detail.ended_at);
   const tokensKnown = detail.tokens.quality !== "unsupported" && detail.tokens.value != null;
+  const agents = detail.event_counts.agent_calls;
+  const agentsKnown = agents.quality !== "unsupported" && agents.value != null && agents.value > 0;
+  const agent = detail.agent?.preview ?? null;
 
   return (
     <header className="session-detail-header">
@@ -86,6 +89,24 @@ export default function SessionDetailHeader({
               ? <><code className={`quality-${detail.tokens.quality}`}>{formatCompactCount(detail.tokens)}</code> tokens</>
               : "Tokens unavailable"}
           </FactChip>
+          {/* How many agents this session delegated to; the rows say which. */}
+          {agentsKnown && (
+            <FactChip title={agents.explanation ?? `${formatSessionCount(agents)} agents spawned in this session`}>
+              <Icon name="git-fork" size={12} />
+              <code className={`quality-${agents.quality}`}>{formatSessionCount(agents)}</code>
+              {agents.value === 1 ? "agent" : "agents"}
+            </FactChip>
+          )}
+          {/* A child page states what it was: its role, model, and how the
+              parent ran it. The parent itself is the crumb before the title. */}
+          {agent?.role && (
+            <FactChip title={`Agent role ${agent.role}`}>
+              <Icon name="git-fork" size={12} />
+              <code>{agent.role}</code>
+            </FactChip>
+          )}
+          {agent?.model && <FactChip title={`Model ${agent.model}`}><code>{agent.model}</code></FactChip>}
+          {agent && <FactChip title={`Run ${agent.mode}`}>{agent.mode}</FactChip>}
         </div>
 
         <div className="session-detail-header-actions" aria-label="Session actions">

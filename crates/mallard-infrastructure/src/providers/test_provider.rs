@@ -8,8 +8,9 @@ use super::traits::{
     DiscoveredSession, MaintenanceActionDescriptor, MaintenanceActionScope,
     MaterializationTargetRequest, PlannedProviderTarget, ProviderDescriptor, SessionActionContext,
     SessionActionDescriptor, SessionActionOutcome, SessionActionRequest, SessionAdapter,
-    SessionAnalysis, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
-    SessionFileMetadata, SessionFileSummary, SessionTimelineContext, SessionTimelineIndex,
+    SessionAgentPreview, SessionAnalysis, SessionChildIdentity, SessionDiscovery,
+    SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
+    SessionTimelineContext, SessionTimelineIndex, SessionTimelineIndexEntry,
     SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::provider_capture::{
@@ -210,6 +211,28 @@ impl SessionAdapter for TestProviderAdapter {
         super::claude::history::summarize_bytes(bytes)
     }
 
+    fn summarize_child_file(
+        &self,
+        path: &Path,
+        child: &SessionChildIdentity,
+    ) -> Result<SessionFileSummary, String> {
+        super::claude::history::summarize_child_file(path, child)
+    }
+
+    fn locate_child_transcript(
+        &self,
+        provider_home: &Path,
+        parent_transcript: &Path,
+        child: &SessionChildIdentity,
+    ) -> Result<Option<std::path::PathBuf>, String> {
+        let path = super::claude::subagents::child_path(
+            parent_transcript,
+            &child.parent_provider_session_id,
+            &child.provider_agent_id,
+        )?;
+        Ok(super::claude::subagents::child_exists(&path, provider_home)?.then_some(path))
+    }
+
     fn build_timeline_index(
         &self,
         path: &Path,
@@ -218,13 +241,23 @@ impl SessionAdapter for TestProviderAdapter {
         super::claude::history::build_timeline_index(path, context)
     }
 
+    fn describe_agent_call(
+        &self,
+        path: &Path,
+        entry: &SessionTimelineIndexEntry,
+        context: &SessionTimelineContext<'_>,
+    ) -> Result<SessionAgentPreview, String> {
+        super::claude::history::describe_agent_call(path, entry, context)
+    }
+
     fn read_timeline_page(
         &self,
         path: &Path,
         index: &SessionTimelineIndex,
         query: &SessionTimelineQuery,
+        context: &SessionTimelineContext<'_>,
     ) -> Result<SessionTimelinePageSlice, String> {
-        super::claude::history::read_timeline_page(path, index, query)
+        super::claude::history::read_timeline_page(path, index, query, context)
     }
 
     fn read_event_detail(

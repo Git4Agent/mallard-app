@@ -283,7 +283,10 @@ fn action_pins(
         .into_iter()
         .collect();
     ConversationActionPins {
-        context: ConversationContextPins {
+        subagent_selection: Default::default(),
+        credential_redaction_enabled: true,
+export_settings_changed: false,
+context: ConversationContextPins {
             host_id: HostId::parse("11111111111111111111111111111111").unwrap(),
             replica_id: ReplicaId::parse("replica-a").unwrap(),
             local_project_id: LocalProjectId::parse("project-a").unwrap(),
@@ -302,6 +305,9 @@ fn action_pins(
             scope_sha256: "f".repeat(64),
         },
         tail: ConversationTailPins {
+            subagents: Default::default(),
+            subagents_omitted: false,
+            missing_local_subagents: Default::default(),
             accepted: accepted.clone(),
             accepted_local: accepted,
             local,

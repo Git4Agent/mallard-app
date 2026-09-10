@@ -13,8 +13,7 @@ use crate::codex_rollout::{
     check_rollout_bounds, CodexStructureAccumulator, CodexStructureErrorKind,
 };
 use mallard_domain::{
-    conversation_chain_digests, sha256_hex, validate_conversation_chain,
-    CanonicalConversationMessage, MessageId,
+    conversation_chain_digests, sha256_hex, CanonicalConversationMessage, MessageId,
 };
 
 pub const CODEX_LINEAGE_CODEC_KEY: &str = "codex.lineage.v1";
@@ -36,6 +35,8 @@ pub enum CodecUnknownReason {
     DuplicateMessageId,
     NonLinearParentage,
     InvalidMessageId,
+    InvalidChildIdentity,
+    UnsupportedChildReference,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,22 +169,23 @@ pub(crate) fn analyze_codex_records(
             is_internal_subagent,
         );
     }
-    if let Err(error) = validate_conversation_chain(&chain) {
-        let reason = if error.contains("duplicate") {
-            CodecUnknownReason::DuplicateMessageId
-        } else {
-            CodecUnknownReason::NonLinearParentage
-        };
-        return unknown(
-            source_thread_id,
-            source_cwd,
-            record_count,
-            reason,
-            is_internal_subagent,
-        );
-    }
-    let (lineage_digest, semantic_digest) = conversation_chain_digests(&chain)
-        .expect("validated conversation chains always produce digests");
+    let (lineage_digest, semantic_digest) = match conversation_chain_digests(&chain) {
+        Ok(digests) => digests,
+        Err(error) => {
+            let reason = if error.contains("duplicate") {
+                CodecUnknownReason::DuplicateMessageId
+            } else {
+                CodecUnknownReason::NonLinearParentage
+            };
+            return unknown(
+                source_thread_id,
+                source_cwd,
+                record_count,
+                reason,
+                is_internal_subagent,
+            );
+        }
+    };
     CodexTranscriptAnalysis {
         source_thread_id,
         source_cwd,

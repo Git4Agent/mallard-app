@@ -6,6 +6,7 @@
 //! imports a concrete adapter or branches on a provider key. Adding a
 //! built-in storage provider is an adapter module plus one registry entry.
 
+pub mod dropbox;
 pub mod local;
 pub mod r2;
 pub mod registry;

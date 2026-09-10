@@ -17,6 +17,38 @@ use tauri::Emitter as _;
 
 pub const CONFIG_CHANGED_EVENT: &str = "project-sync-config-changed";
 pub const STORAGE_SETUP_DRAFTS_CHANGED_EVENT: &str = "project-sync-storage-setup-drafts-changed";
+/// A storage's runtime connection health changed or was forgotten. The
+/// payload names the storage only; the listing carries the health itself.
+pub const STORAGE_CONNECTION_CHANGED_EVENT: &str = "project-sync-storage-connection-changed";
+
+#[derive(Serialize, Clone)]
+pub struct StorageConnectionChangedEvent {
+    pub storage_id: String,
+}
+
+/// Forward the infrastructure's connection-health transitions to the window
+/// for the life of the process. A lagged receiver just keeps forwarding; the
+/// frontend re-reads the whole listing on every event.
+pub fn start_connection_forwarder<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    let mut events = mallard_infrastructure::storage_core::connection_events().subscribe();
+    thread::Builder::new()
+        .name("mallard-connection-events".to_string())
+        .spawn(move || loop {
+            match events.blocking_recv() {
+                Ok(storage_id) => {
+                    let _ = app.emit(
+                        STORAGE_CONNECTION_CHANGED_EVENT,
+                        StorageConnectionChangedEvent {
+                            storage_id: storage_id.to_string(),
+                        },
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        })
+        .ok();
+}
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]

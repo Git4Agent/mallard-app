@@ -8,8 +8,8 @@
 use bytes::Bytes;
 use mallard_domain::StorageConfig;
 use mallard_infrastructure::storage_core::{
-    ensure_storage_marker, library_object_key, CasExpectation, CasOutcome, ExpectedObject,
-    ImmutablePutOutcome, ObjectStore, StageOutcome, HEAD_FILE, TAG_FILE,
+    library_object_key, CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome,
+    ObjectStore, StageOutcome, HEAD_FILE, TAG_FILE,
 };
 use mallard_infrastructure::storage_providers::StorageProviderRegistry;
 use std::collections::BTreeMap;
@@ -229,7 +229,6 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
         &self,
         request: PublishLibraryResourceRequest,
     ) -> Result<PublishedLibraryResource, String> {
-        ensure_storage_marker(&self.store)?;
         request.tag.validate()?;
         if request.repository_id != request.tag.repository_id {
             return Err("Library publication tag does not match its repository".to_string());
@@ -558,6 +557,61 @@ mod tests {
             resources,
             updated_at,
         ))
+    }
+
+    #[test]
+    fn dropbox_two_users_publish_read_and_reject_stale_library_writes() {
+        let server =
+            mallard_infrastructure::storage_core::dropbox_store::mock::MockDropboxServer::new();
+        let second = server.second_user();
+        let first = LibraryResourceEngine::new(server.store);
+        let second = LibraryResourceEngine::new(second);
+        let id = plugin_repository();
+        let resource = plugin("review@review-market", "main");
+        first
+            .publish(request(
+                &id,
+                tag(&plugin_coordinate()),
+                None,
+                std::slice::from_ref(&resource),
+                1,
+            ))
+            .unwrap();
+        let (observed, manifest) = second.inspect(&id).unwrap().unwrap();
+        assert_eq!(
+            manifest.resource_map().get(&resource.resource_id),
+            Some(&resource)
+        );
+        let changed = plugin("review@review-market", "next");
+        second
+            .publish(request(
+                &id,
+                tag(&plugin_coordinate()),
+                Some(observed.clone()),
+                std::slice::from_ref(&changed),
+                2,
+            ))
+            .unwrap();
+        let error = first
+            .publish(request(
+                &id,
+                tag(&plugin_coordinate()),
+                Some(observed),
+                &[resource],
+                3,
+            ))
+            .unwrap_err();
+        assert!(error.contains("head changed after review"), "{error}");
+        assert_eq!(
+            first
+                .inspect(&id)
+                .unwrap()
+                .unwrap()
+                .1
+                .resource_map()
+                .get(&changed.resource_id),
+            Some(&changed)
+        );
     }
 
     #[test]

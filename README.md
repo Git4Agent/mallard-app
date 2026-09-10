@@ -27,7 +27,7 @@ resources portable across teammates and machines.
 - Parses session summaries and conversation previews locally, with metrics for
   start and end times, user turns, tokens, agent messages, and tool calls.
 - Syncs selected project conversations and provider-home resources — memory
-  and session state — through a local folder or Cloudflare R2.
+  and session state — through a local folder, Cloudflare R2, or Dropbox.
 - Compares local and stored resources before Push or Pull, including
   local-only, storage-only, ahead, synchronized, and conflict states.
 - Publishes immutable, SHA-256-verified bundle revisions after an explicit
@@ -89,9 +89,9 @@ Mallard uses Wrangler's authenticated Cloudflare session; the setup flow can
 open the system browser if sign-in or consent is required.
 
 1. In Mallard, open storage settings and add a **Cloudflare R2** storage.
-2. Either enter the five connection fields directly, or choose a storage name,
-   select **Set up with an agent**, and paste the copied instruction into the
-   agent.
+2. Enter the connection fields directly, or select **Run with Codex/Claude**
+   under agent setup. Mallard passes the instruction directly to the agent.
+   Copying the instruction is also available.
 3. For agent setup, the agent may need separate one-time execution approval
    before it starts the exact Mallard CLI setup command. This approval lets
    that command write the current user's `~/.mallard` state and launch the
@@ -113,14 +113,52 @@ Manual **Finish setup** and **Save storage** use the same exact R2 capability
 probe before committing connection changes. Leaving the Secret Access Key
 blank while editing an existing storage preserves the backend-held value.
 
-**Clear storage data** is available for local-folder and R2 storage. The
+For **Dropbox**, select **Run with Codex/Claude** to create a new Mallard shared
+folder. The helper opens Dropbox consent, obtains the namespace, and saves a
+refresh credential in the exact local draft. No app key, authorization code,
+namespace, or token needs to be typed or pasted. Dropbox can still require
+login or MFA. New drafts show the saved refresh token with the same Show/Hide
+and replacement controls as R2. Review the connection and select **Finish
+setup**. Access renews automatically. The storage page says **Connected** only
+after a request to Dropbox has succeeded in this session.
+
+If Dropbox rejects the saved authorization, Mallard says so once, with the
+route, HTTP status, Dropbox error identifier, and request ID it can prove,
+and stops presenting that credential until it changes. The sidebar and the
+Storages index mark the storage **Reconnect**; the storage page, and a Push or
+Pull that failed on it, offer **Reconnect Dropbox**, which opens the same
+storage's settings. Select **Reconnect with Codex/Claude** there, or paste a
+replacement token, then **Save changes**. Reconnection keeps the namespace,
+the storage ID, and the project links, and creates no folder. A manual token
+that expired is reported the same way and needs a replacement. Access that
+merely ran out under a renewable credential is renewed and the read repeated
+once; a write is never repeated. Connection health is runtime state; it is not
+stored and does not change any schema.
+
+Manual Dropbox setup accepts **Namespace ID** and **Access token** for an
+existing shared folder or team namespace. Use a user-linked token from a Full
+Dropbox app with `account_info.read`, `files.metadata.read`,
+`files.content.read`, and `files.content.write`. Replace a manual token when
+it expires. The namespace is fixed after setup. Each machine must connect to
+the same namespace; creating another folder creates another storage.
+
+Dropbox uses the same `.mallard/` layout. Each uploaded object must be at most
+**150 MiB (157,286,400 bytes)**. This Dropbox upload limit does not change
+Local, R2, capture, or download limits. Dropbox transfers objects concurrently
+through upload sessions and commits each bounded batch. See the
+[Dropbox storage design](docs/DESIGN_DROPBOX_SHARED_TEAM_NAMESPACE_STORAGE.md)
+for setup and recovery details. The authorization and folder-creation POC
+passed with one live account. Full transport and two-account live checks
+remain pending.
+
+**Clear storage data** is available for local-folder, R2, and Dropbox storage. The
 confirmation names the storage and requires you to confirm that sync has
 stopped on all machines. It deletes all synced repositories and Library
 resources under `.mallard/v1/repositories/` and `.mallard/v1/library/`.
 Mallard validates and retains `.mallard/_storage.json`. It preserves unrelated
 objects, local files, provider sessions, and the storage connection.
 
-Local-folder clear checks each listed object revision. R2 clear uses
+Local-folder and Dropbox clear check each listed object revision. R2 clear uses
 unconditional deletion because R2 does not support revision-bound
 `DeleteObject`. Normal object deletion still requires a revision check;
 R2 does not provide that operation. Keep sync stopped until clear completes.
@@ -135,12 +173,31 @@ Credentials and machine-specific paths are stored only in Mallard's local
 metadata under `~/.mallard/`; they are never uploaded inside a portable
 project bundle.
 
-### Agent-assisted R2 setup and packaged CLI
+### Agent setup and packaged CLI
 
 Builds produced from this source tree package `mallard-cli` inside both the
-macOS app and the Windows per-user installer. In **New storage → Cloudflare
-R2**, **Set up with an agent** copies the exact packaged executable path and a
-credential-free instruction. The installer does not modify PATH.
+macOS app and the Windows per-user installer. R2 and Dropbox use the same
+agent launch controls. Mallard saves the exact draft and passes the packaged
+CLI path, draft ID, name, and revision to the selected agent. The installer
+does not modify PATH.
+
+Dropbox has no external CLI dependency. Mallard includes its public Dropbox
+app key and uses PKCE with a registered loopback callback. Setup requests
+the four storage scopes above plus `sharing.write`; reconnection and refreshed
+access request only the storage scopes. Full Dropbox permission covers more
+than the selected folder. The helper creates no invitations or public links.
+
+```sh
+mallard-cli storage dropbox setup --name "Dropbox storage 1" \
+  --draft-id "storagedraft-…" --expected-revision 3
+```
+
+The agent runs that command. The user does not enter it. A bounded local
+provisioning journal records creation intent, the acknowledged folder ID,
+sharing job, and namespace. Restart can resume an acknowledged stage. An
+unknown create or share result stops without repeating the mutation. The
+folder remains after cancellation or failure. The journal contains no token.
+See [Dropbox agent setup](docs/PLAN_AGENT_ASSISTED_DROPBOX_SETUP.md).
 
 R2 has one setup command. The copied instruction first saves the exact open
 schema-1 setup draft and includes its non-secret ID and expected revision in
@@ -259,6 +316,33 @@ that branch.
   exact empty directory and is never recursive.
 - Absolute checkout paths, Codex-home paths, storage credentials, restore
   plans, receipts, backups, and local preferences stay on the machine.
+
+Settings > Sync has separate **Push Codex children** and **Push Claude children**
+switches. Both default to On and control the next Push. Each cloud task carries
+an On/Off child stamp: Compare uses the cloud stamp, while Push uses this
+computer's setting. Cloud Off compares only the parent. Cloud On includes
+supported owned children in Compare. A stamp difference permits reviewed Push
+for otherwise synchronized content, including a task with no children.
+
+Pull restores exactly the child files listed in the cloud and keeps local
+settings unchanged. Claude supports direct children only and retains agent
+IDs inside the destination parent directory. Inherited children stay outside
+the task's sync scope. With Push enabled, one unsupported owned child omits
+all children and shows an information icon in review. A missing required
+child blocks Push. If that accepted child exists in storage and all other
+evidence is valid, Pull offers Keep both to restore the cloud copy and retain
+the local files.
+
+Child changes use the same comparison rules as main changes. Review fixes
+child membership; Apply captures the latest bytes. A source change after
+capture fails that task with a request to Push again. Completed writes remain
+after an Apply error; there is no rollback of the task tree.
+
+This is a schema-1 clean cutover with required new fields. Use fresh Mallard
+state and empty test storage. See the [owned-child design](docs/PLAN_CODEX_OWNED_SUBAGENT_SYNC.md)
+and [verification results](docs/CODEX_OWNED_SUBAGENT_SYNC_VERIFICATION.md). Claude scope and validation are in
+the [Claude design](docs/PLAN_CLAUDE_OWNED_SUBAGENT_SYNC.md) and
+[Claude verification](docs/CLAUDE_OWNED_SUBAGENT_SYNC_VERIFICATION.md).
 
 ## Architecture
 
@@ -404,7 +488,7 @@ you intend to pay for three Sonnet 5 turns:
 MALLARD_RUN_LIVE_CLAUDE_TUZI_E2E=1 npm run test:live-claude-tuzi-e2e
 ```
 
-The runner requires Node.js 20.15.0 or newer and exactly Claude Code 2.1.260.
+The runner requires Node.js 20.15.0 or newer and exactly Claude Code 2.1.266.
 Before Cargo starts, it validates `.env.local` as a bounded, no-follow,
 mode-`0600` three-field JSON document and performs a bounded authenticated
 catalog lookup for exact model ID `claude-sonnet-5`. It never passes the key
@@ -516,10 +600,27 @@ binding. It verifies the staged SHA-256 without another semantic analysis.
 The output layout, path-map, redaction, shared-index, and destination checks
 remain in place. A preparation or installation failure affects that thread.
 
+Settings > Privacy controls **Credential redaction** for this machine. It is
+On by default. On replaces detected credentials in exported sessions, child
+sessions, sidecars, provider-state content, and titles. Off preserves that
+content. Exported content can then include API keys, tokens, and passwords.
+Credential-file exclusions and diagnostic sanitization remain active.
+
+Push review shows the selected mode. A setting change before apply requires a
+new review. A save attempted during Push apply returns busy; it does not change
+the saved mode or the active Push. Retry the save after Push completes.
+
+A selected current session with a different stored mode publishes a complete
+new revision under its existing cloud ID. Pull and first-contact comparison use
+the stored revision's mode, independent of this machine's outgoing setting.
+A mode change does not purge comparison caches. On cannot remove content from
+older immutable Off revisions. Off cannot recover text already replaced with
+placeholders. All schemas remain at version 1; there is no migration path.
+
 Conversation path conversion preserves literal marker text and destination
 paths. Tagged references retain absolute, alias, tilde, and URI spellings.
 On return to the same bindings, conversation text is unchanged except for
-credential redaction. Restore IDs and record layout can change.
+credential redaction when enabled. Restore IDs and record layout can change.
 
 Local bindings reference immutable path-origin files. These files hold strict
 record hashes and inverse edits. Retained history uses those edits on later
@@ -646,7 +747,7 @@ npm install
 MALLARD_RUN_LIVE_CLAUDE_AIMOCK_E2E=1 npm run test:live-claude-aimock-e2e
 ```
 
-The current native-format gate requires exactly Claude Code `2.1.260`,
+The current native-format gate requires exactly Claude Code `2.1.266`,
 `@copilotkit/aimock` `1.39.0`, Node.js 20.15.0 or newer, and the mock model
 identifier `claude-sonnet-4-6`. The runner strips inherited provider,
 provider-home, endpoint, and proxy state before Cargo starts. Each Claude
@@ -671,7 +772,7 @@ revision 1, and verifies one incremental cursor append.
 
 The accounting is exact: 12 Claude model-turn processes make 13 authenticated
 `POST /v1/messages?beta=true` requests, because the first content tool round
-uses two Messages calls. Claude Code 2.1.260 also makes one credential-free
+uses two Messages calls. Claude Code 2.1.266 also makes one credential-free
 `HEAD /api/hello` compatibility probe per process. The raw boundary therefore
 requires exactly 25 requests: 13 model requests plus 12 probes. The Messages
 requests are separately reconciled with all 13 semantic aimock scenarios. Any
@@ -723,3 +824,46 @@ implementation notes, and safety contract.
 ## License
 
 Licensed under the [Apache License 2.0](./LICENSE).
+
+### Mixed provider E2E and performance test
+
+The default mixed test creates **25 Codex sessions and 15 Claude sessions**
+with real provider CLIs and local mock responses. It checks 20 Codex fork
+edges, selected-history Push/Pull, native resume, path remapping, credential
+redaction, Keep both, and three project paths. The two conflict rounds add
+eight branches, for 48 final conversations. All test homes and storage are
+temporary.
+
+The original 100-Codex/20-Claude fixture is now **xlarge**. It retains its
+80-edge graph and 132 final conversations.
+
+```sh
+npm run test:mixed-aimock-harness
+MALLARD_RUN_MIXED_AIMOCK_E2E=1 npm run test:mixed-aimock-e2e
+MALLARD_RUN_MIXED_AIMOCK_E2E=1 npm run test:mixed-aimock-e2e -- --debug
+MALLARD_RUN_MIXED_AIMOCK_E2E=1 npm run bench:mixed-aimock-e2e -- --baseline-ref="$BASELINE_REF"
+MALLARD_RUN_MIXED_AIMOCK_E2E=1 npm run test:mixed-aimock-e2e-xlarge
+MALLARD_RUN_MIXED_AIMOCK_E2E=1 npm run bench:mixed-aimock-e2e-xlarge -- --baseline-ref="$BASELINE_REF"
+```
+
+Set `BASELINE_REF` to a reviewed full product commit ID. The benchmark builds
+both revisions with the same test worker. It alternates their samples against
+the same checkpoints. It uses two discarded iterations and at least 20 measured
+samples per operation. Without a baseline, it records measurements and exits 2
+with status `uncalibrated`. Debug builds cannot produce benchmark results.
+
+Reports are in the ignored `output/mixed-aimock/` directory, or
+`output/mixed-aimock-xlarge/` for xlarge. They contain test
+counts, mock audits, operation times, worker CPU and peak RSS, work counters,
+and regression results. They do not contain transcripts or provider homes.
+
+The periodic workflow requires a dedicated Linux runner with the
+`mallard-mixed-aimock` label and the repository variable
+`MIXED_AIMOCK_BASELINE_REF`. The 25/15 test runs nightly at 09:00 UTC. The Sunday
+11:00 UTC run tests xlarge scales 10, 50, and 100 with one and four comparison
+workers. The
+execution phase uses a private network namespace with loopback only.
+
+See [the test procedure](docs/MIXED_PROVIDER_AIMOCK_E2E.md) for pins, test steps,
+benchmark limits, baseline qualification, and runner setup. See the
+[xlarge procedure](docs/MIXED_PROVIDER_AIMOCK_E2E_XLARGE.md) for the larger fixture.

@@ -291,6 +291,13 @@ pub trait ObjectStore: Send + Sync {
     fn local_root(&self) -> Option<&Path> {
         None
     }
+
+    /// What the transport last observed about its credential. Stores that
+    /// track nothing return `None`; the shared store refuses requests while
+    /// the recorded health suspends the connection.
+    fn connection_health(&self) -> Option<super::ConnectionHealth> {
+        None
+    }
 }
 
 /// Compute a SHA-256 over a streaming reader without loading it whole.

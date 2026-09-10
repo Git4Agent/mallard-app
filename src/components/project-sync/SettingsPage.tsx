@@ -104,6 +104,7 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
   const [tuning, setTuning] = useState<AppSettings | null>(null);
   const [tuningBusy, setTuningBusy] = useState(false);
   const [tuningError, setTuningError] = useState<string | null>(null);
+  const [tuningSection, setTuningSection] = useState<"privacy" | "sync" | "performance">("privacy");
   const [tuningLoading, setTuningLoading] = useState(true);
   const [localSummary, setLocalSummary] = useState<LocalStateSummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
@@ -192,6 +193,8 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
   const applyTuning = async (patch: Partial<AppSettings>) => {
     if (!tuning) return;
     setTuningBusy(true);
+    setTuningSection("credential_redaction_enabled" in patch ? "privacy"
+      : "push_codex_children" in patch || "push_claude_children" in patch ? "sync" : "performance");
     setTuningFromAction(true);
     setTuningError(null);
     try {
@@ -322,7 +325,7 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
     tuningNotices.push({
       key: "tuning-error",
       severity: "danger",
-      message: tuning ? tuningError : `Couldn’t read the performance settings. ${tuningError}`,
+      message: tuning ? tuningError : `Couldn’t read the app settings. ${tuningError}`,
       action: tuning ? undefined : (
         <button type="button" className="btn" disabled={tuningLoading} onClick={() => void loadTuning(true)}>
           <Icon name="refresh" size={14} className={tuningLoading ? "icon-spin" : undefined} />
@@ -334,7 +337,7 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
   /* Same reading as the Logs group: the mount load's failure is standing
      content; after a Retry or a select it is an answer. */
   const tuningTiming: NoticeTiming = !tuningFromAction
-    ? { timing: "standing", label: "Problems with performance settings" }
+    ? { timing: "standing", label: "Problems with app settings" }
     : tuningError
       ? { timing: "blocking" }
       : { timing: "progress" };
@@ -416,12 +419,23 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
             <div className="sync-settings-card">
               <SettingsRow
                 label="Credential redaction"
-                control={<span className="sync-settings-flag">Always on</span>}
+                control={(
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    className="sync-settings-switch"
+                    checked={tuning?.credential_redaction_enabled ?? true}
+                    disabled={tuningBusy || !tuning}
+                    onChange={(event) => void applyTuning({ credential_redaction_enabled: event.target.checked })}
+                    aria-label="Credential redaction"
+                  />
+                )}
               >
-                API keys, tokens, and passwords in captured conversations are replaced
-                with typed placeholders before anything leaves this machine.
+                On replaces detected credentials in exported sessions and provider state.
+                Off can export API keys, tokens, and passwords. Applies to this machine.
               </SettingsRow>
             </div>
+            {tuningSection === "privacy" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-sync">
@@ -429,6 +443,38 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
               <Icon name="git-compare-arrows" size={12} /> Sync
             </h2>
             <div className="sync-settings-card">
+              <SettingsRow
+                label="Push Codex children"
+                control={
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    className="sync-settings-switch"
+                    checked={tuning?.push_codex_children ?? true}
+                    disabled={tuningLoading || tuningBusy || !tuning}
+                    onChange={(event) => void applyTuning({ push_codex_children: event.target.checked })}
+                    aria-label="Push Codex children"
+                  />
+                }
+              >
+                Include child conversations in Push. Pull restores the files stored in the cloud.
+              </SettingsRow>
+              <SettingsRow
+                label="Push Claude children"
+                control={
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    className="sync-settings-switch"
+                    checked={tuning?.push_claude_children ?? true}
+                    disabled={tuningLoading || tuningBusy || !tuning}
+                    onChange={(event) => void applyTuning({ push_claude_children: event.target.checked })}
+                    aria-label="Push Claude children"
+                  />
+                }
+              >
+                Include child conversations in Push. Pull restores the files stored in the cloud.
+              </SettingsRow>
               <SettingsRow
                 label="Open Logs on Push and Pull"
                 control={<PreferenceSwitch name="openLogsOnSync" label="Open Logs on Push and Pull" />}
@@ -444,6 +490,7 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
                 and storage.
               </SettingsRow>
             </div>
+            {tuningSection === "sync" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-performance">
@@ -557,11 +604,7 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
                 metered connections.
               </SettingsRow>
             </div>
-            <NoticeZone
-              items={tuningNotices}
-              subject="notes about performance settings"
-              {...tuningTiming}
-            />
+            {tuningSection === "performance" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-logs">

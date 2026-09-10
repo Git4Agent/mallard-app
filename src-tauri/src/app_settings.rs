@@ -3,8 +3,8 @@
 //! `mallard_infrastructure::app_settings`; this module adds the command
 //! surface and the cache consequences the infrastructure crate cannot see:
 //! observation and inventory caches bake limits into their contents, and a
-//! settings change fires no filesystem event, so an update drops them
-//! explicitly.
+//! tuning change fires no filesystem event, so it drops them explicitly.
+//! Redaction-only changes preserve caches. Saves share the host operation lock.
 
 use crate::project_sync::session_watch_service::session_watch_service;
 use mallard_infrastructure::app_settings::{
@@ -24,10 +24,17 @@ async fn run_settings_io<T: Send + 'static>(
 fn update_app_settings_core(
     repository: &LocalStateRepository,
     settings: &AppSettings,
+    reset_caches: impl FnOnce() -> Result<(), String>,
 ) -> Result<AppSettings, String> {
+    let _operation = repository.acquire_host_operation()?;
+    let previous = load_app_settings(repository)?;
     save_app_settings(repository, settings)?;
     install_app_settings(settings);
-    load_app_settings(repository)
+    let saved = load_app_settings(repository)?;
+    if previous.tuning_differs(&saved) {
+        reset_caches()?;
+    }
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -39,9 +46,9 @@ pub async fn get_app_settings() -> Result<AppSettings, String> {
 pub async fn update_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
     run_settings_io(move || {
         let repository = LocalStateRepository::from_user_home()?;
-        let saved = update_app_settings_core(&repository, &settings)?;
-        session_watch_service().reset_all_caches_and_purge_disk(repository.root())?;
-        Ok(saved)
+        update_app_settings_core(&repository, &settings, || {
+            session_watch_service().reset_all_caches_and_purge_disk(repository.root())
+        })
     })
     .await
 }
@@ -60,7 +67,7 @@ mod tests {
         let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
         let settings = AppSettings::default();
 
-        let saved = update_app_settings_core(&repository, &settings).unwrap();
+        let saved = update_app_settings_core(&repository, &settings, || Ok(())).unwrap();
         assert_eq!(saved, settings);
         assert!(temp.path().join(".mallard").join("settings.json").is_file());
 
@@ -68,6 +75,67 @@ mod tests {
             comparison_workers: 0,
             ..settings
         };
-        assert!(update_app_settings_core(&repository, &invalid).is_err());
+        assert!(update_app_settings_core(&repository, &invalid, || Ok(())).is_err());
+    }
+    #[test]
+    fn export_settings_preserve_caches_and_busy_save_preserves_settings() {
+        use mallard_infrastructure::app_settings::{load_app_settings, save_app_settings};
+        let temp = tempfile::tempdir().unwrap();
+        let repo = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        assert!(
+            load_app_settings(&repo)
+                .unwrap()
+                .credential_redaction_enabled
+        );
+        let off = AppSettings {
+            credential_redaction_enabled: false,
+            push_codex_children: false,
+            push_claude_children: false,
+            ..AppSettings::default()
+        };
+        for _ in 0..2 {
+            let saved = update_app_settings_core(&repo, &off, || {
+                panic!("export-setting save must retain caches")
+            })
+            .unwrap();
+            assert_eq!(saved, off);
+        }
+        let run = mallard_infrastructure::credential_redaction::shared()
+            .begin_run()
+            .with_enabled(false);
+        {
+            let _push = repo.acquire_host_operation().unwrap();
+            assert!(
+                update_app_settings_core(&repo, &AppSettings::default(), || panic!(
+                    "busy save purged caches"
+                ))
+                .is_err()
+            );
+            assert_eq!(load_app_settings(&repo).unwrap(), off);
+            assert_eq!(
+                run.stamp().codec,
+                mallard_infrastructure::credential_redaction::REDACTION_OFF_CODEC_V1
+            );
+        }
+        update_app_settings_core(&repo, &AppSettings::default(), || {
+            panic!("export-setting save purged caches")
+        })
+        .unwrap();
+        // Seed a different tuning value on disk only. Never install non-default atomics in tests.
+        save_app_settings(
+            &repo,
+            &AppSettings {
+                comparison_workers: 2,
+                ..AppSettings::default()
+            },
+        )
+        .unwrap();
+        let purged = std::cell::Cell::new(false);
+        update_app_settings_core(&repo, &AppSettings::default(), || {
+            purged.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(purged.get());
     }
 }

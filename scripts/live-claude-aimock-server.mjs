@@ -5,10 +5,10 @@ import { fileURLToPath } from "node:url";
 
 const SCENARIO_VERSION = 1;
 const CLAUDE_MODEL = "claude-sonnet-4-6";
-const MAX_SCENARIO_BYTES = 512 * 1024;
+const MAX_SCENARIO_BYTES = 4 * 1024 * 1024;
 const MAX_SCENARIOS = 64;
-const MAX_EXPECTED_HISTORY_ITEMS = 64;
-const MAX_MARKER_CATALOG_ITEMS = 256;
+const MAX_EXPECTED_HISTORY_ITEMS = 256;
+const MAX_MARKER_CATALOG_ITEMS = 1024;
 const MAX_INPUT_MESSAGES = 512;
 const MAX_MESSAGE_TEXT_BYTES = 256 * 1024;
 const MAX_TOOLS = 8;
@@ -137,6 +137,16 @@ function isMarker(value) {
   return isBoundedString(value, 128) && MARKER_PATTERN.test(value);
 }
 
+// A text fixture is one leading marker followed by a bounded exact body.
+// The request oracle compares the entire assistant body, including whitespace.
+function contentMarker(value) {
+  return typeof value === "string" ? value.split("\n", 1)[0] : null;
+}
+
+function isAssistantContent(value) {
+  return isBoundedString(value, 32 * 1024) && isAssistantMarker(contentMarker(value));
+}
+
 function isUserMarker(value) {
   return isMarker(value) && (value.includes("_USER_") || value.endsWith("_USER"));
 }
@@ -156,7 +166,7 @@ function validateExpectedHistory(value, label) {
     }
     if (
       (entry.role === "user" && !isUserMarker(entry.marker)) ||
-      (entry.role === "assistant" && !isAssistantMarker(entry.marker))
+      (entry.role === "assistant" && !isAssistantContent(entry.marker))
     ) {
       throw new Error(`${label}_${index}_marker`);
     }
@@ -181,7 +191,7 @@ function validateResponse(value, label) {
   }
   if (value.kind === "text") {
     assertExactKeys(value, ["content", "kind"], label);
-    if (!isAssistantMarker(value.content)) {
+    if (!isAssistantContent(value.content)) {
       throw new Error(`${label}_content`);
     }
     return { kind: "text", content: value.content };
@@ -361,9 +371,9 @@ function parseScenarioDocument(input) {
   const markerCatalog = [...new Set(
     scenarios.flatMap((scenario) => [
       scenario.prompt_marker,
-      ...scenario.expected_history.map((entry) => entry.marker),
+      ...scenario.expected_history.map((entry) => contentMarker(entry.marker)),
       ...(scenario.response.kind === "text"
-        ? [scenario.response.content]
+        ? [contentMarker(scenario.response.content)]
         : []),
     ]),
   )];
@@ -631,7 +641,10 @@ function validateScenarioRequest(document, scenario, request) {
       continue;
     }
     const marker = matches[0];
-    if (message.role === "assistant" && text !== marker) {
+    const expectedBody = scenario.expected_history.find(
+      (entry) => entry.role === "assistant" && contentMarker(entry.marker) === marker,
+    )?.marker;
+    if (message.role === "assistant" && text !== expectedBody) {
       assistantShapeMismatch = index;
     }
     markers.push({ role: message.role, marker, input_index: index });
@@ -662,7 +675,7 @@ function validateScenarioRequest(document, scenario, request) {
     for (let index = 0; index < expected.length; index += 1) {
       if (
         markers[index].role !== expected[index].role ||
-        markers[index].marker !== expected[index].marker
+        markers[index].marker !== contentMarker(expected[index].marker)
       ) {
         fail(7, index);
         break;
@@ -748,7 +761,7 @@ function registerFixtures(mock, document, observations) {
   for (const scenario of document.scenarios) {
     const observation = observations.get(scenario.id);
     const match = {
-      userMessage: scenario.prompt_marker,
+      userMessage: new RegExp(`(?:^|[^A-Za-z0-9_])${scenario.prompt_marker}(?=$|[^A-Za-z0-9_])`, "u"),
       hasToolResult: scenario.require_tool_result,
       endpoint: "chat",
     };
@@ -1291,7 +1304,8 @@ const isMain =
   resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
 
 if (isMain) {
-  runHarness().catch(() => {
+  runHarness().catch((error) => {
+    console.error(/^[a-z0-9_]{1,96}$/u.test(error?.message) ? error.message : "harness_failed");
     process.exitCode = 1;
   });
 }

@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import PushResourceWorkspace, {
   pushBudgetTotal,
   pushReviewDisabledReason,
+  recommendedPushSelection,
   sanitizePushSelection,
 } from "../../src/components/project-sync/PushResourceWorkspace";
 import { recipeWithSelection } from "../../src/components/project-sync/model";
@@ -22,8 +23,8 @@ import type {
   ThreadSyncEntry,
 } from "../../src/types";
 
-/* Push comparison lists every eligible session. The live selection meter,
-   not session age or list order, enforces the aggregate Apply limit. */
+/* Automatic selection fills the budget in newest-first order.
+   Every eligible session remains available for manual selection. */
 
 const MB = 1024 * 1024;
 const LIMIT = 512 * MB;
@@ -74,6 +75,7 @@ function entry(threadId: string, overrides: Partial<ThreadSyncEntry> = {}): Thre
     local_present: true,
     storage_present: false,
     compared_against_storage: true,
+    subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
     local_updated_at: NOW - 3_600,
     push_decision: { action: "create_cloud", selectable: true },
     pull_decision: { action: "no_changes", selectable: false },
@@ -281,9 +283,24 @@ const projectFiles: ProjectContentInventory = {
   scanned_at: NOW,
 };
 
+test("automatic selection takes the newest sessions that fit, even when every session was saved", () => {
+  const entries = Array.from({ length: 394 }, (_, index) => entry(`session-${index}`, {
+    local_updated_at: NOW - index * 60,
+    capture_bytes: 8 * MB,
+  }));
+  const resources = [...entries].reverse().map(conversationResource);
+  const reviewed = comparison({ entries: [...entries].reverse() });
+  const selected = recommendedPushSelection(new Set(resources.map((resource) => resource.resource_id)), resources, reviewed);
+
+  assert.deepEqual([...selected], entries.slice(0, 63).map((row) => row.resource_id));
+  assert.equal(pushBudgetTotal(selected, reviewed)?.total, 507 * MB);
+  assert.equal(pushReviewDisabledReason({ selected, threadComparison: reviewed, deletionApproved: true }), null);
+});
+
 function renderWorkspace(selected: Set<string>, inventory: ProjectContentInventory | null = null) {
   return renderToStaticMarkup(
     <PushResourceWorkspace
+      credentialRedactionEnabled={true}
       resources={[conversationResource(fits), conversationResource(waits), ...(inventory ? [projectFile] : [])]}
       selected={selected}
       projectDefaults={new Set([fits.resource_id])}
@@ -300,7 +317,7 @@ function renderWorkspace(selected: Set<string>, inventory: ProjectContentInvento
   );
 }
 
-test("the review does not apply a newest-first admission policy", () => {
+test("manual selection can use an older session", () => {
   const html = renderWorkspace(new Set([waits.resource_id]));
   assert.doesNotMatch(html, /Too much to push at once|push again after this one|>Later</i);
   assert.match(html, /Catalog profile launch buttons/);
@@ -471,4 +488,28 @@ test("five stored 96 MiB sessions do not expand a selected 40 MiB capture", () =
     "the meter and backend recipe use the same capture set",
   );
   assert.equal(pushReviewDisabledReason({ selected, threadComparison: reviewed, deletionApproved: true }), null);
+});
+
+
+test("Push review shows the selected redaction mode and the Off warning", () => {
+  for (const enabled of [true, false]) {
+    const html = renderToStaticMarkup(
+      <PushResourceWorkspace credentialRedactionEnabled={enabled} resources={[]} selected={new Set()} projectDefaults={new Set()} busy={false} error={null} onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
+    );
+    assert.match(html, new RegExp(`Credential redaction: ${enabled ? "On" : "Off"}`));
+    assert.equal(html.includes("Exported content can include API keys, tokens, and passwords."), !enabled);
+  }
+});
+
+
+test("current sessions remain selectable for a reviewed mode change", () => {
+  const changed = entry("mode-change", { state: "synced", storage_present: true, status_detail: "Export settings changed", push_decision: { action: "publish", selectable: true } });
+  const html = renderToStaticMarkup(
+    <PushResourceWorkspace credentialRedactionEnabled={false} resources={[conversationResource(changed)]}
+      selected={new Set([changed.resource_id])} projectDefaults={new Set([changed.resource_id])}
+      busy={false} error={null} threadComparison={comparison({ entries: [changed] })}
+      onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
+  );
+  assert.match(html, /1 of 1 selected/);
+  assert.doesNotMatch(html, /Nothing to push/);
 });

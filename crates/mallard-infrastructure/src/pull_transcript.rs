@@ -1,7 +1,7 @@
 //! Pure transcript preparation for Pull. No provider-home writes or shared-state updates.
 
 use crate::codex_history_graph::resolve_standalone_codex_bytes;
-use crate::codex_standalone_builder::decode_standalone_codex_bytes;
+use crate::codex_standalone_builder::decode_codex_tree_member;
 use crate::conversation_codec::CodecLineage;
 use crate::credential_redaction;
 use crate::payload::PayloadBytes;
@@ -28,6 +28,8 @@ pub struct PullTranscriptRequest<'a> {
 }
 
 pub struct PreparedPullTranscript {
+    /// Creation records retained from the verified wire graph for tree validation.
+    pub child_references: crate::owned_subagents::ChildReferences,
     pub cloud_provider_thread_id: String,
     pub transcript: VerifiedTranscript,
     pub path_origins: PathOrigins,
@@ -77,20 +79,32 @@ pub fn prepare_pull_transcript(
     cloud_bytes: &[u8],
     request: &PullTranscriptRequest<'_>,
 ) -> Result<PreparedPullTranscript, String> {
+    prepare_pull_transcript_with_identities(
+        adapter,
+        cloud_bytes,
+        request,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+pub fn prepare_pull_transcript_with_identities(
+    adapter: &dyn SessionAdapter,
+    cloud_bytes: &[u8],
+    request: &PullTranscriptRequest<'_>,
+    identities: &std::collections::BTreeMap<String, String>,
+) -> Result<PreparedPullTranscript, String> {
     let started = Instant::now();
     let analysis_before = crate::sync_metrics::analysis_work();
     let wire_verification_elapsed;
     let reconstruction_elapsed;
     let output_verification_elapsed;
+    let child_references;
     let cloud_tail = request.cloud_tail;
     let cloud_thread_id = request.cloud_thread_id;
     let destination_provider_thread_id = request.destination_provider_thread_id.to_string();
     validate_pathmap_root("project root", request.project_root)?;
-    match request.cloud_wire_redaction {
-        Some(stamp) if stamp.codec == credential_redaction::REDACTION_CODEC_V1
-            && stamp.fingerprint == credential_redaction::shared().fingerprint() => {},
-        _ => return Err(format!("redaction_ruleset_mismatch: conversation '{cloud_thread_id}' has no matching redaction stamp")),
-    }
+    let mut redaction =
+        credential_redaction::shared().run_from_stamp(request.cloud_wire_redaction)?;
     let (cloud_provider_thread_id, transcript, path_origins, layout, checkpoint) = if adapter
         .reconstructs_rollout_graph()
     {
@@ -123,7 +137,7 @@ pub fn prepare_pull_transcript(
         }
         wire_verification_elapsed = started.elapsed();
         let reconstruction_started = Instant::now();
-        let artifact = decode_standalone_codex_bytes(
+        let artifact = decode_codex_tree_member(
             &resolved,
             cloud_bytes,
             &destination_provider_thread_id,
@@ -131,6 +145,8 @@ pub fn prepare_pull_transcript(
             (request.canonical_project_root != request.project_root)
                 .then_some(request.canonical_project_root),
             &layout,
+            identities,
+            &mut redaction,
         )?;
         output_verification_elapsed = artifact.output_verification_elapsed;
         reconstruction_elapsed = reconstruction_started
@@ -145,6 +161,7 @@ pub fn prepare_pull_transcript(
                 "decoded conversation disagrees with the accepted cloud coordinates".to_string(),
             );
         }
+        child_references = crate::owned_subagents::ChildReferences::Codex(resolved.leaf_creations);
         (
             resolved.leaf_meta.id,
             artifact.verification,
@@ -174,7 +191,7 @@ pub fn prepare_pull_transcript(
         // `sessionId` restamped — and the installed bytes are re-analyzed
         // as the genuine local form, whose fold becomes
         // `accepted_local_tail`. Local and wire folds are distinct.
-        credential_redaction::shared()
+        redaction
             .certify_wire_document(cloud_bytes.to_vec())
             .map_err(|error| format!("conversation '{}': {error}", cloud_thread_id))?;
         if cloud_tail.codec != mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1
@@ -223,7 +240,11 @@ pub fn prepare_pull_transcript(
             .map_err(|_| format!("conversation '{}' wire is not valid UTF-8", cloud_thread_id))?;
         let mut decoded_text = String::with_capacity(wire_text.len());
         let mut path_origins = PathOrigins::default();
+        let mut child_links = crate::providers::claude::subagents::ChildLinks::new();
+        let mut offset = 0_u64;
         for (index, line) in wire_text.split('\n').enumerate() {
+            let record_offset = offset;
+            offset += line.len() as u64 + 1;
             if index > 0 {
                 decoded_text.push('\n');
             }
@@ -233,6 +254,12 @@ pub fn prepare_pull_transcript(
             }
             let mut wire: serde_json::Value = serde_json::from_str(line)
                 .map_err(|_| "wire transcript record is not valid JSON")?;
+            crate::providers::claude::subagents::record_link(
+                &mut child_links,
+                &wire,
+                record_offset,
+                &cloud_provider_thread_id,
+            )?;
             // Identity changes precede origin capture. The record hash then
             // covers the exact value installed in the provider transcript.
             if let Some(session_id) = wire.get_mut("sessionId") {
@@ -253,6 +280,7 @@ pub fn prepare_pull_transcript(
                 .map_err(|error| format!("serialize decoded conversation record: {error}"))?;
             decoded_text.push_str(&serialized);
         }
+        child_references = crate::owned_subagents::ChildReferences::Claude(child_links);
         let rewritten = decoded_text.into_bytes();
         reconstruction_elapsed = reconstruction_started.elapsed();
         let output_verification_started = Instant::now();
@@ -318,6 +346,7 @@ pub fn prepare_pull_transcript(
         )
     };
     Ok(PreparedPullTranscript {
+        child_references,
         cloud_provider_thread_id,
         transcript,
         path_origins,
@@ -335,7 +364,7 @@ pub fn prepare_pull_transcript(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ordered_preparation::for_each_prepared;
+    use crate::bounded_preparation::{for_each_prepared, PREPARATION_BYTE_BUDGET};
     use crate::providers::{claude, codex, AgentProviderRegistry};
     use mallard_domain::{compute_portable_conversation_tail_with_codec, ProviderKey};
     use serde_json::json;
@@ -452,10 +481,10 @@ mod tests {
                 for_each_prepared(
                     (0..5).collect(),
                     workers,
-                    64 * 1024 * 1024,
+                    PREPARATION_BYTE_BUDGET,
                     |_| fixture.bytes.len() as u64,
                     |id| fixture.prepare(&format!("22222222-2222-4222-8222-{id:012}")),
-                    |_, result| {
+                    |index, result| {
                         let output = result.unwrap();
                         // One semantic analysis for the wire and one for the
                         // final local form. Reconstruction reuses both facts.
@@ -470,16 +499,18 @@ mod tests {
                                 .require(&fixture.provider)
                                 .unwrap()
                                 .codec_key(),
-                            Some(&format!("22222222-2222-4222-8222-{:012}", results.len())),
+                            Some(&format!("22222222-2222-4222-8222-{index:012}")),
                             "/fixture/destination",
                             "/fixture/destination",
                             &output.checkpoint.lineage_digest,
                             &output.checkpoint.semantic_digest,
                             output.transcript.bytes(),
                         ));
-                        results.push(fingerprint(output));
+                        results.push((index, fingerprint(output)));
                     },
                 );
+                // Results arrive in completion order.
+                results.sort_by_key(|(index, _)| *index);
                 results
             };
             assert_eq!(run(1), run(4));
@@ -562,7 +593,7 @@ mod tests {
         let bounds = for_each_prepared(
             (0..8).collect(),
             workers,
-            64 * 1024 * 1024,
+            PREPARATION_BYTE_BUDGET,
             |_| fixture.bytes.len() as u64,
             |id| fixture.prepare(&format!("bench-{id}")),
             |_, result| {

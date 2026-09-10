@@ -107,6 +107,7 @@ mod tests {
             "actions": [],
             "conversation_actions": [],
             "conversation_review": [{
+                "stored_without_credential_redaction": false,
                 "provider": "codex",
                 "thread_id": null,
                 "cloud_thread_id": "cloudthread-test",

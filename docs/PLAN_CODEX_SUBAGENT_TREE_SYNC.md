@@ -2,7 +2,11 @@
 
 ## Decision and scope
 
-**Status:** proposed; implementation gated on the Step 0 viewer proof.
+**Status:** Superseded by
+[PLAN_CODEX_SUBAGENT_CLOSURE_TRANSPORT.md](PLAN_CODEX_SUBAGENT_CLOSURE_TRANSPORT.md),
+which is now superseded by
+[PLAN_CODEX_OWNED_SUBAGENT_SYNC.md](PLAN_CODEX_OWNED_SUBAGENT_SYNC.md)
+(2026-09-07). This document is design history, not an active proposal.
 
 This plan makes a synced Codex parent thread render its subagent activity
 after Pull on another machine. When a user pushes parent thread `A` that

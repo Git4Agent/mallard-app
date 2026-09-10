@@ -286,6 +286,8 @@ fn local_bindings_reject_duplicate_provider_thread_ownership_profile_wide() {
         "replica-duplicate-owner",
     );
     let binding = |thread: &str| LocalConversationBinding {
+        installed_end: None,
+        installed_subagents: Default::default(),
         path_origins_ref: None,
         host_id: scope.host_id.clone(),
         replica_id: scope.replica_id.clone(),

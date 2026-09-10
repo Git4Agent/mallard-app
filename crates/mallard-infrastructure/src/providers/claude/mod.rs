@@ -7,13 +7,17 @@ pub mod codec;
 pub mod discovery;
 pub mod history;
 pub mod materialization;
+pub mod publication;
+pub mod subagents;
 
 use super::traits::{
     shell_quote, MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand,
     ProviderCliLauncher, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
-    SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
-    SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
-    SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
+    SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAgentPreview,
+    SessionAnalysis, SessionChildIdentity, SessionDiscovery, SessionDiscoveryContext,
+    SessionEventDetail, SessionFileMetadata, SessionFileSummary, SessionTimelineContext,
+    SessionTimelineIndex, SessionTimelineIndexEntry, SessionTimelinePageSlice,
+    SessionTimelineQuery,
 };
 use crate::app_settings::conversation_file_limit_bytes;
 use crate::provider_capture::validated_session_metadata;
@@ -325,6 +329,19 @@ impl SessionAdapter for ClaudeAdapter {
         materialization::materialization_targets(request)
     }
 
+    fn child_transcript_target(
+        &self,
+        request: &MaterializationTargetRequest<'_>,
+        child_id: &str,
+    ) -> Result<PathBuf, String> {
+        let targets = self.materialization_targets(request)?;
+        let main = targets
+            .iter()
+            .find(|target| target.role == mallard_domain::ConversationFileRole::Transcript)
+            .ok_or("Claude parent transcript target is missing")?;
+        subagents::child_path(&main.target_path, request.provider_session_id, child_id)
+    }
+
     fn state_target(
         &self,
         provider_home: &Path,
@@ -342,6 +359,30 @@ impl SessionAdapter for ClaudeAdapter {
         history::summarize_bytes(bytes)
     }
 
+    fn summarize_child_file(
+        &self,
+        path: &Path,
+        child: &SessionChildIdentity,
+    ) -> Result<SessionFileSummary, String> {
+        history::summarize_child_file(path, child)
+    }
+
+    /// A Claude child lives beside its parent, named by both ids; the path
+    /// is derived, then proven regular and unlinked under the provider home.
+    fn locate_child_transcript(
+        &self,
+        provider_home: &Path,
+        parent_transcript: &Path,
+        child: &SessionChildIdentity,
+    ) -> Result<Option<PathBuf>, String> {
+        let path = subagents::child_path(
+            parent_transcript,
+            &child.parent_provider_session_id,
+            &child.provider_agent_id,
+        )?;
+        Ok(subagents::child_exists(&path, provider_home)?.then_some(path))
+    }
+
     fn build_timeline_index(
         &self,
         path: &Path,
@@ -355,8 +396,18 @@ impl SessionAdapter for ClaudeAdapter {
         path: &Path,
         index: &SessionTimelineIndex,
         query: &SessionTimelineQuery,
+        context: &SessionTimelineContext<'_>,
     ) -> Result<SessionTimelinePageSlice, String> {
-        history::read_timeline_page(path, index, query)
+        history::read_timeline_page(path, index, query, context)
+    }
+
+    fn describe_agent_call(
+        &self,
+        path: &Path,
+        entry: &SessionTimelineIndexEntry,
+        context: &SessionTimelineContext<'_>,
+    ) -> Result<SessionAgentPreview, String> {
+        history::describe_agent_call(path, entry, context)
     }
 
     fn read_event_detail(

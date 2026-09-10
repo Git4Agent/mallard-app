@@ -886,6 +886,7 @@ fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderSco
             ),
             _ => None,
         },
+        wire_children: crate::ConversationWireChildren::On,
         wire_redaction: test_wire_redaction(),
         wire_path_map: (provider_key == "claude").then(|| ConversationWirePathMap {
             codec: "mallard.pathmap.v1".to_string(),
@@ -1142,6 +1143,7 @@ fn duplicate_threads_across_scopes_are_rejected() {
             )
             .unwrap(),
         ),
+        wire_children: crate::ConversationWireChildren::On,
         wire_redaction: test_wire_redaction(),
         wire_path_map: Some(ConversationWirePathMap {
             codec: "mallard.pathmap.v1".to_string(),
@@ -1599,6 +1601,9 @@ fn push_action(
         cloud_thread_id: None,
         source_resource_id: None,
         pins: ConversationActionPins {
+            subagent_selection: Default::default(),
+            credential_redaction_enabled: true,
+            export_settings_changed: false,
             context: ConversationContextPins {
                 host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
                 replica_id: ReplicaId::parse("replica-a").unwrap(),
@@ -1618,6 +1623,9 @@ fn push_action(
                 scope_sha256,
             },
             tail: ConversationTailPins {
+                subagents: Default::default(),
+                subagents_omitted: false,
+                missing_local_subagents: Default::default(),
                 accepted: None,
                 accepted_local: None,
                 local: Some(portable_tail(
@@ -2281,6 +2289,7 @@ fn fixed_checkpoint(chain: &[CanonicalConversationMessage]) -> ConversationCheck
         compute_portable_conversation_tail(TailPartitionKind::FixedPaginatedTail, 3, chain)
             .unwrap();
     ConversationCheckpoint {
+        accepted_subagents: Default::default(),
         generation: 1,
         accepted: Some(AcceptedConversationVersion {
             artifact_sha256: "a".repeat(64),
@@ -2427,6 +2436,8 @@ fn conversation_checkpoints_validate_layout_witness_and_mapping() {
 #[test]
 fn conversation_bindings_carry_validated_layouts() {
     let binding = LocalConversationBinding {
+        installed_end: None,
+        installed_subagents: Default::default(),
         path_origins_ref: None,
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         replica_id: ReplicaId::parse("replica-a").unwrap(),
@@ -2550,6 +2561,8 @@ fn preserved_provenance_validates_on_every_carrier() {
     // Binding-level: the local carrier is type-distinct from the cloud-space
     // provenance, so only the ordinal rule applies.
     let binding = LocalConversationBinding {
+        installed_end: None,
+        installed_subagents: Default::default(),
         path_origins_ref: None,
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         replica_id: ReplicaId::parse("replica-a").unwrap(),
@@ -2682,6 +2695,7 @@ fn publication_operation(chain: &[CanonicalConversationMessage]) -> Conversation
         thread_id: ThreadId::parse("thread-1").unwrap(),
         cloud_thread_id: CloudThreadId::parse("cloudthread-1").unwrap(),
         operation: ConversationApplyKind::CloudPublication(ConversationPublicationApply {
+            export_settings_changed: false,
             candidate_commit_id: "commit-4".to_string(),
             candidate_manifest_sha256: "f".repeat(64),
             artifact_sha256: "a".repeat(64),
@@ -2863,9 +2877,21 @@ fn plan_actions_validate_relation_action_and_pins() {
     publish.pins.tail.cloud = Some(t4.clone());
     publish.validate().unwrap();
 
+    publish.pins.tail.local = Some(t4.clone());
+    assert!(publish.validate().is_err());
+    publish.pins.export_settings_changed = true;
+    publish.validate().unwrap();
+    publish.pins.tail.local = Some(t5.clone());
+    publish.pins.tail.cloud = Some(t5.clone());
+    assert!(
+        publish.validate().is_err(),
+        "mode change must not bypass metadata adoption"
+    );
+
     // Informational outcomes use the small review row and cannot inhabit the
     // executable action enum.
     let informational = ConversationReviewRow {
+        stored_without_credential_redaction: false,
         provider: provider("codex"),
         thread_id: Some(ThreadId::parse("thread-info").unwrap()),
         cloud_thread_id: None,
@@ -3026,6 +3052,8 @@ fn reshaped_documents_reject_unknown_and_retired_keys() {
 
     // An unknown binding key fails closed without explicit enumeration.
     let binding = LocalConversationBinding {
+        installed_end: None,
+        installed_subagents: Default::default(),
         path_origins_ref: None,
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         replica_id: ReplicaId::parse("replica-a").unwrap(),
@@ -3131,6 +3159,8 @@ fn documents_fail_closed_on_missing_identity_keys() {
     // `#[serde(default)]`; the presence-requiring deserializer is what makes
     // these keys mandatory. The fixtures omit the required identity keys.
     let binding = LocalConversationBinding {
+        installed_end: None,
+        installed_subagents: Default::default(),
         path_origins_ref: None,
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
         replica_id: ReplicaId::parse("replica-a").unwrap(),
@@ -3203,6 +3233,7 @@ fn documents_fail_closed_on_missing_identity_keys() {
 
     // Review rows carry the same present-on-wire pair.
     let row = ConversationReviewRow {
+        stored_without_credential_redaction: false,
         provider: provider("codex"),
         thread_id: Some(ThreadId::parse("thread-1").unwrap()),
         cloud_thread_id: None,
@@ -3222,6 +3253,8 @@ fn documents_fail_closed_on_missing_identity_keys() {
 fn bindings_reject_duplicate_cloud_claims_per_scope() {
     let host = HostId::parse("00112233445566778899aabbccddeeff").unwrap();
     let row = |thread: &str, replica: &str, cloud: Option<&str>| LocalConversationBinding {
+        installed_end: None,
+        installed_subagents: Default::default(),
         path_origins_ref: None,
         host_id: host.clone(),
         replica_id: ReplicaId::parse(replica).unwrap(),
@@ -3325,4 +3358,88 @@ fn storage_setup_draft_validate_bounds_half_edited_fields_without_echoing_values
     backwards.created_at = 2;
     backwards.updated_at = 1;
     assert!(backwards.validate().unwrap_err().contains("timestamps"));
+}
+
+#[test]
+fn missing_child_recovery_requires_exact_missing_evidence() {
+    let mut action = push_action("recover-child", "claude", "profile-claude", "1");
+    let main = action.pins.tail.local.clone().unwrap();
+    action.action = ConversationPlanActionType::KeepBoth;
+    action.cloud_thread_id = Some(CloudThreadId::parse("cloudthread-recover").unwrap());
+    action.pins.tail.accepted = Some(main.clone());
+    action.pins.tail.accepted_local = Some(main.clone());
+    action.pins.tail.cloud = Some(main);
+    action.pins.tail.raw_range = None;
+    action.pins.tail.lineage_digest = Some("1".repeat(64));
+    action.pins.tail.semantic_digest = Some("2".repeat(64));
+    let key = SubagentKey::parse("child-call").unwrap();
+    let content = SubagentContentState {
+        message_count: 1,
+        sha256: "3".repeat(64),
+    };
+    action.pins.tail.subagents.insert(
+        key.clone(),
+        SubagentTailPins {
+            accepted: Some(AcceptedSubagentState {
+                local: content.clone(),
+                normalized: content.clone(),
+            }),
+            local: None,
+            cloud: Some(content.clone()),
+        },
+    );
+    assert!(action.validate().is_err());
+    action.pins.tail.missing_local_subagents.insert(key.clone());
+    assert_eq!(
+        action.pins.tail.classification().unwrap(),
+        TailClassification::Unknown
+    );
+    assert!(action.validate().is_ok());
+    let saved = action.clone();
+    action.pins.tail.subagents.get_mut(&key).unwrap().cloud = None;
+    assert!(action.validate().is_err());
+    action = saved.clone();
+    action.pins.tail.subagents.get_mut(&key).unwrap().local = Some(content);
+    assert!(action.validate().is_err());
+    action = saved.clone();
+    action.pins.tail.subagents.get_mut(&key).unwrap().accepted = None;
+    assert!(action.validate().is_err());
+    action = saved;
+    action.pins.tail.local = None;
+    assert!(action.validate().is_err());
+    let decision = ClassifiedThread::new(
+        TailClassification::Unknown,
+        ConversationCapabilities::default(),
+    )
+    .decision(ConversationPlanDirection::Pull);
+    assert_eq!(decision.action, ConversationReviewAction::Blocked);
+}
+
+#[test]
+fn child_wire_stamp_is_required_and_off_rejects_children() {
+    for provider in ["codex", "claude"] {
+        let parts = sealed_provider_scope(provider, "stamp-test");
+        let mut thread = parts.scope.conversations[&parts.thread_id].clone();
+        let value = serde_json::to_value(&thread).unwrap();
+        for invalid in [None, Some(serde_json::Value::Null), Some(serde_json::json!("unknown"))] {
+            let mut bad = value.clone();
+            match invalid {
+                None => { bad.as_object_mut().unwrap().remove("wire_children"); }
+                Some(value) => { bad["wire_children"] = value; }
+            }
+            assert!(serde_json::from_value::<ConversationThread>(bad).is_err());
+        }
+        thread.wire_children = ConversationWireChildren::Off;
+        thread.validate().unwrap();
+        let key = SubagentKey::parse("child-1").unwrap();
+        thread.files.push(ConversationFileRef {
+            logical_path: cloud_subagent_transcript_path(&thread.provider, &thread.thread_id, &key).unwrap(),
+            role: ConversationFileRole::SubagentTranscript { child_key: key, normalized: SubagentContentState {
+                message_count: 1, sha256: "a".repeat(64),
+            } },
+        });
+        assert!(thread.validate().unwrap_err().contains("Off child stamp"));
+        thread.wire_children = ConversationWireChildren::On;
+        thread.validate().unwrap();
+    }
 }

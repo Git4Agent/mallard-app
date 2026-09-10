@@ -35,8 +35,8 @@ use std::path::Path;
 use crate::conversation_codec::CodecLineage;
 use crate::jsonl_tail_io::{safe_record_end, TailWindow};
 use crate::providers::claude::codec::{
-    classify_claude_record, is_thinking_only_record, project_claude_record,
-    semantic_record_fingerprint, ClaudeRecordClass, MAX_CLAUDE_RECORDS,
+    classify_claude_record_in_context, is_thinking_only_record, project_claude_record,
+    semantic_record_fingerprint, ClaudeRecordClass, ClaudeRecordContext, MAX_CLAUDE_RECORDS,
 };
 use crate::providers::traits::SessionAnalysis;
 use mallard_domain::{
@@ -130,6 +130,17 @@ impl ClaudeChainFeeder {
     }
 
     pub fn feed(&mut self, value: &Value) -> ClaudeFeedOutcome {
+        self.feed_in_context(value, ClaudeRecordContext::Main)
+    }
+
+    pub(crate) fn feed_in_context(
+        &mut self,
+        value: &Value,
+        context: ClaudeRecordContext<'_>,
+    ) -> ClaudeFeedOutcome {
+        if context.validate(value).is_err() {
+            return ClaudeFeedOutcome::Malformed;
+        }
         let Some(object) = value.as_object() else {
             return ClaudeFeedOutcome::Malformed;
         };
@@ -141,7 +152,7 @@ impl ClaudeChainFeeder {
             }
             return ClaudeFeedOutcome::Pending;
         }
-        let (message_id, parent) = match classify_claude_record(object) {
+        let (message_id, parent) = match classify_claude_record_in_context(object, context) {
             Ok(ClaudeRecordClass::NotChain) => return ClaudeFeedOutcome::Ignored,
             Ok(ClaudeRecordClass::Chain { message_id, parent }) => (message_id, parent),
             Err(_) => return ClaudeFeedOutcome::Malformed,
@@ -193,49 +204,70 @@ impl ClaudeChainFeeder {
 /// rebuilds the in-memory skipped-set from it. Thinking-only records never
 /// count toward the ordinal: it is the projected record count at the
 /// boundary, matching what a full analysis of the consumed prefix reports.
-fn pending_watermark(bytes: &[u8]) -> Result<(u64, u64), String> {
-    let mut consumed_end = 0_u64;
-    let mut consumed_ordinal = 0_u64;
-    let mut candidate_ordinal = 0_u64;
-    let mut holding = false;
-    let mut piece_start = 0_usize;
-    for raw in bytes.split(|byte| *byte == b'\n') {
-        let piece_offset = piece_start;
-        piece_start += raw.len() + 1;
-        if piece_offset >= bytes.len() {
-            break;
-        }
-        let record_end = piece_start.min(bytes.len()) as u64;
-        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-        if raw.is_empty() {
-            if !holding {
-                consumed_end = record_end;
+#[derive(Default)]
+pub(crate) struct ClaudeWatermark {
+    consumed_end: u64,
+    consumed_ordinal: u64,
+    candidate_ordinal: u64,
+    holding: bool,
+}
+
+impl ClaudeWatermark {
+    pub(crate) fn feed(
+        &mut self,
+        value: Option<&Value>,
+        record_end: u64,
+        context: ClaudeRecordContext<'_>,
+    ) -> Result<(), String> {
+        let Some(value) = value else {
+            if !self.holding {
+                self.consumed_end = record_end;
             }
-            continue;
-        }
-        let value: Value = serde_json::from_slice(raw)
-            .map_err(|_| "Claude watermark scan found malformed JSON".to_string())?;
-        let Some(object) = value.as_object() else {
-            return Err("Claude watermark scan found a non-object record".to_string());
+            return Ok(());
         };
+        let object = value
+            .as_object()
+            .ok_or("Claude watermark found a non-object record")?;
         if is_thinking_only_record(object) {
-            holding = true;
-            continue;
+            self.holding = true;
+            return Ok(());
         }
-        candidate_ordinal += 1;
-        let is_chain = matches!(
-            classify_claude_record(object),
+        self.candidate_ordinal += 1;
+        if matches!(
+            classify_claude_record_in_context(object, context),
             Ok(ClaudeRecordClass::Chain { .. })
-        );
-        if is_chain {
-            holding = false;
+        ) {
+            self.holding = false;
         }
-        if !holding {
-            consumed_end = record_end;
-            consumed_ordinal = candidate_ordinal;
+        if !self.holding {
+            self.consumed_end = record_end;
+            self.consumed_ordinal = self.candidate_ordinal;
         }
+        Ok(())
     }
-    Ok((consumed_end, consumed_ordinal))
+    pub(crate) fn finish(&self) -> (u64, u64) {
+        (self.consumed_end, self.consumed_ordinal)
+    }
+}
+
+fn pending_watermark(bytes: &[u8], context: ClaudeRecordContext<'_>) -> Result<(u64, u64), String> {
+    let mut watermark = ClaudeWatermark::default();
+    let mut end = 0;
+    for raw in bytes.split_inclusive(|byte| *byte == b'\n') {
+        end += raw.len() as u64;
+        let line = raw.strip_suffix(b"\n").unwrap_or(raw);
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let value = if line.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::from_slice::<Value>(line)
+                    .map_err(|_| "Claude watermark found malformed JSON")?,
+            )
+        };
+        watermark.feed(value.as_ref(), end, context)?;
+    }
+    Ok(watermark.finish())
 }
 
 /// Derive the layout, observed tail, physical mapping, and raw-range pin
@@ -251,34 +283,42 @@ pub fn seed_claude_root(
     bytes: &[u8],
     analysis: &SessionAnalysis,
 ) -> Result<Option<ClaudeSeededRoot>, String> {
-    let CodecLineage::Complete {
-        chain,
-        lineage_digest,
-        semantic_digest,
-    } = &analysis.lineage
-    else {
-        return Err("Claude seeding requires a complete analysis".to_string());
-    };
+    seed_claude_root_in_context(root_path, bytes, analysis, ClaudeRecordContext::Main)
+}
+
+pub(crate) fn seed_claude_root_in_context(
+    root_path: &Path,
+    bytes: &[u8],
+    analysis: &SessionAnalysis,
+    context: ClaudeRecordContext<'_>,
+) -> Result<Option<ClaudeSeededRoot>, String> {
+    seed_claude_root_with_watermark(
+        root_path,
+        bytes,
+        analysis,
+        pending_watermark(bytes, context)?,
+    )
+}
+
+pub(crate) fn claude_root_mapping(
+    root_path: &Path,
+    bytes: &[u8],
+    analysis: &SessionAnalysis,
+    watermark: (u64, u64),
+) -> Result<RootPhysicalMapping, String> {
     let provider_thread_id = analysis
         .source_provider_session_id
         .clone()
-        .ok_or_else(|| "Claude seeding requires a session identity".to_string())?;
-    if safe_record_end(bytes) != bytes.len() as u64 {
-        return Ok(None);
-    }
-    let (consumed, consumed_ordinal) = pending_watermark(bytes)?;
-    let leaf = chain
-        .last()
-        .ok_or_else(|| "complete Claude analysis has an empty chain".to_string())?;
-    let observed_tail = compute_portable_conversation_tail_with_codec(
-        CLAUDE_PORTABLE_TAIL_CODEC_V1,
-        TailPartitionKind::WholeThread,
-        0,
-        chain,
-    )?;
+        .ok_or("Claude mapping requires a session identity")?;
+    let leaf = analysis
+        .lineage
+        .chain()
+        .and_then(|chain| chain.last())
+        .ok_or("Claude mapping requires a complete nonempty chain")?;
+    let (consumed, consumed_ordinal) = watermark;
     let probe_window_len = consumed.min(crate::jsonl_tail_io::PROBE_WINDOW_BYTES);
     let window_start = (consumed - probe_window_len) as usize;
-    let mapping = RootPhysicalMapping {
+    Ok(RootPhysicalMapping {
         provider_thread_id,
         root_path: root_path
             .to_str()
@@ -292,7 +332,34 @@ pub fn seed_claude_root(
         last_canonical_message_id: Some(leaf.message_id.as_str().to_string()),
         last_synthetic_turn_id: None,
         next_synthetic_turn_ordinal: 0,
+    })
+}
+
+pub fn seed_claude_root_with_watermark(
+    root_path: &Path,
+    bytes: &[u8],
+    analysis: &SessionAnalysis,
+    watermark: (u64, u64),
+) -> Result<Option<ClaudeSeededRoot>, String> {
+    let CodecLineage::Complete {
+        chain,
+        lineage_digest,
+        semantic_digest,
+    } = &analysis.lineage
+    else {
+        return Err("Claude seeding requires a complete analysis".to_string());
     };
+    if safe_record_end(bytes) != bytes.len() as u64 {
+        return Ok(None);
+    }
+    let consumed = watermark.0;
+    let observed_tail = compute_portable_conversation_tail_with_codec(
+        CLAUDE_PORTABLE_TAIL_CODEC_V1,
+        TailPartitionKind::WholeThread,
+        0,
+        chain,
+    )?;
+    let mapping = claude_root_mapping(root_path, bytes, analysis, watermark)?;
     let raw_range_pin = RawRangePin {
         start_byte_offset: 0,
         end_byte_offset: consumed,
@@ -323,6 +390,24 @@ pub fn refresh_claude_tail(
     observed_tail: &PortableConversationTail,
     mapping: &RootPhysicalMapping,
     tail: &TailWindow,
+) -> Result<ClaudeTailRefresh, String> {
+    refresh_claude_tail_with_records(
+        layout,
+        observed_tail,
+        mapping,
+        tail,
+        ClaudeRecordContext::Main,
+        &mut |_, _| Ok(()),
+    )
+}
+
+pub(crate) fn refresh_claude_tail_with_records(
+    layout: &RootTailLayout,
+    observed_tail: &PortableConversationTail,
+    mapping: &RootPhysicalMapping,
+    tail: &TailWindow,
+    context: ClaudeRecordContext<'_>,
+    on_record: &mut dyn FnMut(&Value, u64) -> Result<(), String>,
 ) -> Result<ClaudeTailRefresh, String> {
     if tail.window_offset != mapping.consumed_byte_offset - mapping.probe_window_len {
         return Err("Claude tail window does not start at the mapping's probe window".to_string());
@@ -396,7 +481,8 @@ pub fn refresh_claude_tail(
             });
         };
         appended_records += 1;
-        let outcome = feeder.feed(&value);
+        on_record(&value, mapping.consumed_byte_offset + piece_offset as u64)?;
+        let outcome = feeder.feed_in_context(&value, context);
         match outcome {
             ClaudeFeedOutcome::Pending => {
                 holding = true;

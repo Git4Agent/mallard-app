@@ -74,6 +74,9 @@ export interface ActivityLogCleanupResult {
 /** Backend tuning knobs, persisted in ~/.mallard/settings.json. Every field
  * has a serde default on the Rust side, so a partial file still parses. */
 export interface AppSettings {
+  push_codex_children: boolean;
+  push_claude_children: boolean;
+  credential_redaction_enabled: boolean;
   schema: number;
   conversation_file_limit_bytes: number;
   timeline_preview_limit_bytes: number;
@@ -607,6 +610,7 @@ export type StorageFieldKind = "text" | "url" | "directory";
 
 /** One safe, editable configuration field a storage provider declares. */
 export interface StorageFieldDescriptor {
+  immutable_on_edit?: boolean;
   field_id: string;
   label: string;
   kind: StorageFieldKind;
@@ -648,6 +652,8 @@ export interface StorageSecretDescriptor {
 export interface StorageSetupAssistantDescriptor {
   label: string;
   description: string;
+  /** Selects the managed credential field when that saved secret is present. */
+  managed_secret_id?: string | null;
 }
 
 /** Serializable storage-provider facts. The UI renders these; it never
@@ -686,6 +692,36 @@ export interface StorageSummaryField {
   is_path: boolean;
 }
 
+/** What the open transport last observed about a storage's credential.
+ *  `connected` after a success; the three suspending states need a new
+ *  credential or consent; `unreachable` is a temporary failure. */
+export type StorageConnectionState =
+  | "connected"
+  | "reconnect_required"
+  | "token_expired"
+  | "permission_denied"
+  | "unreachable";
+
+/** Allowlisted facts about one refused request: the route literal, the
+ *  HTTP status, the provider's fixed error identifier, and its request ID.
+ *  Never a body, never a token. */
+export interface StorageConnectionEvidence {
+  endpoint: string;
+  http_status?: number | null;
+  error_tag?: string | null;
+  request_id?: string | null;
+}
+
+/** Runtime connection health from the process-shared store. Absent until a
+ *  request has been made in this process; never persisted. */
+export interface StorageConnectionHealth {
+  state: StorageConnectionState;
+  code: string;
+  message: string;
+  observed_at: number;
+  evidence?: StorageConnectionEvidence | null;
+}
+
 /** One configured storage as every listing shows it. */
 export interface StorageSummary {
   storage_id: string;
@@ -698,6 +734,7 @@ export interface StorageSummary {
    *  the record is preserved and shown, never edited, tested, or synced. */
   available: boolean;
   summary: StorageSummaryField[];
+  connection?: StorageConnectionHealth | null;
 }
 
 /** Safe provider settings: a bounded JSON object of scalar-ish values. */
@@ -771,6 +808,12 @@ export interface ProjectSyncConfigChangedEvent {
 
 /** Value-free signal; draft contents are reloaded through the redacting IPC. */
 export type StorageSetupDraftsChangedEvent = Record<string, never>;
+
+/** A storage's runtime connection health changed or was forgotten; the
+ *  listing carries the health itself. */
+export interface StorageConnectionChangedEvent {
+  storage_id: string;
+}
 
 export type ResourceSyncState =
   | "synced"
@@ -926,6 +969,7 @@ export type RemoteContinuity =
  * per-section errors instead of failing the dialog.
  */
 export interface PushReviewContext {
+  credential_redaction_enabled: boolean;
   project: ProjectDetail;
   inventory: ResourceInventory;
   destination_status: PushDestinationStatus;
@@ -991,6 +1035,7 @@ export interface PreservedProvenance {
 }
 
 export interface ConversationReviewRow {
+  stored_without_credential_redaction: boolean;
   provider: ProviderKey;
   thread_id: string | null;
   cloud_thread_id: string | null;
@@ -1035,6 +1080,8 @@ export interface PreservedThreadResult {
 export interface RestoreResult {
   success: boolean;
   message: string;
+  readiness: BundleReadiness | null;
+  readiness_error: string | null;
   plan_id?: string | null;
   /**
    * Present only on restore applies. `false` means the reviewed baseline
@@ -1145,6 +1192,8 @@ export interface SessionEventCounts {
   shell_calls: SessionCount;
   reads: SessionCount;
   other_tools: SessionCount;
+  /** Delegations to a subagent, counted apart from tool calls. */
+  agent_calls: SessionCount;
 }
 
 export type SessionTimelineEventKind =
@@ -1152,7 +1201,48 @@ export type SessionTimelineEventKind =
   | "response"
   | "intermediate_step"
   | "checkpoint"
-  | "tool_call";
+  | "tool_call"
+  | "agent_call";
+
+/** How the parent ran the child: waited for it, launched it in the
+ * background, or spawned a Codex collaborator thread. */
+export type SessionAgentMode = "sync" | "async" | "spawn";
+
+export type SessionAgentStatus =
+  | "completed"
+  | "running"
+  | "failed"
+  | "interrupted"
+  | "incomplete"
+  | "unavailable";
+
+/** One agent row, read from the call, its result, and the child's tail. */
+export interface SessionAgentPreview {
+  provider_agent_id?: string | null;
+  label: string;
+  task?: string | null;
+  role?: string | null;
+  model?: string | null;
+  mode: SessionAgentMode;
+  status: SessionAgentStatus;
+  started_at?: number | null;
+  ended_at?: number | null;
+  tool_calls?: number | null;
+  tokens?: number | null;
+  brief?: string | null;
+  brief_truncated: boolean;
+  report?: string | null;
+  report_truncated: boolean;
+  /** Opens the child as its own session page, when its transcript exists. */
+  transcript_resource_id?: string | null;
+}
+
+/** A child page's link back: the parent and the row it shows for this child. */
+export interface SessionDetailAgent {
+  parent_resource_id: string;
+  parent_title: string;
+  preview: SessionAgentPreview;
+}
 
 export type SessionToolCategory = "file_edit" | "shell" | "read" | "other";
 
@@ -1196,6 +1286,7 @@ export interface ProjectSessionDetail {
   github_repository_url?: string | null;
   snapshot_id: string;
   warnings: SessionDetailWarning[];
+  agent?: SessionDetailAgent | null;
 }
 
 export interface SessionToolCallPreview {
@@ -1228,6 +1319,7 @@ export interface SessionTimelineEvent {
   text?: string | null;
   tool?: SessionToolCallPreview | null;
   checkpoint?: SessionCheckpoint | null;
+  agent?: SessionAgentPreview | null;
 }
 
 export interface ProjectSessionTimelinePage {
@@ -1314,7 +1406,17 @@ export interface ThreadSyncDecision {
   blocked_reason?: string | null;
 }
 
+export type ConversationWireChildren = "on" | "off";
+
+export interface SubagentSelection {
+  wire_children: ConversationWireChildren;
+  keys: string[];
+  omitted: boolean;
+  estimated_bytes: number;
+}
+
 export interface ThreadSyncEntry {
+  subagent_selection: SubagentSelection;
   provider: ProviderKey;
   provider_display_name: string;
   access: ProviderAccessState;

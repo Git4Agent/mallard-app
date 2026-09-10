@@ -314,6 +314,9 @@ pub struct SessionEventCounts {
     pub shell_calls: SessionCount,
     pub reads: SessionCount,
     pub other_tools: SessionCount,
+    /// Delegations to a subagent. Counted apart from tool calls: the row is a
+    /// speaker being created, and the page shows it by default.
+    pub agent_calls: SessionCount,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -324,6 +327,104 @@ pub enum SessionTimelineEventKind {
     IntermediateStep,
     Checkpoint,
     ToolCall,
+    AgentCall,
+}
+
+/// How the parent ran the child: waiting for it (`Sync`), in the background
+/// (`Async`), or as a Codex collaborator thread (`Spawn`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAgentMode {
+    Sync,
+    Async,
+    Spawn,
+}
+
+/// What the parent and the child transcript together prove about the run.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAgentStatus {
+    Completed,
+    Running,
+    Failed,
+    Interrupted,
+    /// The child transcript ends without a final message and is not live.
+    Incomplete,
+    /// No child transcript can be read for this call.
+    Unavailable,
+}
+
+/// Metadata-only agent facts for the index: identities, a provider-home-
+/// relative pointer to the child transcript, and the lifecycle the parent
+/// itself recorded. Never a label, brief, or report — those are read from
+/// the records at page time like every other text.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct SessionAgentIndexEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_agent_id: Option<String>,
+    /// The child transcript relative to the provider home, when the provider
+    /// located it while indexing (Codex rollouts are found by id; Claude
+    /// derives the path from the parent instead).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_status: Option<SessionAgentStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_end: Option<u64>,
+}
+
+/// One agent row, read at page time from the call record, its result, and
+/// the head and tail of the child transcript.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SessionAgentPreview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_agent_id: Option<String>,
+    /// Claude's task description, Codex's nickname; `Agent` when neither.
+    pub label: String,
+    /// Codex's task path, the slug the agent was spawned under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub mode: SessionAgentMode,
+    pub status: SessionAgentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
+    /// Only when the parent recorded them (a synchronous Claude result);
+    /// never computed from the child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
+    pub brief_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
+    pub report_truncated: bool,
+    /// The resource id that opens the child as its own session page, when a
+    /// child transcript exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_resource_id: Option<String>,
+}
+
+/// A child transcript addressed through its parent: the parent's native
+/// session id and the child's own agent id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionChildIdentity {
+    pub parent_provider_session_id: String,
+    pub provider_agent_id: String,
+}
+
+/// The segment that joins a parent resource id to one child agent id.
+pub const AGENT_RESOURCE_SEGMENT: &str = "/agent/";
+
+pub fn agent_resource_id(parent_resource_id: &str, provider_agent_id: &str) -> String {
+    format!("{parent_resource_id}{AGENT_RESOURCE_SEGMENT}{provider_agent_id}")
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -390,6 +491,9 @@ pub struct SessionTimelineIndexEntry {
     pub source: SessionSourceSpan,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<SessionToolIndexEntry>,
+    /// Present exactly on `AgentCall` entries, beside the call's `tool`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<SessionAgentIndexEntry>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -421,6 +525,12 @@ pub struct SessionTimelineContext<'a> {
     /// `/var` and `/private/var` aliases. Provider transcripts may retain the
     /// configured spelling even though ownership checks use the canonical one.
     pub project_root_aliases: &'a [PathBuf],
+    /// Canonical provider home. Child transcripts are located under it and
+    /// pointed to relative to it.
+    pub provider_home: &'a Path,
+    /// Set when the transcript being indexed is itself a child: the provider
+    /// then reads the child's own chain as the main one.
+    pub child: Option<&'a SessionChildIdentity>,
 }
 
 /// Strip the most specific validated spelling of a bound project root.
@@ -509,6 +619,8 @@ pub struct SessionTimelineEvent {
     pub tool: Option<SessionToolCallPreview>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<SessionCheckpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<SessionAgentPreview>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -744,6 +856,15 @@ pub trait SessionAdapter: Send + Sync {
         &self,
         request: &MaterializationTargetRequest<'_>,
     ) -> Result<Vec<PlannedProviderTarget>, String>;
+    /// Resolve a child under the destination parent's native namespace.
+    fn child_transcript_target(
+        &self,
+        request: &MaterializationTargetRequest<'_>,
+        _child_id: &str,
+    ) -> Result<PathBuf, String> {
+        let _ = request;
+        Err("provider does not support child transcripts".into())
+    }
     /// Map one provider-state logical suffix (under
     /// `state/providers/<key>/`) to its machine path. Providers without
     /// provider-state resources refuse.
@@ -760,6 +881,26 @@ pub trait SessionAdapter: Send + Sync {
     /// Summarize an already captured transcript snapshot. Capture callers
     /// must use this instead of reopening the mutable source path.
     fn summarize_bytes(&self, bytes: &[u8]) -> Result<SessionFileSummary, String>;
+    /// Summarize a child transcript for its own session page. The summary's
+    /// `session_id` is the child's agent id.
+    fn summarize_child_file(
+        &self,
+        _path: &Path,
+        _child: &SessionChildIdentity,
+    ) -> Result<SessionFileSummary, String> {
+        Err("provider has no child transcripts".to_string())
+    }
+    /// Locate one child transcript under the provider home, proving it
+    /// belongs to the parent. `Ok(None)` when the parent names a child that
+    /// has no readable file.
+    fn locate_child_transcript(
+        &self,
+        _provider_home: &Path,
+        _parent_transcript: &Path,
+        _child: &SessionChildIdentity,
+    ) -> Result<Option<PathBuf>, String> {
+        Ok(None)
+    }
     /// Build a metadata-only, bounded rich-timeline index. Implementations
     /// must not retain visible message text, tool arguments, or tool output.
     fn build_timeline_index(
@@ -768,13 +909,25 @@ pub trait SessionAdapter: Send + Sync {
         context: &SessionTimelineContext<'_>,
     ) -> Result<SessionTimelineIndex, String>;
     /// Read and normalize one filtered page from a validated index. Filtering
-    /// happens before pagination.
+    /// happens before pagination. Agent rows are described here too: the
+    /// call and result records, then the child's head and tail.
     fn read_timeline_page(
         &self,
         path: &Path,
         index: &SessionTimelineIndex,
         query: &SessionTimelineQuery,
+        context: &SessionTimelineContext<'_>,
     ) -> Result<SessionTimelinePageSlice, String>;
+    /// Describe one indexed agent call the way its page row would, for the
+    /// child's own page header.
+    fn describe_agent_call(
+        &self,
+        _path: &Path,
+        _entry: &SessionTimelineIndexEntry,
+        _context: &SessionTimelineContext<'_>,
+    ) -> Result<SessionAgentPreview, String> {
+        Err("provider has no agent calls".to_string())
+    }
     /// Read one bounded expanded event body on demand.
     fn read_event_detail(
         &self,
@@ -836,6 +989,7 @@ mod tests {
                 affected_paths: Vec::new(),
                 result_source: None,
             }),
+            agent: None,
         })
         .collect::<Vec<_>>();
 

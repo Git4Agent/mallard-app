@@ -1,5 +1,6 @@
 import type {
   ProjectSessionTimelinePage,
+  SessionAgentStatus,
   SessionCount,
   SessionEventCounts,
   SessionTimelineEvent,
@@ -34,6 +35,7 @@ export interface SessionDetailFilters {
   intermediateSteps: boolean;
   checkpoints: boolean;
   toolCalls: boolean;
+  agents: boolean;
 }
 
 export type SessionFilterKey = keyof SessionDetailFilters;
@@ -58,6 +60,7 @@ export const SESSION_EVENT_KIND_LABELS: Record<SessionTimelineEventKind, string>
   intermediate_step: "Step",
   checkpoint: "Checkpoint",
   tool_call: "Tool call",
+  agent_call: "Agent",
 };
 
 const SESSION_FILTER_LABELS: Record<SessionFilterKey, string> = {
@@ -66,6 +69,17 @@ const SESSION_FILTER_LABELS: Record<SessionFilterKey, string> = {
   intermediateSteps: "Steps",
   checkpoints: "Checkpoints",
   toolCalls: "Tool calls",
+  agents: "Agents",
+};
+
+/** What the row prints for a run that is not simply done. */
+export const SESSION_AGENT_STATUS_LABELS: Record<SessionAgentStatus, string> = {
+  completed: "completed",
+  running: "running",
+  failed: "failed",
+  interrupted: "interrupted",
+  incomplete: "incomplete",
+  unavailable: "no transcript",
 };
 
 function sessionCountSupported(count: SessionCount): boolean {
@@ -78,10 +92,8 @@ function sessionCountEmpty(count: SessionCount): boolean {
 }
 
 /**
- * The conversation is what opens by default: prompts and replies. Steps and
- * tool calls — the punchcard rows that account for the work — stay behind
- * SHOW › Steps and SHOW › Tool calls until asked for, so a long session reads
- * as an exchange first and a log second.
+ * Show prompts, replies, and supported checkpoints by default.
+ * Steps, tool calls, and agents require selection.
  */
 export function createDefaultSessionDetailFilters(
   counts: SessionEventCounts,
@@ -92,6 +104,7 @@ export function createDefaultSessionDetailFilters(
     intermediateSteps: false,
     checkpoints: sessionCountSupported(counts.checkpoints),
     toolCalls: false,
+    agents: false,
   };
 }
 
@@ -105,6 +118,7 @@ function sessionFilterCount(
     case "intermediateSteps": return counts.intermediate_steps;
     case "checkpoints": return counts.checkpoints;
     case "toolCalls": return counts.tool_calls;
+    case "agents": return counts.agent_calls;
   }
 }
 
@@ -120,6 +134,7 @@ const SESSION_FILTER_ORDER: readonly SessionFilterKey[] = [
   "intermediateSteps",
   "checkpoints",
   "toolCalls",
+  "agents",
 ];
 
 /**
@@ -168,6 +183,7 @@ export function includedSessionEventKinds(
   if (filters.intermediateSteps) kinds.push("intermediate_step");
   if (filters.checkpoints) kinds.push("checkpoint");
   if (filters.toolCalls) kinds.push("tool_call");
+  if (filters.agents) kinds.push("agent_call");
   return kinds;
 }
 

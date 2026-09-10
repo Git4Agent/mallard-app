@@ -21,8 +21,9 @@ interface Props {
 /**
  * One labelled, bounded box per payload. Each keeps its own raw toggle and copy
  * key so what you copy is always what the box you are looking at shows.
+ * Agent rows reuse it for the brief and the report.
  */
-function PayloadSection({
+export function PayloadSection({
   label,
   value,
   truncated,

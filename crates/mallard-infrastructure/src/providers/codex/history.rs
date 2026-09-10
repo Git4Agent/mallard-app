@@ -7,12 +7,14 @@ use crate::app_settings::{
     conversation_file_limit_bytes, timeline_message_preview_bytes, timeline_page_content_bytes,
     timeline_tool_preview_bytes,
 };
+use crate::codex_subagents::{RolloutLookup, SubagentActivity, SubagentActivityKind};
 use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
-    attach_turn_tool_summaries, most_specific_project_relative_path, timeline_tool_detail_budgets,
-    SessionCount, SessionCountQuality, SessionDetailWarning, SessionEventCounts,
-    SessionEventDetail, SessionFileSummary, SessionSourceSpan, SessionTimelineContext,
-    SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
+    agent_resource_id, attach_turn_tool_summaries, most_specific_project_relative_path,
+    timeline_tool_detail_budgets, SessionAgentIndexEntry, SessionAgentMode, SessionAgentPreview,
+    SessionAgentStatus, SessionCount, SessionCountQuality, SessionDetailWarning,
+    SessionEventCounts, SessionEventDetail, SessionFileSummary, SessionSourceSpan,
+    SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
     SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
     SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
     SessionTurnToolSummary,
@@ -22,7 +24,7 @@ use serde::de::{Deserializer, IgnoredAny, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
@@ -35,7 +37,15 @@ pub(crate) fn max_line_bytes() -> usize {
 const MAX_SUMMARY_CHARS: usize = 180;
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_AFFECTED_PATHS_PER_TOOL: usize = 1_024;
-pub(crate) const TIMELINE_PARSER_VERSION: u32 = 4;
+/// 5: subagent activity indexes as agent calls, with child rollout pointers.
+pub(crate) const TIMELINE_PARSER_VERSION: u32 = 5;
+/// The head and tail of a child rollout its row is read from: the
+/// `session_meta` naming the agent, and the final message.
+const CHILD_WINDOW_BYTES: u64 = 256 * 1024;
+/// A rollout written this recently is still being written to.
+const LIVE_TRANSCRIPT_SECS: u64 = 300;
+/// The collaboration call that creates a child thread.
+const SPAWN_AGENT_TOOL: &str = "spawn_agent";
 
 pub(crate) fn normalize_summary(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -669,6 +679,9 @@ struct PendingTimelineEvent {
 struct TimelineBuilder {
     events: Vec<PendingTimelineEvent>,
     tool_positions: BTreeMap<String, usize>,
+    /// Agent rows by the child's thread id, for the lifecycle events that
+    /// name the thread rather than the call.
+    agent_positions: BTreeMap<String, usize>,
     visible_ids: BTreeSet<String>,
     current_turn_id: Option<String>,
     turn_sequence: u64,
@@ -783,6 +796,7 @@ impl TimelineBuilder {
                 parent_event_id: None,
                 source,
                 tool: None,
+                agent: None,
             },
             order: (source.offset, 0),
             text_key: Some(text),
@@ -856,12 +870,22 @@ impl TimelineBuilder {
         }
         let position = self.events.len();
         self.tool_positions.insert(tool_key, position);
+        // The spawn call is a delegation: its own kind, shown by default,
+        // where tool calls stay behind their toggle.
+        let (kind, agent) = if native_name == SPAWN_AGENT_TOOL {
+            (
+                SessionTimelineEventKind::AgentCall,
+                Some(SessionAgentIndexEntry::default()),
+            )
+        } else {
+            (SessionTimelineEventKind::ToolCall, None)
+        };
         self.events.push(PendingTimelineEvent {
             entry: SessionTimelineIndexEntry {
                 event_id: format!("codex:tool:{call_id}"),
                 ordinal: 0,
                 timestamp,
-                kind: SessionTimelineEventKind::ToolCall,
+                kind,
                 quality: if status == SessionToolCallStatus::Incomplete {
                     SessionCountQuality::LowerBound
                 } else {
@@ -879,11 +903,106 @@ impl TimelineBuilder {
                     result_source,
                     affected_paths: affected_paths_bounded,
                 }),
+                agent,
             },
             order: (source.offset, 1),
             text_key: None,
             assistant_phase: AssistantPhase::Known,
         });
+    }
+
+    /// A child's lifecycle as the parent recorded it. `started` names the
+    /// child thread for the spawn call it answers — or stands in for the call
+    /// when the rollout family carries no call record of its own, as the
+    /// canonical item family does — and `interrupted`/`completed` close the
+    /// row by thread id.
+    fn observe_agent_activity(
+        &mut self,
+        activity: &SubagentActivity,
+        source: SessionSourceSpan,
+        timestamp: Option<u64>,
+        turn_id: String,
+        transcript: Option<String>,
+    ) {
+        match activity.kind {
+            SubagentActivityKind::Started => {
+                let position = self.events.iter().position(|pending| {
+                    pending.entry.kind == SessionTimelineEventKind::AgentCall
+                        && pending
+                            .entry
+                            .tool
+                            .as_ref()
+                            .is_some_and(|tool| tool.provider_call_id == activity.event_id)
+                });
+                let position = match position {
+                    Some(position) => position,
+                    None => {
+                        if self.events.len() >= MAX_TIMELINE_EVENTS {
+                            self.mark_tools_lower_bound(
+                                "timeline_event_limit",
+                                "The Codex transcript contains more agent calls than Mallard can index.",
+                            );
+                            self.truncated = true;
+                            return;
+                        }
+                        let parent = self.latest_assistant_event_id(&turn_id);
+                        self.events.push(PendingTimelineEvent {
+                            entry: SessionTimelineIndexEntry {
+                                event_id: format!("codex:agent:{}", activity.event_id),
+                                ordinal: 0,
+                                timestamp,
+                                kind: SessionTimelineEventKind::AgentCall,
+                                quality: SessionCountQuality::Exact,
+                                turn_id: Some(turn_id),
+                                turn_tool_summary: None,
+                                parent_event_id: parent,
+                                source,
+                                tool: Some(SessionToolIndexEntry {
+                                    provider_call_id: activity.event_id.clone(),
+                                    native_name: SPAWN_AGENT_TOOL.to_string(),
+                                    category: SessionToolCategory::Other,
+                                    status: SessionToolCallStatus::Completed,
+                                    result_source: Some(source),
+                                    affected_paths: Vec::new(),
+                                }),
+                                agent: Some(SessionAgentIndexEntry::default()),
+                            },
+                            order: (source.offset, 1),
+                            text_key: None,
+                            assistant_phase: AssistantPhase::Known,
+                        });
+                        self.events.len() - 1
+                    }
+                };
+                let pending = &mut self.events[position];
+                if let Some(tool) = pending.entry.tool.as_mut() {
+                    tool.status = merge_tool_status(tool.status, SessionToolCallStatus::Completed);
+                    tool.result_source.get_or_insert(source);
+                }
+                pending.entry.quality = SessionCountQuality::Exact;
+                if let Some(agent) = pending.entry.agent.as_mut() {
+                    agent.provider_agent_id = Some(activity.provider_thread_id.clone());
+                    agent.transcript = transcript;
+                }
+                self.agent_positions
+                    .insert(activity.provider_thread_id.clone(), position);
+            }
+            SubagentActivityKind::Interrupted | SubagentActivityKind::Completed => {
+                let Some(position) = self.agent_positions.get(&activity.provider_thread_id) else {
+                    return;
+                };
+                if let Some(agent) = self.events[*position].entry.agent.as_mut() {
+                    agent.recorded_status =
+                        Some(if activity.kind == SubagentActivityKind::Completed {
+                            SessionAgentStatus::Completed
+                        } else {
+                            SessionAgentStatus::Interrupted
+                        });
+                    agent.recorded_end = timestamp;
+                }
+            }
+            SubagentActivityKind::Interacted => {}
+        }
     }
 
     fn complete_tool(
@@ -1037,6 +1156,19 @@ impl TimelineBuilder {
                     pending.entry.quality = SessionCountQuality::LowerBound;
                 }
             }
+            // A spawn that returned without ever starting a thread was
+            // refused — Codex answers the call with the refusal text.
+            if let (SessionTimelineEventKind::AgentCall, Some(tool), Some(agent)) = (
+                pending.entry.kind,
+                pending.entry.tool.as_ref(),
+                pending.entry.agent.as_mut(),
+            ) {
+                if agent.provider_agent_id.is_none()
+                    && tool.status != SessionToolCallStatus::Incomplete
+                {
+                    agent.recorded_status = Some(SessionAgentStatus::Failed);
+                }
+            }
         }
         if has_incomplete {
             self.mark_tools_lower_bound(
@@ -1123,9 +1255,12 @@ fn counts_for_entries(
     inferred_intermediate: bool,
 ) -> SessionEventCounts {
     let count_kind = |kind| entries.iter().filter(|entry| entry.kind == kind).count() as u64;
+    // Categories partition the tool calls alone; an agent call keeps its
+    // `Other` tag for the payload path but is counted as a delegation.
     let count_category = |category| {
         entries
             .iter()
+            .filter(|entry| entry.kind == SessionTimelineEventKind::ToolCall)
             .filter_map(|entry| entry.tool.as_ref())
             .filter(|tool| tool.category == category)
             .count() as u64
@@ -1160,6 +1295,11 @@ fn counts_for_entries(
         "The rollout did not record authoritative assistant phases; placement was inferred from surrounding tool activity.",
     );
     SessionEventCounts {
+        agent_calls: count_with_quality(
+            count_kind(SessionTimelineEventKind::AgentCall),
+            tool_quality,
+            tool_count_explanation(tool_quality),
+        ),
         prompts: count_with_quality(
             count_kind(SessionTimelineEventKind::Prompt),
             visible_quality,
@@ -2016,6 +2156,9 @@ pub(crate) fn build_timeline_index(
     let mut reader = BufReader::new(file);
     let mut canonical = TimelineBuilder::default();
     let mut legacy = TimelineBuilder::default();
+    // One filename inventory per index build, taken only when a spawn is
+    // met; a rollout without children never walks the sessions tree.
+    let lookup = RolloutLookup::new(context.provider_home);
     let mut bytes = Vec::new();
     let mut record_count = 0usize;
     loop {
@@ -2074,6 +2217,32 @@ pub(crate) fn build_timeline_index(
         let timestamp = record_timestamp(&value);
         let outer_type = normalized_type(value.get("type").and_then(Value::as_str));
         let payload = value.get("payload").unwrap_or(&value);
+        // Both activity shapes name the same lifecycle; the canonical item
+        // form belongs to the item family, the event form to the legacy one.
+        if let Ok(Some(activity)) = SubagentActivity::from_record(&value) {
+            let transcript = (activity.kind == SubagentActivityKind::Started)
+                .then(|| {
+                    child_rollout_pointer(
+                        &lookup,
+                        context.provider_home,
+                        &activity.provider_thread_id,
+                    )
+                })
+                .flatten();
+            let payload_type = normalized_type(payload.get("type").and_then(Value::as_str));
+            if payload_type == "itemcompleted" {
+                canonical.saw_family = true;
+                let turn_id = payload
+                    .get("item")
+                    .map(|item| canonical_turn_id(payload, item, source))
+                    .unwrap_or_else(|| canonical.turn_or_orphan());
+                canonical.observe_agent_activity(&activity, source, timestamp, turn_id, transcript);
+            } else {
+                let turn_id = legacy_turn(&mut legacy);
+                legacy.observe_agent_activity(&activity, source, timestamp, turn_id, transcript);
+            }
+            continue;
+        }
         match outer_type.as_str() {
             "eventmsg" => {
                 let payload_type = normalized_type(payload.get("type").and_then(Value::as_str));
@@ -2396,6 +2565,10 @@ fn matching_entry(entry: &SessionTimelineIndexEntry, query: &SessionTimelineQuer
             return false;
         }
     }
+    // Categories partition tool calls; an agent row answers to its own kind.
+    if entry.kind == SessionTimelineEventKind::AgentCall {
+        return true;
+    }
     if let Some(tool) = &entry.tool {
         query.included_tool_categories.contains(&tool.category)
     } else {
@@ -2403,10 +2576,19 @@ fn matching_entry(entry: &SessionTimelineIndexEntry, query: &SessionTimelineQuer
     }
 }
 
+/// The kinds that carry a call payload rather than a message body.
+fn is_call_kind(kind: SessionTimelineEventKind) -> bool {
+    matches!(
+        kind,
+        SessionTimelineEventKind::ToolCall | SessionTimelineEventKind::AgentCall
+    )
+}
+
 pub(crate) fn read_timeline_page(
     path: &Path,
     index: &SessionTimelineIndex,
     query: &SessionTimelineQuery,
+    context: &SessionTimelineContext<'_>,
 ) -> Result<SessionTimelinePageSlice, String> {
     if index.parser_version != TIMELINE_PARSER_VERSION {
         return Err("Codex timeline index version is stale".to_string());
@@ -2423,7 +2605,7 @@ pub(crate) fn read_timeline_page(
     }
     let mut summary_already_emitted = BTreeSet::new();
     for entry in index.events.iter().take(start) {
-        if matching_entry(entry, query) && entry.kind != SessionTimelineEventKind::ToolCall {
+        if matching_entry(entry, query) && !is_call_kind(entry.kind) {
             if let Some(turn_id) = &entry.turn_id {
                 summary_already_emitted.insert(turn_id.clone());
             }
@@ -2438,7 +2620,7 @@ pub(crate) fn read_timeline_page(
             position += 1;
             continue;
         }
-        let text = if entry.kind == SessionTimelineEventKind::ToolCall {
+        let text = if is_call_kind(entry.kind) {
             None
         } else {
             let value = read_source_value(&mut file, entry.source)?;
@@ -2448,15 +2630,25 @@ pub(crate) fn read_timeline_page(
             )
             .0
         };
+        let is_agent = entry.kind == SessionTimelineEventKind::AgentCall;
         let tool = if let Some(tool_index) = &entry.tool {
             let (arguments, result) = tool_payloads(&mut file, entry)?;
             let summary = tool_summary(tool_index, arguments.as_ref());
-            let (argument_preview, argument_truncated) = bounded_text(
-                arguments.as_ref().and_then(value_as_preview),
-                timeline_tool_preview_bytes(),
-            );
-            let (result_preview, result_truncated) =
-                bounded_text(result, timeline_tool_preview_bytes());
+            // An agent row carries its facts on the agent preview; the raw
+            // payload stays one click away through the event detail.
+            let (argument_preview, argument_truncated) = if is_agent {
+                (None, false)
+            } else {
+                bounded_text(
+                    arguments.as_ref().and_then(value_as_preview),
+                    timeline_tool_preview_bytes(),
+                )
+            };
+            let (result_preview, result_truncated) = if is_agent {
+                (None, false)
+            } else {
+                bounded_text(result, timeline_tool_preview_bytes())
+            };
             Some(SessionToolCallPreview {
                 provider_call_id: tool_index.provider_call_id.clone(),
                 native_name: tool_index.native_name.clone(),
@@ -2472,6 +2664,9 @@ pub(crate) fn read_timeline_page(
         } else {
             None
         };
+        let agent = is_agent
+            .then(|| describe_agent(path, entry, context))
+            .transpose()?;
         let event_content_bytes = text
             .as_ref()
             .map_or(0, String::len)
@@ -2484,7 +2679,8 @@ pub(crate) fn read_timeline_page(
                 tool.as_ref()
                     .and_then(|preview| preview.result_preview.as_ref())
                     .map_or(0, String::len),
-            );
+            )
+            .saturating_add(agent.as_ref().map_or(0, agent_preview_bytes));
         if !events.is_empty()
             && page_content_bytes.saturating_add(event_content_bytes)
                 > timeline_page_content_bytes()
@@ -2494,7 +2690,7 @@ pub(crate) fn read_timeline_page(
         page_content_bytes = page_content_bytes.saturating_add(event_content_bytes);
         position += 1;
         let mut turn_tool_summary = None;
-        if entry.kind != SessionTimelineEventKind::ToolCall {
+        if !is_call_kind(entry.kind) {
             if let Some(turn_id) = &entry.turn_id {
                 if summary_already_emitted.insert(turn_id.clone()) {
                     turn_tool_summary = summaries.get(turn_id).cloned();
@@ -2513,6 +2709,7 @@ pub(crate) fn read_timeline_page(
             text,
             tool,
             checkpoint: None,
+            agent,
         });
     }
     let next_index = index.events[position..]
@@ -2520,6 +2717,284 @@ pub(crate) fn read_timeline_page(
         .any(|entry| matching_entry(entry, query))
         .then_some(position);
     Ok(SessionTimelinePageSlice { events, next_index })
+}
+
+/// What an agent preview adds to a page: its two texts.
+fn agent_preview_bytes(agent: &SessionAgentPreview) -> usize {
+    agent
+        .brief
+        .as_ref()
+        .map_or(0, String::len)
+        .saturating_add(agent.report.as_ref().map_or(0, String::len))
+}
+
+/// A child rollout as a pointer the index may keep: relative to the provider
+/// home, or nothing when the id has no file yet.
+fn child_rollout_pointer(
+    lookup: &RolloutLookup,
+    provider_home: &Path,
+    thread_id: &str,
+) -> Option<String> {
+    let path = lookup.find(thread_id).ok().flatten()?;
+    let relative = path.strip_prefix(provider_home).ok()?;
+    let mut pointer = String::new();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return None;
+        };
+        if !pointer.is_empty() {
+            pointer.push('/');
+        }
+        pointer.push_str(part.to_str()?);
+    }
+    (!pointer.is_empty()).then_some(pointer)
+}
+
+/// Resolve an index pointer back under the provider home, refusing anything
+/// but a plain relative path to a regular, unlinked file.
+fn child_rollout_path(provider_home: &Path, pointer: &str) -> Option<PathBuf> {
+    let relative = Path::new(pointer);
+    if relative.is_absolute()
+        || relative.as_os_str().is_empty()
+        || !relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+    let path = provider_home.join(relative);
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    (metadata.is_file() && !metadata.file_type().is_symlink()).then_some(path)
+}
+
+/// What a child rollout's `session_meta` says about itself: the agent's
+/// nickname, role, and the task path it was spawned under.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct CodexChildHead {
+    pub thread_id: Option<String>,
+    pub parent_thread_id: Option<String>,
+    pub nickname: Option<String>,
+    pub role: Option<String>,
+    pub task: Option<String>,
+}
+
+pub(crate) fn codex_child_head(path: &Path) -> Result<CodexChildHead, String> {
+    let file = crate::jsonl_tail_io::open_no_follow(path)?;
+    let mut reader = BufReader::new(file).take(CHILD_WINDOW_BYTES);
+    let mut line = Vec::new();
+    reader
+        .read_until(b'\n', &mut line)
+        .map_err(|error| format!("read '{}': {error}", path.display()))?;
+    if line.last() != Some(&b'\n') {
+        return Err("Codex child rollout has no complete first record".to_string());
+    }
+    let value: Value = serde_json::from_slice(&line)
+        .map_err(|_| "Codex child rollout head is malformed".to_string())?;
+    if normalized_type(value.get("type").and_then(Value::as_str)) != "sessionmeta" {
+        return Err("Codex child rollout does not open with session_meta".to_string());
+    }
+    let payload = value.get("payload").unwrap_or(&value);
+    let text = |key: &str| {
+        string_alias(payload, &[key])
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(|text| truncate_chars(text, 160))
+    };
+    let task = match payload.get("agent_path") {
+        Some(Value::String(path)) => path.rsplit('/').next().map(ToOwned::to_owned),
+        Some(Value::Array(parts)) => parts.last().and_then(Value::as_str).map(ToOwned::to_owned),
+        _ => None,
+    }
+    .map(|task| truncate_chars(task.trim(), 160))
+    .filter(|task| !task.is_empty());
+    let parent_thread_id = payload
+        .pointer("/source/subagent/thread_spawn/parent_thread_id")
+        .or_else(|| payload.get("parent_thread_id"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    Ok(CodexChildHead {
+        thread_id: string_alias(payload, &["id"]).map(ToOwned::to_owned),
+        parent_thread_id,
+        nickname: text("agent_nickname"),
+        role: text("agent_role"),
+        task,
+    })
+}
+
+/// The child rollout's clock and closing message, from its tail alone.
+#[derive(Default)]
+struct ChildTail {
+    last_timestamp: Option<u64>,
+    report: Option<String>,
+    /// The last message the child wrote was a final answer.
+    finished: bool,
+}
+
+fn codex_child_tail(path: &Path) -> Result<ChildTail, String> {
+    let window = crate::jsonl_tail_io::read_suffix_window(path, CHILD_WINDOW_BYTES)?;
+    let bytes = window.bytes.as_slice();
+    let start = if window.window_offset == 0 {
+        0
+    } else {
+        bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |position| position + 1)
+    };
+    let end = bytes[start..]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(start, |position| start + position + 1);
+    let mut tail = ChildTail::default();
+    for line in bytes[start..end].split(|byte| *byte == b'\n') {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if let Some(timestamp) = record_timestamp(&value) {
+            if tail.last_timestamp.is_none_or(|last| timestamp > last) {
+                tail.last_timestamp = Some(timestamp);
+            }
+        }
+        if normalized_type(value.get("type").and_then(Value::as_str)) != "eventmsg" {
+            continue;
+        }
+        let payload = value.get("payload").unwrap_or(&value);
+        let payload_type = normalized_type(payload.get("type").and_then(Value::as_str));
+        let (text, phase) = match payload_type.as_str() {
+            "itemcompleted" => {
+                let Some(item) = payload.get("item") else {
+                    continue;
+                };
+                if normalized_type(item.get("type").and_then(Value::as_str)) != "agentmessage" {
+                    continue;
+                }
+                (
+                    canonical_item_text(item),
+                    normalized_type(item.get("phase").and_then(Value::as_str)),
+                )
+            }
+            "agentmessage" => (
+                event_message_text(payload),
+                normalized_type(payload.get("phase").and_then(Value::as_str)),
+            ),
+            "usermessage" => {
+                tail.finished = false;
+                continue;
+            }
+            _ => continue,
+        };
+        if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
+            tail.report = Some(text);
+            tail.finished = phase != "commentary";
+        }
+    }
+    Ok(tail)
+}
+
+/// Written within the last five minutes: the same rule that marks a session
+/// active on the activity list.
+fn transcript_is_live(path: &Path) -> bool {
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|elapsed| elapsed.as_secs() < LIVE_TRANSCRIPT_SECS)
+}
+
+pub(crate) fn describe_agent_call(
+    entry: &SessionTimelineIndexEntry,
+    context: &SessionTimelineContext<'_>,
+) -> Result<SessionAgentPreview, String> {
+    describe_agent(context.provider_home, entry, context)
+}
+
+/// One agent row from what the parent recorded and the child rollout's head
+/// and tail. The parent's own activity events say whether the child was
+/// interrupted or completed; the child names itself (nickname, role, task
+/// path) in its `session_meta` and closes with its final message. The spawn
+/// message itself is not readable from the rollout, so the row carries no
+/// brief.
+fn describe_agent(
+    _parent: &Path,
+    entry: &SessionTimelineIndexEntry,
+    context: &SessionTimelineContext<'_>,
+) -> Result<SessionAgentPreview, String> {
+    let agent = entry.agent.clone().unwrap_or_default();
+    let child_path = agent
+        .transcript
+        .as_deref()
+        .and_then(|pointer| child_rollout_path(context.provider_home, pointer));
+    let head = child_path
+        .as_deref()
+        .and_then(|path| codex_child_head(path).ok())
+        .filter(|head| {
+            head.thread_id.as_deref() == agent.provider_agent_id.as_deref()
+                && head.parent_thread_id.as_deref() == Some(context.provider_session_id)
+        });
+    let child_exists = head.is_some();
+    let head = head.unwrap_or_default();
+    let label = head
+        .nickname
+        .clone()
+        .or_else(|| head.task.clone())
+        .unwrap_or_else(|| "Agent".to_string());
+    let mut ended_at = agent.recorded_end;
+    let mut report = None;
+    let tail = match (child_exists, child_path.as_deref()) {
+        (true, Some(path)) => Some(codex_child_tail(path)?),
+        _ => None,
+    };
+    if let Some(tail) = &tail {
+        report = tail.report.clone();
+        if ended_at.is_none() {
+            ended_at = tail.last_timestamp;
+        }
+    }
+    let status = if let Some(recorded) = agent.recorded_status {
+        recorded
+    } else if agent.provider_agent_id.is_none() {
+        if transcript_is_live(_parent) {
+            SessionAgentStatus::Running
+        } else {
+            SessionAgentStatus::Incomplete
+        }
+    } else if let (Some(tail), Some(path)) = (&tail, child_path.as_deref()) {
+        if tail.finished {
+            SessionAgentStatus::Completed
+        } else if transcript_is_live(path) {
+            SessionAgentStatus::Running
+        } else {
+            SessionAgentStatus::Incomplete
+        }
+    } else {
+        SessionAgentStatus::Unavailable
+    };
+    let (report, report_truncated) = bounded_text(report, timeline_tool_preview_bytes());
+    Ok(SessionAgentPreview {
+        transcript_resource_id: agent
+            .provider_agent_id
+            .as_deref()
+            .filter(|_| child_exists)
+            .map(|id| agent_resource_id(context.resource_id, id)),
+        provider_agent_id: agent.provider_agent_id,
+        label,
+        task: head.task,
+        role: head.role,
+        model: None,
+        mode: SessionAgentMode::Spawn,
+        status,
+        started_at: entry.timestamp,
+        ended_at,
+        tool_calls: None,
+        tokens: None,
+        brief: None,
+        brief_truncated: false,
+        report,
+        report_truncated,
+    })
 }
 
 fn tool_summary(tool: &SessionToolIndexEntry, arguments: Option<&Value>) -> String {
@@ -2594,6 +3069,8 @@ mod tests {
             provider_session_id: "session-1",
             project_root,
             project_root_aliases: &[],
+            provider_home: project_root,
+            child: None,
         }
     }
 
@@ -3083,7 +3560,8 @@ mod tests {
             included_tool_categories: BTreeSet::new(),
             turn_id: None,
         };
-        let page = read_timeline_page(&transcript, &index, &query).unwrap();
+        let page =
+            read_timeline_page(&transcript, &index, &query, &context(&project_root)).unwrap();
         assert_eq!(page.events.len(), 2);
         assert_eq!(page.events[0].text.as_ref().unwrap().len(), 16 * 1024 + 1);
         let response_preview = page.events[1].text.as_ref().unwrap();
@@ -3119,6 +3597,7 @@ mod tests {
                         affected_paths: Vec::new(),
                         result_source: None,
                     }),
+                    agent: None,
                 },
                 order,
                 text_key: None,
@@ -3243,7 +3722,8 @@ mod tests {
             included_tool_categories: BTreeSet::new(),
             turn_id: None,
         };
-        let page = read_timeline_page(&transcript, &index, &query).unwrap();
+        let page =
+            read_timeline_page(&transcript, &index, &query, &context(&project_root)).unwrap();
         assert_eq!(page.events.len(), 1);
         assert_eq!(page.events[0].text.as_deref(), Some("It is complete."));
         assert_eq!(
@@ -3387,6 +3867,8 @@ mod tests {
             provider_session_id: "session-1",
             project_root: &canonical_root,
             project_root_aliases: &aliases,
+            provider_home: &canonical_root,
+            child: None,
         };
 
         let index = build_timeline_index(&transcript, &context).unwrap();
@@ -3472,7 +3954,8 @@ mod tests {
             included_tool_categories: BTreeSet::from([SessionToolCategory::Read]),
             turn_id: None,
         };
-        let page = read_timeline_page(&transcript, &index, &query).unwrap();
+        let page =
+            read_timeline_page(&transcript, &index, &query, &context(&project_root)).unwrap();
         let preview = page.events[0]
             .tool
             .as_ref()
@@ -3514,7 +3997,8 @@ mod tests {
             included_tool_categories: BTreeSet::from([SessionToolCategory::Other]),
             turn_id: None,
         };
-        let first_page = read_timeline_page(&transcript, &index, &first_query).unwrap();
+        let first_page =
+            read_timeline_page(&transcript, &index, &first_query, &context(&project_root)).unwrap();
         assert_eq!(first_page.events.len(), 1);
         let first_tool = first_page.events[0].tool.as_ref().unwrap();
         assert_eq!(first_tool.provider_call_id, "tool-1");
@@ -3533,7 +4017,9 @@ mod tests {
             start_index: first_page.next_index,
             ..first_query
         };
-        let second_page = read_timeline_page(&transcript, &index, &second_query).unwrap();
+        let second_page =
+            read_timeline_page(&transcript, &index, &second_query, &context(&project_root))
+                .unwrap();
         assert_eq!(second_page.events.len(), 1);
         assert_eq!(
             second_page.events[0]
@@ -3657,5 +4143,186 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.code == "affected_path_limit"));
+    }
+
+    fn codex_parent_meta(thread: &str, project_root: &Path) -> Value {
+        json!({"timestamp":"2026-09-02T09:14:11Z","type":"session_meta","payload":{"id":thread,"cwd":project_root,"timestamp":"2026-09-02T09:14:11Z"}})
+    }
+
+    fn codex_item(timestamp: &str, item: Value) -> Value {
+        json!({"timestamp":timestamp,"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-1","item":item}})
+    }
+
+    #[test]
+    fn subagent_activity_indexes_as_agent_calls_read_from_the_child_rollout() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temp.path()).unwrap().join("codex");
+        let sessions = home.join("sessions/2026/09/02");
+        let project_root = home.join("project");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+        let parent = sessions.join("rollout-2026-09-02T02-14-11-parent-thread.jsonl");
+        let child = sessions.join("rollout-2026-09-02T02-14-31-child-thread.jsonl");
+        write_jsonl(
+            &parent,
+            vec![
+                codex_parent_meta("parent-thread", &project_root),
+                codex_item(
+                    "2026-09-02T09:14:20Z",
+                    json!({"type":"UserMessage","id":"u-1","content":[{"type":"text","text":"Review the PoC"}]}),
+                ),
+                codex_item(
+                    "2026-09-02T09:14:31Z",
+                    json!({"type":"SubAgentActivity","id":"call_spawn1","kind":"started","agent_thread_id":"child-thread","agent_path":"/root/inspect_poc"}),
+                ),
+                codex_item(
+                    "2026-09-02T09:18:36Z",
+                    json!({"type":"SubAgentActivity","id":"call_send1","kind":"interacted","agent_thread_id":"child-thread","agent_path":"/root/inspect_poc"}),
+                ),
+                codex_item(
+                    "2026-09-02T09:20:47Z",
+                    json!({"type":"SubAgentActivity","id":"subagent-completed-1","kind":"completed","agent_thread_id":"child-thread","agent_path":"/root/inspect_poc"}),
+                ),
+                codex_item(
+                    "2026-09-02T09:21:00Z",
+                    json!({"type":"AgentMessage","id":"m-1","phase":"final_answer","content":[{"type":"text","text":"Done."}]}),
+                ),
+            ],
+        );
+        write_jsonl(
+            &child,
+            vec![
+                json!({"timestamp":"2026-09-02T09:14:31Z","type":"session_meta","payload":{"id":"child-thread","cwd":project_root,"timestamp":"2026-09-02T09:14:31Z","parent_thread_id":"parent-thread","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-thread","depth":1}}},"agent_nickname":"Hilbert","agent_role":"explorer","agent_path":"/root/inspect_poc","history_mode":"paginated"}}),
+                codex_item(
+                    "2026-09-02T09:14:40Z",
+                    json!({"type":"UserMessage","id":"cu-1","content":[{"type":"text","text":"Inspect the PoC"}]}),
+                ),
+                codex_item(
+                    "2026-09-02T09:20:40Z",
+                    json!({"type":"AgentMessage","id":"cm-1","phase":"final_answer","content":[{"type":"text","text":"Review: two blocking findings."}]}),
+                ),
+            ],
+        );
+        let context = SessionTimelineContext {
+            resource_id: "codex:conversation:test",
+            provider_session_id: "parent-thread",
+            project_root: &project_root,
+            project_root_aliases: &[],
+            provider_home: &home,
+            child: None,
+        };
+        let index = build_timeline_index(&parent, &context).unwrap();
+        assert_eq!(count_value(&index.counts.agent_calls), 1);
+        assert_eq!(count_value(&index.counts.tool_calls), 0);
+        let entry = index
+            .events
+            .iter()
+            .find(|entry| entry.kind == SessionTimelineEventKind::AgentCall)
+            .unwrap();
+        let indexed = entry.agent.as_ref().unwrap();
+        assert_eq!(indexed.provider_agent_id.as_deref(), Some("child-thread"));
+        assert_eq!(indexed.recorded_status, Some(SessionAgentStatus::Completed));
+        assert_eq!(
+            indexed.transcript.as_deref(),
+            Some("sessions/2026/09/02/rollout-2026-09-02T02-14-31-child-thread.jsonl")
+        );
+        let encoded = serde_json::to_string(&index).unwrap();
+        assert!(!encoded.contains("Hilbert"));
+        assert!(!encoded.contains(home.to_str().unwrap()));
+
+        let query = SessionTimelineQuery {
+            start_index: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([SessionTimelineEventKind::AgentCall]),
+            included_tool_categories: BTreeSet::new(),
+            turn_id: None,
+        };
+        let page = read_timeline_page(&parent, &index, &query, &context).unwrap();
+        assert_eq!(page.events.len(), 1);
+        let agent = page.events[0].agent.clone().unwrap();
+        assert_eq!(agent.label, "Hilbert");
+        assert_eq!(agent.task.as_deref(), Some("inspect_poc"));
+        assert_eq!(agent.role.as_deref(), Some("explorer"));
+        assert_eq!(agent.mode, SessionAgentMode::Spawn);
+        assert_eq!(agent.status, SessionAgentStatus::Completed);
+        assert_eq!(agent.brief, None);
+        assert_eq!(
+            agent.report.as_deref(),
+            Some("Review: two blocking findings.")
+        );
+        assert_eq!(
+            agent.ended_at,
+            parse_timestamp_value(&json!("2026-09-02T09:20:47Z"))
+        );
+        assert_eq!(
+            agent.transcript_resource_id.as_deref(),
+            Some("codex:conversation:test/agent/child-thread")
+        );
+        assert_eq!(describe_agent_call(entry, &context).unwrap(), agent);
+
+        let identity = crate::providers::SessionChildIdentity {
+            parent_provider_session_id: "parent-thread".to_string(),
+            provider_agent_id: "child-thread".to_string(),
+        };
+        let adapter = crate::providers::codex::CodexAdapter::new();
+        use crate::providers::SessionAdapter as _;
+        assert_eq!(
+            adapter
+                .locate_child_transcript(&home, &parent, &identity)
+                .unwrap(),
+            Some(child.clone())
+        );
+        let summary = adapter.summarize_child_file(&child, &identity).unwrap();
+        assert_eq!(summary.session_id, "child-thread");
+        assert!(summary.is_internal_subagent);
+        // A child that names a different parent is refused, not shown.
+        let stranger = crate::providers::SessionChildIdentity {
+            parent_provider_session_id: "other-thread".to_string(),
+            provider_agent_id: "child-thread".to_string(),
+        };
+        assert!(adapter
+            .locate_child_transcript(&home, &parent, &stranger)
+            .is_err());
+    }
+
+    #[test]
+    fn a_refused_spawn_is_an_agent_call_that_failed() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temp.path()).unwrap();
+        let project_root = home.join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let rollout = home.join("rollout.jsonl");
+        write_jsonl(
+            &rollout,
+            vec![
+                codex_parent_meta("parent-thread", &project_root),
+                json!({"timestamp":"2026-09-02T09:14:11Z","type":"event_msg","payload":{"type":"user_message","message":"Spawn a worker"}}),
+                json!({"timestamp":"2026-09-02T09:14:43Z","type":"response_item","payload":{"type":"function_call","call_id":"call_spawn2","name":"spawn_agent","arguments":"{\"agent_type\":\"default\",\"message\":\"gAAAA\"}"}}),
+                json!({"timestamp":"2026-09-02T09:14:43Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_spawn2","output":"collab spawn failed: agent thread limit reached"}}),
+            ],
+        );
+        let context = SessionTimelineContext {
+            resource_id: "codex:conversation:test",
+            provider_session_id: "parent-thread",
+            project_root: &project_root,
+            project_root_aliases: &[],
+            provider_home: &home,
+            child: None,
+        };
+        let index = build_timeline_index(&rollout, &context).unwrap();
+        assert_eq!(count_value(&index.counts.agent_calls), 1);
+        let entry = index
+            .events
+            .iter()
+            .find(|entry| entry.kind == SessionTimelineEventKind::AgentCall)
+            .unwrap();
+        assert_eq!(
+            entry.agent.as_ref().unwrap().recorded_status,
+            Some(SessionAgentStatus::Failed)
+        );
+        let agent = describe_agent_call(entry, &context).unwrap();
+        assert_eq!(agent.status, SessionAgentStatus::Failed);
+        assert_eq!(agent.label, "Agent");
+        assert_eq!(agent.transcript_resource_id, None);
     }
 }

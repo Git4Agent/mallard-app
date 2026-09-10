@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "settings": { "namespace_id": "mock-shared-namespace" },
+  "secrets": { "access_token": "mock-refreshed-access-canary" }
+}

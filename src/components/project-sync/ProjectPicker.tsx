@@ -67,7 +67,7 @@ export default function ProjectPicker({ projects, profiles, providers, storages,
           location: compactProjectPath(project.project_root),
           detail: (
             <>
-              <Icon name="drive" size={13} />
+              <Icon name="storage" size={13} />
               {linkedNames.length === 0 ? "No storage linked" : linkedNames.join(" · ")}
             </>
           ),

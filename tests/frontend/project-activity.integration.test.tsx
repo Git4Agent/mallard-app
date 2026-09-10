@@ -629,6 +629,7 @@ test("fresh storage matches portable Activity rows to conversation comparisons",
       storage_present: false,
       cloud_thread_id: CODEX_SESSION_ID,
       compared_against_storage: true,
+      subagent_selection: { wire_children: "on", keys: [], omitted: true, estimated_bytes: 0 },
       provider_thread_id: CODEX_SESSION_ID,
       push_decision: decision("create_cloud", true),
       pull_decision: decision("report_local_only", false),
@@ -661,12 +662,25 @@ test("fresh storage matches portable Activity rows to conversation comparisons",
 
   assert.match(reviewHtml, /aria-label="Exclude Add Git history mapping"/);
   assert.match(reviewHtml, /<input[^>]*checked=""/);
+  assert.doesNotMatch(browseHtml, /Child rollouts excluded/);
+  assert.match(reviewHtml, /tabindex="0" aria-label="Child rollouts excluded" aria-describedby="[^"]+"/);
+  assert.match(reviewHtml, /role="tooltip"/);
+  assert.match(reviewHtml, /Child conversations are excluded from this Push\. Pull restores the children stored in the cloud\./);
+  const pullHtml = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={{ ...activity, git: null }} comparison={comparison} selectionMode="pull" />,
+  );
+  assert.doesNotMatch(pullHtml, /Child rollouts excluded/);
 });
 
 test("pull selection rows wear the operation chips in the files grammar", () => {
   const chipEntry = (overrides: Record<string, unknown>) => ({
+    provider: "codex", provider_display_name: "Codex", access: "bound_ready",
+    thread_id: "test", conversation_resource_id: "codex:conversation:test", resource_id: "codex:conversation:test",
+    display_name: "Test", local_present: true, storage_present: true,
+    push_decision: reviewDecision("no_changes"),
     state: "storage_ahead",
     compared_against_storage: true,
+    subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
     pull_decision: reviewDecision("materialize_cloud", true),
     ...overrides,
   }) as Parameters<typeof pullOperationChip>[0];
@@ -713,6 +727,7 @@ test("pull selection rows wear the operation chips in the files grammar", () => 
       storage_present: true,
       cloud_thread_id: CODEX_SESSION_ID,
       compared_against_storage: true,
+      subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
       provider_thread_id: CODEX_SESSION_ID,
       push_decision: reviewDecision("require_pull"),
       pull_decision: reviewDecision("keep_both", true),
@@ -733,7 +748,7 @@ test("pull selection rows wear the operation chips in the files grammar", () => 
   assert.match(html, />Update session · keeps local copy</);
 });
 
-test("Pull review shows only cloud-outstanding and divergent sessions", () => {
+test("Pull review includes missing-child recovery and excludes unrelated unavailable sessions", () => {
   const scenarios: Array<{
     key: string;
     title: string;
@@ -745,6 +760,7 @@ test("Pull review shows only cloud-outstanding and divergent sessions", () => {
     { key: "stored", title: "Stored session", state: "storage_only", source: "remote_only", pullAction: "create_local", visible: true },
     { key: "newer-stored", title: "Newer stored session", state: "storage_ahead", source: "local_only", pullAction: "materialize_cloud", visible: true },
     { key: "diverged", title: "Diverged session", state: "diverged", source: "local_only", pullAction: "keep_both", visible: true },
+    { key: "recovery", title: "Missing child recovery", state: "unknown", source: "local_only", pullAction: "keep_both", visible: true },
     { key: "local", title: "Local session", state: "local_ahead", source: "local_only", pullAction: "report_push_eligible", visible: false },
     { key: "synced", title: "Synced session", state: "synced", source: "local_only", pullAction: "no_changes", visible: false },
     { key: "blocked", title: "Unavailable session", state: "unavailable", source: "local_only", pullAction: "report_local_only", visible: false },
@@ -781,6 +797,7 @@ test("Pull review shows only cloud-outstanding and divergent sessions", () => {
         storage_present: true,
         cloud_thread_id: session.logical_thread_id,
         compared_against_storage: true,
+        subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
         provider_thread_id: session.provider_session_id,
         push_decision: reviewDecision("no_changes"),
         pull_decision: reviewDecision(scenario.pullAction, scenario.visible),
@@ -816,7 +833,18 @@ test("Pull review shows only cloud-outstanding and divergent sessions", () => {
 
   assert.equal((html.match(/data-thread-status="cloud-outstanding"/g) ?? []).length, 2);
   assert.equal((html.match(/data-thread-status="divergent"/g) ?? []).length, 1);
-  assert.doesNotMatch(html, /data-thread-status="(?:synced|local-outstanding|pending|conflict|unavailable|unknown)"/);
+  assert.doesNotMatch(html, /data-thread-status="(?:synced|local-outstanding|pending)"/);
+  assert.equal((html.match(/data-thread-status="conflict"/g) ?? []).length, 1);
+  const withoutActivity = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{ ...activity, sessions: [], git: null, unmapped: [] }}
+      comparison={comparison}
+      selectionMode="pull"
+      selectableResourceIds={new Set(sessionRows.map((session) => session.resource_id))}
+    />,
+  );
+  assert.match(withoutActivity, /Include Missing child recovery/);
   for (const scenario of scenarios) {
     if (scenario.visible) assert.match(html, new RegExp(scenario.title));
     else {
@@ -875,6 +903,7 @@ test("Push review shows only ready local-outstanding sessions", () => {
         storage_present: scenario.state !== "local_only",
         cloud_thread_id: scenario.source === "remote_only" ? session.logical_thread_id : null,
         compared_against_storage: true,
+        subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
         provider_thread_id: session.provider_session_id,
         push_decision: reviewDecision(scenario.pushAction, scenario.selectable),
         pull_decision: reviewDecision("no_changes"),
@@ -1790,6 +1819,7 @@ test("Push review renders checkboxes only for selectable bound-ready rows", () =
         storage_present: true,
         cloud_thread_id: CODEX_SESSION_ID,
         compared_against_storage: true,
+        subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
         provider_thread_id: CODEX_SESSION_ID,
         push_decision: decision("no_changes", false),
         pull_decision: decision("no_changes", false),
@@ -1807,6 +1837,7 @@ test("Push review renders checkboxes only for selectable bound-ready rows", () =
         storage_present: true,
         cloud_thread_id: localAheadId,
         compared_against_storage: true,
+        subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
         provider_thread_id: localAheadId,
         push_decision: decision("publish", true),
         pull_decision: decision("report_push_eligible", false),
@@ -1873,6 +1904,7 @@ test("selected storage adds directional indicators and remote-only session rows"
         storage_present: true,
         cloud_thread_id: CODEX_SESSION_ID,
         compared_against_storage: true,
+        subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
         provider_thread_id: CODEX_SESSION_ID,
         local_updated_at: codexSession.ended_at,
         storage_updated_at: codexSession.ended_at - 60,
@@ -1892,6 +1924,7 @@ test("selected storage adds directional indicators and remote-only session rows"
         storage_present: true,
         cloud_thread_id: remoteId,
         compared_against_storage: true,
+        subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
         storage_updated_at: 1_752_802_500,
         push_decision: reviewDecision("no_changes"),
         pull_decision: reviewDecision("create_local", true),
@@ -1909,6 +1942,7 @@ test("selected storage adds directional indicators and remote-only session rows"
         storage_present: true,
         cloud_thread_id: olderId,
         compared_against_storage: true,
+        subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
         provider_thread_id: olderId,
         local_updated_at: activity.window_start - 60,
         storage_updated_at: activity.window_start - 120,
@@ -1973,6 +2007,7 @@ test("unavailable sessions explain why they cannot be synced", () => {
       local_present: true,
       storage_present: false,
       compared_against_storage: true,
+      subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
       provider_thread_id: CODEX_SESSION_ID,
       status_detail: "Session file exceeds the 100 MiB per-file sync limit.",
       local_updated_at: codexSession.ended_at,
@@ -2086,6 +2121,7 @@ test("mixed-provider rows sort deterministically and never collide on native ids
         storage_present: false,
         cloud_thread_id: nativeId,
         compared_against_storage: true,
+        subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
         provider_thread_id: nativeId,
         push_decision: decision,
         pull_decision: { ...decision, action: "report_push_eligible", selectable: false },
@@ -2103,6 +2139,7 @@ test("mixed-provider rows sort deterministically and never collide on native ids
         storage_present: false,
         cloud_thread_id: nativeId,
         compared_against_storage: true,
+        subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
         provider_thread_id: nativeId,
         push_decision: decision,
         pull_decision: { ...decision, action: "report_push_eligible", selectable: false },
@@ -2291,6 +2328,7 @@ test("session actions render from backend descriptors with disabled reasons", ()
           local_present: true,
           storage_present: false,
           compared_against_storage: true,
+          subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
           provider_thread_id: session.provider_session_id,
           push_decision: reviewDecision("create_cloud", true),
           pull_decision: reviewDecision("report_local_only"),
@@ -2760,7 +2798,7 @@ test("an empty Storages rail prompts the way Projects and Catalog do", () => {
   assert.match(empty, /aria-label="Add Cloud A storage"[^]*?data-icon="cloud"/);
   assert.doesNotMatch(empty, /Add your first|sync-sidebar-empty/);
   // Before the descriptors arrive, the one tile is the picker itself.
-  assert.match(storagePane(render([], [])), /class="sidebar-door" title="Add storage"[^]*?data-icon="drive"/);
+  assert.match(storagePane(render([], [])), /class="sidebar-door" title="Add storage"[^]*?data-icon="storage"/);
 
   // And it is a first-run prompt, not a permanent Add row.
   const settled = storagePane(render([{
@@ -2992,6 +3030,7 @@ test("a review shows the whole span at once: no paging, no fold, unlisted entrie
     local_present: true,
     storage_present: false,
     compared_against_storage: true,
+    subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
     push_decision: { action: "create_cloud", selectable: true },
     pull_decision: { action: "no_changes", selectable: false },
   };
@@ -3010,6 +3049,15 @@ test("a review shows the whole span at once: no paging, no fold, unlisted entrie
   assert.match(html, /aria-label="Sessions without an activity row"/);
   assert.match(html, /A thread no session row reaches/);
   assert.doesNotMatch(html, /nothing earlier/);
+  const changed = { ...entry, state: "synced" as const, storage_present: true,
+    status_detail: "Export settings changed", push_decision: { action: "publish" as const, selectable: true } };
+  const modeChange = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={activity} selectionMode="push"
+      comparison={emptyComparison({ entries: [changed] })} selectableResourceIds={new Set([entry.resource_id])} />,
+  );
+  assert.match(modeChange, /A thread no session row reaches/);
+  assert.match(modeChange, />Export settings changed<\/span>/);
+  assert.match(modeChange, /type="checkbox"/);
   // The standing page still pages.
   const standing = renderToStaticMarkup(
     <ProjectChatHistoryContent {...contentDefaults} activity={activity} />,
@@ -3044,6 +3092,7 @@ test("a Push candidate missing from the selected branch projection remains visib
     local_present: true,
     storage_present: false,
     compared_against_storage: true,
+    subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
     provider_thread_id: nativeId,
     push_decision: { action: "create_cloud", selectable: true },
     pull_decision: { action: "no_changes", selectable: false },

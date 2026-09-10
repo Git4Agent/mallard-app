@@ -24,7 +24,7 @@ export interface PullReviewItem {
   conversationReviewRows: ConversationReviewRow[];
   projectContentPath: string | null;
   projectContentEntryType: "file" | "directory" | null;
-  projectContentOperation: "add" | "replace" | "create_directory" | "delete_file" | "delete_directory" | null;
+  projectContentOperation: "add" | "replace" | "create_directory" | null;
   /** Project-relative path the local version is copied to before a diverged
    *  replace — the pull is never lossy. */
   projectContentPreservedCopy: string | null;
@@ -32,7 +32,6 @@ export interface PullReviewItem {
   projectContentSize: number | null;
 }
 
-const NON_DIRECT_RESTORE_KINDS = new Set(["manual"]);
 const VISIBLE_PULL_CONVERSATION_ACTIONS = new Set([
   "materialize_cloud",
   "keep_both",
@@ -46,41 +45,15 @@ function humanize(value: string): string {
     .join(" ");
 }
 
-function blockedConversationDetail(row: ConversationReviewRow): string {
-  switch (row.blocker) {
-    case "codec_unsupported":
-      return "This task cannot be transformed safely by the active provider codec.";
-    case "ambiguous_binding":
-      return "More than one local task could match this stored task.";
-    case "missing_binding":
-      return "Mallard cannot prove which local task this stored task belongs to.";
-    case "detached_requires_pull":
-      return "This task's local mapping changed. Refresh Pull to establish the current mapping.";
-    case "busy":
-      return "Another sync operation still owns this task. Wait, then refresh.";
-    default:
-      return row.blocked_reason ?? "Mallard cannot prove that this task can be changed safely.";
-  }
-}
-
 function conversationActionDetail(row: ConversationReviewRow): string {
   switch (row.action) {
-    case "adopt_cloud_metadata":
-      return "Records the reviewed storage version as accepted. No provider files change.";
     case "materialize_cloud":
       return "Brings the reviewed storage history into this task. Existing provider files are retained.";
     case "keep_both":
+      if (row.blocked_reason) return row.blocked_reason;
       return "Keeps the current local history as an independent task and brings the storage history into this task. No messages are deleted.";
     case "create_local":
       return "Creates a local task from the reviewed storage history.";
-    case "report_push_eligible":
-      return "This computer has newer messages. The task stays local and can be pushed.";
-    case "report_local_only":
-      return "This task exists only on this computer. Pull leaves it unchanged.";
-    case "not_found":
-      return "This task no longer exists locally or in storage.";
-    case "blocked":
-      return blockedConversationDetail(row);
     default:
       return humanize(row.action);
   }
@@ -150,33 +123,11 @@ function restoreActionCopy(action: RestoreAction): {
       projectContentOperation: "create_directory",
     };
   }
-  if (kind === "delete_project_file" || kind === "delete_project_directory") {
-    const projectPath = action.kind.logical_path.replace(/^project\//, "");
-    const isDirectory = kind === "delete_project_directory";
-    return {
-      title: finalPathPart(projectPath),
-      detail: projectPath,
-      provider: null,
-      category: "project_content",
-      projectContentPath: projectPath,
-      projectContentEntryType: isDirectory ? "directory" : "file",
-      projectContentOperation: isDirectory ? "delete_directory" : "delete_file",
-    };
-  }
   if (kind === "write_file" || kind === "merge_file") {
     return {
       title: finalPathPart(action.kind.logical_path),
       detail: action.kind.logical_path,
       provider,
-      category: "project_data",
-    };
-  }
-  if (kind === "manual") {
-    const conversationProvider = conversationResourceProvider(action.resource_id);
-    return {
-      title: conversationProvider ? "Conflicted conversation" : "Manual review",
-      detail: action.kind.message,
-      provider: conversationProvider,
       category: "project_data",
     };
   }
@@ -247,7 +198,7 @@ export function buildPullReviewItems(plan: PullReview): PullReviewItem[] {
 
   for (const row of plan.conversation_review) {
     if (!VISIBLE_PULL_CONVERSATION_ACTIONS.has(row.action)) continue;
-    const detail = conversationActionDetail(row);
+    const detail = conversationActionDetail(row) + (row.stored_without_credential_redaction ? " Stored without credential redaction." : "");
     const item = ensure(
       row.resource_id,
       "project_data",
@@ -304,9 +255,7 @@ export function includeRequiredPullProjectDirectories(
 }
 
 export function restoreActionIds(item: PullReviewItem): string[] {
-  const fileActions = item.restoreActions
-    .filter((action) => !NON_DIRECT_RESTORE_KINDS.has(action.kind.kind))
-    .map((action) => action.action_id);
+  const fileActions = item.restoreActions.map((action) => action.action_id);
   const conversationSelections = item.conversationReviewRows
     .flatMap((row) => row.action_id ? [row.action_id] : []);
   return [...fileActions, ...conversationSelections];
@@ -322,36 +271,8 @@ export function pullActionResourceIds(plan: PullReview): Map<string, string> {
   return resourceIds;
 }
 
-export function pendingIds(item: PullReviewItem, completedActionIds: ReadonlySet<string>): string[] {
-  return restoreActionIds(item).filter((actionId) => !completedActionIds.has(actionId));
-}
-
 export function requiresApproval(item: PullReviewItem): boolean {
-  return item.restoreActions
-    .filter((action) => !NON_DIRECT_RESTORE_KINDS.has(action.kind.kind))
-    .some((action) => action.requires_explicit_approval);
-}
-
-/* The review rows are the backend's signal and the only one. A Manual restore
-   action can never stand in for them: `manual_action` in bundle_engine.rs is
-   its sole constructor and leaves target_path and both digests unset. */
-/** The provider that owns a `<provider>:session:<id>` resource, or null when
- *  the id is not a conversation. Parsed rather than matched against a list, so
- *  registering a provider adapter needs no edit here. */
-export function conversationResourceProvider(resourceId: string): ProviderKey | null {
-  return /^([a-z0-9_-]+):session:/.exec(resourceId)?.[1] ?? null;
-}
-
-export function keepsLocalConversation(item: PullReviewItem): boolean {
-  return item.conversationReviewRows.some((row) => (
-    row.action === "report_push_eligible" || row.action === "report_local_only"
-  ));
-}
-
-export function requiresManualResolution(item: PullReviewItem): boolean {
-  return item.conversationReviewRows.some((row) => row.action === "blocked")
-    || (item.restoreActions.some((action) => action.kind.kind === "manual")
-      && !keepsLocalConversation(item));
+  return item.restoreActions.some((action) => action.requires_explicit_approval);
 }
 
 export function recommendedPullSelection(item: PullReviewItem): boolean {
@@ -366,7 +287,7 @@ export function recommendedPullSelection(item: PullReviewItem): boolean {
     return item.projectContentOperation === "add"
       || item.projectContentOperation === "create_directory";
   }
-  const actions = item.restoreActions.filter((action) => !NON_DIRECT_RESTORE_KINDS.has(action.kind.kind));
+  const actions = item.restoreActions;
   const conversationSelections = item.conversationReviewRows.some((row) => row.action_id != null);
   return (actions.length > 0 || conversationSelections)
     && actions.every((action) => !action.requires_explicit_approval);
@@ -387,14 +308,10 @@ export function itemKindLabel(item: PullReviewItem): string {
 export function buildPullReviewSelection(
   items: PullReviewItem[],
   selected: ReadonlySet<string>,
-  completedActionIds: ReadonlySet<string>,
-  completedResourceIds: ReadonlySet<string>,
 ): PullReviewSelection {
-  const chosen = items.filter((item) => selected.has(item.resourceId) && !completedResourceIds.has(item.resourceId));
+  const chosen = items.filter((item) => selected.has(item.resourceId) && restoreActionIds(item).length > 0);
   return {
-    resourceIds: chosen
-      .filter((item) => pendingIds(item, completedActionIds).length > 0)
-      .map((item) => item.resourceId),
-    restoreActionIds: chosen.flatMap((item) => restoreActionIds(item).filter((id) => !completedActionIds.has(id))),
+    resourceIds: chosen.map((item) => item.resourceId),
+    restoreActionIds: chosen.flatMap(restoreActionIds),
   };
 }

@@ -9,7 +9,12 @@ import type {
 import SyncPathBar, { type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import LandingPicker, { type LandingCard, type LandingDoor } from "./LandingPicker";
 import { storageDoors } from "./model";
-import { findStorageProvider, storageSubtitle } from "./StorageSettings";
+import {
+  connectionSuspends,
+  findStorageProvider,
+  storageConnectionIssue,
+  storageSubtitle,
+} from "./StorageSettings";
 
 /**
  * The page the storage trail is rooted at: every storage page begins its path
@@ -37,7 +42,8 @@ interface Props {
   busy: boolean;
   /** Theme and app-wide commands; the bar here is the window's only chrome. */
   appActions: PathBarMenuGroup[];
-  onOpenStorage: (storageId: string) => void;
+  /** Opens the storage's page; a refused credential opens its settings. */
+  onOpenStorage: (storageId: string, settingsExpanded: boolean) => void;
   onOpenStorageDraft: (draftId: string) => void;
   /** Add, with the provider already chosen when a door names one; without
       one, the provider picker asks. */
@@ -59,6 +65,7 @@ export default function StorageIndexPage({
   const cards: LandingCard[] = [
     ...storages.map((storage): LandingCard => {
       const name = storage.name || "(unnamed)";
+      const reconnect = storageConnectionIssue(storage);
       const issue = storageIssues[storage.storage_id] ?? null;
       const linked = links.filter((link) => link.storage_id === storage.storage_id).length;
       return {
@@ -68,7 +75,7 @@ export default function StorageIndexPage({
         ariaLabel: [
           `Open ${name}`,
           storage.available ? null : `Unavailable: this build has no ${storage.provider_label} adapter`,
-          issue ? `Storage issue: ${issue}` : null,
+          reconnect ? `Storage issue: ${reconnect}` : issue ? `Storage issue: ${issue}` : null,
         ].filter(Boolean).join(". "),
         location: storageSubtitle(storage),
         /* The tally and the issue word are the card's two facts; the word is
@@ -87,7 +94,12 @@ export default function StorageIndexPage({
                 <span>Unavailable</span>
               </span>
             )}
-            {issue && (
+            {reconnect ? (
+              <span className="sync-storage-index-warning">
+                <Icon name="alert-triangle" size={12} aria-hidden="true" />
+                <span>Reconnect</span>
+              </span>
+            ) : issue && (
               <span className="sync-storage-index-warning">
                 <Icon name="alert-triangle" size={12} aria-hidden="true" />
                 <span>Issue</span>
@@ -95,7 +107,7 @@ export default function StorageIndexPage({
             )}
           </span>
         ),
-        onOpen: () => onOpenStorage(storage.storage_id),
+        onOpen: () => onOpenStorage(storage.storage_id, connectionSuspends(storage.connection)),
       };
     }),
     // A persisted setup draft is content too: badged, tally-less, opening
@@ -132,7 +144,7 @@ export default function StorageIndexPage({
   return (
     <>
       <SyncPathBar
-        crumbs={[{ id: "storages", label: "Storages", icon: "drive", tone: "root" }]}
+        crumbs={[{ id: "storages", label: "Storages", icon: "storage", tone: "root" }]}
         overflow={appActions}
         overflowLabel="App actions"
         ariaLabel="Storages path"
@@ -148,7 +160,7 @@ export default function StorageIndexPage({
              the picker itself. */
           doors={doors.length > 0 ? doors : [{
             key: "any",
-            icon: "drive",
+            icon: "storage",
             label: "Add storage…",
             ariaLabel: "Add storage",
             onOpen: () => onAddStorage(),

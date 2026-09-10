@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mallard · Storage icon choices</title>
+  <style>
+    @font-face { font-family: "Baloo 2"; src: url("/fonts/Baloo2-Variable.woff2") format("woff2"); font-weight: 400 800; font-display: swap; }
+    :root { color-scheme: dark; --bg: #15120f; --surface: #191512; --row: #1e1a16; --active: #2d2622; --line: #4a433b; --ink: #f3ede1; --soft: #d3cbbc; --muted: #a79e90; --accent: #bf9169; --accent-ink: #1b1612; --focus: #f0e8d5; --size: 16px; }
+    :root[data-theme="light"] { color-scheme: light; --bg: #fefbf6; --surface: #fdf9f4; --row: #faf3eb; --active: #f0e3d5; --line: #aa998d; --ink: #1e1817; --soft: #3d332e; --muted: #6f6159; --accent: #8a6347; --accent-ink: #fffaf4; --focus: #2a211d; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+    a { color: var(--soft); text-underline-offset: 4px; }
+    h1, h2, h3, p { margin: 0; }
+    h1, h2, h3 { font-family: "Baloo 2", -apple-system, sans-serif; }
+    svg.icon { width: var(--size); height: var(--size); display: block; flex: 0 0 auto; color: inherit; overflow: visible; }
+    .definitions { position: absolute; width: 0; height: 0; overflow: hidden; }
+    .page { max-width: 1180px; margin: auto; padding: 32px 30px 42px; }
+    .eyebrow { font-size: 10px; font-weight: 650; letter-spacing: 1.7px; color: var(--muted); text-transform: uppercase; }
+    .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin: 8px 0 22px; }
+    h1 { font-size: 34px; line-height: 1.15; font-weight: 650; }
+    .intro { color: var(--muted); margin-top: 8px; }
+    .scope { margin-top: 7px; color: var(--soft); white-space: nowrap; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 11px; }
+    .toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 22px; padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .control { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+    .segmented { display: flex; border: 1px solid var(--line); border-radius: 6px; padding: 2px; gap: 2px; }
+    .segmented button { border: 0; border-radius: 3px; background: transparent; color: var(--muted); padding: 4px 10px; font-size: 12px; }
+    .segmented button[aria-pressed="true"] { color: var(--ink); background: var(--active); }
+    .scale-note { margin-left: auto; color: var(--muted); font-size: 11px; }
+    .baseline { display: flex; gap: 25px; align-items: center; flex-wrap: wrap; padding: 15px 0 20px; color: var(--muted); }
+    .baseline strong { font-size: 11px; font-weight: 600; }
+    .baseline .pair { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .baseline .why { margin-left: auto; font-size: 11px; }
+    .choices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+    .choice { min-width: 0; border-top: 2px solid var(--line); padding-top: 15px; }
+    .choice.selected { border-top-color: var(--accent); }
+    .choice-title { display: flex; align-items: center; gap: 9px; }
+    .letter { width: 23px; height: 23px; border: 1px solid var(--line); border-radius: 4px; display: grid; place-items: center; font-size: 11px; color: var(--soft); }
+    .choice h2 { font-size: 21px; line-height: 1.1; font-weight: 650; }
+    .pick { margin-left: auto; color: var(--accent); font-size: 10px; font-weight: 650; }
+    .choice-sub { margin-top: 7px; color: var(--muted); font-size: 12px; }
+    .large-marks { display: grid; grid-template-columns: repeat(4, 1fr); margin: 25px 0 24px; }
+    .large-marks > div { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+    .large-marks .icon { width: 36px; height: 36px; color: var(--soft); }
+    .large-marks span { color: var(--muted); font-size: 10px; }
+    .caption { font-size: 10px; letter-spacing: 1px; color: var(--muted); text-transform: uppercase; margin-bottom: 8px; }
+    .sidebar { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 9px; }
+    .nav-row, .storage-row { display: flex; align-items: center; gap: 10px; }
+    .nav-row { background: var(--active); border-radius: 5px; min-height: 39px; padding: 8px 10px; font-family: "Baloo 2", sans-serif; font-size: 15px; font-weight: 600; }
+    .sidebar-label { margin: 16px 10px 4px; font-size: 9px; font-weight: 600; letter-spacing: 1.5px; color: var(--muted); }
+    .storage-row { min-height: 55px; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+    .storage-row:last-child { border-bottom: 0; }
+    .storage-row .icon { color: var(--soft); }
+    .storage-copy { min-width: 0; }
+    .storage-copy b { font-size: 12px; font-weight: 550; display: block; line-height: 1.35; }
+    .storage-copy small { font-size: 10px; color: var(--muted); display: block; margin-top: 2px; }
+    .sizes { display: flex; gap: 16px; align-items: flex-end; margin: 16px 0; height: 48px; }
+    .sizes > div { display: flex; flex-direction: column; align-items: center; gap: 5px; min-width: 27px; }
+    .sizes small { color: var(--muted); font-size: 9px; }
+    .sizes .size-label { align-self: center; margin-right: auto; font-size: 11px; color: var(--muted); }
+    .note { min-height: 55px; color: var(--soft); font-size: 12px; line-height: 1.5; }
+    .select { display: block; width: 100%; padding: 8px 12px; margin-top: 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font-size: 12px; }
+    .select[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+    .detail { margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1.05fr 1fr; gap: 32px; }
+    .detail h3 { font-size: 18px; font-weight: 650; margin-bottom: 6px; }
+    .detail p, .detail li { color: var(--muted); font-size: 12px; }
+    .detail ol { margin: 0; padding-left: 18px; }
+    .detail li + li { margin-top: 4px; }
+    .sources { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 7px 18px; font-size: 10px; color: var(--muted); }
+    .download { display: inline-block; margin-top: 10px; font-size: 11px; }
+    @media (max-width: 850px) { .page { padding: 24px 20px; } .choices { gap: 15px; } .choice h2 { font-size: 18px; } .pick { display: none; } .large-marks .icon { width: 30px; height: 30px; } .scale-note, .baseline .why { width: 100%; margin-left: 0; } }
+    @media (max-width: 650px) { .choices, .detail { grid-template-columns: 1fr; } .head { flex-direction: column; gap: 8px; } .choices { gap: 28px; } .note { min-height: auto; } .large-marks .icon { width: 48px; height: 48px; } }
+    @media print { .toolbar, .select { display: none; } .page { padding: 10px; } }
+  </style>
+</head>
+<body>
+  <svg class="definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs><symbol xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" id="brand-cloudflare" fill="currentColor"><path d="M16.5088 16.8447c.1475-.5068.0908-.9707-.1553-1.3154-.2246-.3164-.6045-.499-1.0615-.5205l-8.6592-.1123a.1559.1559 0 0 1-.1333-.0713c-.0283-.042-.0351-.0986-.021-.1553.0278-.084.1123-.1484.2036-.1562l8.7359-.1123c1.0351-.0489 2.1601-.8868 2.5537-1.9136l.499-1.3013c.0215-.0561.0293-.1128.0147-.168-.5625-2.5463-2.835-4.4453-5.5499-4.4453-2.5039 0-4.6284 1.6177-5.3876 3.8614-.4927-.3658-1.1187-.5625-1.794-.499-1.2026.119-2.1665 1.083-2.2861 2.2856-.0283.31-.0069.6128.0635.894C1.5683 13.171 0 14.7754 0 16.752c0 .1748.0142.3515.0352.5273.0141.083.0844.1475.1689.1475h15.9814c.0909 0 .1758-.0645.2032-.1553l.12-.4268zm2.7568-5.5634c-.0771 0-.1611 0-.2383.0112-.0566 0-.1054.0415-.127.0976l-.3378 1.1744c-.1475.5068-.0918.9707.1543 1.3164.2256.3164.6055.498 1.0625.5195l1.8437.1133c.0557 0 .1055.0263.1329.0703.0283.043.0351.1074.0214.1562-.0283.084-.1132.1485-.204.1553l-1.921.1123c-1.041.0488-2.1582.8867-2.5527 1.914l-.1406.3585c-.0283.0713.0215.1416.0986.1416h6.5977c.0771 0 .1474-.0489.169-.126.1122-.4082.1757-.837.1757-1.2803 0-2.6025-2.125-4.727-4.7344-4.727" /></symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" id="brand-dropbox" fill="currentColor"><path d="M6 1.807L0 5.629l6 3.822 6.001-3.822L6 1.807zM18 1.807l-6 3.822 6 3.822 6-3.822-6-3.822zM0 13.274l6 3.822 6.001-3.822L6 9.452l-6 3.822zM18 9.452l-6 3.822 6 3.822 6-3.822-6-3.822zM6 18.371l6.001 3.822 6-3.822-6-3.822L6 18.371z" /></symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="outline-cloud">
+  <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+</symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="outline-folder">
+  <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+</symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="outline-hard-drive">
+  <path d="M10 16h.01" />
+  <path d="M2.212 11.577a2 2 0 0 0-.212.896V18a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.527a2 2 0 0 0-.212-.896L18.55 5.11A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+  <path d="M21.946 12.013H2.054" />
+  <path d="M6 16h.01" />
+</symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" id="pixel-cloud" shape-rendering="crispEdges">
+  <path d="M22 10h-4v2h4v-2Zm2 2h-2v6h2v-6Zm-2 6H2v2h20v-2ZM2 12H0v6h2v-6Zm2-2H2v2h2v-2Zm4-2H4v2h4V8Zm8-4h-6v2h6V4Zm-6 2H8v2h2V6Zm0 4H8v2h2v-2Zm8-4h-2v2h2V6Z" />
+  <path d="M20 8h-2v4h2V8Zm-2 4h-2v2h2v-2Z" />
+</symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" id="pixel-folder" shape-rendering="crispEdges">
+  <path d="M4 4h6v2H4zm0 14h16v2H4zM20 8h2v10h-2zM2 6h2v12H2zm8 0h10v2H10z" />
+</symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" id="pixel-server" shape-rendering="crispEdges">
+  <path d="M6 7h4v2H6zm0 8h4v2H6zM2 5h2v14H2zm18 0h2v14h-2zM4 19h16v2H4zM4 3h16v2H4zm0 8h16v2H4z" />
+</symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" id="current-drive" shape-rendering="crispEdges"><path d="M3 2h18v2H3ZM3 7h18v2H3ZM1 4h2v3H1ZM21 4h2v3h-2ZM19 9h2v11h-2ZM3 9h2v11H3ZM5 20h14v2H5ZM9 11h6v2H9Z" /></symbol>
+<symbol xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" id="current-cloud" shape-rendering="crispEdges"><path d="M22 12v-1h-2V9h-1V8h-1V7h-3v1h-1V6h-1V5H8v1H7v1H6v1H5v3H2v1H1v5h1v1h1v1h2v1h14v-1h2v-1h1v-1h1v-5h-1Zm0 4h-1v1h-1v1h-2v1H6v-1H4v-1H3v-1H2v-3h1v-1h3V9h1V8h1V7h1V6h3v1h1v2h3V8h1v1h1v1h1v2h2v1h1v3Z" /></symbol></defs></svg>
+  <main class="page">
+    <div class="eyebrow">Mallard / Storage / Design study</div>
+    <header class="head">
+      <div><h1>Storage icon choices</h1><p class="intro">One clear shape for each role. Compare the same storage list in three styles.</p></div>
+      <span class="scope">Plan and mock only</span>
+    </header>
+    <div class="toolbar" aria-label="Mock display controls">
+      <div class="control"><span>Theme</span><div class="segmented" aria-label="Theme"><button data-theme="dark" aria-pressed="true">Dark</button><button data-theme="light" aria-pressed="false">Light</button></div></div>
+      <div class="control"><span>Row icon size</span><div class="segmented" aria-label="Row icon size"><button data-size="12" aria-pressed="false">12</button><button data-size="16" aria-pressed="true">16</button><button data-size="20" aria-pressed="false">20</button><button data-size="24" aria-pressed="false">24 px</button></div></div>
+      <span class="scale-note">SVG source shapes · actual size rows · enlarged samples above</span>
+    </div>
+    <div class="baseline">
+      <strong>CURRENT</strong>
+      <span class="pair"><svg class="icon" aria-hidden="true"><use href="#current-drive"/></svg>Storages / Local</span>
+      <span class="pair"><svg class="icon" aria-hidden="true"><use href="#current-cloud"/></svg>R2</span>
+      <span class="pair"><svg class="icon" aria-hidden="true"><use href="#current-cloud"/></svg>Dropbox</span>
+      <span class="why">Archive-shaped drive · one cloud for two providers</span>
+    </div>
+    <section class="choices" aria-label="Three storage icon choices" id="choices"></section>
+    <section class="detail" aria-live="polite">
+      <div><h3 id="detail-title">C · Provider marks</h3><p id="detail-copy"></p><a class="download" href="PLAN.md">Read the design plan and sources</a></div>
+      <div><h3>Plan after selection</h3><ol><li>Set the storage and provider icon mapping.</li><li>Check small sizes, both themes, and text labels.</li><li>Apply the selected set to the sidebar, path bar, and storage views.</li></ol></div>
+    </section>
+    <footer class="sources"><span>Guidance:</span><a href="https://developer.apple.com/design/human-interface-guidelines/icons">Apple HIG</a><a href="https://developers.google.com/fonts/docs/material_symbols">Material Symbols</a><a href="https://learn.microsoft.com/en-us/windows/apps/develop/ui/controls/icons">Microsoft</a><a href="https://www.w3.org/WAI/WCAG22/Understanding/non-text-contrast.html">WCAG 1.4.11</a><span>Geometry: Pixelarticons · Lucide · Simple Icons</span></footer>
+  </main>
+  <script>
+    const sets = [
+      { key: "A", title: "Pixel system", sub: "Keep Mallard’s pixel style", icons: ["pixel-server", "pixel-folder", "pixel-cloud", "pixel-cloud"], note: "Fits the current icons. Provider labels carry the difference between R2 and Dropbox.", detail: "Use a server stack for the storage section and a folder for local storage. This is the smallest visual change. The cloud remains a general remote-storage symbol. Use 12 or 24 px for the clearest pixel rendering on 2× displays." },
+      { key: "B", title: "Soft outline", sub: "Use a familiar vector icon family", icons: ["outline-hard-drive", "outline-folder", "outline-cloud", "outline-cloud"], note: "Smooth shapes at small sizes. The storage icons would differ from Mallard’s other pixel icons.", detail: "Use Lucide’s hard drive, folder, and cloud. The shared 24-unit grid and 2-unit strokes keep the family consistent. Choose this direction if a broader icon style change is planned. Keep provider labels visible." },
+      { key: "C", title: "Provider marks", sub: "Identify each storage provider", icons: ["pixel-server", "pixel-folder", "brand-cloudflare", "brand-dropbox"], note: "Keeps the pixel shell. Distinct provider shapes make mixed storage lists easier to scan.", detail: "Recommended for mixed storage. Keep pixel icons for Mallard navigation and local folders. Use provider marks for Cloudflare R2 and Dropbox. This is a monochrome geometry study; confirm official brand variants before use in the application." }
+    ];
+    const icon = (name, size) => `<svg class="icon" aria-hidden="true"${size ? ` style="width:${size}px;height:${size}px"` : ""}><use href="#${name}"/></svg>`;
+    const labels = ["Storages", "Local folder", "R2", "Dropbox"];
+    const rows = [["Team folder", "Local folder"], ["Design R2", "Cloudflare R2"], ["Team Dropbox", "Dropbox"]];
+    document.querySelector("#choices").innerHTML = sets.map((set) => `
+      <article class="choice${set.key === "C" ? " selected" : ""}" data-choice="${set.key}">
+        <div class="choice-title"><span class="letter">${set.key}</span><h2>${set.title}</h2>${set.key === "C" ? '<span class="pick">Suggested</span>' : ""}</div>
+        <p class="choice-sub">${set.sub}</p>
+        <div class="large-marks">${set.icons.map((name, i) => `<div>${icon(name)}<span>${labels[i]}</span></div>`).join("")}</div>
+        <p class="caption">In the storage list</p>
+        <div class="sidebar">
+          <div class="nav-row">${icon(set.icons[0])}<span>Storages</span></div>
+          <div class="sidebar-label">STORAGE LOCATIONS</div>
+          ${rows.map((row, i) => `<div class="storage-row">${icon(set.icons[i + 1])}<div class="storage-copy"><b>${row[0]}</b><small>${row[1]}</small></div></div>`).join("")}
+        </div>
+        <div class="sizes"><span class="size-label">Storage at</span>${[12, 16, 20, 24].map((size) => `<div>${icon(set.icons[0], size)}<small>${size}px</small></div>`).join("")}</div>
+        <p class="note">${set.note}</p>
+        <button class="select" data-select="${set.key}" aria-pressed="${set.key === "C"}">${set.key === "C" ? "Reviewing C" : `Review ${set.key}`}</button>
+      </article>`).join("");
+    document.querySelector("#detail-copy").textContent = sets[2].detail;
+    document.querySelectorAll("button[data-theme]").forEach((button) => button.addEventListener("click", () => {
+      document.documentElement.dataset.theme = button.dataset.theme;
+      document.querySelectorAll("button[data-theme]").forEach((item) => item.setAttribute("aria-pressed", String(item === button)));
+    }));
+    document.querySelectorAll("button[data-size]").forEach((button) => button.addEventListener("click", () => {
+      document.documentElement.style.setProperty("--size", `${button.dataset.size}px`);
+      document.querySelectorAll("button[data-size]").forEach((item) => item.setAttribute("aria-pressed", String(item === button)));
+    }));
+    document.querySelectorAll("button[data-select]").forEach((button) => button.addEventListener("click", () => {
+      const key = button.dataset.select;
+      const set = sets.find((item) => item.key === key);
+      document.querySelectorAll(".choice").forEach((item) => item.classList.toggle("selected", item.dataset.choice === key));
+      document.querySelectorAll("button[data-select]").forEach((item) => {
+        item.setAttribute("aria-pressed", String(item === button));
+        item.textContent = item === button ? `Reviewing ${key}` : `Review ${item.dataset.select}`;
+      });
+      document.querySelector("#detail-title").textContent = `${key} · ${set.title}`;
+      document.querySelector("#detail-copy").textContent = set.detail;
+    }));
+  </script>
+</body>
+</html>

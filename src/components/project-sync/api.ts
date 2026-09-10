@@ -229,16 +229,20 @@ export const projectSyncApi = {
     localProjectId: string,
     storageId: string,
     recipe: BundleRecipe,
+    credentialRedactionEnabled: boolean,
     projectContentReviewToken?: string | null,
     projectContentRemovalIds: string[] = [],
     acknowledgedWarningDigests: string[] = [],
+    subagentSelections: Record<string, import("../../types").SubagentSelection> = {},
   ) => invoke<ProjectOperationResult>("push_bundle", {
     localProjectId,
     storageId,
     recipe,
+    credentialRedactionEnabled,
     projectContentReviewToken: projectContentReviewToken ?? null,
     projectContentRemovalIds,
     acknowledgedWarningDigests,
+    subagentSelections,
   }),
 
   /** Run one declared action. The backend refuses an action the provider
@@ -263,8 +267,8 @@ export const projectSyncApi = {
     approvedActionIds,
   }),
 
-  getRestoreReadiness: (review: PullReview) =>
-    invoke<BundleReadiness>("get_restore_readiness", { review }),
+  getRestoreReadiness: (localProjectId: string, storageId: string) =>
+    invoke<BundleReadiness>("get_restore_readiness", { localProjectId, storageId }),
 
   listSetupDrafts: () =>
     invoke<SetupDraftList>("list_setup_drafts"),

@@ -11,9 +11,10 @@ use super::traits::{
     shell_quote, AfterPullActionOffer, MaintenanceActionDescriptor, MaintenanceActionScope,
     MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand, ProviderCliLauncher,
     ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionOutcome,
-    SessionActionRequest, SessionAdapter, SessionAnalysis, SessionDiscovery,
-    SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
-    SessionTimelineContext, SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery,
+    SessionActionRequest, SessionAdapter, SessionAgentPreview, SessionAnalysis,
+    SessionChildIdentity, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
+    SessionFileMetadata, SessionFileSummary, SessionTimelineContext, SessionTimelineIndex,
+    SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::conversation_codec::{
     analyze_codex_transcript, CODEX_CODEC_VERSION, CODEX_LINEAGE_CODEC_KEY,
@@ -310,12 +311,65 @@ impl SessionAdapter for CodexAdapter {
         materialization::materialization_targets(request)
     }
 
+    fn child_transcript_target(
+        &self,
+        request: &MaterializationTargetRequest<'_>,
+        child_id: &str,
+    ) -> Result<std::path::PathBuf, String> {
+        let targets = self.materialization_targets(&MaterializationTargetRequest {
+            provider_session_id: child_id,
+            source_provider_session_id: None,
+            existing_transcript_path: None,
+            sidecars: &[],
+            ..*request
+        })?;
+        if targets.len() != 1 {
+            return Err("child requires one transcript target".into());
+        }
+        Ok(targets[0].target_path.clone())
+    }
+
     fn summarize_file(&self, path: &Path) -> Result<SessionFileSummary, String> {
         history::summarize_rollout_file(path)
     }
 
     fn summarize_bytes(&self, bytes: &[u8]) -> Result<SessionFileSummary, String> {
         history::summarize_rollout_bytes(bytes)
+    }
+
+    /// A child rollout is a rollout: its own thread id is the agent id.
+    fn summarize_child_file(
+        &self,
+        path: &Path,
+        child: &SessionChildIdentity,
+    ) -> Result<SessionFileSummary, String> {
+        let summary = history::summarize_rollout_file(path)?;
+        if summary.session_id != child.provider_agent_id {
+            return Err("Codex child rollout does not carry the expected thread id".to_string());
+        }
+        Ok(summary)
+    }
+
+    /// A Codex child is found by id across the sessions tree, then proven to
+    /// name this parent in its own `session_meta`.
+    fn locate_child_transcript(
+        &self,
+        provider_home: &Path,
+        _parent_transcript: &Path,
+        child: &SessionChildIdentity,
+    ) -> Result<Option<std::path::PathBuf>, String> {
+        let Some(path) = crate::codex_subagents::RolloutLookup::new(provider_home)
+            .find(&child.provider_agent_id)?
+        else {
+            return Ok(None);
+        };
+        let head = history::codex_child_head(&path)?;
+        if head.thread_id.as_deref() != Some(child.provider_agent_id.as_str())
+            || head.parent_thread_id.as_deref() != Some(child.parent_provider_session_id.as_str())
+        {
+            return Err("Codex child rollout does not name this parent".to_string());
+        }
+        Ok(Some(path))
     }
 
     fn build_timeline_index(
@@ -331,8 +385,18 @@ impl SessionAdapter for CodexAdapter {
         path: &Path,
         index: &SessionTimelineIndex,
         query: &SessionTimelineQuery,
+        context: &SessionTimelineContext<'_>,
     ) -> Result<SessionTimelinePageSlice, String> {
-        history::read_timeline_page(path, index, query)
+        history::read_timeline_page(path, index, query, context)
+    }
+
+    fn describe_agent_call(
+        &self,
+        _path: &Path,
+        entry: &SessionTimelineIndexEntry,
+        context: &SessionTimelineContext<'_>,
+    ) -> Result<SessionAgentPreview, String> {
+        history::describe_agent_call(entry, context)
     }
 
     fn read_event_detail(

@@ -24,6 +24,10 @@ fn combined_output(output: &std::process::Output) -> String {
 }
 
 fn create_r2_draft(home: &std::path::Path, name: &str) -> StorageSetupDraft {
+    create_storage_draft(home, name, "r2")
+}
+
+fn create_storage_draft(home: &std::path::Path, name: &str, provider: &str) -> StorageSetupDraft {
     let repository = LocalStateRepository::from_home_dir(home).unwrap();
     repository
         .save_storage_setup_draft(StorageSetupDraft {
@@ -34,7 +38,7 @@ fn create_r2_draft(home: &std::path::Path, name: &str) -> StorageSetupDraft {
             storage: StorageConfig {
                 id: StorageId::parse(generated_named_id("storage").unwrap()).unwrap(),
                 name: name.to_string(),
-                provider: StorageProviderKey::parse("r2").unwrap(),
+                provider: StorageProviderKey::parse(provider).unwrap(),
                 provider_config: StorageProviderConfig::new(
                     1,
                     BoundedConfigObject::empty(),
@@ -269,6 +273,45 @@ fn setup_rejects_a_stale_draft_revision_before_wrangler() {
     let combined = combined_output(&output);
     assert!(!combined.contains(name));
     assert!(!combined.contains(&draft_id));
+}
+
+#[test]
+fn dropbox_setup_reads_the_draft_from_the_selected_home_before_authorization() {
+    let draft_home = tempfile::tempdir().unwrap();
+    let other_home = tempfile::tempdir().unwrap();
+    let draft = create_storage_draft(draft_home.path(), "Dropbox test storage", "dropbox");
+    let draft_id = draft.draft_id.to_string();
+    // A stale revision stops before browser login and proves the draft was read.
+    let stale_revision = draft.revision.saturating_add(1).to_string();
+    for (home, expected_exit, expected_code) in [
+        (
+            draft_home.path(),
+            3,
+            "storage_setup_draft_revision_conflict",
+        ),
+        (other_home.path(), 2, "storage_setup_draft_not_found"),
+    ] {
+        let output = command(home)
+            .args([
+                "storage",
+                "dropbox",
+                "setup",
+                "--name",
+                &draft.storage.name,
+                "--draft-id",
+                &draft_id,
+                "--expected-revision",
+                &stale_revision,
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(expected_exit));
+        assert!(output.stdout.is_empty());
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["code"], expected_code);
+        assert!(!home.join(".mallard/dropbox_setup_journal").exists());
+    }
 }
 
 #[test]

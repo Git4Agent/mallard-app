@@ -17,6 +17,65 @@
 use serde::{Deserialize, Serialize};
 
 use crate::conversation_tail::PortableConversationTail;
+use crate::{SubagentContentState, SubagentTailPins};
+
+/// Adapt compact child evidence to the same proof boundary and comparator.
+pub fn compare_subagent_tail(
+    pins: &SubagentTailPins,
+) -> Result<TailClassification, TailEvidenceBlocker> {
+    let side = |state: Option<&SubagentContentState>, wire| match state {
+        Some(state) => TailSideEvidence::Present(if wire {
+            state.normalized_tail()
+        } else {
+            state.local_tail()
+        }),
+        None => TailSideEvidence::ConfirmedAbsent,
+    };
+    let evidence = VerifiedTailEvidence::new(
+        side(pins.accepted.as_ref().map(|pair| &pair.normalized), true),
+        side(pins.accepted.as_ref().map(|pair| &pair.local), false),
+        side(pins.local.as_ref(), false),
+        side(pins.cloud.as_ref(), true),
+    )?;
+    Ok(compare_conversation_tail(&evidence))
+}
+
+/// Fold already-classified rollouts without comparing their content again.
+pub fn fold_conversation_relations(
+    main: TailClassification,
+    children: impl IntoIterator<Item = TailClassification>,
+) -> TailClassification {
+    use TailClassification::*;
+    let mut local = false;
+    let mut cloud = false;
+    let mut divergent = false;
+    let mut advanced = false;
+    for relation in std::iter::once(main).chain(children) {
+        match relation {
+            Unknown => return Unknown,
+            Divergent => divergent = true,
+            LocalOutstanding | MissingCloud => local = true,
+            CloudOutstanding | MissingLocal => cloud = true,
+            Sync(SyncCurrency::Advanced) => advanced = true,
+            Sync(SyncCurrency::Current) | MissingBoth => {}
+        }
+    }
+    if divergent || (local && cloud) {
+        Divergent
+    } else if matches!(main, MissingCloud | MissingLocal | MissingBoth) {
+        main
+    } else if local {
+        LocalOutstanding
+    } else if cloud {
+        CloudOutstanding
+    } else {
+        Sync(if advanced {
+            SyncCurrency::Advanced
+        } else {
+            SyncCurrency::Current
+        })
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -196,4 +255,123 @@ pub fn compare_conversation_tail(evidence: &VerifiedTailEvidence) -> TailClassif
     // Everything else — either side rewritten at or below its pinned end,
     // or both sides moved — is a pinned divergence.
     TailClassification::Divergent
+}
+
+#[cfg(test)]
+mod owned_child_tests {
+    use super::*;
+    use crate::AcceptedSubagentState;
+
+    fn state(count: u64, byte: &str) -> SubagentContentState {
+        SubagentContentState {
+            message_count: count,
+            sha256: byte.repeat(64),
+        }
+    }
+
+    #[test]
+    fn children_use_the_existing_evidence_and_content_rules() {
+        let local = state(2, "a");
+        let wire = state(2, "b");
+        let accepted = AcceptedSubagentState {
+            local: local.clone(),
+            normalized: wire.clone(),
+        };
+        let pins = SubagentTailPins {
+            accepted: Some(accepted),
+            local: Some(local.clone()),
+            cloud: Some(wire.clone()),
+        };
+        assert_eq!(
+            compare_subagent_tail(&pins),
+            Ok(TailClassification::Sync(SyncCurrency::Current))
+        );
+        for (local, cloud, expected) in [
+            (
+                state(3, "c"),
+                wire.clone(),
+                TailClassification::LocalOutstanding,
+            ),
+            (
+                local.clone(),
+                state(3, "d"),
+                TailClassification::CloudOutstanding,
+            ),
+            (state(2, "c"), wire.clone(), TailClassification::Divergent),
+            (state(1, "c"), wire.clone(), TailClassification::Divergent),
+            (state(3, "c"), state(3, "d"), TailClassification::Divergent),
+        ] {
+            assert_eq!(
+                compare_subagent_tail(&SubagentTailPins {
+                    local: Some(local),
+                    cloud: Some(cloud),
+                    ..pins.clone()
+                }),
+                Ok(expected)
+            );
+        }
+        assert_eq!(
+            compare_subagent_tail(&SubagentTailPins {
+                local: None,
+                ..pins.clone()
+            }),
+            Err(TailEvidenceBlocker::ExpectedSideMissing)
+        );
+        assert_eq!(
+            compare_subagent_tail(&SubagentTailPins {
+                accepted: None,
+                ..pins.clone()
+            }),
+            Err(TailEvidenceBlocker::UnacceptedOverlap)
+        );
+        assert_eq!(
+            compare_subagent_tail(&SubagentTailPins {
+                accepted: None,
+                cloud: None,
+                ..pins.clone()
+            }),
+            Ok(TailClassification::MissingCloud)
+        );
+        assert_eq!(
+            compare_subagent_tail(&SubagentTailPins {
+                accepted: None,
+                local: None,
+                ..pins
+            }),
+            Ok(TailClassification::MissingLocal)
+        );
+    }
+
+    #[test]
+    fn fold_counts_new_children_and_mixed_sides_without_hiding_invalid_evidence() {
+        use TailClassification::*;
+        let synced = Sync(SyncCurrency::Current);
+        assert_eq!(
+            fold_conversation_relations(synced, [MissingCloud]),
+            LocalOutstanding
+        );
+        assert_eq!(
+            fold_conversation_relations(synced, [MissingLocal]),
+            CloudOutstanding
+        );
+        assert_eq!(
+            fold_conversation_relations(synced, [LocalOutstanding, CloudOutstanding]),
+            Divergent
+        );
+        assert_eq!(
+            fold_conversation_relations(LocalOutstanding, [CloudOutstanding]),
+            Divergent
+        );
+        assert_eq!(fold_conversation_relations(synced, [Divergent]), Divergent);
+        assert_eq!(fold_conversation_relations(Divergent, [Unknown]), Unknown);
+        assert_eq!(
+            fold_conversation_relations(MissingCloud, [MissingCloud]),
+            MissingCloud
+        );
+        assert_eq!(
+            fold_conversation_relations(MissingLocal, [MissingLocal]),
+            MissingLocal
+        );
+        assert_eq!(fold_conversation_relations(synced, [synced]), synced);
+    }
 }

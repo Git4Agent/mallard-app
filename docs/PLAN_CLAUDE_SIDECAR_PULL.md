@@ -228,10 +228,12 @@ In `prepare_pull_conversation_actions`:
    error here is already a per-thread `PreparedPullConversationFailure`.
 3. **Memory weight**: unchanged. Sidecar bytes are read in the serial
    consume stage (inside `apply_prepared_pull_conversation`), never in the
-   parallel prepare workers, so the `for_each_prepared` size function at
-   `:11185` keeps weighing the transcript alone and the 64 MiB preparation
-   budget is untouched. A prepared sidecar holds a `VerifiedBody`, which is
-   a temp file on disk, not heap.
+   parallel prepare workers, so the `for_each_prepared` size function keeps
+   weighing what the worker reads (the transcript and the child rollouts)
+   and the preparation budget is untouched: since 2026-09-09 that is
+   `bounded_preparation::PREPARATION_BYTE_BUDGET` (256 MiB), reserved only
+   while a job runs (`docs/PLAN_PREPARATION_SCHEDULER.md`). A prepared
+   sidecar holds a `VerifiedBody`, which is a temp file on disk, not heap.
 
 `materialization_targets` still receives `&[(String, String)]`; build that
 slice from `cloud_sidecars` at both call sites.
@@ -493,7 +495,8 @@ is why §4.1 blocks beyond it rather than allowing `MAX_FILES`.
 - RAM: per thread at apply, transcript plus sidecars in memory for the
   engine request, bounded by the 512 MiB capture ceiling and the 100 MiB
   per-file limit that Push already enforces; same class as a transcript
-  today. The parallel prepare budget (64 MiB) is untouched (§4.4).
+  today. The parallel prepare budget (`PREPARATION_BYTE_BUDGET`, running
+  jobs only) is untouched (§4.4).
 - Disk: K temp files under `TMPDIR` for the Pull's duration, plus the
   object cache's existing 256 MiB.
 

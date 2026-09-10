@@ -323,6 +323,12 @@ pub fn analyze_codex_rollout_structure(
 pub(crate) fn authoritative_session_meta(
     bytes: &[u8],
 ) -> Result<CodexSessionMetaRecord, CodexStructureError> {
+    authoritative_session_meta_with_record(bytes).map(|(meta, _)| meta)
+}
+
+pub(crate) fn authoritative_session_meta_with_record(
+    bytes: &[u8],
+) -> Result<(CodexSessionMetaRecord, Value), CodexStructureError> {
     check_rollout_bounds(bytes)?;
     for raw in bytes.split(|byte| *byte == b'\n') {
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
@@ -336,7 +342,7 @@ pub(crate) fn authoritative_session_meta(
             )
         })?;
         match structural_record_type(&value) {
-            Some("session_meta") => return parse_session_meta(&value),
+            Some("session_meta") => return Ok((parse_session_meta(&value)?, value)),
             Some("response_item") | Some("event_msg") | Some("compacted") => {
                 return Err(error(
                     CodexStructureErrorKind::MissingSessionMetadata,
@@ -381,7 +387,7 @@ fn parse_session_meta(value: &Value) -> Result<CodexSessionMetaRecord, CodexStru
     let payload = payload_object(value).ok_or_else(|| malformed_meta("has no payload"))?;
     let id = session_meta_id(payload)
         .ok_or_else(|| malformed_meta("has no thread ID"))
-        .and_then(|value| validate_text("thread ID", value, 128))?;
+        .and_then(|value| validate_text("thread ID", value, 4096))?;
     let cwd = string_field(payload, &["cwd", "working_directory", "workingDirectory"])
         .ok_or_else(|| malformed_meta("has no cwd"))
         .and_then(|value| validate_text("cwd", value, 4096))?;
@@ -399,7 +405,7 @@ fn parse_session_meta(value: &Value) -> Result<CodexSessionMetaRecord, CodexStru
         payload,
         &["parent_thread_id", "parentThreadId"],
         "parent thread ID",
-        128,
+        4096,
     )?;
     let history_mode = optional_text(
         payload,

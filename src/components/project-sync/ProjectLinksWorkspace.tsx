@@ -49,6 +49,8 @@ import SiblingRepoNotice from "./SiblingRepoNotice";
 import { isIrrecoverableSyncError } from "./syncError";
 import type { SyncOutcome, SyncOutcomeAction } from "./syncOutcome";
 import {
+  connectionDetail,
+  connectionSuspends,
   draftSettingsFromForm,
   fieldsSet,
   findStorageProvider,
@@ -256,7 +258,7 @@ export function createAgentSetupMarker(
  *  An edit in the form kills the marker before this is ever consulted. */
 export function reconcileAgentSetup(
   marker: AgentSetupMarker,
-  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets">,
+  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets" | "setup_assistant">,
   setupDrafts: readonly StorageSetupDraft[],
 ): AgentSetupReconciliation {
   const candidate = setupDrafts.find(({ draft_id }) => draft_id === marker.draftId);
@@ -1150,7 +1152,7 @@ export default function ProjectLinksWorkspace({
         openStorageSession(revealedReconciliation.draft, descriptor);
         setAgentNotice({
           kind: "ready",
-          message: `${descriptor.display_name} settings filled in. Review or edit them, optionally test the connection, then finish setup yourself.`,
+          message: `${descriptor.display_name} connection prepared. Review it, optionally test it, then select ${revealed.edits_existing ? "Save changes" : "Finish setup"}.`,
         });
       } catch {
         if (
@@ -1614,7 +1616,7 @@ export default function ProjectLinksWorkspace({
       {
         id: "storages",
         label: "Storages",
-        icon: "drive",
+        icon: "storage",
         tone: "root",
         title: "All storages",
         ariaLabel: "All storages",
@@ -1762,7 +1764,31 @@ export default function ProjectLinksWorkspace({
         message: `This build has no ${providerLabelForPage} adapter (configuration version ${storageSession.draft.config_version}), so this draft cannot be edited, tested, or finished here.`,
       });
     }
-    if (!creatingStorage && !bundleLoading && bundleError) {
+    /* A refused credential is the one standing fact about this storage:
+       every read fails the same way until it changes, so the repository
+       listing's failure says nothing more. The action opens the settings,
+       where the same namespace is kept and only the credential is asked
+       for again; once open, the editor's guide row carries it. */
+    const storageConnection = savedEditedStorage?.connection ?? null;
+    const connectionRefused = !creatingStorage && connectionSuspends(storageConnection);
+    if (connectionRefused && storageConnection) {
+      storageNotices.push({
+        key: "storage-connection",
+        severity: "danger",
+        message: connectionDetail(storageConnection),
+        action: showStorageDetails ? undefined : (
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={formLocked}
+            onClick={() => void toggleStorageDetails()}
+          >
+            Reconnect {providerLabelForPage}
+          </button>
+        ),
+      });
+    }
+    if (!creatingStorage && !bundleLoading && bundleError && !connectionRefused) {
       storageNotices.push({ key: "repository-list-failed", severity: "danger", message: bundleError });
     }
     if (!creatingStorage && !bundleLoading && !bundleError && catalogRepoError) {
@@ -1777,7 +1803,12 @@ export default function ProjectLinksWorkspace({
       ? { timing: "blocking" }
       : { timing: "standing", label: "Problems with this storage" };
 
-    const agentSlot = !storageSession || !descriptor?.setup_assistant || !creatingStorage
+    /* On an existing storage the agent's job is regaining access to the
+       same destination, so its verb says so whether or not access has
+       been refused yet. */
+    const agentVerb = creatingStorage ? "Run with" : "Reconnect with";
+    const agentSlot = !storageSession || !descriptor?.setup_assistant
+      || !creatingStorage && !descriptor.setup_assistant.managed_secret_id
       ? undefined
       : agentNotice?.kind === "launched" ? (
         <>
@@ -1832,14 +1863,14 @@ export default function ProjectLinksWorkspace({
             type="button"
             className="btn storage-setup-guide-button storage-setup-agent-cta"
             disabled={busy}
-            title={`Opens ${defaultAgentLauncher.launcher.display_name} in a terminal window with the setup instruction as its prompt`}
+            title={`Opens ${defaultAgentLauncher.launcher.display_name} in a terminal window with the ${creatingStorage ? "setup" : "reconnection"} instruction as its prompt`}
             onClick={() => void launchAgentSetup(defaultAgentLauncher.key, defaultAgentLauncher.launcher.display_name)}
           >
             <ProviderMark
               provider={defaultAgentLauncher.key}
               displayName={defaultAgentLauncher.launcher.display_name}
               size={13}
-            /> Run with {defaultAgentLauncher.launcher.display_name}
+            /> {agentVerb} {defaultAgentLauncher.launcher.display_name}
           </button>
           <button
             type="button"
@@ -1869,7 +1900,7 @@ export default function ProjectLinksWorkspace({
                   >
                     <ProviderMark provider={key} displayName={launcher.display_name} size={13} />
                     <span className="storage-setup-agent-menu-text">
-                      Run with {launcher.display_name}
+                      {agentVerb} {launcher.display_name}
                       <small>Opens a terminal window with the instruction as its prompt</small>
                     </span>
                   </button>
@@ -1984,6 +2015,7 @@ export default function ProjectLinksWorkspace({
                   secretPresence={secretPresence}
                   disabled={formLocked}
                   editsExisting={!creatingStorage}
+                  connection={creatingStorage ? null : storageConnection}
                   onSwitchProvider={creatingStorage ? switchStorageProvider : undefined}
                   onRemove={!creatingStorage && storageLinkCount === 0 ? () => onRemoveStorage(pageStorageId) : undefined}
                   // A draft's create is the page's verb and lives in the
@@ -2382,6 +2414,20 @@ export default function ProjectLinksWorkspace({
     // So the section crumb names the page you are on and steps aside once you
     // open a session, giving the title the width it needs.
     if (sessionDetailSubview) {
+      // An agent's page sits under the session that delegated to it; the
+      // parent is the crumb before the title, and the way back.
+      if (sessionHeader?.state === "ready" && sessionHeader.parent) {
+        const parent = sessionHeader.parent;
+        pathCrumbs.push({
+          id: "session-parent",
+          label: parent.title,
+          title: `Back to ${parent.title}`,
+          onActivate: () => onOpenSessionDetail(sessionDetailSubview.localProjectId, {
+            resourceId: parent.resourceId,
+            occurrenceKey: parent.resourceId,
+          }),
+        });
+      }
       // The leaf is the page's one visible title, so it also carries the
       // page's identity: the provider's mark, and a dot when the session is
       // live. The words stay in the tooltip and in hidden text for readers.
@@ -3049,7 +3095,20 @@ export default function ProjectLinksWorkspace({
                           message: failedMessage,
                           action: (
                             <div className="sync-sync-review-recovery-actions">
-                              {isIrrecoverableSyncError(failedMessage) ? (
+                              {connectionSuspends(storage.connection) ? (
+                                /* A refused credential fails the same way
+                                   on every retry; the way forward is the
+                                   storage's own settings, same namespace,
+                                   credential asked for again. */
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  disabled={noticeActionsDisabled}
+                                  onClick={() => onOpenStorage(storage.storage_id, true)}
+                                >
+                                  Reconnect {storage.provider_label}
+                                </button>
+                              ) : isIrrecoverableSyncError(failedMessage) ? (
                                 <button
                                   type="button"
                                   className="btn btn-ghost danger"
@@ -3258,6 +3317,10 @@ export default function ProjectLinksWorkspace({
             resourceId={sessionDetailSubview.resourceId}
             occurrenceKey={sessionDetailSubview.occurrenceKey}
             onHeaderChange={handleSessionHeaderChange}
+            onOpenSession={(resourceId) => onOpenSessionDetail(sessionDetailSubview.localProjectId, {
+              resourceId,
+              occurrenceKey: resourceId,
+            })}
           />
         </Suspense>
       )}

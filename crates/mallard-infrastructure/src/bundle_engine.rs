@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::payload::PayloadBytes;
@@ -34,8 +34,8 @@ use mallard_domain::{
 use crate::storage_core::{
     open_read_only_no_follow, parse_json_bytes, parse_json_reader, repository_object_key,
     repository_tag_key, sha256_reader, validate_bundle_relative_object_key, CasExpectation,
-    CasOutcome, ExpectedObject, ObjectPrefix, ObjectStore, StageOutcome, VerifiedBody, HEAD_FILE,
-    MAX_LIST_PAGE, REPOSITORY_TAGS_PREFIX,
+    CasOutcome, ExpectedObject, ObjectKey, ObjectPrefix, ObjectStore, StageOutcome, VerifiedBody,
+    HEAD_FILE, MAX_LIST_PAGE, REPOSITORY_TAGS_PREFIX,
 };
 
 const MAX_BUNDLE_HEAD_BYTES: u64 = 64 * 1024;
@@ -159,6 +159,14 @@ impl Default for ObjectCache {
 }
 
 impl ObjectCache {
+    /// The process-wide cache every production engine shares.
+    pub fn global() -> Arc<ObjectCache> {
+        static CACHE: OnceLock<Arc<ObjectCache>> = OnceLock::new();
+        CACHE
+            .get_or_init(|| Arc::new(ObjectCache::default()))
+            .clone()
+    }
+
     fn get(&self, key: &ObjectCacheKey) -> Option<VerifiedBody> {
         let mut inner = self.inner.lock().ok()?;
         let hit = inner.entries.get(key).cloned()?;
@@ -480,6 +488,10 @@ pub struct BundleEngine<S> {
     /// writable scope through it; planning and apply resolve every fetched
     /// scope and leave unresolvable ones preserved and inert.
     contracts: Arc<PortableResourceRegistry>,
+    /// Verified immutable objects shared across operations: payload bodies
+    /// for planning and apply, and manifests for every read that is not a
+    /// continuity witness. `None` reads the store every time.
+    object_cache: Option<Arc<ObjectCache>>,
 }
 
 impl<S: ObjectStore> BundleEngine<S> {
@@ -491,17 +503,28 @@ impl<S: ObjectStore> BundleEngine<S> {
         )
     }
 
+    /// Attach an engine to a store whose opener already verified the Mallard
+    /// storage marker: `ConfiguredObjectStore::shared` does so once per
+    /// storage configuration, and tests that build bare stores call
+    /// `ensure_storage_marker` themselves.
     pub fn open_with_contracts(
         store: S,
         storage_id: StorageId,
         contracts: Arc<PortableResourceRegistry>,
     ) -> Result<Self, String> {
-        crate::storage_core::ensure_storage_marker(&store)?;
         Ok(Self {
             store,
             storage_id,
             contracts,
+            object_cache: None,
         })
+    }
+
+    /// Share verified objects through `cache`; production engines pass
+    /// [`ObjectCache::global`].
+    pub fn with_object_cache(mut self, cache: Arc<ObjectCache>) -> Self {
+        self.object_cache = Some(cache);
+        self
     }
 
     pub fn contracts(&self) -> &PortableResourceRegistry {
@@ -596,7 +619,6 @@ impl<S: ObjectStore> BundleEngine<S> {
         let manifest_sha256 = sha256_hex(&manifest_bytes);
         let manifest_relative_key = format!("_manifests/{}-{}.json", revision, commit_id);
         let manifest_key = repository_object_key(&identity.bundle_id, &manifest_relative_key)?;
-        self.store.put_immutable(&manifest_key, &manifest_bytes)?;
 
         let commit = CommitRecord {
             schema_version: BUNDLE_SCHEMA,
@@ -618,7 +640,7 @@ impl<S: ObjectStore> BundleEngine<S> {
             &identity.bundle_id,
             &format!("_commits/{}-{}.json", revision, commit_id),
         )?;
-        self.store.put_immutable(&commit_key, &commit_bytes)?;
+        self.write_manifest_and_commit(manifest_key, manifest_bytes, commit_key, commit_bytes)?;
 
         let head = BundleHead {
             schema_version: BUNDLE_SCHEMA,
@@ -1005,7 +1027,6 @@ impl<S: ObjectStore> BundleEngine<S> {
             let manifest_relative_key = format!("_manifests/{}-{}.json", revision, commit_id);
             let manifest_key =
                 repository_object_key(&request.identity.bundle_id, &manifest_relative_key)?;
-            self.store.put_immutable(&manifest_key, &manifest_bytes)?;
 
             let (added_files, changed_files, removed_files) =
                 file_delta(previous_manifest.as_ref(), &manifest);
@@ -1029,7 +1050,7 @@ impl<S: ObjectStore> BundleEngine<S> {
                 &request.identity.bundle_id,
                 &format!("_commits/{}-{}.json", revision, commit_id),
             )?;
-            self.store.put_immutable(&commit_key, &commit_bytes)?;
+            self.write_manifest_and_commit(manifest_key, manifest_bytes, commit_key, commit_bytes)?;
             on_phase(
                 "publish: write manifest and commit",
                 phase_started.elapsed(),
@@ -1081,17 +1102,16 @@ impl<S: ObjectStore> BundleEngine<S> {
     }
 
     /// Lazy payload access for `snapshot`, sharing verified objects through
-    /// `cache` and reporting bulk downloads through `on_progress`.
+    /// the engine's cache and reporting bulk downloads through `on_progress`.
     pub fn byte_source<'a>(
         &'a self,
         snapshot: &'a BundleSnapshot,
-        cache: Option<Arc<ObjectCache>>,
         on_progress: Option<&'a mut dyn FnMut(FetchProgress)>,
     ) -> EngineByteSource<'a, S> {
         EngineByteSource {
             engine: self,
             snapshot,
-            cache,
+            cache: self.object_cache.clone(),
             loaded: BTreeMap::new(),
             on_progress,
         }
@@ -1151,19 +1171,24 @@ impl<S: ObjectStore> BundleEngine<S> {
             return Err("historical manifest size must be nonzero".to_string());
         }
         let relative_key = format!("_manifests/{revision}-{commit_id}.json");
-        validate_bundle_relative_object_key(&relative_key)?;
-        let key = repository_object_key(bundle_id, &relative_key)?;
-        let outcome = self.store.stage_verified(
-            &key,
-            &ExpectedObject {
-                size: manifest_size,
-                sha256: manifest_sha256.to_string(),
-            },
-        )?;
-        let body = match outcome {
-            StageOutcome::Missing => return Err(format!("bundle manifest '{}' is missing", key)),
+        let body = match self.manifest_body(
+            bundle_id,
+            &relative_key,
+            manifest_size,
+            manifest_sha256,
+            false,
+        )? {
+            StageOutcome::Missing => {
+                return Err(format!(
+                    "bundle manifest '{}' is missing",
+                    repository_object_key(bundle_id, &relative_key)?
+                ))
+            }
             StageOutcome::Mismatch => {
-                return Err(format!("bundle manifest '{}' failed verification", key))
+                return Err(format!(
+                    "bundle manifest '{}' failed verification",
+                    repository_object_key(bundle_id, &relative_key)?
+                ))
             }
             StageOutcome::Verified(body) => body,
         };
@@ -1199,16 +1224,13 @@ impl<S: ObjectStore> BundleEngine<S> {
             return Err("historical manifest size must be nonzero".to_string());
         }
         let relative_key = format!("_manifests/{revision}-{commit_id}.json");
-        validate_bundle_relative_object_key(&relative_key)?;
-        let key = repository_object_key(bundle_id, &relative_key)?;
-        let outcome = self.store.stage_verified(
-            &key,
-            &ExpectedObject {
-                size: manifest_size,
-                sha256: manifest_sha256.to_string(),
-            },
-        )?;
-        let body = match outcome {
+        let body = match self.manifest_body(
+            bundle_id,
+            &relative_key,
+            manifest_size,
+            manifest_sha256,
+            true,
+        )? {
             StageOutcome::Missing | StageOutcome::Mismatch => return Ok(None),
             StageOutcome::Verified(body) => body,
         };
@@ -1667,27 +1689,95 @@ impl<S: ObjectStore> BundleEngine<S> {
         Ok(plan)
     }
 
+    /// One immutable batch for the two publication records: a remote store
+    /// commits both in one window, and neither is visible until the head
+    /// swings. Outcomes are not inspected beyond their count; an identical
+    /// object already present under either key satisfies the write.
+    fn write_manifest_and_commit(
+        &self,
+        manifest_key: ObjectKey,
+        manifest_bytes: Vec<u8>,
+        commit_key: ObjectKey,
+        commit_bytes: Vec<u8>,
+    ) -> Result<(), String> {
+        let written = self.store.put_many(vec![
+            (manifest_key, Bytes::from(manifest_bytes)),
+            (commit_key, Bytes::from(commit_bytes)),
+        ])?;
+        if written.len() != 2 {
+            return Err("manifest and commit batch returned the wrong outcome count".to_string());
+        }
+        Ok(())
+    }
+
     fn read_manifest(&self, head: &BundleHead) -> Result<BundleManifest, String> {
         head.validate()?;
-        validate_bundle_relative_object_key(&head.manifest_key)?;
-        let key = repository_object_key(&head.bundle_id, &head.manifest_key)?;
-        let outcome = self.store.stage_verified(
-            &key,
-            &ExpectedObject {
-                size: head.manifest_size,
-                sha256: head.manifest_sha256.clone(),
-            },
-        )?;
-        let body = match outcome {
-            StageOutcome::Missing => return Err(format!("bundle manifest '{}' is missing", key)),
+        let body = match self.manifest_body(
+            &head.bundle_id,
+            &head.manifest_key,
+            head.manifest_size,
+            &head.manifest_sha256,
+            false,
+        )? {
+            StageOutcome::Missing => {
+                return Err(format!(
+                    "bundle manifest '{}' is missing",
+                    repository_object_key(&head.bundle_id, &head.manifest_key)?
+                ))
+            }
             StageOutcome::Mismatch => {
-                return Err(format!("bundle manifest '{}' failed verification", key))
+                return Err(format!(
+                    "bundle manifest '{}' failed verification",
+                    repository_object_key(&head.bundle_id, &head.manifest_key)?
+                ))
             }
             StageOutcome::Verified(body) => body,
         };
         let manifest: BundleManifest = parse_json_reader(body.open()?, "bundle manifest")?;
         manifest.validate_against_head(head)?;
         Ok(manifest)
+    }
+
+    /// Verified bytes of one immutable manifest object. A fresh head names
+    /// its manifest by digest, so a digest-verified copy in the object cache
+    /// is that manifest. `witness` bypasses the cache for reads that must
+    /// observe the remote repository itself; they share what they verified.
+    fn manifest_body(
+        &self,
+        bundle_id: &BundleId,
+        relative_key: &str,
+        size: u64,
+        sha256: &str,
+        witness: bool,
+    ) -> Result<StageOutcome, String> {
+        validate_bundle_relative_object_key(relative_key)?;
+        let key = repository_object_key(bundle_id, relative_key)?;
+        let cache_key = ObjectCacheKey {
+            storage_id: self.storage_id.clone(),
+            bundle_id: bundle_id.clone(),
+            sha256: sha256.to_string(),
+            size,
+        };
+        if !witness {
+            if let Some(hit) = self
+                .object_cache
+                .as_ref()
+                .and_then(|cache| cache.get(&cache_key))
+            {
+                return Ok(StageOutcome::Verified(hit));
+            }
+        }
+        let outcome = self.store.stage_verified(
+            &key,
+            &ExpectedObject {
+                size,
+                sha256: sha256.to_string(),
+            },
+        )?;
+        if let (Some(cache), StageOutcome::Verified(body)) = (&self.object_cache, &outcome) {
+            cache.insert(cache_key, body.clone());
+        }
+        Ok(outcome)
     }
 
     fn publish_tag(&self, manifest: &BundleManifest) -> Result<(), String> {
@@ -1816,6 +1906,118 @@ mod tests {
             kind: BundleKind::Project,
             repository_fingerprint: None,
         }
+    }
+
+    #[test]
+    fn dropbox_two_users_publish_review_and_restore_project_content() {
+        let server = crate::storage_core::dropbox_store::mock::MockDropboxServer::new();
+        let second = server.second_user();
+        let first = BundleEngine::open(server.store, storage_id()).unwrap();
+        let second = BundleEngine::open(second, storage_id()).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        write(&source.join("note.md"), b"shared project content");
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let recipe = recipe_for(inventory.resources.iter().map(|r| r.resource_id.clone()));
+        let id = bundle_id(94);
+        publish_captured(
+            &first,
+            identity(id.clone(), "Dropbox project"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        assert_eq!(second.list_remote_bundles().unwrap().len(), 1);
+        let snapshot = second.inspect(&id).unwrap();
+        let binding = active_binding(id, &target);
+        let homes = BTreeMap::new();
+        let plan = second
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &homes,
+                &BTreeMap::new(),
+                100,
+                0,
+            )
+            .unwrap();
+        let approved = plan.actions.iter().map(|a| a.action_id.clone()).collect();
+        let mut bytes = second.byte_source(&snapshot, None);
+        second
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut bytes,
+                &binding,
+                &homes,
+                &plan,
+                &approved,
+                &temp.path().join("backups"),
+                101,
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read(target.join("note.md")).unwrap(),
+            b"shared project content"
+        );
+    }
+
+    #[test]
+    fn dropbox_partial_payload_commit_keeps_the_published_head() {
+        let server = crate::storage_core::dropbox_store::mock::MockDropboxServer::new();
+        let engine = BundleEngine::open(server.store.clone(), storage_id()).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        write(&source.join("a.md"), b"first original");
+        write(&source.join("b.md"), b"second original");
+        let mut capture = CaptureRequest::for_project(&source);
+        capture.include_project_content = true;
+        let inventory = discover_project(registry(), &capture).unwrap();
+        let recipe = recipe_for(inventory.resources.iter().map(|r| r.resource_id.clone()));
+        let id = bundle_id(95);
+        publish_captured(
+            &engine,
+            identity(id.clone(), "Partial commit"),
+            &recipe,
+            &capture_recipe(registry(), &capture, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        let before = engine.read_head(&id).unwrap();
+        write(&source.join("a.md"), b"first changed");
+        write(&source.join("b.md"), b"second changed");
+        server.reject_payloads_after(1);
+        let error = publish_captured(
+            &engine,
+            identity(id.clone(), "Partial commit"),
+            &recipe,
+            &capture_recipe(registry(), &capture, &recipe).unwrap(),
+            before.clone(),
+            20,
+        )
+        .unwrap_err();
+        assert!(error.contains("rate limit"));
+        let after = engine.read_head(&id).unwrap().unwrap();
+        let before = before.unwrap();
+        assert_eq!(after.0, before.0);
+        assert_eq!(after.1, before.1);
+        assert_eq!(after.0.schema_version, 1);
+        let prefix = crate::storage_core::ObjectPrefix::parse(format!(
+            ".mallard/v1/repositories/{id}/_objects"
+        ))
+        .unwrap();
+        assert_eq!(
+            server.store.list(&prefix, None, 100).unwrap().entries.len(),
+            3
+        );
     }
 
     fn recipe_for(resource_ids: impl IntoIterator<Item = String>) -> BundleRecipe {
@@ -2127,7 +2329,10 @@ mod tests {
         let id = bundle_id(2);
         let store_root = temp.path().join("store");
         let store = LocalObjectStore::open(&store_root).unwrap();
-        let engine = BundleEngine::open(store, storage_id()).unwrap();
+        crate::storage_core::ensure_storage_marker(&store).unwrap();
+        let engine = BundleEngine::open(store, storage_id())
+            .unwrap()
+            .with_object_cache(Arc::new(ObjectCache::default()));
         let first = publish_captured(
             &engine,
             identity(id.clone(), "Project"),
@@ -2165,8 +2370,7 @@ mod tests {
             .next()
             .unwrap()
             .clone();
-        let cache = Arc::new(ObjectCache::default());
-        let mut bytes = engine.byte_source(&snapshot, Some(cache.clone()), None);
+        let mut bytes = engine.byte_source(&snapshot, None);
         assert_eq!(
             bytes.read_bounded(&path, 1024, "test payload").unwrap(),
             b"version one"
@@ -2183,7 +2387,7 @@ mod tests {
             .get_mut(&path)
             .unwrap()
             .size += 1;
-        let mut bytes = engine.byte_source(&wrong_size, Some(cache), None);
+        let mut bytes = engine.byte_source(&wrong_size, None);
         let error = bytes.body(&path).unwrap_err();
         assert!(
             error.contains("does not match manifest size/hash"),
@@ -2402,7 +2606,7 @@ mod tests {
             .unwrap();
         assert!(write_action.requires_explicit_approval);
         let approved = BTreeSet::from([write_action.action_id.clone()]);
-        let mut bytes = engine.byte_source(&snapshot, None, None);
+        let mut bytes = engine.byte_source(&snapshot, None);
         let result = engine
             .apply_restore_plan_lazy(
                 &snapshot,
@@ -2555,7 +2759,7 @@ mod tests {
         assert_eq!(pin.storage_content_sha256, sha256_hex(b"storage v2"));
         assert!(!pin.reusable_witness);
         let approved = BTreeSet::from([action.action_id.clone()]);
-        let mut bytes = engine.byte_source(&snapshot, None, None);
+        let mut bytes = engine.byte_source(&snapshot, None);
         let result = engine
             .apply_restore_plan_lazy(
                 &snapshot,
@@ -2669,7 +2873,7 @@ mod tests {
             b"landed after the plan",
         );
         let approved = BTreeSet::from([action.action_id.clone()]);
-        let mut bytes = engine.byte_source(&snapshot, None, None);
+        let mut bytes = engine.byte_source(&snapshot, None);
         let result = engine
             .apply_restore_plan_lazy(
                 &snapshot,
@@ -2703,13 +2907,14 @@ mod tests {
 
     /// Store wrapper recording every staged/metadata key and every write so
     /// tests can prove which payload objects an operation actually downloaded
-    /// or uploaded. The trait-default `put_many` routes through
-    /// `put_immutable`, so bulk uploads are recorded per object.
+    /// or uploaded. `put_many` records its batch size and then routes through
+    /// `put_immutable`, so bulk uploads are also recorded per object.
     #[derive(Clone)]
     struct CountingStore {
         inner: LocalObjectStore,
         keys: Arc<Mutex<Vec<String>>>,
         puts: Arc<Mutex<Vec<String>>>,
+        put_batches: Arc<Mutex<Vec<usize>>>,
         put_pointers: Arc<Mutex<Vec<(String, usize)>>>,
         cas_writes: Arc<Mutex<Vec<String>>>,
         force_next_cas_conflict: Arc<Mutex<bool>>,
@@ -2721,6 +2926,7 @@ mod tests {
                 inner: LocalObjectStore::open(root).unwrap(),
                 keys: Arc::new(Mutex::new(Vec::new())),
                 puts: Arc::new(Mutex::new(Vec::new())),
+                put_batches: Arc::new(Mutex::new(Vec::new())),
                 put_pointers: Arc::new(Mutex::new(Vec::new())),
                 cas_writes: Arc::new(Mutex::new(Vec::new())),
                 force_next_cas_conflict: Arc::new(Mutex::new(false)),
@@ -2730,8 +2936,14 @@ mod tests {
         fn reset(&self) {
             self.keys.lock().unwrap().clear();
             self.puts.lock().unwrap().clear();
+            self.put_batches.lock().unwrap().clear();
             self.put_pointers.lock().unwrap().clear();
             self.cas_writes.lock().unwrap().clear();
+        }
+
+        /// Object counts of every bulk write, in call order.
+        fn put_batches(&self) -> Vec<usize> {
+            self.put_batches.lock().unwrap().clone()
         }
 
         /// Immutable payload writes under the content-addressed namespace.
@@ -2828,6 +3040,17 @@ mod tests {
             self.inner.put_immutable(key, bytes)
         }
 
+        fn put_many(
+            &self,
+            objects: Vec<(ObjectKey, Bytes)>,
+        ) -> Result<Vec<ImmutablePutOutcome>, String> {
+            self.put_batches.lock().unwrap().push(objects.len());
+            objects
+                .iter()
+                .map(|(key, bytes)| self.put_immutable(key, bytes))
+                .collect()
+        }
+
         fn compare_and_swap(
             &self,
             key: &ObjectKey,
@@ -2896,6 +3119,8 @@ mod tests {
 
         assert!(error.contains("compare again before pushing"), "{error}");
         assert_eq!(store.cas_count(), 1);
+        // One payload window, then the manifest and commit in one batch.
+        assert_eq!(store.put_batches(), vec![1, 2]);
     }
 
     #[test]
@@ -3158,6 +3383,82 @@ mod tests {
             )
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn manifest_reads_are_served_from_the_object_cache_after_one_store_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-project");
+        fs::create_dir_all(&source).unwrap();
+        write(&source.join("note.md"), b"cached manifest");
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let recipe = recipe_for(inventory.resources.iter().map(|r| r.resource_id.clone()));
+        let id = bundle_id(78);
+        let store = CountingStore::open(&temp.path().join("store"));
+        let engine = BundleEngine::open(store.clone(), storage_id())
+            .unwrap()
+            .with_object_cache(Arc::new(ObjectCache::default()));
+        publish_captured(
+            &engine,
+            identity(id.clone(), "Cached"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        let manifest_key_reads = |store: &CountingStore| {
+            store
+                .keys
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|key| key.contains("/_manifests/"))
+                .count()
+        };
+
+        // The first inspect stages the manifest; the second is a cache hit.
+        store.reset();
+        let first = engine.inspect(&id).unwrap();
+        assert_eq!(manifest_key_reads(&store), 1);
+        let second = engine.inspect(&id).unwrap();
+        assert_eq!(manifest_key_reads(&store), 1);
+        assert_eq!(first.manifest.commit_id, second.manifest.commit_id);
+
+        // A publish against the inspected head re-reads the head, never the
+        // manifest it already holds.
+        store.reset();
+        write(&source.join("note.md"), b"cached manifest, changed");
+        let observed = engine.read_head(&id).unwrap();
+        publish_captured(
+            &engine,
+            identity(id.clone(), "Cached"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            observed,
+            20,
+        )
+        .unwrap();
+        assert_eq!(manifest_key_reads(&store), 0);
+
+        // The continuity probe always witnesses the store.
+        store.reset();
+        let head = first.head;
+        for expected_reads in [1, 2] {
+            assert!(engine
+                .fetch_manifest_version_optional(
+                    &id,
+                    head.revision,
+                    &head.commit_id,
+                    head.manifest_size,
+                    &head.manifest_sha256,
+                )
+                .unwrap()
+                .is_some());
+            assert_eq!(manifest_key_reads(&store), expected_reads);
+        }
     }
 
     #[test]
@@ -3431,7 +3732,9 @@ mod tests {
                 .map(|resource| resource.resource_id.clone()),
         );
         let store = CountingStore::open(&temp.path().join("store"));
-        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+        let engine = BundleEngine::open(store.clone(), storage_id())
+            .unwrap()
+            .with_object_cache(Arc::new(ObjectCache::default()));
         let snapshot = publish_captured(
             &engine,
             identity(bundle_id(45), "Prefetch"),
@@ -3460,13 +3763,11 @@ mod tests {
                     .to_string()
             })
             .collect::<Vec<_>>();
-        let cache = Arc::new(ObjectCache::default());
         let mut events = Vec::new();
         store.reset();
         {
             let mut on_progress = |progress| events.push(progress);
-            let mut bytes =
-                engine.byte_source(&snapshot, Some(cache.clone()), Some(&mut on_progress));
+            let mut bytes = engine.byte_source(&snapshot, Some(&mut on_progress));
             bytes.prefetch(&requested).unwrap();
             assert_eq!(*store.keys.lock().unwrap(), expected_keys);
 
@@ -3494,7 +3795,7 @@ mod tests {
         events.clear();
         {
             let mut on_progress = |progress| events.push(progress);
-            let mut bytes = engine.byte_source(&snapshot, Some(cache), Some(&mut on_progress));
+            let mut bytes = engine.byte_source(&snapshot, Some(&mut on_progress));
             bytes.prefetch(&requested).unwrap();
         }
         assert!(store.keys.lock().unwrap().is_empty());
@@ -3546,7 +3847,7 @@ mod tests {
             .next()
             .unwrap();
         let entry_size = project_scope(&snapshot.manifest).files[logical_path].size;
-        let mut limited_bytes = engine.byte_source(&snapshot, None, None);
+        let mut limited_bytes = engine.byte_source(&snapshot, None);
         let error = limited_bytes
             .read_bounded(
                 logical_path,
@@ -3595,7 +3896,7 @@ mod tests {
         // In-sync apply: the pinned no-op completes without any payload.
         let approved = BTreeSet::from([write_action.action_id.clone()]);
         store.reset();
-        let mut apply_bytes = engine.byte_source(&snapshot, None, None);
+        let mut apply_bytes = engine.byte_source(&snapshot, None);
         let result = engine
             .apply_restore_plan_lazy(
                 &snapshot,
@@ -3644,7 +3945,7 @@ mod tests {
             .unwrap();
         let approved = BTreeSet::from([write_action.action_id.clone()]);
         store.reset();
-        let mut apply_bytes = engine.byte_source(&snapshot, None, None);
+        let mut apply_bytes = engine.byte_source(&snapshot, None);
         engine
             .apply_restore_plan_lazy(
                 &snapshot,
@@ -3675,7 +3976,7 @@ mod tests {
             serde_json::from_slice(&fs::read(&head_path).unwrap()).unwrap();
         changed_head.manifest_size += 1;
         fs::write(&head_path, serde_json::to_vec(&changed_head).unwrap()).unwrap();
-        let mut apply_bytes = engine.byte_source(&snapshot, None, None);
+        let mut apply_bytes = engine.byte_source(&snapshot, None);
         let error = engine
             .apply_restore_plan_lazy(
                 &snapshot,

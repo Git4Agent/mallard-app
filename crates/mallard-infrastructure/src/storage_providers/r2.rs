@@ -402,6 +402,7 @@ impl StorageProviderAdapter for R2Adapter {
             clear_mode: super::traits::StorageClearMode::Unconditional,
             fields: vec![
                 StorageFieldDescriptor {
+                immutable_on_edit: false,
                     field_id: FieldKey::parse("api_url").expect("static field key"),
                     label: "S3 API URL".to_string(),
                     kind: StorageFieldKind::Url,
@@ -415,6 +416,7 @@ impl StorageProviderAdapter for R2Adapter {
                     derive: None,
                 },
                 StorageFieldDescriptor {
+                immutable_on_edit: false,
                     field_id: FieldKey::parse("bucket").expect("static field key"),
                     label: "Bucket name".to_string(),
                     kind: StorageFieldKind::Text,
@@ -429,6 +431,7 @@ impl StorageProviderAdapter for R2Adapter {
                     }),
                 },
                 StorageFieldDescriptor {
+                immutable_on_edit: false,
                     field_id: FieldKey::parse("account_id").expect("static field key"),
                     label: "Account ID".to_string(),
                     kind: StorageFieldKind::Text,
@@ -443,6 +446,7 @@ impl StorageProviderAdapter for R2Adapter {
                     }),
                 },
                 StorageFieldDescriptor {
+                immutable_on_edit: false,
                     field_id: FieldKey::parse("access_key_id").expect("static field key"),
                     label: "Access Key ID".to_string(),
                     kind: StorageFieldKind::Text,
@@ -462,6 +466,7 @@ impl StorageProviderAdapter for R2Adapter {
                 help_url: Some(R2_CREDENTIALS_DOC.to_string()),
             }],
             setup_assistant: Some(StorageSetupAssistantDescriptor {
+                managed_secret_id: None,
                 label: "Agent setup".to_string(),
                 description: "Fills these values for your review — you complete Cloudflare sign-in, MFA, and consent in the browser, and finish setup yourself.".to_string(),
             }),
@@ -547,6 +552,7 @@ impl StorageProviderAdapter for R2Adapter {
         config: &StorageProviderConfig,
         setup_id: &str,
         runtime: &Handle,
+        _journal: &mut dyn super::traits::StorageProbeJournal,
     ) -> Result<(), StorageAdapterError> {
         let store = open_store(config, runtime.clone())?;
         store
@@ -560,6 +566,7 @@ impl StorageProviderAdapter for R2Adapter {
         config: &StorageProviderConfig,
         setup_id: &str,
         runtime: &Handle,
+        _journal: &mut dyn super::traits::StorageProbeJournal,
     ) -> Result<(), StorageAdapterError> {
         let store = open_store(config, runtime.clone())?;
         store
@@ -815,6 +822,7 @@ mod tests {
                 cli_path: "/Applications/Mallard.app/Contents/MacOS/mallard-cli",
                 draft_id: "draft-exact-123",
                 draft_revision: 7,
+                reconnect: false,
             })
             .unwrap();
         for expected in [

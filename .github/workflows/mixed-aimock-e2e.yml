@@ -1,0 +1,104 @@
+name: Mixed provider E2E and xlarge performance
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: Reviewed baseline product commit (40 characters)
+        required: true
+        type: string
+      profile:
+        description: Mixed is 25 Codex + 15 Claude; xlarge is 100 Codex + 20 Claude
+        default: mixed
+        type: choice
+        options: [mixed, xlarge]
+      scale:
+        description: Codex subset for xlarge only (ignored for mixed)
+        default: "100"
+        type: choice
+        options: ["10", "50", "100"]
+  schedule:
+    - cron: "0 9 * * *"
+    - cron: "0 11 * * 0"
+
+permissions:
+  contents: read
+
+# One dedicated host. Never overlap benchmark jobs or cancel a timed run.
+concurrency:
+  group: mixed-aimock-performance-host
+  cancel-in-progress: false
+
+jobs:
+  cases:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.cases.outputs.matrix }}
+    steps:
+      - id: cases
+        env:
+          REQUESTED_PROFILE: ${{ inputs.profile || 'mixed' }}
+          REQUESTED_SCALE: ${{ inputs.scale || '100' }}
+          WEEKLY: ${{ github.event.schedule == '0 11 * * 0' }}
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const profile = process.env.REQUESTED_PROFILE;
+          if (!["mixed", "xlarge"].includes(profile)) throw new Error("Invalid profile");
+          const scale = Number(process.env.REQUESTED_SCALE);
+          if (![10, 50, 100].includes(scale)) throw new Error("Invalid scale");
+          const include = process.env.WEEKLY === "true"
+            ? [1, 4].flatMap(workers => [10, 50, 100].map(scale => ({ profile: "xlarge", scale, workers })))
+            : [{ profile, scale: profile === "xlarge" ? scale : 25, workers: 4 }];
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify({ include })}\n`);
+          NODE
+
+  mixed:
+    needs: cases
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.cases.outputs.matrix) }}
+    runs-on: [self-hosted, linux, mallard-mixed-aimock]
+    timeout-minutes: 90
+    env:
+      BASELINE_REF: ${{ inputs.baseline_ref || vars.MIXED_AIMOCK_BASELINE_REF }}
+      REQUESTED_PROFILE: ${{ matrix.profile }}
+      REQUESTED_SCALE: ${{ matrix.scale }}
+      WORKERS: ${{ matrix.workers }}
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check reviewed baseline and fixed tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BASELINE_REF" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "$BASELINE_REF^{commit}"
+          node --version
+          rustc --version
+          command -v codex claude unshare ip
+      - name: Install and check the test harness
+        run: |
+          npm ci
+          npm run test:aimock-servers
+          npm run test:mixed-aimock-harness
+          cargo fetch --locked
+          node scripts/prepare-mixed-aimock.mjs "$BASELINE_REF"
+      - name: Run with external network access disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--benchmark --profile="$REQUESTED_PROFILE" --workers="$WORKERS" --baseline-ref="$BASELINE_REF")
+          if [[ "$REQUESTED_PROFILE" == "xlarge" ]]; then args+=(--scale="$REQUESTED_SCALE"); fi
+          scripts/run-mixed-aimock-isolated.sh "${args[@]}"
+      - name: Retain sanitized results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mixed-aimock-${{ matrix.profile }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.scale }}-${{ matrix.workers }}
+          path: output/mixed-aimock*/**
+          if-no-files-found: error
+          retention-days: 90

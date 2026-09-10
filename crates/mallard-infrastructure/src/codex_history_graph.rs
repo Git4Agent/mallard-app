@@ -21,10 +21,9 @@ use crate::conversation_codec::{CanonicalChainBuilder, ChainFeedOutcome};
 use crate::jsonl_tail_io::{open_no_follow, safe_record_end, TailWindow, PROBE_WINDOW_BYTES};
 use mallard_domain::{
     compute_portable_conversation_tail, conversation_chain_digests, conversation_prefix_witness,
-    sha256_hex, validate_conversation_chain, CanonicalConversationMessage, ConversationCheckpoint,
-    ConversationPrefixWitness, MessageId, PhysicalMappingState, PortableConversationTail,
-    RootPhysicalMapping, RootTailLayout, TailAccumulator, TailPartitionKind,
-    PORTABLE_TAIL_CODEC_V1,
+    sha256_hex, CanonicalConversationMessage, ConversationCheckpoint, ConversationPrefixWitness,
+    MessageId, PhysicalMappingState, PortableConversationTail, RootPhysicalMapping, RootTailLayout,
+    TailAccumulator, TailPartitionKind, PORTABLE_TAIL_CODEC_V1,
 };
 
 /// One physical segment of a resolved logical root, base-most first.
@@ -42,6 +41,7 @@ pub struct ResolvedSegment {
 /// A fully resolved and flattened logical root.
 #[derive(Clone, Debug)]
 pub struct ResolvedCodexRoot {
+    pub leaf_creations: crate::codex_subagents::CreationRecords,
     pub chain: Vec<CanonicalConversationMessage>,
     pub partition_kind: TailPartitionKind,
     pub start_record_count: u64,
@@ -222,6 +222,15 @@ pub fn resolve_captured_codex_root(
             )
         })?;
         let (bytes, stamp) = crate::jsonl_tail_io::read_snapshot(&path)?;
+        if sources
+            .values()
+            .map(|(bytes, _)| bytes.len() as u64)
+            .sum::<u64>()
+            + bytes.len() as u64
+            > crate::provider_capture::MAX_CAPTURE_BYTES
+        {
+            return Err("Codex graph exceeds the aggregate capture limit".into());
+        }
         if reference.end_byte_offset > bytes.len() as u64 {
             return Err(format!(
                 "Codex history base '{}' is shorter than its declared cutoff",
@@ -272,6 +281,18 @@ pub fn resolve_captured_codex_root(
     Ok((resolved, sources))
 }
 
+/// Bytes the leaf's authoritative `session_meta` declares for its immediate
+/// history base: a scheduling weight for the preparation budget, not a
+/// validated read. A leaf without a base, or one whose metadata does not
+/// parse, weighs 0 and reports its own error when it is built.
+pub fn declared_history_bytes(leaf: &[u8]) -> u64 {
+    authoritative_session_meta(leaf)
+        .ok()
+        .and_then(|meta| meta.history_base)
+        .map(|base| base.end_byte_offset)
+        .unwrap_or(0)
+}
+
 /// Resolve a verified standalone wire transcript without a filesystem round trip.
 /// A portable root cannot depend on provider-local history files.
 pub(crate) fn resolve_standalone_codex_bytes(bytes: &[u8]) -> Result<ResolvedCodexRoot, String> {
@@ -313,6 +334,7 @@ fn resolve_segments(
     let mut resolved_segments = Vec::with_capacity(segments.len());
     let mut boundary = 0_u64;
     let leaf_index = segments.len() - 1;
+    let mut leaf_creations = Default::default();
     for (index, segment) in segments.into_iter().enumerate() {
         let mut structure = CodexStructureAccumulator::new(Some(&segment.meta.id));
         let mut record_count = 0_u64;
@@ -330,7 +352,10 @@ fn resolve_segments(
             .history_base
             .as_ref()
             .map_or(0, |base| base.end_ordinal_exclusive);
+        let mut byte_offset = 0;
         for raw in segment.bytes.split(|byte| *byte == b'\n') {
+            let record_offset = byte_offset;
+            byte_offset += raw.len() as u64 + 1;
             let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
             if raw.is_empty() {
                 continue;
@@ -365,6 +390,13 @@ fn resolve_segments(
                         actual_ordinal
                     ));
                 }
+            }
+            if index == leaf_index {
+                crate::codex_subagents::record_creation(
+                    &mut leaf_creations,
+                    &value,
+                    record_offset,
+                )?;
             }
             record_count += 1;
             structure
@@ -403,7 +435,6 @@ fn resolve_segments(
     let leaf_last_message_id = builder.last_message_id().cloned();
     let leaf_synthetic_turn = builder.synthetic_turn_resume();
     let chain = builder.finish();
-    validate_conversation_chain(&chain)?;
     let (lineage_digest, semantic_digest) = conversation_chain_digests(&chain)?;
     let partition_kind = if leaf_meta.history_base.is_some() {
         TailPartitionKind::FixedPaginatedTail
@@ -414,6 +445,7 @@ fn resolve_segments(
         return Err("Codex root without a native base cannot have a boundary".to_string());
     }
     Ok(ResolvedCodexRoot {
+        leaf_creations,
         chain,
         partition_kind,
         start_record_count: boundary,
@@ -439,6 +471,9 @@ pub fn effective_tail_partition(
     layout: Option<&RootTailLayout>,
     resolved: &ResolvedCodexRoot,
 ) -> Result<(TailPartitionKind, u64), String> {
+    if resolved.leaf_meta.is_internal_subagent {
+        return Ok((TailPartitionKind::WholeThread, 0));
+    }
     let Some(layout) = layout else {
         return Ok((resolved.partition_kind, resolved.start_record_count));
     };
@@ -545,6 +580,16 @@ pub fn refresh_codex_tail(
     mapping: &RootPhysicalMapping,
     tail: &TailWindow,
 ) -> Result<CodexTailRefresh, String> {
+    refresh_codex_tail_with_records(layout, observed_tail, mapping, tail, &mut |_, _| Ok(()))
+}
+
+pub fn refresh_codex_tail_with_records(
+    layout: &RootTailLayout,
+    observed_tail: &PortableConversationTail,
+    mapping: &RootPhysicalMapping,
+    tail: &TailWindow,
+    on_record: &mut dyn FnMut(&serde_json::Value, u64) -> Result<(), String>,
+) -> Result<CodexTailRefresh, String> {
     if tail.window_offset != mapping.consumed_byte_offset - mapping.probe_window_len {
         return Err("Codex tail window does not start at the mapping's probe window".to_string());
     }
@@ -591,7 +636,10 @@ pub fn refresh_codex_tail(
     let relative = |absolute: u64| (absolute - tail.window_offset) as usize;
     let mut appended_records = 0_u64;
     let mut next_record_ordinal = mapping.consumed_record_ordinal;
+    let mut record_offset = mapping.consumed_byte_offset;
     for raw in tail.bytes[window..relative(safe_end)].split(|byte| *byte == b'\n') {
+        let offset = record_offset;
+        record_offset += raw.len() as u64 + 1;
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
         if raw.is_empty() {
             continue;
@@ -601,6 +649,7 @@ pub fn refresh_codex_tail(
                 reason: CodexTailInvalidReason::MalformedAppend,
             });
         };
+        on_record(&value, offset)?;
         let Some(actual_ordinal) = value.get("ordinal").and_then(serde_json::Value::as_u64) else {
             if appended_records == 0 {
                 // Codex 0.147 emits both legacy and paginated histories. An
@@ -699,6 +748,7 @@ mod tests {
 
     fn retained_checkpoint(path: &Path, bytes: &[u8]) -> ConversationCheckpoint {
         ConversationCheckpoint {
+            accepted_subagents: Default::default(),
             generation: 1,
             accepted: None,
             accepted_local_tail: None,
@@ -782,6 +832,18 @@ mod tests {
             "payload": {"type": "message", "id": id, "content": text},
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn declared_history_bytes_weighs_the_leaf_by_its_declared_base_cutoff() {
+        let lines = |meta: String| format!("{meta}\n{}\n", message_line("m1", "hi")).into_bytes();
+        assert_eq!(
+            declared_history_bytes(&lines(meta_line("leaf", Some(("base", 2, 4096))))),
+            4096
+        );
+        assert_eq!(declared_history_bytes(&lines(meta_line("root", None))), 0);
+        assert_eq!(declared_history_bytes(b"{not json\n"), 0);
+        assert_eq!(declared_history_bytes(b""), 0);
     }
 
     fn encode_paginated_lines(lines: &[String]) -> Vec<u8> {

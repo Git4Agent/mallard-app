@@ -581,8 +581,9 @@ pub fn fetch_activity_snapshot(
         .iter()
         .find(|storage| &storage.id == storage_id)
         .ok_or_else(|| format!("storage '{}' is not configured", storage_id))?;
-    let store = ConfiguredObjectStore::from_config(storage)?;
-    let engine = crate::bundle_engine::BundleEngine::open(store, storage.id.clone())?;
+    let store = ConfiguredObjectStore::shared(storage)?;
+    let engine = crate::bundle_engine::BundleEngine::open(store, storage.id.clone())?
+        .with_object_cache(crate::bundle_engine::ObjectCache::global());
     engine.inspect_optional(bundle_id)
 }
 
@@ -2225,6 +2226,7 @@ mod activity_only_tests {
             _path: &Path,
             _index: &SessionTimelineIndex,
             _query: &SessionTimelineQuery,
+            _context: &SessionTimelineContext<'_>,
         ) -> Result<SessionTimelinePageSlice, String> {
             self.timeline_calls.fetch_add(1, Ordering::SeqCst);
             Err("timeline must not run for Activity".to_string())
@@ -2296,6 +2298,8 @@ mod activity_only_tests {
         provider_thread_id: &str,
     ) -> LocalConversationBinding {
         LocalConversationBinding {
+            installed_end: None,
+            installed_subagents: Default::default(),
             path_origins_ref: None,
             host_id: resolved.binding.host_id.clone(),
             replica_id: resolved.binding.replica_id.clone(),
@@ -2951,6 +2955,8 @@ mod activity_only_tests {
         repository
             .mutate_conversation_bindings(|bindings| {
                 bindings.bindings.push(LocalConversationBinding {
+                    installed_end: None,
+                    installed_subagents: Default::default(),
                     path_origins_ref: None,
                     host_id: resolved.binding.host_id.clone(),
                     replica_id: resolved.binding.replica_id.clone(),

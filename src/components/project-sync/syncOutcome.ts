@@ -312,7 +312,7 @@ export function buildPullOutcome({
     ? afterPullActions
     : failures.length === 0
       && !baselineStalled
-      && readinessProblems.length > 0
+      && (readinessProblems.length > 0 || error)
       && result.plan_id
       ? [{ kind: "recheck", label: "Recheck" }]
       : needsAttention

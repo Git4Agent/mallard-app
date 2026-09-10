@@ -276,6 +276,7 @@ pub fn publish_request(
             ),
             // The real binary stamp: harness rows flow through the real
             // pull gates, which require fingerprint equality.
+            wire_children: mallard_domain::ConversationWireChildren::On,
             wire_redaction: Some(mallard_infrastructure::credential_redaction::shared().stamp()),
             // Codex declares its path map in-band; the out-of-band stamp is
             // claude-only and forbidden here.
@@ -487,7 +488,7 @@ pub fn assert_snapshot_consistent<S: ObjectStore>(
     snapshot: &BundleSnapshot,
 ) {
     snapshot.validate().unwrap();
-    let mut bytes = engine.byte_source(snapshot, None, None);
+    let mut bytes = engine.byte_source(snapshot, None);
     for (path, entry) in snapshot.manifest.all_files() {
         let body = bytes.body(path).unwrap();
         assert_eq!(body.size(), entry.size);

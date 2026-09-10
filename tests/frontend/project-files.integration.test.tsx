@@ -142,6 +142,7 @@ test("an explicit Push scan presents new entries selected and locks both directo
 
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
+      credentialRedactionEnabled={true}
       resources={inventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={selected}
       projectDefaults={selected}
@@ -182,6 +183,7 @@ test("Project file controls stay on the dedicated page", () => {
   const selected = new Set(inventory.entries.map((candidate) => candidate.descriptor.resource_id));
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
+      credentialRedactionEnabled={true}
       resources={inventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={selected}
       projectDefaults={selected}
@@ -204,6 +206,7 @@ test("the footer carries the step navigator beside Push, forward then back", () 
   const selected = new Set(inventory.entries.map((candidate) => candidate.descriptor.resource_id));
   const render = (activeStep: "history" | "project_files") => renderToStaticMarkup(
     <PushResourceWorkspace
+      credentialRedactionEnabled={true}
       resources={inventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={selected}
       projectDefaults={selected}
@@ -307,6 +310,7 @@ test("Push review shows only local-outstanding project files", () => {
   const selected = new Set(mixedInventory.entries.map((candidate) => candidate.descriptor.resource_id));
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
+      credentialRedactionEnabled={true}
       resources={mixedInventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={selected}
       projectDefaults={selected}
@@ -363,6 +367,7 @@ test("Push gates storage deletions and Pull omits conflict deletions", () => {
 
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
+      credentialRedactionEnabled={true}
       resources={removalInventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={new Set()}
       projectDefaults={new Set()}
@@ -453,6 +458,7 @@ test("file review details reuse the project copyable popover", () => {
 test("opening the files step scans by itself — no interstitial, just the scaffold", () => {
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
+      credentialRedactionEnabled={true}
       resources={[]}
       selected={new Set()}
       projectDefaults={new Set()}
@@ -632,13 +638,8 @@ test("Pull project content starts as keep-local and selecting a nested file requ
       projectName="Project B"
       plan={pullPlan}
       binding={binding}
-      readiness={null}
-      restoreResult={null}
       phase="idle"
       supportLoading={false}
-      completedActionIds={new Set()}
-      completedResourceIds={new Set()}
-      failedResourceIds={new Set()}
       busy={false}
       error={null}
       onApply={() => undefined}
@@ -748,13 +749,8 @@ test("generic pull rows wear the same operation chips", () => {
       projectName="Project B"
       plan={genericPlan}
       binding={binding}
-      readiness={null}
-      restoreResult={null}
       phase="idle"
       supportLoading={false}
-      completedActionIds={new Set()}
-      completedResourceIds={new Set()}
-      failedResourceIds={new Set()}
       busy={false}
       error={null}
       onApply={() => undefined}
@@ -839,21 +835,18 @@ test("confirming keep-local still submits an empty approved set so Pull can adva
           plan_id: pullPlan.plan_id,
           applied_action_ids: [],
           failed_actions: [],
-          divergences: [],
           preserved_threads: [],
           after_pull_actions: [],
+          readiness: { bundle_id: binding.bundle_id, state: "ready", issues: [] },
+          readiness_error: null,
         };
-      },
-      getRestoreReadiness: async () => {
-        calls.push("verify");
-        return { bundle_id: binding.bundle_id, state: "ready", issues: [] };
       },
     },
     pullPlan,
     { resourceIds: [], restoreActionIds: [] },
     () => undefined,
   );
-  assert.deepEqual(calls, ["restore:0", "verify"]);
+  assert.deepEqual(calls, ["restore:0"]);
   assert.equal(result.success, true);
 });
 

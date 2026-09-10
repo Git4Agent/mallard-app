@@ -23,5 +23,14 @@ export function isPushReviewRow(
   status: ThreadStatusIconName,
   decision: { action: string; selectable: boolean },
 ): boolean {
-  return isPushReviewStatus(status) && isPushReviewDecision(decision);
+  return (isPushReviewStatus(status) || status === "synced") && isPushReviewDecision(decision);
+}
+
+/** A reviewed restoration can also recover a missing accepted child. */
+export function isPullReviewRow(
+  status: ThreadStatusIconName,
+  decision: { action: string; selectable: boolean },
+): boolean {
+  return isPullReviewStatus(status)
+    || (decision.selectable && decision.action === "keep_both");
 }

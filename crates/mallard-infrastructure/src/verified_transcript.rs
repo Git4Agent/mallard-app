@@ -52,6 +52,38 @@ impl VerifiedTranscript {
         )
     }
 
+    pub(crate) fn from_claude_child_analysis(
+        bytes: PayloadBytes,
+        analysis: &SessionAnalysis,
+        agent_id: &str,
+    ) -> Result<Self, String> {
+        if !analysis.is_internal_subagent {
+            return Err("child verification requires child analysis".into());
+        }
+        Self::from_parts(
+            crate::providers::claude::provider_key(),
+            crate::providers::claude::CLAUDE_LINEAGE_CODEC_KEY,
+            bytes,
+            Some(agent_id),
+            Some(analysis.source_cwd.as_deref().unwrap_or("")),
+            &analysis.lineage,
+        )
+    }
+
+    /// Claude child project ownership comes from its containing parent and
+    /// namespace. The child's working directory is conversation content.
+    pub(crate) fn matches_child_identity_and_bytes(
+        &self,
+        provider: &ProviderKey,
+        agent_id: &str,
+        bytes: &PayloadBytes,
+    ) -> bool {
+        &self.provider == provider
+            && self.provider_thread_id == agent_id
+            && self.bytes.len() == bytes.len()
+            && self.bytes.sha256() == bytes.sha256()
+    }
+
     fn from_parts(
         provider: ProviderKey,
         codec: &str,
@@ -99,12 +131,29 @@ impl VerifiedTranscript {
         semantic_digest: &str,
         bytes: &PayloadBytes,
     ) -> bool {
-        &self.provider == provider
-            && self.codec == codec
-            && Some(self.provider_thread_id.as_str()) == provider_thread_id
-            && (self.cwd == project_root || self.cwd == canonical_project_root)
+        self.codec == codec
             && self.lineage_digest == lineage_digest
             && self.semantic_digest == semantic_digest
+            && self.matches_identity_and_bytes(
+                provider,
+                provider_thread_id,
+                project_root,
+                canonical_project_root,
+                bytes,
+            )
+    }
+
+    pub(crate) fn matches_identity_and_bytes(
+        &self,
+        provider: &ProviderKey,
+        provider_thread_id: Option<&str>,
+        project_root: &str,
+        canonical_project_root: &str,
+        bytes: &PayloadBytes,
+    ) -> bool {
+        &self.provider == provider
+            && Some(self.provider_thread_id.as_str()) == provider_thread_id
+            && (self.cwd == project_root || self.cwd == canonical_project_root)
             && self.bytes.len() == bytes.len()
             && self.bytes.sha256() == bytes.sha256()
     }

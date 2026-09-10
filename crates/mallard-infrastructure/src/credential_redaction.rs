@@ -1,13 +1,9 @@
-//! One-way credential redaction for the conversation wire form
-//! (`mallard.redact.v1`).
+//! Credential redaction for exported sessions and provider content.
 //!
-//! Every byte stream that leaves the machine — Codex rollout records, Claude
-//! transcript lines, sidecars, provider-state files, content-derived
-//! descriptor metadata — passes this deterministic encoder at the push
-//! boundary. Detected secrets are replaced by typed placeholders from a
-//! frozen vocabulary (`<password>`, `<anthropic-api-key>`, `<secret>`, …);
-//! there is no decode, so placeholder spans materialize verbatim on every
-//! machine, the origin included after a cloud-ahead pull.
+//! An On run replaces detected secrets with typed placeholders. An Off run
+//! preserves content without detector work. Bare ruleset methods remain On
+//! for diagnostic sanitization. Each published session carries the selected
+//! run's stamp; Pull and adoption use that stored mode.
 //!
 //! Detection algorithm adopted from `entireio/cli` (MIT), which vendors the
 //! `betterleaks` rule corpus (a gitleaks fork, MIT): layered leaf detection
@@ -44,6 +40,10 @@ use crate::payload::PayloadBytes;
 
 /// The single compiled-in ruleset codec this binary carries.
 pub const REDACTION_CODEC_V1: &str = "mallard.redact.v1";
+pub const REDACTION_OFF_CODEC_V1: &str = "mallard.redact.off.v1";
+/// Sentinel required by the stamp's 64-hex-character shape. Not a policy hash.
+pub const REDACTION_OFF_FINGERPRINT: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Shannon entropy floor for the L1 candidate layer (bits per char). Hex
 /// strings top out at 4.0 and UUIDs near log2(17), so digests and ids are
@@ -476,6 +476,7 @@ impl DetectionCache {
 /// creates one run per conversation preparation, then drops it. The cache
 /// stores only SHA-256 keys and detector regions, never source strings.
 pub struct RedactionRun<'a> {
+    enabled: bool,
     ruleset: &'a RedactionRuleset,
     cache: DetectionCache,
 }
@@ -532,8 +533,14 @@ impl RedactionRuleset {
         let credential_json_key_pattern = format!("^{DB_PASSWORD_KEY_SHAPE}$");
         Self {
             entropy_candidate: compile(ENTROPY_CANDIDATE_PATTERN),
-            vendor_set: RegexSet::new(VENDOR_RULES.iter().map(|rule| rule.pattern))
-                .expect("vendor rule set compiles"),
+            // Omit boundaries in the prefilter to avoid Unicode DFA fallback.
+            // Individual vendor regexes still check the original boundaries.
+            vendor_set: RegexSet::new(
+                VENDOR_RULES
+                    .iter()
+                    .map(|rule| rule.pattern.replace(r"\b", "")),
+            )
+            .expect("vendor rule set compiles"),
             vendor: VENDOR_RULES
                 .iter()
                 .map(|rule| compile(rule.pattern))
@@ -580,13 +587,41 @@ impl RedactionRuleset {
     /// returned value or enters machine-local or portable state.
     pub fn begin_run(&self) -> RedactionRun<'_> {
         RedactionRun {
+            enabled: true,
             ruleset: self,
             cache: DetectionCache::new(),
         }
     }
 
+    /// Incoming content selects its run from the stored stamp, never local settings.
+    pub fn run_from_stamp(
+        &self,
+        stamp: Option<&mallard_domain::ConversationWireRedaction>,
+    ) -> Result<RedactionRun<'_>, String> {
+        let enabled = match stamp {
+            Some(stamp)
+                if stamp.codec == REDACTION_CODEC_V1 && stamp.fingerprint == self.fingerprint =>
+            {
+                true
+            }
+            Some(stamp)
+                if stamp.codec == REDACTION_OFF_CODEC_V1
+                    && stamp.fingerprint == REDACTION_OFF_FINGERPRINT =>
+            {
+                false
+            }
+            _ => {
+                return Err(
+                    "redaction_ruleset_mismatch: missing or unsupported redaction stamp".into(),
+                )
+            }
+        };
+        Ok(self.begin_run().with_enabled(enabled))
+    }
+
     fn uncached_run(&self) -> RedactionRun<'_> {
         RedactionRun {
+            enabled: true,
             ruleset: self,
             cache: DetectionCache::disabled(),
         }
@@ -1400,30 +1435,64 @@ impl RedactionRuleset {
 }
 
 impl RedactionRun<'_> {
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub fn stamp(&self) -> mallard_domain::ConversationWireRedaction {
+        if self.enabled {
+            self.ruleset.stamp()
+        } else {
+            mallard_domain::ConversationWireRedaction {
+                codec: REDACTION_OFF_CODEC_V1.into(),
+                fingerprint: REDACTION_OFF_FINGERPRINT.into(),
+            }
+        }
+    }
+
     pub fn redact_str(&mut self, s: &str) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
         self.ruleset.redact_str_with_cache(s, &mut self.cache)
     }
 
     pub fn redact_value(&mut self, value: &Value) -> (Value, bool) {
+        if !self.enabled {
+            return (value.clone(), false);
+        }
         self.ruleset.redact_value_with_cache(value, &mut self.cache)
     }
 
     pub fn redact_record_gated(&mut self, record: &Value) -> Result<Value, String> {
+        if !self.enabled {
+            return Ok(record.clone());
+        }
         self.ruleset
             .redact_record_gated_with_cache(record, &mut self.cache)
     }
 
     pub fn verify_wire_value(&mut self, wire: &Value) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
         self.ruleset
             .verify_wire_value_with_cache(wire, &mut self.cache)
     }
 
     pub fn redact_jsonl_text(&mut self, text: &str) -> Result<(String, usize), String> {
+        if !self.enabled {
+            return Ok((text.to_owned(), 0));
+        }
         self.ruleset
             .redact_jsonl_text_with_cache(text, &mut self.cache)
     }
 
     pub fn redact_document(&mut self, bytes: Vec<u8>) -> Result<(Vec<u8>, bool), String> {
+        if !self.enabled {
+            return Ok((bytes, false));
+        }
         self.ruleset
             .redact_document_with_cache(bytes, &mut self.cache)
     }
@@ -1432,14 +1501,19 @@ impl RedactionRun<'_> {
         &mut self,
         bytes: impl Into<PayloadBytes>,
     ) -> Result<RedactedWireBytes, String> {
+        if !self.enabled {
+            return Ok(RedactedWireBytes {
+                bytes: bytes.into(),
+            });
+        }
         self.ruleset
             .certify_wire_document_with_cache(bytes, &mut self.cache)
     }
 }
 
-/// Wire bytes certified to be a redaction fixpoint of the compiled-in
-/// ruleset. Producers either check the document or preserve the checks from
-/// a trusted record encoder. Conversation publish paths require this type.
+/// Immutable wire bytes processed under the selected run. On certifies the
+/// compiled ruleset fixpoint; Off preserves content without a secret check.
+/// Producers apply the selected run to the document or each encoded record. Conversation publish paths require this type.
 ///
 /// Callers outside this crate cannot assert a certificate for arbitrary bytes:
 ///
@@ -1455,12 +1529,13 @@ pub struct RedactedWireBytes {
 }
 
 impl RedactedWireBytes {
-    /// Complete the trusted Codex Encode builder without another scan.
+    /// Complete a trusted conversation builder without another scan.
     ///
-    /// The caller must have redacted source records, checked the final head
-    /// and inserted projection records, and preserved those checks through
-    /// serialization. Only excluded identity fields and numeric ordinals
-    /// may change after a record's check. The payload is immutable.
+    /// Codex checks source records, the final head, and generated projections
+    /// before serialization; only excluded identity fields and numeric ordinals
+    /// can change afterward. Claude checks every serialized record during its
+    /// final analysis. Both paths must finish their checks over the complete
+    /// payload under the selected run. The payload is immutable.
     pub(crate) fn from_verified_payload(bytes: PayloadBytes) -> Self {
         Self { bytes }
     }
@@ -2013,6 +2088,45 @@ mod tests {
     }
 
     #[test]
+    fn vendor_prefilter_preserves_unicode_boundary_rejections() {
+        for input in [
+            "界AKIAIOSFODNN7EXAMPLE",
+            "AKIAIOSFODNN7EXAMPLE界",
+            "xAKIAIOSFODNN7EXAMPLE",
+            "AKIAIOSFODNN7EXAMPLE_",
+        ] {
+            let mut regions = Vec::new();
+            shared().detect_vendor(input, &mut regions);
+            assert!(regions.is_empty(), "unexpected vendor match in {input}");
+        }
+    }
+
+    #[test]
+    fn vendor_prefilter_preserves_punctuation_before_unicode_word() {
+        let aws_secret = format!("{}+", "a".repeat(39));
+        let google_key = format!("AIza{}-", "a".repeat(34));
+        for (prefix, secret, label, rule) in [
+            (
+                "aws_secret_access_key = ",
+                aws_secret,
+                "<aws-secret-key>",
+                "aws-secret-access-key",
+            ),
+            ("", google_key, "<google-api-key>", "google-api-key"),
+        ] {
+            let input = format!("{prefix}{secret}界");
+            let mut regions = Vec::new();
+            shared().detect_vendor(&input, &mut regions);
+            assert_eq!(regions.len(), 1, "missing vendor match for {rule}");
+            let region = &regions[0];
+            assert_eq!(region.start, prefix.len());
+            assert_eq!(region.end, prefix.len() + secret.len());
+            assert_eq!(region.label, label);
+            assert_eq!(region.rule, rule);
+        }
+    }
+
+    #[test]
     fn aws_secret_context_rule_is_surgical() {
         let input = "aws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEYAA";
         assert_eq!(redact(input), "aws_secret_access_key = <aws-secret-key>");
@@ -2395,6 +2509,7 @@ mod tests {
         let second = "another plain paragraph with ordinary words. ".repeat(64);
         let data_uri = format!("data:image/png;base64,{}", "A".repeat(2048));
         let mut run = RedactionRun {
+            enabled: true,
             ruleset: shared(),
             cache: DetectionCache::with_limits(1, 1, DETECTION_CACHE_MAX_REGIONS),
         };
@@ -2414,6 +2529,7 @@ mod tests {
         drop(run);
 
         let mut next_run = RedactionRun {
+            enabled: true,
             ruleset: shared(),
             cache: DetectionCache::with_limits(1, 1, DETECTION_CACHE_MAX_REGIONS),
         };
@@ -2426,6 +2542,7 @@ mod tests {
             "ordinary words. ".repeat(80)
         );
         let mut no_region_capacity = RedactionRun {
+            enabled: true,
             ruleset: shared(),
             cache: DetectionCache::with_limits(1, 1, 0),
         };
@@ -2644,5 +2761,81 @@ mod tests {
         let stamp = shared().stamp();
         assert_eq!(stamp.codec, REDACTION_CODEC_V1);
         stamp.validate().unwrap();
+    }
+    #[test]
+    fn off_run_preserves_content_without_detector_cache_work() {
+        let text = format!(
+            "{} sk-ant-api03-aaaabbbbccccddddeeee",
+            "ordinary text ".repeat(200)
+        );
+        let value = json!({"content": text, "access_token": "raw-token"});
+        let jsonl = format!("{value}\n");
+        let mut off = shared().begin_run().with_enabled(false);
+        assert_eq!(off.redact_str(&text), None);
+        assert_eq!(off.redact_value(&value), (value.clone(), false));
+        assert_eq!(off.redact_record_gated(&value).unwrap(), value);
+        off.verify_wire_value(&value).unwrap();
+        assert_eq!(off.redact_jsonl_text(&jsonl).unwrap(), (jsonl.clone(), 0));
+        for bytes in [
+            jsonl.as_bytes().to_vec(),
+            text.as_bytes().to_vec(),
+            vec![0xff, 0, 1],
+        ] {
+            assert_eq!(
+                off.redact_document(bytes.clone()).unwrap(),
+                (bytes.clone(), false)
+            );
+            assert_eq!(
+                off.certify_wire_document(bytes.clone()).unwrap().as_bytes(),
+                bytes
+            );
+        }
+        assert_eq!(
+            (
+                off.cache.lookups,
+                off.cache.hits,
+                off.cache.inserted,
+                off.cache.hashed_bytes
+            ),
+            (0, 0, 0, 0)
+        );
+        let mut on = shared().begin_run();
+        assert!(on.redact_value(&value).1);
+        on.redact_value(&value);
+        assert!(
+            on.cache.lookups > 0
+                && on.cache.hits > 0
+                && on.cache.inserted > 0
+                && on.cache.hashed_bytes > 0
+        );
+        assert!(shared().redact_str(&text).is_some());
+        assert!(shared().verify_wire_value(&value).is_err());
+    }
+
+    #[test]
+    fn stored_stamp_selects_exact_supported_run() {
+        let on = shared().stamp();
+        let off = shared().begin_run().with_enabled(false).stamp();
+        assert_eq!(off.codec, REDACTION_OFF_CODEC_V1);
+        assert_eq!(off.fingerprint, REDACTION_OFF_FINGERPRINT);
+        for stamp in [&on, &off] {
+            assert_eq!(
+                shared().run_from_stamp(Some(stamp)).unwrap().stamp(),
+                *stamp
+            );
+        }
+        assert!(shared().run_from_stamp(None).is_err());
+        for (codec, fingerprint) in [
+            (on.codec.clone(), off.fingerprint.clone()),
+            (off.codec.clone(), on.fingerprint.clone()),
+            ("unknown".into(), off.fingerprint.clone()),
+        ] {
+            assert!(shared()
+                .run_from_stamp(Some(&mallard_domain::ConversationWireRedaction {
+                    codec,
+                    fingerprint
+                }))
+                .is_err());
+        }
     }
 }

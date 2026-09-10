@@ -65,6 +65,7 @@ const detail: ProjectSessionDetail = {
     shell_calls: exact(2),
     reads: { quality: "unsupported", explanation: "This transcript cannot distinguish direct reads." },
     other_tools: exact(1),
+    agent_calls: exact(1),
   },
   actions: [{
     action_id: "codex.open_in_app",
@@ -184,9 +185,9 @@ function renderTimeline(
 
 test("filters carry event kinds only, and the conversation is what opens by default", () => {
   const filters = createDefaultSessionDetailFilters(detail.event_counts);
-  // Prompts and replies open; the punchcard rows — steps and tool calls —
-  // wait behind their SHOW toggles until asked for.
+  // Steps, tool calls, and agents require selection.
   assert.deepEqual(includedSessionEventKinds(filters), ["prompt", "response", "checkpoint"]);
+  assert.equal(filters.agents, false);
   assert.equal(filters.toolCalls, false);
   assert.equal(filters.intermediateSteps, false);
   assert.equal("toolCategories" in filters, false);
@@ -212,16 +213,18 @@ test("a toggle appears only for a kind this session actually holds", () => {
     "responses",
     "intermediateSteps",
     "toolCalls",
+    "agents",
   ]);
   assert.deepEqual(toggles.map((toggle) => toggle.label), [
     "Prompts",
     "Replies",
     "Steps",
     "Tool calls",
+    "Agents",
   ]);
 
   const coverage = sessionEventCoverage(detail.event_counts);
-  assert.equal(coverage.total, 2 + 3 + 1 + 0 + 4);
+  assert.equal(coverage.total, 2 + 3 + 1 + 0 + 4 + 1);
   // intermediate_steps is a lower bound, so the denominator refuses to claim
   // precision it does not have.
   assert.equal(coverage.approximate, true);
@@ -239,7 +242,7 @@ test("the toolbar states one count, with the denominator the page never had", ()
   );
 
   assert.match(html, /class="session-detail-toolbar"/);
-  assert.match(html, /5 of 10\+ events/);
+  assert.match(html, /5 of 11\+ events/);
   assert.match(html, /aria-pressed="true"[^>]*>[^<]*<span class="session-detail-filter-box"[^>]*><\/span><span class="session-detail-filter-name">Prompts/);
   assert.match(html, /<span class="session-detail-filter-name">Tool calls<\/span><span class="session-detail-filter-count quality-exact">4<\/span>/);
   // No checkpoint control and no second panel of any kind.
@@ -314,7 +317,119 @@ test("the header is one strip: hidden h1, facts as chips, verbs on the right", (
   assert.doesNotMatch(distinct, /session-detail-summary|Expose the durable conversation/);
 });
 
-test("the timeline is a rail: tiles for turns, punches for calls, no speaker headings", () => {
+const agentEvent: SessionTimelineEvent = {
+  event_id: "agent-1",
+  ordinal: 2,
+  timestamp: START + 100,
+  kind: "agent_call",
+  quality: "exact",
+  turn_id: "turn-1",
+  parent_event_id: "prompt-1",
+  tool: {
+    provider_call_id: "task-1",
+    native_name: "Task",
+    category: "other",
+    status: "completed",
+    summary: "Research term marking",
+    argument_truncated: false,
+    result_truncated: false,
+    affected_paths: [],
+  },
+  agent: {
+    provider_agent_id: "a1b2c3",
+    label: "Research term marking",
+    role: "general-purpose",
+    model: "claude-opus-5",
+    mode: "async",
+    status: "completed",
+    started_at: START + 100,
+    ended_at: START + 931,
+    brief: "Research how reading apps mark a target word.",
+    brief_truncated: false,
+    report: "I have enough. Here are the findings.",
+    report_truncated: false,
+    transcript_resource_id: "codex:conversation:session-1/agent/a1b2c3",
+  },
+};
+
+test("a delegation is a tile and a row: AGENT stamp, label, role, length, status only when not done", () => {
+  const html = renderTimeline([events[0], agentEvent]);
+  // Its own row class, between the punch runs and the cards, and the fork
+  // mark on a 24px tile named for the agent.
+  assert.match(html, /class="session-detail-row-agent"/);
+  assert.match(html, /event-agent-call agent-completed/);
+  assert.match(html, /aria-label="Agent · Research term marking · \d{2}:\d{2}"/);
+  assert.match(html, /data-icon="git-fork"/);
+  // The row: stamp, label, role pill, the background mode, the length.
+  assert.match(html, /session-detail-tool-name session-detail-agent-stamp">Agent</);
+  assert.match(html, /class="session-detail-agent-label" title="Research term marking">Research term marking</);
+  assert.match(html, /class="session-detail-agent-pill">general-purpose</);
+  assert.match(html, /class="session-detail-agent-pill mode">async</);
+  assert.match(html, /class="session-detail-agent-meta"><span>14m<\/span>/);
+  // Done says nothing; the brief and report wait behind the row.
+  assert.doesNotMatch(html, /session-detail-agent-status/);
+  assert.doesNotMatch(html, /Open transcript|Here are the findings/);
+  // Codex's nickname rows carry the task path beside the name.
+  const codexHtml = renderTimeline([
+    { ...agentEvent, agent: { ...agentEvent.agent!, label: "Hilbert", task: "inspect_poc", mode: "spawn", role: "explorer" } },
+  ]);
+  assert.match(codexHtml, /session-detail-agent-label" title="Hilbert">Hilbert<\/span><span class="session-detail-agent-task" title="inspect_poc">inspect_poc</);
+  assert.doesNotMatch(codexHtml, /session-detail-agent-pill mode/);
+});
+
+test("a run that is not simply done prints its status, and the tile takes its colour", () => {
+  for (const [status, label, tone] of [
+    ["failed", "failed", "agent-failed"],
+    ["running", "running", "agent-running"],
+    ["interrupted", "interrupted", "agent-interrupted"],
+    ["incomplete", "incomplete", "agent-incomplete"],
+    ["unavailable", "no transcript", "agent-unavailable"],
+  ] as const) {
+    const html = renderTimeline([
+      { ...agentEvent, agent: { ...agentEvent.agent!, status, transcript_resource_id: null } },
+    ]);
+    assert.match(html, new RegExp(`event-agent-call ${tone}`));
+    assert.match(html, new RegExp(`class="session-detail-agent-status status-${status}">${label}</span>`));
+  }
+});
+
+test("agents open with the conversation and count on the header", () => {
+  const header = renderToStaticMarkup(
+    <SessionDetailHeader
+      detail={detail}
+      headingRef={{ current: null }}
+      actionBusyId={null}
+      onAction={() => undefined}
+    />,
+  );
+  assert.match(header, /data-icon="git-fork"[^]*?<code class="quality-exact">1<\/code>agent<\/span>/);
+  assert.doesNotMatch(header, /\/agent\//);
+
+  // A child page states what it was, and offers no verbs of its own.
+  const childHeader = renderToStaticMarkup(
+    <SessionDetailHeader
+      detail={{
+        ...detail,
+        actions: [],
+        event_counts: { ...detail.event_counts, agent_calls: exact(0) },
+        agent: {
+          parent_resource_id: "codex:conversation:session-1",
+          parent_title: "Build provider-neutral session detail",
+          preview: agentEvent.agent!,
+        },
+      }}
+      headingRef={{ current: null }}
+      actionBusyId={null}
+      onAction={() => undefined}
+    />,
+  );
+  assert.match(childHeader, /<code>general-purpose<\/code>/);
+  assert.match(childHeader, /<code>claude-opus-5<\/code>/);
+  assert.match(childHeader, /title="Run async">async</);
+  assert.doesNotMatch(childHeader, /agents<\/span>|session-detail-launch/);
+});
+
+test("the timeline is a column of tiles for turns and punches for calls, no speaker headings", () => {
   const html = renderTimeline(events);
 
   // One divider for four same-day events, where each row used to carry a date.
@@ -347,7 +462,7 @@ test("the timeline is a rail: tiles for turns, punches for calls, no speaker hea
   assert.doesNotMatch(html, /Chronological record|session-detail-section-heading|loaded<\/code>/);
 });
 
-test("the wait between turns is a chip on the rail, and ticks never carry one", () => {
+test("the wait between turns is a chip in the node column, and ticks never carry one", () => {
   assert.equal(formatSessionGap(START, START + 30), null);
   assert.equal(formatSessionGap(START, START + 300), "+5m");
   assert.equal(formatSessionGap(START, START + 7_200), "+2h");
@@ -502,7 +617,7 @@ test("a tool row leads with its tinted action, and shows status only when it is 
   );
   assert.match(failed, /<span class="session-detail-tool-status status-failed">failed<\/span>/);
 
-  // The failure is visible from the rail: the punch takes the failure colour.
+  // The failure is visible from the node column: the punch takes the failure colour.
   const timeline = renderTimeline([events[0], failedToolEvent]);
   assert.match(timeline, /event-tool-call tool-failed/);
 });

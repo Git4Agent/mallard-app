@@ -1,13 +1,15 @@
-# Mallard Managed Cloud V1
+# Mallard Managed Cloud Architecture V2
 
 ## Git Project and Catalog Item plan
 
 - **Status:** Proposed
-- **Date:** September 1, 2026
+- **Date:** September 9, 2026
+- **Product target:** Managed Cloud V1
 - **Scope:** Git projects, skills, plugin install intent, and Codex pets
 
-This document is the complete Managed Cloud V1 plan. It contains only the current
-design.
+This document defines architecture V2 for the first Managed Cloud release. It
+contains the product rules, portable contracts, service operations, delivery steps,
+and acceptance requirements. It can be read without an earlier plan or review.
 
 ## 1. Product definition
 
@@ -31,72 +33,38 @@ access container.
 
 | Question | V1 decision |
 | --- | --- |
-| Repository classes | `git_project` and `catalog` |
-| Project admission | Git projects only |
-| Project content | Reviewed conversations and supported provider state |
-| Catalog item content | Exactly one skill, plugin install intent, Codex pet v1, or Codex pet v2 |
-| Catalog boundary | One independent Catalog item |
-| Access boundary | One managed Project or Catalog item |
-| Visibility | Public or private |
-| Roles | Admin and Member |
-| First Admin | Repository creator |
-| Collaboration | Admin invites Members |
-| Anonymous access | Current public snapshot only |
-| Content pointer | One current head per repository |
-| Publication | Reviewed Push by an active Admin or Member |
-| Concurrent publication | Exact-head compare-and-swap |
-| Stale publication | Reject and require a new review |
-| Accepted resource removal | Not supported |
-| Repository removal | No product UI or API |
+| Repository classes | Git project or one Catalog item |
+| Access boundary | One repository; no parent access container |
+| Visibility and roles | Public or private; Admin and Member |
+| Anonymous access | Current public snapshot |
+| Publication | Reviewed Push, one head, immutable linear history |
+| Concurrency | Compare expected commit ID and repository revision |
+| Retention | Hard quota; separate controlled repository removal |
 | Git source | Remains in the configured Git remote |
 | Application content encryption | None |
 
 ### 1.2 Included
 
-V1 includes:
-
-- Git project validation and fingerprinting;
-- reviewed project Push and Pull;
-- Codex and Claude skills;
-- Codex and Claude plugin install intent;
-- Codex pet v1 and v2 packages;
-- reviewed Catalog item Push and Pull;
-- public and private Projects and Catalog items;
-- repository invitations;
-- Admin and Member management;
-- one accepted head and immutable history per repository;
-- optimistic concurrency;
-- public discovery and featured examples;
-- repository export;
-- OAuth sign-in;
-- quotas, audit, monitoring, and service recovery.
+V1 includes Git admission, reviewed project and Catalog Push and Pull, public
+discovery, featured examples, OAuth sign-in, repository invitations, access
+management, history, repository removal, quotas, audit, monitoring, and recovery.
 
 ### 1.3 Not included
 
 V1 does not include:
 
-- non-Git project repositories;
-- ordinary Git project-file cloud sync;
-- Git source hosting or Git-host writes;
-- parent access containers;
-- shared membership across repositories;
-- multi-item Catalog repositories;
-- shared access settings across Catalog items;
-- per-file visibility or membership inside one Catalog item;
-- roles other than Admin and Member;
-- multiple managed heads in one repository;
-- content approval queues;
-- automatic combination of concurrent publications;
-- plugin binaries or marketplace credentials;
-- Claude pets;
-- pet format conversion;
-- accepted resource removal;
-- repository-removal workflows;
-- a web write client;
-- billing;
-- shared public object caching;
-- client-side content encryption; or
-- end-to-end content encryption.
+- non-Git projects, project-file cloud sync, or Git source hosting and writes;
+- parent access containers or shared membership across repositories;
+- multi-item Catalog repositories or per-file access settings;
+- additional roles, approval queues, multiple heads, or automatic merge;
+- plugin binaries, marketplace credentials, Claude pets, or pet format conversion;
+- removal of individual accepted resources;
+- a web client, public slugs, or a service export operation;
+- billing, shared public object caching, direct R2 uploads, or cross-repository deduplication; or
+- client-side or end-to-end content encryption.
+
+Future features require a new reviewed design. V1 has no dormant service fields
+for them.
 
 ## 2. Repository and access model
 
@@ -105,44 +73,25 @@ V1 does not include:
 | Class | Required identity | Portable content |
 | --- | --- | --- |
 | `git_project` | Bundle ID and Git repository fingerprint | Project conversations and supported provider state |
-| `catalog` | Provider, resource kind, and stable resource ID | One skill, plugin intent, or pet package |
+| `catalog` | Provider, resource kind, format, format version, and resource ID | One skill, plugin intent, or pet package |
 
-A Catalog item repository is not a project repository. It has no project root and
-does not make non-Git projects eligible for Managed Cloud V1.
+Repository class and bound identity cannot change after creation. A Catalog item
+has no project root. It does not make a non-Git project eligible for managed sync.
 
-A service repository ID is an opaque managed-service identifier. It is distinct from
-the portable project bundle ID and Catalog resource ID.
+The service repository ID is opaque. It is distinct from portable bundle and
+Catalog resource IDs. Portable identity grants no access and cannot prove that a
+private repository exists.
 
-Project bundle IDs, project fingerprints, and Catalog resource IDs are not access
-identifiers. Knowing one does not grant access or prove that a private service
-repository exists.
+### 2.2 Supported Catalog formats
 
-Each Catalog item repository contains exactly one item. Its provider, resource kind,
-and stable resource ID cannot change after creation.
+V1 supports Codex and Claude skills and plugin install intent, plus Codex pet v1
+and v2. Pet versions remain separate items and UI choices.
 
-The Catalog UI groups item repositories by visibility. The group is a view. It is not
-an access container. For example:
-
-| Public | Private |
-| --- | --- |
-| `petv2_rika` | `petv1_rika321` |
-| `petv1_rena` | `skill_codex_rena` |
-| `skill_codex_rika` |  |
-
-These names are examples only. V1 does not create them automatically and does not
-require this naming pattern.
-
-### 2.2 Catalog provider matrix
-
-Catalog items use this closed matrix:
-
-| Provider | `agent_skill` | `plugin_install_intent` | `codex_pet_v1` | `codex_pet_v2` |
-| --- | --- | --- | --- | --- |
-| `codex` | Yes | Yes | Yes | Yes |
-| `claude` | Yes | Yes | No | No |
-
-The service rejects an unknown provider, an unknown resource kind, or an invalid
-provider-and-kind pair.
+The current [Catalog registry](../src-tauri/src/storage_catalog/registry.rs) defines
+serialized provider/kind/format/version coordinates. The service rejects unlisted
+coordinates. Generate shared contract fixtures from that registry and its codecs.
+Adding a registered format requires matching service validation before managed
+publication is enabled.
 
 ### 2.3 Visibility
 
@@ -150,6 +99,9 @@ provider-and-kind pair.
 | --- | --- | --- | --- |
 | Public | Current accepted snapshot | Yes | Active Admin or Member |
 | Private | No | Yes | Active Admin or Member |
+
+These access rules apply to active repositories. Pending removal and erasure use
+the restrictions in section 2.8.
 
 Visibility applies to one complete Project or one complete Catalog item. All files
 and objects in an item inherit its visibility. Other Catalog items can use a different
@@ -159,7 +111,6 @@ Anonymous public access does not include:
 
 - retained history;
 - unaccepted uploads;
-- review plans;
 - invitations;
 - membership data;
 - audit events;
@@ -177,16 +128,18 @@ Every public read checks current D1 metadata and returns `Cache-Control: no-stor
 | Read private snapshot | No | Yes | Yes |
 | Read retained history | No | Yes | Yes |
 | Publish after review | No | Yes | Yes |
-| Export retained content | No | No | Yes |
+| Leave the repository | No | Yes | Yes |
 | Invite or remove a Member | No | No | Yes |
 | Promote or demote an Admin | No | No | Yes |
-| Change name, slug, or visibility | No | No | Yes |
+| Change name or visibility | No | No | Yes |
+| Request or cancel repository removal | No | No | Yes |
 
 Rules:
 
 - `admin` and `member` are the only role values.
 - The creator becomes the first Admin.
-- Each repository keeps at least one active Admin.
+- Each active repository and each repository pending removal keeps at least one
+  active Admin.
 - An invitation grants Member access.
 - An Admin can promote an accepted Member.
 - A role applies to one complete Project or Catalog item.
@@ -213,61 +166,87 @@ account with the matching verified email, an active invitation, and an unused to
 
 ### 2.6 Visibility changes
 
-Project and Catalog item creation always starts private.
+Creation starts private. To make a repository public, an Admin reviews the complete
+accepted snapshot and submits its commit ID, manifest digest, expected repository
+revision, warning acknowledgements, and explicit public-content acknowledgement.
+The route requires recent Admin authentication. Its transaction checks these inputs
+against current state before changing visibility and recording the audit event.
 
-Changing a repository to public requires:
+Changing visibility to private increments the repository revision before returning.
+There is no shared public object cache to purge. Downloaded copies cannot be revoked.
 
-1. an accepted head;
-2. a current full disclosure review;
-3. explicit public-content acknowledgement;
-4. an expected repository revision; and
-5. recent Admin authentication.
+### 2.7 No resource removal through sync
 
-Changing a repository to private increments its revision before the API returns.
-There is no shared public object cache, so no cache purge is required.
+Project Push can add a resource or replace content for the same stable identity.
+The candidate must retain every accepted resource that it does not replace.
+Catalog Push can replace only its bound item; an empty item is invalid.
+Neither class accepts tombstones. Pull can create or update local resources, but
+cannot delete them. Removing a Member does not change content.
 
-Downloaded public copies cannot be revoked.
+Accepted history remains within a hard quota until the whole repository is removed.
+A full repository stays readable. A publication that needs more quota is rejected.
+Removal preview, request, status, and cancellation require no free content quota.
 
-### 2.7 No-removal rule
+### 2.8 Controlled repository removal
 
-A successful Project publication can add a resource or replace the content of the
-same stable resource identity. It cannot omit an accepted resource or publish a
-tombstone.
+Removal covers one complete repository: its current snapshot, history, and uploads.
+It never deletes local files, provider resources, Git checkouts, Git remotes, or
+another managed repository.
 
-A successful Catalog item publication can replace only the content of its stable
-resource identity. It cannot change the item identity, publish an empty item, or
-publish a tombstone.
+~~~text
+active -> removal_pending -> deleting -> removed
+             |
+             `-> active (private, after cancellation)
+~~~
 
-This rule applies to project conversations, project provider state, skills, plugin
-install intent, and pets.
+An Admin reads a preview containing the repository ID, display name, revision,
+current commit ID or absence, retained bytes, and cancellation terms. The request
+confirms the name and expected revision and commit ID, with an idempotency key.
+One D1 transaction checks Admin access and these values, starts the removal,
+increments the revision, makes the repository private, and revokes invitations.
+It closes upload admission and records a new removal ID, deadline, and audit event.
 
-Pull can create or update local content. Pull does not delete a local resource.
+From that commit, content reads and ordinary mutations are denied. Existing uploads
+cannot publish. Admins can use the same removal route for status or cancellation.
+Cancellation is available for seven days. It checks the expected repository
+revision, increments it, restores active private access, and invalidates the pending
+removal.
+Invitations and old uploads do not resume. Publishing public content again requires
+the visibility review in section 2.6.
 
-Removing a Member does not remove repository content.
+After the deadline, the worker atomically claims the pending removal by state and
+removal ID. Cancellation and this claim cannot both succeed. A delayed job for a
+cancelled request cannot claim a later request. Before deletion, the worker writes
+and verifies one immutable removal record outside D1, at the key in section 6.3.
+The record holds the repository ID, removal ID, authorizing Admin ID, and claim time.
+It stays outside the repository's deletion scope and prevents recovery from restoring
+access. An uncertain record write blocks erasure.
 
-Accepted publications and their objects remain retained. Repository quota is a hard
-cap. V1 rejects a new publication when accepted history consumes the quota.
+The worker finishes or aborts tracked writes, then deletes exact repository-owned
+keys in bounded, retryable batches. It verifies erasure against the object inventory.
+Uncertain writes or deletes keep the state at `deleting` and raise an alert.
+A final D1 transaction removes content metadata, releases committed usage and any
+remaining reservations once, and marks the repository `removed`. Keep minimum
+Admin authorization, removal status, and audit metadata for the existing status
+route. Repository IDs and physical keys are never reused.
 
 ## 3. Common repository protocol
 
 ### 3.1 One current head
 
-Each repository has zero or one current head. The head contains:
+Each repository has zero or one current head. Its API envelope contains the service
+repository ID and class, repository revision, publication revision, commit ID,
+manifest SHA-256 and byte length, and update time.
 
-- service repository ID;
-- repository class;
-- publication revision;
-- commit ID;
-- manifest key;
-- manifest SHA-256;
-- manifest byte length;
-- update time; and
-- opaque ETag.
+Publication compares `expected_commit_id` with the current commit ID; null means no
+head. Publication revisions increase along the immutable chain, and commit IDs
+cannot recur. `expected_repository_revision` separately protects metadata and access
+changes. The managed API needs no additional concurrency token.
 
-The first publication compares against an absent head. Each later publication
-compares against the exact ETag that the user reviewed.
-
-Only the head change accepts a publication.
+Only the committed D1 head change accepts a publication. Service identity and
+repository revision stay in the API envelope. The desktop adapter maps portable
+head fields to the class-specific engine. For `CasExpectation::Match`, it uses the
+commit ID as the comparison value.
 
 ### 3.2 Immutable history
 
@@ -277,20 +256,15 @@ Each successful publication creates:
 - one immutable manifest; and
 - one immutable commit that references the previous commit.
 
-The commit chain is linear. Active Admins and Members can read retained history.
-Anonymous users can read only the current public snapshot.
+The commit chain is linear. While the repository is active, Admins and Members can
+read retained history. Anonymous users can read only the current public snapshot.
+History is immutable until the separate whole-repository erasure operation.
 
 ### 3.3 Concurrent publication
 
-If two users review the same head:
-
-1. both plans pin the same ETag;
-2. the first valid publication changes the head;
-3. the second publication receives `head_changed`;
-4. the second publication cannot overwrite the winner; and
-5. the losing user reads the new snapshot and reviews again.
-
-The service does not combine the two publications.
+Two publications can compare against the same commit ID. The first valid transaction
+wins. The other receives `head_changed` and must read the new snapshot and obtain
+new approval. The service does not combine concurrent publications.
 
 ### 3.4 Shared storage properties
 
@@ -302,15 +276,26 @@ The shared properties are:
 - schema 1 documents;
 - UTF-8 JSON;
 - bounded fields and collections;
-- UTC RFC 3339 times;
+- integer Unix timestamps in seconds, as serialized by the Rust DTOs;
 - lowercase SHA-256 values;
 - content-addressed payloads;
 - create-only immutable writes;
-- exact byte-length checks;
-- one compare-and-swap head; and
-- non-authoritative listing tags.
+- exact byte-length checks; and
+- one compare-and-swap head.
 
-The repository class cannot change after creation.
+Use the current Rust field names, numeric types, enum encodings, optional fields,
+and canonical digest rules. Do not replace integer timestamps with strings or round
+integer values in the Worker. SHA-256 verification uses the received immutable
+bytes. Canonical content digests use the same field order and ordered collections
+as the Rust encoder.
+
+Project fixtures come from `BundleManifest`, `BundleHead`, `BundleScope`, and
+`ConversationThread` in the [Rust domain](../crates/mallard-domain/src/lib.rs).
+Catalog fixtures use `CatalogResourceEnvelope` and `PublishedResourceEntry`;
+the managed item container is defined in section 5.5.
+The desktop and service must share valid and invalid serialization fixtures. Test
+required fields, enum values, omitted values, integer boundaries, and digest
+calculation. This is one current contract, with no alternate legacy encoding.
 
 ### 3.5 Managed desktop binding
 
@@ -326,6 +311,26 @@ One local managed binding represents one service repository. It contains:
 The binding contains no R2 credential. Local scope IDs, provider-home paths, resource
 targets, and profile IDs do not enter portable content. Distinct service repositories
 use distinct local bindings.
+
+### 3.6 Managed publication boundary
+
+A dedicated desktop adapter passes publication context to the HTTPS API. Generic
+object-key operations carry immutable bytes; account policy and approval stay in
+the managed operation.
+
+After Apply validates the candidate, the upload request carries its manifest,
+selected resource identities, approved action types, approval digest, warning
+acknowledgements, and approval expiry. It also supplies the repository class,
+expected repository revision, expected commit ID, and reviewed visibility. Public
+Push includes acknowledgement of the exact complete candidate snapshot.
+The approval digest covers the manifest digest and these review fields, using the
+shared contract fixtures.
+
+The service binds those immutable inputs to one upload session and its authenticated
+actor. Its expiry cannot exceed the approval expiry. This is the server's approval
+record. The service validates content and acknowledgements; human review remains a
+desktop responsibility. Local targets, provider-home bindings, executable actions,
+backups, and receipts stay on the machine.
 
 ## 4. Git project repository contract
 
@@ -357,7 +362,7 @@ Portable project content can include:
 - selected Claude conversations;
 - supported project-scoped provider state;
 - stable portable resource identity;
-- the current Git commit ID; and
+- recorded conversation Git context; and
 - privacy-preserving publication origin.
 
 Portable project content cannot include:
@@ -375,243 +380,174 @@ Portable project content cannot include:
 
 ### 4.3 Project manifest
 
-The immutable project manifest records:
+The immutable project manifest uses the current `BundleManifest` shape:
 
-- schema version;
-- bundle ID and display name;
-- repository fingerprint;
-- publication revision;
-- bundle commit ID;
-- current Git commit ID;
-- update time;
-- publishing origin; and
-- reviewed resource scopes.
+| Field | Content |
+| --- | --- |
+| `schema_version` | Portable bundle schema 1 |
+| `revision`, `commit_id` | Publication revision and bundle commit ID |
+| `updated_at` | Integer Unix timestamp in seconds |
+| `bundle` | `bundle_id`, `display_name`, `kind`, and `repository_fingerprint` |
+| `published_by_origin` | Portable publication origin |
+| `scopes` | Map of typed sync scopes |
 
-Each scope contains bounded resource descriptors, conversation entries, file entries,
-and directory entries. Managed Cloud rejects project files and all tombstones.
+Managed Git projects require `bundle.kind = project` and a fingerprint that matches
+the service binding. The current Git commit ID is an admission input. It is not a
+new top-level manifest field. Recorded conversation Git context keeps its existing
+serialized form.
+
+Each scope has `revision`, `content_sha256`, `recipe`, `captured_with`,
+`conversations`, `resources`, `files`, `directories`, and `tombstones`. The service
+validates the canonical scope digest, recipe-to-resource identity, and references
+within the scope. Managed Cloud rejects project-file content and applies the
+retention rule in section 2.7.
+
+Conversation entries keep the current typed identity, presentation, file inventory,
+lineage and semantic digests, message count, portable tail, declared wire rules,
+provenance, and timestamps. Preserve supported child-session and sidecar references
+through the same file and conversation contracts. Do not invent a reduced cloud
+conversation DTO. Required wire fields and references must pass the same validators
+and serialization fixtures as the desktop.
 
 ### 4.4 Project Push review
 
-The desktop:
+Compare reads the managed head and manifest, discovers local resources, and compares
+local observations, accepted bases, and managed state. It shows additions, changes,
+retained items, conflicts, and warnings. It does not capture an upload package or
+build executable conversation actions. Refresh and Push comparison use manifest
+metadata without downloading conversation payloads.
 
-1. validates the Git binding and fingerprint;
-2. reads the current managed head and manifest;
-3. discovers allowed project resources;
-4. captures candidates into private temporary files;
-5. compares local, accepted-base, and managed state;
-6. shows additions, changes, retained items, conflicts, and warnings;
-7. lets the user select exact resources;
-8. pins the repository revision, visibility, head ETag, source digests, selection,
-   acknowledgements, and expiry;
-9. rechecks every pin; and
-10. publishes the reviewed result.
+The user selects resource identities and permitted actions. The review context pins
+the local binding revision, repository revision, visibility, expected commit ID,
+acknowledgements, and expiry. It remains machine-local.
 
-The proposed manifest carries forward every current resource that the user did not
-replace.
+When the user selects Apply, the desktop:
+
+1. rechecks the review context and current binding;
+2. discovers current local state and captures the selected resources;
+3. builds current typed conversation actions and proves their allowed effects;
+4. matches them to the approved resource identities and action types;
+5. blocks changed or newly warned actions that the approval does not cover;
+6. builds and validates the portable candidate manifest and object inventory;
+7. creates the upload with the approval fields from section 3.6;
+8. uploads the required immutable bytes; and
+9. publishes against the reviewed commit ID and repository revision.
+
+An item failure is reported for that item. Valid selected items can proceed. A
+failed item keeps its accepted cloud content. New warnings or a change outside the
+approved effect require another review. Public publication also requires disclosure
+approval for the exact complete candidate snapshot before upload or publication.
 
 ### 4.5 Project Pull review
 
-The desktop:
+Compare reads and verifies the authorized head and manifest, then compares managed
+content with local observations and accepted bases. It shows proposed creates,
+updates, preserved items, conflicts, warnings, and manual actions. It can verify
+payloads needed to determine whether a resource is eligible for Pull. The result is
+a review context, not a persisted executable conversation plan.
 
-1. reads the exact authorized head;
-2. verifies the manifest and selected objects;
-3. compares managed content with local content and accepted bases;
-4. shows creates, updates, preserved items, conflicts, warnings, and manual actions;
-5. lets the user approve exact actions;
-6. pins the head, manifest, target digests, selection, acknowledgements, and expiry;
-7. rechecks every pin;
-8. creates local backups where an update can overwrite content;
-9. applies with atomic replacement where supported; and
-10. records outcomes and accepted bases.
+The user selects resource identities and action types. Apply rechecks expiry,
+binding revision, repository revision, head, and manifest. It then fetches and
+verifies the selected objects, reads current local targets, and builds fresh typed
+actions. Approved selections match by resource identity and action type. An action
+that no longer matches is blocked; unrelated approved actions can proceed.
 
-Pull plans stay machine-local.
+Immediately before a local write, Apply verifies the fresh target digest and other
+action pins, creates the required backup, and uses atomic replacement where
+supported. Receipts advance accepted bases only after success. Review context,
+executable actions, backups, and receipts stay machine-local. Project conversation
+Apply does not introduce a persisted executable plan or a recovery journal.
 
 ## 5. Catalog item repository contract
 
-### 5.1 Item identity
+### 5.1 Item identity and isolation adapter
 
-One Catalog item repository contains exactly one item. The item identity is:
+The stable item identity is:
 
 ~~~text
-(provider, resource_kind, resource_id)
+(provider, resource_kind, format, format_version, resource_id)
 ~~~
 
-The tuple is portable and stable. It is different from the opaque service repository
-ID. The provider, resource kind, and resource ID cannot change after creation.
+The Catalog codec derives `resource_id` from the coordinate and canonical identity.
+The managed binding maps that item to one local provider/format scope and target.
+Local profile IDs, homes, scope IDs, storage IDs, and accepted bases stay local.
 
-Each item has one visibility value, one membership list, one current head, and one
-history. Visibility and membership do not affect other Catalog items.
+The current `LibraryResourceManifest.resources` map can contain several items.
+The managed adapter must construct an item publication from the selected resource;
+it cannot forward the Library manifest.
 
-Local Catalog profile IDs, configured homes, scope IDs, storage IDs, and accepted
-bases do not enter managed content.
+The adapter:
 
-The managed adapter maps the item to one compatible local provider-and-kind scope and
-resource target. Existing local-folder and user-owned S3/R2 Catalog protocols remain
-unchanged.
+1. resolves the selected resource ID in the exact local scope;
+2. obtains its current `CatalogResourceEnvelope` and `PublishedResourceEntry`;
+3. checks coordinate and identity against the service binding;
+4. builds the single-entry container in section 5.5; and
+5. includes only referenced payload digests, lengths, and bytes.
+
+The service independently checks this projection. It rejects sibling entries,
+foreign identities, unreferenced objects, and references outside this repository's
+verified inventory. For Pull, the adapter passes the verified envelope and payloads
+to the existing provider/format apply path. It does not replace a Library resource set.
+
+Existing local-folder and user-owned S3/R2 Catalog protocols remain unchanged.
 
 ### 5.2 Skills
 
-`agent_skill` is available for Codex and Claude.
-
-A skill resource contains:
-
-- closed skill scope;
-- effective name;
-- install-directory name;
-- canonical content digest; and
-- a bounded relative file tree that includes `SKILL.md`.
-
-The supported skill scopes are:
-
-- Codex home;
-- shared Codex user scope; and
-- Claude user scope.
-
-Skill validation rejects:
-
-- absolute or escaping paths;
-- empty and dot path segments;
-- backslashes and control characters;
-- case-folded path collisions;
-- nested Git metadata;
-- symbolic links;
-- special files;
-- unsupported file modes;
-- missing `SKILL.md`;
-- digest mismatch; and
-- size, depth, file-count, or path-length overflow.
-
-Executable skill files require an explicit warning acknowledgement.
+Use the existing [skill codec](../src-tauri/src/storage_catalog/agent_skill.rs) for
+identity, supported scopes, file validation, and limits. The package must include
+`SKILL.md` and pass bounded path, file-type, collision, and integrity checks.
+Executable files require explicit warning acknowledgement.
 
 ### 5.3 Plugin install intent
 
-`plugin_install_intent` is available for Codex and Claude.
+The [plugin-intent codec](../src-tauri/src/storage_catalog/plugin_intent.rs) defines
+portable identity, marketplace source validation, and resolution policy. Managed
+storage carries semantic installation intent. Plugin code, credentials, local
+installation state, and command strings are excluded.
 
-The resource stores semantic installation intent, not plugin code. It contains:
-
-- provider;
-- provider-native marketplace namespace;
-- canonical qualified plugin ID;
-- credential-free marketplace source when portable;
-- optional Git revision; and
-- resolution policy.
-
-The two resolution policies are:
-
-- `provider_resolved`: the desktop can use a validated provider operation; and
-- `manual_only`: the source is not portable enough for an automatic operation.
-
-The resource does not contain:
-
-- downloaded plugin files;
-- marketplace credentials;
-- API tokens;
-- local install paths;
-- observed installed version;
-- enablement state;
-- exported skills; or
-- shell commands.
-
-During Pull, the desktop derives a closed argument vector from the provider adapter.
-It never executes a command string from portable content. The desktop revalidates the
-provider, source, marketplace operation, and expected target before execution.
+Pull uses a validated provider operation when the source can be resolved safely.
+Otherwise, it returns a manual action. The execution boundary is in section 9.5.
 
 ### 5.4 Codex pets
 
-Pets are Codex-only. V1 and V2 are different resource kinds and can coexist as
-independent Catalog items.
-
-| Kind | Atlas | Grid | Cell |
-| --- | --- | --- | --- |
-| `codex_pet_v1` | 1536 x 1872 | 8 x 9 | 192 x 208 |
-| `codex_pet_v2` | 1536 x 2288 | 8 x 11 | 192 x 208 |
-
-A pet resource contains:
-
-- pet ID;
-- display name;
-- description;
-- atlas basename;
-- one PNG or WebP atlas descriptor; and
-- canonical content digest.
-
-Validation checks the exact format dimensions, safe basename, byte limit, content
-digest, object digest, and object length. V1 does not convert between pet formats.
+Use the [pet codec](../src-tauri/src/storage_catalog/codex_pet.rs) for versioned
+identity, atlas dimensions, image formats, safe basenames, byte limits, and digest
+checks. Preserve the selected format version. Managed Cloud performs no conversion.
 
 ### 5.5 Catalog item manifest
 
-The Catalog item manifest contains:
+The managed container has these fields:
 
-- schema version;
-- provider, resource kind, and stable resource ID;
-- revision and commit ID;
-- update time;
-- capturing application and version;
-- privacy-preserving publishing origin;
-- one complete resource descriptor; and
-- the immutable objects that the descriptor references.
-
-The manifest is the complete snapshot of one Catalog item. A publication replaces
-the accepted content for that same item. It cannot add a second item or change the
-item identity.
-
-The service also validates these kind-specific identity fields:
-
-| Kind | Identity fields |
+| Field | Content |
 | --- | --- |
-| Skill | Scope, effective name, install-directory name |
-| Plugin intent | Provider, namespace, qualified plugin ID |
-| Pet | Pet format and pet ID |
+| `schema_version` | Managed Catalog item schema 1 |
+| `revision`, `commit_id` | Item publication revision and commit ID |
+| `updated_at` | Integer Unix timestamp in seconds |
+| `captured_with` | Existing `CatalogCapturedWith` |
+| `published_by_origin` | Existing `PortableCatalogOrigin` |
+| `entry` | One existing `PublishedResourceEntry` |
 
-Content changes do not change these identity fields. A change to an identity field
-requires a new Catalog item repository.
+Reuse the entry and resource envelope from the
+[Catalog domain](../src-tauri/src/storage_catalog/domain.rs), with the registered
+codec's identity, descriptor, file-reference, and canonical-digest validators.
+The container adds no Library repository ID or `resources` map. The service ID
+stays in the API envelope. Publication metadata is specific to this item.
 
-A public item exposes its complete current manifest and all referenced objects. It
-does not expose a private item.
+The entry's coordinate and derived resource ID must match the binding. A change to
+identity requires a new repository. Public access exposes the complete current
+manifest and its referenced objects.
 
-### 5.6 Catalog item Push review
+### 5.6 Catalog review differences
 
-The desktop:
+Catalog uses the approval and transfer sequence in sections 4.4 and 4.5 with its
+existing typed item plans and journaled apply. Unlike project conversations, its
+inventory captures the complete package during review. Apply rechecks the exact
+resource, warnings, scope, target, and managed head before using the adapter in
+section 5.1. The review shows provider, kind, format version, identity, and effect.
 
-1. resolves the item's machine-local provider scope and resource target;
-2. reads the current managed head and manifest;
-3. inventories the exact local item;
-4. validates and captures the candidate package;
-5. compares local, accepted-base, and managed content;
-6. holds an unreviewed managed change for Pull;
-7. shows the update, conflicts, warnings, provider, kind, and resource ID;
-8. requires approval for the complete item package;
-9. pins the local scope, resource target, repository revision, visibility, head ETag,
-   package digest, acknowledgements, and expiry;
-10. rechecks every pin; and
-11. publishes by compare-and-swap.
-
-An item without a valid local mapping cannot be pushed.
-
-### 5.7 Catalog item Pull review
-
-The desktop:
-
-1. reads and verifies the complete current Catalog item;
-2. resolves its compatible local provider scope and resource target;
-3. inventories the exact local target;
-4. compares local, accepted-base, and managed content;
-5. creates one typed item action;
-6. shows the provider, kind, target, effect, conflict behavior, and warnings;
-7. pins the managed head, scope, and expected local target;
-8. requires explicit acknowledgement for destructive updates;
-9. applies the approved action through the matching provider-and-kind adapter;
-10. records the outcome; and
-11. advances the accepted base only after success.
-
-An item with no valid local scope mapping remains view-only until the user selects a
-compatible local scope.
-
-Skills and pets can preserve divergent local content as a reviewed copy before the
-managed version is applied. Plugin intent cannot be copied. A plugin conflict requires
-an explicit provider operation or a manual action.
-
-Catalog item Pull does not remove a local resource.
+An item with no compatible local scope remains view-only until the user selects one.
+Skills and pets can preserve divergent local content as a reviewed copy. Plugin
+intent cannot be copied; its conflict requires a provider operation or manual action.
 
 ## 6. Cloud architecture
 
@@ -623,111 +559,83 @@ Mallard desktop
   | HTTPS with OAuth access token
   v
 Cloudflare Worker API
-  |-- D1: identity, access, repository metadata, heads, plans, quota, audit
-  |-- R2: private immutable manifests, commits, payloads, staging, exports
+  |-- D1: identity, access, metadata, heads, uploads, quota, audit
+  |-- R2: private immutable manifests, commits, payloads, removal records
   |-- Queue and Cron: expiry, cleanup, reconciliation, notification retry
   `-- Email provider: invitation messages
 ~~~
 
-The desktop never receives:
-
-- R2 credentials;
-- D1 credentials;
-- Worker administration tokens; or
-- direct internal object keys.
-
-Every read and write passes through the Worker.
+Every read and write passes through the Worker. The desktop receives no R2 or D1
+credentials, administration tokens, or internal object keys.
 
 ### 6.2 Component ownership
 
-The Worker owns:
+The Worker owns authorization, class-specific validation, publication, read access,
+invitations, removal, quotas, bounded errors, and audit.
 
-- OAuth callbacks and session rotation;
-- repository authorization;
-- repository-class validation;
-- public discovery;
-- invitations and membership;
-- review-plan registration;
-- upload validation;
-- manifest validation;
-- head compare-and-swap;
-- history metadata;
-- quota reservation;
-- idempotency;
-- audit; and
-- bounded errors.
-
-D1 is authoritative for identity, authorization, repository metadata, current heads,
-history reachability, quotas, idempotency, and audit metadata.
-
-R2 is authoritative for immutable bytes at an exact internal key.
-
-An R2 listing never grants access and never decides the current head.
+D1 is authoritative for identity, access, metadata, heads, accepted history,
+quota counters, upload state, idempotency, and audit metadata. R2 holds immutable
+bytes at exact internal keys. An R2 listing grants no access and cannot select a head.
 
 ### 6.3 Internal R2 keys
 
 ~~~text
-repos/<service-repository-id>/objects/<sha256>
-repos/<service-repository-id>/manifests/<revision>-<commit-id>.json
-repos/<service-repository-id>/commits/<revision>-<commit-id>.json
-staging/<service-repository-id>/<upload-id>/<object-id>
-exports/<service-repository-id>/<export-id>
+repos/<repository-id>/objects/<sha256>/<upload-id>
+repos/<repository-id>/manifests/<revision>-<commit-id>.json
+repos/<repository-id>/commits/<revision>-<commit-id>.json
+removals/<repository-id>/<removal-id>.json
 ~~~
 
-The Worker constructs each key from validated identifiers. A client cannot submit a
-complete internal key.
+The Worker builds keys from validated identifiers. Clients submit logical object
+references. D1 identifies a physical payload by `(repository_id, sha256, upload_id)`.
+An upload ID is never reused. Existing verified payloads can be referenced using
+their original upload ID within the same repository. A new upload after deletion
+uses a new key, so a delayed delete cannot affect the replacement.
+
+Manifest and commit keys are also immutable and never reused after cleanup claims
+them. Unaccepted bytes use the same layout.
 
 ### 6.4 Upload and publication transaction
 
-An upload session pins:
+Publication has three steps:
 
-- service repository;
-- repository class;
-- actor;
-- repository revision;
-- expected head ETag;
-- visibility;
-- review-plan digest;
-- expected object hashes and lengths;
-- quota reservation;
-- expiry; and
-- idempotency key.
+1. **Create upload.** Submit the candidate and approval fields from section 3.6.
+   The Worker derives the required revision and previous-commit link from the
+   expected head. It validates the candidate against them and pins manifest/commit
+   digests and the exact object inventory. It reserves quota in D1 and returns an
+   upload ID, expiry, and missing-object list.
+2. **Send objects.** Use one PUT per missing payload. Register each write before
+   R2 I/O, stream with create-only semantics, and verify SHA-256 and length. Only
+   verified writes become available. `upload_objects` protects the fixed reference
+   set while the session is active.
+3. **Publish.** Revalidate the candidate and verified inventory in memory, write and
+   verify immutable manifest/commit bytes, then execute the final D1 batch.
+   No R2 I/O or content parsing occurs in the batch.
 
-The Worker streams each object, enforces exact length, computes SHA-256, and writes
-with create-only semantics. Incomplete uploads remain unreachable in staging.
+Finalization uses one D1 batch to commit publication, head, references, quota
+counters, committed upload, idempotent result, and success audit event. Guards read
+transaction-time access, lifecycle, repository revision, visibility, expected commit,
+upload expiry, immutable candidate, verified references, acknowledgements, and quota.
+Any failed guard, including a head update that matches zero rows, aborts the whole
+batch. Failure leaves accepted state and the upload's approval and reservation
+unchanged; a separate expiry operation can later release the reservation. See
+[D1 batch transaction semantics](https://developers.cloudflare.com/d1/worker-api/d1-database/).
 
-The final D1 transaction:
-
-1. reauthorizes the active Admin or Member;
-2. rechecks repository class, revision, and visibility;
-3. rechecks the expected head ETag;
-4. verifies the unused review plan;
-5. validates the class-specific manifest;
-6. proves that the new manifest omits no current resource;
-7. verifies immutable-object metadata;
-8. inserts publication metadata;
-9. advances the head by compare-and-swap;
-10. updates current and historical reachability;
-11. commits quota;
-12. consumes the plan;
-13. records idempotency; and
-14. writes audit.
-
-If compare-and-swap fails, the current head remains unchanged.
+Upload inputs cannot change after creation. Manifest and commit preparation has the
+same tracked-write and cleanup protection as payloads. A successful R2 write never
+accepts publication. Retry handling follows section 6.6; the concurrency contract
+is in section 3.3. Slice 0 selects the SQL guard or coordination implementation.
 
 ### 6.5 Read path
 
-The Worker:
+The Worker authorizes an active repository, resolves the requested publication and
+logical object reference through D1, then streams the exact R2 bytes with length and
+digest. The desktop independently verifies SHA-256 and byte length.
 
-1. resolves the service repository;
-2. authorizes active membership or current-public-snapshot access;
-3. validates the requested logical coordinate;
-4. resolves exact D1 object metadata;
-5. reads the R2 object;
-6. verifies length; and
-7. streams bytes with digest and ETag.
-
-The desktop independently verifies length and SHA-256.
+`publication_objects` maps publications to exact physical objects. Anonymous reads
+must name the current public head. Member history reads must name an accepted
+publication. An object can belong to several publications; its mere presence or
+hash cannot grant access.
 
 ### 6.6 Idempotency
 
@@ -747,36 +655,49 @@ V1 requires idempotency only for:
 - repository creation;
 - invitation creation and delivery;
 - upload-session creation;
-- publication; and
-- export creation.
+- publication;
+- repository-removal requests; and
+- removal cancellation.
 
 Compare-and-swap protects against different concurrent publications. Idempotency
 protects against a retry of the same publication.
 
+Reauthorize before returning a stored result. A committed upload remains terminal
+after its idempotency record expires. Use its immutable inputs and publication link
+to return the matching result without another quota change. Expired or failed
+uploads cannot be reactivated.
+
 ### 6.7 Quota and cleanup
 
-V1 limits:
+Limits cover repositories, accepted bytes, object counts and sizes, concurrent
+uploads, manifest and resource bounds, audit retention, and request rates.
 
-- repositories per account;
-- accepted bytes per repository and account;
-- objects per repository;
-- concurrent uploads;
-- object size;
-- manifest size;
-- project resources per manifest and exactly one resource per Catalog item manifest;
-- skill files and bytes;
-- pet atlas bytes;
-- audit retention; and
-- request rates.
+Store `reserved_bytes` on each upload and `committed_bytes` on the repository and
+charged account. Admission checks committed usage plus active reservations in one
+D1 transaction. Publication converts only newly accepted physical bytes and metadata
+to committed usage; reused objects add no charge. Expiry releases its reservation
+once. Transactional state changes and idempotency protect all counter updates.
 
-Cleanup can remove only expired staging data, expired exports, expired plans, expired
-invitations, and unreachable objects that were never accepted.
+Ordinary cleanup removes expired invitations, uncommitted expired sessions, and
+bytes never accepted by a publication. Accepted references remain protected under
+section 2.7.
 
-Cleanup cannot remove an accepted publication or an object reachable from accepted
-history.
+1. In D1, claim an exact object as `deleting` only when it has no accepted reference,
+   active upload reference, or unresolved write. Expire a session and release its
+   reservation atomically before dropping its protection. A timeout alone does not
+   prove that an R2 write ended.
+2. Publication and upload reuse must reject objects already claimed for deletion.
+   Publication checks this again within its transaction.
+3. Delete the claimed key and record the result. An uncertain result keeps the claim
+   for retry at that exact key. A replacement uses a new upload ID.
 
-Reconciliation detects missing bytes, untracked bytes, expired reservations, head
-disagreement, and tag drift.
+If publication commits first, cleanup cannot claim its objects. If cleanup claims
+first, publication cannot accept those objects. Apply the same protection to
+unaccepted manifests and commits.
+
+D1 records pending cleanup and removal work before Queue delivery. Cron resumes
+missed jobs. Reconciliation checks missing or untracked bytes, expired reservations,
+counter totals, and disagreement between heads and stored data.
 
 ## 7. D1 model
 
@@ -784,19 +705,19 @@ disagreement, and tag drift.
 
 | Table | Purpose |
 | --- | --- |
-| `users`, `identities`, `devices`, `refresh_sessions` | Accounts and sessions |
-| `repositories` | Service ID, class, name, slug, visibility, revision, featured flag |
+| `users`, `identities`, `refresh_sessions` | Accounts, charged usage, identity, and sessions; session labels supply the device list |
+| `repositories` | Service ID, class, name, visibility, revision, lifecycle, committed bytes, featured flag |
 | `project_repository_bindings` | Bundle ID and Git fingerprint |
-| `catalog_repository_bindings` | Provider, resource kind, and stable resource ID |
-| `repository_heads` | Zero or one current head per service repository |
-| `repository_publications` | Immutable linear publication history |
+| `catalog_repository_bindings` | Provider, resource kind, format, format version, and resource ID |
+| `repository_heads` | Current publication pointer |
+| `repository_publications` | Immutable linear history |
+| `publication_objects` | Publication-to-physical-object references |
 | `repository_members` | Repository Admin or Member |
 | `repository_invitations` | Email HMAC, masked label, token hash, expiry, state |
-| `review_plans` | Content model, review digest, pins, acknowledgements, expiry |
-| `objects`, `upload_sessions` | R2 metadata, reachability, and staging |
-| `quota_ledgers` | Account and repository reserved and committed use |
-| `idempotency_records` | Safe mutation replay |
-| `repository_exports` | Expiring repository exports |
+| `objects` | Physical key identity, verified digest and length, lifecycle, write and deletion status |
+| `upload_sessions`, `upload_objects` | Immutable candidate, actor, approval fields, references, reserved bytes, expiry, tracked writes |
+| `idempotency_records` | Mutation request digest and result |
+| `repository_removals` | Removal ID, confirmation, deadline, work progress, completion status |
 | `audit_events` | Sanitized security history |
 
 ### 7.2 Closed values
@@ -806,48 +727,44 @@ disagreement, and tag drift.
 | User state | `active`, `suspended` |
 | Repository class | `git_project`, `catalog` |
 | Visibility | `public`, `private` |
-| Provider | `codex`, `claude` |
-| Catalog item kind | `agent_skill`, `plugin_install_intent`, `codex_pet_v1`, `codex_pet_v2` |
+| Repository state | `active`, `removal_pending`, `deleting`, `removed` |
+| Catalog coordinate | Supported registry entries from section 2.2 |
 | Role | `admin`, `member` |
 | Membership state | `active`, `suspended`, `removed` |
 | Invitation state | `pending`, `accepted`, `revoked`, `expired` |
-| Plan state | `active`, `used`, `expired`, `revoked` |
-| Upload state | `created`, `receiving`, `ready`, `committed`, `expired`, `failed` |
-| Reachability | `current`, `historical`, `unreachable` |
+| Upload state | `created`, `receiving`, `committed`, `expired`, `failed` |
+| Object state | `writing`, `ready`, `deleting`, `deleted` |
 
-### 7.3 Required constraints
+Reachability comes from publication references. Upload protection comes from upload
+references and active session state. Unresolved writes retain protection after expiry.
 
-Enforce:
+### 7.3 Schema constraints
 
-- one identity per provider subject;
-- exactly one binding that matches each service repository class;
-- one portable bundle identity inside each project binding;
-- exact Catalog item identity match between binding and manifest;
-- valid provider-and-kind ownership for each Catalog item;
-- one current public slug;
-- one active membership per repository and user;
-- at least one active Admin per repository;
-- zero or one current head;
-- one publication revision and commit ID per repository;
-- one live object coordinate per repository;
-- non-negative quota values;
-- public discovery only for public repositories;
-- current head that references verified class-specific data;
-- a linear previous-commit chain;
-- no resource omission or tombstone;
-- no stale-head publication; and
-- no cross-class manifest acceptance.
+Use unique keys, foreign keys, and value checks for:
+
+- identity provider and subject;
+- repository binding identity and class;
+- membership by repository and user;
+- one head row per repository, referencing a publication in that repository;
+- unique publication revision and commit ID per repository, and one publication per upload;
+- physical object identity `(repository_id, sha256, upload_id)` and references within that repository;
+- one idempotent result per actor, operation, and key; and
+- closed states and non-negative quota values.
+
+Transactional policy checks remain in their owning sections.
 
 ### 7.4 Atomic operations
 
 | Operation | One transaction contains |
 | --- | --- |
-| Create project repository | Private repository, project binding, creator Admin, quota, idempotency, audit |
-| Create Catalog item repository | Private repository, item binding, creator Admin, quota, idempotency, audit |
+| Create repository | Private repository, class binding, creator Admin, quota admission, idempotency, audit |
 | Accept invitation | Membership, consumed invitation, repository revision, audit |
-| Change membership | Role or state, last-Admin proof, repository revision, audit |
-| Change visibility | Visibility, disclosure proof, repository revision, audit |
-| Publish | Membership, plan, head CAS, publication, reachability, quota, idempotency, audit |
+| Change membership | Role or state, checks from section 2.4, repository revision, audit |
+| Change visibility | Inputs from section 2.6, visibility, repository revision, audit |
+| Create or expire upload | Session, object references, reservation, idempotency where applicable |
+| Publish | Guards and effects in section 6.4 |
+| Claim cleanup | Reference and write checks in section 6.7, deletion claim |
+| Request, cancel, claim, or complete removal | Corresponding lifecycle transition and effects in section 2.8 |
 
 ## 8. Service API
 
@@ -863,12 +780,12 @@ change. Operations listed in section 6.6 also include `Idempotency-Key`.
 | `POST` | `/v1/auth/callback` | Complete one callback |
 | `POST` | `/v1/auth/refresh` | Rotate refresh token |
 | `POST` | `/v1/auth/logout` | Revoke current session |
-| `GET` | `/v1/me` | Account, devices, repositories, and limits |
+| `GET` | `/v1/me` | Account, sessions, repositories, and limits |
 | `GET` | `/v1/public/repositories` | Filtered public repository listing |
-| `GET` | `/v1/public/repositories/{slug}` | Public summary and repository class |
-| `GET` | `/v1/public/repositories/{slug}/head` | Current public head |
-| `GET` | `/v1/public/repositories/{slug}/manifest/{commit_id}` | Current public manifest |
-| `GET` | `/v1/public/repositories/{slug}/objects/{sha256}?commit_id={commit_id}` | Current public object |
+| `GET` | `/v1/public/repositories/{repository_id}` | Public summary and repository class |
+| `GET` | `/v1/public/repositories/{repository_id}/head` | Current public head |
+| `GET` | `/v1/public/repositories/{repository_id}/manifest/{commit_id}` | Current public manifest |
+| `GET` | `/v1/public/repositories/{repository_id}/objects/{sha256}?commit_id={commit_id}` | Current public object |
 
 Public listing filters can include repository class, provider, and Catalog item kind.
 The authenticated repository list can also filter by visibility. These filters create
@@ -879,17 +796,16 @@ the Public and Private Catalog views.
 | Method | Route | Purpose |
 | --- | --- | --- |
 | `GET`, `POST` | `/v1/repositories` | List memberships or create a private repository |
-| `GET`, `PATCH` | `/v1/repositories/{repository_id}` | Read or change metadata |
+| `GET`, `PATCH` | `/v1/repositories/{repository_id}` | Read metadata or change the display name |
 | `POST` | `/v1/repositories/{repository_id}/visibility` | Make public or private |
-| `POST` | `/v1/repositories/{repository_id}/exports` | Export retained content |
-| `GET` | `/v1/repositories/{repository_id}/exports/{export_id}` | Read export status |
-| `GET` | `/v1/repositories/{repository_id}/exports/{export_id}/content` | Download completed export |
 | `GET` | `/v1/repositories/{repository_id}/members` | Active and invited access |
 | `POST` | `/v1/repositories/{repository_id}/invitations` | Invite Member |
 | `POST` | `/v1/repositories/{repository_id}/invitations/{invitation_id}/revoke` | Revoke invitation |
 | `POST` | `/v1/invitations/accept` | Accept token from request body |
 | `PATCH`, `DELETE` | `/v1/repositories/{repository_id}/members/{user_id}` | Change or remove membership |
-| `POST` | `/v1/repositories/{repository_id}/leave` | Leave under the last-Admin rule |
+| `GET` | `/v1/repositories/{repository_id}/removal` | Admin removal preview or operation status |
+| `POST` | `/v1/repositories/{repository_id}/removal` | Confirm and schedule removal of the complete repository |
+| `POST` | `/v1/repositories/{repository_id}/removal/cancel` | Cancel during the recovery period |
 
 Project repository creation accepts:
 
@@ -909,15 +825,27 @@ Catalog item repository creation accepts:
   "repository_class": "catalog",
   "display_name": "Rika",
   "provider": "codex",
-  "resource_kind": "codex_pet_v2",
-  "resource_id": "petv2_rika"
+  "resource_kind": "desktop_pet",
+  "format": "openai.codex-pet",
+  "format_version": 2,
+  "resource_id": "resource-0000000000000000000000000000000000000000000000000000000000000000"
 }
 ~~~
 
-The service validates and stores the Catalog item identity. Catalog item creation is
-private even when the requested name matches a public item. Invitation acceptance
-sends the raw token in the request body. Raw invitation tokens do not enter URLs or
-logs.
+The example resource ID is illustrative. The desktop supplies the ID derived by the
+Catalog codec from the full coordinate and item identity. The service validates and
+stores that binding. Catalog item creation is private even when the requested name
+matches a public item. Invitation acceptance sends the raw token in the request body.
+Raw invitation tokens do not enter URLs or logs.
+
+Membership DELETE permits self-removal or Admin removal of another user, under
+section 2.4. It also serves the Leave action.
+
+Removal request fields are `expected_repository_revision`, `expected_commit_id`
+(null for no head), and `confirmed_display_name`. Cancellation sends the current
+repository revision. Both use `Idempotency-Key` and normal Admin authentication.
+Status uses existing Admin authorization and returns lifecycle state, cancellation
+deadline, and completion time when available. The lifecycle is defined in section 2.8.
 
 ### 8.3 Content routes
 
@@ -927,18 +855,14 @@ logs.
 | `GET` | `/v1/repositories/{repository_id}/history` | Retained history |
 | `GET` | `/v1/repositories/{repository_id}/publications/{commit_id}` | Publication metadata |
 | `GET` | `/v1/repositories/{repository_id}/manifests/{commit_id}` | Authorized manifest |
-| `POST` | `/v1/repositories/{repository_id}/push-plans` | Register class-specific Push review |
-| `POST` | `/v1/repositories/{repository_id}/disclosure-plans` | Register public disclosure review |
-| `POST` | `/v1/repositories/{repository_id}/uploads` | Start bounded upload |
-| `PUT` | `/v1/repositories/{repository_id}/uploads/{upload_id}/objects/{object_id}` | Upload expected object |
-| `POST` | `/v1/repositories/{repository_id}/uploads/{upload_id}/complete` | Verify upload |
-| `POST` | `/v1/repositories/{repository_id}/publish` | Publish by head CAS |
-| `GET` | `/v1/repositories/{repository_id}/objects/{object_id}` | Read authorized object |
+| `POST` | `/v1/repositories/{repository_id}/uploads` | Create upload with candidate and approval fields |
+| `PUT` | `/v1/repositories/{repository_id}/uploads/{upload_id}/objects/{sha256}` | Upload expected payload |
+| `POST` | `/v1/repositories/{repository_id}/publish` | Validate and publish the upload by head comparison |
+| `GET` | `/v1/repositories/{repository_id}/objects/{sha256}?commit_id={commit_id}` | Read authorized payload |
 
-The review-plan request is tagged with the repository class. The service rejects a
-tag that differs from the repository binding.
-
-Creating a plan or upload does not change the head.
+The upload body is defined in section 3.6. A Catalog request uses the projection in
+section 5.1. Publish sends the upload ID and its own `Idempotency-Key`; it cannot
+replace the candidate or approval fields. Section 6.4 defines all three steps.
 
 ### 8.4 Stable errors
 
@@ -958,12 +882,14 @@ Stable error codes are:
 - `resource_removal_not_supported`;
 - `revision_conflict`;
 - `head_changed`;
+- `repository_removal_pending`;
+- `removal_cannot_cancel`;
 - `last_admin`;
 - `invitation_invalid`;
 - `invitation_expired`;
 - `quota_exceeded`;
 - `object_integrity_failed`;
-- `plan_expired`;
+- `upload_expired`;
 - `warning_acknowledgement_required`;
 - `idempotency_mismatch`; and
 - `temporarily_unavailable`.
@@ -988,20 +914,14 @@ Tokens live only in the operating-system keychain.
 
 ### 9.2 Authorization
 
-Every private read and every write uses this order:
+Every private read and write authenticates the active account, resolves the
+repository, and checks lifecycle, membership, and required role. The applicable
+operation then validates content, revision inputs, acknowledgements, quotas, and
+rate limits. Publication repeats its guards within the D1 transaction.
 
-1. authenticate token;
-2. resolve service repository;
-3. verify active membership;
-4. verify role where Admin is required;
-5. verify repository class and content model;
-6. verify expected revision and head;
-7. verify plan and warning acknowledgements;
-8. enforce quota and rate limit; and
-9. record sanitized audit.
-
-Unauthorized private access returns the same bounded `not_found` response for a
-missing repository and a hidden repository.
+Private access returns the same bounded `not_found` response for a missing and a
+hidden repository. Removal status uses the Admin authorization from section 2.8.
+Anonymous requests cannot reveal removed repositories.
 
 ### 9.3 Plaintext content
 
@@ -1069,122 +989,57 @@ Logs, metrics, traces, errors, and audit do not contain:
 
 Use opaque IDs, request IDs, bounded error codes, byte counts, and digests.
 
-## 10. Workflows and failure behavior
+## 10. Featured examples and failure behavior
 
-### 10.1 Create Git project repository
+### 10.1 Featured examples
 
-1. The desktop validates Git root, origin, fingerprint, and current commit.
-2. The API creates a private `git_project` repository and first Admin.
-3. Project Push review selects the initial portable state.
-4. The desktop registers the plan and uploads immutable objects.
-5. Publication creates the first head by compare-and-swap against absence.
-6. The desktop stores the local managed-repository binding.
+An internal publisher creates private example repositories, publishes reviewed
+heads, completes the visibility review, and sets the featured flag. A Git project,
+skill, plugin intent, pet v1, and pet v2 can each be an independent example.
+Anonymous users can discover and Pull them. Publication requires membership.
 
-### 10.2 Create Catalog item repository
+### 10.2 Additional failure behavior
 
-1. The user selects one local skill, plugin intent, or pet.
-2. The desktop resolves its provider, resource kind, stable resource ID, and local
-   scope.
-3. The API creates one private `catalog` repository and first Admin.
-4. Catalog item Push review shows the complete initial package.
-5. The service validates the item identity and package.
-6. Publication creates the first head by compare-and-swap against absence.
-7. The desktop links that local item to the managed repository.
-
-### 10.3 Invite Member
-
-1. An Admin submits an email.
-2. The API stores email HMAC, masked label, and token hash.
-3. The email provider sends the raw token once.
-4. The recipient signs in with the matching verified email.
-5. One transaction creates Member access and consumes the invitation.
-
-The Member can read and publish reviewed snapshots of that repository.
-
-### 10.4 Publish
-
-1. The desktop reads the current head.
-2. The applicable Push review compares local and managed state.
-3. The user selects Project resources or approves one Catalog item and accepts
-   warnings.
-4. The desktop registers the plan and uploads required objects.
-5. The publication transaction rechecks access, repository revision, visibility,
-   content model, plan, objects, quota, and head ETag.
-6. Compare-and-swap advances the head.
-7. The new snapshot becomes current.
-
-For a public repository, review states that the complete resulting snapshot becomes
-public.
-
-### 10.5 Pull
-
-1. The desktop reads the authorized head.
-2. It verifies the class-specific manifest and selected objects.
-3. The applicable Pull review shows exact local actions.
-4. The user approves actions and warnings.
-5. The desktop rechecks local targets.
-6. The desktop applies through the project or Catalog item adapter.
-7. The desktop records outcomes and accepted bases.
-
-Anonymous Pull is limited to a public current snapshot.
-
-### 10.6 Featured examples
-
-An internal publisher creates example repositories as private, publishes reviewed
-initial heads, completes disclosure review, changes visibility to public, and sets the
-featured flag.
-
-V1 can feature one Git project repository and several independent Catalog item
-repositories. A skill, plugin intent, pet v1, and pet v2 example each has its own
-visibility, membership, and head.
-
-Anonymous users can discover and Pull them. Publication requires invitation.
-
-### 10.7 Failure rules
+Publication, cleanup, removal, and local review failures follow their owning
+sections. These additional cases define the remaining user or operator action:
 
 | Failure | Result |
 | --- | --- |
-| OAuth validation fails | No session |
-| D1 fails before commit | Retryable error; no state change |
-| R2 succeeds but publication fails | Unaccepted immutable data; later cleanup |
-| Publication succeeds but response is lost | Idempotent retry returns the recorded result |
-| Repository revision changed | No publication; fresh review |
-| Head ETag changed | `head_changed`; winner remains |
-| Repository class or Catalog item identity differs | Reject before publication |
-| Proposed manifest omits an accepted resource | `resource_removal_not_supported` |
-| Object digest or length differs | No publication |
 | Invitation delivery fails | Revoke the undelivered token |
-| Queue job runs twice | No duplicate change |
+| Queue job runs twice | Resume the recorded operation without repeating its committed effects |
 | Public head changes during anonymous Pull | Restart from the current head |
-| Visibility becomes private during public read | Deny the later object read |
-| Local target changes after Pull review | Block the affected action |
-| Provider plugin action cannot be derived | Manual action; no execution |
-| Receipt fails after local apply | Report reconciliation; do not repeat an unsafe action |
-
-No failure can publish private data, overwrite a changed head, mix repository classes,
-apply an unreviewed local action, or delete a resource.
+| Visibility becomes private during public read | Deny later object reads |
+| Local receipt fails after Apply | Report reconciliation; do not repeat an unsafe action |
 
 ## 11. Operations and UX
 
 ### 11.1 Retention
 
+Accepted-content retention and cancellation follow sections 2.7 and 2.8. Other
+defaults are:
+
 | Data | Default |
 | --- | --- |
 | Pending invitation | 7 days |
-| Upload staging | 24 hours |
-| Unaccepted objects | 7 days |
-| Export | 24 hours |
+| Upload session | At most 24 hours, bounded by approval expiry |
+| Unaccepted bytes | Eligible for cleanup 7 days after the session ends, subject to section 6.7 |
 | Idempotency record | 24 hours |
 | Sanitized audit | 365 days |
-| Accepted publications | Retained within hard repository quota |
+| Recovery copies | Expire within 30 days after verified erasure |
+
+The removal record outside D1 remains available until recovery copies expire.
+Backup retention is an operator policy; the desktop shows repository lifecycle and
+cancellation status. An erasure deadline permits work to start and does not promise
+that failed work is complete.
 
 ### 11.2 Audit and monitoring
 
 Audit records opaque actor and target IDs, repository class, repository ID, action,
 result, bounded reason, request ID, build ID, and time.
 
-Audit covers identity, invitations, roles, visibility, review plans, publication,
-conflicts, integrity, quotas, public disclosure, and export.
+Audit covers identity, invitations, roles, visibility, publication,
+conflicts, integrity, quotas, public disclosure, removal requests,
+cancellation, erasure progress, and completion.
 
 Monitor:
 
@@ -1200,7 +1055,8 @@ Monitor:
 - reconciliation.
 
 Alert on private-resource probing, token reuse, integrity failure, invalid quota
-state, missing current objects, unauthorized public reads, and dead-letter growth.
+state, missing current objects, unauthorized public reads, dead-letter growth, and
+stalled erasure or unresolved object operations.
 
 ### 11.3 Backup and service recovery
 
@@ -1211,13 +1067,17 @@ Production requires:
 - deployment-configuration backup;
 - signing-key rotation;
 - dead-letter replay;
-- repository export;
 - D1-to-R2 reconciliation;
 - isolated recovery tests; and
 - a disaster-recovery exercise.
 
 A recovered head remains unavailable until all referenced objects pass coordinate,
 length, and digest checks.
+
+Before opening a recovered database to traffic, apply the removal records retained
+outside that restore. Removed repositories stay inaccessible and their residual
+content is erased again. Recovery tests must cover a database restored to a point
+before a removal request or quota release.
 
 ### 11.4 Desktop navigation
 
@@ -1228,7 +1088,7 @@ The managed-cloud UI contains:
 - **Invitations**;
 - **History**;
 - **Activity**; and
-- account and device settings.
+- account and session settings.
 
 Projects and Catalog each contain **Public** and **Private** sections. The Public
 section contains public repositories. The Private section contains only private
@@ -1236,52 +1096,37 @@ repositories for which the signed-in user is an active Admin or Member. It never
 lists another user's private repository.
 
 Each Catalog row is one item and one access boundary. It shows name, provider,
-resource kind, visibility, and the signed-in user's role when applicable. Names such
-as `petv2_rika` and `skill_codex_rena` are examples, not required formats.
+resource kind, visibility, and the signed-in user's role when applicable.
 
 An active Admin or Member sees **Review and push**, **Review and pull**, and
 **History**.
 
 ### 11.5 Repository settings
 
-Admins can manage name, visibility, public slug, Members, invitations, quota, audit
-summary, and export.
+Admins can manage name, visibility, Members, invitations, quota, audit summary,
+and whole-repository removal. The removal view shows the repository, current
+revision, retained bytes, cancellation deadline, and erasure state.
+It offers cancellation only during the recovery period.
 
-The repository class, project identity, and Catalog item provider, resource kind, and
-resource ID are read-only after creation.
+The repository class, project identity, and Catalog item provider, resource kind,
+format, format version, and resource ID are read-only after creation.
 
 Members can view repository identity, visibility, current head, history, and active
 members.
 
-### 11.6 Required messages
+### 11.6 Required disclosure
 
-For a non-Git project:
-
-> Managed Cloud V1 supports Git projects only.
-
-For an unsupported provider-and-kind pair:
-
-> This provider does not support that Catalog resource type.
-
-For a head conflict:
-
-> The repository changed after your review. Pull the current snapshot and review your
-> changes again.
-
-For attempted resource removal:
-
-> Managed Cloud V1 cannot remove an accepted resource. The current resource remains.
-
-Before first managed publication:
+Before first managed publication, state:
 
 - Mallard stores the selected content in the managed service.
 - Mallard does not end-to-end encrypt the content.
 - Controlled service operators can access stored content.
 - Credentials and complete provider homes must not be selected.
-- Public repository content can be read by anyone.
+- Anyone can read public repository content.
 
-Plugin disclosure also states that the cloud stores installation intent, not plugin
-code, and that the desktop can run a reviewed provider operation during Pull.
+Plugin disclosure states that the service stores installation intent and that the
+desktop can run a reviewed provider operation during Pull. Removal confirmation
+uses the repository and cancellation terms from section 2.8.
 
 ## 12. Delivery and verification
 
@@ -1289,80 +1134,65 @@ code, and that the desktop can run a reviewed provider operation during Pull.
 
 **Slice 0: Common contracts**
 
-Deliver repository classes, shared head and object protocol, managed adapter, local
-binding, keychain tokens, closed validators, review-plan digesting, and deterministic
-service contract tests.
+Deliver current Rust serialization fixtures, head and object protocol, managed
+publication adapter, local binding, keychain tokens, validators, approval digesting,
+and deterministic service contract tests. Prove publication and cleanup with
+synthetic data before adding user publication.
+
+Implementation note: select and test the simplest guard mechanism for section 6.4.
+SQL validation can use aborting triggers; a Durable Object per repository can
+coordinate mutations if it reduces complexity. Neither option may rely on a check
+after commit. Coordination must cover all competing repository operations, and D1
+must still protect shared account quotas and current authorization. Keep the SQL
+statement order and any trigger definitions with the Slice 0 implementation. See
+[Durable Object state](https://developers.cloudflare.com/durable-objects/reference/in-memory-state/).
 
 **Slice 1: Public Git project read**
 
-Deliver Worker, D1, private R2, project repository creation by an internal publisher,
-public listing, current-snapshot read, project Pull review, and public limits.
+Deliver Worker, D1, private R2, project creation by an internal publisher, public
+listing, current-snapshot read, project Pull review, and public limits.
 
 **Slice 2: Identity and private Git project publication**
 
-Deliver OAuth, devices, rotating sessions, private creation, first Admin, project
-Push, uploads, head compare-and-swap, history, quotas, and idempotency.
+Deliver OAuth, rotating sessions with labels, private creation, first Admin, project
+Push, uploads, publication, history, quotas, and idempotency.
 
 **Slice 3: Skills**
 
-Deliver one-resource Catalog item creation, independent visibility and access, closed
-provider-and-kind validation, Codex and Claude skill capture, public and private skill
-Push and Pull, disclosure, and tests.
+Deliver the Catalog isolation adapter, item creation, independent access, Codex and
+Claude skill capture, public and private Push and Pull, and disclosure.
 
 **Slice 4: Plugin install intent**
 
-Add plugin items to the same one-resource model. Deliver portable intent validation,
-marketplace-source validation, provider-derived Pull actions, manual-only outcomes,
-public disclosure, and tests.
+Add validated plugin items and provider-derived Pull actions, including manual
+outcomes and public disclosure.
 
 **Slice 5: Codex pets**
 
-Add pet items to the same one-resource model. Deliver v1 and v2 validation, atlas
-object handling, preview metadata, Push and Pull, public disclosure, and tests.
+Add v1 and v2 items, atlas handling, previews, Push and Pull, and public disclosure.
 
 **Slice 6: Collaboration and operations**
 
-Deliver invitations, role changes, last-Admin guard, Member publication, visibility
-changes, featured examples, export, queues, reconciliation, metrics, alerts, backup,
-and runbooks.
+Deliver invitations, role changes, Member publication, visibility changes, featured
+examples, repository removal, queues, reconciliation, monitoring, backup, and runbooks.
 
-Each slice must work end to end before the next slice starts.
+Each slice must work end to end and pass its relevant tests before the next starts.
 
 ### 12.2 Test groups
 
-Test:
-
-- repository-class immutability;
-- Git-only project admission and fingerprinting;
-- closed Catalog provider-and-kind matrix;
-- exactly one resource in each Catalog item repository;
-- stable Catalog item provider, kind, and resource ID;
-- independent visibility, membership, head, and history for two Catalog items;
-- correct Public and Private Catalog grouping;
-- skill path, file, digest, size, and executable-warning boundaries;
-- plugin-intent source, namespace, ID, and provider-action boundaries;
-- pet v1 and v2 format, size, dimension, and digest boundaries;
-- visibility, roles, invitations, and last Admin;
-- absence of repository-removal routes and states;
-- rejection of resource omission and tombstones;
-- zero-or-one head invariant;
-- first publication and later compare-and-swap;
-- two concurrent publications with one winner;
-- linear immutable history;
-- object length, digest, and create-only writes;
-- cross-repository, cross-class, and cross-kind probing;
-- historical public probing;
-- review-plan expiry and reuse;
-- idempotent creation, invitation, upload, publication, and export;
-- OAuth, refresh rotation, device revocation, and invitation replay;
-- access for anonymous, non-member, Member, and Admin;
-- project Push and Pull review;
-- Catalog item Push and Pull review;
-- skill and pet preservation-copy behavior;
-- plugin manual-only and provider-resolved behavior;
-- public disclosure for every repository class and resource kind;
-- partial D1, R2, queue, local apply, provider action, and receipt failures; and
-- backup, recovery, export, and reconciliation.
+| Contract | Verification |
+| --- | --- |
+| Identity and access (sections 2.3-2.6, 9.1-9.2) | Anonymous, non-member, Member, and Admin cases; session rotation and revocation; invitation replay; concurrent Admin changes |
+| Retention and removal (sections 2.7-2.8) | Full quota; cancellation versus claim; delayed cancelled jobs; partial erasure; repeated completion; restore from before request and quota release |
+| Portable contracts (sections 3.4, 4.1-4.3, 5.2-5.5) | Generated valid and invalid fixtures; integer boundaries; canonical digests; codec limits; class and identity mismatch |
+| Project review (sections 4.4-4.5) | Compare performs no upload capture or executable conversation planning; Apply checks fresh actions, approved effects, target drift, and per-item failures |
+| Catalog projection and review (sections 5.1, 5.6) | Place public and private items in one local Library; verify the exact transmitted item and payload set; exercise local scope and warning drift |
+| Publication (sections 3.3, 6.4) | First-head race, two writers, zero-row head update, and injected failures across the transaction; compare all persistent effects before and after failure |
+| Reads (section 6.5) | Cross-repository and historical public probes; truncated or corrupt objects; visibility and head changes during Pull |
+| Retries (section 6.6) | Lost responses and concurrent retries; same key with changed body; terminal uploads after idempotency-record expiry |
+| Cleanup and quota (section 6.7) | Both race orderings; delayed delete after re-upload with a new upload ID; unresolved writes; concurrent account reservations; repeated expiry |
+| Local execution (sections 4.5, 5.6, 9.5, 10.2) | Skill and pet copy preservation; provider/manual plugin outcomes; partial apply and receipt failures |
+| Operations (sections 11.1-11.3) | Queue replay, reconciliation, stalled erasure alerts, and isolated backup/recovery exercise |
 
 Run:
 
@@ -1376,71 +1206,14 @@ Run:
 Use development, staging with synthetic data, internal featured examples, invited
 private beta, production readiness review, and general release.
 
-Do not add compatibility for an undeployed cloud design.
+External private beta requires working repository removal and passing erasure,
+quota-release, and recovery tests. Do not add compatibility for an undeployed design.
 
-## 13. Production acceptance and future work
+## 13. Production acceptance
 
-### 13.1 Production acceptance
-
-V1 is ready when:
-
-- A managed Project or Catalog item is the only access boundary.
-- Repository class is `git_project` or `catalog` and cannot change.
-- Git project creation rejects a project that is not Git-managed.
-- Git source does not enter managed content.
-- Catalog supports the closed provider-and-kind matrix.
-- Each Catalog item repository contains exactly one item.
-- Each Catalog item has its own public or private visibility.
-- The Public and Private Catalog sections are views, not access containers.
-- Skills, plugin intent, and pet packages pass their closed validators.
-- Plugin code and credentials do not enter portable intent.
-- Each repository is public or private.
-- Public and private repositories can invite Members.
-- Admin and Member are the only roles.
-- One active Admin always remains.
-- Each repository has zero or one current head.
-- Anonymous users can read only a public current snapshot.
-- Private content requires active membership.
-- Any active Admin or Member can publish after the applicable review.
-- Concurrent publication has one compare-and-swap winner.
-- A stale publication cannot overwrite the current head.
-- A publication cannot omit or tombstone an accepted resource.
-- Pull cannot delete a local resource.
-- The product has no repository-removal action.
-- Managed content has no client-side or end-to-end encryption.
-- Tokens stay out of normal JSON and logs.
-- R2 is private and every read is authorized by the Worker.
-- Immutable data passes exact length and SHA-256 checks.
-- Project and Catalog item Push and Pull remain reviewed.
-- Queue, reconciliation, and recovery exercises pass.
-- Existing local-folder and user-owned S3/R2 behavior remains unchanged.
-
-### 13.2 Future work
-
-Future releases can consider:
-
-- multi-item Catalog collections;
-- shared visibility or access across repositories;
-- multiple managed heads;
-- content approval;
-- additional roles;
-- non-Git projects;
-- ordinary project-file cloud sync;
-- additional Catalog providers and resource kinds;
-- Claude pets;
-- pet format conversion;
-- controlled resource and repository removal;
-- Git-host write integration;
-- web write clients;
-- billing;
-- public search and caching;
-- direct uploads;
-- cross-repository deduplication;
-- regional scaling; and
-- client-controlled content encryption.
-
-Future features require a new reviewed product and schema design. V1 contains no
-dormant service fields for them.
+Release requires completed delivery slices, passing verification in section 12.2,
+and the rollout gate in section 12.3. Operations must have working alerts and a
+tested recovery runbook from section 11. Record release evidence against these sections.
 
 ## Implementation references
 

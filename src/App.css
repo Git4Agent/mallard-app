@@ -7281,6 +7281,13 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --session-detail-amber: color-mix(in srgb, var(--yellow) 52%, var(--text-0));
   --session-detail-link: color-mix(in srgb, var(--blue) 72%, var(--text-0));
   --session-detail-you: color-mix(in srgb, var(--red) 75%, var(--text-0));
+  /* The agent ink is the tool column's `other` purple — a delegation is the
+     one call that is not a file, a shell, or a read — and its edge is the
+     step note's. A live run prints in green mixed the same way, for the same
+     reason: --green alone measures 3.6:1 on the row paper. */
+  --session-detail-agent: color-mix(in srgb, var(--purple) 85%, var(--text-0));
+  --session-detail-agent-edge: color-mix(in srgb, var(--purple) 60%, var(--accent));
+  --session-detail-live: color-mix(in srgb, var(--green) 58%, var(--text-0));
 }
 
 /* SVG marks never shrink. A fractional width breaks their whole-cell grid. */
@@ -7503,33 +7510,18 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   background: var(--border);
 }
 
-/* ---- the rail ---------------------------------------------------------- */
+/* ---- the event list ---------------------------------------------------- */
 
-/* One 2px stroke down each day, drawn behind the tiles — the same weight the
-   Activity rail carries. Left 11px centres it under the 24px node column.
-   Scoped to the list, so day dividers break it naturally and empty or error
-   states never draw a rail with nothing on it. */
+/* No stroke joins the tiles: the 24px node column alone carries the order,
+   and the gap chips between events say how long each wait was. */
 .session-detail-event-list {
-  position: relative;
   min-width: 0;
   display: grid;
   gap: 0;
   list-style: none;
 }
 
-.session-detail-event-list::before {
-  content: "";
-  position: absolute;
-  top: 6px;
-  bottom: 6px;
-  left: 11px;
-  width: 2px;
-  border-radius: 1px;
-  background: var(--border-mid);
-}
-
 .session-detail-event-list > li {
-  position: relative;
   min-width: 0;
 }
 
@@ -7542,8 +7534,8 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   margin-top: 4px;
 }
 
-/* The wait before this turn, sitting on the rail between the two events it
-   separates. Four idle minutes while an agent retried are part of what
+/* The wait before this turn, sitting in the node column between the two
+   events it separates. Four idle minutes while an agent retried are part of what
    happened. Ticks never carry one: a wait before a call reads as the call's
    own runtime. */
 .session-detail-event-gap {
@@ -7554,8 +7546,6 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 }
 
 .session-detail-event-gap > span {
-  position: relative;
-  z-index: 1;
   padding: 1px 5px;
   border: 1px solid var(--border-mid);
   border-radius: var(--r-pill);
@@ -7567,7 +7557,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 
 /* ---- one event --------------------------------------------------------- */
 
-/* Two columns: the rail node, then the body. The tile identifies the speaker
+/* Two columns: the speaker node, then the body. The tile identifies the speaker
    with name · clock, and the divider above states the date once. */
 .session-detail-event {
   min-width: 0;
@@ -7585,11 +7575,9 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 }
 
 /* A 24px punchcard tile in the box grammar's own ink: a whole cell for the
-   12px glyph inside, and wide enough to cover the rail behind it. The tile is
-   the only thing that names the speaker — the cards carry no mark. */
+   12px glyph inside. The tile is the only thing that names the speaker — the
+   cards carry no mark. */
 .session-detail-event-node {
-  position: relative;
-  z-index: 1;
   width: 24px;
   height: 24px;
   display: grid;
@@ -7612,12 +7600,10 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   font-size: var(--type-2xs);
 }
 
-/* One punch per call: a hollow 9px square on the rail. Failures fill in the
-   failure colour, so a bad call is findable from the rail alone before any
-   row is read. */
+/* One punch per call: a hollow 9px square in the node column. Failures fill
+   in the failure colour, so a bad call is findable from the column alone
+   before any row is read. */
 .session-detail-event-tick {
-  position: relative;
-  z-index: 1;
   width: 9px;
   height: 9px;
   /* Centered on the 30px row's first line. */
@@ -7664,8 +7650,8 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 }
 
 /* Both speakers write in the same card: an ink box on the punchcard's 8px
-   corner, whose only chrome is the stamp band. Who is talking is the rail
-   tile's job, so the card carries no name or mark. Every box on the rail
+   corner, whose only chrome is the stamp band. Who is talking is the node
+   tile's job, so the card carries no name or mark. Every box in the column
    runs to the content's right edge, flush with the SHOW bar above. */
 .session-detail-card {
   overflow: hidden;
@@ -7699,7 +7685,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 }
 
 /* A step — the agent narrating its work between calls — is a note, not an
-   answer: the same ink box as everything else on the rail, but no stamp band,
+   answer: the same ink box as everything else in the column, but no stamp band,
    a subtler fill, one size under the reply prose, and its purple kept as a
    thick left edge so the kind is still readable at a glance. */
 .session-detail-intermediate-prose {
@@ -8083,6 +8069,174 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   display: grid;
   gap: 8px;
   padding: 6px 0 4px;
+}
+
+/* ---- agent rows -------------------------------------------------------- */
+
+/* A delegation is a speaker being created, not a shell command: it takes a
+   24px tile in the node column, worn in the agent ink, and a tool-grammar
+   row — AGENT stamp · label · role · length — that opens like any other. The
+   tile takes the failure or amber colour with the run, so a refused or
+   cut-off agent is findable from the column alone. */
+.event-agent-call .session-detail-event-node {
+  border-color: var(--session-detail-agent-edge);
+  color: var(--session-detail-agent);
+}
+
+.event-agent-call.agent-failed .session-detail-event-node {
+  border-color: var(--danger-text);
+  color: var(--danger-text);
+}
+
+.event-agent-call.agent-interrupted .session-detail-event-node,
+.event-agent-call.agent-incomplete .session-detail-event-node,
+.event-agent-call.agent-unavailable .session-detail-event-node {
+  border-color: var(--session-detail-amber);
+  color: var(--session-detail-amber);
+}
+
+/* Between the tight punch runs and the cards: an agent row is a speaker. */
+.session-detail-event-list > li.session-detail-row-agent + li,
+.session-detail-event-list > li + li.session-detail-row-agent {
+  margin-top: 8px;
+}
+
+.session-detail-agent > summary {
+  min-height: 34px;
+}
+
+.session-detail-agent-stamp {
+  color: var(--session-detail-agent);
+}
+
+/* The task, in the body face: it is the row's name, where a tool row's
+   command is an identifier. */
+.session-detail-agent-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-0);
+  font-size: var(--type-md);
+  font-weight: var(--weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Codex's task path — the slug the agent was spawned under — beside the
+   nickname, in the identifier face. */
+.session-detail-agent-task {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-detail-agent-pill {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 1px 6px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--r-pill);
+  color: var(--text-1);
+  font-size: var(--type-3xs);
+  white-space: nowrap;
+}
+
+/* Background runs are dashed: the parent did not wait for this one. */
+.session-detail-agent-pill.mode {
+  border-style: dashed;
+  color: var(--text-2);
+}
+
+.session-detail-agent-meta {
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Printed only when the run is not simply done, on the tool status's shape:
+   danger for a failure, amber for a run cut short or a transcript that is not
+   there, green for one still writing. */
+.session-detail-agent-status {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--danger-text);
+  border-radius: var(--r-pill);
+  color: var(--danger-text);
+  font-size: var(--type-3xs);
+  white-space: nowrap;
+}
+
+.session-detail-agent-status.status-interrupted,
+.session-detail-agent-status.status-incomplete,
+.session-detail-agent-status.status-unavailable {
+  border-color: var(--session-detail-amber);
+  color: var(--session-detail-amber);
+}
+
+.session-detail-agent-status.status-running {
+  border-color: var(--session-detail-live);
+  color: var(--session-detail-live);
+}
+
+/* The facts the row could not hold, one chip each, above the brief. */
+.session-detail-agent-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.session-detail-agent-facts > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.session-detail-agent-facts > span > svg {
+  color: var(--text-3);
+}
+
+/* Where a text would be: what the run proves instead, in a sentence. */
+.session-detail-agent-note {
+  color: var(--text-2);
+  font-size: var(--type-xs);
+  font-style: italic;
+}
+
+.session-detail-agent-verbs {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.session-detail-agent-open {
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  font-size: var(--type-xs);
 }
 
 /* ---- payload pane ------------------------------------------------------ */
@@ -11378,3 +11532,8 @@ summary {
     animation: none;
   }
 }
+
+.sync-child-omission { position: relative; display: inline-flex; color: var(--text-2); }
+.sync-child-omission-tooltip { display: none; position: absolute; z-index: 20; right: 0; bottom: calc(100% + 6px); width: 260px; padding: 8px 10px; border-radius: 6px; background: var(--surface-card); color: var(--text-1); box-shadow: 0 2px 12px #0003; font-size: 12px; font-weight: normal; }
+.sync-child-omission:hover .sync-child-omission-tooltip,
+.sync-child-omission:focus .sync-child-omission-tooltip { display: block; }

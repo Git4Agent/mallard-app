@@ -22,11 +22,11 @@ use std::time::{Duration, Instant};
 use crate::app_settings::conversation_file_limit_bytes;
 use crate::codex_history_graph::{ResolvedCodexRoot, ResolvedSegment};
 use crate::codex_paginated_projection::project_with_sources;
-use crate::codex_paginated_projection::{
-    complete_paginated_item_projection, verify_projection_fixpoint,
-};
+use crate::codex_paginated_projection::verify_projection_fixpoint;
 use crate::codex_rollout::{session_meta_id, structural_record_type};
-use crate::conversation_codec::{analyze_codex_transcript, CodecLineage};
+use crate::conversation_codec::{
+    analyze_codex_records, parsed_records, CodecLineage, CodexTranscriptAnalysis,
+};
 use crate::credential_redaction;
 use crate::jsonl_tail_io::read_bounded;
 use crate::payload::PayloadBytes;
@@ -163,6 +163,7 @@ fn encode_codex_root_with_reader(
         layout,
         redactor,
         origins,
+        &std::collections::BTreeMap::new(),
         read_segment,
     )?;
     Ok(StandaloneConversationArtifact {
@@ -206,31 +207,81 @@ pub fn decode_standalone_codex_root(
         layout,
         &mut redaction,
         &PathOrigins::default(),
+        &std::collections::BTreeMap::new(),
         &|segment| read_bounded(&segment.path).map(Cow::Owned),
     )
 }
 
-pub(crate) fn decode_standalone_codex_bytes(
+/// Encode one member of the selected tree from its captured sources.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_codex_tree_member(
+    resolved: &ResolvedCodexRoot,
+    sources: &crate::codex_history_graph::CodexSourceSnapshots,
+    root: &str,
+    canonical_root: Option<&str>,
+    layout: Option<&mallard_domain::RootTailLayout>,
+    redactor: &mut credential_redaction::RedactionRun<'_>,
+    origins: &PathOrigins,
+    identities: &std::collections::BTreeMap<String, String>,
+) -> Result<StandaloneConversationArtifact<credential_redaction::RedactedWireBytes>, String> {
+    let artifact = reconstruct_codex_root(
+        resolved,
+        BuildMode::Encode {
+            root,
+            canonical_root,
+        },
+        layout,
+        redactor,
+        origins,
+        identities,
+        &|segment| {
+            sources
+                .get(&segment.path)
+                .map(|(bytes, _)| Cow::Borrowed(bytes.as_bytes()))
+                .ok_or_else(|| "tree source was not captured".into())
+        },
+    )?;
+    Ok(StandaloneConversationArtifact {
+        root_bytes: credential_redaction::RedactedWireBytes::from_verified_payload(
+            artifact.root_bytes,
+        ),
+        root_provider_thread_id: artifact.root_provider_thread_id,
+        path_origins: artifact.path_origins,
+        portable_tail: artifact.portable_tail,
+        prefix_witness: artifact.prefix_witness,
+        message_count: artifact.message_count,
+        last_canonical_message_id: artifact.last_canonical_message_id,
+        last_synthetic_turn_id: artifact.last_synthetic_turn_id,
+        next_synthetic_turn_ordinal: artifact.next_synthetic_turn_ordinal,
+        lineage_digest: artifact.lineage_digest,
+        semantic_digest: artifact.semantic_digest,
+        artifact_sha256: artifact.artifact_sha256,
+        verification: artifact.verification,
+        output_verification_elapsed: artifact.output_verification_elapsed,
+    })
+}
+
+pub fn decode_codex_tree_member(
     resolved: &ResolvedCodexRoot,
     bytes: &[u8],
-    root_provider_thread_id: &str,
-    target_root: &str,
-    canonical_target_root: Option<&str>,
+    destination: &str,
+    root: &str,
+    canonical_root: Option<&str>,
     layout: &mallard_domain::RootTailLayout,
+    identities: &std::collections::BTreeMap<String, String>,
+    redaction: &mut credential_redaction::RedactionRun<'_>,
 ) -> Result<StandaloneConversationArtifact<PayloadBytes>, String> {
-    if resolved.segments.len() != 1 || resolved.leaf_file_size != bytes.len() as u64 {
-        return Err("wire bytes do not match their standalone resolution".to_string());
-    }
     reconstruct_codex_root(
         resolved,
         BuildMode::Decode {
-            root_provider_thread_id,
-            target_root,
-            canonical_target_root,
+            root_provider_thread_id: destination,
+            target_root: root,
+            canonical_target_root: canonical_root,
         },
         Some(layout),
-        &mut credential_redaction::shared().begin_run(),
+        redaction,
         &PathOrigins::default(),
+        identities,
         &|_| Ok(Cow::Borrowed(bytes)),
     )
 }
@@ -243,10 +294,11 @@ fn reconstruct_codex_root(
     layout: Option<&mallard_domain::RootTailLayout>,
     redactor: &mut credential_redaction::RedactionRun<'_>,
     previous_origins: &PathOrigins,
+    identities: &std::collections::BTreeMap<String, String>,
     read_segment: &SegmentReader<'_>,
 ) -> Result<StandaloneConversationArtifact<PayloadBytes>, String> {
     let home = std::env::var("HOME").ok();
-    let (output_root_id, mapper, encode_mode) = match mode {
+    let (mut output_root_id, mapper, encode_mode) = match mode {
         BuildMode::Encode {
             root,
             canonical_root,
@@ -266,10 +318,15 @@ fn reconstruct_codex_root(
         ),
     };
 
+    if encode_mode {
+        if let Some(mapped) = identities.get(&resolved.leaf_meta.id) {
+            output_root_id = mapped.clone();
+        }
+    }
     // Transform each physical source record before folding metadata. This
     // preserves exact record ownership through metadata updates and forks.
     let mut path_origins = PathOrigins::default();
-    let (mut authoritative, original) = read_source_records(
+    let (mut authoritative, mut original) = read_source_records(
         resolved,
         read_segment,
         &mapper,
@@ -289,29 +346,43 @@ fn reconstruct_codex_root(
         validate_path_map_marker(&marker)?;
         rewrite_meta_record(&mut authoritative, &output_root_id)?;
     }
+    let child_boundary = if resolved.leaf_meta.is_internal_subagent {
+        let boundary = authoritative["payload"]["subagent_history_start_ordinal"]
+            .as_u64()
+            .ok_or("child has no native history boundary")?;
+        Some(boundary)
+    } else {
+        None
+    };
+    crate::codex_subagents::rewrite_references(&mut authoritative, identities);
     let mut output = Vec::new();
+    let mut output_boundary = None;
+    let mut output_head = authoritative.clone();
     if encode_mode {
         // Classify redundant display records in the native source form.
         // Path mapping must not precede HTML decoding or URI projection.
         let native = project_with_sources(
-            original.iter().map(|record| record.local.clone()).collect(),
+            original.iter().map(|record| &record.local),
             &output_root_id,
             &mut |_| Ok(()),
-        )?;
+        )?
+        .into_iter()
+        .map(|record| (record.source_index, record.derived))
+        .collect::<Vec<_>>();
         // Retain the redaction gate for secrets exposed by display decoding.
         // Generated wire projections are proof inputs, never published.
-        complete_paginated_item_projection(
-            original.iter().map(|record| record.wire.clone()).collect(),
+        project_with_sources(
+            original.iter().map(|record| &record.wire),
             &output_root_id,
             &mut |record| redactor.verify_wire_value(record),
         )?;
-        let mut ordinal = append_output_record(&mut output, authoritative, 0)?;
-        for projected in native {
-            let Some(index) = projected.source_index else {
+        let mut ordinal = 1;
+        for (source_index, derived) in native {
+            let Some(index) = source_index else {
                 continue;
             };
-            let source = &original[index];
-            if projected.derived && !source.covered {
+            let source = &mut original[index];
+            if derived && !source.covered {
                 path_origins
                     .sources
                     .get_mut(source.source)
@@ -319,34 +390,53 @@ fn reconstruct_codex_root(
                     .derived = true;
                 continue;
             }
-            let mut wire = source.wire.clone();
+            if child_boundary.is_some_and(|boundary| source.native_ordinal >= boundary)
+                && output_boundary.is_none()
+            {
+                output_boundary = Some(ordinal);
+            }
+            let mut wire = std::mem::take(&mut source.wire);
+            crate::codex_subagents::rewrite_references(&mut wire, identities);
             normalize_item_identity(&mut wire, &output_root_id);
             mapper.verify_wire_record(&wire)?;
             ordinal = append_output_record(&mut output, wire, ordinal)?;
         }
+        output_boundary.get_or_insert(ordinal);
     } else {
         authoritative
             .as_object_mut()
             .ok_or("metadata is not an object")?
             .insert("ordinal".into(), Value::from(0));
         let head = mapper.decode_record_with_origins(&authoritative)?;
-        path_origins.push(&output_root_id, head.origins);
-        append_output_record(&mut output, head.local, 0)?;
+        output_head = head.local;
+        let source_ordinals: Vec<_> = original
+            .iter()
+            .map(|source| source.native_ordinal)
+            .collect();
         let decoded = original
             .into_iter()
             .map(|source| {
                 let mut wire = source.wire;
+                crate::codex_subagents::rewrite_references(&mut wire, identities);
                 normalize_item_identity(&mut wire, &output_root_id);
                 mapper.decode_record_with_origins(&wire)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let projected = project_with_sources(
-            decoded.iter().map(|record| record.local.clone()).collect(),
+            decoded.iter().map(|record| &record.local),
             &output_root_id,
             &mut |_| Ok(()),
         )?;
         for (index, projected) in projected.into_iter().enumerate() {
-            let mut record = projected.value;
+            if child_boundary.is_some_and(|boundary| {
+                projected
+                    .source_index
+                    .is_some_and(|source| source_ordinals[source] >= boundary)
+            }) && output_boundary.is_none()
+            {
+                output_boundary = Some((index + 1) as u64);
+            }
+            let mut record = projected.value.into_owned();
             let (fields, derived) = if let Some(source) = projected.source_index {
                 if record != decoded[source].local {
                     return Err("projection changed retained source text".into());
@@ -365,11 +455,36 @@ fn reconstruct_codex_root(
             append_output_record(&mut output, record, (index + 1) as u64)?;
         }
     }
+    if child_boundary.is_some() {
+        let boundary = output_boundary
+            .unwrap_or_else(|| output.iter().filter(|byte| **byte == b'\n').count() as u64 + 1);
+        output_head["payload"]["subagent_history_start_ordinal"] = Value::from(boundary);
+    }
+    let mut with_head = Vec::new();
+    append_output_record(&mut with_head, output_head.clone(), 0)?;
+    with_head.extend(output);
+    output = with_head;
+    if !encode_mode {
+        let head = mapper.decode_record_with_origins(&authoritative)?;
+        let head_origins = RecordPathOrigins::capture(&output_head, head.origins.fields)?;
+        path_origins
+            .sources
+            .entry(output_root_id.clone())
+            .or_default()
+            .insert(0, head_origins);
+    }
     if output.len() as u64 > conversation_file_limit_bytes() {
         return Err("standalone Codex output exceeds the bounded transcript limit".to_string());
     }
     let output_verification_started = Instant::now();
-    validate_standalone_record_layout(&output)?;
+    let analysis = analyze_standalone_output(&output)?;
+    let output_record_count = analysis.record_count as u64;
+    if child_boundary.is_some() {
+        let boundary = output_head["payload"]["subagent_history_start_ordinal"].as_u64();
+        if !boundary.is_some_and(|boundary| boundary > 0 && boundary <= output_record_count) {
+            return Err("standalone child output has an invalid native boundary".into());
+        }
+    }
     if !encode_mode {
         validate_projection_fixpoint(&output, &output_root_id)?;
     }
@@ -377,12 +492,11 @@ fn reconstruct_codex_root(
     // Full verification: the output must re-analyze to a canonical chain
     // with exactly the resolved chain's message identities under the output
     // identity, and the output-form tail is refolded from that analysis.
-    let analysis = analyze_codex_transcript(&output);
     if analysis.source_thread_id.as_deref() != Some(output_root_id.as_str()) {
         return Err("standalone output lost its root identity".to_string());
     }
-    if analysis.is_internal_subagent {
-        return Err("standalone output claims to be an internal subagent".to_string());
+    if analysis.is_internal_subagent != resolved.leaf_meta.is_internal_subagent {
+        return Err("standalone output changed its subagent role".to_string());
     }
     let output = PayloadBytes::from(output);
     let verification = VerifiedTranscript::from_codex_analysis(output.clone(), &analysis)?;
@@ -498,6 +612,7 @@ struct SourceRecord<'a> {
     source: &'a str,
     ordinal: usize,
     covered: bool,
+    native_ordinal: u64,
 }
 
 /// Parse each source once, folding the leaf metadata and collecting its body.
@@ -512,6 +627,7 @@ fn read_source_records<'a>(
 ) -> Result<(Value, Vec<SourceRecord<'a>>), String> {
     let mut effective: Option<Value> = None;
     let mut records = Vec::new();
+    let mut activity_events = std::collections::BTreeMap::new();
     for (index, segment) in resolved.segments.iter().enumerate() {
         let bytes = read_segment(segment)?;
         if (bytes.len() as u64) < segment.consumed_byte_len {
@@ -533,6 +649,16 @@ fn read_source_records<'a>(
                     segment.provider_thread_id
                 )
             })?;
+            if !encode_mode {
+                if let Some(activity) =
+                    crate::codex_subagents::SubagentActivity::from_record(&value)?
+                {
+                    crate::codex_subagents::verify_activity_identity(
+                        &mut activity_events,
+                        &activity,
+                    )?;
+                }
+            }
             let prior = previous.record(&segment.provider_thread_id, record_number - 1);
             if encode_mode {
                 if let Some(prior) = prior.filter(|origin| origin.derived) {
@@ -541,6 +667,9 @@ fn read_source_records<'a>(
                     continue;
                 }
             }
+            let native_ordinal = value["ordinal"]
+                .as_u64()
+                .unwrap_or((record_number - 1) as u64);
             let mut local = value.clone();
             let mut value = (|| -> Result<Value, String> {
                 if encode_mode {
@@ -572,6 +701,7 @@ fn read_source_records<'a>(
                     source: &segment.provider_thread_id,
                     ordinal: record_number - 1,
                     covered: prior.is_some(),
+                    native_ordinal,
                 });
                 continue;
             }
@@ -655,12 +785,7 @@ fn rewrite_identity_fields(payload: &mut Map<String, Value>, output_root_id: &st
             payload.insert(key.to_string(), Value::String(output_root_id.to_string()));
         }
     }
-    for key in [
-        "forked_from_id",
-        "forkedFromId",
-        "parent_thread_id",
-        "parentThreadId",
-    ] {
+    for key in ["forked_from_id", "forkedFromId"] {
         payload.remove(key);
     }
     payload.insert(
@@ -681,56 +806,71 @@ fn append_output_record(
         .as_object_mut()
         .ok_or_else(|| "Codex rollout record is not a JSON object".to_string())?;
     record.insert("ordinal".to_string(), Value::from(ordinal));
-    let encoded =
-        serde_json::to_vec(&value).map_err(|_| "serialize standalone Codex record".to_string())?;
-    output.extend_from_slice(&encoded);
+    serde_json::to_writer(&mut *output, &value)
+        .map_err(|_| "serialize standalone Codex record".to_string())?;
     output.push(b'\n');
     ordinal
         .checked_add(1)
         .ok_or_else(|| "standalone Codex ordinal overflow".to_string())
 }
 
-fn validate_standalone_record_layout(bytes: &[u8]) -> Result<(), String> {
+/// Check standalone layout and analyze the chain from the same parsed records.
+fn analyze_standalone_output(bytes: &[u8]) -> Result<CodexTranscriptAnalysis, String> {
     let mut expected_ordinal = 0_u64;
     let mut session_meta_count = 0_u64;
-    for raw in bytes.split(|byte| *byte == b'\n') {
-        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-        if raw.is_empty() {
-            continue;
+    let mut failure = None;
+    let records = parsed_records(bytes).inspect(|record| {
+        if failure.is_some() {
+            return;
         }
-        let value: Value = serde_json::from_slice(raw)
-            .map_err(|_| "standalone Codex output contains malformed JSON".to_string())?;
-        let ordinal = value
-            .get("ordinal")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| "standalone Codex output record has no ordinal".to_string())?;
-        if ordinal != expected_ordinal {
-            return Err(format!(
-                "standalone Codex output expected ordinal {expected_ordinal}, got {ordinal}"
-            ));
-        }
-        if structural_record_type(&value) == Some("session_meta") {
-            session_meta_count = session_meta_count.saturating_add(1);
-            if ordinal != 0 {
-                return Err("standalone Codex output has non-head session metadata".to_string());
+        let checked = (|| -> Result<(), String> {
+            let value = record
+                .as_ref()
+                .map_err(|_| "standalone Codex output contains malformed JSON".to_string())?;
+            let ordinal = value
+                .get("ordinal")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "standalone Codex output record has no ordinal".to_string())?;
+            if ordinal != expected_ordinal {
+                return Err(format!(
+                    "standalone Codex output expected ordinal {expected_ordinal}, got {ordinal}"
+                ));
             }
+            if structural_record_type(value) == Some("session_meta") {
+                session_meta_count += 1;
+                if ordinal != 0 {
+                    return Err("standalone Codex output has non-head session metadata".into());
+                }
+            }
+            expected_ordinal = expected_ordinal
+                .checked_add(1)
+                .ok_or_else(|| "standalone Codex ordinal overflow".to_string())?;
+            Ok(())
+        })();
+        if let Err(error) = checked {
+            failure = Some(error);
         }
-        expected_ordinal = expected_ordinal
-            .checked_add(1)
-            .ok_or_else(|| "standalone Codex ordinal overflow".to_string())?;
+    });
+    let analysis = analyze_codex_records(bytes, records);
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    if let CodecLineage::Unknown { reason } = &analysis.lineage {
+        return Err(format!("standalone output failed re-analysis: {reason:?}"));
     }
     if session_meta_count != 1 {
         return Err(format!(
             "standalone Codex output has {session_meta_count} session metadata records"
         ));
     }
-    Ok(())
+    Ok(analysis)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::codex_history_graph::resolve_codex_root;
+    use crate::conversation_codec::analyze_codex_transcript;
     use crate::session_path_map::ROOT_TOKEN;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -761,6 +901,38 @@ mod tests {
             "payload": {"type": "message", "id": id, "content": text},
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn combined_output_check_rejects_invalid_layout_and_malformed_suffix() {
+        let meta: Value = serde_json::from_str(&meta_line("root", None)).unwrap();
+        let message: Value = serde_json::from_str(&message_line("m1", "hello")).unwrap();
+        let mut valid = Vec::new();
+        append_output_record(&mut valid, meta.clone(), 0).unwrap();
+        append_output_record(&mut valid, message.clone(), 1).unwrap();
+        let combined = analyze_standalone_output(&valid).unwrap();
+        let separate = analyze_codex_transcript(&valid);
+        assert_eq!(combined.record_count, separate.record_count);
+        assert_eq!(combined.lineage, separate.lineage);
+        for suffix in [
+            format!("{message}\n"),
+            format!(
+                "{}\n",
+                json!({"type":"event_msg","ordinal":3,"payload":{"type":"token_count"}})
+            ),
+            format!(
+                "{}\n",
+                json!({"type":"session_meta","ordinal":2,"payload":meta["payload"]})
+            ),
+            "{malformed\n".to_string(),
+        ] {
+            let mut invalid = valid.clone();
+            invalid.extend_from_slice(suffix.as_bytes());
+            assert!(analyze_standalone_output(&invalid).is_err());
+        }
+        let mut missing_head = Vec::new();
+        append_output_record(&mut missing_head, message, 0).unwrap();
+        assert!(analyze_standalone_output(&missing_head).is_err());
     }
 
     fn write(
@@ -874,7 +1046,7 @@ mod tests {
         let mut outputs = Vec::new();
         for (workers, admitted_jobs) in [(1, 1), (4, 4), (4, 2)] {
             let mut run = Vec::new();
-            let bounds = crate::ordered_preparation::for_each_prepared(
+            let bounds = crate::bounded_preparation::for_each_prepared(
                 (0..8).collect(),
                 workers,
                 admitted_jobs * (base_len + leaf_len),
@@ -896,6 +1068,8 @@ mod tests {
             );
             assert!(bounds.peak_jobs <= workers.min(admitted_jobs as usize));
             assert!(bounds.peak_source_bytes <= admitted_jobs * (base_len + leaf_len));
+            // Results arrive in completion order.
+            run.sort_by_key(|(index, _)| *index);
             outputs.push(run);
         }
         assert_eq!(outputs[0], outputs[1]);

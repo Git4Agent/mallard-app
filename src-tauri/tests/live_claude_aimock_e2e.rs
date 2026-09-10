@@ -52,8 +52,8 @@ const MODEL: &str = "claude-sonnet-4-6";
 const LIVE_TUZI_TEST_GATE: &str = "MALLARD_RUN_LIVE_CLAUDE_TUZI_E2E";
 const LIVE_TUZI_MODEL: &str = "claude-sonnet-5";
 const LIVE_TUZI_SOURCE_SESSION_ID: &str = "018f3f2e-7b91-7ad0-8000-000000000301";
-const EXPECTED_AIMOCK_CLAUDE_VERSION: &str = "2.1.260 (Claude Code)";
-const EXPECTED_TUZI_CLAUDE_VERSION: &str = "2.1.260 (Claude Code)";
+const EXPECTED_AIMOCK_CLAUDE_VERSION: &str = "2.1.266 (Claude Code)";
+const EXPECTED_TUZI_CLAUDE_VERSION: &str = "2.1.266 (Claude Code)";
 const PLACEHOLDER_API_KEY: &str = "mallard-local-aimock-placeholder";
 const INHERITED_SECRET_MARKER: &str = "mallard-inherited-secret-sentinel";
 const READ_TOOL_CALL_ID: &str = "mallard_claude_read_r1";
@@ -2927,6 +2927,8 @@ fn timeline_history(
         provider_session_id: provider_thread_id,
         project_root,
         project_root_aliases: &[],
+        provider_home: project_root,
+        child: None,
     };
     let index = adapter
         .build_timeline_index(transcript, &context)
@@ -2954,6 +2956,7 @@ fn timeline_history(
                     included_tool_categories: BTreeSet::new(),
                     turn_id: None,
                 },
+                &context,
             )
             .expect("production Claude timeline page failed");
         for event in page.events {
@@ -3069,7 +3072,7 @@ fn assert_transcript_structure_and_history(
         .chain()
         .expect("Claude lineage is complete")
         .len();
-    // Claude Code 2.1.260 can link the final tool-round response either
+    // Claude Code 2.1.266 can link the final tool-round response either
     // through the tool-result row or directly through the tool-use row. The
     // latter leaves exactly that result off the active ancestry; the timeline
     // checks below still require the tool result and its marker.
@@ -3092,6 +3095,8 @@ fn assert_transcript_structure_and_history(
         provider_session_id: provider_thread_id,
         project_root,
         project_root_aliases: &[],
+        provider_home: project_root,
+        child: None,
     };
     let index = adapter
         .build_timeline_index(&path, &context)
@@ -3392,6 +3397,8 @@ fn assert_live_text_transcript(
         provider_session_id: provider_thread_id,
         project_root,
         project_root_aliases: &[],
+        provider_home: project_root,
+        child: None,
     };
     let index = adapter
         .build_timeline_index(&path, &context)
@@ -4911,21 +4918,37 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &base_transcript[..],
         "the resumed turn must append, never rewrite"
     );
-    let before_extension = metrics.snapshot();
-    let extended = redacted(
-        service_a.compare_threads(&project_id_a, &storage_id),
-        "cannot compare after the appended Claude turn",
-    );
-    let delta = metrics.snapshot().delta_since(&before_extension);
-    assert_eq!(
-        delta.transcript_bytes_read, 0,
-        "the appended turn rides the cursor, never a whole-file read"
-    );
-    assert_eq!(delta.full_graph_resolves, 0);
-    assert!(
-        delta.append_bytes_read >= (extended_transcript.len() - base_transcript.len()) as u64,
-        "the cursor reads the appended bytes"
-    );
+    // A comparison serves its watcher-clean observation until the watcher
+    // reports the append, and that delivery is asynchronous: poll for the
+    // comparison that consumes it. Every earlier comparison serves the cache
+    // with no reads; the consuming one reads only the appended bytes.
+    let appended_bytes = (extended_transcript.len() - base_transcript.len()) as u64;
+    let deadline = Instant::now() + TRANSCRIPT_SETTLE_TIMEOUT;
+    let extended = loop {
+        let before_extension = metrics.snapshot();
+        let extended = redacted(
+            service_a.compare_threads(&project_id_a, &storage_id),
+            "cannot compare after the appended Claude turn",
+        );
+        let delta = metrics.snapshot().delta_since(&before_extension);
+        assert_eq!(
+            delta.transcript_bytes_read, 0,
+            "the appended turn rides the cursor, never a whole-file read"
+        );
+        assert_eq!(delta.full_graph_resolves, 0);
+        if delta.append_bytes_read >= appended_bytes {
+            break extended;
+        }
+        assert_eq!(
+            delta.append_bytes_read, 0,
+            "a comparison ahead of the watcher serves its cache untouched"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the watcher did not report the appended Claude turn before its bounded deadline"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
     let primary_row = extended
         .entries
         .iter()

@@ -35,13 +35,14 @@ impl StorageProviderRegistry {
         Ok(Self { adapters: map })
     }
 
-    /// The process-wide production registry: the local folder and R2.
+    /// The process-wide production registry: local folder, R2, and Dropbox.
     pub fn production() -> &'static StorageProviderRegistry {
         static REGISTRY: OnceLock<StorageProviderRegistry> = OnceLock::new();
         REGISTRY.get_or_init(|| {
             StorageProviderRegistry::from_adapters(vec![
                 Arc::new(super::local::LocalFolderAdapter),
                 Arc::new(super::r2::R2Adapter),
+                Arc::new(super::dropbox::DropboxAdapter),
             ])
             .expect("production storage registry has no duplicate registrations")
         })
@@ -53,6 +54,7 @@ impl StorageProviderRegistry {
         StorageProviderRegistry::from_adapters(vec![
             Arc::new(super::local::LocalFolderAdapter),
             Arc::new(super::r2::R2Adapter),
+            Arc::new(super::dropbox::DropboxAdapter),
             Arc::new(super::test_provider::TestStorageAdapter),
         ])
         .expect("test storage registry has no duplicate registrations")
@@ -147,12 +149,12 @@ mod tests {
             registry.require(&local, 2).err().as_deref(),
             Some("storage provider 'local' config version 2 is not supported by this build")
         );
-        let dropbox = StorageProviderKey::parse("dropbox").unwrap();
+        let unknown = StorageProviderKey::parse("unregistered").unwrap();
         assert_eq!(
-            registry.require(&dropbox, 1).err().as_deref(),
-            Some("no storage provider is registered for 'dropbox'")
+            registry.require(&unknown, 1).err().as_deref(),
+            Some("no storage provider is registered for 'unregistered'")
         );
-        assert!(registry.latest(&dropbox).is_none());
+        assert!(registry.latest(&unknown).is_none());
     }
 
     #[test]
@@ -167,6 +169,7 @@ mod tests {
             vec![
                 (10, "r2".to_string()),
                 (20, "local".to_string()),
+                (30, "dropbox".to_string()),
                 (90, "teststore".to_string())
             ]
         );

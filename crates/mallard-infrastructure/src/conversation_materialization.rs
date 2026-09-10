@@ -26,6 +26,27 @@ use mallard_domain::{
 
 const MAX_PROVIDER_TARGET_BYTES: u64 = 512 * 1024 * 1024;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    thread_local! { static WRITES_BEFORE_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
+    pub fn fail_after_provider_writes(writes: usize) {
+        WRITES_BEFORE_FAILURE.with(|remaining| remaining.set(Some(writes)));
+    }
+    pub(super) fn before_provider_write() -> Result<(), String> {
+        WRITES_BEFORE_FAILURE.with(|remaining| match remaining.get() {
+            Some(0) => {
+                remaining.set(None);
+                Err("injected provider write failure".into())
+            }
+            Some(count) => {
+                remaining.set(Some(count - 1));
+                Ok(())
+            }
+            None => Ok(()),
+        })
+    }
+}
+
 struct StageCleanup(Vec<PathBuf>);
 
 impl Drop for StageCleanup {
@@ -52,6 +73,8 @@ pub struct ConversationMaterializationRequest {
     pub operation: ConversationApplyOperation,
     pub targets: Vec<ConversationTargetPayload>,
     pub transcript: VerifiedTranscript,
+    /// Existing prepared child outputs, in key order. Never serialized.
+    pub subagents: Vec<crate::owned_subagents::InstalledChildPayload>,
     /// Bytes returned by the source check, required only when the transcript
     /// is replaced in place. Kept in memory for its backup, never serialized.
     pub checked_transcript: Option<Vec<u8>>,
@@ -268,6 +291,8 @@ pub fn apply_conversation_materialization_locked(
     }
 
     for target in &operation.targets {
+        #[cfg(any(test, feature = "test-support"))]
+        test_support::before_provider_write()?;
         commit_one_target(target)?;
     }
 
@@ -542,6 +567,37 @@ fn verify_target_role_set(
     if transcripts != 1 {
         return Err("resumable conversation requires exactly one transcript".to_string());
     }
+    let mut child_keys = std::collections::BTreeSet::new();
+    for target in targets {
+        if let ConversationFileRole::SubagentTranscript { child_key, .. } = &target.role {
+            if !matches!(operation.provider.as_str(), "codex" | "claude")
+                || (operation.provider.as_str() == "claude" && child_key.as_str().contains('/'))
+                || !child_keys.insert(child_key.clone())
+            {
+                return Err("invalid or duplicate child materialization target".into());
+            }
+        }
+    }
+    if let ConversationApplyKind::ProviderMaterialization(materialization) = &operation.operation {
+        if let Some(binding) = materialization.bindings_after.bindings.iter().find(|row| {
+            row.thread_id == operation.thread_id
+                && row.replica_id == operation.replica_id
+                && row.provider_profile_id == operation.provider_profile_id
+        }) {
+            if binding.installed_subagents.keys().ne(child_keys.iter()) {
+                return Err("child targets differ from the resulting installation map".into());
+            }
+            if matches!(operation.provider.as_str(), "codex" | "claude") {
+                let main = targets
+                    .iter()
+                    .find(|target| target.role == ConversationFileRole::Transcript)
+                    .unwrap();
+                if binding.installed_end != Some(main.bytes.len() as u64) {
+                    return Err("main installation cutoff differs from the emitted bytes".into());
+                }
+            }
+        }
+    }
     // Provider index rows are conditional presentation metadata (Codex keeps
     // `session_index.jsonl`); the registered adapter declares how many one
     // operation may carry. Providers without an index allow none.
@@ -594,6 +650,98 @@ fn verify_transcript_request(
     ) {
         return Err("verified transcript does not match the materialization target".to_string());
     }
+    let child_count = request
+        .targets
+        .iter()
+        .filter(|target| matches!(target.role, ConversationFileRole::SubagentTranscript { .. }))
+        .count();
+    if child_count != request.subagents.len()
+        || request
+            .subagents
+            .windows(2)
+            .any(|pair| pair[0].key() >= pair[1].key())
+    {
+        return Err("child targets require one ordered verification result each".into());
+    }
+    if child_count == 0 {
+        return Ok(());
+    }
+    if !matches!(operation.provider.as_str(), "codex" | "claude") {
+        return Err("provider does not support child transcripts".into());
+    }
+    let binding = materialization
+        .bindings_after
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.thread_id == operation.thread_id
+                && binding.host_id == operation.host_id
+                && binding.replica_id == operation.replica_id
+                && binding.local_project_id == operation.local_project_id
+                && binding.provider_profile_id == operation.provider_profile_id
+        })
+        .ok_or("child transcript has no resulting parent binding")?;
+    let accepted = materialization
+        .sync_config_after
+        .links
+        .iter()
+        .find(|link| {
+            link.storage_id == operation.cloud.storage_id
+                && link.local_project_id == operation.local_project_id
+        })
+        .and_then(|link| {
+            link.conversation_checkpoints
+                .get(&mallard_domain::SyncScopeKey::Provider(
+                    operation.provider.clone(),
+                ))
+        })
+        .and_then(|threads| threads.get(&operation.thread_id))
+        .map(|checkpoint| &checkpoint.accepted_subagents)
+        .ok_or("child transcript has no accepted content evidence")?;
+    if accepted.keys().ne(binding.installed_subagents.keys()) {
+        return Err("child accepted states differ from the installation map".into());
+    }
+    for target in &request.targets {
+        let ConversationFileRole::SubagentTranscript {
+            child_key,
+            normalized,
+        } = &target.role
+        else {
+            continue;
+        };
+        let child = binding
+            .installed_subagents
+            .get(child_key)
+            .ok_or("child transcript has no installed identity")?;
+        let owner = match child_key.owner() {
+            Some(owner) => binding
+                .installed_subagents
+                .get(&owner)
+                .map(|entry| entry.provider_thread_id.as_str()),
+            None => binding.provider_thread_id.as_deref(),
+        }
+        .ok_or("child transcript has no installed owner")?;
+        let accepted = accepted
+            .get(child_key)
+            .ok_or("child transcript has no accepted content evidence")?;
+        let proof_index = request
+            .subagents
+            .binary_search_by(|child| child.key().cmp(child_key))
+            .map_err(|_| "child transcript has no verification result")?;
+        if normalized != &accepted.normalized
+            || !request.subagents[proof_index].matches_installation(
+                &operation.provider,
+                child,
+                owner,
+                accepted,
+                &project.project_root,
+                &project.canonical_project_root,
+                &target.bytes,
+            )
+        {
+            return Err("child transcript disagrees with its installation evidence".into());
+        }
+    }
     Ok(())
 }
 
@@ -602,7 +750,10 @@ fn verify_provider_payload(
     target: &ConversationApplyTarget,
     path: &Path,
 ) -> Result<(), String> {
-    if target.role == ConversationFileRole::Transcript {
+    if matches!(
+        target.role,
+        ConversationFileRole::Transcript | ConversationFileRole::SubagentTranscript { .. }
+    ) {
         // Commit checks the staged digest against the immutable verified bytes.
         return Ok(());
     }
@@ -629,6 +780,9 @@ fn verify_provider_payload(
         }
         ConversationFileRole::Sidecar { sidecar_kind } => {
             adapter.verify_sidecar(sidecar_kind, &bytes)?;
+        }
+        ConversationFileRole::SubagentTranscript { .. } => {
+            unreachable!("child verified before staging")
         }
     }
     Ok(())
@@ -1149,6 +1303,27 @@ mod tests {
         .unwrap();
         assert!(commit_one_target(&transcript).is_err());
         assert_eq!(fs::read(&transcript.target_path).unwrap(), b"captured");
+    }
+
+    #[test]
+    fn verified_child_still_checks_the_staged_digest() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let child = target(
+            &root,
+            "child",
+            ConversationFileRole::SubagentTranscript {
+                child_key: mallard_domain::SubagentKey::parse("creation").unwrap(),
+                normalized: mallard_domain::SubagentContentState {
+                    message_count: 1,
+                    sha256: "0".repeat(64),
+                },
+            },
+            None,
+        );
+        fs::write(child.staged_path.as_deref().unwrap(), b"corrupted stage").unwrap();
+        assert!(commit_one_target(&child).is_err());
+        assert!(!Path::new(&child.target_path).exists());
     }
 
     #[test]

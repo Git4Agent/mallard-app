@@ -1054,10 +1054,12 @@ pub async fn list_remote_bundle_snapshots(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn push_bundle(
+    credential_redaction_enabled: bool,
     app: tauri::AppHandle,
     local_project_id: LocalProjectId,
     storage_id: StorageId,
     recipe: BundleRecipe,
+    subagent_selections: std::collections::BTreeMap<ResourceId, mallard_domain::SubagentSelection>,
     project_content_review_token: Option<String>,
     project_content_removal_ids: Option<Vec<ResourceId>>,
     acknowledged_warning_digests: Option<Vec<String>>,
@@ -1111,6 +1113,8 @@ pub async fn push_bundle(
             &local_project_id,
             &storage_id,
             PushApproval {
+                credential_redaction_enabled,
+                subagent_selections,
                 recipe,
                 project_content_review_token,
                 project_content_removal_ids: project_content_removal_ids.unwrap_or_default(),
@@ -1435,10 +1439,15 @@ pub async fn apply_bundle_restore(
 }
 
 #[tauri::command]
-pub async fn get_restore_readiness(review: PullReview) -> Result<BundleReadiness, String> {
-    let review = RestorePlan::from(review);
+pub async fn get_restore_readiness(
+    local_project_id: LocalProjectId,
+    storage_id: StorageId,
+) -> Result<BundleReadiness, String> {
     let repository = repository()?;
-    run_blocking(move || get_restore_readiness_with_repository(&repository, &review)).await
+    run_blocking(move || {
+        get_restore_readiness_with_repository(&repository, &local_project_id, &storage_id)
+    })
+    .await
 }
 
 #[tauri::command]

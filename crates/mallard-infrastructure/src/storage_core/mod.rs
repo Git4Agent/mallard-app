@@ -7,11 +7,16 @@
 //! beyond the shape of their object keys; each protocol keeps its own engine
 //! on top.
 
+pub mod connection;
+pub mod dropbox_store;
 pub mod local_store;
 pub mod marker;
 pub mod object_store;
 pub mod s3_store;
 
+pub use connection::{
+    connection_events, ConnectionEvidence, ConnectionHealth, ConnectionHealthCell, ConnectionState,
+};
 pub(crate) use local_store::open_read_only_no_follow;
 pub use local_store::LocalObjectStore;
 pub use marker::{ensure_storage_marker, StorageMarker};
@@ -26,10 +31,11 @@ pub use s3_store::{
 };
 
 use crate::storage_providers::StorageProviderRegistry;
-use mallard_domain::{BundleId, StorageConfig};
+use mallard_domain::{BundleId, StorageConfig, StorageId};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::io::{BufReader, Read};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::runtime::Handle;
 
 pub const MALLARD_ROOT: &str = ".mallard";
@@ -129,6 +135,9 @@ pub fn clear_managed_storage_data<S: ObjectStore + ?Sized>(
 
 /// The only shared storage-clear loop. The delete callback is private to this
 /// module and its transports; it cannot be used by normal object operations.
+/// Clear is destructive and rare, so it re-validates the storage marker
+/// immediately before deleting instead of trusting the check made when the
+/// shared store was opened.
 fn clear_managed_data_with<S: ObjectStore + ?Sized>(
     store: &S,
     delete: impl Fn(&StoreListEntry) -> Result<DeleteOutcome, String>,
@@ -304,17 +313,93 @@ pub(crate) fn parse_json_reader<T: for<'de> Deserialize<'de>>(
         .map_err(|error| format!("parse {}: {}", label, error))
 }
 
+#[derive(Clone)]
 pub struct ConfiguredObjectStore {
     inner: Arc<dyn ObjectStore>,
+    storage_id: StorageId,
+}
+
+/// One opened store per storage configuration for the life of the process,
+/// keyed by storage ID and pinned to the exact configuration it was built
+/// from. Connection pools, a refreshed Dropbox token, the verified storage
+/// marker, and the connection health survive across Compare, Push, and
+/// Pull; an edited configuration (renamed, rotated secret) replaces its
+/// entry, and a successful probe or a removal forgets it.
+type SharedStoreTable = BTreeMap<StorageId, (StorageConfig, ConfiguredObjectStore)>;
+static SHARED_STORES: OnceLock<Mutex<SharedStoreTable>> = OnceLock::new();
+
+fn shared_stores() -> Result<std::sync::MutexGuard<'static, SharedStoreTable>, String> {
+    SHARED_STORES
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| "the shared storage table is poisoned".to_string())
 }
 
 impl ConfiguredObjectStore {
-    /// Open through the production storage registry.
-    pub fn from_config(config: &StorageConfig) -> Result<Self, String> {
-        Self::open_with(StorageProviderRegistry::production(), config)
+    /// The process-shared store for `config`, opened through the production
+    /// registry. The Mallard storage marker is verified exactly once, when
+    /// the entry is created; two concurrent first opens produce one marker
+    /// read because creation happens under the table lock.
+    pub fn shared(config: &StorageConfig) -> Result<Self, String> {
+        Self::share_with(StorageProviderRegistry::production(), config)
+    }
+
+    /// `shared` through an explicit registry. Production code calls
+    /// `shared`; tests seed the table with loopback-backed stores.
+    pub fn share_with(
+        registry: &StorageProviderRegistry,
+        config: &StorageConfig,
+    ) -> Result<Self, String> {
+        let mut stores = shared_stores()?;
+        if let Some((opened_from, store)) = stores.get(&config.id) {
+            if opened_from == config {
+                return Ok(store.clone());
+            }
+        }
+        let store = Self::open_with(registry, config)?;
+        if let Err(error) = ensure_storage_marker(&store) {
+            // A marker read refused for the credential keeps its store: the
+            // entry answers from the recorded health until the credential
+            // changes or a probe succeeds, instead of asking again on every
+            // open. Any other failure leaves no entry.
+            if store
+                .connection_health()
+                .is_some_and(|health| health.suspends())
+            {
+                stores.insert(config.id.clone(), (config.clone(), store));
+            }
+            return Err(error);
+        }
+        stores.insert(config.id.clone(), (config.clone(), store.clone()));
+        Ok(store)
+    }
+
+    /// The connection health of the shared store opened for exactly this
+    /// configuration, or nothing when no such store is open. A table read:
+    /// it never opens a store or sends a request.
+    pub fn connection_health_for(config: &StorageConfig) -> Option<ConnectionHealth> {
+        let stores = shared_stores().ok()?;
+        let (opened_from, store) = stores.get(&config.id)?;
+        if opened_from != config {
+            return None;
+        }
+        store.inner.connection_health()
+    }
+
+    /// Drop the shared entry so the next open starts from a fresh transport
+    /// with no recorded health: after a probe proved the connection, or
+    /// after the storage was removed. Listeners are told either way.
+    pub fn forget(storage_id: &StorageId) {
+        let removed = shared_stores()
+            .ok()
+            .is_some_and(|mut stores| stores.remove(storage_id).is_some());
+        if removed {
+            let _ = connection_events().send(storage_id.clone());
+        }
     }
 
     /// Open through an explicit registry (tests register extra providers).
+    /// The caller owns marker verification.
     pub fn open_with(
         registry: &StorageProviderRegistry,
         config: &StorageConfig,
@@ -325,7 +410,31 @@ impl ConfiguredObjectStore {
             .validate_config(&config.provider_config)
             .map_err(|error| error.to_string())?;
         let inner = adapter.open(&config.provider_config, Handle::try_current().ok())?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            storage_id: config.id.clone(),
+        })
+    }
+
+    /// Every request passes here. A store whose credential was rejected
+    /// answers from its recorded health without a request, and a state
+    /// transition observed around the call is announced to listeners.
+    fn guarded<T>(
+        &self,
+        call: impl FnOnce(&dyn ObjectStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let before = self.inner.connection_health();
+        if let Some(health) = &before {
+            if health.suspends() {
+                return Err(health.describe());
+            }
+        }
+        let result = call(self.inner.as_ref());
+        let after = self.inner.connection_health();
+        if before.map(|health| health.state) != after.map(|health| health.state) {
+            let _ = connection_events().send(self.storage_id.clone());
+        }
+        result
     }
 }
 
@@ -335,7 +444,7 @@ impl ObjectStore for ConfiguredObjectStore {
         key: &ObjectKey,
         max_bytes: u64,
     ) -> Result<Option<StoredMetadata>, String> {
-        self.inner.get_metadata(key, max_bytes)
+        self.guarded(|store| store.get_metadata(key, max_bytes))
     }
 
     fn get_metadata_many(
@@ -343,7 +452,7 @@ impl ObjectStore for ConfiguredObjectStore {
         keys: &[ObjectKey],
         max_bytes: u64,
     ) -> Result<Vec<Option<StoredMetadata>>, String> {
-        self.inner.get_metadata_many(keys, max_bytes)
+        self.guarded(|store| store.get_metadata_many(keys, max_bytes))
     }
 
     fn stage_verified(
@@ -351,25 +460,25 @@ impl ObjectStore for ConfiguredObjectStore {
         key: &ObjectKey,
         expected: &ExpectedObject,
     ) -> Result<StageOutcome, String> {
-        self.inner.stage_verified(key, expected)
+        self.guarded(|store| store.stage_verified(key, expected))
     }
 
     fn stage_many_verified(
         &self,
         requests: &[(ObjectKey, ExpectedObject)],
     ) -> Result<Vec<StageOutcome>, String> {
-        self.inner.stage_many_verified(requests)
+        self.guarded(|store| store.stage_many_verified(requests))
     }
 
     fn put_immutable(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
-        self.inner.put_immutable(key, bytes)
+        self.guarded(|store| store.put_immutable(key, bytes))
     }
 
     fn put_many(
         &self,
         objects: Vec<(ObjectKey, bytes::Bytes)>,
     ) -> Result<Vec<ImmutablePutOutcome>, String> {
-        self.inner.put_many(objects)
+        self.guarded(|store| store.put_many(objects))
     }
 
     fn compare_and_swap(
@@ -378,7 +487,7 @@ impl ObjectStore for ConfiguredObjectStore {
         expectation: &CasExpectation,
         bytes: &[u8],
     ) -> Result<CasOutcome, String> {
-        self.inner.compare_and_swap(key, expectation, bytes)
+        self.guarded(|store| store.compare_and_swap(key, expectation, bytes))
     }
 
     fn supports_conditional_delete(&self) -> bool {
@@ -386,11 +495,11 @@ impl ObjectStore for ConfiguredObjectStore {
     }
 
     fn delete(&self, key: &ObjectKey, expected_etag: &str) -> Result<DeleteOutcome, String> {
-        self.inner.delete(key, expected_etag)
+        self.guarded(|store| store.delete(key, expected_etag))
     }
 
     fn clear_managed_data(&self) -> Result<ManagedStorageClearResult, String> {
-        self.inner.clear_managed_data()
+        self.guarded(|store| store.clear_managed_data())
     }
 
     fn list(
@@ -399,11 +508,15 @@ impl ObjectStore for ConfiguredObjectStore {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<StoreListPage, String> {
-        self.inner.list(prefix, cursor, limit)
+        self.guarded(|store| store.list(prefix, cursor, limit))
     }
 
     fn local_root(&self) -> Option<&std::path::Path> {
         self.inner.local_root()
+    }
+
+    fn connection_health(&self) -> Option<ConnectionHealth> {
+        self.inner.connection_health()
     }
 }
 
@@ -511,6 +624,64 @@ mod tests {
 
         assert_eq!(error, "A local folder storage has no secrets.");
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn shared_store_is_reused_until_its_configuration_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("storage");
+        let config = crate::storage_providers::local::local_storage_config(
+            mallard_domain::StorageId::parse("storage-shared-test").unwrap(),
+            "Shared",
+            &root,
+        );
+        let first = ConfiguredObjectStore::shared(&config).unwrap();
+        // The marker is verified by the opener, once.
+        assert!(root.join(STORAGE_MARKER_KEY).is_file());
+        let second = ConfiguredObjectStore::shared(&config).unwrap();
+        assert!(Arc::ptr_eq(&first.inner, &second.inner));
+
+        let moved_root = temp.path().join("storage-moved");
+        let moved = crate::storage_providers::local::local_storage_config(
+            config.id.clone(),
+            "Shared",
+            &moved_root,
+        );
+        let third = ConfiguredObjectStore::shared(&moved).unwrap();
+        assert!(!Arc::ptr_eq(&first.inner, &third.inner));
+        assert!(moved_root.join(STORAGE_MARKER_KEY).is_file());
+        assert!(Arc::ptr_eq(
+            &third.inner,
+            &ConfiguredObjectStore::shared(&moved).unwrap().inner
+        ));
+    }
+
+    #[test]
+    fn forgetting_a_shared_store_rebuilds_it_and_tells_listeners() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = crate::storage_providers::local::local_storage_config(
+            mallard_domain::StorageId::parse("storage-forget-test").unwrap(),
+            "Forgotten",
+            &temp.path().join("storage"),
+        );
+        let first = ConfiguredObjectStore::shared(&config).unwrap();
+        // A local store tracks no health, and the table read opens nothing.
+        assert!(ConfiguredObjectStore::connection_health_for(&config).is_none());
+        let mut events = connection_events().subscribe();
+        ConfiguredObjectStore::forget(&config.id);
+        let mut announced = false;
+        while let Ok(storage_id) = events.try_recv() {
+            announced |= storage_id == config.id;
+        }
+        assert!(announced, "forgetting an open store is announced");
+        let second = ConfiguredObjectStore::shared(&config).unwrap();
+        assert!(!Arc::ptr_eq(&first.inner, &second.inner));
+        // Forgetting a storage that is not open is silent.
+        let unknown = mallard_domain::StorageId::parse("storage-never-opened").unwrap();
+        ConfiguredObjectStore::forget(&unknown);
+        assert!(!events
+            .try_recv()
+            .is_ok_and(|storage_id| storage_id == unknown));
     }
 
     #[test]

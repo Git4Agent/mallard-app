@@ -1,20 +1,26 @@
-import { memo, useEffect, useMemo } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { SessionCount, SessionTimelineEvent } from "../../../types";
+import type { SessionAgentPreview, SessionCount, SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
 import ProviderMark from "../../sync-review/ProviderMark";
 import { githubCommitUrl, openExternalUrl } from "../externalLink";
-import SessionDetailToolCall, { type SessionToolDetailState } from "./SessionDetailToolCall";
+import SessionDetailToolCall, {
+  PayloadSection,
+  type SessionToolDetailState,
+} from "./SessionDetailToolCall";
 import {
   eventAnchorId,
+  formatCompactNumber,
   formatSessionCount,
   formatSessionDetailClock,
+  formatSessionDuration,
   isSafeExternalMarkdownUrl,
   projectMarkdownDisplayPath,
   type ProjectMarkdownImageState,
   safeMarkdownUrl,
   safeProjectMarkdownPath,
+  SESSION_AGENT_STATUS_LABELS,
   SESSION_EVENT_KIND_LABELS,
   sessionDetailDateTime,
 } from "./sessionDetailModel";
@@ -34,6 +40,8 @@ interface Props {
   projectRoot: string;
   /** The project's GitHub remote, when it has one: a checkpoint sha links there. */
   repositoryUrl?: string | null;
+  /** Opens another session page — an agent's transcript — in this workspace. */
+  onOpenSession?: (resourceId: string) => void;
 }
 
 /** Alt text (or the path) inside a bordered chip: the still-loading and
@@ -255,7 +263,9 @@ function EventNode({
     ? SESSION_EVENT_KIND_LABELS.prompt
     : event.kind === "checkpoint"
       ? SESSION_EVENT_KIND_LABELS.checkpoint
-      : providerDisplayName || SESSION_EVENT_KIND_LABELS[event.kind];
+      : event.kind === "agent_call"
+        ? `${SESSION_EVENT_KIND_LABELS.agent_call} · ${event.agent?.label ?? ""}`.replace(/ · $/, "")
+        : providerDisplayName || SESSION_EVENT_KIND_LABELS[event.kind];
   const label = event.timestamp != null
     ? `${speaker} · ${formatSessionDetailClock(event.timestamp)}`
     : speaker;
@@ -265,8 +275,139 @@ function EventNode({
         ? <Icon name="user" size={12} />
         : event.kind === "checkpoint"
           ? <Icon name="git-commit" size={12} />
-          : <ProviderMark provider={provider} displayName={providerDisplayName} size={12} />}
+          : event.kind === "agent_call"
+            ? <Icon name="git-fork" size={12} />
+            : <ProviderMark provider={provider} displayName={providerDisplayName} size={12} />}
     </span>
+  );
+}
+
+/** What the pane says where a text would be, by what the run proves. */
+function agentBriefNote(agent: SessionAgentPreview): string {
+  return agent.mode === "spawn"
+    ? "The brief is not readable from the rollout; the child transcript opens with it."
+    : "No brief was recorded for this agent.";
+}
+
+function agentReportNote(agent: SessionAgentPreview): string {
+  switch (agent.status) {
+    case "running": return "Still running — no report yet.";
+    case "failed": return "The call failed before a report.";
+    case "interrupted": return "Interrupted before a final message.";
+    case "unavailable": return "No transcript is available for this agent.";
+    default: return "The transcript ends before a final message.";
+  }
+}
+
+/**
+ * A delegation row on the tool-row grammar with a 24px tile: `AGENT` stamp,
+ * the task's label, the role, then calls and length. Status prints only when
+ * the run is not simply done. Opening the row shows the facts, the brief and
+ * the report as bounded payload boxes, and the one verb — Open transcript —
+ * which makes the child its own session page. The row keeps its own open
+ * state: nothing is fetched on expand, the page already carries the texts.
+ */
+function AgentRow({
+  event,
+  onOpenSession,
+}: {
+  event: SessionTimelineEvent;
+  onOpenSession?: (resourceId: string) => void;
+}) {
+  const agent = event.agent;
+  const [expanded, setExpanded] = useState(false);
+  if (!agent) {
+    return (
+      <div className="session-detail-tool-malformed" role="note">
+        <Icon name="alert-triangle" size={12} />
+        This agent call could not be projected safely.
+      </div>
+    );
+  }
+  const length = formatSessionDuration(agent.started_at, agent.ended_at);
+  const start = agent.started_at != null ? formatSessionDetailClock(agent.started_at) : null;
+  const end = agent.ended_at != null ? formatSessionDetailClock(agent.ended_at) : null;
+  const transcript = agent.transcript_resource_id ?? null;
+  return (
+    <details
+      className={`session-detail-tool-call session-detail-agent status-${agent.status}`}
+      open={expanded}
+      onToggle={(toggleEvent) => setExpanded(toggleEvent.currentTarget.open)}
+    >
+      <summary>
+        <span className="session-detail-tool-name session-detail-agent-stamp">Agent</span>
+        <span className="session-detail-agent-label" title={agent.label}>{agent.label}</span>
+        {agent.task && <span className="session-detail-agent-task" title={agent.task}>{agent.task}</span>}
+        {agent.role && <span className="session-detail-agent-pill">{agent.role}</span>}
+        {agent.mode === "async" && <span className="session-detail-agent-pill mode">async</span>}
+        <span className="session-detail-agent-meta">
+          {agent.tool_calls != null && (
+            <span>{formatCompactNumber(agent.tool_calls)} {agent.tool_calls === 1 ? "call" : "calls"}</span>
+          )}
+          {length && <span>{length}</span>}
+        </span>
+        {agent.status !== "completed" && (
+          <span className={`session-detail-agent-status status-${agent.status}`}>
+            {SESSION_AGENT_STATUS_LABELS[agent.status]}
+          </span>
+        )}
+        <span className="session-detail-tool-chevron" aria-hidden="true">
+          <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
+        </span>
+      </summary>
+      {expanded && (
+        <div className="session-detail-tool-body">
+          <div className="session-detail-tool-payload">
+            {/* The facts the row could not hold, one chip each: role, model,
+                mode, the span, and what the parent recorded of the child's
+                own accounting. */}
+            <div className="session-detail-agent-facts">
+              {agent.role && <span><Icon name="git-fork" size={12} />{agent.role}</span>}
+              {agent.model && <span>{agent.model}</span>}
+              <span>{agent.mode}</span>
+              {start && (
+                <span>
+                  <Icon name="clock" size={12} />
+                  {start} → {end ?? "…"}{length ? ` · ${length}` : ""}
+                </span>
+              )}
+              {agent.tool_calls != null && (
+                <span>{formatCompactNumber(agent.tool_calls)} {agent.tool_calls === 1 ? "call" : "calls"}</span>
+              )}
+              {agent.tokens != null && <span>{formatCompactNumber(agent.tokens)} tokens</span>}
+            </div>
+            {agent.brief
+              ? <PayloadSection label="Brief" value={agent.brief} truncated={agent.brief_truncated} />
+              : (
+                <section className="session-detail-payload-section">
+                  <div className="session-detail-payload-head"><span className="session-detail-payload-label">Brief</span></div>
+                  <p className="session-detail-agent-note">{agentBriefNote(agent)}</p>
+                </section>
+              )}
+            {agent.report
+              ? <PayloadSection label="Report" value={agent.report} truncated={agent.report_truncated} />
+              : (
+                <section className="session-detail-payload-section">
+                  <div className="session-detail-payload-head"><span className="session-detail-payload-label">Report</span></div>
+                  <p className="session-detail-agent-note">{agentReportNote(agent)}</p>
+                </section>
+              )}
+            <div className="session-detail-agent-verbs">
+              <button
+                type="button"
+                className="btn btn-ghost session-detail-agent-open"
+                disabled={!transcript || !onOpenSession}
+                title={transcript ? "Open this agent's transcript as its own page" : "No transcript is available for this agent."}
+                onClick={() => { if (transcript) onOpenSession?.(transcript); }}
+              >
+                <Icon name="external-link" size={12} />
+                Open transcript
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </details>
   );
 }
 
@@ -428,11 +569,13 @@ export default function SessionDetailEvent({
   onLoadProjectImage,
   projectRoot,
   repositoryUrl,
+  onOpenSession,
 }: Props) {
   const classes = [
     "session-detail-event",
     `event-${event.kind.replace(/_/g, "-")}`,
     event.kind === "tool_call" && event.tool ? `tool-${event.tool.status}` : "",
+    event.kind === "agent_call" && event.agent ? `agent-${event.agent.status}` : "",
   ].filter(Boolean).join(" ");
 
   return (
@@ -464,6 +607,8 @@ export default function SessionDetailEvent({
             detailState={toolDetails[event.event_id]}
             onExpandedChange={onToolExpandedChange}
           />
+        ) : event.kind === "agent_call" ? (
+          <AgentRow event={event} onOpenSession={onOpenSession} />
         ) : event.kind === "checkpoint" ? (
           <CheckpointBody event={event} repositoryUrl={repositoryUrl} />
         ) : event.kind === "prompt" ? (

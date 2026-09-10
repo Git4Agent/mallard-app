@@ -48,16 +48,17 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   assert.match(html, />Light</);
   assert.match(html, />Dark</);
 
-  // The three boolean preferences render as drawn switches, all on by
-  // default — each default preserves what was hardcoded before.
+  // Boolean settings render as switches. Redaction defaults On while loading.
   const switches = html.match(/role="switch"[^>]*class="sync-settings-switch"[^>]*checked=""/g) ?? [];
-  assert.equal(switches.length, 3);
+  assert.equal(switches.length, 6);
+  for (const provider of ["Codex", "Claude"]) {
+    assert.match(html, new RegExp(`<input[^>]*role="switch"[^>]*disabled=""[^>]*aria-label="Push ${provider} children"[^>]*checked=""`));
+  }
 
-  // Redaction is a stated fact, not a control — and the copy names the
-  // guarantee without surfacing the ruleset identifier.
-  assert.match(html, /class="sync-settings-flag">Always on</);
+  // Redaction is disabled until saved settings load.
+  assert.doesNotMatch(html, /Always on/);
   assert.doesNotMatch(html, /redact\.v1|mallard\.redact/);
-  assert.doesNotMatch(html, /<input[^>]*aria-label="Credential redaction"/);
+  assert.match(html, /<input[^>]*role="switch"[^>]*disabled=""[^>]*aria-label="Credential redaction"[^>]*checked=""/);
 
   // The Logs group carries the absorbed log-policy surface: both selects on
   // the app's select shell, the folder verb, and both cleanup verbs.

@@ -7,12 +7,14 @@ use crate::app_settings::{
 };
 use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
-    attach_turn_tool_summaries, most_specific_project_relative_path, timeline_tool_detail_budgets,
-    SessionCount, SessionCountQuality, SessionDetailWarning, SessionEventCounts,
-    SessionEventDetail, SessionFileSummary, SessionSourceSpan, SessionTimelineContext,
-    SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
-    SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
-    SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
+    agent_resource_id, attach_turn_tool_summaries, most_specific_project_relative_path,
+    timeline_tool_detail_budgets, SessionAgentIndexEntry, SessionAgentMode, SessionAgentPreview,
+    SessionAgentStatus, SessionChildIdentity, SessionCount, SessionCountQuality,
+    SessionDetailWarning, SessionEventCounts, SessionEventDetail, SessionFileSummary,
+    SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind,
+    SessionTimelineIndex, SessionTimelineIndexEntry, SessionTimelinePageSlice,
+    SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory,
+    SessionToolIndexEntry,
 };
 use mallard_domain::NoticeSeverity;
 use serde_json::Value;
@@ -29,7 +31,18 @@ fn max_line_bytes() -> usize {
 }
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_CLAUDE_RECORDS: usize = 100_000;
-pub(crate) const TIMELINE_PARSER_VERSION: u32 = 1;
+/// 2: `Task`/`Agent` calls index as agent calls, with child identities.
+pub(crate) const TIMELINE_PARSER_VERSION: u32 = 2;
+/// The suffix of a child transcript that its row is read from: the last
+/// record's clock and the final message. The same bound the scan window uses.
+const CHILD_TAIL_WINDOW_BYTES: u64 = 256 * 1024;
+/// A transcript written this recently is still being written to.
+const LIVE_TRANSCRIPT_SECS: u64 = 300;
+
+/// The tools that create a subagent. `Task` is the older spelling of `Agent`.
+fn is_agent_tool(name: &str) -> bool {
+    matches!(name, "Task" | "Agent")
+}
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
     let meta = fs::metadata(path).map_err(|e| format!("inspect '{}': {}", path.display(), e))?;
@@ -109,6 +122,46 @@ impl ClaudeTokenUsage {
 pub(crate) fn summarize_file(path: &Path) -> Result<SessionFileSummary, String> {
     let bytes = read_bounded(path)?;
     summarize_bytes(&bytes)
+}
+
+/// A child transcript's records are all sidechain records naming the parent
+/// session and the agent. Read as the child's own page, that sidechain is the
+/// main chain: the flag comes off, and a record that is not this child's is
+/// skipped rather than indexed under the wrong identity.
+fn normalize_child_record(mut value: Value, child: &SessionChildIdentity) -> Option<Value> {
+    let object = value.as_object_mut()?;
+    if object.get("sessionId").and_then(Value::as_str)
+        != Some(child.parent_provider_session_id.as_str())
+        || object.get("agentId").and_then(Value::as_str) != Some(child.provider_agent_id.as_str())
+        || object.get("isSidechain").and_then(Value::as_bool) != Some(true)
+    {
+        return None;
+    }
+    object.remove("isSidechain");
+    Some(value)
+}
+
+/// The Activity summary of a child transcript, identified by its agent id.
+pub(crate) fn summarize_child_file(
+    path: &Path,
+    child: &SessionChildIdentity,
+) -> Result<SessionFileSummary, String> {
+    let bytes = read_bounded(path)?;
+    let mut summary = SummaryAccumulator::new();
+    for record in crate::conversation_codec::parsed_records(&bytes) {
+        match record {
+            Ok(value) => {
+                if let Some(value) = normalize_child_record(value, child) {
+                    summary.observe(&Ok(value));
+                }
+            }
+            Err(error) => summary.observe(&Err(error)),
+        }
+    }
+    let mut summary = summary.finish()?;
+    summary.session_id = child.provider_agent_id.clone();
+    summary.is_internal_subagent = true;
+    Ok(summary)
 }
 
 pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String> {
@@ -469,6 +522,7 @@ impl ClaudeTimelineBuilder {
                 parent_event_id: None,
                 source,
                 tool: None,
+                agent: None,
             },
             order: (source.offset, 0),
         });
@@ -570,12 +624,22 @@ impl ClaudeTimelineBuilder {
         let position = self.events.len();
         self.tool_positions_by_call_id
             .insert(call_id.clone(), position);
+        // A delegation is its own kind: the row is a speaker being created,
+        // shown by default, where tool calls stay behind their toggle.
+        let (kind, agent) = if is_agent_tool(&native_name) {
+            (
+                SessionTimelineEventKind::AgentCall,
+                Some(SessionAgentIndexEntry::default()),
+            )
+        } else {
+            (SessionTimelineEventKind::ToolCall, None)
+        };
         self.events.push(PendingTimelineEvent {
             entry: SessionTimelineIndexEntry {
                 event_id: format!("claude:tool:{call_id}"),
                 ordinal: 0,
                 timestamp,
-                kind: SessionTimelineEventKind::ToolCall,
+                kind,
                 quality: SessionCountQuality::LowerBound,
                 turn_id: Some(turn_id),
                 turn_tool_summary: None,
@@ -589,6 +653,7 @@ impl ClaudeTimelineBuilder {
                     result_source: None,
                     affected_paths,
                 }),
+                agent,
             },
             order: (
                 source.offset,
@@ -597,11 +662,15 @@ impl ClaudeTimelineBuilder {
         });
     }
 
+    /// `agent_result` is the record's `toolUseResult`, which on an agent call
+    /// names the child (`agentId`) and says whether the parent waited for it.
     fn complete_tool(
         &mut self,
         call_id: &str,
         status: SessionToolCallStatus,
         source: SessionSourceSpan,
+        timestamp: Option<u64>,
+        agent_result: Option<&Value>,
     ) {
         let position = self.tool_positions_by_call_id.get(call_id).copied();
         let Some(position) = position else {
@@ -620,6 +689,27 @@ impl ClaudeTimelineBuilder {
             };
             tool.result_source = Some(source);
             pending.entry.quality = SessionCountQuality::Exact;
+        }
+        if let Some(agent) = pending.entry.agent.as_mut() {
+            let result = agent_result.unwrap_or(&Value::Null);
+            agent.provider_agent_id = result
+                .get("agentId")
+                .and_then(Value::as_str)
+                .filter(|id| super::subagents::valid_agent_id(id))
+                .map(ToOwned::to_owned);
+            // A synchronous result is the child's end; a background launch
+            // records nothing about the end, which the child tail supplies.
+            let waited = result.get("isAsync").and_then(Value::as_bool) != Some(true);
+            agent.recorded_status = if status == SessionToolCallStatus::Failed {
+                Some(SessionAgentStatus::Failed)
+            } else if waited {
+                Some(SessionAgentStatus::Completed)
+            } else {
+                None
+            };
+            agent.recorded_end = (agent.recorded_status.is_some())
+                .then_some(timestamp)
+                .flatten();
         }
     }
 
@@ -673,6 +763,7 @@ impl ClaudeTimelineBuilder {
                     parent_event_id: None,
                     source: group.source,
                     tool: None,
+                    agent: None,
                 },
                 order: group.order,
             });
@@ -704,7 +795,12 @@ impl ClaudeTimelineBuilder {
         let visible_ids = self
             .events
             .iter()
-            .filter(|pending| pending.entry.kind != SessionTimelineEventKind::ToolCall)
+            .filter(|pending| {
+                !matches!(
+                    pending.entry.kind,
+                    SessionTimelineEventKind::ToolCall | SessionTimelineEventKind::AgentCall
+                )
+            })
             .map(|pending| pending.entry.event_id.clone())
             .collect::<BTreeSet<_>>();
         for pending in &mut self.events {
@@ -778,9 +874,12 @@ fn claude_counts(
     inferred_responses: bool,
 ) -> SessionEventCounts {
     let count_kind = |kind| entries.iter().filter(|entry| entry.kind == kind).count() as u64;
+    // Categories partition the tool calls alone; an agent call keeps its
+    // `Other` tag for the payload path but is counted as a delegation.
     let count_category = |category| {
         entries
             .iter()
+            .filter(|entry| entry.kind == SessionTimelineEventKind::ToolCall)
             .filter_map(|entry| entry.tool.as_ref())
             .filter(|tool| tool.category == category)
             .count() as u64
@@ -805,6 +904,11 @@ fn claude_counts(
     let visible_explanation = (visible_quality == SessionCountQuality::LowerBound)
         .then_some("Some Claude records could not be safely indexed.");
     SessionEventCounts {
+        agent_calls: claude_count(
+            count_kind(SessionTimelineEventKind::AgentCall),
+            tool_quality,
+            claude_tool_explanation(tool_quality),
+        ),
         prompts: claude_count(
             count_kind(SessionTimelineEventKind::Prompt),
             visible_quality,
@@ -1073,7 +1177,13 @@ fn consume_claude_record(
                         );
                         continue;
                     };
-                    builder.complete_tool(call_id, tool_result_status(block), source);
+                    builder.complete_tool(
+                        call_id,
+                        tool_result_status(block),
+                        source,
+                        timestamp,
+                        value.get("toolUseResult"),
+                    );
                 }
             }
         }
@@ -1174,7 +1284,13 @@ fn consume_claude_record(
                             .or_else(|| block.get("toolUseId"))
                             .and_then(Value::as_str)
                         {
-                            builder.complete_tool(call_id, tool_result_status(block), source);
+                            builder.complete_tool(
+                        call_id,
+                        tool_result_status(block),
+                        source,
+                        timestamp,
+                        value.get("toolUseResult"),
+                    );
                         }
                     }
                     "text" | "thinking" | "redactedthinking" | "image" | "document"
@@ -1296,6 +1412,13 @@ pub(crate) fn build_timeline_index(
                 );
                 continue;
             }
+        };
+        let value = match context.child {
+            Some(child) => match normalize_child_record(value, child) {
+                Some(value) => value,
+                None => continue,
+            },
+            None => value,
         };
         consume_claude_record(&mut builder, &value, source_span(start, end), context);
     }
@@ -1435,6 +1558,10 @@ fn matching_entry(entry: &SessionTimelineIndexEntry, query: &SessionTimelineQuer
             return false;
         }
     }
+    // Categories partition tool calls; an agent row answers to its own kind.
+    if entry.kind == SessionTimelineEventKind::AgentCall {
+        return true;
+    }
     if let Some(tool) = &entry.tool {
         query.included_tool_categories.contains(&tool.category)
     } else {
@@ -1508,10 +1635,19 @@ fn tool_summary(tool: &SessionToolIndexEntry, input: Option<&Value>) -> String {
         .unwrap_or_else(|| tool.native_name.clone())
 }
 
+/// The kinds that carry a call payload rather than a message body.
+fn is_call_kind(kind: SessionTimelineEventKind) -> bool {
+    matches!(
+        kind,
+        SessionTimelineEventKind::ToolCall | SessionTimelineEventKind::AgentCall
+    )
+}
+
 pub(crate) fn read_timeline_page(
     path: &Path,
     index: &SessionTimelineIndex,
     query: &SessionTimelineQuery,
+    context: &SessionTimelineContext<'_>,
 ) -> Result<SessionTimelinePageSlice, String> {
     if index.parser_version != TIMELINE_PARSER_VERSION {
         return Err("Claude timeline index version is stale".to_string());
@@ -1527,7 +1663,7 @@ pub(crate) fn read_timeline_page(
         .collect::<BTreeMap<_, _>>();
     let mut summary_already_emitted = BTreeSet::new();
     for entry in index.events.iter().take(start) {
-        if matching_entry(entry, query) && entry.kind != SessionTimelineEventKind::ToolCall {
+        if matching_entry(entry, query) && !is_call_kind(entry.kind) {
             if let Some(turn_id) = &entry.turn_id {
                 summary_already_emitted.insert(turn_id.clone());
             }
@@ -1542,18 +1678,27 @@ pub(crate) fn read_timeline_page(
             position += 1;
             continue;
         }
-        let text = if entry.kind == SessionTimelineEventKind::ToolCall {
+        let text = if is_call_kind(entry.kind) {
             None
         } else {
             let value = read_source_value(&mut file, entry.source)?;
             bounded_text(record_text(&value), timeline_message_preview_bytes()).0
         };
+        let is_agent = entry.kind == SessionTimelineEventKind::AgentCall;
         let tool = if let Some(tool_index) = &entry.tool {
             let (arguments, result, summary) = tool_payloads(&mut file, entry)?;
-            let (argument_preview, argument_truncated) =
-                bounded_text(arguments, timeline_tool_preview_bytes());
-            let (result_preview, result_truncated) =
-                bounded_text(result, timeline_tool_preview_bytes());
+            // An agent row carries its brief and report on the agent preview;
+            // the raw payload stays one click away through the event detail.
+            let (argument_preview, argument_truncated) = if is_agent {
+                (None, false)
+            } else {
+                bounded_text(arguments, timeline_tool_preview_bytes())
+            };
+            let (result_preview, result_truncated) = if is_agent {
+                (None, false)
+            } else {
+                bounded_text(result, timeline_tool_preview_bytes())
+            };
             Some(SessionToolCallPreview {
                 provider_call_id: tool_index.provider_call_id.clone(),
                 native_name: tool_index.native_name.clone(),
@@ -1569,6 +1714,9 @@ pub(crate) fn read_timeline_page(
         } else {
             None
         };
+        let agent = is_agent
+            .then(|| describe_agent(&mut file, path, entry, context))
+            .transpose()?;
         let event_content_bytes = text
             .as_ref()
             .map_or(0, String::len)
@@ -1581,7 +1729,8 @@ pub(crate) fn read_timeline_page(
                 tool.as_ref()
                     .and_then(|preview| preview.result_preview.as_ref())
                     .map_or(0, String::len),
-            );
+            )
+            .saturating_add(agent.as_ref().map_or(0, agent_preview_bytes));
         if !events.is_empty()
             && page_content_bytes.saturating_add(event_content_bytes)
                 > timeline_page_content_bytes()
@@ -1591,7 +1740,7 @@ pub(crate) fn read_timeline_page(
         page_content_bytes = page_content_bytes.saturating_add(event_content_bytes);
         position += 1;
         let mut turn_tool_summary = None;
-        if entry.kind != SessionTimelineEventKind::ToolCall {
+        if !is_call_kind(entry.kind) {
             if let Some(turn_id) = &entry.turn_id {
                 if summary_already_emitted.insert(turn_id.clone()) {
                     turn_tool_summary = summaries.get(turn_id).cloned();
@@ -1610,6 +1759,7 @@ pub(crate) fn read_timeline_page(
             text,
             tool,
             checkpoint: None,
+            agent,
         });
     }
     let next_index = index.events[position..]
@@ -1617,6 +1767,253 @@ pub(crate) fn read_timeline_page(
         .any(|entry| matching_entry(entry, query))
         .then_some(position);
     Ok(SessionTimelinePageSlice { events, next_index })
+}
+
+/// What an agent preview adds to a page: its two texts.
+pub(crate) fn agent_preview_bytes(agent: &SessionAgentPreview) -> usize {
+    agent
+        .brief
+        .as_ref()
+        .map_or(0, String::len)
+        .saturating_add(agent.report.as_ref().map_or(0, String::len))
+}
+
+/// The child transcript's clock and closing message, from its tail alone.
+#[derive(Default)]
+struct ChildTail {
+    last_timestamp: Option<u64>,
+    report: Option<String>,
+    /// The last durable record is a final assistant message: the child said
+    /// its piece and stopped.
+    finished: bool,
+}
+
+fn claude_child_tail(path: &Path) -> Result<ChildTail, String> {
+    let window = crate::jsonl_tail_io::read_suffix_window(path, CHILD_TAIL_WINDOW_BYTES)?;
+    let bytes = window.bytes.as_slice();
+    // Only complete records: drop the head of a mid-file window and a torn
+    // last line, the way the scan window does.
+    let start = if window.window_offset == 0 {
+        0
+    } else {
+        bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |position| position + 1)
+    };
+    let end = bytes[start..]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(start, |position| start + position + 1);
+    let mut tail = ChildTail::default();
+    for line in bytes[start..end].split(|byte| *byte == b'\n') {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if let Some(timestamp) = value.get("timestamp").and_then(parse_timestamp_value) {
+            if tail.last_timestamp.is_none_or(|last| timestamp > last) {
+                tail.last_timestamp = Some(timestamp);
+            }
+        }
+        match normalized_type(value.get("type").and_then(Value::as_str)).as_str() {
+            "assistant" => {
+                let stop_reason = normalized_type(
+                    value
+                        .get("message")
+                        .and_then(|message| message.get("stop_reason"))
+                        .and_then(Value::as_str),
+                );
+                if let Some(text) = record_text(&value).filter(|text| !text.trim().is_empty()) {
+                    tail.report = Some(text);
+                    tail.finished = is_terminal_response_stop_reason(&stop_reason);
+                } else if value
+                    .get("message")
+                    .and_then(|message| message.get("content"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|blocks| !blocks.is_empty())
+                {
+                    tail.finished = false;
+                }
+            }
+            "user" => tail.finished = false,
+            _ => {}
+        }
+    }
+    Ok(tail)
+}
+
+/// Written within the last five minutes: the same rule that marks a session
+/// active on the activity list.
+fn transcript_is_live(path: &Path) -> bool {
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|elapsed| elapsed.as_secs() < LIVE_TRANSCRIPT_SECS)
+}
+
+pub(crate) fn describe_agent_call(
+    path: &Path,
+    entry: &SessionTimelineIndexEntry,
+    context: &SessionTimelineContext<'_>,
+) -> Result<SessionAgentPreview, String> {
+    let mut file =
+        File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
+    describe_agent(&mut file, path, entry, context)
+}
+
+/// One agent row from the call, its result, and the child's tail. The call
+/// record names the task (`description`, `subagent_type`, `prompt`); the
+/// result record names the child and, when the parent waited for it, its end,
+/// its report, and its own accounting. A background child is read from its
+/// transcript's tail instead: last clock, final message, and whether it said
+/// one at all.
+fn describe_agent(
+    file: &mut File,
+    path: &Path,
+    entry: &SessionTimelineIndexEntry,
+    context: &SessionTimelineContext<'_>,
+) -> Result<SessionAgentPreview, String> {
+    let tool = entry
+        .tool
+        .as_ref()
+        .ok_or_else(|| "agent call has no call metadata".to_string())?;
+    let agent = entry.agent.clone().unwrap_or_default();
+    let call_value = read_source_value(file, entry.source)?;
+    let input = find_tool_block(&call_value, &tool.provider_call_id)
+        .and_then(|block| block.get("input"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let (result_value, result_timestamp) = match tool.result_source {
+        Some(span) if span != entry.source => {
+            let value = read_source_value(file, span)?;
+            let timestamp = value.get("timestamp").and_then(parse_timestamp_value);
+            (Some(value), timestamp)
+        }
+        Some(_) => (Some(call_value.clone()), entry.timestamp),
+        None => (None, None),
+    };
+    let result_meta = result_value
+        .as_ref()
+        .and_then(|value| value.get("toolUseResult"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    // The report is prose: the text blocks of the result, not their JSON.
+    let result_text = result_value
+        .as_ref()
+        .and_then(|value| find_tool_block(value, &tool.provider_call_id))
+        .and_then(|block| block.get("content").or_else(|| block.get("result")))
+        .and_then(|content| match content {
+            Value::String(text) => Some(text.clone()),
+            Value::Array(blocks) => {
+                let text = blocks
+                    .iter()
+                    .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                (!text.is_empty()).then_some(text)
+            }
+            other => value_as_preview(other),
+        });
+    let text_field = |value: &Value, key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(|text| truncate_chars(text, 160))
+    };
+    let waited = result_meta.get("isAsync").and_then(Value::as_bool) != Some(true);
+    let label = text_field(&input, "description")
+        .or_else(|| text_field(&result_meta, "description"))
+        .unwrap_or_else(|| "Agent".to_string());
+    let role =
+        text_field(&input, "subagent_type").or_else(|| text_field(&result_meta, "agentType"));
+    let model = text_field(&result_meta, "resolvedModel");
+    let (brief, brief_truncated) = bounded_text(
+        input
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        timeline_tool_preview_bytes(),
+    );
+    // A child of a child is not addressed through this page: nested
+    // delegations are read on the parent's page, never followed from here.
+    let child_path = agent
+        .provider_agent_id
+        .as_deref()
+        .filter(|_| context.child.is_none())
+        .and_then(|id| super::subagents::child_path(path, context.provider_session_id, id).ok());
+    let child_exists = child_path.as_ref().is_some_and(|child| {
+        super::subagents::child_exists(child, context.provider_home) == Ok(true)
+    });
+    let mut ended_at = None;
+    let mut report = None;
+    let mut tool_calls = None;
+    let mut tokens = None;
+    let status = if tool.status == SessionToolCallStatus::Failed {
+        ended_at = result_timestamp;
+        report = result_text;
+        SessionAgentStatus::Failed
+    } else if waited && tool.status == SessionToolCallStatus::Completed {
+        ended_at = result_timestamp;
+        report = result_text;
+        tool_calls = result_meta.get("totalToolUseCount").and_then(Value::as_u64);
+        tokens = result_meta.get("totalTokens").and_then(Value::as_u64);
+        SessionAgentStatus::Completed
+    } else if agent.provider_agent_id.is_none() {
+        // Called, never answered: still running if the parent is being
+        // written, else cut off with it.
+        if transcript_is_live(path) {
+            SessionAgentStatus::Running
+        } else {
+            SessionAgentStatus::Incomplete
+        }
+    } else if let Some(child) = child_path.as_ref().filter(|_| child_exists) {
+        let tail = claude_child_tail(child)?;
+        ended_at = tail.last_timestamp;
+        report = tail.report;
+        if tail.finished {
+            SessionAgentStatus::Completed
+        } else if transcript_is_live(child) {
+            SessionAgentStatus::Running
+        } else {
+            SessionAgentStatus::Incomplete
+        }
+    } else {
+        SessionAgentStatus::Unavailable
+    };
+    let (report, report_truncated) = bounded_text(report, timeline_tool_preview_bytes());
+    Ok(SessionAgentPreview {
+        transcript_resource_id: agent
+            .provider_agent_id
+            .as_deref()
+            .filter(|_| child_exists)
+            .map(|id| agent_resource_id(context.resource_id, id)),
+        provider_agent_id: agent.provider_agent_id,
+        label,
+        task: None,
+        role,
+        model,
+        mode: if waited {
+            SessionAgentMode::Sync
+        } else {
+            SessionAgentMode::Async
+        },
+        status,
+        started_at: entry.timestamp,
+        ended_at,
+        tool_calls,
+        tokens,
+        brief,
+        brief_truncated,
+        report,
+        report_truncated,
+    })
 }
 
 pub(crate) fn read_event_detail(
@@ -1679,6 +2076,8 @@ mod tests {
             provider_session_id: "session-1",
             project_root,
             project_root_aliases: &[],
+            provider_home: project_root,
+            child: None,
         }
     }
 
@@ -1897,7 +2296,13 @@ mod tests {
             included_tool_categories: BTreeSet::new(),
             turn_id: None,
         };
-        let page = read_timeline_page(&transcript, &index, &response_query).unwrap();
+        let page = read_timeline_page(
+            &transcript,
+            &index,
+            &response_query,
+            &context(&project_root),
+        )
+        .unwrap();
         assert_eq!(page.events.len(), 1);
         assert_eq!(page.events[0].text.as_deref(), Some("The source is clear."));
         assert_eq!(
@@ -2247,7 +2652,8 @@ mod tests {
             ]),
             turn_id: None,
         };
-        let page = read_timeline_page(&transcript, &index, &query).unwrap();
+        let page =
+            read_timeline_page(&transcript, &index, &query, &context(&project_root)).unwrap();
         assert_eq!(page.events.len(), 3);
         let tools = page
             .events
@@ -2381,11 +2787,15 @@ mod tests {
         let query = SessionTimelineQuery {
             start_index: None,
             limit: 50,
-            included_event_kinds: BTreeSet::from([SessionTimelineEventKind::ToolCall]),
+            included_event_kinds: BTreeSet::from([
+                SessionTimelineEventKind::ToolCall,
+                SessionTimelineEventKind::AgentCall,
+            ]),
             included_tool_categories: BTreeSet::from([SessionToolCategory::Other]),
             turn_id: None,
         };
-        let page = read_timeline_page(&transcript, &index, &query).unwrap();
+        let page =
+            read_timeline_page(&transcript, &index, &query, &context(&project_root)).unwrap();
         assert_eq!(page.events.len(), cases.len());
         let summaries = page
             .events
@@ -2426,7 +2836,7 @@ mod tests {
         assert_eq!(max_line_bytes() as u64, conversation_file_limit_bytes());
         assert!(fs::metadata(&transcript).unwrap().len() > 2 * 1024 * 1024);
         let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
-        assert_eq!(index.parser_version, 1);
+        assert_eq!(index.parser_version, TIMELINE_PARSER_VERSION);
         assert!(!index.truncated);
         assert!(index.warnings.is_empty(), "{:?}", index.warnings);
         assert_eq!(index.counts.tool_calls.quality, SessionCountQuality::Exact);
@@ -2447,7 +2857,8 @@ mod tests {
             included_tool_categories: BTreeSet::from([SessionToolCategory::Read]),
             turn_id: None,
         };
-        let page = read_timeline_page(&transcript, &index, &query).unwrap();
+        let page =
+            read_timeline_page(&transcript, &index, &query, &context(&project_root)).unwrap();
         let preview = page.events[0]
             .tool
             .as_ref()
@@ -2496,7 +2907,8 @@ mod tests {
             included_tool_categories: BTreeSet::from([SessionToolCategory::Other]),
             turn_id: None,
         };
-        let first_page = read_timeline_page(&transcript, &index, &first_query).unwrap();
+        let first_page =
+            read_timeline_page(&transcript, &index, &first_query, &context(&project_root)).unwrap();
         assert_eq!(first_page.events.len(), 1);
         let first_tool = first_page.events[0].tool.as_ref().unwrap();
         assert_eq!(first_tool.provider_call_id, "tool-1");
@@ -2512,7 +2924,9 @@ mod tests {
             start_index: first_page.next_index,
             ..first_query
         };
-        let second_page = read_timeline_page(&transcript, &index, &second_query).unwrap();
+        let second_page =
+            read_timeline_page(&transcript, &index, &second_query, &context(&project_root))
+                .unwrap();
         assert_eq!(second_page.events.len(), 1);
         assert_eq!(
             second_page.events[0]
@@ -2572,10 +2986,12 @@ mod tests {
             provider_session_id: "session-1",
             project_root: &canonical_root,
             project_root_aliases: &aliases,
+            provider_home: &canonical_root,
+            child: None,
         };
 
         let index = build_timeline_index(&transcript, &context).unwrap();
-        assert_eq!(index.parser_version, 1);
+        assert_eq!(index.parser_version, TIMELINE_PARSER_VERSION);
         let tools = index
             .events
             .iter()
@@ -2667,5 +3083,197 @@ mod tests {
         assert!(truncated);
         assert!(preview.ends_with('…'));
         assert!(preview.len() <= timeline_tool_preview_bytes());
+    }
+
+    fn claude_agent_parent(project_root: &Path, waited: bool) -> Vec<Value> {
+        let result = if waited {
+            json!({"status":"completed","agentId":"a1b2c3","agentType":"Explore","resolvedModel":"claude-opus-5","totalDurationMs":239970,"totalTokens":88416,"totalToolUseCount":33})
+        } else {
+            json!({"isAsync":true,"status":"async_launched","agentId":"a1b2c3","description":"Research term marking","resolvedModel":"claude-opus-5"})
+        };
+        vec![
+            json!({"type":"user","uuid":"u-1","sessionId":"session-1","cwd":project_root,"timestamp":"2026-08-27T06:00:00Z","message":{"role":"user","content":"Research the term marking"}}),
+            json!({"type":"assistant","uuid":"a-1","sessionId":"session-1","timestamp":"2026-08-27T06:00:05Z","message":{"id":"msg-1","role":"assistant","stop_reason":"tool_use","content":[
+                {"type":"tool_use","id":"task-1","name":"Task","input":{"description":"Research term marking","subagent_type":"general-purpose","prompt":"Research how reading apps mark a target word."}}
+            ]}}),
+            json!({"type":"user","uuid":"r-1","sessionId":"session-1","timestamp":"2026-08-27T06:00:09Z","toolUseResult":result,"message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"task-1","content":[{"type":"text","text":"I have a complete picture. Here is the map."}]}
+            ]}}),
+            json!({"type":"assistant","uuid":"a-2","sessionId":"session-1","timestamp":"2026-08-27T06:14:41Z","message":{"id":"msg-2","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"The three reports agree."}]}}),
+        ]
+    }
+
+    fn claude_agent_child(project_root: &Path) -> Vec<Value> {
+        vec![
+            json!({"type":"user","uuid":"c-1","parentUuid":null,"isSidechain":true,"sessionId":"session-1","agentId":"a1b2c3","cwd":project_root,"timestamp":"2026-08-27T06:00:09Z","message":{"role":"user","content":"Research how reading apps mark a target word."}}),
+            json!({"type":"assistant","uuid":"c-2","parentUuid":"c-1","isSidechain":true,"sessionId":"session-1","agentId":"a1b2c3","timestamp":"2026-08-27T06:10:36Z","message":{"id":"cm-1","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"I have enough. Here are the findings."}],"usage":{"input_tokens":2,"output_tokens":100}}}),
+        ]
+    }
+
+    fn agent_page(
+        transcript: &Path,
+        index: &SessionTimelineIndex,
+        context: &SessionTimelineContext<'_>,
+    ) -> SessionTimelineEvent {
+        let query = SessionTimelineQuery {
+            start_index: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([SessionTimelineEventKind::AgentCall]),
+            included_tool_categories: BTreeSet::from([SessionToolCategory::Other]),
+            turn_id: None,
+        };
+        let page = read_timeline_page(transcript, index, &query, context).unwrap();
+        assert_eq!(page.events.len(), 1);
+        page.events.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn background_agent_calls_index_as_their_own_kind_and_read_the_child_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temp.path()).unwrap();
+        let project_root = home.join("project");
+        let projects = home.join("projects");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::create_dir_all(projects.join("session-1/subagents")).unwrap();
+        let transcript = projects.join("session-1.jsonl");
+        let child = projects.join("session-1/subagents/agent-a1b2c3.jsonl");
+        write_jsonl(&transcript, claude_agent_parent(&project_root, false));
+        write_jsonl(&child, claude_agent_child(&project_root));
+        let context = SessionTimelineContext {
+            resource_id: "claude:conversation:test",
+            provider_session_id: "session-1",
+            project_root: &project_root,
+            project_root_aliases: &[],
+            provider_home: &home,
+            child: None,
+        };
+
+        let index = build_timeline_index(&transcript, &context).unwrap();
+        assert_eq!(count_value(&index.counts.agent_calls), 1);
+        assert_eq!(count_value(&index.counts.tool_calls), 0);
+        assert_eq!(count_value(&index.counts.other_tools), 0);
+        let entry = index
+            .events
+            .iter()
+            .find(|entry| entry.kind == SessionTimelineEventKind::AgentCall)
+            .unwrap();
+        let indexed = entry.agent.as_ref().unwrap();
+        assert_eq!(indexed.provider_agent_id.as_deref(), Some("a1b2c3"));
+        assert_eq!(indexed.recorded_status, None);
+        // The index keeps identities only — never the brief or the label.
+        let encoded = serde_json::to_string(&index).unwrap();
+        assert!(!encoded.contains("Research"));
+
+        let event = agent_page(&transcript, &index, &context);
+        let tool = event.tool.as_ref().unwrap();
+        assert_eq!(tool.argument_preview, None);
+        assert_eq!(tool.result_preview, None);
+        let agent = event.agent.unwrap();
+        assert_eq!(agent.label, "Research term marking");
+        assert_eq!(agent.role.as_deref(), Some("general-purpose"));
+        assert_eq!(agent.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(agent.mode, SessionAgentMode::Async);
+        assert_eq!(agent.status, SessionAgentStatus::Completed);
+        assert_eq!(
+            agent.brief.as_deref(),
+            Some("Research how reading apps mark a target word.")
+        );
+        assert_eq!(
+            agent.report.as_deref(),
+            Some("I have enough. Here are the findings.")
+        );
+        assert_eq!(agent.started_at, entry.timestamp);
+        assert_eq!(
+            agent.ended_at,
+            parse_timestamp_value(&json!("2026-08-27T06:10:36Z"))
+        );
+        assert_eq!(agent.tool_calls, None);
+        assert_eq!(
+            agent.transcript_resource_id.as_deref(),
+            Some("claude:conversation:test/agent/a1b2c3")
+        );
+        assert_eq!(
+            describe_agent_call(&transcript, entry, &context).unwrap(),
+            agent
+        );
+
+        // The child is its own page: the sidechain is its main chain.
+        let identity = SessionChildIdentity {
+            parent_provider_session_id: "session-1".to_string(),
+            provider_agent_id: "a1b2c3".to_string(),
+        };
+        let summary = summarize_child_file(&child, &identity).unwrap();
+        assert_eq!(summary.session_id, "a1b2c3");
+        assert!(summary.is_internal_subagent);
+        assert_eq!(summary.user_rounds, 1);
+        assert_eq!(summary.agent_messages, 1);
+        let child_context = SessionTimelineContext {
+            resource_id: "claude:conversation:test/agent/a1b2c3",
+            provider_session_id: "a1b2c3",
+            child: Some(&identity),
+            ..context
+        };
+        let child_index = build_timeline_index(&child, &child_context).unwrap();
+        assert_eq!(count_value(&child_index.counts.prompts), 1);
+        assert_eq!(count_value(&child_index.counts.responses), 1);
+        assert_eq!(count_value(&child_index.counts.agent_calls), 0);
+
+        // Without its transcript the row still stands, and says so.
+        fs::remove_file(&child).unwrap();
+        let agent = agent_page(&transcript, &index, &context).agent.unwrap();
+        assert_eq!(agent.status, SessionAgentStatus::Unavailable);
+        assert_eq!(agent.transcript_resource_id, None);
+        assert_eq!(agent.report, None);
+    }
+
+    #[test]
+    fn waited_agent_calls_take_their_end_and_report_from_the_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temp.path()).unwrap();
+        let project_root = home.join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = home.join("session-1.jsonl");
+        write_jsonl(&transcript, claude_agent_parent(&project_root, true));
+        let context = SessionTimelineContext {
+            resource_id: "claude:conversation:test",
+            provider_session_id: "session-1",
+            project_root: &project_root,
+            project_root_aliases: &[],
+            provider_home: &home,
+            child: None,
+        };
+        let index = build_timeline_index(&transcript, &context).unwrap();
+        let entry = index
+            .events
+            .iter()
+            .find(|entry| entry.kind == SessionTimelineEventKind::AgentCall)
+            .unwrap();
+        assert_eq!(
+            entry.agent.as_ref().unwrap().recorded_status,
+            Some(SessionAgentStatus::Completed)
+        );
+        let agent = agent_page(&transcript, &index, &context).agent.unwrap();
+        assert_eq!(agent.mode, SessionAgentMode::Sync);
+        assert_eq!(agent.status, SessionAgentStatus::Completed);
+        assert_eq!(agent.role.as_deref(), Some("general-purpose"));
+        assert_eq!(agent.tool_calls, Some(33));
+        assert_eq!(agent.tokens, Some(88416));
+        assert_eq!(
+            agent.report.as_deref(),
+            Some("I have a complete picture. Here is the map.")
+        );
+        assert_eq!(
+            agent.ended_at,
+            parse_timestamp_value(&json!("2026-08-27T06:00:09Z"))
+        );
+        // No child file was ever written: the row has nothing to open.
+        assert_eq!(agent.transcript_resource_id, None);
+        // The per-turn call count is tool calls alone.
+        let prompt = index
+            .events
+            .iter()
+            .find(|entry| entry.kind == SessionTimelineEventKind::Prompt)
+            .unwrap();
+        assert_eq!(prompt.turn_tool_summary, None);
     }
 }

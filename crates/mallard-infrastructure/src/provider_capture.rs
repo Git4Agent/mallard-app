@@ -232,7 +232,6 @@ impl CaptureRequest {
 struct SourceFile {
     physical_path: PathBuf,
     logical_path: String,
-    opaque_content: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -421,7 +420,7 @@ pub fn capture_selected(
     selected_resource_ids: &BTreeSet<String>,
 ) -> Result<CapturedResources, String> {
     let discovery = discover_full(registry, request)?;
-    capture_from_discovery(registry, request, &discovery, selected_resource_ids)
+    capture_from_discovery(registry, request, &discovery, selected_resource_ids, true)
 }
 
 /// `capture_selected` over an existing Discovery. Only the walk and its
@@ -432,6 +431,7 @@ pub fn capture_from_discovery(
     request: &CaptureRequest,
     discovery: &Discovery,
     selected_resource_ids: &BTreeSet<String>,
+    credential_redaction_enabled: bool,
 ) -> Result<CapturedResources, String> {
     capture_from_discovery_with_workers(
         registry,
@@ -439,6 +439,7 @@ pub fn capture_from_discovery(
         discovery,
         selected_resource_ids,
         bounded_refresh_workers(selected_resource_ids.len()),
+        credential_redaction_enabled,
     )
 }
 
@@ -505,12 +506,16 @@ fn take_capture_outcome(
 fn capture_resource(
     registry: &crate::providers::AgentProviderRegistry,
     item: &CapturePlanItem<'_>,
+    credential_redaction_enabled: bool,
 ) -> Result<CapturedUnit, String> {
     let resource_id = item.resource_id;
     if let Some(source) = item.discovered.files.first() {
         crate::sync_metrics::record_selected_capture(&source.physical_path);
     }
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
+    let mut redaction = crate::credential_redaction::shared()
+        .begin_run()
+        .with_enabled(credential_redaction_enabled);
     let mut files = Vec::with_capacity(item.discovered.files.len());
     for (source, (source_mtime, mode)) in item
         .discovered
@@ -535,19 +540,16 @@ fn capture_resource(
             );
             (bytes, None)
         };
-        // Sidecar and provider-state bytes are captured in wire form: the
-        // credential scrub runs here, once, so review diffing, retention
-        // dedup, and publish all see one consistent redacted byte stream.
-        // Conversation transcripts stay local-form — review seeding and the
-        // pull-time local target expectations read them — and are redacted
-        // by their own wire builders at publish instead.
+        // Sidecars and provider state use the selected run at capture.
+        // Transcripts remain local-form evidence until their wire builders
+        // process them at publication. Off preserves the captured content.
         let scrub = match kind_primitive(&item.discovered.descriptor.kind) {
             Some(ResourceKindPrimitive::ProviderState) => true,
             Some(ResourceKindPrimitive::Conversation) => !is_transcript,
             _ => false,
         };
         let bytes = if scrub {
-            crate::credential_redaction::shared()
+            redaction
                 .redact_document(bytes)
                 .map_err(|error| {
                     format!(
@@ -560,19 +562,6 @@ fn capture_resource(
             bytes
         };
         let bytes = PayloadBytes::from(bytes);
-        if let Some(secret) = detect_secret_material(bytes.as_bytes()) {
-            if source.opaque_content {
-                warnings.push(format!(
-                    "{} may contain {} (opaque user content requires review)",
-                    source.logical_path, secret
-                ));
-            } else {
-                return Err(format!(
-                    "resource '{}' contains possible {} in '{}'",
-                    resource_id, secret, source.logical_path
-                ));
-            }
-        }
         files.push(CapturedFile {
             logical_path: source.logical_path.clone(),
             resource_id: resource_id.to_string(),
@@ -660,6 +649,7 @@ fn capture_from_discovery_with_workers(
     discovery: &Discovery,
     selected_resource_ids: &BTreeSet<String>,
     workers: usize,
+    credential_redaction_enabled: bool,
 ) -> Result<CapturedResources, String> {
     let canonical_project = canonical_existing_dir(&request.project_root, "project root")?;
     let mut approved_roots = Vec::new();
@@ -793,7 +783,7 @@ fn capture_from_discovery_with_workers(
                     let Some(item) = work_items.get(index) else {
                         break;
                     };
-                    let outcome = capture_resource(registry, item);
+                    let outcome = capture_resource(registry, item, credential_redaction_enabled);
                     if outcome.is_err() && !captures_in_isolation(item) {
                         failed.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
@@ -882,7 +872,7 @@ pub(crate) fn capture_recipe(
     recipe: &domain::BundleRecipe,
 ) -> Result<CapturedResources, String> {
     let discovery = discover_full(registry, request)?;
-    capture_recipe_from_discovery(registry, request, &discovery, recipe)
+    capture_recipe_from_discovery(registry, request, &discovery, recipe, true)
 }
 
 /// Capture a recipe from an existing Discovery, sharing one walk between
@@ -892,6 +882,7 @@ pub fn capture_recipe_from_discovery(
     request: &CaptureRequest,
     discovery: &Discovery,
     recipe: &domain::BundleRecipe,
+    credential_redaction_enabled: bool,
 ) -> Result<CapturedResources, String> {
     recipe.validate()?;
     let selected = recipe
@@ -899,7 +890,13 @@ pub fn capture_recipe_from_discovery(
         .keys()
         .map(|id| id.as_str().to_string())
         .collect();
-    capture_from_discovery(registry, request, discovery, &selected)
+    capture_from_discovery(
+        registry,
+        request,
+        discovery,
+        &selected,
+        credential_redaction_enabled,
+    )
 }
 
 /// Convert captured descriptors into the shared current domain model. This
@@ -1137,7 +1134,6 @@ fn install_provider_discovery(
         let mut files = vec![SourceFile {
             physical_path: session.physical_path,
             logical_path: transcript_logical.clone(),
-            opaque_content: true,
         }];
         let mut logical_paths = vec![transcript_logical.clone()];
         let mut blocked_reason = session.blocked_reason;
@@ -1156,7 +1152,6 @@ fn install_provider_discovery(
             files.push(SourceFile {
                 physical_path: sidecar.physical_path,
                 logical_path: logical.clone(),
-                opaque_content: true,
             });
             logical_paths.push(logical.clone());
             sidecar_refs.push(CapturedSidecarRef {
@@ -1221,7 +1216,6 @@ fn install_provider_discovery(
             .map(|file| SourceFile {
                 physical_path: file.physical_path,
                 logical_path: format!("state/providers/{}/{}", provider, file.logical_suffix),
-                opaque_content: true,
             })
             .collect::<Vec<_>>();
         if files.is_empty() {
@@ -1525,7 +1519,6 @@ fn add_project_content_file(
             files: vec![SourceFile {
                 physical_path: path.to_path_buf(),
                 logical_path,
-                opaque_content: true,
             }],
             conversation: None,
         },
@@ -2443,17 +2436,14 @@ mod tests {
             SourceFile {
                 physical_path: transcript,
                 logical_path: "state/transcript.jsonl".to_string(),
-                opaque_content: false,
             },
             SourceFile {
                 physical_path: sidecar,
                 logical_path: "state/sidecar.bin".to_string(),
-                opaque_content: true,
             },
             SourceFile {
                 physical_path: temp.path().join("missing.bin"),
                 logical_path: "state/missing.bin".to_string(),
-                opaque_content: true,
             },
         ];
         assert_eq!(capture_bytes_of_files(&files), 1_024);
@@ -2548,7 +2538,8 @@ mod tests {
         assert!(all_ids.len() >= 2, "fixture must span several resources");
 
         let direct = capture_selected(registry(), &request, &all_ids).unwrap();
-        let shared = capture_from_discovery(registry(), &request, &discovery, &all_ids).unwrap();
+        let shared =
+            capture_from_discovery(registry(), &request, &discovery, &all_ids, true).unwrap();
         assert_eq!(
             direct, shared,
             "the wrapper and the seam capture identically"
@@ -2562,8 +2553,10 @@ mod tests {
         let other_ids: BTreeSet<String> = all_ids.difference(&conversation_ids).cloned().collect();
         assert!(!conversation_ids.is_empty() && !other_ids.is_empty());
         let first =
-            capture_from_discovery(registry(), &request, &discovery, &conversation_ids).unwrap();
-        let second = capture_from_discovery(registry(), &request, &discovery, &other_ids).unwrap();
+            capture_from_discovery(registry(), &request, &discovery, &conversation_ids, true)
+                .unwrap();
+        let second =
+            capture_from_discovery(registry(), &request, &discovery, &other_ids, true).unwrap();
         let union_files: BTreeSet<String> = first
             .files
             .keys()
@@ -2930,7 +2923,8 @@ mod tests {
             "codex:session:child-source".to_string(),
             "codex:session:child-thread-source".to_string(),
         ]);
-        let captured = capture_from_discovery(registry(), &request, &discovery, &selected).unwrap();
+        let captured =
+            capture_from_discovery(registry(), &request, &discovery, &selected, true).unwrap();
         assert!(captured
             .resources
             .contains_key("codex:session:parent-thread"));
@@ -3263,13 +3257,12 @@ mod tests {
         (request, home)
     }
 
-    fn source_file(home: &Path, name: &str, bytes: &[u8], opaque: bool) -> SourceFile {
+    fn source_file(home: &Path, name: &str, bytes: &[u8], _opaque: bool) -> SourceFile {
         let physical = home.join(name);
         fs::write(&physical, bytes).unwrap();
         SourceFile {
             physical_path: physical,
             logical_path: format!("state/codex/{name}"),
-            opaque_content: opaque,
         }
     }
 
@@ -3329,7 +3322,7 @@ mod tests {
         // failure is recorded against beta alone.
         let beta_path = codex.join("sessions/2026/07/17/rollout-thread-beta.jsonl");
         unreadable(&beta_path);
-        let captured = capture_from_discovery(registry(), &request, &discovery, &all_ids);
+        let captured = capture_from_discovery(registry(), &request, &discovery, &all_ids, true);
         readable(&beta_path);
         let captured = captured.unwrap();
         assert!(captured.conversations.contains_key(&alpha));
@@ -3342,7 +3335,7 @@ mod tests {
         // A bundle requirement that cannot be read still fails the capture.
         let notes_path = project.join("notes.md");
         unreadable(&notes_path);
-        let error = capture_from_discovery(registry(), &request, &discovery, &all_ids);
+        let error = capture_from_discovery(registry(), &request, &discovery, &all_ids, true);
         readable(&notes_path);
         let error = error.unwrap_err();
         assert!(error.contains("read"), "{error}");
@@ -3361,11 +3354,12 @@ mod tests {
         )]);
         let selected = BTreeSet::from(["r0".to_string()]);
         let error =
-            capture_from_discovery(registry(), &request, &discovery, &selected).unwrap_err();
+            capture_from_discovery(registry(), &request, &discovery, &selected, true).unwrap_err();
         assert!(error.contains("outside approved roots"), "{error}");
 
         request.include_project_content = true;
-        let captured = capture_from_discovery(registry(), &request, &discovery, &selected).unwrap();
+        let captured =
+            capture_from_discovery(registry(), &request, &discovery, &selected, true).unwrap();
         assert_eq!(captured.files.len(), 2);
         let source_meta = fs::symlink_metadata(request.project_root.join("notes.txt")).unwrap();
         let notes = &captured.files["state/codex/notes.txt"];
@@ -3533,8 +3527,7 @@ mod tests {
             ),
             (
                 "r3",
-                // Opaque user content with a token shape captures with a
-                // warning instead of failing.
+                // Provider content does not run a second marker scan.
                 vec![source_file(&home, "r3.json", b"note ghp_abcdef123", true)],
             ),
             (
@@ -3551,55 +3544,82 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect();
-        let serial =
-            capture_from_discovery_with_workers(registry(), &request, &discovery, &selected, 1)
-                .unwrap();
-        let parallel =
-            capture_from_discovery_with_workers(registry(), &request, &discovery, &selected, 4)
-                .unwrap();
+        let serial = capture_from_discovery_with_workers(
+            registry(),
+            &request,
+            &discovery,
+            &selected,
+            1,
+            true,
+        )
+        .unwrap();
+        let parallel = capture_from_discovery_with_workers(
+            registry(),
+            &request,
+            &discovery,
+            &selected,
+            4,
+            true,
+        )
+        .unwrap();
         assert_eq!(serial, parallel);
         assert_eq!(serial.resources.len(), 5);
         assert_eq!(serial.files.len(), 6);
-        assert!(serial
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("credential-shaped token")));
+        assert!(serial.warnings.is_empty());
     }
 
     #[test]
-    fn parallel_capture_reports_the_earliest_failing_resource() {
+    fn provider_markers_do_not_block_on_or_off_capture() {
         let temp = tempfile::tempdir().unwrap();
         let (request, home) = pipeline_fixture(temp.path());
-        let secret = b"-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n";
+        let raw = br#"{"access_token":"sk-ant-api03-aaaabbbbccccddddeeee"}"#;
+        let placeholder = br#"{"access_token":"<api-key>"}"#;
         let discovery = synthetic_discovery(vec![
+            ("raw", vec![source_file(&home, "raw.json", raw, false)]),
             (
-                "a-clean",
-                vec![source_file(&home, "a.json", &vec![b'z'; 100_000], false)],
-            ),
-            (
-                "b-secret",
-                vec![source_file(&home, "b.json", secret, false)],
-            ),
-            (
-                "c-secret",
-                vec![source_file(&home, "c.json", secret, false)],
+                "placeholder",
+                vec![source_file(&home, "placeholder.json", placeholder, false)],
             ),
         ]);
-        let selected: BTreeSet<String> = ["a-clean", "b-secret", "c-secret"]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        let serial =
-            capture_from_discovery_with_workers(registry(), &request, &discovery, &selected, 1)
-                .unwrap_err();
-        let parallel =
-            capture_from_discovery_with_workers(registry(), &request, &discovery, &selected, 4)
-                .unwrap_err();
-        // Both failing resources race; the merge always reports the
-        // earliest resource ID with today's exact message.
-        assert_eq!(serial, parallel);
-        assert!(serial.contains("'b-secret'"), "{serial}");
-        assert!(serial.contains("private key material"), "{serial}");
+        let selected = BTreeSet::from(["raw".to_string(), "placeholder".to_string()]);
+        for enabled in [true, false] {
+            let serial = capture_from_discovery_with_workers(
+                registry(),
+                &request,
+                &discovery,
+                &selected,
+                1,
+                enabled,
+            )
+            .unwrap();
+            let parallel = capture_from_discovery_with_workers(
+                registry(),
+                &request,
+                &discovery,
+                &selected,
+                4,
+                enabled,
+            )
+            .unwrap();
+            assert_eq!(serial, parallel);
+            assert!(serial.warnings.is_empty());
+            let bytes = serial.files["state/codex/raw.json"].bytes.as_bytes();
+            assert_eq!(
+                std::str::from_utf8(bytes)
+                    .unwrap()
+                    .contains("sk-ant-api03-aaaabbbbccccddddeeee"),
+                !enabled
+            );
+            if !enabled {
+                assert_eq!(bytes, raw);
+            }
+            assert_eq!(
+                serial.files["state/codex/placeholder.json"]
+                    .bytes
+                    .as_bytes(),
+                placeholder
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -3624,7 +3644,6 @@ mod tests {
             files.push(SourceFile {
                 physical_path: physical,
                 logical_path: format!("state/codex/big-{index:02}.bin"),
-                opaque_content: false,
             });
         }
         let discovery = synthetic_discovery(vec![("big", files)]);
@@ -3636,6 +3655,7 @@ mod tests {
                 &discovery,
                 &selected,
                 workers,
+                true,
             )
             .unwrap_err();
             assert!(

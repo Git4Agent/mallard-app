@@ -13,7 +13,7 @@ import Icon, { iconNameFromHint, type IconName } from "../Icons";
 import { catalogDoors, catalogScopeIcon, catalogScopeLabel } from "../storage-catalog/model";
 import type { CatalogCapabilityDescriptor, CatalogScopeView } from "../storage-catalog/types";
 import { projectLabel, storageDoors } from "./model";
-import { findStorageProvider } from "./StorageSettings";
+import { connectionSuspends, findStorageProvider, storageConnectionIssue } from "./StorageSettings";
 
 /* One rail, one list. The head says the five destinations once, as a strip of
    glyphs; below it the rail is whichever root the workspace is standing in, at
@@ -402,14 +402,18 @@ export default function ProjectSidebar({
               label: `Add ${door.label} storage`,
               onOpen: () => onAddStorage(door.key),
             }))
-            : [{ key: "any", icon: "drive", label: "Add storage", onOpen: () => onAddStorage() }]}
+            : [{ key: "any", icon: "storage", label: "Add storage", onOpen: () => onAddStorage() }]}
         />
       ) : storages.map((storage) => {
         const usage = storageUsage[storage.storage_id] ?? 0;
         const storageName = storage.name || "storage";
         /* A storage this build cannot open is flagged the way a broken
-           one is: the row stays, the triangle says why in its name. */
-        const storageIssue = storageIssues[storage.storage_id]
+           one is: the row stays, the triangle says why in its name. A
+           refused credential comes first and opens straight onto the
+           settings, where the same namespace is kept and only the
+           credential is asked for again. */
+        const storageIssue = storageConnectionIssue(storage)
+          ?? storageIssues[storage.storage_id]
           ?? (storage.available ? null : `This build has no ${storage.provider_label} adapter`);
         return (
           <div
@@ -419,7 +423,7 @@ export default function ProjectSidebar({
             <button
               type="button"
               className="sidebar-profile-main"
-              onClick={() => onOpenStorage(storage.storage_id, false)}
+              onClick={() => onOpenStorage(storage.storage_id, connectionSuspends(storage.connection))}
               disabled={busy}
               title={storageIssue ? `Open ${storageName} — ${storageIssue}` : `Open ${storageName}`}
               aria-label={storageIssue
@@ -539,7 +543,7 @@ export default function ProjectSidebar({
             onClick={onOpenStorageIndex}
             disabled={busy}
           >
-            <Icon name="drive" size={19} />
+            <Icon name="storage" size={19} />
           </button>
           <button
             type="button"

@@ -78,6 +78,7 @@ impl StorageProviderAdapter for TestStorageAdapter {
             clear_mode: super::traits::StorageClearMode::RevisionChecked,
             fields: vec![
                 StorageFieldDescriptor {
+                    immutable_on_edit: false,
                     field_id: FieldKey::parse("directory").unwrap(),
                     label: "Folder".to_string(),
                     kind: StorageFieldKind::Directory,
@@ -88,6 +89,7 @@ impl StorageProviderAdapter for TestStorageAdapter {
                     derive: None,
                 },
                 StorageFieldDescriptor {
+                    immutable_on_edit: false,
                     field_id: FieldKey::parse("label").unwrap(),
                     label: "Label".to_string(),
                     kind: StorageFieldKind::Text,
@@ -107,6 +109,7 @@ impl StorageProviderAdapter for TestStorageAdapter {
                 help_url: None,
             }],
             setup_assistant: Some(StorageSetupAssistantDescriptor {
+                managed_secret_id: None,
                 label: "Set up with an agent".to_string(),
                 description: "Test assistant.".to_string(),
             }),
@@ -168,6 +171,7 @@ impl StorageProviderAdapter for TestStorageAdapter {
         config: &StorageProviderConfig,
         _setup_id: &str,
         _runtime: &Handle,
+        _journal: &mut dyn super::traits::StorageProbeJournal,
     ) -> Result<(), StorageAdapterError> {
         let typed = decode(config)?;
         if Path::new(&typed.directory).is_dir() {
@@ -185,6 +189,7 @@ impl StorageProviderAdapter for TestStorageAdapter {
         _config: &StorageProviderConfig,
         _setup_id: &str,
         _runtime: &Handle,
+        _journal: &mut dyn super::traits::StorageProbeJournal,
     ) -> Result<(), StorageAdapterError> {
         Ok(())
     }

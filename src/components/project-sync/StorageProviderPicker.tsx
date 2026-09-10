@@ -26,7 +26,7 @@ export default function StorageProviderPicker({ providers, busy, appActions, onC
           {
             id: "storages",
             label: "Storages",
-            icon: "drive",
+            icon: "storage",
             tone: "root",
             title: "All storages",
             ariaLabel: "All storages",
