@@ -1,0 +1,736 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mallard — Storage settings: locked form with reveal</title>
+<link rel="stylesheet" href="/src/App.css">
+<style>
+/* ═══ specimen chrome — not part of the app ═══ */
+html, body { height: auto; overflow: auto; }
+body { background: var(--retro-frame-gutter, var(--bg-1)); padding: 18px 20px 80px; color: var(--text-1); font-family: var(--font-sans); }
+[hidden] { display: none !important; }
+.spec-wrap { max-width: 900px; margin: 0 auto; }
+.spec-head { margin: 0 0 4px; font-family: var(--font-display); font-size: 20px; font-weight: 800; color: var(--text-0); }
+.spec-lede { margin: 0 0 14px; color: var(--text-2); font-size: var(--type-sm); line-height: 1.55; max-width: 78ch; }
+.spec-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0 0 8px; }
+.spec-title { font-family: var(--font-display); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); min-width: 86px; }
+.spec-btn { font-family: var(--font-display); font-size: 13px; font-weight: 700; color: var(--text-0); background: var(--button-bg); border: var(--box-border); border-radius: 999px; padding: 4px 12px; cursor: pointer; box-shadow: var(--shadow-card); }
+.spec-btn:active { transform: translate(1px,1px); box-shadow: none; }
+.spec-btn[aria-pressed="true"] { background: var(--button-primary-bg); color: var(--button-primary-text); }
+.spec-btn:disabled { opacity: .4; cursor: default; }
+.spec-gap { width: 12px; }
+.spec-note { margin: 12px 0 12px; padding: 10px 14px; border: 1px dashed var(--border-mid); border-radius: 10px; color: var(--text-2); font-size: var(--type-sm); line-height: 1.55; }
+.spec-note b { color: var(--text-0); font-family: var(--font-display); }
+.spec-note code, .spec-panel code { font-family: var(--font-mono); font-size: .92em; color: var(--text-1); }
+.spec-caption { width: 860px; max-width: 100%; margin: 8px auto 0; min-height: 18px; color: var(--text-2); font-family: var(--font-mono); font-size: var(--type-2xs); }
+.spec-panel { margin: 26px 0 0; padding: 16px 20px 18px; background: var(--bg-0); border: var(--box-border); border-radius: var(--retro-panel-radius); box-shadow: var(--shadow-card); color: var(--text-1); font-size: var(--type-sm); line-height: 1.55; }
+.spec-panel h2 { margin: 0 0 8px; font-family: var(--font-display); font-size: 17px; font-weight: 800; color: var(--text-0); }
+.spec-panel h3 { margin: 18px 0 6px; font-family: var(--font-display); font-size: 14px; font-weight: 800; color: var(--text-0); }
+.spec-panel p { margin: 0 0 8px; }
+.spec-panel ul { margin: 4px 0 0 18px; padding: 0; }
+.spec-panel li + li { margin-top: 5px; }
+.spec-panel a { color: var(--accent); }
+.spec-panel b { color: var(--text-0); }
+.spec-table-wrap { overflow-x: auto; }
+.spec-table { width: 100%; border-collapse: collapse; margin: 6px 0 4px; font-size: var(--type-xs); }
+.spec-table th, .spec-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.spec-table th { font-family: var(--font-display); font-weight: 700; color: var(--text-0); }
+.spec-table tr.rec td { background: var(--success-soft); }
+
+/* The app window at the screenshot's size, from the shipped shell classes. */
+.st-window { position: relative; width: 860px; max-width: 100%; height: 680px; margin: 0 auto; }
+.st-window > .sync-app { height: 100%; }
+.st-window .sync-main { overflow-y: auto; }
+/* The specimen re-renders the whole card on every tick; the app animates only on mount. */
+.st-window .sync-storage-settings-below, .st-window .sync-storage-details-panel, .st-strip .sync-storage-details-panel { animation: none; }
+
+/* ═══ A/C · the facts sheet — proposed classes, shipped tokens ═══ */
+.st-facts { margin: 0; padding: 4px 0; display: flex; flex-direction: column; }
+.st-fact { display: grid; grid-template-columns: 150px minmax(0, 1fr); align-items: center; gap: 10px 14px; min-height: 40px; padding: 6px 14px; }
+.st-fact + .st-fact { border-top: 1px solid var(--border); }
+.st-fact > dt { margin: 0; color: var(--text-1); font-family: var(--font-display); font-size: var(--type-sm); font-weight: var(--weight-semibold); }
+.st-fact > dd { margin: 0; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.st-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-0); font-family: var(--font-mono); font-size: var(--type-sm); user-select: all; }
+.st-value.name { font-family: var(--font-sans); font-weight: var(--weight-semibold); user-select: text; }
+.st-copy { all: unset; display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--text-2); cursor: pointer; }
+.st-copy:hover { color: var(--text-0); background: var(--bg-hover); }
+.st-copy:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.st-copied { color: var(--success-text); font-family: var(--font-display); font-size: var(--type-2xs); font-weight: var(--weight-semibold); }
+.st-stored { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px 3px 6px; border: 1px solid var(--border); border-radius: var(--r-pill); background: var(--surface-muted); color: var(--text-1); font-family: var(--font-display); font-size: var(--type-2xs); font-weight: var(--weight-semibold); white-space: nowrap; }
+.st-stored.refused { border-color: var(--danger-text); color: var(--danger-text); background: var(--danger-soft); }
+.st-hint { color: var(--text-3); font-size: var(--type-2xs); white-space: nowrap; }
+.st-fact > dd > .btn { margin-left: auto; min-height: 26px; padding: 2px 9px; display: inline-flex; align-items: center; gap: 6px; }
+.st-fact > dd > .st-inline { display: flex; align-items: center; gap: 6px; flex: 1; }
+.st-fact > dd > .st-inline > input { min-width: 0; flex: 1; height: 30px; padding: 0 9px; border: 1px solid var(--control-border); border-radius: 7px; color: var(--text-0); background: var(--surface-row); font: inherit; font-size: var(--type-sm); font-weight: var(--weight-semibold); }
+.st-band-title { margin: 0; padding: 10px 14px 2px; color: var(--text-2); font-family: var(--font-display); font-size: var(--type-2xs); font-weight: var(--weight-bold); letter-spacing: .06em; text-transform: uppercase; }
+.st-band { border-top: 1px solid var(--border); }
+.st-fixed { display: inline-flex; align-items: center; gap: 7px; min-width: 0; color: var(--text-2); font-size: var(--type-xs); line-height: 1.35; }
+.st-fixed > svg { flex: none; }
+.sync-storage-editor-footer > .st-fixed { flex: 1 1 200px; }
+/* B · the locked form: a lock beside every fixed field's name; the secret row
+   carries Show/Hide, Copy, and the hide-countdown, all in the field's own
+   inset. The two verbs sit on the input's right edge, the way the shipped
+   Show button does. */
+.st-secret-verbs { position: absolute; top: 4px; right: 4px; display: flex; align-items: center; gap: 2px; }
+.st-secret-verbs > .sync-secret-reveal { position: static; }
+.st-secret-verbs > .st-copy { width: 25px; height: 25px; }
+.sync-secret-input.st-has-copy > input { padding-right: 92px; }
+.st-secret-cap { display: inline-flex; align-items: center; gap: 5px; color: var(--text-3); font-family: var(--font-mono); font-size: var(--type-2xs); font-variant-numeric: tabular-nums; }
+.st-secret-cap.copied { color: var(--success-text); }
+.st-secret-cap.error { color: var(--danger-text); }
+.form-label-row > .st-secret-cap { margin-left: auto; }
+.st-refused-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px 1px 5px; border: 1px solid var(--danger-text); border-radius: var(--r-pill); background: var(--danger-soft); color: var(--danger-text); font-family: var(--font-display); font-size: var(--type-2xs); font-weight: var(--weight-semibold); }
+.st-name-wrap { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.st-name-stamp { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-display); font-size: var(--type-xs); font-weight: var(--weight-medium); white-space: nowrap; }
+.st-name-stamp.saved { color: var(--success-text); }
+.st-name-stamp.saving { color: var(--text-2); }
+.st-name-stamp.failed { color: var(--danger-text); }
+.st-name-stamp.dim { opacity: .55; }
+.sync-storage-card header > .st-name-wrap > input { width: 220px; height: 33px; padding: 0 9px; border: 1px solid var(--control-border); border-radius: 7px; color: var(--text-0); background: var(--surface-row); font: inherit; font-size: var(--type-sm); font-weight: var(--weight-semibold); }
+
+.st-lock { color: var(--text-3); }
+.st-readonly[readonly] { color: var(--text-1); background: var(--surface-muted); }
+/* Reconnect band: the one editable thing, shown only when a credential is refused */
+.st-reconnect { padding: 10px 14px 12px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--danger-soft) 45%, transparent); display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.st-reconnect .storage-provider-field { max-width: 460px; }
+.st-reconnect-verbs { display: flex; justify-content: flex-end; gap: 6px; }
+.st-reconnect-verbs .btn-primary { min-height: 28px; }
+/* The strip of every state, static */
+.st-strip { display: grid; gap: 14px; }
+.st-strip > figure { margin: 0; }
+.st-strip figcaption { margin: 0 0 4px; color: var(--text-3); font-family: var(--font-display); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.st-strip .sync-storage-card { border: 1px solid var(--border); border-radius: 12px; background: var(--bg-0); overflow: hidden; }
+.st-strip .sync-storage-fields { grid-template-columns: 1fr 1fr; }
+</style>
+</head>
+<body>
+<div class="spec-wrap">
+  <h1 class="spec-head">Storage settings · locked form, secrets revealable</h1>
+  <p class="spec-lede">You chose <b>B</b>: the form stays, every destination field is read-only, and the secret is visible on demand for both R2 and Dropbox. This pass makes B the page and settles what B leaves open: how a saved secret gets to the screen, how long it stays, what copies it, and how the name saves without a Save button. Toggle the provider and the connection state; <b>Show</b> and <b>Copy</b> run live, and the reveal hides itself the way the recommendation says.</p>
+
+  <div class="spec-bar">
+    <span class="spec-title">Direction</span>
+    <button class="spec-btn" data-spec="opt" data-value="now">Now</button>
+    <button class="spec-btn" data-spec="opt" data-value="b">B · Locked form + reveal (chosen)</button>
+    <span class="spec-gap"></span>
+    <span class="spec-title">Record</span>
+    <button class="spec-btn" data-spec="opt" data-value="a">A · Facts sheet</button>
+    <button class="spec-btn" data-spec="opt" data-value="c">C · Access band</button>
+  </div>
+  <div class="spec-bar">
+    <span class="spec-title">Provider</span>
+    <button class="spec-btn" data-spec="provider" data-value="r2">Cloudflare R2</button>
+    <button class="spec-btn" data-spec="provider" data-value="dropbox">Dropbox</button>
+    <button class="spec-btn" data-spec="provider" data-value="local">Local folder</button>
+    <span class="spec-gap"></span>
+    <span class="spec-title">Connection</span>
+    <button class="spec-btn" data-spec="conn" data-value="connected">Connected</button>
+    <button class="spec-btn" data-spec="conn" data-value="untested">Untested</button>
+    <button class="spec-btn" data-spec="conn" data-value="refused">Refused</button>
+  </div>
+  <div class="spec-bar">
+    <span class="spec-title">Name saves</span>
+    <button class="spec-btn" data-spec="name" data-value="auto">In the header, on blur / Enter</button>
+    <button class="spec-btn" data-spec="name" data-value="row">⋯ → Rename row (shipped)</button>
+    <span class="spec-gap"></span>
+    <span class="spec-title">Reveal hides</span>
+    <button class="spec-btn" data-spec="hide" data-value="30">after 30 s</button>
+    <button class="spec-btn" data-spec="hide" data-value="leave">when you leave</button>
+  </div>
+  <div class="spec-bar">
+    <span class="spec-title">Try</span>
+    <button class="spec-btn" data-try="rename">Rename…</button>
+    <button class="spec-btn" data-try="reveal">Show every secret</button>
+    <button class="spec-btn" data-try="leave">Leave the page</button>
+    <button class="spec-btn" data-try="test">Test connection</button>
+    <button class="spec-btn" data-try="reset">Reset</button>
+    <span class="spec-gap"></span>
+    <span class="spec-title">Theme</span>
+    <button class="spec-btn" data-spec="theme" data-value="light">Light</button>
+    <button class="spec-btn" data-spec="theme" data-value="dark">Dark</button>
+  </div>
+  <div class="spec-note" id="spec-note"></div>
+</div>
+
+<div id="st-host"></div>
+<p class="spec-caption" id="spec-caption"></p>
+
+<div class="spec-wrap">
+  <section class="spec-panel" aria-labelledby="rec-head">
+    <h2 id="rec-head">B, settled · what the form does now</h2>
+    <p>The form is kept because it is the shape people already learned during setup; what changes is that nothing on it is a place to type except the name. Four decisions fill in the rest:</p>
+    <ul>
+      <li><b>Fixed fields are <code>readonly</code>, not <code>disabled</code>.</b> Readonly text keeps full contrast, takes focus, and selects (⌘A in the field, or triple-click), so a value can be copied without a Copy button. A lock beside the field's name says why it doesn't type; the footer says it once in words: destination and credentials are fixed, another bucket is a new storage.</li>
+      <li><b>Show fetches, it doesn't unmask.</b> The secret is not in the page: the field holds a mask, and <b>Show</b> asks the backend for that one value (<code>reveal_storage_secret</code>). It is shown in the field, <b>Hide</b> or the timer drops it, leaving the page drops it. Copy works without Show: it fetches, puts the value on the clipboard, and drops it, with a "Copied" receipt. Both R2's Secret Access Key and Dropbox's two tokens behave the same way; Dropbox's access token says it renews automatically so nobody tries to keep it.</li>
+      <li><b>Hides after 30 s by default.</b> Password managers auto-conceal (1Password, Bitwarden); consoles (AWS Secrets Manager, Stripe) leave it until you navigate. The countdown sits in the label row, so the hide never surprises. "Until you leave" is on the toggle if you'd rather.</li>
+      <li><b>The name saves itself.</b> It is the one live field, so it follows the Settings page's receipt grammar (2026-09-11): save on blur or Enter through the existing <code>rename_storage</code>, "Saving…" → "Saved" beside the field, Esc restores, and a refused name ("already used by another storage") stays in the field with the reason. No Save button, so no button that claims to save the locked fields too. The shipped ⋯ → Rename row is on the toggle as the fallback.</li>
+    </ul>
+    <p><b>Refused credential</b> keeps A's answer: the secret's label wears a Refused chip and the guide row's <b>Reconnect…</b> opens the one editable band (R2: paste, Test, Save credential; Dropbox: the shipped sign-in lane; Local: Browse…). The locked fields stay locked underneath it — same bucket, same account, new key.</p>
+    <div class="spec-table-wrap">
+      <table class="spec-table">
+        <thead><tr><th>Element</th><th>Now</th><th>B</th></tr></thead>
+        <tbody>
+          <tr><td>Destination fields</td><td>editable inputs, Save storage</td><td><code>readonly</code> + lock; footer rule line</td></tr>
+          <tr><td>Type switch</td><td>disabled segmented control</td><td>provider label (<code>.sync-storage-editor-provider</code>)</td></tr>
+          <tr><td>Secret</td><td>"Stored — type to replace" + Show (nothing to show)</td><td>masked readonly + Show (fetch) + Copy; hides itself</td></tr>
+          <tr><td>Name</td><td>⋯ → Rename row</td><td>header field, saves on blur/Enter with receipt</td></tr>
+          <tr><td>Footer</td><td>N of N set · Test connection · Save storage</td><td>rule line · Test connection</td></tr>
+          <tr><td>Refused</td><td>type into the secret field, Save storage</td><td>Refused chip + Reconnect… band (secrets only)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="spec-panel" aria-labelledby="states-head">
+    <h2 id="states-head">Every state of B, static</h2>
+    <p>The card alone, one per state, so they can be compared without clicking. The window above runs the same states.</p>
+    <div class="st-strip" id="st-strip"></div>
+  </section>
+
+  <section class="spec-panel" aria-labelledby="std-head">
+    <h2 id="std-head">What the standards say · revealing a saved secret</h2>
+    <ul>
+      <li><b>AWS Secrets Manager</b> console: a secret's page shows its metadata; the value appears only after <a href="https://docs.aws.amazon.com/secretsmanager/latest/userguide/retrieving-secrets.html">Retrieve secret value</a>, a separate call that is recorded (CloudTrail). Reveal is an explicit act, fetched on demand, logged. Mallard's version: <code>reveal_storage_secret</code> on Show, one event in the Logs drawer, never the value.</li>
+      <li><b>1Password</b> and <b>Bitwarden</b>: concealed fields with a per-field reveal and a Copy that works without revealing; values conceal again on their own (1Password auto-conceal, Bitwarden hides on navigation and clears the clipboard after a timeout). That is the Show + Copy + 30 s pattern.</li>
+      <li><b>Stripe</b>, <a href="https://docs.stripe.com/keys">API keys</a>: test secret keys can be revealed in the dashboard; live keys are shown once and then only rolled. <b>Cloudflare R2</b> shows a token's Secret Access Key once, at creation; <b>GitHub</b> PATs likewise. That is the case for Mallard revealing at all: for R2 it is the only place the user can still read the key they saved.</li>
+      <li><b>Apple HIG</b>, <a href="https://developer.apple.com/design/human-interface-guidelines/text-fields">Text fields</a>: a secure field hides its content; give people a way to show it when they need to check it. macOS Keychain Access does the same with a "Show password" checkbox, gated by the login password — Mallard has no such gate, so the timer and the log do the reassuring instead.</li>
+      <li><b>Material 3</b>, <a href="https://m3.material.io/components/text-fields/guidelines">Text fields</a>: a password field's trailing icon toggles visibility; read-only fields inside a form must look distinct from editable ones. The lock glyph and the muted surface (<code>--surface-muted</code>) do that here, with the name field the one raised surface.</li>
+      <li><b>NN/g</b>, <a href="https://www.nngroup.com/articles/password-masking/">Stop password masking</a> and the show-password follow-ups: masking without an unmask control is what causes errors and re-typing; a visible toggle costs nothing when the person is alone at their machine.</li>
+      <li><b>WCAG 2.2</b>, <a href="https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html">1.4.3</a>: inactive controls are exempt from contrast, which is exactly why the fixed fields are <code>readonly</code> and not <code>disabled</code> — readonly text keeps its normal ink and stays selectable.</li>
+    </ul>
+  </section>
+
+  <section class="spec-panel" aria-labelledby="fit-head">
+    <h2 id="fit-head">Project fit · the plan</h2>
+    <h3>What the page reads</h3>
+    <ul>
+      <li><b>No edit draft for viewing.</b> Today opening settings runs <code>create_storage_edit_draft</code> and autosaves a draft that shadows the storage (the index then says "Unsaved settings — not applied yet"). B needs only the storage's settings and secret presence: one new read, <code>get_storage_details(storage_id)</code> → <code>{ settings, secrets: [{secret_id, present}] }</code> (the <code>StorageSetupDraftSummary</code> shape minus the draft fields), or the same two fields added to <code>StorageSummary</code>. No draft file, no revision, no autosave, no discard.</li>
+      <li><b>Reveal is its own command.</b> <code>reveal_storage_secret(storage_id, secret_id) → String</code>, declared secrets only (as the exact-fetch of a new draft already filters), reading the committed <code>provider_config.secrets</code>. This deliberately reverses the rule in <code>secrets.rs</code> ("a saved value is never returned to the frontend") for one explicit, per-secret call; the listing, drafts and updates stay redacted. The Rust side zeroizes on drop as it does now; the JS side holds the value only in the field's state while shown and drops it on Hide, timer, or unmount. Record one Logs event ("Secret revealed · <storage> · <secret label>"), never the value.</li>
+      <li><b>Copy</b> calls the same command and writes to the clipboard without setting the field visible; the 1.5 s "Copied" receipt reuses the Settings stamp classes.</li>
+    </ul>
+    <h3>What the page writes</h3>
+    <ul>
+      <li><b>Name</b>: the existing <code>rename_storage(storage_id, name, expected_config_revision)</code> on blur/Enter, trimmed, skipped when unchanged; the receipt hook from <code>settingsReceipts.ts</code> drives Saving…/Saved/failed. A refused rename keeps the typed name and shows the backend's reason; Esc restores the saved one.</li>
+      <li><b>Test connection</b>: needs <code>test_storage(storage_id)</code> on the committed config (today only drafts can be tested) and it should refresh <code>connection</code> so the guide row's "verified N min ago" is a real observation.</li>
+      <li><b>Reconnect</b> stays on a draft — the only place a draft is still created for an existing storage — with the backend refusing any <code>settings</code> change on an <code>edits_existing</code> draft (immutability enforced by the API, not only the UI). Dropbox's shipped lane already works like this; R2's band is the secret field + Test + Save credential.</li>
+    </ul>
+    <h3>Removed (clean cutover)</h3>
+    <ul>
+      <li>Edit-draft autosave, <code>saveStorageDraftBeforeNavigation</code> on the storage page, "Discard draft", the index's "Unsaved settings" caption, and <code>saveEditedStorage</code> / <b>Save storage</b>.</li>
+      <li><code>immutable_on_edit</code> on <code>StorageFieldDescriptor</code> (only Dropbox set it; under B every field is immutable on edit), in the types and the three adapters.</li>
+      <li>The disabled type switch on an existing storage; <code>onSwitchProvider</code> stays for new drafts only.</li>
+      <li>The "Stored — type to replace" placeholder and the typed-secret path (<code>typedSecrets</code>, <code>secretOperationsFromForm</code>) for existing storages — they remain for creation and for the reconnect band.</li>
+    </ul>
+    <h3>Test pins that move (<code>storage-settings.integration.test.tsx</code>)</h3>
+    <ul>
+      <li>Existing-storage render (~281–293): <code>Storage settings</code> title stays only in the ⋯-row variant; with the header name field the pin becomes <code>aria-label="Storage name"</code> on an existing storage. <code>Stored — type to replace</code> goes; the secret pin becomes a masked <code>readonly</code> input with <code>aria-pressed="false"</code> Show and a Copy button.</li>
+      <li>The <code>readOnly=""…value="shared-42"</code> pins (1146, 1174) invert: every declared field is readonly on an existing storage, none on a fresh draft (1142 stays).</li>
+      <li>"Test connection, then Save storage" (1811) and the Dropbox reconnect ending at Save storage (1955) become Test, then <b>Save credential</b> in the reconnect band.</li>
+      <li>New pins: Show calls <code>reveal_storage_secret</code> with the storage and secret ids and never on mount; Hide clears the value; a 30 s fake-clock advance clears it; unmount clears it; rename on blur calls <code>rename_storage</code> once and not when unchanged.</li>
+      <li>Creation pins (Bucket name aria-label, Finish setup, the R2 and Dropbox lanes, the new-draft exact-fetch review at ~1002–1010) are untouched.</li>
+    </ul>
+  </section>
+</div>
+
+<script>
+const ICONS = {"activity": "<svg aria-hidden=\"true\" data-icon=\"activity\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M4 20h18v2H4ZM2 2h2v18H2ZM7 6h2v12H7ZM12 10h2v8h-2ZM17 14h2v4h-2Z\"></path></svg>", "alert-triangle": "<svg aria-hidden=\"true\" data-icon=\"alert-triangle\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M14 11v3h-1v3h-2v-3h-1v-3h4Z\"></path><path d=\"M11 18h2v2h-2Z\"></path><path d=\"M22 20v-2h-1v-2h-1v-2h-1v-2h-1v-2h-1V8h-1V6h-1V4h-1V2h-1V1h-2v1h-1v2H9v2H8v2H7v2H6v2H5v2H4v2H3v2H2v2H1v2h1v1h20v-1h1v-2h-1ZM3 21v-1h1v-2h1v-2h1v-2h1v-2h1v-2h1V8h1V6h1V4h2v2h1v2h1v2h1v2h1v2h1v2h1v2h1v2h1v1H3Z\"></path></g></svg>", "ban": "<svg aria-hidden=\"true\" data-icon=\"ban\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M9 1h6v1h2v1h2v1h1v1h1v2h1v2h1v6h-1v2h-1v2h-1v1h-1v1h-2v1h-2v1H9v-1H7v-1H5v-1H4v-1H3v-2H2v-2H1V9h1V7h1V5h1V4h1V3h2V2h2V1Zm0 2v1H7v1H6l13 13v-1h1v-2h1V9h-1V7h-1V6h-1V5h-1V4h-2V3H9ZM5 6v1H4v2H3v6h1v2h1v1h1v1h1v1h2v1h6v-1h2v-1h1L5 6Z\"></path></g></svg>", "cat": "<svg aria-hidden=\"true\" data-icon=\"cat\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-mallard-pixel\" fill=\"currentColor\" stroke=\"none\" d=\"M2 4h2v6H2ZM20 4h2v6h-2ZM4 6h2v2H4ZM18 6h2v2h-2ZM6 8h12v2H6ZM0 10h2v8H0ZM22 10h2v8h-2ZM6 12h2v2H6ZM16 12h2v2h-2ZM2 18h2v2H2ZM20 18h2v2h-2ZM4 20h16v2H4Z\"></path></svg>", "catalog": "<svg aria-hidden=\"true\" data-icon=\"catalog\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M4 4h5v5H4ZM15 4h5v5h-5ZM4 15h5v5H4ZM15 15h5v5h-5Z\"></path></svg>", "check": "<svg aria-hidden=\"true\" data-icon=\"check\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M19 9v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-2v-1H9v-1H8v-1H7v-1H6v-1h1v-1h1v1h1v1h1v1h2v-1h1v-1h1v-1h1v-1h1V9h1V8h1v1h1Z\"></path></svg>", "chevron-down": "<svg aria-hidden=\"true\" data-icon=\"chevron-down\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M20 8v2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-4v-1H9v-1H8v-1H7v-1H6v-1H5v-1H4V8h2v1h1v1h1v1h1v1h1v1h4v-1h1v-1h1v-1h1V9h1V8h2Z\"></path></svg>", "chevron-left": "<svg aria-hidden=\"true\" data-icon=\"chevron-left\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M16 4v2h-1v1h-1v1h-1v1h-1v1h-1v4h1v1h1v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v-1h-1v-1h-1v-1H9v-1H8v-4h1V9h1V8h1V7h1V6h1V5h1V4h2Z\"></path></svg>", "chevron-right": "<svg aria-hidden=\"true\" data-icon=\"chevron-right\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M8 4h2v1h1v1h1v1h1v1h1v1h1v1h1v4h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H8v-2h1v-1h1v-1h1v-1h1v-1h1v-4h-1V9h-1V8h-1V7H9V6H8V4Z\"></path></svg>", "chevron-up": "<svg aria-hidden=\"true\" data-icon=\"chevron-up\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M10 8h4v1h1v1h1v1h1v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v-1h-1v-1h-1v-1h-4v1H9v1H8v1H7v1H6v1H4v-2h1v-1h1v-1h1v-1h1v-1h1V9h1V8Z\"></path></svg>", "claude-mark": "<svg aria-hidden=\"true\" data-icon=\"claude-mark\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-claude-mark\" fill=\"currentColor\" stroke=\"none\" shape-rendering=\"geometricPrecision\" d=\"M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z\"></path></svg>", "clock": "<svg aria-hidden=\"true\" data-icon=\"clock\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M22 9V7h-1V5h-1V4h-1V3h-2V2h-2V1H9v1H7v1H5v1H4v1H3v2H2v2H1v6h1v2h1v2h1v1h1v1h2v1h2v1h6v-1h2v-1h2v-1h1v-1h1v-2h1v-2h1V9h-1Zm-1 6h-1v2h-1v2h-2v1h-2v1H9v-1H7v-1H5v-2H4v-2H3V9h1V7h1V5h2V4h2V3h6v1h2v1h2v2h1v2h1v6Z\"></path><path d=\"M16 15v1h-1v1h-1v-1h-1v-1h-1v-1h-1V5h2v8h1v1h1v1h1Z\"></path></g></svg>", "cloud": "<svg aria-hidden=\"true\" data-icon=\"cloud\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M22 12v-1h-2V9h-1V8h-1V7h-3v1h-1V6h-1V5H8v1H7v1H6v1H5v3H2v1H1v5h1v1h1v1h2v1h14v-1h2v-1h1v-1h1v-5h-1Zm0 4h-1v1h-1v1h-2v1H6v-1H4v-1H3v-1H2v-3h1v-1h3V9h1V8h1V7h1V6h3v1h1v2h3V8h1v1h1v1h1v2h2v1h1v3Z\"></path></svg>", "code": "<svg aria-hidden=\"true\" data-icon=\"code\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M8 6h2v2H8ZM6 8h2v2H6ZM4 10h2v4H4ZM6 14h2v2H6ZM8 16h2v2H8Z\"></path><path d=\"M14 6h2v2h-2ZM16 8h2v2h-2ZM18 10h2v4h-2ZM16 14h2v2h-2ZM14 16h2v2h-2Z\"></path></g></svg>", "computer": "<svg aria-hidden=\"true\" data-icon=\"computer\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M19 16h1v1h-1Z\"></path><path d=\"M22 4V3h-5v1h-1v16h1v1h5v-1h1V4h-1Zm-1 10v5h-3v-5h3Zm-3-2v-2h3v2h-3Zm0-4V6h3v2h-3Z\"></path><path d=\"M4 19h10v2H4Z\"></path><path d=\"M3 5v10h11v2H2v-1H1V4h1V3h12v2H3Z\"></path></g></svg>", "copy": "<svg aria-hidden=\"true\" data-icon=\"copy\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M8 8h13v13H8Zm1 1v11h11V9Z\"></path><path d=\"M3 3h13v5h-1V4H4v11h4v1H3Z\"></path></g></svg>", "check-circle": "<svg aria-hidden=\"true\" data-icon=\"check-circle\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M19 9v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-2v-1H9v-1H8v-1H7v-1H6v-1h1v-1h1v1h1v1h1v1h2v-1h1v-1h1v-1h1v-1h1V9h1V8h1v1h1Z\"></path><path d=\"M22 9V7h-1V5h-1V4h-1V3h-2V2h-2V1H9v1H7v1H5v1H4v1H3v2H2v2H1v6h1v2h1v2h1v1h1v1h2v1h2v1h6v-1h2v-1h2v-1h1v-1h1v-2h1v-2h1V9h-1Zm-2 6v2h-1v2h-2v1h-2v1H9v-1H7v-1H5v-2H4v-2H3V9h1V7h1V5h2V4h2V3h6v1h2v1h2v2h1v2h1v6h-1Z\"></path></g></svg>", "download": "<svg aria-hidden=\"true\" data-icon=\"download\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M4 20h16v2H4ZM11 2h2v16h-2ZM13 14h2v2h-2ZM15 12h2v2h-2ZM17 10h2v2h-2ZM9 14h2v2H9ZM7 12h2v2H7ZM5 10h2v2H5Z\"></path></svg>", "drive": "<svg aria-hidden=\"true\" data-icon=\"drive\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M3 2h18v2H3ZM3 7h18v2H3ZM1 4h2v3H1ZM21 4h2v3h-2ZM19 9h2v11h-2ZM3 9h2v11H3ZM5 20h14v2H5ZM9 11h6v2H9Z\"></path></svg>", "edit": "<svg aria-hidden=\"true\" data-icon=\"edit\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M22 4v3h-1v1h-1V7h-1V6h2V5h-1V4h-1v2h-1V5h-1V4h1V3h3v1h1Z\"></path><path d=\"M18 14v7h-1v1H2v-1H1V6h1V5h12v1h-1v1H3v13h13v-5h1v-1h1Z\"></path><path d=\"M18 8V7h-1V6h-2v1h-1v1h-1v1h-1v1h-1v1h-1v1H9v1H8v1H7v4h4v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1V9h-1Zm-1 2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H8v-2h1v-1h1v-1h1v-1h1v-1h1v-1h1V9h1V8h2v2Z\"></path></g></svg>", "file": "<svg aria-hidden=\"true\" data-icon=\"file\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M18 1v1h1v1h1v1h1v1h1v1h1v16h-1v1H5v-1H4V2h1V1h13Zm-1 2H6v18h15V8h-4V3Zm2 1v2h2V5h-1V4h-1Z\"></path></svg>", "folder": "<svg aria-hidden=\"true\" data-icon=\"folder\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z\"></path></svg>", "external-link": "<svg aria-hidden=\"true\" data-icon=\"external-link\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M2 6h8v2H2ZM2 6h2v16H2ZM2 20h18v2H2ZM18 12h2v10h-2ZM12 0h10v2H12ZM20 0h2v10h-2ZM18 2h2v2h-2ZM16 4h2v2h-2ZM14 6h2v2h-2ZM12 8h2v2h-2ZM10 10h2v2h-2Z\"></path></svg>", "git-branch": "<svg aria-hidden=\"true\" data-icon=\"git-branch\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-git-branch-mark icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M20 2V1h-4v1h-1v4h1v1h1v4H7V7h1V6h1V2H8V1H4v1H3v4h1v1h1v10H4v1H3v4h1v1h4v-1h1v-4H8v-1H7v-4h12V7h1V6h1V2h-1ZM5 3h2v2H5Zm2 18H5v-2h2ZM19 5h-2V3h2Z\"></path></svg>", "git-commit": "<svg aria-hidden=\"true\" data-icon=\"git-commit\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M1 11h6v2H1Z\"></path><path d=\"M17 11h6v2h-6Z\"></path><path d=\"M9 7h6v2H9Z\"></path><path d=\"M9 15h6v2H9Z\"></path><path d=\"M7 9h2v6H7Z\"></path><path d=\"M15 9h2v6h-2Z\"></path></g></svg>", "git-compare-arrows": "<svg aria-hidden=\"true\" data-icon=\"git-compare-arrows\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M8 15h1v2H8v1H7v1H1v-2h6v-1h1v-1Z\"></path><path d=\"M21 16h1v2h-1v1h-1v1h-1v1h-1v-3h-4v-1h-1v-1h-1v-2h-1v-1h-1v-2H9v-1H8V8H7V7H1V5h7v1h1v2h1v2h1v1h1v2h1v1h1v2h4v-3h1v1h1v1h1v1Z\"></path><path d=\"M22 5v2h-1v1h-1v1h-1v1h-1V7h-4v1h-1v1h-1V7h1V6h1V5h4V2h1v1h1v1h1v1h1Z\"></path></g></svg>", "git-fork": "<svg aria-hidden=\"true\" data-icon=\"git-fork\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M4 14h4v2H4ZM4 20h4v2H4ZM2 16h2v4H2ZM8 16h2v4H8ZM16 2h4v2h-4ZM16 8h4v2h-4ZM14 4h2v4h-2ZM20 4h2v4h-2ZM12 17h5v2h-5ZM17 12h2v5h-2ZM5 2h2v10H5Z\"></path></svg>", "git-folder": "<svg aria-hidden=\"true\" data-icon=\"git-folder\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-git-folder-shell icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z\"></path><g class=\"icon-git-folder-mark icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M7 10h2v2H7ZM9 12h2v2H9ZM7 14h2v2H7ZM12 14h5v2h-5Z\"></path></g></svg>", "info": "<svg aria-hidden=\"true\" data-icon=\"info\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\"><path d=\"M6 2h12v2H6ZM6 20h12v2H6ZM2 6h2v12H2ZM20 6h2v12h-2ZM18 4h2v2h-2ZM18 18h2v2h-2ZM4 4h2v2H4ZM4 18h2v2H4Z\"></path><path d=\"M11 7h2v2h-2ZM11 11h2v6h-2Z\"></path></g></svg>", "lightbulb": "<svg aria-hidden=\"true\" data-icon=\"lightbulb\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-mallard-pixel\" fill=\"currentColor\" stroke=\"none\" d=\"M8 2h8v2H8ZM6 4h2v2H6ZM16 4h2v2H16ZM4 6h2v6H4ZM18 6h2v6H18ZM6 12h2v2H6ZM16 12h2v2H16ZM8 14h8v4H8ZM10 18h4v2H10Z\"></path></svg>", "link": "<svg aria-hidden=\"true\" data-icon=\"link\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M16 10h1v7h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H5v-1H4v-1H3v-1H2v-1H1v-5h1v-1h1v-1h1v-1h1v3H4v1H3v3h1v1h1v1h1v1h4v-1h1v-1h1v-1h1v-1h1v-1h1v-5h-1v-1h-1V9h1V8h1v1h1v1Z\"></path><path d=\"M23 5v5h-1v1h-1v1h-1v1h-1v-3h1V9h1V6h-1V5h-1V4h-1V3h-4v1h-1v1h-1v1h-1v1h-1v1H9v5h1v1h1v1h-1v1H9v-1H8v-1H7V7h1V6h1V5h1V4h1V3h1V2h1V1h6v1h1v1h1v1h1v1h1Z\"></path></g></svg>", "link-off": "<svg aria-hidden=\"true\" data-icon=\"link-off\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M16 10h1v7h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H5v-1H4v-1H3v-1H2v-1H1v-5h1v-1h1v-1h1v-1h1v3H4v1H3v3h1v1h1v1h1v1h4v-1h1v-1h1v-1h1v-1h1v-1h1v-5h-1v-1h-1V9h1V8h1v1h1v1Z\"></path><path d=\"M23 5v5h-1v1h-1v1h-1v1h-1v-3h1V9h1V6h-1V5h-1V4h-1V3h-4v1h-1v1h-1v1h-1v1h-1v1H9v5h1v1h1v1h-1v1H9v-1H8v-1H7V7h1V6h1V5h1V4h1V3h1V2h1V1h6v1h1v1h1v1h1v1h1Z\"></path><path d=\"M3 1h2v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1H9V9H8V8H7V7H6V6H5V5H4V4H3V3H2V2h1V1Z\"></path></g></svg>", "lock": "<svg aria-hidden=\"true\" data-icon=\"lock\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M21 12v-1h-3V5h-1V3h-1V2h-2V1h-4v1H8v1H7v2H6v6H3v1H2v10h1v1h18v-1h1V12h-1Zm-1 1v8H4v-8h16ZM9 5V4h1V3h4v1h1v1h1v6H8V5h1Z\"></path></svg>", "message": "<svg aria-hidden=\"true\" data-icon=\"message\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z\"></path></svg>", "moon": "<svg aria-hidden=\"true\" data-icon=\"moon\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M6 2h8v2h-2v2h-2V4H6V2ZM4 6V4h2v2H4Zm0 10H2V6h2v10Zm2 2H4v-2h2v2Zm2 2H6v-2h2v2Zm10 0v2H8v-2h10Zm2-2v2h-2v-2h2Zm-2-4h2v4h2v-8h-2v2h-2v2Zm-6 0v2h6v-2h-6Zm-2-2h2v2h-2v-2Zm0 0V6H8v6h2Z\"></path></svg>", "more": "<svg aria-hidden=\"true\" data-icon=\"more\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M3 9h2v2H3ZM11 9h2v2h-2ZM19 9h2v2h-2ZM1 11h2v2H1ZM9 11h2v2H9ZM17 11h2v2h-2ZM3 13h2v2H3ZM11 13h2v2h-2ZM19 13h2v2h-2ZM5 11h2v2H5ZM13 11h2v2h-2ZM21 11h2v2h-2Z\"></path></svg>", "octagon-x": "<svg aria-hidden=\"true\" data-icon=\"octagon-x\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M17 8v2h-1v1h-1v2h1v1h1v2h-1v1h-2v-1h-1v-1h-2v1h-1v1H8v-1H7v-2h1v-1h1v-2H8v-1H7V8h1V7h2v1h1v1h2V8h1V7h2v1h1Z\"></path><path d=\"M22 8V7h-1V6h-1V5h-1V4h-1V3h-1V2h-1V1H8v1H7v1H6v1H5v1H4v1H3v1H2v1H1v8h1v1h1v1h1v1h1v1h1v1h1v1h1v1h8v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1V8h-1Zm-2 7v1h-1v1h-1v1h-1v1h-1v1h-1v1H9v-1H8v-1H7v-1H6v-1H5v-1H4v-1H3V9h1V8h1V7h1V6h1V5h1V4h1V3h6v1h1v1h1v1h1v1h1v1h1v1h1v6h-1Z\"></path></g></svg>", "openai": "<svg aria-hidden=\"true\" data-icon=\"openai\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-chatgpt-mark\" fill=\"currentColor\" stroke=\"none\" transform=\"translate(1 1) scale(0.06875)\" d=\"m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z\"></path></svg>", "paw": "<svg aria-hidden=\"true\" data-icon=\"paw\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-mallard-pixel\" fill=\"currentColor\" stroke=\"none\" d=\"M6 2h4v4H6ZM14 2h4v4H14ZM2 8h4v4H2ZM18 8h4v4H18ZM8 12h8v8H8ZM4 14h4v4H4ZM16 14h4v4H16ZM6 18h2v2H6ZM16 18h2v2H16Z\"></path></svg>", "plus": "<svg aria-hidden=\"true\" data-icon=\"plus\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M13 11h7v2h-7v7h-2v-7H4v-2h7V4h2v7Z\"></path></svg>", "puzzle": "<svg aria-hidden=\"true\" data-icon=\"puzzle\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-mallard-pixel\" fill=\"currentColor\" stroke=\"none\" d=\"M2 2h16v2H2ZM2 4h2v6H2ZM16 4h2v6H16ZM4 8h4v2H4ZM18 8h4v2H18ZM6 10h2v6H6ZM20 10h2v6H20ZM2 14h4v2H2ZM16 14h4v2H16ZM2 16h2v6H2ZM16 16h2v6H16ZM4 20h12v2H4Z\"></path></svg>", "range": "<svg aria-hidden=\"true\" data-icon=\"range\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill icon-mallard-pixel\" fill=\"currentColor\" stroke=\"none\"><path d=\"M5 5h6v2H7v10h4v2H5Z\"></path><path d=\"M19 5h-6v2h4v10h-4v2h6Z\"></path></g></svg>", "refresh": "<svg aria-hidden=\"true\" data-icon=\"refresh\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M23 14v1h-1v2h-1v2h-1v1h-1v1h-2v1h-2v1H9v-1H7v-1H5v-1H3v1H2v1H1v-7h7v1H7v1H6v2h1v1h2v1h6v-1h2v-1h2v-2h1v-3h3Z\"></path><path d=\"M23 2v7h-7V8h1V7h1V5h-1V4h-2V3H9v1H7v1H5v2H4v3H1V9h1V7h1V5h1V4h1V3h2V2h2V1h6v1h2v1h2v1h2V3h1V2h1Z\"></path></g></svg>", "settings": "<svg aria-hidden=\"true\" data-icon=\"settings\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M15 2h4v2h3v2h-3v2h-4v-2h-13v-2h13ZM5 9h4v2h13v2h-13v2h-4v-2h-3v-2h3ZM11 16h4v2h7v2h-7v2h-4v-2h-9v-2h9Z\"></path></svg>", "sidebar-collapse": "<svg aria-hidden=\"true\" data-icon=\"sidebar-collapse\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M22 5V3h-2V2H4v1H2v2H1v14h1v2h2v1h16v-1h2v-2h1V5h-1ZM7 19H5v-1H4V6h1V5h2v14Zm13-1h-1v1h-9V5h9v1h1v12Z\"></path><path d=\"M18 7v2h-1v1h-1v1h-1v2h1v1h1v1h1v2h-2v-1h-1v-1h-1v-1h-1v-1h-1v-2h1v-1h1V9h1V8h1V7h2Z\"></path></g></svg>", "sidebar-expand": "<svg aria-hidden=\"true\" data-icon=\"sidebar-expand\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><g class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\"><path d=\"M22 5V3h-2V2H4v1H2v2H1v14h1v2h2v1h16v-1h2v-2h1V5h-1ZM7 19H5v-1H4V6h1V5h2v14Zm13-1h-1v1h-9V5h9v1h1v12Z\"></path><path d=\"M18 11v2h-1v1h-1v1h-1v1h-1v1h-2v-2h1v-1h1v-1h1v-2h-1v-1h-1V9h-1V7h2v1h1v1h1v1h1v1h1Z\"></path></g></svg>", "storage": "<svg aria-hidden=\"true\" data-icon=\"storage\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M6 7h4v2H6zm0 8h4v2H6zM2 5h2v14H2zm18 0h2v14h-2zM4 19h16v2H4zM4 3h16v2H4zm0 8h16v2H4z\"></path></svg>", "sun": "<svg aria-hidden=\"true\" data-icon=\"sun\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M13 3h-2v2h2V3zm4 2h2v2h-2V5zm-6 6h2v2h-2v-2zm-8 0h2v2H3v-2zm18 0h-2v2h2v-2zM5 5h2v2H5V5zm14 14h-2v-2h2v2zm-8 2h2v-2h-2v2zm-4-2H5v-2h2v2zM9 7h6v2H9V7zm0 8H7V9h2v6zm0 0v2h6v-2h2V9h-2v6H9Z\"></path></svg>", "token": "<svg aria-hidden=\"true\" data-icon=\"token\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M6 2h6v2H6ZM4 4h2v2H4ZM12 4h2v2h-2ZM4 12h2v2H4ZM12 12h2v2h-2ZM6 14h6v2H6ZM2 6h2v6H2ZM14 6h2v6h-2ZM14 8h4v2h-4ZM10 18h2v2h-2ZM18 10h2v2h-2ZM12 20h2v2h-2ZM18 18h2v2h-2ZM12 20h6v2h-6ZM8 14h2v4H8ZM20 12h2v6h-2ZM7 6h4v2H7ZM9 6h2v6H9ZM15 14h2v4h-2ZM14 12h3v2h-3Z\"></path></svg>", "tool": "<svg aria-hidden=\"true\" data-icon=\"tool\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-mallard-pixel\" fill=\"currentColor\" stroke=\"none\" d=\"M10 2h4v8h-4ZM6 6h4v12H6ZM14 6h4v12h-4ZM2 10h4v4H2ZM18 10h4v4h-4ZM10 14h4v8h-4Z\"></path></svg>", "trash": "<svg aria-hidden=\"true\" data-icon=\"trash\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M18 22H6v-2h12ZM9 6h6V4h2v2h5v2h-2v12h-2V8H6v12H4V8H2V6h5V4h2ZM15 4H9V2h6Z\"></path></svg>", "terminal": "<svg aria-hidden=\"true\" data-icon=\"terminal\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M4 6h2v2H4ZM6 8h2v2H6ZM8 10h2v2H8ZM10 12h2v2h-2ZM8 14h2v2H8ZM6 16h2v2H6ZM4 18h2v2H4ZM14 18h6v2h-6Z\"></path></svg>", "upload": "<svg aria-hidden=\"true\" data-icon=\"upload\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M4 4h16V2H4ZM11 22h2V6h-2ZM13 10h2V8h-2ZM15 12h2v-2h-2ZM17 14h2v-2h-2ZM9 10h2V8H9ZM7 12h2v-2H7ZM5 14h2v-2H5Z\"></path></svg>", "search": "<svg aria-hidden=\"true\" data-icon=\"search\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M8 2h2v1h-2ZM5 3h3v1h-3ZM10 3h3v1h-3ZM4 4h2v1h-2ZM12 4h2v1h-2ZM3 5h2v1h-2ZM13 5h2v1h-2ZM3 6h1v1h-1ZM14 6h1v1h-1ZM3 7h1v1h-1ZM14 7h1v1h-1ZM2 8h1v1h-1ZM15 8h1v1h-1ZM2 9h1v1h-1ZM15 9h1v1h-1ZM3 10h1v1h-1ZM14 10h1v1h-1ZM3 11h1v1h-1ZM14 11h1v1h-1ZM3 12h2v1h-2ZM13 12h2v1h-2ZM4 13h2v1h-2ZM12 13h2v1h-2ZM5 14h3v1h-3ZM10 14h3v1h-3ZM8 15h2v1h-2ZM15 15h2v1h-2ZM16 16h2v1h-2ZM17 17h2v1h-2ZM18 18h2v1h-2ZM19 19h2v1h-2ZM20 20h2v1h-2Z\"></path></svg>", "user": "<svg aria-hidden=\"true\" data-icon=\"user\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill icon-pixelarticons\" fill=\"currentColor\" stroke=\"none\" d=\"M9 2h6v2H9ZM9 10h6v2H9ZM15 4h2v6h-2ZM7 4h2v6H7ZM4 18h2v4H4ZM18 18h2v4h-2ZM8 14h8v2H8ZM6 16h2v2H6ZM16 16h2v2h-2Z\"></path></svg>", "x": "<svg aria-hidden=\"true\" data-icon=\"x\" fill=\"none\" height=\"12\" shape-rendering=\"crispEdges\" viewBox=\"0 0 24 24\" width=\"12\"><path class=\"icon-pixel-fill\" fill=\"currentColor\" stroke=\"none\" d=\"M14 13h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h-1v1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-2v1h-1v1H9v1H8v1H7v1H6v1H5v1H4v1H3v-1H2v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-2H9v-1H8V9H7V8H6V7H5V6H4V5H3V4H2V3h1V2h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h2V9h1V8h1V7h1V6h1V5h1V4h1V3h1V2h1v1h1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v2Z\"></path></svg>"};
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function icon(name, size = 12, cls = "") {
+  const t = document.createElement("template");
+  t.innerHTML = ICONS[name] || ICONS.info;
+  const svg = t.content.firstElementChild;
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  if (cls) svg.setAttribute("class", cls);
+  return svg.outerHTML;
+}
+
+/* ── The three providers, with the facts each adapter's summary() publishes ── */
+const PROVIDERS = {
+  r2: {
+    label: "Cloudflare R2", icon: "cloud", name: "mallard-quick",
+    facts: [
+      { id: "bucket", label: "Bucket", value: "mallard-quick" },
+      { id: "account_id", label: "Account ID", value: "023e105f4ecef8ad9ca31a8372d0c353" },
+      { id: "endpoint", label: "S3 endpoint", value: "https://023e105f4ecef8ad9ca31a8372d0c353.r2.cloudflarestorage.com" },
+    ],
+    access: [{ id: "access_key_id", label: "Access Key ID", value: "4a2b9c1d7e8f0a3b5c6d7e8f9a0b1c2d" }],
+    secrets: [{ id: "secret_access_key", label: "Secret Access Key", value: "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0u1V2w3X4", placeholder: "Rejected by Cloudflare R2 — paste a replacement", help: "Cloudflare shows this once, when the token is created. Mallard keeps it on this machine." }],
+    managed: false,
+    fields: [
+      { id: "api_url", label: "S3 API URL", value: "https://023e105f4ecef8ad9ca31a8372d0c353.r2.cloudflarestorage.com", url: true },
+      { id: "bucket", label: "Bucket name", value: "mallard-quick" },
+      { id: "account_id", label: "Account ID", value: "023e105f4ecef8ad9ca31a8372d0c353" },
+      { id: "access_key_id", label: "Access Key ID", value: "4a2b9c1d7e8f0a3b5c6d7e8f9a0b1c2d" },
+    ],
+    refusedMessage: "Cloudflare R2 rejected the stored access key (403 · InvalidAccessKeyId).",
+    guide: "https://developers.cloudflare.com/r2/api/tokens/",
+    fixed: "Bucket, account and access key are fixed for this storage. To sync to another bucket, add a new storage.",
+  },
+  dropbox: {
+    label: "Dropbox", icon: "cloud", name: "Team Dropbox",
+    facts: [
+      { id: "folder_name", label: "Folder", value: "Mallard Sync" },
+      { id: "namespace_id", label: "Namespace ID", value: "ns:4823017" },
+    ],
+    access: [],
+    secrets: [
+      { id: "access_token", label: "Access token", value: "sl.u.AFyQ3nR8kZt0b2LxPq9WvJm7Hc4YeTd1oSaG6NiUf5XrBwK2lM8pDzE0vC3hQ7yJ", help: "Short-lived; renewed automatically from the refresh token." },
+      { id: "refresh_token", label: "Refresh token", value: "rt_9XkQ2mPz7LbT4vWn8HcJ3sYd6FgR1aE5uKoI0NxZ", help: "Issued to this Mallard app and Dropbox account at sign-in. Renews access automatically." },
+    ],
+    managed: true,
+    fields: [{ id: "namespace_id", label: "Namespace ID", value: "ns:4823017", help: "Use the same namespace ID on each machine. This value cannot change after setup." }],
+    refusedMessage: "Dropbox no longer accepts the saved sign-in (401 · invalid_access_token).",
+    guide: "https://www.dropbox.com/developers/documentation/http/documentation",
+    fixed: "Folder and namespace are fixed for this storage. To sync to another folder, add a new storage.",
+  },
+  local: {
+    label: "Local folder", icon: "drive", name: "Backup disk",
+    facts: [{ id: "directory", label: "Folder", value: "/Volumes/backup/mallard-storage", path: true }],
+    access: [], secrets: [], managed: false,
+    fields: [{ id: "directory", label: "Location path", value: "/Volumes/backup/mallard-storage", folder: true }],
+    refusedMessage: "The folder is not mounted (/Volumes/backup).",
+    guide: null,
+    fixed: "The folder is fixed for this storage. To sync to another folder, add a new storage.",
+  },
+};
+
+const REPOS = [
+  { name: "aspnet-core", git: true, revision: 17, updated: "2 h ago" },
+  { name: "mallard-app", git: true, revision: 41, updated: "yesterday" },
+  { name: "notes", git: false, revision: 3, updated: "Aug 30" },
+];
+
+/* ── Specimen state ── */
+const params = new URLSearchParams(location.search);
+const pick = (value, allowed, fallback) => (allowed.includes(value) ? value : fallback);
+const S = {
+  opt: pick(params.get("opt"), ["now", "a", "b", "c"], "b"),
+  provider: pick(params.get("provider"), ["r2", "dropbox", "local"], "r2"),
+  conn: pick(params.get("conn"), ["connected", "untested", "refused"], "connected"),
+  name: pick(params.get("name"), ["auto", "row"], "auto"),
+  hide: pick(params.get("hide"), ["30", "leave"], "30"),
+  theme: pick(params.get("theme"), ["light", "dark"], "light"),
+};
+let V; // visit state
+const TIMERS = {};
+function resetVisit() {
+  for (const k of Object.keys(TIMERS)) { clearInterval(TIMERS[k]); delete TIMERS[k]; }
+  V = { renaming: false, inlineEditing: false, name: PROVIDERS[S.provider].name, savedName: PROVIDERS[S.provider].name, nameStamp: null, testing: false, verifiedAt: S.conn === "connected" ? "3 min ago" : null, reconnecting: false, copied: null, secretVisible: false, menuOpen: false, replacement: "", revealed: {}, revealing: {}, secretCopied: {}, left: false };
+}
+resetVisit();
+
+const NOTES = {
+  now: "<b>Now.</b> The setup form, reused for an existing storage. Every destination field is an input, the secret accepts a replacement any time, the type switch is a disabled control, and the footer ends at <i>Save storage</i>. Changing the bucket here silently points the storage at a different history.",
+  a: "<b>A · Facts sheet (record).</b> The facts as text with copy, drawn from the listing's own summary; the name has a <i>Rename…</i> verb; the footer states that destination and credentials are fixed and offers <i>Test connection</i>. A refused credential is the one editable moment: <i>Reconnect…</i> opens a band with only the secret. Try Connection → Refused.",
+  b: "<b>B · Locked form + reveal (chosen).</b> The setup form, every destination field <code>readonly</code> with a lock beside its name. The secret is a masked read-only field with <i>Show</i>, which fetches the saved value from the backend on click, and <i>Copy</i>. A revealed value hides itself (toggle above). The name is the one live field: it saves on blur or Enter and says so. When the provider refuses the credential, the field wears a Refused chip and <i>Reconnect…</i> opens the one editable band.",
+  c: "<b>C · Facts + Access band (record).</b> A, with the credential in its own band and a standing <i>Replace access key…</i> verb, so a key can be rotated before the old one is revoked. It is a settings edit, which you asked to remove; it is here so the trade is visible.",
+};
+
+/* ── Markup ── */
+function pathBar() {
+  const P = PROVIDERS[S.provider];
+  return `<header class="sync-pathbar sync-titlebar" data-tauri-drag-region>
+    <ol class="sync-path" aria-label="${esc(V.name)} path" data-tauri-drag-region>
+      <li class="sync-path-item" data-tauri-drag-region><button type="button" class="sync-path-crumb root" title="Storages">${icon("storage", 14)}<span>Storages</span></button></li>
+      <li class="sync-path-item leaf-item" data-tauri-drag-region><span class="sync-path-separator" aria-hidden="true" data-tauri-drag-region>/</span><span class="sync-path-crumb leaf" aria-current="page" data-tauri-drag-region>${icon(P.icon, 14)}<span>${esc(V.name)}</span></span></li>
+    </ol>
+    <div class="sync-path-actions" data-tauri-drag-region>
+      <button type="button" class="sync-path-sync" title="Refresh repositories in ${esc(V.name)}">${icon("refresh", 14)}<span class="sync-path-sync-label">Refresh</span></button>
+      <span class="sync-path-divider" aria-hidden="true" data-tauri-drag-region></span>
+      <div class="sync-path-overflow${V.menuOpen ? " open" : ""}"><button type="button" class="sync-path-more" data-action="more" title="Storage and app actions" aria-label="Storage and app actions" aria-haspopup="menu" aria-expanded="${V.menuOpen}">${icon("more", 16)}</button>
+      ${V.menuOpen ? overflowMenu() : ""}</div>
+    </div>
+  </header>`;
+}
+function overflowMenu() {
+  const P = PROVIDERS[S.provider];
+  const item = (id, ic, label, danger = false, disabled = false, detail = "") => `<button type="button" class="sync-path-menu-item${danger ? " danger" : ""}" role="menuitem" data-menu="${id}"${disabled ? " disabled" : ""}>${icon(ic, 13)}<span class="sync-path-menu-copy"><span>${label}</span>${detail ? `<small>${esc(detail)}</small>` : ""}</span></button>`;
+  const rows = [];
+  if (S.provider === "local") rows.push(item("reveal", "folder", "Reveal in Finder", false, false, "/Volumes/backup/mallard-storage"));
+  rows.push(item("settings", "settings", "Hide storage settings"));
+  if (S.name === "row" || S.opt === "now" || S.opt === "a" || S.opt === "c") rows.push(item("rename", "edit", "Rename storage…"));
+  if (S.opt === "c" && P.secrets.length) rows.push(item("replace", "lock", P.managed ? "Reconnect Dropbox…" : "Replace access key…"));
+  rows.push(item("clear", "trash", "Clear storage data…", true));
+  rows.push(item("remove", "x", "Remove storage…", true, true, "Linked to 3 projects — unlink first"));
+  return `<div class="sync-path-menu end" role="menu" aria-label="Storage"><div class="sync-path-menu-group"><div class="sync-path-menu-label">Storage</div>${rows.join("")}</div></div>`;
+}
+
+function renameRow() {
+  if (!V.renaming) return "";
+  return `<form class="sync-path-rename" data-form="rename">
+    <label for="st-rename">Storage name</label>
+    <input id="st-rename" value="${esc(V.name)}" aria-label="Storage name" autofocus>
+    <button type="submit" class="btn btn-primary">Save</button>
+    <button type="button" class="btn btn-ghost" data-action="rename-cancel">Cancel</button>
+  </form>`;
+}
+
+function guideRow() {
+  const P = PROVIDERS[S.provider];
+  if (S.provider === "local" && S.conn !== "refused") return "";
+  const refused = S.conn === "refused";
+  const link = P.guide ? `<button type="button" class="btn-link">Setup guide</button>` : "";
+  if (refused) {
+    const verb = V.reconnecting ? "" : `<button type="button" class="btn storage-setup-guide-button storage-setup-agent-cta" data-action="reconnect">${icon("refresh", 12)} ${P.managed ? "Reconnect Dropbox…" : S.provider === "local" ? "Choose folder…" : "Reconnect…"}</button>`;
+    return `<div class="storage-setup-guide" role="alert">${icon("alert-triangle", 13)}<span class="storage-setup-guide-error">${esc(P.refusedMessage)}</span>${link}${verb}</div>`;
+  }
+  if (V.testing) return `<div class="storage-setup-guide" role="status"><span class="status-loader"></span><span class="storage-setup-guide-copy">Testing the connection…</span>${link}</div>`;
+  const copy = V.verifiedAt
+    ? `Connected · verified ${esc(V.verifiedAt)}.${P.managed ? " Access renews automatically." : ""}`
+    : `Configured. Test the connection to verify it.${P.managed ? " Access renews automatically." : ""}`;
+  return `<div class="storage-setup-guide" role="note">${icon(V.verifiedAt ? "check-circle" : "info", 13)}<span class="storage-setup-guide-copy">${copy}</span>${link}</div>`;
+}
+
+function copyBtn(fact) {
+  if (V.copied === fact.id) return `<span class="st-copied">${icon("check", 11)} Copied</span>`;
+  return `<button type="button" class="st-copy" data-copy="${fact.id}" title="Copy ${esc(fact.label)}" aria-label="Copy ${esc(fact.label)}">${icon("copy", 13)}</button>`;
+}
+function factRow(fact) {
+  const reveal = fact.path ? `<button type="button" class="btn">${icon("folder", 12)} Reveal in Finder</button>` : "";
+  return `<div class="st-fact"><dt>${esc(fact.label)}</dt><dd><span class="st-value" title="${esc(fact.value)}">${esc(fact.value)}</span>${copyBtn(fact)}${reveal}</dd></div>`;
+}
+function nameRow() {
+  if (S.name === "inline") {
+    if (V.inlineEditing) {
+      return `<div class="st-fact"><dt>Name</dt><dd><form class="st-inline" data-form="inline-rename"><input value="${esc(V.name)}" aria-label="Storage name" autofocus><button type="submit" class="btn btn-primary">Save</button><button type="button" class="btn btn-ghost" data-action="inline-cancel">Cancel</button></form></dd></div>`;
+    }
+    return `<div class="st-fact"><dt>Name</dt><dd><span class="st-value name">${esc(V.name)}</span><button type="button" class="btn" data-action="inline-edit">${icon("edit", 12)} Rename…</button></dd></div>`;
+  }
+  return `<div class="st-fact"><dt>Name</dt><dd><span class="st-value name">${esc(V.name)}</span><button type="button" class="btn" data-action="rename"${V.renaming ? " disabled" : ""}>${icon("edit", 12)} Rename…</button></dd></div>`;
+}
+function secretRow(secret, standing) {
+  const P = PROVIDERS[S.provider];
+  const refused = S.conn === "refused";
+  if (P.managed) {
+    const chip = refused ? `<span class="st-stored refused">${icon("alert-triangle", 11)} Refused</span>` : `<span class="st-stored">${icon("check", 11)} Signed in</span>`;
+    const verb = standing && !V.reconnecting ? `<button type="button" class="btn${refused ? " storage-setup-agent-cta" : ""}" data-action="reconnect">${icon("refresh", 12)} Reconnect Dropbox…</button>` : "";
+    return `<div class="st-fact"><dt>${esc(secret.label)}</dt><dd>${chip}<span class="st-hint">${refused ? "Sign in again to keep this folder." : "Access renews automatically."}</span>${verb}</dd></div>`;
+  }
+  const chip = refused ? `<span class="st-stored refused">${icon("alert-triangle", 11)} Refused</span>` : `<span class="st-stored">${icon("lock", 11)} Stored</span>`;
+  const verb = standing && !V.reconnecting ? `<button type="button" class="btn${refused ? " storage-setup-agent-cta" : ""}" data-action="reconnect">${icon("refresh", 12)} Replace access key…</button>` : "";
+  return `<div class="st-fact"><dt>${esc(secret.label)}</dt><dd>${chip}<span class="st-hint">${refused ? "Rejected by the provider." : "Never shown after setup."}</span>${verb}</dd></div>`;
+}
+function reconnectBand() {
+  if (!V.reconnecting) return "";
+  const P = PROVIDERS[S.provider];
+  if (P.managed) {
+    return `<div class="st-reconnect" role="region" aria-label="Reconnect Dropbox">
+      <div class="storage-setup-route-row agent r2-lane" style="border:0;padding:0;background:transparent">${icon("link", 13)}<span class="storage-setup-route-label">Dropbox sign-in</span><span class="storage-setup-guide-copy">Sign in with the account that owns <b>${esc(P.facts[0].value)}</b>. The folder and namespace stay as they are.</span></div>
+      <div class="st-reconnect-verbs"><button type="button" class="btn btn-ghost" data-action="reconnect-cancel">Cancel</button><button type="button" class="btn">Copy link</button><button type="button" class="btn btn-primary">Open browser</button></div>
+    </div>`;
+  }
+  if (S.provider === "local") {
+    return `<div class="st-reconnect" role="region" aria-label="Choose folder">
+      <span class="st-fixed">${icon("info", 12)} Mount the disk, or point this storage at the same folder on another path. A different folder is a new storage.</span>
+      <div class="st-reconnect-verbs"><button type="button" class="btn btn-ghost" data-action="reconnect-cancel">Cancel</button><button type="button" class="btn">${icon("folder", 12)} Browse…</button></div>
+    </div>`;
+  }
+  const secret = P.secrets[0];
+  return `<div class="st-reconnect" role="region" aria-label="Replace access key">
+    <div class="storage-provider-field"><span class="form-label-row"><label class="sync-field-name" for="st-secret">${esc(secret.label)}</label></span>
+      <span class="sync-secret-input"><input type="${V.secretVisible ? "text" : "password"}" id="st-secret" value="${esc(V.replacement)}" placeholder="${esc(secret.placeholder)}" autocomplete="new-password" data-input="replacement"><button type="button" class="sync-secret-reveal" data-action="reveal" aria-pressed="${V.secretVisible}">${V.secretVisible ? "Hide" : "Show"}</button></span></div>
+    <span class="st-fixed">${icon("info", 12)} Same bucket, same account, same Access Key ID — only the secret changes. Use a key issued for ${esc(P.access[0].value.slice(0, 8))}…</span>
+    <div class="st-reconnect-verbs"><button type="button" class="btn btn-ghost" data-action="reconnect-cancel">Cancel</button><button type="button" class="btn"${V.replacement ? "" : " disabled"}>Test connection</button><button type="button" class="btn btn-primary"${V.replacement ? "" : " disabled"}>Save credential</button></div>
+  </div>`;
+}
+
+function cardHeader({ title = "Storage settings", nameField = false } = {}) {
+  const P = PROVIDERS[S.provider];
+  const name = nameField
+    ? `<input value="${esc(V.name)}" aria-label="Storage name" placeholder="Storage name" data-input="name">`
+    : `<h2 class="sync-storage-editor-title">${title}</h2>`;
+  const type = S.opt === "now"
+    ? `<div class="sync-segmented" role="radiogroup" aria-label="Storage type">${["Cloudflare R2", "Dropbox", "Local folder"].map((l) => `<button type="button" role="radio" aria-checked="${l === P.label}" class="${l === P.label ? "active" : ""}" disabled>${l}</button>`).join("")}</div>`
+    : `<span class="sync-storage-editor-provider">${esc(P.label)}</span>`;
+  return `<header><span class="sync-storage-icon">${icon(P.icon, 18)}</span>${name}${type}</header>`;
+}
+
+function fieldsGrid(readonly) {
+  const P = PROVIDERS[S.provider];
+  const refused = S.conn === "refused";
+  const lock = readonly ? `<span class="st-lock" title="Fixed for this storage">${icon("lock", 11)}</span>` : "";
+  const folder = P.fields.filter((f) => f.folder).map((f) => `<label class="sync-folder-field compact"><span class="sync-field-name">${esc(f.label)} ${lock}</span><div><input type="text" value="${esc(f.value)}"${readonly ? ' readonly class="st-readonly"' : ""} spellcheck="false"><button type="button" class="btn"${readonly ? " disabled" : ""}>${icon("folder", 13)} Browse…</button></div></label>`).join("");
+  const grid = P.fields.filter((f) => !f.folder).map((f) => `<div class="storage-provider-field${f.url ? " storage-provider-url-field" : ""}"><span class="form-label-row"><label class="sync-field-name">${esc(f.label)}</label>${lock}</span><input type="${f.url ? "url" : "text"}" value="${esc(f.value)}"${readonly ? ' readonly class="st-readonly"' : ""} spellcheck="false">${f.help ? `<small class="st-hint" style="white-space:normal">${esc(f.help)}</small>` : ""}</div>`).join("");
+  const secrets = readonly
+    ? P.secrets.map(secretFieldB).join("")
+    : P.managed ? "" : P.secrets.map((s) => `<div class="storage-provider-field"><span class="form-label-row"><label class="sync-field-name">${esc(s.label)}</label></span><span class="sync-secret-input"><input type="password" value="" placeholder="${refused ? esc(s.placeholder) : "Stored — type to replace"}" autocomplete="new-password"><button type="button" class="sync-secret-reveal">Show</button></span></div>`).join("");
+  const body = grid || secrets ? `<div class="sync-storage-fields storage-provider-fields" aria-label="${esc(P.label)} connection details">${grid}${secrets}</div>` : "";
+  return folder + body;
+}
+
+const MASK = "••••••••••••••••••••••••";
+function secretFieldB(secret) {
+  const refused = S.conn === "refused";
+  const shown = V.revealed[secret.id];
+  const busy = V.revealing[secret.id];
+  let cap = "";
+  if (V.secretCopied[secret.id]) cap = `<span class="st-secret-cap copied">${icon("check", 11)} Copied</span>`;
+  else if (busy) cap = `<span class="st-secret-cap"><span class="status-loader"></span> Reading…</span>`;
+  else if (shown && shown.error) cap = `<span class="st-secret-cap error">${icon("alert-triangle", 11)} ${esc(shown.error)}</span>`;
+  else if (shown && S.hide === "30") cap = `<span class="st-secret-cap">${icon("clock", 11)} Hides in <span data-countdown="${secret.id}">${shown.left}</span> s</span>`;
+  else if (shown) cap = `<span class="st-secret-cap">${icon("clock", 11)} Hides when you leave</span>`;
+  const chip = refused && secret.id !== "access_token" ? `<span class="st-refused-chip">${icon("alert-triangle", 10)} Refused</span>` : "";
+  const value = shown && !shown.error ? secret.value : MASK;
+  return `<div class="storage-provider-field"><span class="form-label-row"><label class="sync-field-name" for="st-sec-${secret.id}">${esc(secret.label)}</label>${chip}<span class="st-lock" title="Fixed for this storage">${icon("lock", 11)}</span>${cap}</span>
+    <span class="sync-secret-input st-has-copy"><input type="${shown && !shown.error ? "text" : "password"}" id="st-sec-${secret.id}" value="${esc(value)}" readonly class="st-readonly" spellcheck="false" aria-describedby="st-sec-help-${secret.id}">
+      <span class="st-secret-verbs"><button type="button" class="st-copy" data-copy-secret="${secret.id}" title="Copy ${esc(secret.label)}" aria-label="Copy ${esc(secret.label)}"${busy ? " disabled" : ""}>${icon("copy", 13)}</button><button type="button" class="sync-secret-reveal" data-reveal="${secret.id}" aria-pressed="${!!shown && !shown.error}"${busy ? " disabled" : ""}>${shown && !shown.error ? "Hide" : "Show"}</button></span></span>
+    ${secret.help ? `<small id="st-sec-help-${secret.id}" class="st-hint" style="white-space:normal">${esc(secret.help)}</small>` : ""}</div>`;
+}
+
+function nameHeaderB() {
+  if (S.name !== "auto") return `<h2 class="sync-storage-editor-title">Storage settings</h2>`;
+  const st = V.nameStamp;
+  const stamp = st ? `<span class="st-name-stamp ${st.kind}${st.dim ? " dim" : ""}" role="status">${st.kind === "saving" ? `${icon("refresh", 11, "icon-spin")} Saving…` : st.kind === "failed" ? `${icon("alert-triangle", 11)} ${esc(st.text)}` : `${icon("check", 11)} Saved`}</span>` : "";
+  return `<span class="st-name-wrap"><input value="${esc(V.name)}" aria-label="Storage name" placeholder="Storage name" data-input="name" data-name-field>${stamp}</span>`;
+}
+
+function cardNow() {
+  const P = PROVIDERS[S.provider];
+  const guide = S.provider === "local" ? "" : (() => {
+    const refused = S.conn === "refused";
+    const copy = refused ? P.refusedMessage : P.managed
+      ? (S.conn === "connected" ? "Connected. Access renews automatically." : "Access renews automatically. Test the connection to verify it, or reconnect below.")
+      : (S.conn === "connected" ? "Connected. You can review or update the connection values below." : "Configured. You can review or update the connection values below.");
+    return `<div class="storage-setup-guide${P.managed ? " r2-lane" : ""}" role="${refused ? "alert" : "note"}">${icon(refused ? "alert-triangle" : "check-circle", 13)}<span class="${refused ? "storage-setup-guide-error" : "storage-setup-guide-copy"}">${esc(copy)}</span>${P.guide ? `<button type="button" class="btn-link">Setup guide</button>` : ""}${P.managed ? `<button type="button" class="btn storage-setup-guide-button storage-setup-agent-cta">${icon("refresh", 12)} Reconnect Dropbox</button>` : ""}</div>`;
+  })();
+  const total = P.fields.length + (P.managed ? 0 : P.secrets.length);
+  return `<article class="sync-storage-card">${cardHeader()}${guide}${fieldsGrid(false)}
+    <footer class="sync-storage-editor-footer">${P.secrets.length && !P.managed ? `<span class="sync-storage-editor-progress">${total} of ${total} set</span>` : ""}<button type="button" class="btn" data-action="test">Test connection</button><button type="button" class="btn btn-primary">Save storage</button></footer></article>`;
+}
+
+function cardB() {
+  const P = PROVIDERS[S.provider];
+  const type = `<span class="sync-storage-editor-provider">${esc(P.label)}</span>`;
+  const header = `<header><span class="sync-storage-icon">${icon(P.icon, 18)}</span>${nameHeaderB()}${type}</header>`;
+  return `<article class="sync-storage-card">${header}${guideRow()}${reconnectBand()}${fieldsGrid(true)}
+    <footer class="sync-storage-editor-footer"><span class="st-fixed">${icon("lock", 12)} ${esc(P.fixed)}</span><button type="button" class="btn" data-action="test"${V.testing || S.conn === "refused" ? " disabled" : ""}>${V.testing ? "Testing…" : "Test connection"}</button></footer></article>`;
+}
+
+function cardA(withAccessBand) {
+  const P = PROVIDERS[S.provider];
+  const facts = P.facts.map(factRow).join("");
+  let access = "";
+  const accessRows = [...P.access.map(factRow), ...P.secrets.map((s) => secretRow(s, withAccessBand))].join("");
+  if (withAccessBand && accessRows) {
+    access = `<div class="st-band"><h3 class="st-band-title">Access</h3><dl class="st-facts">${accessRows}</dl></div>`;
+  } else if (accessRows) {
+    access = accessRows; // inline in the same list
+  }
+  const list = withAccessBand
+    ? `<dl class="st-facts">${nameRow()}${facts}</dl>${access}`
+    : `<dl class="st-facts">${nameRow()}${facts}${access}</dl>`;
+  const footerLine = withAccessBand
+    ? `Destination is fixed for this storage. To sync to another ${S.provider === "r2" ? "bucket" : "folder"}, add a new storage.`
+    : P.fixed;
+  return `<article class="sync-storage-card">${cardHeader()}${guideRow()}${reconnectBand()}${list}
+    <footer class="sync-storage-editor-footer"><span class="st-fixed">${icon("lock", 12)} ${esc(footerLine)}</span><button type="button" class="btn" data-action="test"${V.testing || S.conn === "refused" ? " disabled" : ""}>${V.testing ? "Testing…" : "Test connection"}</button></footer></article>`;
+}
+
+function card() {
+  if (S.opt === "now") return cardNow();
+  if (S.opt === "b") return cardB();
+  return cardA(S.opt === "c");
+}
+
+function reposHtml() {
+  return `<section class="sync-storage-repositories" aria-labelledby="storage-repositories-heading">
+    <div class="sync-storage-repositories-heading"><h2 id="storage-repositories-heading">Repositories</h2></div>
+    <div class="sync-storage-repository-list">${REPOS.map((r) => `<div class="sync-storage-repository-item"><div class="sync-storage-repository-row">
+      <span class="sync-storage-repository-icon">${icon(r.git ? "git-folder" : "folder", 14)}</span>
+      <strong class="sync-storage-repository-name">${esc(r.name)}</strong>
+      <span class="sync-storage-repository-chips"><span class="sync-storage-repo-chip"><span>Revision</span><b>${r.revision}</b></span><span class="sync-storage-repo-chip"><span>Updated</span><b>${esc(r.updated)}</b></span></span>
+      <button type="button" class="sync-history-commit-toggle" aria-expanded="false" aria-label="Show details for ${esc(r.name)}">${icon("chevron-down", 12)}</button>
+    </div></div>`).join("")}</div>
+  </section>`;
+}
+
+function noticeHtml() {
+  // The column's one box: on a refused credential with the settings open the
+  // guide row carries it, so the zone stays empty (as shipped).
+  return "";
+}
+
+function frameHtml() {
+  return `<div class="st-window" id="st-window"><div class="sync-app"><div class="sync-workspace">${pathBar()}
+    <main class="sync-main sync-project-links-page sync-storage-settings-page" id="st-main">
+      <section class="profile-links-section" aria-label="${esc(V.name)}">
+        ${renameRow()}
+        <div class="sync-storage-settings-below sync-storage-settings-dedicated settings-expanded">
+          ${noticeHtml()}
+          <div class="sync-storage-details-panel">${card()}</div>
+          ${reposHtml()}
+        </div>
+      </section>
+    </main></div></div></div>`;
+}
+
+/* ── Static strip of A's states ── */
+function stripHtml() {
+  const keep = { ...S }, keepV = { ...V };
+  const shots = [];
+  const shoot = (caption, opt, provider, conn, mutate) => {
+    S.opt = opt; S.provider = provider; S.conn = conn; S.name = "auto"; S.hide = "30";
+    resetVisit(); if (mutate) mutate();
+    shots.push(`<figure><figcaption>${caption}</figcaption>${card()}</figure>`);
+  };
+  shoot("B · R2 · connected", "b", "r2", "connected");
+  shoot("B · R2 · secret shown (28 s left)", "b", "r2", "connected", () => { V.revealed.secret_access_key = { left: 28 }; });
+  shoot("B · R2 · copied", "b", "r2", "connected", () => { V.secretCopied.secret_access_key = true; });
+  shoot("B · R2 · name saved", "b", "r2", "connected", () => { V.nameStamp = { kind: "saved" }; });
+  shoot("B · R2 · name refused (taken)", "b", "r2", "connected", () => { V.nameStamp = { kind: "failed", text: "Name already used by another storage" }; });
+  shoot("B · R2 · reveal failed (file unreadable)", "b", "r2", "connected", () => { V.revealed.secret_access_key = { error: "Couldn’t read the saved value" }; });
+  shoot("B · R2 · untested", "b", "r2", "untested");
+  shoot("B · R2 · refused", "b", "r2", "refused");
+  shoot("B · R2 · refused → Reconnect… open", "b", "r2", "refused", () => { V.reconnecting = true; });
+  shoot("B · Dropbox · connected, both tokens shown", "b", "dropbox", "connected", () => { V.revealed.access_token = { left: 19 }; V.revealed.refresh_token = { left: 25 }; });
+  shoot("B · Dropbox · refused → Reconnect open", "b", "dropbox", "refused", () => { V.reconnecting = true; });
+  shoot("B · Local folder · mounted", "b", "local", "connected");
+  shoot("B · Local folder · not mounted", "b", "local", "refused");
+  shoot("Now · R2 (shipped)", "now", "r2", "connected");
+  Object.assign(S, keep); V = keepV;
+  return shots.join("");
+}
+
+/* ── Render ── */
+function render() {
+  document.documentElement.dataset.theme = S.theme;
+  for (const b of $$("[data-spec]")) b.setAttribute("aria-pressed", String(S[b.dataset.spec] === b.dataset.value));
+  $("#spec-note").innerHTML = NOTES[S.opt];
+  const host = $("#st-host");
+  const scroll = $("#st-main")?.scrollTop ?? 0;
+  host.innerHTML = frameHtml();
+  const main = $("#st-main"); if (main) main.scrollTop = scroll;
+  const P = PROVIDERS[S.provider];
+  $("#spec-caption").textContent = `opt=${S.opt} · provider=${S.provider} · conn=${S.conn} · name=${S.name} · hide=${S.hide} · revealed=${Object.keys(V.revealed).length} · card = ${S.opt === "now" ? "shipped StorageEditor" : S.opt === "b" ? "StorageEditor, readonly fields, reveal_storage_secret on Show" : "facts sheet from StorageSummary.summary"}`;
+  const q = new URLSearchParams(S); history.replaceState(null, "", "?" + q.toString());
+  $("#st-strip").innerHTML = stripHtml();
+  const f = host.querySelector("[autofocus]"); if (f) f.focus();
+}
+
+document.addEventListener("click", (event) => {
+  const spec = event.target.closest("[data-spec]");
+  if (spec) { S[spec.dataset.spec] = spec.dataset.value; if (spec.dataset.spec !== "theme" && spec.dataset.spec !== "name") resetVisit(); render(); return; }
+  const tryBtn = event.target.closest("[data-try]");
+  if (tryBtn) {
+    const t = tryBtn.dataset.try;
+    if (t === "rename") { if (S.opt === "b" && S.name === "auto") { render(); const f = $("[data-name-field]"); if (f) { f.focus(); f.select(); } return; } V.renaming = true; }
+    if (t === "reveal") { for (const s of PROVIDERS[S.provider].secrets) reveal(s.id); return; }
+    if (t === "leave") { leavePage(); return; }
+    if (t === "test") runTest();
+    if (t === "reset") resetVisit();
+    render(); return;
+  }
+  const act = event.target.closest("[data-action]");
+  if (act) {
+    const a = act.dataset.action;
+    if (a === "rename") V.renaming = true;
+    if (a === "rename-cancel") V.renaming = false;
+    if (a === "inline-edit") V.inlineEditing = true;
+    if (a === "inline-cancel") V.inlineEditing = false;
+    if (a === "reconnect") { V.reconnecting = true; V.menuOpen = false; }
+    if (a === "reconnect-cancel") { V.reconnecting = false; V.replacement = ""; }
+    if (a === "reveal") V.secretVisible = !V.secretVisible;
+    if (a === "test") runTest();
+    if (a === "more") V.menuOpen = !V.menuOpen;
+    render(); return;
+  }
+  const menu = event.target.closest("[data-menu]");
+  if (menu) {
+    const m = menu.dataset.menu;
+    V.menuOpen = false;
+    if (m === "rename") V.renaming = true;
+    if (m === "replace") V.reconnecting = true;
+    render(); return;
+  }
+  const rev = event.target.closest("[data-reveal]");
+  if (rev) { const id = rev.dataset.reveal; if (V.revealed[id]) conceal(id); else reveal(id); return; }
+  const cs = event.target.closest("[data-copy-secret]");
+  if (cs) {
+    const id = cs.dataset.copySecret;
+    const secret = PROVIDERS[S.provider].secrets.find((s) => s.id === id);
+    // Copy never needs Show: the value is fetched, put on the clipboard, and dropped.
+    try { navigator.clipboard?.writeText(secret.value); } catch {}
+    V.secretCopied[id] = true; render();
+    setTimeout(() => { delete V.secretCopied[id]; render(); }, 1500);
+    return;
+  }
+  const copy = event.target.closest("[data-copy]");
+  if (copy) {
+    V.copied = copy.dataset.copy;
+    const fact = [...PROVIDERS[S.provider].facts, ...PROVIDERS[S.provider].access].find((f) => f.id === V.copied);
+    try { navigator.clipboard?.writeText(fact.value); } catch {}
+    render();
+    setTimeout(() => { if (V.copied === copy.dataset.copy) { V.copied = null; render(); } }, 1500);
+    return;
+  }
+  if (V.menuOpen && !event.target.closest(".sync-path-overflow")) { V.menuOpen = false; render(); }
+});
+document.addEventListener("submit", (event) => {
+  const form = event.target.closest("[data-form]");
+  if (!form) return;
+  event.preventDefault();
+  const value = form.querySelector("input").value.trim();
+  if (value) V.name = value;
+  V.renaming = false; V.inlineEditing = false;
+  render();
+});
+document.addEventListener("input", (event) => {
+  const input = event.target.closest("[data-input]");
+  if (!input) return;
+  if (input.dataset.input === "replacement") { V.replacement = input.value; render(); const f = $("[data-input=replacement]"); if (f) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); } }
+  if (input.dataset.input === "name") { V.name = input.value; if (V.nameStamp && V.nameStamp.kind !== "saving") { V.nameStamp = null; $(".st-name-stamp")?.remove(); } }
+});
+document.addEventListener("focusout", (event) => { if (event.target.matches?.("[data-name-field]")) saveName(); });
+document.addEventListener("keydown", (event) => {
+  if (event.target.matches?.("[data-name-field]") && event.key === "Enter") { event.preventDefault(); saveName(); event.target.blur(); }
+  if (event.target.matches?.("[data-name-field]") && event.key === "Escape") { V.name = V.savedName; render(); }
+});
+function saveName() {
+  const next = V.name.trim();
+  if (!next || next === V.savedName) { V.name = V.savedName; render(); return; }
+  V.nameStamp = { kind: "saving" }; render();
+  setTimeout(() => {
+    if (/taken/i.test(next)) { V.nameStamp = { kind: "failed", text: "Name already used by another storage" }; render(); return; }
+    V.savedName = next; V.nameStamp = { kind: "saved" }; render();
+    setTimeout(() => { if (V.nameStamp?.kind === "saved") { V.nameStamp.dim = true; render(); } }, 2400);
+    setTimeout(() => { if (V.nameStamp?.kind === "saved") { V.nameStamp = null; render(); } }, 2700);
+  }, 350);
+}
+/* Show = one backend call per secret (reveal_storage_secret), never part of
+   the page load. The value lives in the field only while shown. */
+function reveal(id) {
+  if (V.revealing[id] || V.revealed[id]) return;
+  V.revealing[id] = true; render();
+  setTimeout(() => {
+    delete V.revealing[id];
+    if (S.provider === "local") return;
+    V.revealed[id] = { left: 30 }; render();
+    if (S.hide === "30") {
+      TIMERS[id] = setInterval(() => {
+        const r = V.revealed[id]; if (!r) { clearInterval(TIMERS[id]); return; }
+        r.left -= 1; if (r.left <= 0) { conceal(id); return; }
+        // Tick in place: a full render each second would steal focus and selection.
+        for (const n of $$(`[data-countdown="${id}"]`)) n.textContent = r.left;
+      }, 1000);
+    }
+  }, 280);
+}
+function conceal(id) { clearInterval(TIMERS[id]); delete TIMERS[id]; delete V.revealed[id]; render(); }
+function leavePage() {
+  for (const id of Object.keys(V.revealed)) conceal(id);
+  V.left = true; render();
+  $("#spec-note").innerHTML = "<b>Left the page.</b> Every revealed value was dropped on unmount — the form remounts masked. (The frame below is the page opened again.)";
+}
+function runTest() {
+  if (V.testing) return;
+  V.testing = true; render();
+  setTimeout(() => { V.testing = false; V.verifiedAt = "just now"; if (S.conn === "untested") S.conn = "connected"; render(); }, 900);
+}
+render();
+</script>
+</body>
+</html>

@@ -32,7 +32,6 @@ pub enum StorageFieldKind {
 pub struct StorageFieldDescriptor {
     pub field_id: FieldKey,
     pub label: String,
-    pub immutable_on_edit: bool,
     pub kind: StorageFieldKind,
     pub required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

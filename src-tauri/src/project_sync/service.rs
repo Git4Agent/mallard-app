@@ -10,6 +10,7 @@ use chrono::{TimeZone, Utc};
 use mallard_application::storage_setup::{self as storage_setup, storage_local_root};
 pub use mallard_application::storage_setup::{
     CommitStorageDraftResult, StorageSetupDraftSummary, StorageSummary, TestStorageDraftResult,
+    VerifyStorageResult,
 };
 use mallard_domain::portable::contracts;
 use mallard_domain::PortableContractResolver;
@@ -1211,6 +1212,37 @@ pub(super) fn commit_storage_setup_draft_with_repository(
                 &machine.profiles,
             )
         },
+    )
+    .map_err(setup_error)
+}
+
+/// One saved secret for the storage page's Show or Copy. The command logs
+/// the reveal; the value itself goes only to the caller.
+pub(super) fn reveal_storage_secret_with_repository(
+    repository: &LocalStateRepository,
+    storage_id: &StorageId,
+    secret_id: &mallard_domain::SecretKey,
+) -> Result<String, String> {
+    storage_setup::reveal_storage_secret(
+        repository,
+        StorageProviderRegistry::production(),
+        storage_id,
+        secret_id,
+    )
+    .map_err(setup_error)
+}
+
+/// Probe one saved storage as it is configured, without a draft.
+pub(super) fn test_storage_with_repository(
+    repository: &LocalStateRepository,
+    runtime: tokio::runtime::Handle,
+    storage_id: &StorageId,
+) -> Result<VerifyStorageResult, String> {
+    storage_setup::verify_storage(
+        repository,
+        StorageProviderRegistry::production(),
+        &runtime,
+        storage_id,
     )
     .map_err(setup_error)
 }

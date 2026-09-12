@@ -55,6 +55,7 @@ import type {
   StorageProviderDescriptor,
   StorageProviderKey,
   StorageSetupDraft,
+  TestStorageResult,
   StorageSetupDraftList,
   TestStorageDraftResult,
   UpdateStorageSetupDraftRequest,
@@ -172,6 +173,14 @@ export const projectSyncApi = {
 
   renameStorage: (storageId: string, name: string, expectedConfigRevision: number) =>
     invoke<SyncConfig>("rename_storage", { storageId, name, expectedConfigRevision }),
+
+  /** One saved secret, on Show or Copy. The backend logs the reveal. */
+  revealStorageSecret: (storageId: string, secretId: string) =>
+    invoke<string>("reveal_storage_secret", { storageId, secretId }),
+
+  /** Probe a saved storage as configured, without a draft. */
+  testStorage: (storageId: string) =>
+    invoke<TestStorageResult>("test_storage", { storageId }),
 
   removeStorage: (storageId: string, expectedConfigRevision: number) =>
     invoke<SyncConfig>("remove_storage", { storageId, expectedConfigRevision }),

@@ -514,6 +514,33 @@ test("an irrecoverable Push error replaces retry with the local-state reset", ()
   assert.match(html, /data-icon="trash"/);
 });
 
+test("a failed comparison offers the local-state reset only for stale metadata", () => {
+  const resource = memoryResource("review");
+  const render = (threadComparisonError: string) => renderToStaticMarkup(
+    <PushResourceWorkspace
+      credentialRedactionEnabled={true}
+      resources={[resource]}
+      selected={new Set()}
+      projectDefaults={new Set()}
+      busy={false}
+      error={null}
+      threadComparisonError={threadComparisonError}
+      onToggle={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+      onResetMetadata={() => undefined}
+    />,
+  );
+
+  // A transport failure is not repaired by forgetting sync bases.
+  const offline = render("S3 get 'bundles/head.json': dispatch failure: io error");
+  assert.match(offline, /Conversations couldn&#x27;t be compared/);
+  assert.doesNotMatch(offline, /Reset local sync state/);
+
+  const stale = render("conversation checkpoint is stale at LineageDigest");
+  assert.match(stale, /Reset local sync state/);
+});
+
 test("two steps render two plain tabs — never a Review tab", () => {
   const resource = memoryResource("review");
   const html = renderToStaticMarkup(
@@ -555,6 +582,15 @@ test("blocked destinations gate before review and publish failures recheck the d
   const pendingPushCreation = openPushChooser.indexOf("setPendingPush({");
   assert.ok(destinationGate >= 0 && destinationGate < pendingPushCreation);
   assert.match(openPushChooser.slice(destinationGate, pendingPushCreation), /setStorageNotice\([\s\S]*return;/);
+  // An unreachable storage stops at the card too, as the action-failed
+  // notice whose actions are Retry, Reconnect, or a metadata-gated Reset —
+  // never a review with 0/0 selectable and an unconditional Reset.
+  const unavailableGate = openPushChooser.indexOf('destination.state === "unavailable"');
+  assert.ok(unavailableGate >= 0 && unavailableGate < destinationGate);
+  assert.match(
+    openPushChooser.slice(unavailableGate, destinationGate),
+    /kind: "action_failed",\s*action: "push",\s*message: storageFailureMessage\(storageId, destination\.message\)[\s\S]*return;/,
+  );
 
   const publishProject = source.slice(
     source.indexOf("const publishProject = async"),

@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type {
   SecretOperation,
   StorageConnectionHealth,
@@ -11,7 +11,8 @@ import type {
 } from "../../types";
 import Icon, { iconNameFromHint, type IconName } from "../Icons";
 import { openExternalUrl } from "./externalLink";
-import { compactProjectPath } from "./model";
+import { compactProjectPath, formatRelativeTime } from "./model";
+import { rowReceipt, useSettingsReceipts } from "./settingsReceipts";
 
 /**
  * The storage form, drawn from a provider descriptor: every field, secret,
@@ -380,19 +381,18 @@ function ModeDoor({ icon, title, detail, help, checked, disabled, onChoose }: {
   );
 }
 
+/** The New-storage form. A settled storage never opens here: its page is
+ *  `StorageLockedForm`, and a credential is replaced through
+ *  `StorageReconnectBand`. */
 export function StorageEditor({
   descriptor,
   providers,
   form,
   secretPresence,
   disabled,
-  editsExisting,
   onChange,
   onSwitchProvider,
-  onRemove,
-  primaryAction,
   setupSlot,
-  connection,
   destinationConflict,
   setupMode,
   discoverySlot,
@@ -406,23 +406,12 @@ export function StorageEditor({
   form: StorageEditorForm;
   secretPresence: SecretPresence;
   disabled: boolean;
-  /** The draft edits a storage that already exists: the name stays in the
-   *  page heading and the card opens on the configured guide row. */
-  editsExisting: boolean;
   onChange: (form: StorageEditorForm) => void;
-  /** Switching type restarts the draft on the chosen provider; absent (and
-   *  for an existing storage) the switch is shown locked. */
+  /** Switching type restarts the draft on the chosen provider; absent the
+   *  switch is shown locked. */
   onSwitchProvider?: (provider: StorageProviderDescriptor) => void;
-  /** The trash at the header's end, for a storage that already exists. */
-  onRemove?: () => void;
-  /** An existing storage's save sits in the card's own footer. */
-  primaryAction?: ReactNode;
   /** The workspace owns setup and its lifecycle. */
   setupSlot?: ReactNode;
-  /** What the open transport last observed about an existing storage's
-   *  credential. The guide row and the credential field read it; a new
-   *  draft has none. */
-  connection?: StorageConnectionHealth | null;
   /** The connected storage that already occupies the folder the form names.
    *  The editor states it under the folder field with a door to that
    *  storage; the workspace, which owns the verbs, disables Test and Save
@@ -462,58 +451,35 @@ export function StorageEditor({
   const folderFields = descriptor.fields.filter((field) => field.kind === "directory");
   const gridFields = descriptor.fields.filter((field) => field.kind !== "directory");
   const managed = hasManagedCredentials(descriptor, secretPresence);
-  const credentialed = descriptor.secrets.length > 0 || !!descriptor.local_setup;
   /* A new draft on a provider that can look in its account is asked Create
      new or Use existing before it shows a lane. The doors are the editor's;
-     what each door leads to is the workspace's. An existing storage, and a
-     provider that cannot look, are past the question. */
-  const doors = !editsExisting && setupMode && descriptor.discovery
+     what each door leads to is the workspace's. A provider that cannot look
+     is past the question. */
+  const doors = setupMode && descriptor.discovery
     ? { ...setupMode, discovery: descriptor.discovery }
     : null;
   const usingExisting = doors?.mode === "existing";
   const showLanes = doors === null || doors.mode === "create";
   /* Direct setup is available for both creation and discovery. */
-  const wranglerLane = !!descriptor.local_setup && !editsExisting && !managed;
+  const wranglerLane = !!descriptor.local_setup && !managed;
   // Keep review available when a prepared draft is reopened or edited.
   const wranglerReviewReady = setupDone || descriptor.secrets.some((secret) => secretPresence[secret.secret_id]);
   const showFields = wranglerLane
     ? wranglerReviewReady || manualExpanded
     : showLanes || (usingExisting && !!manualEntry);
-  const suspended = connectionSuspends(connection);
-  const observedConnected = connection?.state === "connected";
-  /* "Connected" is said only after an observed success; a stored credential
-     by itself proves nothing, and a refused one says so in the row. */
-  const guideCopy = suspended
-    ? connection!.message
-    : managed
-      ? observedConnected
-        ? "Connected. Access renews automatically."
-        : "Access renews automatically. Test the connection to verify it, or reconnect below."
-      : observedConnected
-        ? "Connected. You can review or update the connection values below."
-        : "Configured. You can review or update the connection values below.";
-  const replacementPlaceholder = connection?.state === "token_expired"
-    ? "Expired — paste a replacement"
-    : `Rejected by ${descriptor.display_name} — paste a replacement`;
-
   return (
     <article className="sync-storage-card">
       <header>
         <span className="sync-storage-icon"><Icon name={iconNameFromHint(descriptor.icon, "drive")} size={18} /></span>
-        {editsExisting ? (
-          <h2 className="sync-storage-editor-title">Storage settings</h2>
-        ) : (
-          <input
-            value={form.name}
-            onChange={(event) => setName(event.target.value)}
-            disabled={disabled}
-            aria-label="Storage name"
-            placeholder="Storage name"
-          />
-        )}
-        {/* The type switch lists every provider this build offers. A new
-            draft restarts on the chosen one; an existing storage keeps its
-            type, so the switch only states it. */}
+        <input
+          value={form.name}
+          onChange={(event) => setName(event.target.value)}
+          disabled={disabled}
+          aria-label="Storage name"
+          placeholder="Storage name"
+        />
+        {/* The type switch lists every provider this build offers; a draft
+            restarts on the chosen one. */}
         <div className="sync-segmented" role="radiogroup" aria-label="Storage type">
           {(providers ?? [descriptor]).map((provider) => {
             const current = provider.key === descriptor.key && provider.config_version === descriptor.config_version;
@@ -525,16 +491,13 @@ export function StorageEditor({
                 aria-checked={current}
                 className={current ? "active" : undefined}
                 onClick={() => { if (!current) onSwitchProvider?.(provider); }}
-                disabled={disabled || editsExisting || !onSwitchProvider}
+                disabled={disabled || !onSwitchProvider}
               >
                 {provider.display_name}
               </button>
             );
           })}
         </div>
-        {onRemove && (
-          <button type="button" className="btn btn-ghost danger" onClick={onRemove} disabled={disabled} title="Remove storage" aria-label="Remove storage"><Icon name="trash" size={14} /></button>
-        )}
       </header>
 
       {doors && (
@@ -569,7 +532,6 @@ export function StorageEditor({
               onChange={(event) => setSetting(field.field_id, event.target.value)}
               placeholder={field.placeholder ?? undefined}
               disabled={disabled}
-              readOnly={editsExisting && field.immutable_on_edit}
               required={field.required}
               spellCheck={false}
               autoCapitalize="none"
@@ -617,7 +579,7 @@ export function StorageEditor({
         </div>
       )}
       {usingExisting && discoverySlot}
-      {(showLanes || usingExisting && wranglerLane) && !editsExisting && !managed && (wranglerLane || !setupDone) && (wranglerLane || descriptor.manual_setup_hint || descriptor.setup_guide_url) && (
+      {(showLanes || usingExisting && wranglerLane) && !managed && (wranglerLane || !setupDone) && (wranglerLane || descriptor.manual_setup_hint || descriptor.setup_guide_url) && (
         <>
 
           <div className="storage-setup-route-row" role="note">
@@ -649,10 +611,13 @@ export function StorageEditor({
           </div>
         </>
       )}
-      {(managed || editsExisting && credentialed) && (
-        <div className={`storage-setup-guide${descriptor.local_setup ? " r2-lane" : ""}`} role={suspended ? "alert" : "note"}>
-          <Icon name={suspended ? "alert-triangle" : "check-circle"} size={13} />
-          <span className={suspended ? "storage-setup-guide-error" : "storage-setup-guide-copy"}>{guideCopy}</span>
+      {managed && (
+        /* A stored credential by itself proves nothing: "Connected" waits
+           for an observed success, which only the settled storage's page
+           can report. */
+        <div className={`storage-setup-guide${descriptor.local_setup ? " r2-lane" : ""}`} role="note">
+          <Icon name="check-circle" size={13} />
+          <span className="storage-setup-guide-copy">Access renews automatically. Test the connection to verify it.</span>
           {descriptor.setup_guide_url && (
             <button type="button" className="btn-link" onClick={() => void openExternalUrl(descriptor.setup_guide_url!)}>Setup guide</button>
           )}
@@ -677,7 +642,6 @@ export function StorageEditor({
                 onChange={(event) => setSetting(field.field_id, event.target.value)}
                 placeholder={field.placeholder ?? undefined}
                 disabled={disabled}
-                readOnly={(editsExisting || managed) && field.immutable_on_edit}
                 required={field.required}
                 spellCheck={false}
                 autoCapitalize="none"
@@ -706,9 +670,7 @@ export function StorageEditor({
                     id={`${fieldIdPrefix}-secret-${secret.secret_id}`}
                     value={form.typedSecrets[secret.secret_id] ?? ""}
                     onChange={(event) => setSecret(secret.secret_id, event.target.value)}
-                    placeholder={present
-                      ? (suspended ? replacementPlaceholder : "Stored — type to replace")
-                      : (secret.placeholder ?? undefined)}
+                    placeholder={present ? "Stored — type to replace" : (secret.placeholder ?? undefined)}
                     disabled={disabled}
                     required={secret.required && !present}
                     autoComplete="new-password"
@@ -728,16 +690,427 @@ export function StorageEditor({
           })}
         </div>
       )}
-      {primaryAction && (
-        <footer className="sync-storage-editor-footer">
-          {descriptor.secrets.length > 0 && (
-            <span className="sync-storage-editor-progress" aria-live="polite">
-              {fieldsSet(descriptor, form, secretPresence).set} of {fieldsSet(descriptor, form, secretPresence).total} set
+    </article>
+  );
+}
+
+/** How long a revealed secret stays on screen before the field masks
+ *  itself again. */
+export const SECRET_REVEAL_MS = 30_000;
+const SECRET_MASK = "••••••••••••••••••••••••";
+const COPIED_MS = 1_500;
+
+type Revealed = { value: string; hidesAt: number };
+
+/**
+ * A settled storage's page: the setup form with every field read-only,
+ * because a destination is fixed for the life of a storage. Two verbs
+ * remain — the name, which saves itself, and Test connection — plus the
+ * one editable moment, replacing a refused credential, which the workspace
+ * seats here as `reconnect.band`.
+ *
+ * A saved secret is not in the page. Show asks the backend for that one
+ * value and the field masks itself again after SECRET_REVEAL_MS, on Hide,
+ * or when the page goes; Copy fetches, writes the clipboard, and drops it.
+ */
+export function StorageLockedForm({
+  storage,
+  descriptor,
+  disabled,
+  onRename,
+  focusNameSeq = 0,
+  onRevealSecret,
+  onTest,
+  testing,
+  verifiedAt,
+  reconnect,
+}: {
+  storage: StorageSummary;
+  descriptor: StorageProviderDescriptor;
+  disabled: boolean;
+  /** Save the name (Save or Enter); resolves false when refused (the shell
+   *  has shown why) so the receipt can say so. */
+  onRename: (name: string) => Promise<boolean>;
+  /** Bumped by the ⋯ menu's Rename to put the caret in the name field. */
+  focusNameSeq?: number;
+  onRevealSecret: (secretId: string) => Promise<string>;
+  onTest: () => void;
+  testing: boolean;
+  /** When this visit last saw the connection verified; null until then. */
+  verifiedAt: number | null;
+  reconnect: {
+    open: boolean;
+    onOpen: () => void;
+    /** The secrets-only editor, seated under the guide row while open. */
+    band: ReactNode;
+  };
+}) {
+  const fieldIdPrefix = useId();
+  const [name, setName] = useState(storage.name);
+  const savedName = storage.name;
+  useEffect(() => { setName(savedName); }, [savedName]);
+  const receipts = useSettingsReceipts();
+  const nameRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!focusNameSeq) return;
+    nameRef.current?.focus();
+    nameRef.current?.select();
+  }, [focusNameSeq]);
+  const [savingName, setSavingName] = useState(false);
+  const nameDirty = name.trim() !== savedName;
+  const commitName = async () => {
+    const next = name.trim();
+    if (!next || next === savedName || savingName) return;
+    setSavingName(true);
+    receipts.begin("name", ["name"]);
+    const ok = await onRename(next);
+    receipts.settle("name", ok, ok ? `Storage renamed to ${next}` : null);
+    setSavingName(false);
+  };
+  const cancelName = () => setName(savedName);
+  const nameReceipt = rowReceipt(receipts.state, "name");
+
+  const [revealed, setRevealed] = useState<Record<string, Revealed>>({});
+  const [revealing, setRevealing] = useState<Record<string, boolean>>({});
+  const [revealError, setRevealError] = useState<Record<string, string>>({});
+  const [copied, setCopied] = useState<Record<string, boolean>>({});
+  const [now, setNow] = useState(() => Date.now());
+  const timers = useRef(new Set<number>());
+  useEffect(() => {
+    const standing = timers.current;
+    return () => { for (const timer of standing) window.clearTimeout(timer); };
+  }, []);
+  const later = (ms: number, run: () => void) => {
+    const timer = window.setTimeout(() => { timers.current.delete(timer); run(); }, ms);
+    timers.current.add(timer);
+  };
+  // One clock for every countdown; it runs only while something is shown.
+  const anyRevealed = Object.keys(revealed).length > 0;
+  useEffect(() => {
+    if (!anyRevealed) return;
+    const tick = window.setInterval(() => {
+      const at = Date.now();
+      setNow(at);
+      setRevealed((current) => {
+        const kept = Object.fromEntries(Object.entries(current).filter(([, entry]) => entry.hidesAt > at));
+        return Object.keys(kept).length === Object.keys(current).length ? current : kept;
+      });
+    }, 1000);
+    return () => window.clearInterval(tick);
+  }, [anyRevealed]);
+  const conceal = (secretId: string) => setRevealed((current) => {
+    const { [secretId]: _gone, ...rest } = current;
+    return rest;
+  });
+  const reveal = async (secretId: string) => {
+    if (revealing[secretId]) return;
+    setRevealing((current) => ({ ...current, [secretId]: true }));
+    setRevealError((current) => { const { [secretId]: _gone, ...rest } = current; return rest; });
+    try {
+      const value = await onRevealSecret(secretId);
+      setNow(Date.now());
+      setRevealed((current) => ({ ...current, [secretId]: { value, hidesAt: Date.now() + SECRET_REVEAL_MS } }));
+    } catch (reason) {
+      setRevealError((current) => ({ ...current, [secretId]: reason instanceof Error ? reason.message : String(reason) }));
+    } finally {
+      setRevealing((current) => { const { [secretId]: _gone, ...rest } = current; return rest; });
+    }
+  };
+  const copy = async (secretId: string) => {
+    if (revealing[secretId]) return;
+    setRevealing((current) => ({ ...current, [secretId]: true }));
+    setRevealError((current) => { const { [secretId]: _gone, ...rest } = current; return rest; });
+    try {
+      const value = revealed[secretId]?.value ?? await onRevealSecret(secretId);
+      await navigator.clipboard.writeText(value);
+      setCopied((current) => ({ ...current, [secretId]: true }));
+      later(COPIED_MS, () => setCopied((current) => { const { [secretId]: _gone, ...rest } = current; return rest; }));
+    } catch (reason) {
+      setRevealError((current) => ({ ...current, [secretId]: reason instanceof Error ? reason.message : String(reason) }));
+    } finally {
+      setRevealing((current) => { const { [secretId]: _gone, ...rest } = current; return rest; });
+    }
+  };
+
+  const settingString = (fieldId: string) => {
+    const value = storage.settings[fieldId];
+    return typeof value === "string" ? value : value == null ? "" : String(value);
+  };
+  const presence = Object.fromEntries(storage.secrets.map((secret) => [secret.secret_id, secret.present]));
+  const folderFields = descriptor.fields.filter((field) => field.kind === "directory");
+  const gridFields = descriptor.fields.filter((field) => field.kind !== "directory");
+  const managed = hasManagedCredentials(descriptor, presence);
+  const suspended = connectionSuspends(storage.connection);
+  const lock = <span className="sync-storage-lock" title="Fixed for this storage"><Icon name="lock" size={11} /></span>;
+  /* "Connected" is said only after this visit saw a probe succeed; a stored
+     credential proves nothing, and a refused one says so in the row. */
+  const guideCopy = verifiedAt !== null
+    ? `Connected · verified ${formatRelativeTime(Math.floor(verifiedAt / 1000))}.${managed ? " Access renews automatically." : ""}`
+    : `Configured. Test the connection to verify it.${managed ? " Access renews automatically." : ""}`;
+  const showGuide = suspended || descriptor.secrets.length > 0 || !!descriptor.local_setup;
+
+  return (
+    <article className="sync-storage-card sync-storage-locked">
+      <header>
+        <span className="sync-storage-icon"><Icon name={iconNameFromHint(descriptor.icon, "drive")} size={18} /></span>
+        {/* The name saves the way a project rename does: Save and Cancel
+            appear beside the field as soon as it differs from what is
+            saved; Enter saves, Escape cancels; the receipt says it landed. */}
+        <form
+          className="sync-storage-name"
+          onSubmit={(event) => { event.preventDefault(); void commitName(); }}
+        >
+          <input
+            ref={nameRef}
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") { cancelName(); event.currentTarget.blur(); }
+            }}
+            disabled={disabled || savingName}
+            aria-label="Storage name"
+            placeholder="Storage name"
+          />
+          {nameDirty && (
+            <span className="sync-storage-name-verbs">
+              <button type="submit" className="btn btn-primary" disabled={disabled || savingName || !name.trim()}>
+                {savingName ? "Saving…" : "Save"}
+              </button>
+              <button type="button" className="btn btn-ghost" disabled={disabled || savingName} onClick={cancelName}>
+                Cancel
+              </button>
             </span>
           )}
-          {primaryAction}
-        </footer>
+          {nameReceipt && !nameDirty && (
+            <span className={`sync-storage-name-stamp ${nameReceipt.kind}${nameReceipt.kind === "saved" && nameReceipt.fading ? " dim" : ""}`} role="status">
+              {nameReceipt.kind === "saving"
+                ? <><Icon name="refresh" size={11} className="icon-spin" /> Saving…</>
+                : nameReceipt.kind === "failed"
+                  ? <><Icon name="alert-triangle" size={11} /> Not saved</>
+                  : <><Icon name="check" size={11} /> Saved</>}
+            </span>
+          )}
+        </form>
+        <span className="sync-storage-editor-provider">{descriptor.display_name}</span>
+      </header>
+
+      {showGuide && (
+        <div className="storage-setup-guide" role={suspended ? "alert" : "note"}>
+          <Icon name={suspended ? "alert-triangle" : verifiedAt !== null ? "check-circle" : "info"} size={13} />
+          <span className={suspended ? "storage-setup-guide-error" : "storage-setup-guide-copy"}>
+            {suspended ? storage.connection!.message : guideCopy}
+          </span>
+          {descriptor.setup_guide_url && (
+            <button type="button" className="btn-link" onClick={() => void openExternalUrl(descriptor.setup_guide_url!)}>Setup guide</button>
+          )}
+          {suspended && !reconnect.open && (
+            <button type="button" className="btn storage-setup-guide-button storage-setup-agent-cta" disabled={disabled} onClick={reconnect.onOpen}>
+              <Icon name="refresh" size={12} /> Reconnect…
+            </button>
+          )}
+        </div>
       )}
+      {reconnect.open && reconnect.band}
+
+      {folderFields.map((field) => (
+        <label key={field.field_id} className="sync-folder-field compact">
+          <span className="sync-field-name">{field.label} {lock}</span>
+          <div>
+            <input type="text" value={settingString(field.field_id)} readOnly spellCheck={false} />
+          </div>
+          {field.help && <small>{field.help}</small>}
+        </label>
+      ))}
+
+      {(gridFields.length > 0 || descriptor.secrets.length > 0) && (
+        <div className="sync-storage-fields storage-provider-fields" aria-label={`${descriptor.display_name} connection details`}>
+          {gridFields.map((field) => (
+            <div key={field.field_id} className={`storage-provider-field${field.kind === "url" ? " storage-provider-url-field" : ""}`}>
+              <span className="form-label-row">
+                <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-field-${field.field_id}`}>{field.label}</label>
+                {lock}
+              </span>
+              <input
+                type={field.kind === "url" ? "url" : "text"}
+                id={`${fieldIdPrefix}-field-${field.field_id}`}
+                value={settingString(field.field_id)}
+                readOnly
+                spellCheck={false}
+              />
+              {field.help && <small className="sync-storage-field-help">{field.help}</small>}
+            </div>
+          ))}
+          {descriptor.secrets.map((secret) => {
+            const present = !!presence[secret.secret_id];
+            const shown = revealed[secret.secret_id];
+            const busy = !!revealing[secret.secret_id];
+            const error = revealError[secret.secret_id];
+            const secondsLeft = shown ? Math.max(0, Math.ceil((shown.hidesAt - now) / 1000)) : 0;
+            const inputId = `${fieldIdPrefix}-secret-${secret.secret_id}`;
+            return (
+              <div key={secret.secret_id} className="storage-provider-field">
+                <span className="form-label-row">
+                  <label className="sync-field-name" htmlFor={inputId}>{secret.label}</label>
+                  {suspended && present && (
+                    <span className="sync-storage-refused-chip"><Icon name="alert-triangle" size={10} /> Refused</span>
+                  )}
+                  {lock}
+                  {copied[secret.secret_id]
+                    ? <span className="sync-secret-cap copied" role="status"><Icon name="check" size={11} /> Copied</span>
+                    : busy
+                      ? <span className="sync-secret-cap"><span className="status-loader" /> Reading…</span>
+                      : shown
+                        ? <span className="sync-secret-cap"><Icon name="clock" size={11} /> Hides in {secondsLeft} s</span>
+                        : null}
+                </span>
+                <span className={`sync-secret-input${present ? " has-copy" : ""}`}>
+                  <input
+                    type={shown ? "text" : "password"}
+                    id={inputId}
+                    value={shown ? shown.value : present ? SECRET_MASK : ""}
+                    placeholder={present ? undefined : "Not stored"}
+                    readOnly
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                  {present && (
+                    <span className="sync-secret-verbs">
+                      <button
+                        type="button"
+                        className="sync-secret-copy"
+                        onClick={() => void copy(secret.secret_id)}
+                        disabled={disabled || busy}
+                        title={`Copy ${secret.label}`}
+                        aria-label={`Copy ${secret.label}`}
+                      >
+                        <Icon name="copy" size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        className="sync-secret-reveal"
+                        onClick={() => { if (shown) conceal(secret.secret_id); else void reveal(secret.secret_id); }}
+                        aria-pressed={!!shown}
+                        disabled={disabled || busy}
+                      >
+                        {shown ? "Hide" : "Show"}
+                      </button>
+                    </span>
+                  )}
+                </span>
+                {/* A refused read is said under the field, where there is
+                    room for a sentence; the label row keeps its one word. */}
+                {error
+                  ? <small className="sync-storage-field-help error" role="alert"><Icon name="alert-triangle" size={11} /> {error}</small>
+                  : secret.help && <small className="sync-storage-field-help">{secret.help}</small>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <footer className="sync-storage-editor-footer">
+        <span className="sync-storage-fixed">
+          <Icon name="lock" size={12} />
+          This storage’s destination and credentials are fixed. To sync somewhere else, add a new storage.
+        </span>
+        {verifiedAt !== null && !testing && (
+          <span className="storage-setup-verified" role="status">
+            <Icon name="check-circle" size={13} /> Connection verified
+          </span>
+        )}
+        <button
+          type="button"
+          className="btn"
+          disabled={disabled || testing || suspended || reconnect.open}
+          onClick={onTest}
+        >
+          {testing ? "Testing…" : "Test connection"}
+        </button>
+      </footer>
     </article>
+  );
+}
+
+/**
+ * The one editable band on a settled storage: the credential, and nothing
+ * else. The workspace opens an edit draft for it (the backend refuses any
+ * settings change on that draft), seats the provider's lane, and owns the
+ * verbs — Cancel, Test connection, Save credential.
+ */
+export function StorageReconnectBand({
+  descriptor,
+  form,
+  secretPresence,
+  disabled,
+  connection,
+  onChange,
+  setupSlot,
+  verbs,
+}: {
+  descriptor: StorageProviderDescriptor;
+  form: StorageEditorForm;
+  secretPresence: SecretPresence;
+  disabled: boolean;
+  connection?: StorageConnectionHealth | null;
+  onChange: (form: StorageEditorForm) => void;
+  setupSlot?: ReactNode;
+  verbs: ReactNode;
+}) {
+  const fieldIdPrefix = useId();
+  const [secretVisible, setSecretVisible] = useState<Record<string, boolean>>({});
+  const setSecret = (secretId: string, value: string) => onChange({
+    ...form,
+    typedSecrets: { ...form.typedSecrets, [secretId]: value },
+  });
+  const replacementPlaceholder = connection?.state === "token_expired"
+    ? "Expired — paste a replacement"
+    : `Rejected by ${descriptor.display_name} — paste a replacement`;
+  return (
+    <div className="sync-storage-reconnect" role="region" aria-label={`Reconnect ${descriptor.display_name}`}>
+      {setupSlot && (
+        <div className="storage-setup-route-row agent r2-lane" role="note">
+          <Icon name={descriptor.local_setup === "dropbox" ? "link" : "terminal"} size={13} />
+          <span className="storage-setup-route-label">{descriptor.local_setup === "dropbox" ? "Dropbox sign-in" : "Wrangler setup"}</span>
+          {setupSlot}
+        </div>
+      )}
+      {activeSecrets(descriptor, secretPresence).map((secret) => {
+        const present = !!secretPresence[secret.secret_id];
+        const visible = !!secretVisible[secret.secret_id];
+        return (
+          <div key={secret.secret_id} className="storage-provider-field">
+            <span className="form-label-row">
+              <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-secret-${secret.secret_id}`}>{secret.label}</label>
+              {(secret.help || secret.help_url) && <HelpMark text={secret.help ?? secret.label} url={secret.help_url} />}
+            </span>
+            <span className="sync-secret-input">
+              <input
+                type={visible ? "text" : "password"}
+                id={`${fieldIdPrefix}-secret-${secret.secret_id}`}
+                value={form.typedSecrets[secret.secret_id] ?? ""}
+                onChange={(event) => setSecret(secret.secret_id, event.target.value)}
+                placeholder={present && connectionSuspends(connection) ? replacementPlaceholder : (secret.placeholder ?? undefined)}
+                disabled={disabled}
+                autoComplete="new-password"
+              />
+              <button
+                type="button"
+                className="sync-secret-reveal"
+                onClick={() => setSecretVisible((current) => ({ ...current, [secret.secret_id]: !visible }))}
+                aria-pressed={visible}
+                disabled={disabled}
+              >
+                {visible ? "Hide" : "Show"}
+              </button>
+            </span>
+          </div>
+        );
+      })}
+      <span className="sync-storage-fixed">
+        <Icon name="info" size={12} />
+        Same destination — only the credential changes.
+      </span>
+      <div className="sync-storage-reconnect-verbs">{verbs}</div>
+    </div>
   );
 }

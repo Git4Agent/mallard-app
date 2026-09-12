@@ -333,7 +333,10 @@ summary:focus-visible {
 
 .btn-primary {
   background: var(--button-primary-bg);
-  color: var(--text-0);
+  /* The ink that reads on the primary fill in both palettes. --text-0 was the
+     page ink, which the dark palette change dropped to 2.41:1 here; every
+     shipping button was masked by the doubled-class override below. */
+  color: var(--button-primary-text);
   font-weight: var(--weight-semibold);
 }
 
@@ -1652,6 +1655,7 @@ summary:focus-visible {
 }
 .sync-field-grid input,
 .sync-storage-fields input,
+.sync-storage-reconnect input,
 .sync-folder-field input,
 .sync-storage-card header > input {
   min-width: 0;
@@ -2525,6 +2529,142 @@ button.storage-found-group-head:hover { color: var(--text-1); background: var(--
 }
 .sync-secret-reveal:hover:not(:disabled) { color: var(--text-0); background: var(--bg-hover); }
 .sync-secret-reveal:disabled { cursor: default; opacity: 0.58; }
+
+/* ── The settled storage's page: the setup form, locked ──
+   Every destination field is read-only for the life of the storage and says
+   so with a lock beside its name. Readonly, never disabled: the value keeps
+   its ink and stays selectable. The secret is masked until Show fetches it,
+   Copy fetches without showing, and the countdown in the label row says when
+   the field masks itself again. */
+.sync-storage-locked input[readonly] {
+  color: var(--text-1);
+  background: var(--surface-muted);
+  cursor: default;
+}
+.sync-storage-locked .sync-folder-field.compact > div > input { flex: 1; }
+.sync-storage-lock { display: inline-flex; color: var(--text-3); }
+.sync-storage-field-help {
+  color: var(--text-3);
+  font-size: var(--type-2xs);
+  line-height: 1.35;
+}
+.sync-storage-field-help.error { color: var(--danger-text); }
+.sync-storage-field-help.error > svg { vertical-align: -1px; }
+/* The Copy and Show verbs share the input's right edge, Copy first. */
+.sync-secret-input.has-copy > input { padding-right: 92px; }
+.sync-secret-verbs {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  bottom: 1px;
+  display: flex;
+  align-items: stretch;
+}
+.sync-secret-verbs > .sync-secret-reveal { position: static; }
+.sync-secret-copy {
+  min-width: 32px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-left: 1px solid var(--button-border);
+  color: var(--text-2);
+  background: transparent;
+  cursor: pointer;
+}
+.sync-secret-copy:hover:not(:disabled) { color: var(--text-0); background: var(--bg-hover); }
+.sync-secret-copy:disabled { cursor: default; opacity: 0.58; }
+.sync-secret-cap {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.sync-secret-cap.copied { color: var(--success-text); }
+.sync-secret-cap > .status-loader { width: 10px; height: 10px; }
+.sync-storage-refused-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px 1px 5px;
+  border: 1px solid var(--danger-text);
+  border-radius: var(--r-pill);
+  background: var(--danger-soft);
+  color: var(--danger-text);
+  font-family: var(--font-display);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+/* The name is the card's one live field; its receipt stands beside it in
+   the Settings page's grammar (Saving… / Saved / Not saved). */
+.sync-storage-name { min-width: 0; margin: 0; display: inline-flex; align-items: center; gap: 8px; }
+/* Save and Cancel stand beside the field only while it differs from the
+   saved name — the project rename row's pair, in the card's header. */
+.sync-storage-name-verbs { display: inline-flex; align-items: center; gap: 6px; }
+.sync-storage-name-verbs > .btn { min-height: 28px; padding: 2px 10px; }
+.sync-storage-card header > .sync-storage-name > input {
+  width: 220px;
+  height: 33px;
+  padding: 0 9px;
+  border: 1px solid var(--control-border);
+  border-radius: 7px;
+  color: var(--text-0);
+  background: var(--surface-row);
+  font: inherit;
+  font-size: var(--type-sm);
+  font-weight: var(--weight-semibold);
+}
+.sync-storage-name-stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-display);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+.sync-storage-name-stamp.saved { color: var(--success-text); }
+.sync-storage-name-stamp.saving { color: var(--text-2); }
+.sync-storage-name-stamp.failed { color: var(--danger-text); }
+.sync-storage-name-stamp.dim { opacity: 0.55; }
+/* The footer's rule line takes the room the verbs leave. */
+.sync-storage-fixed {
+  flex: 1 1 200px;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-2);
+  font-size: var(--type-xs);
+  line-height: 1.35;
+}
+.sync-storage-fixed > svg { flex: none; }
+.sync-storage-editor-footer > .sync-storage-fixed + .btn,
+.sync-storage-editor-footer > .sync-storage-fixed + .storage-setup-verified { margin-left: auto; }
+/* The one editable band on a settled storage: the credential, under the
+   guide row that asked for it, in a whisper of the danger tint. */
+.sync-storage-reconnect {
+  padding: 10px 14px 12px;
+  display: grid;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--danger-soft) 45%, transparent);
+}
+.sync-storage-reconnect > .storage-setup-route-row { padding: 0; border: 0; background: transparent; }
+.sync-storage-reconnect > .storage-provider-field { max-width: 460px; }
+.sync-storage-reconnect-verbs {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
 .sync-storage-editor-footer {
   min-height: 44px;
   padding: 8px 14px;
@@ -5434,6 +5574,20 @@ span.sync-path-crumb {
   border-radius: 8px;
 }
 
+/* The Sessions/Files switch of a non-Git project: the segmented pill, seated
+   at the page's start above the panel it controls. Its tabs carry a glyph
+   and a word, so they lay out as a row rather than a text run. */
+.sync-project-view-tabs {
+  align-self: flex-start;
+  margin: 0 0 10px;
+}
+
+.sync-project-view-tabs > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .sync-project-tab-panel {
   width: 100%;
 }
@@ -5942,8 +6096,13 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   visibility: visible;
 }
 
+/* The app's opaque focus ring, not a translucent accent wash: the wash
+   measured 2.05-2.86:1 against the rows it sits on, under the 3:1 a focus
+   indicator needs. The base rule's `outline: none` only silences the
+   unfocused-by-keyboard case. */
 .sync-thread-sync-indicator:focus-visible {
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 /* The three neutral badges say "no verdict yet", so they take the muted text
@@ -6113,8 +6272,11 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   visibility: visible;
 }
 
+/* Same opaque ring as the status indicator; the 45% wash measured 2.61-2.72:1
+   on light rows. */
 .sync-history-thread-metric:focus-visible {
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .sync-history-thread-meta svg { color: var(--text-3); }

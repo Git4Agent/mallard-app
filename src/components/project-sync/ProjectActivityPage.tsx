@@ -869,6 +869,22 @@ function SessionDebugMenu({
     }
   };
 
+  /* A dialog that closes when focus leaves it is unreachable by keyboard
+     unless opening it also moves focus in. Once the panel has been placed,
+     the first Copy button takes focus; Escape hands it back to the trigger. */
+  const focusedForOpen = useRef(false);
+  useEffect(() => {
+    if (!open) {
+      focusedForOpen.current = false;
+      return;
+    }
+    if (!placement || focusedForOpen.current) return;
+    focusedForOpen.current = true;
+    const frame = window.requestAnimationFrame(() => {
+      panelRef.current?.querySelector<HTMLElement>("button")?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, placement]);
   useEffect(() => {
     if (!open) return;
     // The panel is portalled onto body, so it is not inside rootRef. Both have

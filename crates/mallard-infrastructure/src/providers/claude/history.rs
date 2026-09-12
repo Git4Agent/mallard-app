@@ -31,8 +31,8 @@ fn max_line_bytes() -> usize {
 }
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_CLAUDE_RECORDS: usize = 100_000;
-/// 2: `Task`/`Agent` calls index as agent calls, with child identities.
-pub(crate) const TIMELINE_PARSER_VERSION: u32 = 2;
+/// Fixed at 1. Only the current parser is supported.
+pub(crate) const TIMELINE_PARSER_VERSION: u32 = 1;
 /// The suffix of a child transcript that its row is read from: the last
 /// record's clock and the final message. The same bound the scan window uses.
 const CHILD_TAIL_WINDOW_BYTES: u64 = 256 * 1024;
@@ -1135,6 +1135,12 @@ fn tool_result_status(block: &Value) -> SessionToolCallStatus {
         .or_else(|| block.get("isError"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+        || (block.get("type").and_then(Value::as_str) == Some("advisor_tool_result")
+            && block
+                .get("content")
+                .and_then(|content| content.get("type"))
+                .and_then(Value::as_str)
+                == Some("advisor_tool_result_error"))
     {
         SessionToolCallStatus::Failed
     } else {
@@ -1278,19 +1284,24 @@ fn consume_claude_record(
                         );
                     }
                     "toolresult" | "servertoolresult" | "websearchtoolresult"
-                    | "webfetchtoolresult" | "codeexecutiontoolresult" => {
+                    | "webfetchtoolresult" | "codeexecutiontoolresult" | "advisortoolresult" => {
                         if let Some(call_id) = block
                             .get("tool_use_id")
                             .or_else(|| block.get("toolUseId"))
                             .and_then(Value::as_str)
                         {
                             builder.complete_tool(
-                        call_id,
-                        tool_result_status(block),
-                        source,
-                        timestamp,
-                        value.get("toolUseResult"),
-                    );
+                                call_id,
+                                tool_result_status(block),
+                                source,
+                                timestamp,
+                                value.get("toolUseResult"),
+                            );
+                        } else {
+                            builder.mark_tools_lower_bound(
+                                "tool_result_missing_id",
+                                "A Claude tool result had no tool-use ID.",
+                            );
                         }
                     }
                     "text" | "thinking" | "redactedthinking" | "image" | "document"
@@ -1461,7 +1472,14 @@ fn redact_binary_preview_content(value: &Value) -> Value {
         Value::Object(object) => Value::Object(
             object
                 .iter()
-                .map(|(key, value)| (key.clone(), redact_binary_preview_content(value)))
+                .map(|(key, value)| {
+                    let preview = if key == "encrypted_content" {
+                        Value::String("[encrypted content omitted]".to_string())
+                    } else {
+                        redact_binary_preview_content(value)
+                    };
+                    (key.clone(), preview)
+                })
                 .collect(),
         ),
         other => other.clone(),
@@ -1477,13 +1495,18 @@ fn value_as_preview(value: &Value) -> Option<String> {
 }
 
 fn find_tool_block<'a>(value: &'a Value, call_id: &str) -> Option<&'a Value> {
+    content_blocks(value)?
+        .iter()
+        .find(|block| block.get("id").and_then(Value::as_str) == Some(call_id))
+}
+
+fn find_tool_result_block<'a>(value: &'a Value, call_id: &str) -> Option<&'a Value> {
     content_blocks(value)?.iter().find(|block| {
-        block.get("id").and_then(Value::as_str) == Some(call_id)
-            || block
-                .get("tool_use_id")
-                .or_else(|| block.get("toolUseId"))
-                .and_then(Value::as_str)
-                == Some(call_id)
+        block
+            .get("tool_use_id")
+            .or_else(|| block.get("toolUseId"))
+            .and_then(Value::as_str)
+            == Some(call_id)
     })
 }
 
@@ -1506,7 +1529,7 @@ fn tool_payloads(
         } else {
             read_source_value(file, result_source)?
         };
-        find_tool_block(&result_value, &tool.provider_call_id)
+        find_tool_result_block(&result_value, &tool.provider_call_id)
             .and_then(|block| block.get("content").or_else(|| block.get("result")))
             .and_then(value_as_preview)
     } else {
@@ -1904,7 +1927,7 @@ fn describe_agent(
     // The report is prose: the text blocks of the result, not their JSON.
     let result_text = result_value
         .as_ref()
-        .and_then(|value| find_tool_block(value, &tool.provider_call_id))
+        .and_then(|value| find_tool_result_block(value, &tool.provider_call_id))
         .and_then(|block| block.get("content").or_else(|| block.get("result")))
         .and_then(|content| match content {
             Value::String(text) => Some(text.clone()),
@@ -2559,6 +2582,100 @@ mod tests {
 
         let detail = read_event_detail(&transcript, &index, &tool_entry.event_id).unwrap();
         assert_eq!(detail.result.as_deref(), Some("source contents"));
+    }
+
+    #[test]
+    fn advisor_results_complete_calls_and_preserve_safe_details() {
+        for same_record in [false, true] {
+            for (content, status, expected_preview) in [
+                (
+                    json!({"type":"advisor_result","text":"Check the boundary.","stop_reason":"end_turn"}),
+                    SessionToolCallStatus::Completed,
+                    "Check the boundary.",
+                ),
+                (
+                    json!({"type":"advisor_redacted_result","encrypted_content":"short-opaque-payload"}),
+                    SessionToolCallStatus::Completed,
+                    "[encrypted content omitted]",
+                ),
+                (
+                    json!({"type":"advisor_tool_result_error","error_code":"overloaded"}),
+                    SessionToolCallStatus::Failed,
+                    "overloaded",
+                ),
+            ] {
+                let temp = tempfile::tempdir().unwrap();
+                let transcript = temp.path().join("session.jsonl");
+                let call = json!({"type":"server_tool_use","id":"advisor-1","name":"advisor","input":{}});
+                let result = json!({"type":"advisor_tool_result","tool_use_id":"advisor-1","content":content});
+                let record = |blocks: Vec<Value>| {
+                    json!({"type":"assistant","message":{"id":"msg-1","role":"assistant","stop_reason":"tool_use","content":blocks}})
+                };
+                let records = if same_record {
+                    vec![record(vec![call, result])]
+                } else {
+                    vec![record(vec![call]), record(vec![result])]
+                };
+                write_jsonl(&transcript, records);
+
+                let index = build_timeline_index(&transcript, &context(temp.path())).unwrap();
+                assert!(index.warnings.is_empty(), "{:?}", index.warnings);
+                assert_eq!(count_value(&index.counts.tool_calls), 1);
+                assert_eq!(index.counts.tool_calls.quality, SessionCountQuality::Exact);
+                let entry = &index.events[0];
+                let tool = entry.tool.as_ref().unwrap();
+                assert_eq!(tool.status, status);
+                assert!(tool.result_source.is_some());
+                let detail = read_event_detail(&transcript, &index, &entry.event_id).unwrap();
+                assert_eq!(detail.arguments.as_deref(), Some("{}"));
+                let result = detail.result.unwrap();
+                assert!(result.contains(expected_preview));
+                assert!(!result.contains("short-opaque-payload"));
+            }
+        }
+    }
+
+    #[test]
+    fn advisor_calls_without_results_stay_incomplete_after_replay() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("session.jsonl");
+        let call = json!({"type":"assistant","message":{"id":"msg-1","role":"assistant","stop_reason":"tool_use","content":[
+            {"type":"server_tool_use","id":"advisor-1","name":"advisor","input":{}}
+        ]}});
+        write_jsonl(&transcript, vec![call.clone(), call]);
+        let index = build_timeline_index(&transcript, &context(temp.path())).unwrap();
+        assert_eq!(count_value(&index.counts.tool_calls), 1);
+        assert_eq!(index.counts.tool_calls.quality, SessionCountQuality::LowerBound);
+        assert_eq!(index.warnings.len(), 1);
+        assert_eq!(index.warnings[0].code, "incomplete_tool_call");
+        let tool = index.events[0].tool.as_ref().unwrap();
+        assert_eq!(tool.status, SessionToolCallStatus::Incomplete);
+        assert!(tool.result_source.is_none());
+    }
+
+    #[test]
+    fn unsupported_and_unmatched_advisor_results_keep_warnings() {
+        for (block, warning) in [
+            (json!({"type":"future_tool_result"}), "unknown_tool_block"),
+            (
+                json!({"type":"advisor_tool_result","content":{"type":"advisor_result","text":"Advice"}}),
+                "tool_result_missing_id",
+            ),
+            (
+                json!({"type":"advisor_tool_result","tool_use_id":"missing-call","content":{"type":"advisor_result","text":"Advice"}}),
+                "orphan_tool_result",
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let transcript = temp.path().join("session.jsonl");
+            write_jsonl(&transcript, vec![json!({"type":"assistant","message":{
+                "id":"msg-1","role":"assistant","stop_reason":"tool_use","content":[block]
+            }})]);
+            let index = build_timeline_index(&transcript, &context(temp.path())).unwrap();
+            assert_eq!(index.warnings.len(), 1);
+            assert_eq!(index.warnings[0].code, warning);
+            assert_eq!(index.counts.tool_calls.quality, SessionCountQuality::LowerBound);
+        }
     }
 
     #[test]

@@ -18,6 +18,8 @@ import {
   storageSubtitle,
   storageSubtitleIsPath,
   StorageEditor,
+  StorageLockedForm,
+  StorageReconnectBand,
   type StorageEditorForm,
   applyFieldDerivations,
   suggestStorageName,
@@ -115,6 +117,8 @@ function folderSummary(patch: Partial<StorageSummary> = {}): StorageSummary {
     icon: "drive",
     available: true,
     summary: [{ field_id: "directory", label: "Folder", value: "/Users/test/storage", is_path: true }],
+    settings: { directory: "/Users/test/storage" },
+    secrets: [],
     ...patch,
   };
 }
@@ -132,6 +136,8 @@ function cloudSummary(patch: Partial<StorageSummary> = {}): StorageSummary {
       { field_id: "bucket", label: "Bucket", value: "mallard-team", is_path: false },
       { field_id: "account_id", label: "Account ID", value: "0123456789abcdef0123456789abcdef", is_path: false },
     ],
+    settings: { api_url: "https://example.test/team", access_key_id: "key-id" },
+    secrets: [{ secret_id: "api_secret", present: true }],
     ...patch,
   };
 }
@@ -162,7 +168,6 @@ test("the editor renders the fields and secrets its descriptor declares", () => 
       form={emptyForm}
       secretPresence={{}}
       disabled={false}
-      editsExisting={false}
       onChange={() => undefined}
       setupSlot={<button type="button">Run with Claude Code</button>}
     />,
@@ -198,7 +203,6 @@ test("a folder provider renders its directory field with Browse and no credentia
       form={{ ...emptyForm, name: "Local storage 1", settings: { directory: "/tmp/storage" } }}
       secretPresence={{}}
       disabled={false}
-      editsExisting={false}
       onChange={() => undefined}
     />,
   );
@@ -241,7 +245,6 @@ test("a taken folder is refused under the field, with a door to the storage that
       form={{ ...emptyForm, name: "Local storage 2", settings: { directory: "/Users/test/storage" } }}
       secretPresence={{}}
       disabled={false}
-      editsExisting={false}
       onChange={() => undefined}
       destinationConflict={conflict ? { storage: owner, onOpen: () => undefined } : null}
     />,
@@ -264,33 +267,97 @@ test("a taken folder is refused under the field, with a door to the storage that
   assert.doesNotMatch(workspace, /disabled=\{formLocked \|\| !storageReady\}/);
 });
 
-test("a stored secret is reported by presence only and is never rendered", () => {
+test("a settled storage opens as the locked form: read-only fields, a masked secret with Show and Copy, and the name as the one live field", () => {
+  const revealed: string[] = [];
   const html = renderToStaticMarkup(
-    <StorageEditor
+    <StorageLockedForm
+      storage={cloudSummary()}
       descriptor={cloudProvider}
-      form={{ name: "Cloud storage", settings: { api_url: "https://example.test/team", access_key_id: "key-id" }, typedSecrets: {} }}
-      secretPresence={{ api_secret: true }}
       disabled={false}
-      editsExisting={true}
-      onChange={() => undefined}
+      onRename={async () => true}
+      onRevealSecret={async (secretId) => { revealed.push(secretId); return "never-rendered"; }}
+      onTest={() => undefined}
+      testing={false}
+      verifiedAt={null}
+      reconnect={{ open: false, onOpen: () => undefined, band: null }}
     />,
   );
-
-  // An edit draft keeps the name in the page heading and opens on the
-  // configured guide row instead of the setup routes.
-  assert.match(html, /sync-storage-editor-title">Storage settings</);
-  assert.doesNotMatch(html, /aria-label="Storage name"|storage-setup-route-row/);
-  assert.match(html, /Configured\. You can review or update the connection values below\./);
-  // Public values stay editable; the secret says only that it exists.
-  assert.match(html, /value="https:\/\/example\.test\/team"/);
-  assert.match(html, /value="key-id"/);
-  assert.match(html, /Stored — type to replace/);
+  // The header keeps the name field and states the type as a label: no
+  // type switch, no trash, nothing that says Save.
+  assert.match(html, /class="sync-storage-card sync-storage-locked"/);
+  assert.match(html, /<form class="sync-storage-name"><input[^>]*aria-label="Storage name"[^>]*value="Cloud storage"/);
+  assert.match(html, /sync-storage-editor-provider">Cloud A</);
+  // Unchanged, the name shows no verbs; typing makes Save and Cancel appear
+  // beside it (the project rename's pair), Enter submits, Escape cancels.
+  assert.doesNotMatch(html, /sync-storage-name-verbs/);
+  const form = readFileSync("src/components/project-sync/StorageSettings.tsx", "utf8");
+  assert.match(form, /\{nameDirty && \(\s*<span className="sync-storage-name-verbs">\s*<button type="submit" className="btn btn-primary"[\s\S]*?Save[\s\S]*?<button type="button" className="btn btn-ghost"[^>]*onClick=\{cancelName\}>\s*Cancel/);
+  assert.doesNotMatch(form, /onBlur=\{\(\) => void commitName\(\)\}/);
+  assert.doesNotMatch(html, /sync-segmented|Save storage|Remove storage|storage-setup-route-row/);
+  // Every declared field is readonly with its saved value and a lock; never disabled.
+  assert.match(html, /<input type="url"[^>]*readOnly=""[^>]*value="https:\/\/example\.test\/team"/);
+  assert.match(html, /<input type="text"[^>]*readOnly=""[^>]*value="key-id"/);
+  assert.equal((html.match(/class="sync-storage-lock"/g) ?? []).length, 4, "three fields and the secret each wear the lock");
+  assert.doesNotMatch(html, /disabled=""/);
+  // The secret is a masked readonly field: the saved value is not in the page.
   const secretInput = html.match(/<input type="password"[^>]*>/)?.[0] ?? "";
-  assert.ok(secretInput, "the secret field renders as a password input");
-  // Controlled, so it carries an empty value attribute — never a stored one.
-  assert.doesNotMatch(secretInput, /value="[^"]+"/);
-  assert.doesNotMatch(secretInput, /required/);
-  assert.match(html, /aria-pressed="false"[^>]*>Show</);
+  assert.match(secretInput, /readOnly=""/);
+  assert.match(secretInput, /value="•+"/);
+  assert.doesNotMatch(html, /never-rendered|Stored — type to replace/);
+  assert.deepEqual(revealed, [], "nothing is fetched on mount");
+  assert.match(html, /class="sync-secret-copy"[^>]*aria-label="Copy API Secret"/);
+  assert.match(html, /sync-secret-reveal" aria-pressed="false">Show</);
+  // The guide row says what this visit knows; the footer states the rule and keeps Test.
+  assert.match(html, /role="note"[\s\S]*?Configured\. Test the connection to verify it\./);
+  assert.match(html, /sync-storage-fixed">[\s\S]*?destination and credentials are fixed\. To sync somewhere else, add a new storage\./);
+  assert.match(html, /<button type="button" class="btn">Test connection<\/button>/);
+  assert.doesNotMatch(html, /Reconnect…|sync-storage-refused-chip/);
+
+  // A secret the storage does not hold has no verbs and says so.
+  const missing = renderToStaticMarkup(
+    <StorageLockedForm
+      storage={cloudSummary({ secrets: [{ secret_id: "api_secret", present: false }] })}
+      descriptor={cloudProvider}
+      disabled={false}
+      onRename={async () => true}
+      onRevealSecret={async () => ""}
+      onTest={() => undefined}
+      testing={false}
+      verifiedAt={null}
+      reconnect={{ open: false, onOpen: () => undefined, band: null }}
+    />,
+  );
+  assert.match(missing, /placeholder="Not stored"/);
+  assert.doesNotMatch(missing, /sync-secret-copy|>Show</);
+
+  // Verified this visit: the row says so and the footer wears the chip.
+  const verified = renderToStaticMarkup(
+    <StorageLockedForm
+      storage={cloudSummary()}
+      descriptor={cloudProvider}
+      disabled={false}
+      onRename={async () => true}
+      onRevealSecret={async () => ""}
+      onTest={() => undefined}
+      testing={false}
+      verifiedAt={Date.now() - 5_000}
+      reconnect={{ open: false, onOpen: () => undefined, band: null }}
+    />,
+  );
+  assert.match(verified, /data-icon="check-circle"[\s\S]*?Connected · verified/);
+  assert.match(verified, /storage-setup-verified[^>]*>[\s\S]*?Connection verified/);
+
+  // The workspace reads the page off the listing and asks the backend only
+  // on Show or Copy, through the one reveal door.
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /onRevealSecret=\{\(secretId\) => projectSyncApi\.revealStorageSecret\(pageStorageId, secretId\)\}/);
+  assert.doesNotMatch(workspace, /Save storage|settingsExpanded\) void ensureStorageEditSession/);
+  // One storage page: the card is unconditional, over the repositories.
+  assert.match(workspace, /\{!creatingStorage && savedEditedStorage && descriptor && \(\s*<StorageLockedForm/);
+  assert.doesNotMatch(workspace, /storageDetailsExpanded|Hide storage settings|label: "Repositories"/);
+  const api = readFileSync("src/components/project-sync/api.ts", "utf8");
+  assert.match(api, /invoke<string>\("reveal_storage_secret", \{ storageId, secretId \}\)/);
+  assert.match(api, /invoke<TestStorageResult>\("test_storage", \{ storageId \}\)/);
 });
 
 test("readiness and the tally count required fields plus required secrets, stored or typed", () => {
@@ -376,6 +443,23 @@ test("the subtitle prefers the path fact, then the first fact, then the provider
 test("connection failures use actionable storage language named after the provider", () => {
   assert.equal(
     storageAccessErrorMessage(cloudSummary(), "S3 get '.mallard/_storage.json': dispatch failure"),
+    "Couldn’t reach Cloud A. Check the network and try again.",
+  );
+  // The first storage write a new user makes fails behind a prefix.
+  assert.equal(
+    storageAccessErrorMessage(cloudSummary(), "register the repo in 'Cloud storage': S3 conditional put 'bundles/x': dispatch failure: io error"),
+    "Couldn’t reach Cloud A. Check the network and try again.",
+  );
+  assert.equal(
+    storageAccessErrorMessage(cloudSummary(), "S3 get 'x': service error: unhandled error (AccessDenied)"),
+    "Cloud A rejected the credentials. Reconnect the storage with a current key, then try again.",
+  );
+  assert.equal(
+    storageAccessErrorMessage(cloudSummary(), "S3 list 'bundles/': service error: NoSuchBucket"),
+    "The Cloud A bucket can’t be found. Check the bucket name in the storage settings.",
+  );
+  assert.equal(
+    storageAccessErrorMessage(cloudSummary(), "S3 get 'x': service error: unhandled error"),
     "Couldn’t connect to Cloud A. Check the connection settings and credentials, then try again.",
   );
   assert.equal(
@@ -653,7 +737,7 @@ test("the Storages index lists every storage as a row that opens its page", () =
   // says whose settings it holds. No secret ever reaches the page.
   assert.match(html, /aria-label="Continue setting up Half-typed cloud — resumable storage draft"[\s\S]*?data-icon="cloud"/);
   assert.match(html, /<strong>Half-typed cloud<\/strong>[\s\S]*?landing-picker-card-location">Setup not finished — not connected to Mallard yet</);
-  assert.match(html, /landing-picker-card-location">Unsaved Cloud A settings — not applied yet</);
+  assert.match(html, /landing-picker-card-location">Reconnect not finished — Cloud A credential not saved yet</);
   assert.equal((html.match(/sync-draft-badge">Draft/g) ?? []).length, 2);
   assert.equal((html.match(/sync-storage-repo-chip/g) ?? []).length, 3);
   assert.doesNotMatch(html, /prepared-access-key|api_secret|value="/);
@@ -932,7 +1016,6 @@ test("help marks are buttons that carry the descriptor's documentation link and 
       form={{ name: "Team", settings: { api_url: "", bucket: "", account_id: "", access_key_id: "" }, typedSecrets: {} }}
       secretPresence={{}}
       disabled={false}
-      editsExisting={false}
       onChange={() => {}}
     />,
   );
@@ -973,7 +1056,6 @@ test("the editor fills the suggested name from the source field and leaves a typ
       form={{ name: "team-configs", settings: { directory: "/Volumes/backup/team-configs" }, typedSecrets: {} }}
       secretPresence={{}}
       disabled={false}
-      editsExisting={false}
       onChange={() => {}}
     />,
   );
@@ -1003,7 +1085,6 @@ test("a revealed draft secret fills the field for review and is not re-sent unti
       form={form}
       secretPresence={secretPresenceOf(revealedDraft)}
       disabled={false}
-      editsExisting={false}
       onChange={() => undefined}
     />,
   );
@@ -1096,7 +1177,7 @@ test("the existing clear menu supports both clear modes and hides unavailable st
 const dropboxProvider: StorageProviderDescriptor = {
     key: "dropbox", config_version: 1, display_name: "Dropbox", description: "Shared namespace",
     display_rank: 30, icon: "cloud", clear_mode: "revision_checked", default_name: "Dropbox storage",
-    fields: [{ field_id: "namespace_id", label: "Namespace ID", kind: "text", required: true, immutable_on_edit: true }],
+    fields: [{ field_id: "namespace_id", label: "Namespace ID", kind: "text", required: true }],
     secrets: [
       { secret_id: "access_token", label: "Access token", required: true },
       { secret_id: "refresh_token", label: "Refresh token", required: true },
@@ -1109,12 +1190,11 @@ const dropboxProvider: StorageProviderDescriptor = {
 test("Dropbox declares direct setup and keeps the manual connection fields", () => {
   const descriptor = dropboxProvider;
   const form = { name: "Dropbox storage 1", settings: { namespace_id: "shared-42" }, typedSecrets: {} };
-  const render = (editsExisting: boolean) => renderToStaticMarkup(
+  const fresh = renderToStaticMarkup(
     <StorageEditor descriptor={descriptor} form={form} secretPresence={{ access_token: true }}
-      disabled={false} editsExisting={editsExisting} onChange={() => {}}
+      disabled={false} onChange={() => {}}
       setupSlot={<button type="button">Connect Dropbox</button>} />,
   );
-  const fresh = render(false);
   assert.match(fresh, /Namespace ID/);
   assert.match(fresh, /Access token/);
   assert.doesNotMatch(fresh, /Refresh token/);
@@ -1125,9 +1205,28 @@ test("Dropbox declares direct setup and keeps the manual connection fields", () 
   assert.doesNotMatch(fresh, /readOnly/);
   assert.equal(fieldsSet(descriptor, form, { access_token: true }).total, 2);
   assert.equal(storageDraftReady(descriptor, form, { access_token: true }), true);
-  const edited = render(true);
-  assert.match(edited, /readOnly=""[^>]*value="shared-42"/);
-  assert.doesNotMatch(edited, /type="password"[^>]*readOnly/);
+  // Settled, the same storage is the locked form: the namespace read-only,
+  // both tokens masked and revealable, nothing to type.
+  const locked = renderToStaticMarkup(
+    <StorageLockedForm
+      storage={cloudSummary({ provider: "dropbox", provider_label: "Dropbox", settings: { namespace_id: "shared-42" },
+        secrets: [{ secret_id: "access_token", present: true }, { secret_id: "refresh_token", present: true }] })}
+      descriptor={descriptor}
+      disabled={false}
+      onRename={async () => true}
+      onRevealSecret={async () => "token"}
+      onTest={() => undefined}
+      testing={false}
+      verifiedAt={null}
+      reconnect={{ open: false, onOpen: () => undefined, band: null }}
+    />,
+  );
+  assert.match(locked, /readOnly=""[^>]*value="shared-42"/);
+  assert.match(locked, /Access token[\s\S]*?aria-label="Copy Access token"[\s\S]*?Refresh token[\s\S]*?aria-label="Copy Refresh token"/);
+  assert.equal((locked.match(/type="password"[^>]*readOnly=""/g) ?? []).length, 2);
+  assert.equal((locked.match(/>Show</g) ?? []).length, 2);
+  assert.match(locked, /Access renews automatically\./);
+  assert.doesNotMatch(locked, /Connect Dropbox|Manual setup|Stored — type to replace/);
 });
 
 test("Dropbox OAuth credentials use the same review and replacement field as R2", () => {
@@ -1143,24 +1242,22 @@ test("Dropbox OAuth credentials use the same review and replacement field as R2"
   assert.deepEqual(fieldsSet(dropboxProvider, form, presence), { set: 2, total: 2 });
   assert.equal(storageDraftReady(dropboxProvider, { ...form, settings: {} }, presence), false);
   assert.equal(storageDraftReady(dropboxProvider, { ...form, typedSecrets: {} }, {}), false);
-  for (const editsExisting of [false, true]) {
-    const editorForm = editsExisting ? formFromDraft(dropboxProvider, {
-      ...draft, secrets: draft.secrets.map(({ secret_id, present }) => ({ secret_id, present })),
-    }) : form;
-    const html = renderToStaticMarkup(<StorageEditor descriptor={dropboxProvider} form={editorForm} secretPresence={presence}
-      disabled={false} editsExisting={editsExisting} onChange={() => {}}
+  {
+    const html = renderToStaticMarkup(<StorageEditor descriptor={dropboxProvider} form={form} secretPresence={presence}
+      disabled={false} onChange={() => {}}
       setupSlot={<button type="button">Connect Dropbox</button>} />);
     // Presence alone never says "Connected": that word waits for an
     // observed success on the transport.
     assert.match(html, /Access renews automatically\. Test the connection to verify it/);
     assert.doesNotMatch(html, /Connected\./);
-    assert.match(html, /readOnly=""[^>]*value="shared-42"/);
+    assert.match(html, /value="shared-42"/);
+    assert.doesNotMatch(html, /readOnly/);
     assert.match(html, /Connect Dropbox/);
     assert.match(html, /Refresh token/);
     assert.doesNotMatch(html, /Access token/);
     const credentialInput = html.match(/<input type="password"[^>]*>/)?.[0] ?? "";
     assert.match(credentialInput, /placeholder="Stored — type to replace"/);
-    assert.match(credentialInput, editsExisting ? /value=""/ : /value="refresh-review-canary"/);
+    assert.match(credentialInput, /value="refresh-review-canary"/);
     assert.doesNotMatch(credentialInput, /readOnly|required=""/);
     assert.match(html, /sync-secret-reveal[^>]*>Show<\/button>/);
     assert.doesNotMatch(html, />Stored<|Manual setup/);
@@ -1171,46 +1268,67 @@ test("Dropbox OAuth credentials use the same review and replacement field as R2"
   });
 });
 
-test("the guide row and credential field say what the transport last observed", () => {
+test("the guide row and the reconnect band say what the transport last observed", () => {
   const draft = cloudDraft({ provider: "dropbox", provider_label: "Dropbox", name: "Dropbox storage 1",
     settings: { namespace_id: "shared-42" }, edits_existing: true,
     secrets: [{ secret_id: "access_token", present: false }, { secret_id: "refresh_token", present: true }],
   });
   const form = formFromDraft(dropboxProvider, draft);
   const presence = secretPresenceOf(draft);
-  const render = (connection: StorageConnectionHealth | null) => renderToStaticMarkup(
-    <StorageEditor descriptor={dropboxProvider} form={form} secretPresence={presence}
-      disabled={false} editsExisting onChange={() => {}} connection={connection}
-      setupSlot={<button type="button">Reconnect Dropbox</button>} />,
+  const storage = (connection: StorageConnectionHealth | null) => cloudSummary({
+    provider: "dropbox", provider_label: "Dropbox", settings: { namespace_id: "shared-42" },
+    secrets: [{ secret_id: "access_token", present: false }, { secret_id: "refresh_token", present: true }],
+    connection,
+  });
+  const band = (connection: StorageConnectionHealth | null) => (
+    <StorageReconnectBand descriptor={dropboxProvider} form={form} secretPresence={presence} disabled={false}
+      connection={connection} onChange={() => {}} setupSlot={<button type="button">Reconnect Dropbox</button>}
+      verbs={<button type="button">Save credential</button>} />
+  );
+  const render = (connection: StorageConnectionHealth | null, open = false) => renderToStaticMarkup(
+    <StorageLockedForm storage={storage(connection)} descriptor={dropboxProvider} disabled={false}
+      onRename={async () => true} onRevealSecret={async () => ""} onTest={() => undefined} testing={false} verifiedAt={null}
+      reconnect={{ open, onOpen: () => undefined, band: band(connection) }} />,
   );
   const unknown = render(null);
   assert.match(unknown, /role="note"/);
-  assert.match(unknown, /Access renews automatically\. Test the connection to verify it, or reconnect below\./);
-  assert.doesNotMatch(unknown, /Connected\./);
-  assert.match(unknown, /placeholder="Stored — type to replace"/);
+  assert.match(unknown, /Configured\. Test the connection to verify it\. Access renews automatically\./);
+  assert.doesNotMatch(unknown, /Connected\.|Reconnect…|sync-storage-reconnect/);
 
-  const connected = render({ state: "connected", code: "connected", message: "Connected.", observed_at: 1 });
-  assert.match(connected, /data-icon="check-circle"/);
-  assert.match(connected, /Connected\. Access renews automatically\./);
-
-  const refused = render({
+  const refusal: StorageConnectionHealth = {
     state: "reconnect_required", code: "dropbox_reconnect_required", observed_at: 2,
     message: "Dropbox rejected the saved authorization. Reconnect Dropbox to restore access.",
     evidence: { endpoint: "oauth2/token", http_status: 400, error_tag: "invalid_grant", request_id: "req-1" },
-  });
+  };
+  const refused = render(refusal);
   assert.match(refused, /role="alert"/);
   assert.match(refused, /data-icon="alert-triangle"/);
   assert.match(refused, /storage-setup-guide-error">Dropbox rejected the saved authorization\. Reconnect Dropbox to restore access\.</);
-  assert.match(refused, /placeholder="Rejected by Dropbox — paste a replacement"/);
-  assert.match(refused, /Reconnect Dropbox/);
-  assert.doesNotMatch(refused, /Connected|req-1/);
+  // The one door: Reconnect… in the row; the refused token wears the chip;
+  // Test waits until the credential is replaced.
+  assert.match(refused, /storage-setup-agent-cta"[^>]*>[\s\S]*?Reconnect…/);
+  assert.match(refused, /Refresh token[\s\S]*?sync-storage-refused-chip/);
+  assert.match(refused, /<button type="button" class="btn" disabled="">Test connection<\/button>/);
+  assert.doesNotMatch(refused, /Connected|req-1|sync-storage-reconnect/);
 
-  const expired = render({ state: "token_expired", code: "dropbox_token_expired", message: "The Dropbox access token expired.", observed_at: 3 });
+  // Open, the band sits under the row with the lane and the replaceable
+  // token only — the namespace stays locked below it.
+  const opened = render(refusal, true);
+  assert.match(opened, /class="sync-storage-reconnect" role="region" aria-label="Reconnect Dropbox"/);
+  assert.match(opened, /Dropbox sign-in[\s\S]*?Reconnect Dropbox/);
+  assert.match(opened, /placeholder="Rejected by Dropbox — paste a replacement"/);
+  assert.match(opened, /Same destination — only the credential changes\./);
+  assert.match(opened, /Save credential/);
+  assert.doesNotMatch(opened, /Reconnect…/);
+  assert.ok(opened.indexOf("sync-storage-reconnect") < opened.indexOf('value="shared-42"'));
+  assert.match(opened, /readOnly=""[^>]*value="shared-42"/);
+
+  const expired = renderToStaticMarkup(band({ state: "token_expired", code: "dropbox_token_expired", message: "The Dropbox access token expired.", observed_at: 3 }));
   assert.match(expired, /placeholder="Expired — paste a replacement"/);
   // A temporary failure suspends nothing and changes no copy.
   const unreachable = render({ state: "unreachable", code: "dropbox_request_failed", message: "Dropbox could not be reached.", observed_at: 4 });
   assert.match(unreachable, /role="note"/);
-  assert.doesNotMatch(unreachable, /could not be reached/);
+  assert.doesNotMatch(unreachable, /could not be reached|Reconnect…/);
 });
 
 test("connection helpers name the provider and print only allowlisted facts", () => {
@@ -1286,13 +1404,14 @@ test("a refused credential badges the index and the rail and leads to the settin
   // Static markup cannot click; the sources pin where each door leads and
   // what the agent verb and the failure notice offer.
   for (const path of ["src/components/project-sync/StorageIndexPage.tsx", "src/components/project-sync/ProjectSidebar.tsx"]) {
-    assert.match(readFileSync(path, "utf8"), /onOpenStorage\(storage\.storage_id, connectionSuspends\(storage\.connection\)\)/);
+    assert.match(readFileSync(path, "utf8"), /onOpenStorage\(storage\.storage_id\)/);
   }
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   assert.match(workspace, /<DropboxSetupLane/);
-  assert.match(workspace, /connectionSuspends\(storage\.connection\) \? \([\s\S]*?onClick=\{\(\) => onOpenStorage\(storage\.storage_id, true\)\}[\s\S]*?Reconnect \{storage\.provider_label\}/);
+  assert.match(workspace, /connectionSuspends\(storage\.connection\) \? \([\s\S]*?onClick=\{\(\) => onOpenStorage\(storage\.storage_id\)\}[\s\S]*?Reconnect \{storage\.provider_label\}/);
   assert.match(workspace, /key: "storage-connection",[\s\S]*?message: connectionDetail\(storageConnection\)/);
-  assert.match(workspace, /connection=\{creatingStorage \? null : storageConnection\}/);
+  assert.match(workspace, /<StorageReconnectBand[\s\S]*?connection=\{storageConnection\}/);
+  assert.match(workspace, /const beginReconnect = \(\) => \{[\s\S]*?ensureStorageEditSession\(savedEditedStorage\)/);
   const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   assert.match(shell, /listen<StorageConnectionChangedEvent>\(\s*"project-sync-storage-connection-changed"/);
 });
@@ -1367,7 +1486,6 @@ test("a provider that can look in its account asks a new draft Create new or Use
   const render = (
     mode: StorageSetupMode | null,
     manualEntry = false,
-    editsExisting = false,
     descriptor = discoveryProvider,
   ) => renderToStaticMarkup(
     <StorageEditor
@@ -1375,7 +1493,6 @@ test("a provider that can look in its account asks a new draft Create new or Use
       form={emptyForm}
       secretPresence={{}}
       disabled={false}
-      editsExisting={editsExisting}
       onChange={() => undefined}
       setupMode={{ mode, onChoose: () => undefined }}
       discoverySlot={<div id="discovery-slot" />}
@@ -1407,9 +1524,8 @@ test("a provider that can look in its account asks a new draft Create new or Use
   assert.doesNotMatch(existing, /Set up with an agent|Manual setup|API URL/);
   assert.match(render("existing", true), /discovery-slot[\s\S]*API URL/);
 
-  // An existing storage is past the question, and so is a provider that cannot look.
-  assert.doesNotMatch(render(null, false, true), /storage-mode-doors/);
-  const plain = render(null, false, false, cloudProvider);
+  // A provider that cannot look is past the question.
+  const plain = render(null, false, cloudProvider);
   assert.doesNotMatch(plain, /storage-mode-doors/);
   assert.doesNotMatch(plain, /Set up with an agent/);
   assert.match(plain, /API URL/);
@@ -1510,31 +1626,41 @@ function renderLane(mode: R2SetupMode, state: Partial<R2SetupState>, disabled = 
 const r2Scan = (patch: Partial<StorageDiscoveryResult> = {}) => scanResult({ scope: "Default, EU, US and FedRAMP", ...patch });
 
 test("local Wrangler setup offers collapsed manual entry and opens details at final review", () => {
-  const render = (editsExisting: boolean, setupDone = false) => renderToStaticMarkup(<StorageEditor
-    descriptor={wranglerProvider} form={formFromDraft(wranglerProvider, cloudDraft())}
-    secretPresence={{}} disabled={false} editsExisting={editsExisting} onChange={() => {}} setupDone={setupDone}
-    setupSlot={<R2SetupLane
-      mode={editsExisting ? "reconnect" : "create"} flow={r2Flow({})} disabled={false} descriptor={wranglerProvider}
+  const lane = (mode: "create" | "reconnect") => (
+    <R2SetupLane
+      mode={mode} flow={r2Flow({})} disabled={false} descriptor={wranglerProvider}
       storages={[]} onOpenStorage={noop} onCreateInstead={noop} onReset={noop}
-    />}
+    />
+  );
+  const render = (setupDone = false) => renderToStaticMarkup(<StorageEditor
+    descriptor={wranglerProvider} form={formFromDraft(wranglerProvider, cloudDraft())}
+    secretPresence={{}} disabled={false} onChange={() => {}} setupDone={setupDone}
+    setupSlot={lane("create")}
   />);
-  const creating = render(false);
+  const creating = render();
   assert.match(creating, /class="storage-setup-route-row agent r2-lane"[^>]*>[\s\S]*?Wrangler setup[\s\S]*?Set up with Wrangler/);
   assert.match(creating, /Creates a bucket and issues its key\./);
   assert.match(creating, /Manual setup[\s\S]*aria-expanded="false" aria-label="Enter by hand"[^>]*><svg[^>]*data-icon="chevron-down"/);
   assert.doesNotMatch(creating, /API URL/);
   assert.doesNotMatch(creating, /Set up with an agent|Connect Dropbox|Run with Claude|Listening for your agent|Reset setup/);
-  assert.match(render(false, true), /Manual setup[\s\S]*API URL/);
-  const existing = render(true);
-  assert.match(existing, /Reconnect with Wrangler/);
+  assert.match(render(true), /Manual setup[\s\S]*API URL/);
+  // Settled, the lane rides the reconnect band: a new key for the same
+  // bucket, pasted or issued, and no destination field to type in.
+  const existing = renderToStaticMarkup(<StorageReconnectBand
+    descriptor={wranglerProvider} form={formFromDraft(wranglerProvider, cloudDraft())}
+    secretPresence={{}} disabled={false} onChange={() => {}} setupSlot={lane("reconnect")}
+    verbs={<button type="button">Save credential</button>}
+  />);
+  assert.match(existing, /Wrangler setup[\s\S]*?Reconnect with Wrangler/);
   assert.match(existing, /Issues a new key for this bucket\./);
-  assert.doesNotMatch(existing, /Manual setup|Set up with Wrangler/);
-  assert.match(existing, /API URL/);
+  assert.doesNotMatch(existing, /Manual setup|Set up with Wrangler|API URL/);
+  assert.match(existing, /type="password"/);
+  assert.match(existing, /Save credential/);
 });
 
 test("the Use-existing Wrangler route offers manual expansion and preserves prepared drafts", () => {
   const render = (setupDone = false, secretPresence = {}) => renderToStaticMarkup(<StorageEditor
-    descriptor={{ ...wranglerProvider, setup_guide_url: "https://example.test/r2-setup" }} form={emptyForm} secretPresence={secretPresence} disabled={false} editsExisting={false} onChange={() => {}}
+    descriptor={{ ...wranglerProvider, setup_guide_url: "https://example.test/r2-setup" }} form={emptyForm} secretPresence={secretPresence} disabled={false} onChange={() => {}}
     setupMode={{ mode: "existing", onChoose: noop }} manualEntry={false}
     setupDone={setupDone}
     setupSlot={<R2SetupLane

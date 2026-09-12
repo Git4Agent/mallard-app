@@ -25,6 +25,7 @@ use super::service::{
     remove_local_project_with_repository, remove_project_link_with_repository,
     remove_storage_with_repository, rename_local_project_with_repository,
     rename_storage_with_repository, repository, reset_project_sync_metadata_with_repository,
+    reveal_storage_secret_with_repository, test_storage_with_repository,
     resolve_project_markdown_path_with_repository, save_project_binding_with_repository,
     save_project_link_with_repository, session_detail_error, should_log_history_scan,
     sibling_bundle_status_with_repository, storage_log_label, storage_provider_descriptors,
@@ -39,7 +40,7 @@ use super::service::{
     SaveProjectLinkRequest, SessionDetailError, SessionDetailErrorCode, SessionTimelineEventKind,
     SessionToolCategory, SetupDraftInspection, SetupDraftList, SiblingBundleStatus,
     StorageDataClearResult, StorageProviderDescriptor, StorageSetupDraftList,
-    StorageSetupDraftSummary, TestStorageDraftResult, ThreadSyncComparison,
+    StorageSetupDraftSummary, TestStorageDraftResult, ThreadSyncComparison, VerifyStorageResult,
     UpdateStorageSetupDraftRequest, HISTORY_SCAN_LOGGED_AT,
 };
 use crate::activity_log::{emit_typed_log, ActivityLogScope};
@@ -313,6 +314,71 @@ pub async fn commit_storage_setup_draft(
         }
     }
     result
+}
+
+#[tauri::command]
+pub async fn reveal_storage_secret(
+    app: tauri::AppHandle,
+    storage_id: StorageId,
+    secret_id: mallard_domain::SecretKey,
+) -> Result<String, String> {
+    let repository = repository()?;
+    let log_storage_id = storage_id.clone();
+    let log_repository = repository.clone();
+    let log_secret_id = secret_id.clone();
+    // The log names the storage and the secret's label, never its value.
+    let (storage_name, secret_label) = run_blocking(move || {
+        let config = load_project_sync_config_with_repository(&log_repository)?;
+        let storage = config
+            .storages
+            .iter()
+            .find(|storage| storage.storage_id == log_storage_id);
+        let label = storage
+            .and_then(|storage| {
+                storage_provider_descriptors()
+                    .into_iter()
+                    .find(|descriptor| {
+                        descriptor.key == storage.provider
+                            && descriptor.config_version == storage.config_version
+                    })
+            })
+            .and_then(|descriptor| {
+                descriptor
+                    .secrets
+                    .into_iter()
+                    .find(|secret| secret.secret_id == log_secret_id)
+                    .map(|secret| secret.label)
+            })
+            .unwrap_or_else(|| log_secret_id.as_str().to_string());
+        Ok((
+            storage.map(|storage| storage.name.clone()).unwrap_or_default(),
+            label,
+        ))
+    })
+    .await?;
+    let log_storage_id = storage_id.clone();
+    let result = run_blocking(move || {
+        reveal_storage_secret_with_repository(&repository, &storage_id, &secret_id)
+    })
+    .await;
+    if result.is_ok() {
+        ActivityLogScope::new(ActivityLogType::Storage)
+            .storage(&log_storage_id, Some(&storage_name))
+            .emit(
+                &app,
+                "ok",
+                "storage.secret_revealed",
+                &format!("Secret revealed — {storage_name} · {secret_label}"),
+            );
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn test_storage(storage_id: StorageId) -> Result<VerifyStorageResult, String> {
+    let repository = repository()?;
+    let runtime = tokio::runtime::Handle::current();
+    run_blocking(move || test_storage_with_repository(&repository, runtime, &storage_id)).await
 }
 
 #[tauri::command]

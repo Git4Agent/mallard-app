@@ -43,6 +43,79 @@ pub use storage_catalog::service::{
     StorageCatalogService,
 };
 
+/// The app menu's Quit item. Tauri's predefined Quit sends `terminate:`
+/// straight to the process, so ⌘Q and Mallard › Quit skipped the frontend's
+/// "Sync in progress" guard, which only hears window close requests. A plain
+/// item with the same shortcut lets the handler route Quit through that
+/// close request instead; the guard then decides, and the app exits when its
+/// last window is gone.
+#[cfg(not(test))]
+const QUIT_MENU_ID: &str = "mallard-quit";
+
+#[cfg(not(test))]
+fn app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let menu = tauri::menu::Menu::default(app)?;
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::menu::{AboutMetadata, MenuItem, PredefinedMenuItem, Submenu};
+        // Mirrors Tauri's default application submenu item for item, with
+        // Quit swapped for the guarded one.
+        let pkg_info = app.package_info();
+        let config = app.config();
+        let about_metadata = AboutMetadata {
+            name: Some(pkg_info.name.clone()),
+            version: Some(pkg_info.version.to_string()),
+            copyright: config.bundle.copyright.clone(),
+            authors: config.bundle.publisher.clone().map(|p| vec![p]),
+            ..Default::default()
+        };
+        let quit = MenuItem::with_id(
+            app,
+            QUIT_MENU_ID,
+            format!("Quit {}", pkg_info.name),
+            true,
+            Some("CmdOrCtrl+Q"),
+        )?;
+        let app_submenu = Submenu::with_items(
+            app,
+            pkg_info.name.clone(),
+            true,
+            &[
+                &PredefinedMenuItem::about(app, None, Some(about_metadata))?,
+                &PredefinedMenuItem::separator(app)?,
+                &PredefinedMenuItem::services(app, None)?,
+                &PredefinedMenuItem::separator(app)?,
+                &PredefinedMenuItem::hide(app, None)?,
+                &PredefinedMenuItem::hide_others(app, None)?,
+                &PredefinedMenuItem::separator(app)?,
+                &quit,
+            ],
+        )?;
+        if let Some(default_app_submenu) = menu.items()?.first() {
+            menu.remove(default_app_submenu)?;
+        }
+        menu.prepend(&app_submenu)?;
+    }
+    Ok(menu)
+}
+
+#[cfg(not(test))]
+fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
+    if event.id() != QUIT_MENU_ID {
+        return;
+    }
+    let windows = app.webview_windows();
+    if windows.is_empty() {
+        app.exit(0);
+        return;
+    }
+    // A close request, not a destroy: the frontend's onCloseRequested
+    // listener (ProjectSync.tsx) may prevent it while a sync is writing.
+    for window in windows.values() {
+        let _ = window.close();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[cfg(not(test))]
 pub fn run() {
@@ -51,6 +124,8 @@ pub fn run() {
         .manage(project_sync::dropbox_setup::DropboxSetupControl::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .menu(app_menu)
+        .on_menu_event(on_menu_event)
         .setup(|app| {
             // Tuning values must be live before the first command runs. A
             // corrupt or out-of-range settings file falls back to defaults —
@@ -94,6 +169,8 @@ pub fn run() {
             project_sync::commands::get_project_sync_config,
             project_sync::commands::list_storage_providers,
             project_sync::commands::rename_storage,
+            project_sync::commands::reveal_storage_secret,
+            project_sync::commands::test_storage,
             project_sync::commands::remove_storage,
             project_sync::commands::setup_r2_storage,
             project_sync::commands::propose_r2_bucket_name,

@@ -60,6 +60,8 @@ import {
   storageSubtitle,
   storageSubtitleIsPath,
   StorageEditor,
+  StorageLockedForm,
+  StorageReconnectBand,
   storageNameIsAuto,
   storageNameForSettings,
   type StorageEditorForm,
@@ -83,7 +85,7 @@ import {
 type LinkKey = { projectId: string; storageId: string };
 export type StorageReviewKind = "pull" | "push";
 type StorageEditorRequest =
-  | { mode: "open"; storageId: string; settingsExpanded: boolean; requestId: number }
+  | { mode: "open"; storageId: string; requestId: number }
   | { mode: "resume-draft"; draft: StorageSetupDraft; requestId: number }
   | { mode: "close"; requestId: number };
 
@@ -99,6 +101,8 @@ type InlineStorageReview = {
   continueDisabled?: boolean;
   /** Why onContinue is withheld right now — surfaced as the button's title. */
   continueTitle?: string | null;
+  /** The verb the review's primary wears; the card button shows the same. */
+  continueLabel?: string | null;
 };
 
 /**
@@ -174,8 +178,8 @@ interface Props {
   /** Mint a draft on a provider and open its form; the type switch uses it
    *  to restart a new draft, carrying a typed name along. */
   onCreateStorageDraft: (provider: StorageProviderKey, name?: string) => Promise<void>;
-  /** Open a storage's page; `settingsExpanded` lands with the editor open. */
-  onOpenStorage: (storageId: string, settingsExpanded: boolean) => void;
+  /** Open a storage's page: its settings card over its repositories. */
+  onOpenStorage: (storageId: string) => void;
   /** The Storages crumb every storage page is rooted at. */
   onOpenStorageIndex: () => void;
   onClearStorage: (storageId: string) => void;
@@ -192,6 +196,8 @@ interface Props {
   /** Commit-free probe of the exact draft revision. Resolves true on a
    *  verified connection; failures surface through the shared error zone. */
   onTestStorageDraft: (draftId: string, expectedRevision: number) => Promise<boolean>;
+  /** Probe a settled storage as it is saved, without a draft. */
+  onTestStorage: (storageId: string) => Promise<boolean>;
   /** The persisted storage-draft list changed (created, updated, discarded). */
   onStorageDraftsChanged?: () => void;
   storageDraftSaveQueue: StorageDraftSaveQueue;
@@ -452,6 +458,12 @@ export function projectPushActionLabel({
   return "Push";
 }
 
+/** The two faces of a non-Git project, in the order the strip shows them. */
+const PROJECT_VIEWS = [
+  { id: "sessions", label: "Sessions", icon: "message" },
+  { id: "files", label: "Files", icon: "file" },
+] as const;
+
 export function projectPullActionLabel({
   preparing,
   applying,
@@ -515,6 +527,7 @@ export default function ProjectLinksWorkspace({
   onRenameStorage,
   onCommitStorageDraft,
   onTestStorageDraft,
+  onTestStorage,
   storageEditorRequest,
   onStorageEditorRequestHandled,
   storageDraftSaveQueue,
@@ -539,7 +552,6 @@ export default function ProjectLinksWorkspace({
      ref mirrors it synchronously so queued saves read the latest form. */
   const [storageSession, setStorageSession] = useState<StorageDraftSession | null>(null);
   const storageSessionRef = useRef<StorageDraftSession | null>(null);
-  const [storageDetailsExpanded, setStorageDetailsExpanded] = useState(false);
   /* Opening a settled storage's settings asks the backend for an edit draft
      first; the panel shows its loading line until that draft arrives. */
   const [storageSessionLoading, setStorageSessionLoading] = useState(false);
@@ -603,8 +615,12 @@ export default function ProjectLinksWorkspace({
         : { name: draft.name, settings: {}, typedSecrets: {} },
     });
   };
-  const [renamingStorageId, setRenamingStorageId] = useState<string | null>(null);
-  const [storageNameDraft, setStorageNameDraft] = useState("");
+  /* When this visit last saw the settled storage's connection verified; a
+     probe that succeeds forgets the transport's recorded health, so the
+     page keeps its own receipt. */
+  const [storageVerifiedAt, setStorageVerifiedAt] = useState<number | null>(null);
+  /* Bumped by ⋯ → Rename storage… to put the caret in the name field. */
+  const [nameFocusSeq, setNameFocusSeq] = useState(0);
   const [remoteBundles, setRemoteBundles] = useState<BundleSnapshotSummary[] | null>(null);
   const [bundleLoading, setBundleLoading] = useState(false);
   const [bundleError, setBundleError] = useState<string | null>(null);
@@ -696,9 +712,8 @@ export default function ProjectLinksWorkspace({
     : null;
 
   useEffect(() => {
-    setRenamingStorageId(null);
-    setStorageNameDraft(savedEditedStorage?.name ?? "");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setStorageVerifiedAt(null);
+    setNameFocusSeq(0);
   }, [editingStorage?.storageId]);
 
   useEffect(() => {
@@ -1061,7 +1076,6 @@ export default function ProjectLinksWorkspace({
       resetStorageSession();
       clearStorageListing();
       setEditingStorage(null);
-      setStorageDetailsExpanded(false);
       onStorageEditorRequestHandled?.();
       return;
     }
@@ -1075,7 +1089,6 @@ export default function ProjectLinksWorkspace({
         : null;
       setEditingStorage({ projectId: "", storageId: draft.storage_id });
       openStorageSession(draft, descriptorFor(draft));
-      setStorageDetailsExpanded(true);
       if (settled) void loadStorageBundles(settled);
       onStorageEditorRequestHandled?.();
       return;
@@ -1092,8 +1105,6 @@ export default function ProjectLinksWorkspace({
     // Every open is a navigation onto the page, so the listing reloads —
     // a commit that just replaced the connection settings lands here too.
     void loadStorageBundles(storage);
-    setStorageDetailsExpanded(storageEditorRequest.settingsExpanded);
-    if (storageEditorRequest.settingsExpanded) void ensureStorageEditSession(storage);
     onStorageEditorRequestHandled?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageEditorRequest?.requestId]);
@@ -1118,16 +1129,14 @@ export default function ProjectLinksWorkspace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageSession]);
 
-  const openStorageEditorWithSettings = async (storage: StorageSummary) => {
+  const openStorageDetails = async (storage: StorageSummary) => {
     const switchingStorage = editingStorage?.storageId !== storage.storage_id;
     if (switchingStorage) {
       if (!(await saveStorageDraftBeforeNavigation())) return;
       clearStorageListing();
       setEditingStorage({ projectId: "", storageId: storage.storage_id });
     }
-    setStorageDetailsExpanded(true);
     if (switchingStorage) await loadStorageBundles(storage);
-    void ensureStorageEditSession(storage);
   };
 
   /* The rail can discard the draft this form is editing. Its disappearance
@@ -1147,7 +1156,6 @@ export default function ProjectLinksWorkspace({
     if (!draftListedRef.current) return;
     const wasNew = !session.draft.edits_existing;
     resetStorageSession();
-    setStorageDetailsExpanded(false);
     if (wasNew) {
       clearStorageListing();
       setEditingStorage(null);
@@ -1166,7 +1174,6 @@ export default function ProjectLinksWorkspace({
       resetStorageSession();
       clearStorageListing();
       setEditingStorage(null);
-      setStorageDetailsExpanded(false);
       return;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1300,26 +1307,6 @@ export default function ProjectLinksWorkspace({
     setRenameError(result.message);
   };
 
-  const saveStorageName = async () => {
-    const storage = savedEditedStorage;
-    if (!storage || renamingStorageId !== storage.storage_id) return;
-    const name = storageNameDraft.trim();
-    if (!name || name === storage.name) return;
-    await run(`rename-storage:${storage.storage_id}`, async () => {
-      const renamed = await onRenameStorage(storage.storage_id, name);
-      if (!renamed) return;
-      // An open edit draft would write the old name back on Finish, so it
-      // follows the rename; the autosave carries it.
-      const session = storageSessionRef.current;
-      if (session?.draft.edits_existing && session.form.name !== name) {
-        draftDirtyRef.current = true;
-        updateStorageSession((current) => ({ ...current, form: { ...current.form, name } }));
-      }
-      setStorageNameDraft(name);
-      setRenamingStorageId(null);
-    });
-  };
-
   if (editingStorage && (savedEditedStorage || storageSession)) {
     const pageStorageId = editingStorage.storageId;
     const descriptor = storageSession
@@ -1350,16 +1337,13 @@ export default function ProjectLinksWorkspace({
       ?? "";
     const storageAvailable = savedEditedStorage?.available ?? storageSession?.draft.available ?? false;
     const supportsManagedClear = storageAvailable && (descriptor?.clear_mode === "revision_checked" || descriptor?.clear_mode === "unconditional");
-    const showStorageDetails = creatingStorage
-      || (storageDetailsExpanded && (!!storageSession || storageSessionLoading));
-    const storageDetailsId = `storage-${pageStorageId}-settings`;
-    const storageNameChanged = !!storageNameDraft.trim() && storageNameDraft.trim() !== savedEditedStorage?.name;
     const storageLinkCount = links.filter((link) => link.storage_id === pageStorageId).length;
-    const renamingStorage = renamingStorageId === pageStorageId;
     const pathFact = savedEditedStorage?.summary.find((field) => field.is_path) ?? null;
     const formLocked = busy || !!runningAction || r2.state.running || dropbox.state.running;
     const storageActionBlocked = formLocked || !storageReady || destinationConflict !== null;
 
+    /* Creation's Finish setup, and a reconnect's Save credential: the same
+       verified commit of the exact draft the user reviewed. */
     const saveEditedStorage = () => run(`storage:${pageStorageId}`, async () => {
       if (!storageSession) return;
       const session = draftSessionRef.current;
@@ -1376,11 +1360,28 @@ export default function ProjectLinksWorkspace({
       committingRef.current = false;
       if (!result || draftSessionRef.current !== session) return;
       // A successful commit consumes the draft. Only the page remains, now on
-      // the settled storage, whether it was created or replaced.
+      // the settled storage; a reconnect leaves the credential verified.
+      const reconnected = !creatingStorage;
       resetStorageSession();
-      setStorageDetailsExpanded(false);
-      onOpenStorage(result.storage_id, false);
+      setStorageVerifiedAt(reconnected ? Date.now() : null);
+      onOpenStorage(result.storage_id);
     });
+
+    /* The settled storage's own probe: no draft, the saved configuration as
+       it is. Success is this visit's receipt; refusal reaches the shell's
+       error zone like every other action. */
+    const testSavedStorage = () => run(`test-storage:${pageStorageId}`, async () => {
+      setStorageVerifiedAt(null);
+      const verified = await onTestStorage(pageStorageId);
+      if (verified) setStorageVerifiedAt(Date.now());
+    });
+
+    /* Reconnect opens the storage's edit draft — the one draft a settled
+       storage still has, and the backend holds its settings and name fixed —
+       so the band under the guide row can take a replacement credential. */
+    const beginReconnect = () => {
+      if (savedEditedStorage) void ensureStorageEditSession(savedEditedStorage);
+    };
 
     /* The advisory twin of Finish: same gate, same probe, no commit. The
        verdict is only as fresh as the fields it tested, so every edit, save,
@@ -1403,12 +1404,16 @@ export default function ProjectLinksWorkspace({
     const discardStorageDraftAndClose = () => run(`discard-draft:${pageStorageId}`, async () => {
       const session = storageSessionRef.current;
       if (!session) return;
-      const approved = await confirm(
-        `Discard the storage draft for ${session.form.name || "(unnamed)"}?\n\nThis removes only Mallard’s local setup draft; external storage resources are not changed.`,
-        { title: "Discard storage draft" },
-      );
-      if (!approved) return;
       const wasNew = !session.draft.edits_existing;
+      // A reconnect's Cancel is its own answer; a setup draft is asked, as
+      // it may hold an afternoon of setup.
+      if (wasNew) {
+        const approved = await confirm(
+          `Discard the storage draft for ${session.form.name || "(unnamed)"}?\n\nThis removes only Mallard’s local setup draft; external storage resources are not changed.`,
+          { title: "Discard storage draft" },
+        );
+        if (!approved) return;
+      }
       try {
         await storageDraftSaveQueue.enqueue(
           () => projectSyncApi.discardStorageSetupDraft(session.draft.draft_id),
@@ -1418,7 +1423,6 @@ export default function ProjectLinksWorkspace({
         return;
       }
       resetStorageSession();
-      setStorageDetailsExpanded(false);
       onStorageDraftsChanged?.();
       if (wasNew) onOpenStorageIndex();
     });
@@ -1439,9 +1443,8 @@ export default function ProjectLinksWorkspace({
         return;
       }
       resetStorageSession();
-      setStorageDetailsExpanded(false);
       onStorageDraftsChanged?.();
-      onOpenStorage(storage.storage_id, false);
+      onOpenStorage(storage.storage_id);
     });
 
     /* The header's type switch restarts a new draft on another provider:
@@ -1461,7 +1464,6 @@ export default function ProjectLinksWorkspace({
         return;
       }
       resetStorageSession();
-      setStorageDetailsExpanded(false);
       onStorageDraftsChanged?.();
       await onCreateStorageDraft(provider.key, keptName);
     });
@@ -1483,18 +1485,6 @@ export default function ProjectLinksWorkspace({
     const r2Ready = (r2.state.phase === "review" || dropbox.state.phase === "review");
     const askingSetupMode = creatingStorage && !!descriptor?.discovery
       && (storageSetupMode !== null || (progress?.set ?? 0) === 0) && !r2Ready;
-    /* Hide keeps the draft: it is autosaved and listed on the rail, and the
-       page's own Discard is the way to drop it. */
-    const toggleStorageDetails = async () => {
-      if (storageDetailsExpanded && storageSession) {
-        if (!(await saveStorageDraftBeforeNavigation())) return;
-        setStorageDetailsExpanded(false);
-        return;
-      }
-      setStorageDetailsExpanded(true);
-      if (savedEditedStorage && !storageSession) void ensureStorageEditSession(savedEditedStorage);
-    };
-
     // The trail starts at the Storages index the crumb leads back to; the
     // storage itself carries the switcher; the section names the page. A
     // draft being created has no section yet and nothing to switch to, so
@@ -1538,7 +1528,7 @@ export default function ProjectLinksWorkspace({
                     detailIsPath: storageSubtitleIsPath(candidate),
                     icon: iconNameFromHint(candidate.icon, "drive"),
                     disabled: busy,
-                    onSelect: () => onOpenStorage(candidate.storage_id, false),
+                    onSelect: () => onOpenStorage(candidate.storage_id),
                   })),
               }] : []),
               {
@@ -1554,11 +1544,6 @@ export default function ProjectLinksWorkspace({
             menuLabel: "Storage",
             disabled: busy,
           },
-      ...(creatingStorage ? [] : [{
-        id: "section",
-        label: "Repositories",
-        tone: "section" as const,
-      }]),
     ];
 
     // Storage commands plus the sidebar's storage shortcuts. A draft receives
@@ -1576,22 +1561,13 @@ export default function ProjectLinksWorkspace({
             icon: "folder" as const,
             onSelect: () => revealPath(pathFact.value),
           }] : []),
-          ...(storageAvailable ? [{
-            id: "storage-settings",
-            label: storageDetailsExpanded && storageSession ? "Hide storage settings" : "Storage settings",
-            icon: "settings" as const,
-            disabled: busy,
-            onSelect: toggleStorageDetails,
-          }] : []),
           {
             id: "rename",
             label: "Rename storage…",
             icon: "edit" as const,
             disabled: busy,
-            onSelect: () => {
-              setStorageNameDraft(savedEditedStorage?.name ?? "");
-              setRenamingStorageId(pageStorageId);
-            },
+            // The name is the settings card's one live field.
+            onSelect: () => setNameFocusSeq((seq) => seq + 1),
           },
           ...(supportsManagedClear ? [{
             id: "clear",
@@ -1662,17 +1638,9 @@ export default function ProjectLinksWorkspace({
       storageNotices.push({
         key: "storage-connection",
         severity: "danger",
+        // The settings card's guide row, right under this box, carries the
+        // Reconnect… door; the box states the refusal.
         message: connectionDetail(storageConnection),
-        action: showStorageDetails ? undefined : (
-          <button
-            type="button"
-            className="btn btn-ghost"
-            disabled={formLocked}
-            onClick={() => void toggleStorageDetails()}
-          >
-            Reconnect {providerLabelForPage}
-          </button>
-        ),
       });
     }
     if (!creatingStorage && !bundleLoading && bundleError && !connectionRefused) {
@@ -1710,10 +1678,21 @@ export default function ProjectLinksWorkspace({
           return;
         }
         resetStorageSession();
-        setStorageDetailsExpanded(false);
         onStorageDraftsChanged?.();
         await onCreateStorageDraft(descriptor.key, descriptor.default_name ?? undefined);
       });
+    };
+    /* Every edit to an open draft — a setup form or a reconnect band —
+       invalidates the current setup result, stales a Test verdict, and arms
+       the draft autosave. */
+    const onStorageFormChange = (nextForm: StorageEditorForm) => {
+      draftEditVersionRef.current += 1;
+      r2.dismiss();
+      dropbox.dismiss();
+      setStorageTestVerified(false);
+      setStorageDraftActionError(null);
+      draftDirtyRef.current = true;
+      updateStorageSession((current) => ({ ...current, form: nextForm }));
     };
     const setupSlot = storageSession && descriptor?.local_setup === "wrangler"
       ? <R2SetupLane
@@ -1723,13 +1702,13 @@ export default function ProjectLinksWorkspace({
           descriptor={descriptor}
           storages={storages}
           bucketName={storageSession.form.settings.bucket}
-          onOpenStorage={(storageId) => onOpenStorage(storageId, false)}
+          onOpenStorage={(storageId) => onOpenStorage(storageId)}
           onCreateInstead={() => chooseSetupMode("create")}
           onReset={resetR2Setup}
         />
       : storageSession && descriptor?.local_setup === "dropbox"
         ? <DropboxSetupLane flow={dropbox} mode={r2Mode} disabled={formLocked} descriptor={descriptor} storages={storages}
-            onOpenStorage={(id) => onOpenStorage(id, false)} onCreateInstead={() => chooseSetupMode("create")}
+            onOpenStorage={(id) => onOpenStorage(id)} onCreateInstead={() => chooseSetupMode("create")}
             onNewSetup={() => void run("new-dropbox-account", async () => {
               // Preserve the original draft and its journal for recovery.
               if (!(await saveStorageDraftBeforeNavigation())) return;
@@ -1755,45 +1734,9 @@ export default function ProjectLinksWorkspace({
           className="profile-links-section"
           aria-label={creatingStorage ? "New storage" : storageName}
         >
-          {/* Renaming opens from the ⋯ as a row under the trail, the same
-              once-in-a-while surface the project rename uses. */}
-          {renamingStorage && (
-            <form
-              className="sync-path-rename"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void saveStorageName();
-              }}
-            >
-              <label htmlFor="sync-storage-rename-input">Storage name</label>
-              <input
-                id="sync-storage-rename-input"
-                value={storageNameDraft}
-                onChange={(event) => setStorageNameDraft(event.target.value)}
-                aria-label="Storage name"
-                disabled={busy}
-                autoFocus
-              />
-              <button type="submit" className="btn btn-primary" disabled={busy || !storageNameChanged}>
-                {runningAction === `rename-storage:${pageStorageId}` ? "Saving…" : "Save"}
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                disabled={busy}
-                onClick={() => {
-                  setStorageNameDraft(savedEditedStorage?.name ?? "");
-                  setRenamingStorageId(null);
-                }}
-              >
-                Cancel
-              </button>
-            </form>
-          )}
-
           <div
             ref={storageSettingsRef}
-            className={`sync-storage-settings-below sync-storage-settings-dedicated${showStorageDetails ? " settings-expanded" : " settings-collapsed"}`}
+            className="sync-storage-settings-below sync-storage-settings-dedicated"
           >
             {/* The column's one box, at the head of the column it speaks for,
                 the way the session page's zone sits under its header. */}
@@ -1804,15 +1747,8 @@ export default function ProjectLinksWorkspace({
             />
 
 
-            <div
-              id={storageDetailsId}
-              className="sync-storage-details-panel"
-              hidden={!showStorageDetails}
-            >
-              {showStorageDetails && storageSessionLoading && (
-                <div className="sync-storage-repository-state"><span className="status-loader" /> Opening storage settings…</div>
-              )}
-              {showStorageDetails && storageSession && descriptor && (
+            <div className="sync-storage-details-panel">
+              {creatingStorage && storageSession && descriptor && (
                 <StorageEditor
                   /* Identity, so every per-draft control state inside the
                      editor — which secrets are revealed — resets when the
@@ -1823,57 +1759,70 @@ export default function ProjectLinksWorkspace({
                   form={storageSession.form}
                   secretPresence={secretPresence}
                   disabled={formLocked}
-                  editsExisting={!creatingStorage}
-                  connection={creatingStorage ? null : storageConnection}
                   destinationConflict={destinationConflict
                     ? { storage: destinationConflict, onOpen: () => void openConflictingStorage(destinationConflict) }
                     : null}
                   setupMode={askingSetupMode ? { mode: storageSetupMode, onChoose: chooseSetupMode } : undefined}
                   manualEntry={manualEntry}
                   setupDone={r2Ready}
-                  onSwitchProvider={creatingStorage ? switchStorageProvider : undefined}
-                  onRemove={!creatingStorage && storageLinkCount === 0 ? () => onRemoveStorage(pageStorageId) : undefined}
-                  // A draft's create is the page's verb and lives in the
-                  // commit bar below; a settled storage's save belongs to the
-                  // drawer it commits.
-                  primaryAction={creatingStorage ? undefined : (
-                    <>
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={storageActionBlocked}
-                        onClick={() => void testStorageConnection()}
-                      >
-                        {runningAction === `test-storage:${pageStorageId}` ? "Testing…" : "Test connection"}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-primary"
-                        disabled={storageActionBlocked}
-                        onClick={() => void saveEditedStorage()}
-                      >
-                        {runningAction === `storage:${pageStorageId}` ? "Saving…" : "Save storage"}
-                      </button>
-                    </>
-                  )}
-                  onChange={(nextForm) => {
-                    // An edit invalidates the current setup result.
-                    draftEditVersionRef.current += 1;
-                    r2.dismiss();
-                    dropbox.dismiss();
-                    // The same edit stales a Test verdict and arms the
-                    // draft autosave.
-                    setStorageTestVerified(false);
-                    setStorageDraftActionError(null);
-                    draftDirtyRef.current = true;
-                    updateStorageSession((current) => ({ ...current, form: nextForm }));
-                  }}
+                  onSwitchProvider={switchStorageProvider}
+                  onChange={onStorageFormChange}
                   setupSlot={setupSlot}
+                />
+              )}
+              {!creatingStorage && savedEditedStorage && descriptor && (
+                <StorageLockedForm
+                  key={pageStorageId}
+                  storage={savedEditedStorage}
+                  descriptor={descriptor}
+                  disabled={busy || !!runningAction}
+                  onRename={(name) => onRenameStorage(pageStorageId, name)}
+                  focusNameSeq={nameFocusSeq}
+                  onRevealSecret={(secretId) => projectSyncApi.revealStorageSecret(pageStorageId, secretId)}
+                  onTest={() => void testSavedStorage()}
+                  testing={runningAction === `test-storage:${pageStorageId}`}
+                  verifiedAt={storageVerifiedAt}
+                  reconnect={{
+                    open: !!storageSession || storageSessionLoading,
+                    onOpen: beginReconnect,
+                    band: storageSession ? (
+                      <StorageReconnectBand
+                        key={storageSession.draft.draft_id}
+                        descriptor={descriptor}
+                        form={storageSession.form}
+                        secretPresence={secretPresence}
+                        disabled={formLocked}
+                        connection={storageConnection}
+                        onChange={onStorageFormChange}
+                        setupSlot={setupSlot}
+                        verbs={(
+                          <>
+                            {storageTestVerified && (
+                              <span className="storage-setup-verified" role="status">
+                                <Icon name="check-circle" size={13} /> Connection verified
+                              </span>
+                            )}
+                            <button type="button" className="btn btn-ghost" disabled={formLocked} onClick={() => void discardStorageDraftAndClose()}>
+                              Cancel
+                            </button>
+                            <button type="button" className="btn" disabled={storageActionBlocked} onClick={() => void testStorageConnection()}>
+                              {runningAction === `test-storage:${pageStorageId}` ? "Testing…" : "Test connection"}
+                            </button>
+                            <button type="button" className="btn btn-primary" disabled={storageActionBlocked} onClick={() => void saveEditedStorage()}>
+                              {runningAction === `storage:${pageStorageId}` ? "Saving…" : "Save credential"}
+                            </button>
+                          </>
+                        )}
+                      />
+                    ) : (
+                      <div className="sync-storage-repository-state"><span className="status-loader" /> Opening the reconnect…</div>
+                    ),
+                  }}
                 />
               )}
             </div>
 
-            {creatingStorage && showStorageDetails && storageSession && (
+            {creatingStorage && storageSession && (
               <footer className="sync-storage-setup-footer">
                 {progress && progress.total > 0 && (descriptor?.secrets.length ?? 0) > 0 && (
                   <span className="sync-storage-editor-progress" aria-live="polite">
@@ -2018,11 +1967,11 @@ export default function ProjectLinksWorkspace({
         {
           items: [
             {
-              id: "storage-settings",
-              label: "Storage settings…",
+              id: "storage-details",
+              label: "Storage details…",
               icon: "settings" as const,
               disabled: workspaceControlsLocked,
-              onSelect: () => { void openStorageEditorWithSettings(workspaceStorage); },
+              onSelect: () => { void openStorageDetails(workspaceStorage); },
             },
             {
               id: "unlink",
@@ -2210,6 +2159,14 @@ export default function ProjectLinksWorkspace({
           id: "session-parent",
           label: parent.title,
           title: `Back to ${parent.title}`,
+          leading: (
+            <span className="sync-path-leaf-mark">
+              <ProviderMark
+                provider={sessionHeader.provider}
+                displayName={sessionHeader.providerDisplayName}
+              />
+            </span>
+          ),
           onActivate: () => onOpenSessionDetail(sessionDetailSubview.localProjectId, {
             resourceId: parent.resourceId,
             occurrenceKey: parent.resourceId,
@@ -2405,7 +2362,7 @@ export default function ProjectLinksWorkspace({
         aria-label={!workspaceBindingActive
           ? "Set up project before Pull"
           : workspacePullReviewOpen
-          ? `Pull selected changes from ${workspaceStorage.name || "storage"}`
+          ? `${inlineStorageReview?.continueLabel ?? "Pull selected changes"} — ${workspaceStorage.name || "storage"}`
           : showPullCount
             ? `Pull ${pullCount} newer thread${pullCount === 1 ? "" : "s"} from ${workspaceStorage.name || "storage"}`
             : `Pull from ${workspaceStorage.name || "storage"}`}
@@ -2419,7 +2376,11 @@ export default function ProjectLinksWorkspace({
         />
         {workspacePullReadout
           ? <span className="sync-btn-readout">{workspacePullReadout}</span>
-          : <span className="sync-path-sync-label">{projectPullActionLabel({ preparing: workspacePullPreparing, applying: workspacePullApplying })}</span>}
+          : <span className="sync-path-sync-label">{
+            workspacePullReviewOpen && !workspacePullProgress && inlineStorageReview?.continueLabel
+              ? inlineStorageReview.continueLabel
+              : projectPullActionLabel({ preparing: workspacePullPreparing, applying: workspacePullApplying })
+          }</span>}
         {showPullCount && <span className="sync-path-count" aria-hidden="true">{pullCount}</span>}
       </button>
       <button
@@ -2824,9 +2785,9 @@ export default function ProjectLinksWorkspace({
                                 type="button"
                                 className="btn btn-ghost"
                                 disabled={noticeActionsDisabled}
-                                onClick={() => onOpenStorage(storage.storage_id, true)}
+                                onClick={() => onOpenStorage(storage.storage_id)}
                               >
-                                Storage settings
+                                Storage details
                               </button>
                               <button
                                 type="button"
@@ -2888,7 +2849,7 @@ export default function ProjectLinksWorkspace({
                                   type="button"
                                   className="btn btn-ghost"
                                   disabled={noticeActionsDisabled}
-                                  onClick={() => onOpenStorage(storage.storage_id, true)}
+                                  onClick={() => onOpenStorage(storage.storage_id)}
                                 >
                                   Reconnect {storage.provider_label}
                                 </button>
@@ -3042,8 +3003,59 @@ export default function ProjectLinksWorkspace({
           </div>
         ))}
 
+        {activeProject && !newProjectSetup && !inlineStorageReview && !activeProject.is_git_repository && (
+          /* The switch itself, on the page: the section crumb names the view
+             and offers the other in its menu, but a menu behind a chevron is
+             not a control anyone finds. The app's segmented pill, as a real
+             tablist with the arrow-key contract. */
+          <div className="sync-segmented sync-project-view-tabs" role="tablist" aria-label="Project view">
+            {PROJECT_VIEWS.map((view) => {
+              const active = activityView === view.id;
+              return (
+                <button
+                  key={view.id}
+                  type="button"
+                  id={`project-view-${view.id}-tab`}
+                  role="tab"
+                  aria-selected={active}
+                  aria-controls="project-history-panel"
+                  tabIndex={active ? 0 : -1}
+                  className={active ? "active" : undefined}
+                  onClick={() => setActivityView(view.id)}
+                  onKeyDown={(event) => {
+                    const index = PROJECT_VIEWS.findIndex((candidate) => candidate.id === view.id);
+                    const next = event.key === "ArrowRight" || event.key === "ArrowDown"
+                      ? PROJECT_VIEWS[(index + 1) % PROJECT_VIEWS.length]
+                      : event.key === "ArrowLeft" || event.key === "ArrowUp"
+                        ? PROJECT_VIEWS[(index - 1 + PROJECT_VIEWS.length) % PROJECT_VIEWS.length]
+                        : event.key === "Home"
+                          ? PROJECT_VIEWS[0]
+                          : event.key === "End"
+                            ? PROJECT_VIEWS[PROJECT_VIEWS.length - 1]
+                            : null;
+                    if (!next) return;
+                    event.preventDefault();
+                    const strip = event.currentTarget.parentElement;
+                    setActivityView(next.id);
+                    window.requestAnimationFrame(() => {
+                      strip?.querySelector<HTMLButtonElement>(`#project-view-${next.id}-tab`)?.focus();
+                    });
+                  }}
+                >
+                  <Icon name={view.icon} size={13} />
+                  <span>{view.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
         {activeProject && !newProjectSetup && !inlineStorageReview && (
-          <div id="project-history-panel" className="sync-project-tab-panel">
+          <div
+            id="project-history-panel"
+            className="sync-project-tab-panel"
+            role={activeProject.is_git_repository ? undefined : "tabpanel"}
+            aria-labelledby={activeProject.is_git_repository ? undefined : `project-view-${activityView}-tab`}
+          >
             {activityView === "files" && !activeProject.is_git_repository ? (
               <ProjectFilesActivityPage
                 project={activeProject}

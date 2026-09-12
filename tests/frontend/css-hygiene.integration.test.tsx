@@ -69,6 +69,53 @@ function composite(fill: string, surface: string): string {
   return `#${mix(fr, under[0])}${mix(fg, under[1])}${mix(fb, under[2])}`;
 }
 
+/** The first rule for `selector` in source order, declarations only. */
+function ruleBody(selector: string): string {
+  const css = stripComments(appCss);
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = css.match(new RegExp(`(?:^|[}\\n])\\s*${escaped}\\s*\\{([^}]*)\\}`));
+  assert.ok(match, `no rule for ${selector}`);
+  return match![1];
+}
+
+test("the primary button's base ink reads on the primary fill without the doubled class", () => {
+  // Latent, not shipping: every button on screen carries the doubled-class
+  // override, which masked the base rule falling to 2.41:1 in dark when the
+  // palette changed. The base rule is the fallback the next component gets.
+  const ink = ruleBody(".btn-primary").match(/(?:^|;)\s*color\s*:\s*var\((--[a-z0-9-]+)\)/)?.[1];
+  assert.ok(ink, ".btn-primary sets its ink from a token");
+  for (const theme of ["light", "dark"] as const) {
+    const tokens = tokensFor(theme);
+    const measured = contrast(resolve(ink!, tokens), resolve("--button-primary-bg", tokens));
+    assert.ok(measured >= 4.5, `${ink} on --button-primary-bg is ${measured.toFixed(2)}:1 on ${theme} — needs 4.5`);
+  }
+});
+
+test("the focusable status indicator and metric chips wear an opaque focus ring", () => {
+  // These spans turn the default outline off, and the app's opaque ring covers
+  // only form controls, so they drew a translucent accent wash instead — which
+  // measured 2.05-2.86:1 composited on the rows it sits on. A focus indicator
+  // needs 3:1, on every row surface, in both themes. The 09-01 audit measured
+  // the token instead of the drawn ring, which is how this was closed unfixed.
+  for (const selector of [".sync-thread-sync-indicator:focus-visible", ".sync-history-thread-metric:focus-visible"]) {
+    const body = ruleBody(selector);
+    assert.doesNotMatch(body, /box-shadow/, `${selector} must not draw a translucent ring`);
+    const ring = body.match(/outline\s*:\s*2px solid var\((--[a-z0-9-]+)\)/)?.[1];
+    assert.ok(ring, `${selector} draws a 2px solid outline from a token`);
+    for (const theme of ["light", "dark"] as const) {
+      const tokens = tokensFor(theme);
+      const colour = resolve(ring!, tokens);
+      for (const surfaceToken of ["--surface-row", "--surface-row-hover", "--surface-row-active"]) {
+        const measured = contrast(colour, resolve(surfaceToken, tokens));
+        assert.ok(
+          measured >= 3,
+          `${selector} ring ${colour} is ${measured.toFixed(2)}:1 against ${surfaceToken} on ${theme} — needs 3`,
+        );
+      }
+    }
+  }
+});
+
 test("every notice rung reads on its own fill", () => {
   // A notice prints its ink on its own tint, not on bare paper, and the tint is
   // translucent — so the ratio that matters is against the composite. Light

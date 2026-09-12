@@ -19,6 +19,8 @@ const storage: StorageSummary = {
   icon: "drive",
   available: true,
   summary: [{ field_id: "directory", label: "Folder", value: "/tmp/storage", is_path: true }],
+  settings: { directory: "/tmp/storage" },
+  secrets: [],
 };
 
 function summary(overrides: Partial<BundleSnapshotSummary>): BundleSnapshotSummary {

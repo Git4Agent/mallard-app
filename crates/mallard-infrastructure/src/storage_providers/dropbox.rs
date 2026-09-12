@@ -72,7 +72,7 @@ impl StorageProviderAdapter for DropboxAdapter {
         StorageProviderDescriptor {
             key:provider_key(),config_version:1,display_name:"Dropbox".into(),description:"A shared folder in your Dropbox, new or one you already use. Uploads up to 150 MiB per object.".into(),
             default_name:"Dropbox storage".into(),name_suggestion:None,display_rank:30,icon:"cloud".into(),clear_mode:StorageClearMode::RevisionChecked,
-            fields:vec![StorageFieldDescriptor {field_id:FieldKey::parse("namespace_id").expect("static key"),label:"Namespace ID".into(),immutable_on_edit:true,kind:StorageFieldKind::Text,required:true,
+            fields:vec![StorageFieldDescriptor {field_id:FieldKey::parse("namespace_id").expect("static key"),label:"Namespace ID".into(),kind:StorageFieldKind::Text,required:true,
                 placeholder:Some("Shared or team namespace ID".into()),help:Some("Use the same namespace ID on each machine. This value cannot change after setup.".into()),help_url:Some(guide.into()),derive:None}],
             secrets:vec![StorageSecretDescriptor {secret_id:token_key(),label:"Access token".into(),required:true,placeholder:Some("User-linked Dropbox access token".into()),
                 help:Some("For manual setup, supply account_info.read, files.metadata.read, files.content.read, and files.content.write. Replace this token when it expires. Browser setup renews access automatically.".into()),help_url:Some(guide.into())},
@@ -303,7 +303,6 @@ mod tests {
         );
         let summary = serde_json::to_string(&DropboxAdapter.summary(&first).unwrap()).unwrap();
         assert!(!summary.contains("first-token"));
-        assert!(DropboxAdapter.descriptor().fields[0].immutable_on_edit);
         assert_eq!(
             DropboxAdapter.descriptor().fields.len() + DropboxAdapter.descriptor().secrets.len(),
             3

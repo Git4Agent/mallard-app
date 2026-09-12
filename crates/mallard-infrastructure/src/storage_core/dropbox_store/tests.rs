@@ -210,6 +210,7 @@ fn permission_and_manual_expiry_classify_apart_from_rejection() {
         (Error::Expired, "dropbox_token_expired"),
         (Error::Permission, "dropbox_permission_denied"),
         (Error::Namespace, "dropbox_namespace_rejected"),
+        (Error::Unreachable, "dropbox_unreachable"),
         (Error::Unknown, "dropbox_request_failed"),
         (Error::RateLimit, "dropbox_rate_limited"),
         (Error::Cleanup, "dropbox_probe_cleanup_required"),

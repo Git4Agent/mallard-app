@@ -158,6 +158,18 @@ function renderReview(
   );
 }
 
+test("the review opens with nothing ticked and its primary says so", () => {
+  const html = renderReview(restorePlan);
+
+  // Nothing is selected at open, so the apply is the acknowledge-only one:
+  // the verb must not promise a Pull that restores nothing.
+  const primary = html.indexOf("sync-pull-apply-button");
+  assert.ok(primary >= 0);
+  const footer = html.slice(primary);
+  assert.match(footer, /Mark as reviewed<\/button>/);
+  assert.doesNotMatch(footer, />Pull<\/button>|Pull \d+<\/button>/);
+});
+
 test("a replacement storage history offers unlinking without gating Pull", () => {
   const html = renderReview({
     ...restorePlan,
@@ -509,6 +521,19 @@ test("one unnamed failed thread has one failure and a separate Push hold", () =>
   assert.equal(outcome.rows[0].threadId, localThreadId);
   assert.equal(outcome.rows[1].status, "held");
   assert.equal(outcome.rows[1].title, "Push is still blocked");
+});
+
+test("an empty acknowledge-only apply is titled as a mark-as-reviewed, not a Pull", () => {
+  const outcome = buildPullOutcome({
+    projectId: binding.local_project_id,
+    plan: restorePlan,
+    result: result({ reviewed_base_advanced: true, applied_action_ids: [] }),
+    readiness: null,
+    items: buildPullReviewItems(restorePlan),
+    completedResourceIds: new Set(),
+  });
+  assert.equal(outcome.title, "Nothing pulled — storage marked as reviewed");
+  assert.equal(outcome.tone, "success");
 });
 
 test("a Push hold without an action failure keeps Pull available without a failure count", () => {

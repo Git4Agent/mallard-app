@@ -51,6 +51,10 @@ pub(crate) enum Error {
     Missing,
     Conflict,
     RateLimit,
+    /// A read whose request never completed: no connection, DNS failure,
+    /// a dropped socket. Only reads take this — a write that never got a
+    /// response may still have landed, so its result stays `Unknown`.
+    Unreachable,
     Unknown,
     Invalid,
     Integrity,
@@ -69,6 +73,7 @@ impl Error {
             Self::Missing => "The Dropbox object is missing.",
             Self::Conflict => "The Dropbox object changed. Refresh the review and try again.",
             Self::RateLimit => "Dropbox rate limit reached. Wait and try again.",
+            Self::Unreachable => "Dropbox could not be reached. Check the network and try again.",
             Self::Unknown => "The Dropbox request result is unknown. Refresh remote state before retrying.",
             Self::Invalid => "Dropbox returned an invalid response or a noncanonical storage path.",
             Self::Integrity => "Dropbox object integrity verification failed.",
@@ -399,7 +404,11 @@ impl DropboxObjectStore {
                         request_id: None,
                     }),
                 );
-                Err(Error::Unknown)
+                Err(if is_read(route) {
+                    Error::Unreachable
+                } else {
+                    Error::Unknown
+                })
             }
         }
     }
@@ -427,6 +436,7 @@ impl DropboxObjectStore {
             Error::Expired => StorageAdapterError::remote("dropbox_token_expired", message),
             Error::Permission => StorageAdapterError::remote("dropbox_permission_denied", message),
             Error::Namespace => StorageAdapterError::remote("dropbox_namespace_rejected", message),
+            Error::Unreachable => StorageAdapterError::remote("dropbox_unreachable", message),
             Error::Unknown => StorageAdapterError::remote("dropbox_request_failed", message),
             Error::RateLimit => StorageAdapterError::remote("dropbox_rate_limited", message),
             _ => StorageAdapterError::remote("dropbox_probe_failed", message),

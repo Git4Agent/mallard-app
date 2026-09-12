@@ -78,7 +78,6 @@ impl StorageProviderAdapter for TestStorageAdapter {
             clear_mode: super::traits::StorageClearMode::RevisionChecked,
             fields: vec![
                 StorageFieldDescriptor {
-                    immutable_on_edit: false,
                     field_id: FieldKey::parse("directory").unwrap(),
                     label: "Folder".to_string(),
                     kind: StorageFieldKind::Directory,
@@ -89,7 +88,6 @@ impl StorageProviderAdapter for TestStorageAdapter {
                     derive: None,
                 },
                 StorageFieldDescriptor {
-                    immutable_on_edit: false,
                     field_id: FieldKey::parse("label").unwrap(),
                     label: "Label".to_string(),
                     kind: StorageFieldKind::Text,

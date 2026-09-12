@@ -170,10 +170,51 @@ pub struct StorageSummary {
     pub icon: String,
     pub available: bool,
     pub summary: Vec<StorageSummaryField>,
+    /// The safe settings as saved. The storage page shows them read-only:
+    /// a destination is fixed for the life of a storage.
+    pub settings: BoundedConfigObject,
+    /// Which declared secrets the storage holds. Values never travel with a
+    /// listing; `reveal_storage_secret` returns one on an explicit request.
+    pub secrets: Vec<StorageSecretPresence>,
     /// Runtime connection health from the process-shared store, absent
     /// until a request has been made in this process. Never persisted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection: Option<ConnectionHealth>,
+}
+
+/// Presence of one secret on a saved storage.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct StorageSecretPresence {
+    pub secret_id: SecretKey,
+    pub present: bool,
+}
+
+/// Every declared secret, present or not, then any stored key the
+/// descriptor no longer declares (always present).
+fn secret_presence(
+    descriptor: Option<&StorageProviderDescriptor>,
+    provider_config: &StorageProviderConfig,
+) -> Vec<StorageSecretPresence> {
+    let mut secrets = Vec::new();
+    let mut listed = BTreeSet::new();
+    if let Some(descriptor) = descriptor {
+        for secret in &descriptor.secrets {
+            listed.insert(secret.secret_id.clone());
+            secrets.push(StorageSecretPresence {
+                secret_id: secret.secret_id.clone(),
+                present: provider_config.secrets.contains(&secret.secret_id),
+            });
+        }
+    }
+    for key in provider_config.secrets.keys() {
+        if !listed.contains(key) {
+            secrets.push(StorageSecretPresence {
+                secret_id: key.clone(),
+                present: true,
+            });
+        }
+    }
+    secrets
 }
 
 fn validated_registered_adapter<'a>(
@@ -225,8 +266,55 @@ pub fn storage_summary(
             .unwrap_or_else(|| "storage".to_string()),
         available: adapter.is_some(),
         summary,
+        settings: storage.provider_config.settings.clone(),
+        secrets: secret_presence(descriptor.as_ref(), &storage.provider_config),
         connection: ConfiguredObjectStore::connection_health_for(storage),
     })
+}
+
+/// One saved secret, on an explicit request from the storage page's Show
+/// or Copy. Only a secret the adapter declares can be read; listings,
+/// drafts, and updates stay redacted. The caller logs the reveal, never
+/// the value.
+pub fn reveal_storage_secret(
+    repository: &LocalStateRepository,
+    registry: &StorageProviderRegistry,
+    storage_id: &StorageId,
+    secret_id: &SecretKey,
+) -> Result<String, StorageSetupError> {
+    let config = repository
+        .load_config()
+        .map_err(|_| StorageSetupError::persistence())?;
+    let storage = config
+        .storages
+        .iter()
+        .find(|storage| &storage.id == storage_id)
+        .ok_or_else(storage_not_found)?;
+    let adapter = registry
+        .require(&storage.provider, storage.provider_config.version)
+        .map_err(|_| storage_unavailable())?;
+    if !adapter
+        .descriptor()
+        .secrets
+        .iter()
+        .any(|secret| &secret.secret_id == secret_id)
+    {
+        return Err(StorageSetupError::invalid(
+            "storage_secret_unknown",
+            "The storage provider declares no secret with that identifier.",
+        ));
+    }
+    storage
+        .provider_config
+        .secrets
+        .get(secret_id)
+        .map(|value| value.expose().to_string())
+        .ok_or_else(|| {
+            StorageSetupError::invalid(
+                "storage_secret_missing",
+                "This storage holds no value for that secret.",
+            )
+        })
 }
 
 pub fn list_storages(
@@ -295,27 +383,14 @@ pub fn draft_summary(
     let storage = &draft.storage;
     let adapter = registry.get(&storage.provider, storage.provider_config.version);
     let descriptor = adapter.map(StorageProviderAdapter::descriptor);
-    let mut secrets = Vec::new();
-    let mut listed = BTreeSet::new();
-    if let Some(descriptor) = &descriptor {
-        for secret in &descriptor.secrets {
-            listed.insert(secret.secret_id.clone());
-            secrets.push(StorageDraftSecretState {
-                secret_id: secret.secret_id.clone(),
-                present: storage.provider_config.secrets.contains(&secret.secret_id),
-                value: None,
-            });
-        }
-    }
-    for key in storage.provider_config.secrets.keys() {
-        if !listed.contains(key) {
-            secrets.push(StorageDraftSecretState {
-                secret_id: key.clone(),
-                present: true,
-                value: None,
-            });
-        }
-    }
+    let secrets = secret_presence(descriptor.as_ref(), &storage.provider_config)
+        .into_iter()
+        .map(|presence| StorageDraftSecretState {
+            secret_id: presence.secret_id,
+            present: presence.present,
+            value: None,
+        })
+        .collect();
     StorageSetupDraftSummary {
         draft_id: draft.draft_id.clone(),
         storage_id: storage.id.clone(),
@@ -551,15 +626,19 @@ pub fn update_storage_setup_draft(
         })
         .map(|secret| secret.secret_id.clone())
         .collect::<BTreeSet<_>>();
-    if managed {
-        if request.secrets.keys().any(|key| !declared.contains(key))
-            || request.settings != draft.storage.provider_config.settings
-        {
-            return Err(StorageSetupError::invalid(
-                "storage_managed_credentials_locked",
-                "This connection uses a refresh token. Replace that token or reconnect in Dropbox setup. The namespace cannot change.",
-            ));
-        }
+    // A saved storage's destination is fixed: an edit draft exists only to
+    // replace a credential. The name has its own write (`rename_storage`).
+    if matches!(draft.source, StorageSetupDraftSource::Edit { .. })
+        && (request.settings != draft.storage.provider_config.settings
+            || request.name != draft.storage.name)
+    {
+        return Err(storage_settings_locked());
+    }
+    if managed && request.secrets.keys().any(|key| !declared.contains(key)) {
+        return Err(StorageSetupError::invalid(
+            "storage_managed_credentials_locked",
+            "This connection uses a refresh token. Replace that token or reconnect in Dropbox setup.",
+        ));
     }
     for (key, operation) in request.secrets {
         if !declared.contains(&key) {
@@ -610,7 +689,7 @@ pub struct CommitStorageDraftResult {
     pub replaced: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct VerifyStorageResult {
     pub storage_id: StorageId,
     pub config_revision: u64,
@@ -650,7 +729,7 @@ fn pin_draft<'a>(
     adapter
         .validate_config(&draft.storage.provider_config)
         .map_err(|error| StorageSetupError::from_adapter(error, None))?;
-    validate_immutable_fields(adapter, &config, &draft.storage)?;
+    validate_settings_locked(&config, &draft.storage)?;
     ensure_destination_available(registry, &config, &draft.storage)?;
     Ok(PinnedDraft {
         _operation: operation,
@@ -727,7 +806,7 @@ pub fn commit_storage_setup_draft(
             committed_draft
                 .validate_source(config)
                 .map_err(|_| storage_setup_draft_target_conflict())?;
-            validate_immutable_fields(pinned.adapter, config, &storage)?;
+            validate_settings_locked(config, &storage)?;
             ensure_destination_available(registry, config, &storage)?;
             let replaced = match &source {
                 StorageSetupDraftSource::New => {
@@ -1853,13 +1932,28 @@ mod tests {
             create_storage_edit_draft(&repository, &registry, &committed.storage_id).unwrap();
         assert!(edit.edits_existing);
         assert_eq!(edit.storage_id, committed.storage_id);
-        let edit = update_storage_setup_draft(
+        // The name and the settings are fixed on an edit draft.
+        let renamed = update_storage_setup_draft(
             &repository,
             &registry,
             UpdateStorageSetupDraftRequest {
                 draft_id: edit.draft_id.clone(),
                 revision: edit.revision,
                 name: "Proof renamed".to_string(),
+                settings: test_settings(&store_dir),
+                secrets: BTreeMap::new(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(renamed.code(), "storage_settings_locked");
+        let original_name = edit.name.clone();
+        let edit = update_storage_setup_draft(
+            &repository,
+            &registry,
+            UpdateStorageSetupDraftRequest {
+                draft_id: edit.draft_id.clone(),
+                revision: edit.revision,
+                name: original_name.clone(),
                 settings: test_settings(&store_dir),
                 secrets: BTreeMap::new(),
             },
@@ -1877,7 +1971,7 @@ mod tests {
         assert!(replaced.replaced);
         let config = repository.load_config().unwrap();
         assert_eq!(config.storages.len(), 1);
-        assert_eq!(config.storages[0].name, "Proof renamed");
+        assert_eq!(config.storages[0].name, original_name);
     }
 
     #[cfg(unix)]
@@ -1972,8 +2066,8 @@ mod tests {
             UpdateStorageSetupDraftRequest {
                 draft_id: edit.draft_id,
                 revision: edit.revision,
-                name: "Edited".to_string(),
-                settings: test_settings(&store_dir),
+                name: "Original".to_string(),
+                settings: edit.settings.clone(),
                 secrets: BTreeMap::new(),
             },
         )
@@ -2009,7 +2103,7 @@ mod tests {
                 .find(|storage| storage.id == storage_id)
                 .unwrap()
                 .name,
-            "Edited"
+            "Original"
         );
 
         let stale = create_storage_edit_draft(&repository, &registry, &storage_id).unwrap();
@@ -2291,26 +2385,22 @@ mod tests {
     }
 }
 
-fn validate_immutable_fields(
-    adapter: &dyn StorageProviderAdapter,
+fn storage_settings_locked() -> StorageSetupError {
+    StorageSetupError::invalid(
+        "storage_settings_locked",
+        "This storage’s settings are fixed; only its credential can be replaced. To sync to another destination, add a new storage.",
+    )
+}
+
+/// A committed storage keeps its settings for life: a draft that would
+/// write different ones is refused, whichever way it was produced.
+fn validate_settings_locked(
     config: &SyncConfig,
     candidate: &StorageConfig,
 ) -> Result<(), StorageSetupError> {
     if let Some(current) = config.storages.iter().find(|s| s.id == candidate.id) {
-        let old = current.provider_config.settings.to_json();
-        let new = candidate.provider_config.settings.to_json();
-        for field in adapter
-            .descriptor()
-            .fields
-            .iter()
-            .filter(|f| f.immutable_on_edit)
-        {
-            if old.get(field.field_id.as_str()) != new.get(field.field_id.as_str()) {
-                return Err(StorageSetupError::invalid(
-                    "storage_destination_immutable",
-                    "This destination cannot change. Add a new storage connection.",
-                ));
-            }
+        if current.provider_config.settings != candidate.provider_config.settings {
+            return Err(storage_settings_locked());
         }
     }
     Ok(())
@@ -2415,13 +2505,13 @@ mod dropbox_tests {
         let original = storage("storage-0123456789abcdef01234567", "shared", "token-a");
         config.storages.push(original.clone());
         let rotated = storage(original.id.as_str(), "shared", "token-b");
-        assert!(validate_immutable_fields(&DropboxAdapter, &config, &rotated).is_ok());
+        assert!(validate_settings_locked(&config, &rotated).is_ok());
         let moved = storage(original.id.as_str(), "different", "token-b");
         assert_eq!(
-            validate_immutable_fields(&DropboxAdapter, &config, &moved)
+            validate_settings_locked(&config, &moved)
                 .unwrap_err()
                 .code(),
-            "storage_destination_immutable"
+            "storage_settings_locked"
         );
         let duplicate = storage("storage-aaaaaaaaaaaaaaaaaaaaaaaa", "shared", "token-b");
         assert_eq!(
@@ -2499,7 +2589,7 @@ mod dropbox_tests {
             UpdateStorageSetupDraftRequest {
                 draft_id: edit.draft_id,
                 revision: edit.revision,
-                name: "Renamed Dropbox".into(),
+                name: edit.name.clone(),
                 settings: settings.clone(),
                 secrets: BTreeMap::from([(
                     token_key(),
@@ -2526,13 +2616,14 @@ mod dropbox_tests {
             identity
         );
         let edit = create_storage_edit_draft(&repository, &registry, &saved.id).unwrap();
-        let edit = update_storage_setup_draft(
+        // Moving the namespace is refused at the draft, before any probe.
+        let moved = update_storage_setup_draft(
             &repository,
             &registry,
             UpdateStorageSetupDraftRequest {
                 draft_id: edit.draft_id,
                 revision: edit.revision,
-                name: "Moved Dropbox".into(),
+                name: edit.name.clone(),
                 settings: BoundedConfigObject::encode(&DropboxSettingsV1 {
                     namespace_id: "other".into(),
                     folder_name: None,
@@ -2541,19 +2632,8 @@ mod dropbox_tests {
                 secrets: BTreeMap::new(),
             },
         )
-        .unwrap();
-        assert_eq!(
-            test_storage_setup_draft(
-                &repository,
-                &registry,
-                server.runtime(),
-                &edit.draft_id,
-                edit.revision
-            )
-            .unwrap_err()
-            .code(),
-            "storage_destination_immutable"
-        );
+        .unwrap_err();
+        assert_eq!(moved.code(), "storage_settings_locked");
         assert!(StorageSetupJournalStore::new(&repository)
             .list()
             .unwrap()

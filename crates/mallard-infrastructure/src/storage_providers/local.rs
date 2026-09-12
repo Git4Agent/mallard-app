@@ -129,7 +129,6 @@ impl StorageProviderAdapter for LocalFolderAdapter {
             icon: "drive".to_string(),
             clear_mode: super::traits::StorageClearMode::RevisionChecked,
             fields: vec![StorageFieldDescriptor {
-                immutable_on_edit: false,
                 field_id: FieldKey::parse("directory").expect("static field key"),
                 label: "Location path".to_string(),
                 kind: StorageFieldKind::Directory,

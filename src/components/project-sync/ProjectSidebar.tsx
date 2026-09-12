@@ -13,7 +13,7 @@ import Icon, { iconNameFromHint, type IconName } from "../Icons";
 import { catalogDoors, catalogScopeIcon, catalogScopeLabel } from "../storage-catalog/model";
 import type { CatalogCapabilityDescriptor, CatalogScopeView } from "../storage-catalog/types";
 import { projectLabel, storageDoors } from "./model";
-import { connectionSuspends, findStorageProvider, storageConnectionIssue } from "./StorageSettings";
+import { findStorageProvider, storageConnectionIssue } from "./StorageSettings";
 
 /* One rail, one list. The head says the five destinations once, as a strip of
    glyphs; below it the rail is whichever root the workspace is standing in, at
@@ -121,7 +121,7 @@ interface Props {
   onDiscardDraft: (draftId: string) => void;
   onToggleActivity: () => void;
   onAddProject: () => void;
-  onOpenStorage: (storageId: string, settingsExpanded: boolean) => void;
+  onOpenStorage: (storageId: string) => void;
   onOpenStorageDraft: (draftId: string) => void;
   onDiscardStorageDraft: (draftId: string) => void;
   onRemoveStorage: (storageId: string) => void;
@@ -423,7 +423,7 @@ export default function ProjectSidebar({
             <button
               type="button"
               className="sidebar-profile-main"
-              onClick={() => onOpenStorage(storage.storage_id, connectionSuspends(storage.connection))}
+              onClick={() => onOpenStorage(storage.storage_id)}
               disabled={busy}
               title={storageIssue ? `Open ${storageName} — ${storageIssue}` : `Open ${storageName}`}
               aria-label={storageIssue

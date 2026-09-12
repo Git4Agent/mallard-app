@@ -718,8 +718,10 @@ export default function PushResourceWorkspace({
   }
   /* No comparison means no row can be selected: every session shows its
      fallback status and the counts read 0/0. That is a broken review, not an
-     empty one, so it says why at the top and offers the repair that clears
-     stale sync metadata — the usual cause after a storage reset. */
+     empty one, so it says why at the top. Reset is offered only when the
+     error is recognised stale sync metadata; an unreachable storage never
+     reaches this review (it stops at the storage card), and any other
+     failure must not tempt a repair that forgets sync bases. */
   if (!credentialRedactionEnabled) {
     banners.push({
       key: "credential-redaction",
@@ -733,7 +735,7 @@ export default function PushResourceWorkspace({
       severity: "danger",
       title: "Conversations couldn't be compared, so nothing can be selected",
       message: threadComparisonError,
-      action: onResetMetadata
+      action: isIrrecoverableSyncError(threadComparisonError) && onResetMetadata
         ? (
           <button type="button" className="btn btn-ghost" onClick={onResetMetadata} disabled={busy}>Reset local sync state</button>
         )

@@ -303,6 +303,22 @@ test("the path bar hangs the branch on the section crumb and keeps one overflow"
   assert.match(workspace, /menuHeader: \{\s*label: workspaceSectionLabel,/);
   assert.match(workspace, /label: "Switch to",[\s\S]*?onSelect: \(\) => setActivityView\(otherView\),/);
   assert.doesNotMatch(workspace, /sync-path-view-switch|activityViewSwitch/);
+  // The switch is also a control on the page, not only a crumb menu: the
+  // app's segmented pill as a tablist, arrows moving between its two tabs.
+  assert.match(workspace, /className="sync-segmented sync-project-view-tabs" role="tablist" aria-label="Project view"/);
+  assert.match(workspace, /role="tab"\s*aria-selected=\{active\}\s*aria-controls="project-history-panel"\s*tabIndex=\{active \? 0 : -1\}/);
+  assert.match(workspace, /event\.key === "ArrowRight" \|\| event\.key === "ArrowDown"/);
+  assert.match(workspace, /role=\{activeProject\.is_git_repository \? undefined : "tabpanel"\}/);
+  // A popover that closes on outside focus must move focus in when it opens,
+  // or Tab closes it before reaching a Copy button. All three share the recipe.
+  for (const file of [
+    "src/components/storage-catalog/StorageCatalogPage.tsx",
+    "src/components/project-sync/ProjectFileDetailsMenu.tsx",
+    "src/components/project-sync/ProjectActivityPage.tsx",
+  ]) {
+    const source = readFileSync(file, "utf8");
+    assert.match(source, /focusedForOpen\.current = true;[\s\S]*?panelRef\.current\?\.querySelector<HTMLElement>\("button"\)\?\.focus\(\);/, file);
+  }
   assert.match(bar, /index > 0 && <span className="sync-path-separator"[\s\S]*?>\/<\/span>/);
   // The leaf is the page whether or not it opens a menu, so every branch that
   // can render a leaf marks it.
@@ -2810,6 +2826,8 @@ test("an empty Storages rail prompts the way Projects and Catalog do", () => {
     icon: "drive",
     available: true,
     summary: [{ field_id: "directory", label: "Folder", value: "/tmp/storage", is_path: true }],
+    settings: {},
+    secrets: [],
   }]));
   assert.match(settled, /<span>Local storage 1<\/span>/);
   assert.doesNotMatch(settled, /sidebar-door/);
@@ -2832,6 +2850,8 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
         icon: "drive",
         available: true,
         summary: [{ field_id: "directory", label: "Folder", value: "/tmp/storage", is_path: true }],
+        settings: {},
+        secrets: [],
       }]}
       storageUsage={{ "storage-1": 1 }}
       storageDrafts={[]}

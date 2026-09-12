@@ -208,6 +208,22 @@ function InfoMenu({ row, storageRevision, kindNoun }: { row: CatalogScopeRow; st
     }
   }, []);
   const placement = useDebugPopoverPlacement(rootRef, panelRef, open, closeMenu);
+  /* A dialog that closes when focus leaves it is unreachable by keyboard
+     unless opening it also moves focus in. Once the panel has been placed,
+     the first Copy button takes focus; Escape hands it back to the trigger. */
+  const focusedForOpen = useRef(false);
+  useEffect(() => {
+    if (!open) {
+      focusedForOpen.current = false;
+      return;
+    }
+    if (!placement || focusedForOpen.current) return;
+    focusedForOpen.current = true;
+    const frame = window.requestAnimationFrame(() => {
+      panelRef.current?.querySelector<HTMLElement>("button")?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, placement]);
 
   useEffect(() => {
     if (!open) return;
@@ -736,7 +752,7 @@ export default function StorageCatalogPage({
   storages,
   appActions,
   onOpenScope,
-  onOpenStorageSettings,
+  onOpenStorageDetails,
   onAddStorage,
   onAddScope,
   onRemoveScope,
@@ -752,7 +768,7 @@ export default function StorageCatalogPage({
   /** Theme and app-wide commands: this bar is the window's only chrome. */
   appActions: PathBarMenuGroup[];
   onOpenScope: (scopeId: string) => void;
-  onOpenStorageSettings: (storageId: string) => void;
+  onOpenStorageDetails: (storageId: string) => void;
   onAddStorage: () => void;
   onAddScope: () => void;
   onRemoveScope: () => void;
@@ -1234,11 +1250,11 @@ export default function StorageCatalogPage({
         {
           items: [
             {
-              id: "settings",
-              label: "Storage settings…",
+              id: "details",
+              label: "Storage details…",
               icon: "settings",
               disabled: !storageId || busy,
-              onSelect: () => storageId && onOpenStorageSettings(storageId),
+              onSelect: () => storageId && onOpenStorageDetails(storageId),
             },
             {
               id: "unlink",

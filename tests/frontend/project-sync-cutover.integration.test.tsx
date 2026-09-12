@@ -502,7 +502,7 @@ test("path bar menus keep one home per scope", () => {
   // Storage crumb: header block, settings + unlink beside their noun, and the
   // link row that stays put at zero candidates with its reason spelled out.
   assert.match(workspace, /menuHeader: \{\s*label: workspaceStorage\.name \|\| "\(unnamed\)",/);
-  assert.match(workspace, /label: "Storage settings…"/);
+  assert.match(workspace, /label: "Storage details…"/);
   assert.match(workspace, /label: `Unlink from \$\{projectLabel\(workspaceProject\)\}…`/);
   assert.match(workspace, /icon: "link-off" as const/);
   assert.match(workspace, /disabledReason: workspaceAvailableStorages\.length === 0/);
@@ -534,6 +534,12 @@ test("refocus reconciles external changes narrowly and the full reload lives in 
   assert.match(workspace, /className="sync-titlebar-actions"/);
   assert.match(workspace, /workspaceTitle === "Projects" \? null : \(\s*<button[\s\S]*?className="sync-theme-button"/);
   assert.match(workspace, /<PathBarMenu\s+id="sync-app-actions-menu"\s+groups=\{appActions\}/);
+  // Its items sit at tabIndex -1, so opening must move focus in and closing
+  // must hand it back — a no-op registerRef left the menu unreachable by key.
+  assert.match(workspace, /registerRef=\{\(node\) => \{ appMenuPanelRef\.current = node; \}\}/);
+  assert.match(workspace, /focusMenuEdge\(appMenuPanelRef\.current, "first"\)/);
+  assert.match(workspace, /onClose=\{closeAppMenu\}/);
+  assert.doesNotMatch(workspace, /registerRef=\{\(\) => undefined\}/);
 
   // Refocus reconcile only fires after the window was away, and stays narrower than
   // refresh(): project list, repository kinds, and active detail — no audits, profiles,

@@ -59,6 +59,8 @@ interface Props {
 export interface PullReviewPrimary {
   /** Why the apply must not run right now; null when it may. */
   disabledReason: string | null;
+  /** The verb the button wears: "Pull N", or "Mark as reviewed" at zero. */
+  label: string;
   /** Applies the review's current selection — the footer's own onClick. */
   apply: () => void;
 }
@@ -267,6 +269,14 @@ export default function RestorePlanView({
   const primaryDisabledReason = !busy && activityHistoryInUse && !reviewListReady
     ? "Loading storage changes…"
     : null;
+  // An empty apply still runs — it marks the storage as reviewed and
+  // unblocks Push — so the verb must say so instead of promising a Pull
+  // that restores nothing. With rows ticked the button carries their count.
+  const selectedPendingCount = items.filter((item) => (
+    selected.has(item.resourceId) && restoreActionIds(item).length > 0
+  )).length;
+  const primaryLabel = selectedPendingCount > 0 ? `Pull ${selectedPendingCount}` : "Mark as reviewed";
+  const primaryBusyLabel = selectedPendingCount > 0 ? "Pulling…" : "Marking as reviewed…";
 
   // The storage-card Pull button is the same control as the footer primary,
   // so it must run the same apply under the same gating — including the
@@ -280,9 +290,10 @@ export default function RestorePlanView({
   useEffect(() => {
     onPrimaryChange?.({
       disabledReason: primaryDisabledReason,
+      label: primaryLabel,
       apply: () => onApplyRef.current(selectionRef.current),
     });
-  }, [primaryDisabledReason, onPrimaryChange]);
+  }, [primaryDisabledReason, primaryLabel, onPrimaryChange]);
   useEffect(() => () => onPrimaryChange?.(null), [onPrimaryChange]);
 
   const requiredProjectDirectories = requiredPullProjectDirectoryIds(items, selected);
@@ -581,7 +592,7 @@ export default function RestorePlanView({
           {busy
             ? <Icon name="refresh" size={16} className="icon-spin" />
             : <ThreadStatusIcon status="cloud-outstanding" size={16} />}
-          {busy ? "Pulling…" : "Pull"}
+          {busy ? primaryBusyLabel : primaryLabel}
         </button>
       </footer>
     </section>

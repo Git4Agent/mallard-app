@@ -37,9 +37,15 @@ impl StorageMarker {
                 self.format, STORAGE_MARKER_FORMAT
             ));
         }
+        if self.layout_version > STORAGE_LAYOUT_VERSION {
+            return Err(format!(
+                "This storage was written by a newer Mallard (layout version {}; this Mallard reads version {}). Update Mallard to use it.",
+                self.layout_version, STORAGE_LAYOUT_VERSION
+            ));
+        }
         if self.layout_version != STORAGE_LAYOUT_VERSION {
             return Err(format!(
-                "Mallard storage layout version {} is not supported; expected version {}",
+                "This storage uses an older Mallard layout (version {}; this Mallard reads version {}), which this version cannot read.",
                 self.layout_version, STORAGE_LAYOUT_VERSION
             ));
         }

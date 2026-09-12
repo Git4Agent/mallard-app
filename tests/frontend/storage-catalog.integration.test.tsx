@@ -457,7 +457,7 @@ function renderScopePage(scope: CatalogScopeView = scopeView) {
       storages={STORAGES}
       appActions={[]}
       onOpenScope={() => undefined}
-      onOpenStorageSettings={() => undefined}
+      onOpenStorageDetails={() => undefined}
       onAddStorage={() => undefined}
       onAddScope={() => undefined}
       onRemoveScope={() => undefined}

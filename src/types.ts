@@ -610,7 +610,6 @@ export type StorageFieldKind = "text" | "url" | "directory";
 
 /** One safe, editable configuration field a storage provider declares. */
 export interface StorageFieldDescriptor {
-  immutable_on_edit?: boolean;
   field_id: string;
   label: string;
   kind: StorageFieldKind;
@@ -844,7 +843,24 @@ export interface StorageSummary {
    *  the record is preserved and shown, never edited, tested, or synced. */
   available: boolean;
   summary: StorageSummaryField[];
+  /** The saved settings, shown read-only: a destination is fixed for the
+   *  life of a storage. */
+  settings: StorageSettings;
+  /** Which declared secrets the storage holds. A value never rides a
+   *  listing; `reveal_storage_secret` returns one on an explicit request. */
+  secrets: StorageSecretPresence[];
   connection?: StorageConnectionHealth | null;
+}
+
+export interface StorageSecretPresence {
+  secret_id: string;
+  present: boolean;
+}
+
+export interface TestStorageResult {
+  storage_id: string;
+  config_revision: number;
+  verified: boolean;
 }
 
 /** Safe provider settings: a bounded JSON object of scalar-ish values. */

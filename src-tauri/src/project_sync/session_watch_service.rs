@@ -19,6 +19,7 @@
 
 use super::service::LocalTailObservation;
 use mallard_domain::{now_secs, LocalProjectId, ProviderKey, StorageId, ThreadId};
+use mallard_infrastructure::jsonl_tail_io::SourceStamp;
 use mallard_infrastructure::persistence::write_json_atomic;
 use mallard_infrastructure::provider_capture::{self, CaptureRequest, Discovery, LocalSessionView};
 use mallard_infrastructure::providers::AgentProviderRegistry;
@@ -171,9 +172,10 @@ struct ProfileWatch {
     titles_epoch: u64,
     /// JSONL roots whose existence the epoch already accounts for: every
     /// path a cached inventory of this home has listed, plus every path
-    /// seen created while armed. An event on any other JSONL path is
-    /// membership work.
-    known_roots: BTreeSet<PathBuf>,
+    /// seen created while armed. Record file identity at discovery or a
+    /// creation event so a repeated creation flag can be distinguished
+    /// from a replacement. This never makes a dirty observation reusable.
+    known_roots: BTreeMap<PathBuf, Option<SourceStamp>>,
     last_used: std::time::Instant,
 }
 
@@ -505,7 +507,7 @@ fn arm_profile(
         dirty_roots: BTreeSet::new(),
         inventory_epoch: 0,
         titles_epoch: 0,
-        known_roots: BTreeSet::new(),
+        known_roots: BTreeMap::new(),
         last_used: std::time::Instant::now(),
     })
 }
@@ -563,9 +565,24 @@ impl ProfileWatch {
             let is_jsonl = path.extension().and_then(|ext| ext.to_str()) == Some("jsonl");
             if is_jsonl {
                 self.dirty_roots.insert(path.to_path_buf());
-                let membership_change =
-                    matches!(event.kind, EventKind::Create(_) | EventKind::Remove(_))
-                        || !self.known_roots.contains(path);
+                let created = matches!(event.kind, EventKind::Create(_));
+                let stamp = created.then(|| SourceStamp::read(path).ok()).flatten();
+                // FSEvents can repeat a creation flag when an existing file
+                // is appended. Treat it as content work only after proving
+                // the same device/inode as the known source.
+                // Missing identities and replacements still rediscover.
+                #[cfg(unix)]
+                let same_created_file = stamp.as_ref().is_some_and(|current| {
+                    self.known_roots
+                        .get(path)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|previous| previous.same_file(current))
+                });
+                #[cfg(not(unix))]
+                let same_created_file = false;
+                let membership_change = matches!(event.kind, EventKind::Remove(_))
+                    || (created && !same_created_file)
+                    || !self.known_roots.contains_key(path);
                 if membership_change {
                     self.inventory_epoch = self.inventory_epoch.wrapping_add(1);
                 }
@@ -574,8 +591,10 @@ impl ProfileWatch {
                 // rediscovers it. A removed root is unknown again.
                 if matches!(event.kind, EventKind::Remove(_)) {
                     self.known_roots.remove(path);
+                } else if created {
+                    self.known_roots.insert(path.to_path_buf(), stamp);
                 } else {
-                    self.known_roots.insert(path.to_path_buf());
+                    self.known_roots.entry(path.to_path_buf()).or_insert(None);
                 }
             } else {
                 // Directory churn or non-transcript files inside the
@@ -888,12 +907,12 @@ impl SessionWatchService {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(profile) = inner.profiles.get_mut(&home) {
                 if profile.healthy {
-                    profile.known_roots.extend(
-                        views
-                            .iter()
-                            .filter(|view| view.provider == provider)
-                            .map(|view| view.source_path.clone()),
-                    );
+                    for view in views.iter().filter(|view| view.provider == provider) {
+                        profile.known_roots.insert(
+                            view.source_path.clone(),
+                            SourceStamp::read(&view.source_path).ok(),
+                        );
+                    }
                     inner.inventories.insert(
                         (provider, home, local_project_id.clone()),
                         CachedInventory {
@@ -1731,7 +1750,7 @@ mod tests {
             assert!(
                 profile
                     .known_roots
-                    .contains(&canonical_home.join("sessions/rollout-new.jsonl")),
+                    .contains_key(&canonical_home.join("sessions/rollout-new.jsonl")),
                 "a created root is known from its event on"
             );
         }
@@ -1751,6 +1770,164 @@ mod tests {
                 "rearm after recreation"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creation_flag_after_a_claude_append_reuses_the_discovered_inventory() {
+        use notify::event::CreateKind;
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let home = temp.path().join("claude");
+        let source = home.join("projects/project/session.jsonl");
+        let record = format!(
+            "{{\"type\":\"system\",\"sessionId\":\"session\",\"cwd\":{}}}\n",
+            serde_json::to_string(project.to_str().unwrap()).unwrap()
+        );
+        write(&source, record.as_bytes());
+        let home = canonical_home_of(&home).unwrap();
+        let source = std::fs::canonicalize(source).unwrap();
+        let provider = ProviderKey::parse("claude").unwrap();
+        let request = CaptureRequest {
+            project_root: project,
+            provider_homes: BTreeMap::from([(provider, home.clone())]),
+            include_project_content: false,
+            excluded_content_roots: Vec::new(),
+        };
+        let service = service();
+        let (project_id, _, _) = ids();
+        let registry = AgentProviderRegistry::production();
+        assert_eq!(
+            service
+                .discovery_for(registry, &project_id, &request)
+                .unwrap()
+                .1
+                .len(),
+            1
+        );
+        let metrics = sync_metrics::register_root(&home);
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&source)
+            .unwrap()
+            .write_all(record.as_bytes())
+            .unwrap();
+        let created = Event::new(EventKind::Create(CreateKind::File)).add_path(source.clone());
+        service
+            .inner
+            .lock()
+            .unwrap()
+            .profiles
+            .get_mut(&home)
+            .unwrap()
+            .classify(&created);
+        let (_, views) = service
+            .discovery_for(registry, &project_id, &request)
+            .unwrap();
+        assert_eq!(views[0].source_size, (record.len() * 2) as u64);
+        assert_eq!(metrics.snapshot().inventory_reuse_hits, 1);
+        assert_eq!(metrics.snapshot().transcript_bytes_read, 0);
+        assert_eq!(metrics.snapshot().files_head_read, 0);
+
+        // Replacing the file at the same path still forces metadata reads.
+        let replacement = temp.path().join("replacement.jsonl");
+        write(&replacement, record.as_bytes());
+        std::fs::rename(replacement, &source).unwrap();
+        service
+            .inner
+            .lock()
+            .unwrap()
+            .profiles
+            .get_mut(&home)
+            .unwrap()
+            .classify(&created);
+        let (_, views) = service
+            .discovery_for(registry, &project_id, &request)
+            .unwrap();
+        assert_eq!(views[0].source_size, record.len() as u64);
+        assert!(metrics.snapshot().transcript_bytes_read > 0);
+        assert_eq!(metrics.snapshot().files_head_read, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_creation_marks_content_dirty_but_replacement_changes_membership() {
+        use notify::event::{CreateKind, RemoveKind};
+        use std::io::Write;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("claude");
+        let source = home.join("projects/project/session.jsonl");
+        write(&source, b"{\"turn\":1}\n");
+        let home = canonical_home_of(&home).unwrap();
+        let source = std::fs::canonicalize(&source).unwrap();
+        let provider = ProviderKey::parse("claude").unwrap();
+        let mut profile = arm_profile(&provider, &home).unwrap();
+        let created = Event::new(EventKind::Create(CreateKind::File)).add_path(source.clone());
+
+        profile.classify(&created);
+        let epoch = profile.inventory_epoch;
+        assert_eq!(epoch, 1);
+        profile.dirty_roots.clear();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&source)
+            .unwrap()
+            .write_all(b"{\"turn\":2}\n")
+            .unwrap();
+        // macOS can report Create again for this append. Repeating the
+        // event must not force all sessions through metadata discovery.
+        profile.classify(&created);
+        profile.classify(&created);
+        assert_eq!(profile.inventory_epoch, epoch);
+        assert!(profile.dirty_roots.contains(&source));
+
+        let replacement = source.with_extension("replacement");
+        write(&replacement, b"{\"turn\":1}\n{\"turn\":2}\n");
+        std::fs::rename(replacement, &source).unwrap();
+        profile.classify(&created);
+        assert_eq!(
+            profile.inventory_epoch,
+            epoch + 1,
+            "new inode must rediscover"
+        );
+
+        std::fs::remove_file(&source).unwrap();
+        profile.classify(&Event::new(EventKind::Remove(RemoveKind::File)).add_path(source.clone()));
+        assert_eq!(profile.inventory_epoch, epoch + 2);
+        assert!(!profile.known_roots.contains_key(&source));
+
+        // Missing files and symlinks cannot establish reusable identities.
+        profile.classify(&created);
+        assert_eq!(profile.inventory_epoch, epoch + 3);
+        assert!(profile.known_roots[&source].is_none());
+        let target = temp.path().join("outside.jsonl");
+        write(&target, b"{}\n");
+        symlink(&target, &source).unwrap();
+        profile.classify(&created);
+        assert!(profile.known_roots[&source].is_none());
+    }
+
+    #[test]
+    fn creation_without_a_recorded_identity_forces_discovery() {
+        use notify::event::CreateKind;
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("claude");
+        let source = home.join("projects/project/session.jsonl");
+        write(&source, b"{}\n");
+        let home = canonical_home_of(&home).unwrap();
+        let source = std::fs::canonicalize(&source).unwrap();
+        let mut profile = arm_profile(&ProviderKey::parse("claude").unwrap(), &home).unwrap();
+        profile.known_roots.insert(source.clone(), None);
+        profile.classify(&Event::new(EventKind::Create(CreateKind::File)).add_path(source.clone()));
+        assert_eq!(profile.inventory_epoch, 1);
+        assert!(profile.dirty_roots.contains(&source));
     }
 
     fn codex_rollout(home: &Path, id: &str, cwd: &Path) {

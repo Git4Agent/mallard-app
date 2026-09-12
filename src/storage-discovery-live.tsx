@@ -65,7 +65,7 @@ const DROPBOX: StorageProviderDescriptor = {
   icon: "folder",
   clear_mode: "unconditional",
   fields: [
-    { field_id: "namespace_id", label: "Namespace ID", kind: "text", required: true, immutable_on_edit: true, placeholder: "Shared or team namespace ID", help: "Use the same namespace ID on each machine. This value cannot change after setup." },
+    { field_id: "namespace_id", label: "Namespace ID", kind: "text", required: true, placeholder: "Shared or team namespace ID", help: "Use the same namespace ID on each machine. This value cannot change after setup." },
   ],
   secrets: [
     { secret_id: "access_token", label: "Access token", required: true, placeholder: "User-linked Dropbox access token" },
@@ -234,7 +234,6 @@ function Page({ provider, outcome }: { provider: StorageProviderDescriptor; outc
           form={form}
           secretPresence={presence}
           disabled={running}
-          editsExisting={false}
           onChange={(next) => { setForm(next); setReady(null); }}
           onSwitchProvider={() => undefined}
           setupMode={asking ? { mode, onChoose: choose } : undefined}
@@ -245,7 +244,7 @@ function Page({ provider, outcome }: { provider: StorageProviderDescriptor; outc
               discovery={discovery}
               state={state}
               selectedId={selectedId}
-              storages={[{ storage_id: "storage-1", name: "R2 storage", provider: "r2", config_version: 1, provider_label: "Cloudflare R2", icon: "cloud", available: true, summary: [] }]}
+              storages={[{ storage_id: "storage-1", name: "R2 storage", provider: "r2", config_version: 1, provider_label: "Cloudflare R2", icon: "cloud", available: true, summary: [], settings: {}, secrets: [] }]}
               manualEntry={manualEntry}
               disabled={running}
               onScan={() => { setSelectedId(null); setState({ kind: "scanning" }); }}

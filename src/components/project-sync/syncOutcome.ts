@@ -327,7 +327,12 @@ export function buildPullOutcome({
       ? `${problemCount} ${plural(problemCount, "change")} ${problemCount === 1 ? "needs" : "need"} attention`
       : baselineStalled
         ? "Pull complete — Push still blocked"
-        : "Pull complete",
+        : restored.length + preserved.length === 0
+          // The acknowledge-only apply: nothing was taken, the reviewed
+          // baseline moved. "Pull complete · 0 restored" would claim a Pull
+          // that never happened.
+          ? "Nothing pulled — storage marked as reviewed"
+          : "Pull complete",
     stats,
     rows,
     actions,

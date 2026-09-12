@@ -10,7 +10,6 @@ import SyncPathBar, { type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import LandingPicker, { type LandingCard, type LandingDoor } from "./LandingPicker";
 import { storageDoors } from "./model";
 import {
-  connectionSuspends,
   findStorageProvider,
   storageConnectionIssue,
   storageSubtitle,
@@ -42,8 +41,8 @@ interface Props {
   busy: boolean;
   /** Theme and app-wide commands; the bar here is the window's only chrome. */
   appActions: PathBarMenuGroup[];
-  /** Opens the storage's page; a refused credential opens its settings. */
-  onOpenStorage: (storageId: string, settingsExpanded: boolean) => void;
+  /** Opens the storage's page. */
+  onOpenStorage: (storageId: string) => void;
   onOpenStorageDraft: (draftId: string) => void;
   /** Add, with the provider already chosen when a door names one; without
       one, the provider picker asks. */
@@ -107,7 +106,7 @@ export default function StorageIndexPage({
             )}
           </span>
         ),
-        onOpen: () => onOpenStorage(storage.storage_id, connectionSuspends(storage.connection)),
+        onOpen: () => onOpenStorage(storage.storage_id),
       };
     }),
     // A persisted setup draft is content too: badged, tally-less, opening
@@ -123,7 +122,7 @@ export default function StorageIndexPage({
         title: name,
         ariaLabel: `Continue setting up ${name} — resumable storage draft`,
         location: draft.edits_existing
-          ? `Unsaved ${draft.provider_label} settings — not applied yet`
+          ? `Reconnect not finished — ${draft.provider_label} credential not saved yet`
           : "Setup not finished — not connected to Mallard yet",
         detail: (
           <span className="landing-picker-card-chips">

@@ -19,7 +19,7 @@ import Icon, { iconNameFromHint } from "../Icons";
 import Notice from "../notice/Notice";
 import ProviderMark from "../sync-review/ProviderMark";
 import { expandHomePath, isAbsoluteProfilePath } from "../../profilePath";
-import { errorMessage } from "../../storageError";
+import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import {
   compactProjectPath,
@@ -497,7 +497,9 @@ export default function ProjectSetupWorkspace({
       onFinalized(detail, workflowEpoch);
     } catch (reason) {
       if (!workflowIsActive()) return;
-      setError(errorMessage(reason));
+      // Finishing setup registers the repo in the chosen storage; a transport
+      // failure there must name the storage and the fix, not the SDK.
+      setError(storageAccessErrorMessage(selectedStorage, reason));
       // The failed finalize can record an error and advance the draft revision.
       try {
         const reloaded = await projectSyncApi.getSetupDraft(draftId);

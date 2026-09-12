@@ -61,6 +61,7 @@ import StorageIndexPage from "./StorageIndexPage";
 import { storageSubtitle, storageSubtitleIsPath } from "./StorageSettings";
 import StorageProviderPicker from "./StorageProviderPicker";
 import { PathBarBelow, PathBarMenu, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
+import { focusMenuEdge } from "../sync-review/menuKeyboard";
 import PushResourceWorkspace, {
   includeRequiredProjectContentDirectories,
   pullRequiredCopy,
@@ -302,7 +303,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [catalogIndexOpen, setCatalogIndexOpen] = useState(false);
   const [storageIssues, setStorageIssues] = useState<Record<string, string>>({});
   const [storageEditorRequest, setStorageEditorRequest] = useState<
-    | { mode: "open"; storageId: string; settingsExpanded: boolean; requestId: number }
+    | { mode: "open"; storageId: string; requestId: number }
     | { mode: "resume-draft"; draft: StorageSetupDraft; requestId: number }
     | { mode: "close"; requestId: number }
     | null
@@ -363,6 +364,20 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [unreadLogs, setUnreadLogs] = useState(0);
   const [appMenuOpen, setAppMenuOpen] = useState(false);
   const appMenuRef = useRef<HTMLDivElement>(null);
+  // The menu's items sit at tabIndex -1 by the menu contract, so nothing
+  // reaches them unless opening the menu moves focus in. Esc and activation
+  // hand focus back to the button that opened it.
+  const appMenuPanelRef = useRef<HTMLDivElement | null>(null);
+  const appMenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const closeAppMenu = (returnFocus: boolean) => {
+    setAppMenuOpen(false);
+    if (returnFocus) appMenuTriggerRef.current?.focus();
+  };
+  useEffect(() => {
+    if (!appMenuOpen) return;
+    const frame = window.requestAnimationFrame(() => focusMenuEdge(appMenuPanelRef.current, "first"));
+    return () => window.cancelAnimationFrame(frame);
+  }, [appMenuOpen]);
   const activityOpenRef = useRef(false);
   const logDrawerRef = useRef<HTMLDivElement>(null);
   const liveLogLinesRef = useRef<LogLine[]>([]);
@@ -1034,6 +1049,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   /* A running Push or Pull can write remote and local state. Killing the
      process midway can leave a partial result that Mallard does not retry.
 
+     ⌘Q and Mallard › Quit arrive here too: the app menu's Quit item (lib.rs)
+     asks the window to close instead of terminating, so one guard covers
+     every exit.
+
      The listener is registered only while something is in flight. That keeps
      the ordinary close on its default path — `onCloseRequested` destroys the
      window itself when the handler allows the close, so a listener that is
@@ -1238,7 +1257,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       /* This layer consumed Escape; the Push/Pull review listens on window
          and must not also close and discard the whole review. */
       event.stopPropagation();
-      setAppMenuOpen(false);
+      closeAppMenu(true);
     };
     document.addEventListener("pointerdown", handlePointerDown);
     document.addEventListener("focusin", handleFocusIn);
@@ -1397,9 +1416,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     return true;
   };
 
-  /** One route into a storage page, shared by the sidebar, the Storages
-      index, and the banners that deep-link a specific storage's settings. */
-  const openStorageWorkspace = async (storageId: string, settingsExpanded: boolean) => {
+  /** One route into a storage page — its settings card over its
+      repositories — shared by the sidebar, the Storages index, the Catalog,
+      and the banners that deep-link a storage. */
+  const openStorageWorkspace = async (storageId: string) => {
     if (!(await saveStorageDraftBeforeNavigation())) return;
     closeProjectSubview();
     setSetupDraftId(null);
@@ -1415,7 +1435,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setStorageEditorRequest((current) => ({
       mode: "open",
       storageId,
-      settingsExpanded,
       requestId: (current?.requestId ?? 0) + 1,
     }));
   };
@@ -1697,7 +1716,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       }
       setPendingBundleConnection({ projectId, storageId, matches: bundles, reason: "link" });
     } catch (reason) {
-      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
+      // Linking is the first storage write a new user makes, and it fails in
+      // transport prose behind a "register the repo" prefix.
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(storageFailureMessage(storageId, reason));
     } finally {
       if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
@@ -1733,6 +1754,22 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       // A destination the push cannot get past never opens the review — the
       // gate lands as a banner on the storage card instead.
       const destination = context.destination_status;
+      if (destination.state === "unavailable") {
+        // Offline, a revoked credential, an unreachable bucket: the review
+        // would open with nothing selectable. The card's notice carries the
+        // repair that fits — Retry, or Reconnect when the credential is the
+        // cause — and offers Reset only for recognised stale metadata.
+        setStorageNotice({
+          projectId,
+          storageId,
+          kind: "action_failed",
+          action: "push",
+          message: storageFailureMessage(storageId, destination.message),
+        });
+        setActiveProjectId(projectId);
+        setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
+        return;
+      }
       if (
         destination.state === "requires_pull"
         || destination.state === "remote_history_missing"
@@ -1812,7 +1849,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         savedRecipe,
         projectDefaults,
         threadComparison: nextThreadComparison,
-        threadComparisonError: context.thread_comparison_error ?? null,
+        threadComparisonError: context.thread_comparison_error
+          ? storageFailureMessage(storageId, context.thread_comparison_error)
+          : null,
         projectContentInventory: lockedProjectContentInventory,
         projectContentScanned: lockedProjectContentInventory !== null,
         showProjectFiles: !isGitRepository || lockedProjectContentInventory !== null,
@@ -2506,7 +2545,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       }
       setPendingBundleConnection(null);
     } catch (reason) {
-      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(storageFailureMessage(pending.storageId, reason));
     } finally {
       if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
@@ -2638,6 +2677,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       )}
       <div ref={appMenuRef} className={`storage-link-overflow${appMenuOpen ? " open" : ""}`}>
         <button
+          ref={appMenuTriggerRef}
           type="button"
           className="storage-link-more"
           aria-haspopup="menu"
@@ -2646,6 +2686,15 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           title="App actions"
           aria-label="App actions"
           onClick={() => setAppMenuOpen((current) => !current)}
+          onKeyDown={(event) => {
+            // The menu-button contract: the arrows open the menu on its
+            // first or last item.
+            if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+            event.preventDefault();
+            setAppMenuOpen(true);
+            const edge = event.key === "ArrowDown" ? "first" : "last";
+            window.requestAnimationFrame(() => focusMenuEdge(appMenuPanelRef.current, edge));
+          }}
         >
           <Icon name="more" size={16} />
         </button>
@@ -2655,8 +2704,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           label="App actions"
           align="end"
           open={appMenuOpen}
-          registerRef={() => undefined}
-          onClose={() => setAppMenuOpen(false)}
+          registerRef={(node) => { appMenuPanelRef.current = node; }}
+          onClose={closeAppMenu}
         />
       </div>
     </div>
@@ -2831,6 +2880,25 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     try {
       const result = await projectSyncApi.testStorageSetupDraft(draftId, expectedRevision);
       return hostWorkflowEpoch.current === workflowEpoch && result.verified;
+    } catch (reason) {
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
+      return false;
+    } finally {
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
+    }
+  };
+
+  /** Probe a settled storage as it is saved. Success forgets the transport's
+      recorded refusal, so the listing is refreshed to drop its issue. */
+  const testStorage = async (storageId: string): Promise<boolean> => {
+    const workflowEpoch = hostWorkflowEpoch.current;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await projectSyncApi.testStorage(storageId);
+      if (hostWorkflowEpoch.current !== workflowEpoch) return false;
+      adoptConfigSnapshot(await projectSyncApi.getConfig());
+      return result.verified;
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
       return false;
@@ -3182,13 +3250,15 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     projectId: restoreBinding.local_project_id,
     storageId: restorePlan.storage_id,
     // The card's Pull is the review's footer primary: same apply, same
-    // gating. An empty selection still applies — it advances the reviewed
-    // baseline, which is the whole point of an acknowledge-only Pull.
+    // gating, same verb. An empty selection still applies — it advances the
+    // reviewed baseline, which is the whole point of an acknowledge-only
+    // Pull — and the label says so ("Mark as reviewed").
     onContinue: () => {
       pullReviewPrimary?.apply();
     },
     continueDisabled: !pullReviewPrimary || pullReviewPrimary.disabledReason !== null,
     continueTitle: pullReviewPrimary?.disabledReason ?? null,
+    continueLabel: pullReviewPrimary?.label ?? null,
     onClose: closePullReview,
     content: (
       <RestorePlanView
@@ -3490,7 +3560,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             storages={catalogStorages}
             appActions={appActions}
             onOpenScope={openCatalogScope}
-            onOpenStorageSettings={(storageId) => openStorageWorkspace(storageId, true)}
+            onOpenStorageDetails={(storageId) => void openStorageWorkspace(storageId)}
             onAddStorage={openNewStorageConfiguration}
             onAddScope={() => beginAddCatalogScope()}
             onRemoveScope={() => void removeCatalogScope(activeCatalogScope.scope.scope_id)}
@@ -3538,7 +3608,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             storageProviders={storageProviders}
             busy={busy}
             appActions={appActions}
-            onOpenStorage={(storageId, settingsExpanded) => void openStorageWorkspace(storageId, settingsExpanded)}
+            onOpenStorage={(storageId) => void openStorageWorkspace(storageId)}
             onOpenStorageDraft={(draftId) => void openStorageSetupDraft(draftId)}
             onAddStorage={beginAddStorage}
           />
@@ -3585,6 +3655,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             onRenameStorage={renameStorage}
             onCommitStorageDraft={commitStorageDraft}
             onTestStorageDraft={testStorageDraft}
+            onTestStorage={testStorage}
             onStorageDraftsChanged={() => void refreshStorageSetupDrafts()}
             storageDraftSaveQueue={storageDraftSaveQueue}
             storageEditorRequest={storageEditorRequest}

@@ -376,9 +376,15 @@ fn require_secret(config: &StorageProviderConfig) -> Result<&str, StorageAdapter
 
 fn probe_error(error: crate::storage_core::R2CapabilityProbeError) -> StorageAdapterError {
     match error.kind() {
+        // The probe keeps no SDK error by design, so the cause cannot be
+        // narrowed further than the stage that refused. Name the fields a
+        // person can check and the step that re-runs the check.
         R2CapabilityProbeErrorKind::Remote => StorageAdapterError::remote(
             "r2_capability_verification_failed",
-            "R2 authentication or required remote capability verification failed.",
+            format!(
+                "R2 refused the {} check. Check the Account ID, bucket name, and API token permissions, then test again.",
+                error.stage()
+            ),
         ),
         R2CapabilityProbeErrorKind::CleanupRequired => StorageAdapterError::cleanup_required(
             "r2_probe_cleanup_required",
@@ -431,7 +437,6 @@ impl StorageProviderAdapter for R2Adapter {
             clear_mode: super::traits::StorageClearMode::Unconditional,
             fields: vec![
                 StorageFieldDescriptor {
-                immutable_on_edit: false,
                     field_id: FieldKey::parse("api_url").expect("static field key"),
                     label: "S3 API URL".to_string(),
                     kind: StorageFieldKind::Url,
@@ -445,7 +450,6 @@ impl StorageProviderAdapter for R2Adapter {
                     derive: None,
                 },
                 StorageFieldDescriptor {
-                immutable_on_edit: false,
                     field_id: FieldKey::parse("bucket").expect("static field key"),
                     label: "Bucket name".to_string(),
                     kind: StorageFieldKind::Text,
@@ -460,7 +464,6 @@ impl StorageProviderAdapter for R2Adapter {
                     }),
                 },
                 StorageFieldDescriptor {
-                immutable_on_edit: false,
                     field_id: FieldKey::parse("account_id").expect("static field key"),
                     label: "Account ID".to_string(),
                     kind: StorageFieldKind::Text,
@@ -475,7 +478,6 @@ impl StorageProviderAdapter for R2Adapter {
                     }),
                 },
                 StorageFieldDescriptor {
-                immutable_on_edit: false,
                     field_id: FieldKey::parse("access_key_id").expect("static field key"),
                     label: "Access Key ID".to_string(),
                     kind: StorageFieldKind::Text,
