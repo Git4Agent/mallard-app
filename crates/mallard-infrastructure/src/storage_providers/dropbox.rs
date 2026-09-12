@@ -1,6 +1,8 @@
-//! User-linked Dropbox connection. The namespace is the storage identity.
+//! User-linked Dropbox connection. The namespace is the storage identity;
+//! the folder's name, when setup learned it, is what listings show.
 use super::traits::*;
 use crate::dropbox_auth::{validate_token, DropboxCredential};
+use crate::dropbox_setup::valid_folder_name;
 use crate::storage_core::{dropbox_store::DropboxObjectStore, ObjectStore};
 use mallard_domain::{
     BoundedConfigObject, FieldKey, SecretKey, StorageProviderConfig, StorageProviderKey,
@@ -14,6 +16,11 @@ pub struct DropboxAdapter;
 #[serde(deny_unknown_fields)]
 pub struct DropboxSettingsV1 {
     pub namespace_id: String,
+    /// The shared folder's name as Dropbox shows it, recorded by the setup
+    /// lane for listings. Never an identity: the namespace is. Absent when
+    /// the connection was pasted in by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_name: Option<String>,
 }
 pub fn provider_key() -> StorageProviderKey {
     StorageProviderKey::parse("dropbox").expect("static key")
@@ -63,19 +70,28 @@ impl StorageProviderAdapter for DropboxAdapter {
     fn descriptor(&self) -> StorageProviderDescriptor {
         let guide = "https://www.dropbox.com/developers/reference/auth-types";
         StorageProviderDescriptor {
-            key:provider_key(),config_version:1,display_name:"Dropbox".into(),description:"An existing shared or team namespace. Uploads up to 150 MiB per object.".into(),
+            key:provider_key(),config_version:1,display_name:"Dropbox".into(),description:"A shared folder in your Dropbox, new or one you already use. Uploads up to 150 MiB per object.".into(),
             default_name:"Dropbox storage".into(),name_suggestion:None,display_rank:30,icon:"cloud".into(),clear_mode:StorageClearMode::RevisionChecked,
             fields:vec![StorageFieldDescriptor {field_id:FieldKey::parse("namespace_id").expect("static key"),label:"Namespace ID".into(),immutable_on_edit:true,kind:StorageFieldKind::Text,required:true,
                 placeholder:Some("Shared or team namespace ID".into()),help:Some("Use the same namespace ID on each machine. This value cannot change after setup.".into()),help_url:Some(guide.into()),derive:None}],
             secrets:vec![StorageSecretDescriptor {secret_id:token_key(),label:"Access token".into(),required:true,placeholder:Some("User-linked Dropbox access token".into()),
-                help:Some("For manual setup, supply account_info.read, files.metadata.read, files.content.read, and files.content.write. Replace this token when it expires. Agent setup renews access automatically.".into()),help_url:Some(guide.into())},
+                help:Some("For manual setup, supply account_info.read, files.metadata.read, files.content.read, and files.content.write. Replace this token when it expires. Browser setup renews access automatically.".into()),help_url:Some(guide.into())},
                 StorageSecretDescriptor {secret_id:refresh_token_key(),label:"Refresh token".into(),required:true,placeholder:Some("Dropbox refresh token".into()),
-                help:Some("Agent setup saves this token to renew access automatically. Show it to review the value, or enter a replacement issued for this Mallard app and Dropbox account.".into()),help_url:Some(guide.into())}],
-            setup_assistant:Some(StorageSetupAssistantDescriptor {
-                label: "Set up with an agent".into(),
-                description: "Approve Dropbox access in your browser. The agent creates a Mallard shared folder and fills this connection. Dropbox permission covers your account, beyond this folder.".into(),
-                managed_secret_id: Some(refresh_token_key()),
-            }),setup_guide_url:Some(guide.into()),manual_setup_hint:Some("Enter an existing shared or team namespace and a user-linked token. Mallard stores data in .mallard within that namespace.".into()),
+                help:Some("Browser setup saves this token to renew access automatically. Show it to review the value, or enter a replacement issued for this Mallard app and Dropbox account.".into()),help_url:Some(guide.into())}],
+            local_setup: Some(StorageLocalSetup::Dropbox),
+            managed_secret_id: Some(refresh_token_key()),setup_guide_url:Some(guide.into()),manual_setup_hint:Some("Enter an existing shared or team namespace and a user-linked token. Mallard stores data in .mallard within that namespace.".into()),
+            discovery: Some(StorageDiscoveryDescriptor {
+                unit: "shared folder".into(),
+                unit_plural: "shared folders".into(),
+                place: "your Dropbox".into(),
+                create_hint: "A new Mallard shared folder in your Dropbox, created after browser consent.".into(),
+                existing_hint: "A shared folder Mallard already uses, found in your Dropbox — or a namespace you paste in.".into(),
+                existing_help: None,
+                find_label: "Find in my Dropbox".into(),
+                access_hint: "Discovery lists accessible folders and reads their Mallard markers without changing them.".into(),
+                scanning_hint: "Approve access in your browser, then Mallard looks through your shared folders…".into(),
+                prepare_hint: "This is the connection Mallard keeps, renewed automatically.".into(),
+            }),
         }
     }
     fn validate_settings(
@@ -92,6 +108,13 @@ impl StorageProviderAdapter for DropboxAdapter {
         {
             return Err(invalid());
         }
+        if typed
+            .folder_name
+            .as_deref()
+            .is_some_and(|name| !valid_folder_name(name))
+        {
+            return Err(invalid());
+        }
         BoundedConfigObject::encode(&typed).map_err(|_| invalid())
     }
     fn validate_config(&self, config: &StorageProviderConfig) -> Result<(), StorageAdapterError> {
@@ -102,14 +125,25 @@ impl StorageProviderAdapter for DropboxAdapter {
         credential(config)?;
         Ok(())
     }
+    /// The folder's name leads when setup recorded it — it is what a
+    /// listing's subtitle shows — and the namespace ID follows as the fact
+    /// that identifies the storage.
     fn summary(&self, config: &StorageProviderConfig) -> Result<Vec<StorageSummaryField>, String> {
         let typed = decode(config).map_err(|e| e.to_string())?;
-        Ok(vec![StorageSummaryField {
-            field_id: FieldKey::parse("namespace_id")?,
-            label: "Namespace".into(),
-            value: typed.namespace_id,
-            is_path: false,
-        }])
+        let field = |id: &str, label: &str, value: String| -> Result<StorageSummaryField, String> {
+            Ok(StorageSummaryField {
+                field_id: FieldKey::parse(id)?,
+                label: label.into(),
+                value,
+                is_path: false,
+            })
+        };
+        let mut facts = Vec::new();
+        if let Some(name) = typed.folder_name {
+            facts.push(field("folder_name", "Folder", name)?);
+        }
+        facts.push(field("namespace_id", "Namespace ID", typed.namespace_id)?);
+        Ok(facts)
     }
     fn continuity_coordinates(
         &self,
@@ -163,28 +197,7 @@ impl StorageProviderAdapter for DropboxAdapter {
         ))
     }
 
-    fn setup_assistant_instruction(
-        &self,
-        context: &StorageSetupAssistantContext<'_>,
-    ) -> Result<String, String> {
-        let cli_path = serde_json::to_string(context.cli_path).map_err(|_| "invalid CLI path")?;
-        let name =
-            serde_json::to_string(context.storage_name).map_err(|_| "invalid storage name")?;
-        let draft_id = serde_json::to_string(context.draft_id).map_err(|_| "invalid draft ID")?;
-        let revision = context.draft_revision;
-        let command = format!(
-            "Use this literal Mallard CLI executable path: {cli_path}\n\nRun its storage dropbox setup command with --name {name}, --draft-id {draft_id}, and --expected-revision {revision}. Treat the executable path and option values as literal arguments, quote them for the current shell, and never interpret them as shell syntax. No external CLI installation or typed app key is required."
-        );
-        let browser = "I complete Dropbox login, MFA, and consent in the browser. Do not read or control the browser or Mallard window. Do not request, read, print, or copy credentials, local state files, or browser data.";
-        if context.reconnect {
-            return Ok(format!(
-                "Reconnect my existing Dropbox storage so Mallard regains access. Dropbox rejected the saved authorization; the storage, its namespace, and its project links stay exactly as they are. {command}\n\nThis command is authorized to save the exact draft in Mallard's current local state and open the system browser. It reopens Dropbox consent for the same account, obtains a new refresh token for the existing namespace, and saves that token in this exact draft. It creates no folder and changes no namespace. If execution restrictions require approval, request it for this exact command only. Do not change HOME or use another Mallard state directory.\n\n{browser}\n\nWait for the CLI result. It prepares this exact schema-1 draft without committing storage. Report only success or the fixed error, then stop. I review the connection and select Save changes. Do not run setup again automatically after an unknown result."
-            ));
-        }
-        Ok(format!(
-            "Prepare the Dropbox storage draft for my review. {command}\n\nThis command is authorized to save the exact draft in Mallard's current local state, open the system browser, and create a new Mallard shared folder when this draft has no namespace. If execution restrictions require approval, request it for this exact command only. Do not change HOME or use another Mallard state directory.\n\n{browser}\n\nWait for the CLI result. It prepares this exact schema-1 draft without committing storage or sending invitations. Report only success or the fixed error, then stop. I review the connection and select Finish setup. Do not run setup again automatically after an unknown result."
-        ))
-    }
+
 }
 
 #[cfg(test)]
@@ -200,10 +213,48 @@ mod tests {
             1,
             BoundedConfigObject::encode(&DropboxSettingsV1 {
                 namespace_id: namespace.into(),
+                folder_name: None,
             })
             .unwrap(),
             secrets,
         )
+    }
+    fn named(namespace: &str, folder: &str) -> StorageProviderConfig {
+        let mut config = config(namespace, "token");
+        config.settings = BoundedConfigObject::encode(&DropboxSettingsV1 {
+            namespace_id: namespace.into(),
+            folder_name: Some(folder.into()),
+        })
+        .unwrap();
+        config
+    }
+    #[test]
+    fn listings_lead_with_the_folder_name_and_identity_stays_the_namespace() {
+        let by_hand = DropboxAdapter.summary(&config("shared", "token")).unwrap();
+        assert_eq!(by_hand.len(), 1);
+        assert_eq!(by_hand[0].label, "Namespace ID");
+        assert_eq!(by_hand[0].value, "shared");
+        let from_setup = named("shared", "Mallard otter");
+        DropboxAdapter.validate_config(&from_setup).unwrap();
+        let summary = DropboxAdapter.summary(&from_setup).unwrap();
+        assert_eq!(
+            summary.iter().map(|f| (f.label.as_str(), f.value.as_str())).collect::<Vec<_>>(),
+            vec![("Folder", "Mallard otter"), ("Namespace ID", "shared")]
+        );
+        assert_eq!(
+            DropboxAdapter.continuity_coordinates(&from_setup).unwrap(),
+            DropboxAdapter.continuity_coordinates(&config("shared", "token")).unwrap()
+        );
+        for bad in ["", " padded", "a/b", "..", &"x".repeat(256)] {
+            assert!(DropboxAdapter.validate_config(&named("shared", bad)).is_err(), "{bad:?}");
+        }
+        // The name is for listings only: the form never shows it, so it is
+        // not a declared field.
+        assert!(!DropboxAdapter
+            .descriptor()
+            .fields
+            .iter()
+            .any(|field| field.field_id.as_str() == "folder_name"));
     }
     #[test]
     fn refresh_credential_keeps_schema_and_namespace_and_declares_its_review_field() {
@@ -227,43 +278,12 @@ mod tests {
             |secret| secret.secret_id == refresh_token_key() && secret.label == "Refresh token"
         ));
         assert_eq!(
-            descriptor.setup_assistant.unwrap().managed_secret_id,
+            descriptor.managed_secret_id,
             Some(refresh_token_key())
         );
         let text = serde_json::to_string(&DropboxAdapter.journal_facts(&managed).unwrap()).unwrap();
         assert!(!text.contains("refresh-canary"));
-        let context = |reconnect| StorageSetupAssistantContext {
-            storage_name: "Dropbox storage 1",
-            cli_path: "/fixture/mallard-cli",
-            draft_id: "storagedraft-111111111111111111111111",
-            draft_revision: 7,
-            reconnect,
-        };
-        let instruction = DropboxAdapter
-            .setup_assistant_instruction(&context(false))
-            .unwrap();
-        assert!(
-            instruction.contains("storage dropbox setup")
-                && instruction.contains("--expected-revision 7")
-                && instruction.contains("create a new Mallard shared folder")
-                && instruction.contains("Finish setup")
-        );
-        assert!(!instruction.contains("refresh-canary") && !instruction.contains("wrangler"));
-        // Reconnection tells the agent it is regaining access to the same
-        // namespace with the same command, and hands the user Save changes.
-        let reconnect = DropboxAdapter
-            .setup_assistant_instruction(&context(true))
-            .unwrap();
-        assert!(
-            reconnect.contains("regains access")
-                && reconnect.contains("existing namespace")
-                && reconnect.contains("creates no folder")
-                && reconnect.contains("Save changes")
-                && reconnect.contains("--expected-revision 7")
-        );
-        assert!(
-            !reconnect.contains("Finish setup") && !reconnect.contains("new Mallard shared folder")
-        );
+
     }
     #[test]
     fn namespace_identity_does_not_depend_on_token() {

@@ -153,6 +153,12 @@ pub struct StorageSetupJournalStore {
 }
 
 impl StorageSetupJournalStore {
+    pub(crate) fn r2_provisioning(repository: &LocalStateRepository) -> Self {
+        Self {
+            root: repository.root().to_path_buf(),
+            directory: repository.root().join("r2_setup_journal"),
+        }
+    }
     pub(crate) fn dropbox_provisioning(repository: &LocalStateRepository) -> Self {
         Self {
             root: repository.root().to_path_buf(),

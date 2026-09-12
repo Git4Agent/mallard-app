@@ -56,7 +56,7 @@ export default function ProjectFileDetailsMenu({
   ];
   const copiedValue = values.find((value) => value.key === copied);
   const copiedLabel = copied === "all"
-    ? "File details copied."
+    ? "File info copied."
     : copiedValue
       ? `${copiedValue.label} copied.`
       : "";
@@ -110,8 +110,8 @@ export default function ProjectFileDetailsMenu({
         ref={triggerRef}
         type="button"
         className="btn btn-ghost sync-history-debug-trigger"
-        title="File details"
-        aria-label={`Show details for ${relativePath}`}
+        title="File info"
+        aria-label={`Show file info for ${relativePath}`}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={menuId}
@@ -133,12 +133,11 @@ export default function ProjectFileDetailsMenu({
             }
             : { visibility: "hidden" }}
           role="dialog"
-          aria-label={`File details for ${relativePath}`}
+          aria-label={`File info for ${relativePath}`}
           hidden={!open}
         >
           <header>
-            <strong>File details</strong>
-            <span>Click a value to copy it.</span>
+            <strong>File info</strong>
           </header>
           <div className="sync-history-debug-values">
             {/* No aria-label: it would replace the row's content as the

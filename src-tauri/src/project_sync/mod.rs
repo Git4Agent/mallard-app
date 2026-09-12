@@ -7,6 +7,8 @@ pub mod codex_maintenance;
 pub mod commands;
 pub mod config_watcher;
 pub mod maintenance;
+pub mod r2_setup;
+pub mod dropbox_setup;
 pub mod service;
 #[cfg_attr(test, allow(dead_code))]
 pub mod session_watch_service;

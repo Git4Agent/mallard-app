@@ -911,8 +911,8 @@ function SessionDebugMenu({
         ref={triggerRef}
         type="button"
         className="btn btn-ghost sync-history-debug-trigger"
-        title="Session debug info"
-        aria-label="Show session debug info"
+        title="Session info"
+        aria-label="Show session info"
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={menuId}
@@ -939,12 +939,11 @@ function SessionDebugMenu({
                until then so it never shows at the window origin. */
             : { visibility: "hidden" }}
           role="dialog"
-          aria-label="Session debug info"
+          aria-label="Session info"
           hidden={!open}
         >
           <header>
-            <strong>Session debug info</strong>
-            <span>Click a value to copy it.</span>
+            <strong>Session info</strong>
           </header>
           <div className="sync-history-debug-values">
             {/* No aria-label: it would replace the row's content as the

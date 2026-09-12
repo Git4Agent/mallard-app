@@ -446,9 +446,9 @@ test("file review details reuse the project copyable popover", () => {
       onToggle={() => undefined}
     />,
   );
-  assert.match(html, /aria-label="Show details for doc\/test-design\.md"/);
+  assert.match(html, /aria-label="Show file info for doc\/test-design\.md"/);
   assert.match(html, /aria-haspopup="dialog"/);
-  assert.match(html, /<strong>File details<\/strong>/);
+  assert.match(html, /<strong>File info<\/strong>/);
   assert.match(html, /<code>\/tmp\/project-a\/doc\/test-design\.md<\/code>/);
   assert.match(html, /<span>Modified<\/span>/);
   assert.match(html, />Copy all<\/button>/);

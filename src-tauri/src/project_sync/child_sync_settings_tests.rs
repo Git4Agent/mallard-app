@@ -59,6 +59,224 @@ fn push_child_settings(
 }
 
 #[test]
+fn pulled_children_excluded_hides_agent_cards_until_children_are_pulled() {
+    for provider in ["codex", "claude"] {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage = StorageId::parse("child-viewer").unwrap();
+        add_local_storage(&repo, &storage, &temp.path().join("store"));
+        let source = register(&repo);
+        let root = temp.path().join("source");
+        let home = temp.path().join("source-provider");
+        let bind = |project: &LocalProjectRegistration, root: &Path, home: &Path| {
+            if provider == "codex" {
+                bind_and_link_test_replica(&repo, project, &storage, root, home);
+            } else {
+                bind_and_link_claude_replica(&repo, project, &storage, root, home);
+            }
+        };
+        bind(&source, &root, &home);
+        let (main, _) = child_settings_fixture(
+            &home,
+            &root,
+            provider,
+            "019fb002-0000-7000-8000-00000000cc01",
+            3,
+        );
+        // The transport fixture records Claude results only. Add the parent
+        // calls so the viewer has agent cards to hide.
+        if provider == "claude" {
+            let bytes = std::fs::read_to_string(&main).unwrap();
+            let mut records = Vec::new();
+            for line in bytes.lines() {
+                let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+                if record.get("toolUseResult").is_some() {
+                    let call = record["message"]["content"][0]["tool_use_id"].clone();
+                    let task = format!("task-{}", call.as_str().unwrap());
+                    records.push(serde_json::json!({
+                        "type":"assistant", "uuid":task, "parentUuid":record["parentUuid"],
+                        "sessionId":record["sessionId"], "cwd":root,
+                        "message":{"role":"assistant", "content":[
+                            {"type":"tool_use", "id":call, "name":"Task",
+                             "input":{"description":"Fixture child", "prompt":"Inspect fixture"}}
+                        ]}
+                    }));
+                    record["parentUuid"] = serde_json::json!(task);
+                }
+                records.push(record);
+            }
+            std::fs::write(
+                &main,
+                records
+                    .iter()
+                    .map(|record| format!("{record}\n"))
+                    .collect::<String>(),
+            )
+            .unwrap();
+        } else {
+            append_owned_message(&main, "after-agents");
+            use std::io::Write;
+            let bytes = std::fs::read_to_string(&main).unwrap();
+            let event = serde_json::json!({
+                "ordinal":bytes.lines().count(), "timestamp":"2026-09-08T00:02:00Z",
+                "type":"event_msg", "payload":{"type":"user_message", "message":"Inspect the fixture"}
+            });
+            writeln!(
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&main)
+                    .unwrap(),
+                "{event}"
+            )
+            .unwrap();
+        }
+        let target = register_local_project_with_repository(
+            &repo,
+            RegisterLocalProjectRequest {
+                display_name: "target".into(),
+                repository_fingerprint: source.repository_fingerprint.clone(),
+                bundle_id: Some(source.bundle_id.clone()),
+            },
+        )
+        .unwrap();
+        bind(
+            &target,
+            &temp.path().join("target"),
+            &temp.path().join("target-provider"),
+        );
+        let service = ProjectSyncService::new(&repo);
+        for (phase, enabled) in [false, true, false].into_iter().enumerate() {
+            // An unchanged parent can remain synced when children are switched
+            // off. Advance the parent to require an actual replacement Pull.
+            if phase == 2 {
+                if provider == "codex" {
+                    append_owned_message(&main, "parent-after-policy-change");
+                } else {
+                    use std::io::Write;
+                    let bytes = std::fs::read_to_string(&main).unwrap();
+                    let last: serde_json::Value =
+                        serde_json::from_str(bytes.lines().last().unwrap()).unwrap();
+                    let next = serde_json::json!({"type":"user", "uuid":"parent-after-policy-change",
+                        "parentUuid":last["uuid"], "sessionId":last["sessionId"], "cwd":root,
+                        "message":{"role":"user", "content":"Continue the fixture"}});
+                    writeln!(
+                        std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(&main)
+                            .unwrap(),
+                        "{next}"
+                    )
+                    .unwrap();
+                }
+            }
+            save_child_push(&repo, provider, enabled);
+            push_child_settings(&service, &source, &storage);
+            restore_child_settings(&service, &repo, &target, &storage);
+            // Missing optional fields must keep native agent cards visible.
+            let binding_path = repo.conversation_bindings_path();
+            let mut saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&binding_path).unwrap()).unwrap();
+            for row in saved["bindings"].as_array_mut().unwrap() {
+                if row["local_project_id"].as_str() == Some(source.local_project_id.as_str()) {
+                    row.as_object_mut()
+                        .unwrap()
+                        .remove("pulled_children_excluded");
+                }
+            }
+            std::fs::write(&binding_path, serde_json::to_vec(&saved).unwrap()).unwrap();
+            // Reopen local state: viewing must not depend on the Pull process
+            // or on reading storage. Inspect both native and imported copies.
+            let reopened =
+                LocalStateRepository::from_home_dir(repo.root().parent().unwrap()).unwrap();
+            let viewer = ProjectSyncService::new(&reopened);
+            let bindings = reopened.load_conversation_bindings().unwrap();
+            for project in [&source, &target] {
+                let binding = bindings
+                    .bindings
+                    .iter()
+                    .find(|row| row.local_project_id == project.local_project_id)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "missing binding: provider={provider} enabled={enabled} project={}",
+                            project.display_name
+                        )
+                    });
+                let excluded = project.local_project_id == target.local_project_id && !enabled;
+                assert_eq!(
+                    binding.pulled_children_excluded,
+                    excluded,
+                    "provider={provider} enabled={enabled} project={} installed_children={}",
+                    project.display_name,
+                    binding.installed_subagents.len()
+                );
+                let resource = conversation_resource_id(
+                    &ProviderKey::parse(provider).unwrap(),
+                    &binding.thread_id,
+                )
+                .unwrap();
+                let detail = viewer
+                    .get_project_session_detail(&project.local_project_id, &resource)
+                    .unwrap();
+                assert_eq!(
+                    detail.event_counts.agent_calls.value,
+                    Some(if excluded { 0 } else { 3 }),
+                    "{provider}"
+                );
+                for kinds in [
+                    BTreeSet::from([SessionTimelineEventKind::AgentCall]),
+                    BTreeSet::from([
+                        SessionTimelineEventKind::Prompt,
+                        SessionTimelineEventKind::AgentCall,
+                    ]),
+                ] {
+                    let mut cursor = None;
+                    let mut events = Vec::new();
+                    loop {
+                        let page = viewer
+                            .get_project_session_timeline_page(
+                                &project.local_project_id,
+                                &resource,
+                                ProjectSessionTimelineRequest {
+                                    snapshot_id: detail.snapshot_id.clone(),
+                                    cursor,
+                                    limit: Some(1),
+                                    included_event_kinds: kinds.clone(),
+                                    included_tool_categories: BTreeSet::new(),
+                                    turn_id: None,
+                                },
+                            )
+                            .unwrap();
+                        assert!(page.next_cursor.is_none() || !page.events.is_empty());
+                        events.extend(page.events);
+                        cursor = page.next_cursor;
+                        if cursor.is_none() {
+                            break;
+                        }
+                        assert!(events.len() < 20, "pagination did not terminate");
+                    }
+                    assert_eq!(
+                        events
+                            .iter()
+                            .filter(|event| event.kind == SessionTimelineEventKind::AgentCall)
+                            .count(),
+                        if excluded { 0 } else { 3 }
+                    );
+                    if kinds.contains(&SessionTimelineEventKind::Prompt) {
+                        assert!(
+                            events
+                                .iter()
+                                .any(|event| event.kind == SessionTimelineEventKind::Prompt),
+                            "provider={provider} enabled={enabled} excluded={excluded} counts={:?}",
+                            detail.event_counts
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn child_settings_stamp_scope_and_pull_lifecycle() {
     use std::io::Write;
     for provider in ["codex", "claude"] {

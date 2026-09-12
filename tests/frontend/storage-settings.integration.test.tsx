@@ -8,6 +8,7 @@ import {
   connectionSuspends,
   draftSettingsFromForm,
   fieldsSet,
+  findDestinationConflict,
   findStorageProvider,
   formFromDraft,
   secretOperationsFromForm,
@@ -21,14 +22,29 @@ import {
   applyFieldDerivations,
   suggestStorageName,
   storageNameIsAuto,
+  storageNameForSettings,
 } from "../../src/components/project-sync/StorageSettings";
+import type { StorageSetupMode } from "../../src/components/project-sync/StorageSettings";
+import { StorageDiscoveryPanel, type DiscoveryState } from "../../src/components/project-sync/StorageDiscovery";
 import {
   CatalogStorageRepositoryRow,
-  createAgentSetupMarker,
-  reconcileAgentSetup,
+  createStorageSetupMarker,
+  loadPreparedR2Draft,
+  reconcileStorageSetup,
   StorageRepositoryDetails,
   StorageRepositoryRow,
 } from "../../src/components/project-sync/ProjectLinksWorkspace";
+import {
+  bucketNameIssue,
+  idleR2State,
+  R2SetupLane,
+  WRANGLER_INSTALL_COMMAND,
+  WRANGLER_INSTALL_AGENT_MESSAGE,
+  r2SetupErrorCode,
+  type R2SetupFlow,
+  type R2SetupMode,
+  type R2SetupState,
+} from "../../src/components/project-sync/R2Setup";
 import type {
   CatalogCapabilityDescriptor,
   CatalogStorageRepositoryView,
@@ -43,6 +59,7 @@ import { storageAccessErrorMessage } from "../../src/storageError";
 import type {
   RemoteBundleSummary,
   StorageConnectionHealth,
+  StorageDiscoveryResult,
   StorageProviderDescriptor,
   StorageSetupDraft,
   StorageSummary,
@@ -67,10 +84,8 @@ const cloudProvider: StorageProviderDescriptor = {
   secrets: [
     { secret_id: "api_secret", label: "API Secret", required: true, help: "Shown once when the key is created." },
   ],
-  setup_assistant: {
-    label: "Set up with an agent",
-    description: "A coding agent runs the Mallard CLI and prepares this draft for your review.",
-  },
+  managed_secret_id: null,
+  local_setup: null,
 };
 
 const folderProvider: StorageProviderDescriptor = {
@@ -85,7 +100,7 @@ const folderProvider: StorageProviderDescriptor = {
     { field_id: "directory", label: "Folder", kind: "directory", required: true, help: "An absolute path on this Mac." },
   ],
   secrets: [],
-  setup_assistant: null,
+  managed_secret_id: null,
 };
 
 const emptyForm: StorageEditorForm = { name: "", settings: {}, typedSecrets: {} };
@@ -140,7 +155,7 @@ function cloudDraft(patch: Partial<StorageSetupDraft> = {}): StorageSetupDraft {
   };
 }
 
-test("the editor renders exactly the fields, secrets, and assistant its descriptor declares", () => {
+test("the editor renders the fields and secrets its descriptor declares", () => {
   const html = renderToStaticMarkup(
     <StorageEditor
       descriptor={cloudProvider}
@@ -149,7 +164,7 @@ test("the editor renders exactly the fields, secrets, and assistant its descript
       disabled={false}
       editsExisting={false}
       onChange={() => undefined}
-      agentSlot={<button type="button">Run with Claude Code</button>}
+      setupSlot={<button type="button">Run with Claude Code</button>}
     />,
   );
 
@@ -161,23 +176,14 @@ test("the editor renders exactly the fields, secrets, and assistant its descript
   assert.match(html, /class="sync-segmented" role="radiogroup" aria-label="Storage type"/);
   assert.match(html, /role="radio" aria-checked="true" class="active"[^>]*>Cloud A</);
   assert.doesNotMatch(html, /sync-storage-editor-provider/);
-  // Two named routes from the descriptor's assistant: its label leads the
-  // agent lane and seats the hand-off cluster; the manual lane introduces
-  // the fields. No provider docs link, no provider name in the copy.
-  assert.match(html, /storage-setup-route-row agent/);
-  assert.match(html, /Set up with an agent/);
-  assert.match(html, /A coding agent runs the Mallard CLI and prepares this draft for your review\./);
-  assert.match(html, /Run with Claude Code/);
-  assert.match(html, /Manual setup/);
-  assert.match(html, /Enter an existing Cloud A connection in the fields below\./);
-  assert.doesNotMatch(html, /Setup guide|Cloudflare|R2/);
+  assert.doesNotMatch(html, /Set up with an agent|Run with Claude Code/);
   // Fields in declaration order, typed by kind; help rides the ? mark.
   assert.match(html, /API URL[\s\S]*Access Key ID[\s\S]*Region hint[\s\S]*API Secret/);
   assert.match(html, /<input type="url"[^>]*placeholder="https:\/\/example\.test\/bucket"/);
   assert.match(html, /<input type="text"[^>]*required=""/);
   assert.equal((html.match(/class="field-help"/g) ?? []).length, 2);
   assert.match(html, /aria-label="Copy it from the provider console\."/);
-  assert.match(html, /class="storage-provider-url-field"/);
+  assert.match(html, /class="storage-provider-field storage-provider-url-field"/);
   // The secret is a password field with a reveal; nothing stored is shown.
   assert.match(html, /type="password"/);
   assert.match(html, /sync-secret-reveal/);
@@ -200,6 +206,62 @@ test("a folder provider renders its directory field with Browse and no credentia
   assert.match(html, /<label class="sync-folder-field compact"><span class="sync-field-name">Folder<\/span><div><input[^>]*\/tmp\/storage[^>]*><button[^>]*>.*Browse…<\/button><\/div><small>An absolute path on this Mac\.<\/small><\/label>/);
   assert.match(html, /role="radio" aria-checked="true" class="active"[^>]*>Local folder</);
   assert.doesNotMatch(html, /storage-setup-route-row|sync-storage-fields|type="password"|Manual setup/);
+});
+
+test("a folder another storage already occupies is found as typed, not as canonicalised", () => {
+  // Same provider, same directory field, same folder up to a trailing slash:
+  // the page catches what it can read off a storage's summary facts. Symlinks
+  // and case stay the backend's call — it refuses the same folder on Test
+  // and Save through its canonical check.
+  const owner = folderSummary({ storage_id: "storage-owner", name: "Backup drive", summary: [
+    { field_id: "directory", label: "Folder", value: "/Volumes/Backup/mallard/", is_path: true },
+  ] });
+  const others = [cloudSummary(), folderSummary({ storage_id: "storage-elsewhere" }), owner];
+  const typed = (directory: string) => ({ settings: { directory } });
+  assert.equal(findDestinationConflict(folderProvider, typed("/Volumes/Backup/mallard"), others, null), owner);
+  assert.equal(findDestinationConflict(folderProvider, typed("  /Volumes/Backup/mallard//  "), others, null), owner);
+  // The storage being edited is not a conflict with itself.
+  assert.equal(findDestinationConflict(folderProvider, typed("/Volumes/Backup/mallard"), others, "storage-owner"), null);
+  // A different folder, an empty field, and a bare root all pass.
+  assert.equal(findDestinationConflict(folderProvider, typed("/Volumes/Backup/mallard2"), others, null), null);
+  assert.equal(findDestinationConflict(folderProvider, typed(""), others, null), null);
+  assert.equal(findDestinationConflict(folderProvider, typed("/"), others, null), null);
+  // Another provider's storage never owns a folder, and a non-path fact is
+  // never compared, even when its text happens to match.
+  const lookalike = cloudSummary({ summary: [{ field_id: "directory", label: "Folder", value: "/Volumes/Backup/mallard", is_path: false }] });
+  assert.equal(findDestinationConflict(folderProvider, typed("/Volumes/Backup/mallard"), [lookalike], null), null);
+  assert.equal(findDestinationConflict(cloudProvider, { settings: { api_url: "/Volumes/Backup/mallard" } }, others, null), null);
+});
+
+test("a taken folder is refused under the field, with a door to the storage that owns it", () => {
+  const owner = folderSummary({ storage_id: "storage-owner", name: "Backup drive" });
+  const render = (conflict: boolean) => renderToStaticMarkup(
+    <StorageEditor
+      descriptor={folderProvider}
+      form={{ ...emptyForm, name: "Local storage 2", settings: { directory: "/Users/test/storage" } }}
+      secretPresence={{}}
+      disabled={false}
+      editsExisting={false}
+      onChange={() => undefined}
+      destinationConflict={conflict ? { storage: owner, onOpen: () => undefined } : null}
+    />,
+  );
+  const refused = render(true);
+  assert.match(refused, /class="notice danger storage-destination-conflict" role="alert"/);
+  assert.match(refused, /This folder is already connected as Backup drive\./);
+  assert.match(refused, /class="btn btn-primary"[^>]*>Open Backup drive</);
+  assert.match(refused, /Choose another…/);
+  // The band sits after the folder field, inside the card, so the field it
+  // refers to is the one directly above it.
+  assert.ok(refused.indexOf("sync-folder-field") < refused.indexOf("storage-destination-conflict"));
+  assert.doesNotMatch(render(false), /storage-destination-conflict|already connected/);
+
+  // The verbs live in the workspace, which gates all four — Test, Save,
+  // Create, and the create form's Test — on the same blocked flag.
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /const storageActionBlocked = formLocked \|\| !storageReady \|\| destinationConflict !== null;/);
+  assert.equal(workspace.match(/disabled=\{storageActionBlocked\}/g)?.length, 4);
+  assert.doesNotMatch(workspace, /disabled=\{formLocked \|\| !storageReady\}/);
 });
 
 test("a stored secret is reported by presence only and is never rendered", () => {
@@ -334,9 +396,9 @@ test("icon hints resolve to a mark, and an unknown hint takes the caller's fallb
   assert.equal(iconNameFromHint("", "cloud"), "cloud");
 });
 
-test("agent setup reconciliation adopts only a newer revision of the exact draft", () => {
+test("setup reconciliation adopts only a newer revision of the exact draft", () => {
   const saved = cloudDraft({ revision: 4, name: " Team backup ", settings: {}, secrets: [{ secret_id: "api_secret", present: false }] });
-  const marker = createAgentSetupMarker(saved, saved.name);
+  const marker = createStorageSetupMarker(saved, saved.name);
   assert.deepEqual(marker, {
     draftId: saved.draft_id,
     revision: 4,
@@ -349,20 +411,20 @@ test("agent setup reconciliation adopts only a newer revision of the exact draft
 
   const prepared = cloudDraft({ revision: 6, name: "Team backup" });
   const sameNameOtherDraft = cloudDraft({ draft_id: "storagedraft-other", revision: 50 });
-  assert.deepEqual(reconcileAgentSetup(marker, cloudProvider, [sameNameOtherDraft, prepared]), {
+  assert.deepEqual(reconcileStorageSetup(marker, cloudProvider, [sameNameOtherDraft, prepared]), {
     kind: "adopt",
     draft: prepared,
   });
   // Only the exact draft, only a newer revision.
-  assert.deepEqual(reconcileAgentSetup(marker, cloudProvider, []), { kind: "preserve", reason: "no_update" });
-  assert.deepEqual(reconcileAgentSetup(marker, cloudProvider, [cloudDraft({ revision: 4 })]), { kind: "preserve", reason: "no_update" });
-  assert.deepEqual(reconcileAgentSetup(marker, cloudProvider, [sameNameOtherDraft]), { kind: "preserve", reason: "no_update" });
+  assert.deepEqual(reconcileStorageSetup(marker, cloudProvider, []), { kind: "preserve", reason: "no_update" });
+  assert.deepEqual(reconcileStorageSetup(marker, cloudProvider, [cloudDraft({ revision: 4 })]), { kind: "preserve", reason: "no_update" });
+  assert.deepEqual(reconcileStorageSetup(marker, cloudProvider, [sameNameOtherDraft]), { kind: "preserve", reason: "no_update" });
   // A newer revision that changed identity, was renamed, or is incomplete
   // is refused rather than adopted.
-  assert.deepEqual(reconcileAgentSetup(marker, cloudProvider, [cloudDraft({ revision: 5, storage_id: "storage-changed" })]), { kind: "preserve", reason: "invalid" });
-  assert.deepEqual(reconcileAgentSetup(marker, cloudProvider, [cloudDraft({ revision: 5, name: "Renamed" })]), { kind: "preserve", reason: "invalid" });
-  assert.deepEqual(reconcileAgentSetup(marker, cloudProvider, [cloudDraft({ revision: 5, secrets: [{ secret_id: "api_secret", present: false }] })]), { kind: "preserve", reason: "invalid" });
-  assert.deepEqual(reconcileAgentSetup(marker, cloudProvider, [cloudDraft({ revision: 5, settings: { api_url: "" } })]), { kind: "preserve", reason: "invalid" });
+  assert.deepEqual(reconcileStorageSetup(marker, cloudProvider, [cloudDraft({ revision: 5, storage_id: "storage-changed" })]), { kind: "preserve", reason: "invalid" });
+  assert.deepEqual(reconcileStorageSetup(marker, cloudProvider, [cloudDraft({ revision: 5, name: "Renamed" })]), { kind: "preserve", reason: "invalid" });
+  assert.deepEqual(reconcileStorageSetup(marker, cloudProvider, [cloudDraft({ revision: 5, secrets: [{ secret_id: "api_secret", present: false }] })]), { kind: "preserve", reason: "invalid" });
+  assert.deepEqual(reconcileStorageSetup(marker, cloudProvider, [cloudDraft({ revision: 5, settings: { api_url: "" } })]), { kind: "preserve", reason: "invalid" });
 });
 
 test("config revision events recover invalid startup snapshots without reloading valid peers", () => {
@@ -1039,18 +1101,18 @@ const dropboxProvider: StorageProviderDescriptor = {
       { secret_id: "access_token", label: "Access token", required: true },
       { secret_id: "refresh_token", label: "Refresh token", required: true },
     ],
-    setup_assistant: { label: "Set up with an agent", description: "Approve Dropbox access. The agent creates a Mallard shared folder.", managed_secret_id: "refresh_token" },
+    managed_secret_id: "refresh_token", local_setup: "dropbox",
     setup_guide_url: "https://www.dropbox.com/developers/reference/auth-types",
     manual_setup_hint: "Use an existing shared or team namespace.",
 };
 
-test("Dropbox setup uses the R2 agent route and keeps two manual connection fields", () => {
+test("Dropbox declares direct setup and keeps the manual connection fields", () => {
   const descriptor = dropboxProvider;
   const form = { name: "Dropbox storage 1", settings: { namespace_id: "shared-42" }, typedSecrets: {} };
   const render = (editsExisting: boolean) => renderToStaticMarkup(
     <StorageEditor descriptor={descriptor} form={form} secretPresence={{ access_token: true }}
       disabled={false} editsExisting={editsExisting} onChange={() => {}}
-      agentSlot={<button type="button">Run with Codex</button>} />,
+      setupSlot={<button type="button">Connect Dropbox</button>} />,
   );
   const fresh = render(false);
   assert.match(fresh, /Namespace ID/);
@@ -1058,8 +1120,8 @@ test("Dropbox setup uses the R2 agent route and keeps two manual connection fiel
   assert.doesNotMatch(fresh, /Refresh token/);
   assert.match(fresh, /Setup guide/);
   assert.match(fresh, /Use an existing shared or team namespace/);
-  assert.match(fresh, /Set up with an agent/);
-  assert.match(fresh, /Run with Codex/);
+  assert.match(fresh, /Dropbox setup/);
+  assert.match(fresh, /Connect Dropbox/);
   assert.doesNotMatch(fresh, /readOnly/);
   assert.equal(fieldsSet(descriptor, form, { access_token: true }).total, 2);
   assert.equal(storageDraftReady(descriptor, form, { access_token: true }), true);
@@ -1087,13 +1149,13 @@ test("Dropbox OAuth credentials use the same review and replacement field as R2"
     }) : form;
     const html = renderToStaticMarkup(<StorageEditor descriptor={dropboxProvider} form={editorForm} secretPresence={presence}
       disabled={false} editsExisting={editsExisting} onChange={() => {}}
-      agentSlot={<button type="button">Run with Codex</button>} />);
+      setupSlot={<button type="button">Connect Dropbox</button>} />);
     // Presence alone never says "Connected": that word waits for an
     // observed success on the transport.
     assert.match(html, /Access renews automatically\. Test the connection to verify it/);
     assert.doesNotMatch(html, /Connected\./);
     assert.match(html, /readOnly=""[^>]*value="shared-42"/);
-    assert.match(html, /Run with Codex/);
+    assert.match(html, /Connect Dropbox/);
     assert.match(html, /Refresh token/);
     assert.doesNotMatch(html, /Access token/);
     const credentialInput = html.match(/<input type="password"[^>]*>/)?.[0] ?? "";
@@ -1119,11 +1181,11 @@ test("the guide row and credential field say what the transport last observed", 
   const render = (connection: StorageConnectionHealth | null) => renderToStaticMarkup(
     <StorageEditor descriptor={dropboxProvider} form={form} secretPresence={presence}
       disabled={false} editsExisting onChange={() => {}} connection={connection}
-      agentSlot={<button type="button">Reconnect with Codex</button>} />,
+      setupSlot={<button type="button">Reconnect Dropbox</button>} />,
   );
   const unknown = render(null);
   assert.match(unknown, /role="note"/);
-  assert.match(unknown, /Access renews automatically\. Test the connection to verify it, or use the agent to reconnect\./);
+  assert.match(unknown, /Access renews automatically\. Test the connection to verify it, or reconnect below\./);
   assert.doesNotMatch(unknown, /Connected\./);
   assert.match(unknown, /placeholder="Stored — type to replace"/);
 
@@ -1140,7 +1202,7 @@ test("the guide row and credential field say what the transport last observed", 
   assert.match(refused, /data-icon="alert-triangle"/);
   assert.match(refused, /storage-setup-guide-error">Dropbox rejected the saved authorization\. Reconnect Dropbox to restore access\.</);
   assert.match(refused, /placeholder="Rejected by Dropbox — paste a replacement"/);
-  assert.match(refused, /Reconnect with Codex/);
+  assert.match(refused, /Reconnect Dropbox/);
   assert.doesNotMatch(refused, /Connected|req-1/);
 
   const expired = render({ state: "token_expired", code: "dropbox_token_expired", message: "The Dropbox access token expired.", observed_at: 3 });
@@ -1227,7 +1289,7 @@ test("a refused credential badges the index and the rail and leads to the settin
     assert.match(readFileSync(path, "utf8"), /onOpenStorage\(storage\.storage_id, connectionSuspends\(storage\.connection\)\)/);
   }
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
-  assert.match(workspace, /const agentVerb = creatingStorage \? "Run with" : "Reconnect with";/);
+  assert.match(workspace, /<DropboxSetupLane/);
   assert.match(workspace, /connectionSuspends\(storage\.connection\) \? \([\s\S]*?onClick=\{\(\) => onOpenStorage\(storage\.storage_id, true\)\}[\s\S]*?Reconnect \{storage\.provider_label\}/);
   assert.match(workspace, /key: "storage-connection",[\s\S]*?message: connectionDetail\(storageConnection\)/);
   assert.match(workspace, /connection=\{creatingStorage \? null : storageConnection\}/);
@@ -1235,12 +1297,666 @@ test("a refused credential badges the index and the rail and leads to the settin
   assert.match(shell, /listen<StorageConnectionChangedEvent>\(\s*"project-sync-storage-connection-changed"/);
 });
 
-test("Dropbox agent watcher adopts only a complete exact draft with managed credentials", () => {
+test("Dropbox preparation adopts only a complete exact draft with managed credentials", () => {
   const start = cloudDraft({ provider: "dropbox", provider_label: "Dropbox", name: "Dropbox storage 1", settings: {}, secrets: [], revision: 1 });
-  const marker = createAgentSetupMarker(start, start.name);
+  const marker = createStorageSetupMarker(start, start.name);
   const ready = { ...start, revision: 2, settings: { namespace_id: "shared-42" }, secrets: [{ secret_id: "refresh_token", present: true }] };
-  assert.equal(reconcileAgentSetup(marker, dropboxProvider, [ready]).kind, "adopt");
-  assert.equal(reconcileAgentSetup(marker, dropboxProvider, [{ ...ready, secrets: [] }]).kind, "preserve");
-  assert.equal(reconcileAgentSetup(marker, dropboxProvider, [{ ...ready, draft_id: "another-draft" }]).kind, "preserve");
-  assert.equal(reconcileAgentSetup(marker, dropboxProvider, [{ ...ready, revision: 1 }]).kind, "preserve");
+  assert.equal(reconcileStorageSetup(marker, dropboxProvider, [ready]).kind, "adopt");
+  assert.equal(reconcileStorageSetup(marker, dropboxProvider, [{ ...ready, secrets: [] }]).kind, "preserve");
+  assert.equal(reconcileStorageSetup(marker, dropboxProvider, [{ ...ready, draft_id: "another-draft" }]).kind, "preserve");
+  assert.equal(reconcileStorageSetup(marker, dropboxProvider, [{ ...ready, revision: 1 }]).kind, "preserve");
+});
+
+/* A provider that can look in its account declares every sentence the
+   Use-existing door and lane print; the page never names it. */
+const discoveryProvider: StorageProviderDescriptor = {
+  ...cloudProvider,
+  discovery: {
+    unit: "bucket",
+    unit_plural: "buckets",
+    place: "your Cloud A account",
+    create_hint: "A new bucket in your Cloud A account, made by the agent or by hand.",
+    existing_hint: "Use a shared R2 bucket with your team, or connect your own.",
+    existing_help: { label: "Set up team access", url: "https://example.test/account-members" },
+    find_label: "Find in my account",
+    access_hint: "Uses your Cloud A sign-in. Read-only: lists the buckets and reads one marker file in each.",
+    scanning_hint: "Looking through your Cloud A account…",
+    prepare_hint: "Cloud A issues an access key for this bucket only.",
+  },
+};
+
+function scanResult(patch: Partial<StorageDiscoveryResult> = {}): StorageDiscoveryResult {
+  return {
+    scan_id: "scan-1",
+    scope: "He Qu · 023e105f…72d0c353 · Default and EU jurisdictions",
+    status: "partial",
+    issues: ["1 bucket could not be read (team-archive: access denied)."],
+    candidates: [
+      { candidate_id: "c-1", name: "mallard-otter", marker: "storage", marker_detail: "layout 1", facts: [{ label: "Jurisdiction", value: "Default" }], cautions: [], connected_storage_id: "storage-cloud" },
+      { candidate_id: "c-2", name: "mallard-brave", identity: "ns 1234567890", marker: "storage", marker_detail: "layout 1", facts: [{ label: "Jurisdiction", value: "EU" }, { label: "Created", value: "Sep 2" }], cautions: ["Viewer — Push will be refused"] },
+      { candidate_id: "c-3", name: "mallard-gently", marker: "unsupported", marker_detail: "layout 2", facts: [], cautions: [] },
+      { candidate_id: "c-4", name: "assets-prod", marker: "missing", facts: [], cautions: [] },
+      { candidate_id: "c-5", name: "www-static", marker: "missing", facts: [], cautions: [] },
+      { candidate_id: "c-6", name: "team-archive", marker: "unreadable", marker_detail: "access denied", facts: [], cautions: [] },
+    ],
+    ...patch,
+  };
+}
+
+function renderDiscoveryPanel(state: DiscoveryState, selectedId: string | null = null, manualEntry = false) {
+  return renderToStaticMarkup(
+    <StorageDiscoveryPanel
+      descriptor={discoveryProvider}
+      discovery={discoveryProvider.discovery!}
+      state={state}
+      selectedId={selectedId}
+      storages={[cloudSummary()]}
+      manualEntry={manualEntry}
+      disabled={false}
+      onScan={() => undefined}
+      onCancelScan={() => undefined}
+      onSelect={() => undefined}
+      onOpenStorage={() => undefined}
+      onToggleManual={() => undefined}
+      onCreateInstead={() => undefined}
+    />,
+  );
+}
+
+test("a provider that can look in its account asks a new draft Create new or Use existing before any lane", () => {
+  const render = (
+    mode: StorageSetupMode | null,
+    manualEntry = false,
+    editsExisting = false,
+    descriptor = discoveryProvider,
+  ) => renderToStaticMarkup(
+    <StorageEditor
+      descriptor={descriptor}
+      form={emptyForm}
+      secretPresence={{}}
+      disabled={false}
+      editsExisting={editsExisting}
+      onChange={() => undefined}
+      setupMode={{ mode, onChoose: () => undefined }}
+      discoverySlot={<div id="discovery-slot" />}
+      manualEntry={manualEntry}
+      setupSlot={<button type="button">Connect Dropbox</button>}
+    />,
+  );
+  const asking = render(null);
+  assert.match(asking, /class="storage-mode-doors" role="radiogroup"/);
+  assert.match(asking, /<strong>Create new<\/strong>/);
+  assert.match(asking, /A new bucket in your Cloud A account, made by the agent or by hand\./);
+  assert.match(asking, /<strong>Use existing<\/strong>/);
+  assert.match(asking, /Use a shared R2 bucket with your team, or connect your own\./);
+  assert.match(asking, /<\/button><a class="btn-link storage-mode-help" href="https:\/\/example\.test\/account-members" target="_blank" rel="noopener noreferrer">Set up team access <svg/);
+  assert.doesNotMatch(asking, /Set up with an agent|Manual setup|API URL|discovery-slot/);
+
+  // Create new is today's card, with the doors kept as a switch above it.
+  const creating = render("create");
+  assert.match(creating, /class="storage-mode-door" role="radio" aria-checked="true"><span class="storage-mode-door-title">[\s\S]*?<strong>Create new<\/strong>/);
+  assert.match(creating, /aria-checked="false"><span class="storage-mode-door-title">[\s\S]*?<strong>Use existing<\/strong>/);
+  assert.doesNotMatch(creating, /Set up with an agent|Connect Dropbox/);
+  assert.match(creating, /API URL/);
+  assert.doesNotMatch(creating, /discovery-slot/);
+
+  // Use existing seats the look where the lanes were; the fields unfold
+  // only for a connection pasted by hand.
+  const existing = render("existing");
+  assert.match(existing, /discovery-slot/);
+  assert.doesNotMatch(existing, /Set up with an agent|Manual setup|API URL/);
+  assert.match(render("existing", true), /discovery-slot[\s\S]*API URL/);
+
+  // An existing storage is past the question, and so is a provider that cannot look.
+  assert.doesNotMatch(render(null, false, true), /storage-mode-doors/);
+  const plain = render(null, false, false, cloudProvider);
+  assert.doesNotMatch(plain, /storage-mode-doors/);
+  assert.doesNotMatch(plain, /Set up with an agent/);
+  assert.match(plain, /API URL/);
+});
+
+test("the discovery panel groups what the scan found by marker and offers only Mallard storages", () => {
+  const html = renderDiscoveryPanel({ kind: "result", result: scanResult() }, "c-2");
+  assert.match(html, /He Qu · 023e105f…72d0c353 · Default and EU jurisdictions · 6 buckets checked, read-only\./);
+  assert.match(html, /2 Mallard storages · 2 without Mallard data · 1 unsupported · 1 could not be read/);
+  // A short list is not an empty one: the partial scan says what it skipped.
+  assert.match(html, /class="notice warning storage-found-notice" role="alert"/);
+  assert.match(html, /Scan incomplete\.<\/strong> 1 bucket could not be read \(team-archive: access denied\)\. A Mallard storage there would not be listed\./);
+  for (const head of ["Mallard storages", "Needs a newer Mallard", "Other buckets — no Mallard data", "Could not be checked"]) {
+    assert.match(html, new RegExp(`<span>${head}</span>`));
+  }
+  // Four rows are drawn (the ones without Mallard data stay folded); only
+  // the readable storage nobody is connected to can be chosen.
+  assert.equal(html.match(/type="radio"/g)?.length, 4);
+  assert.equal(html.match(/type="radio"[^>]*disabled=""/g)?.length, 3);
+  assert.match(html, /aria-label="Use mallard-brave"[^>]*checked=""/);
+  assert.match(html, /class="storage-found-row selected"/);
+  assert.match(html, /<code>ns 1234567890<\/code>/);
+  assert.match(html, /Connected · Cloud storage/);
+  assert.match(html, /class="btn btn-ghost"[^>]*>Open</);
+  assert.match(html, /Viewer — Push will be refused/);
+  assert.match(html, /<span>Jurisdiction<\/span><b>EU<\/b>/);
+  assert.match(html, /Mallard storage · layout 1/);
+  assert.match(html, /Needs a newer Mallard · layout 2/);
+  assert.match(html, /Could not read the marker · access denied/);
+  assert.doesNotMatch(html, /assets-prod|www-static/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /Enter by hand/);
+  assert.match(renderDiscoveryPanel({ kind: "result", result: scanResult() }, "c-2", true), /Hide fields/);
+});
+
+test("the discovery panel states the wait, the empty scan, and a scan that could not start", () => {
+  assert.match(renderDiscoveryPanel({ kind: "idle" }), /Find in my account/);
+  const scanning = renderDiscoveryPanel({ kind: "scanning" });
+  assert.match(scanning, /status-loader[\s\S]*Looking through your Cloud A account…/);
+  assert.match(scanning, />Cancel</);
+  assert.doesNotMatch(scanning, /Find in my account/);
+
+  const empty = renderDiscoveryPanel({
+    kind: "result",
+    result: scanResult({ status: "complete", issues: [], candidates: scanResult().candidates.filter((candidate) => candidate.marker === "missing") }),
+  });
+  assert.match(empty, /No Mallard storage in your Cloud A account\./);
+  assert.match(empty, /2 buckets checked; none holds Mallard data\. Nothing was changed\./);
+  assert.match(empty, /Create a new bucket instead/);
+  assert.doesNotMatch(empty, /Scan incomplete|type="radio"/);
+
+  const failed = renderDiscoveryPanel({ kind: "error", message: "Wrangler is not signed in on this Mac." });
+  assert.match(failed, /class="notice danger storage-found-notice" role="alert"/);
+  assert.match(failed, /Could not look in your Cloud A account\.<\/strong> Wrangler is not signed in on this Mac\./);
+  assert.match(failed, /Try again/);
+
+  // The browser step keeps the list in view, inert, and says whose turn it is.
+  const preparing = renderDiscoveryPanel({ kind: "preparing", candidate: scanResult().candidates[1], result: scanResult() });
+  assert.match(preparing, /Approve access to mallard-brave in your browser\. Cloud A issues an access key for this bucket only\./);
+  assert.doesNotMatch(preparing, /Enter by hand|Find in my account/);
+  assert.equal(preparing.match(/type="radio"[^>]*disabled=""/g)?.length, 4);
+});
+
+test("Dropbox selection uses the saved scan and exact draft through direct commands", () => {
+  const source = readFileSync("src/components/project-sync/DropboxSetup.tsx", "utf8");
+  assert.match(source, /saved.draft_id, saved.revision, login.session_id/);
+  assert.match(source, /scan!.scan_id/);
+  assert.match(source, /candidate\?\.candidate_id/);
+  const api = readFileSync("src/components/project-sync/api.ts", "utf8");
+  assert.match(api, /"discover_dropbox_storage"/);
+  assert.match(api, /"prepare_dropbox_storage"/);
+  assert.doesNotMatch(api, /launch_storage_setup_assistant|storage_setup_assistant_instruction|prepare_storage_draft_from_discovery/);
+});
+
+const noop = () => undefined;
+const wranglerProvider: StorageProviderDescriptor = { ...discoveryProvider, managed_secret_id: null, local_setup: "wrangler" };
+const account = { id: "1".repeat(32), name: "Personal" };
+
+/** The lane drawn from one state of the hand-off; the verbs are inert. */
+function r2Flow(state: Partial<R2SetupState>): R2SetupFlow {
+  return {
+    state: { ...idleR2State(), ...state },
+    isRunning: () => false,
+    start: noop, changeLogin: noop, continueWith: noop, setJurisdiction: noop, setName: noop, suggestAnother: noop,
+    createAndAuthorize: noop, useBucket: noop, cancel: async () => undefined, retry: noop, scanAgain: noop, dismiss: noop,
+  };
+}
+function renderLane(mode: R2SetupMode, state: Partial<R2SetupState>, disabled = false, bucketName?: string) {
+  return renderToStaticMarkup(
+    <div className="storage-setup-route-row agent r2-lane">
+      <R2SetupLane
+        mode={mode} flow={r2Flow(state)} disabled={disabled} descriptor={wranglerProvider} storages={[cloudSummary()]}
+        bucketName={bucketName} onOpenStorage={noop} onCreateInstead={noop} onReset={noop}
+      />
+    </div>,
+  );
+}
+const r2Scan = (patch: Partial<StorageDiscoveryResult> = {}) => scanResult({ scope: "Default, EU, US and FedRAMP", ...patch });
+
+test("local Wrangler setup offers collapsed manual entry and opens details at final review", () => {
+  const render = (editsExisting: boolean, setupDone = false) => renderToStaticMarkup(<StorageEditor
+    descriptor={wranglerProvider} form={formFromDraft(wranglerProvider, cloudDraft())}
+    secretPresence={{}} disabled={false} editsExisting={editsExisting} onChange={() => {}} setupDone={setupDone}
+    setupSlot={<R2SetupLane
+      mode={editsExisting ? "reconnect" : "create"} flow={r2Flow({})} disabled={false} descriptor={wranglerProvider}
+      storages={[]} onOpenStorage={noop} onCreateInstead={noop} onReset={noop}
+    />}
+  />);
+  const creating = render(false);
+  assert.match(creating, /class="storage-setup-route-row agent r2-lane"[^>]*>[\s\S]*?Wrangler setup[\s\S]*?Set up with Wrangler/);
+  assert.match(creating, /Creates a bucket and issues its key\./);
+  assert.match(creating, /Manual setup[\s\S]*aria-expanded="false" aria-label="Enter by hand"[^>]*><svg[^>]*data-icon="chevron-down"/);
+  assert.doesNotMatch(creating, /API URL/);
+  assert.doesNotMatch(creating, /Set up with an agent|Connect Dropbox|Run with Claude|Listening for your agent|Reset setup/);
+  assert.match(render(false, true), /Manual setup[\s\S]*API URL/);
+  const existing = render(true);
+  assert.match(existing, /Reconnect with Wrangler/);
+  assert.match(existing, /Issues a new key for this bucket\./);
+  assert.doesNotMatch(existing, /Manual setup|Set up with Wrangler/);
+  assert.match(existing, /API URL/);
+});
+
+test("the Use-existing Wrangler route offers manual expansion and preserves prepared drafts", () => {
+  const render = (setupDone = false, secretPresence = {}) => renderToStaticMarkup(<StorageEditor
+    descriptor={{ ...wranglerProvider, setup_guide_url: "https://example.test/r2-setup" }} form={emptyForm} secretPresence={secretPresence} disabled={false} editsExisting={false} onChange={() => {}}
+    setupMode={{ mode: "existing", onChoose: noop }} manualEntry={false}
+    setupDone={setupDone}
+    setupSlot={<R2SetupLane
+      mode="existing" flow={r2Flow({})} disabled={false} descriptor={wranglerProvider}
+      storages={[]} onOpenStorage={noop} onCreateInstead={noop} onReset={noop}
+    />}
+  />);
+  const initial = render();
+  assert.match(initial, /Find in my account/);
+  assert.match(initial, /Manual setup[\s\S]*Setup guide[\s\S]*aria-expanded="false" aria-label="Enter by hand"[^>]*><svg[^>]*data-icon="chevron-down"/);
+  assert.doesNotMatch(initial, /API URL|Access Key ID|API Secret/);
+  const html = render(true);
+  assert.match(html, /r2-lane[\s\S]*?Lists your buckets read-only[\s\S]*?Find in my account[\s\S]*?Manual setup[\s\S]*?Setup guide <svg[\s\S]*?API URL/);
+  assert.match(html, /Access Key ID/);
+  assert.match(html, /API Secret/);
+  assert.doesNotMatch(html, /Enter by hand|Hide fields|Set up with Wrangler/);
+  assert.match(render(false, { api_secret: true }), /Manual setup[\s\S]*Setup guide[\s\S]*API URL/);
+});
+
+test("the lane shows every step from the first one on, with Reset at its tail", () => {
+  const html = renderLane("create", { phase: "check", running: true });
+  const titles = [...html.matchAll(/class="r2-step-title">([^<]+)</g)].map((match) => match[1]);
+  assert.deepEqual(titles, ["Wrangler", "Sign in", "Account", "Bucket", "Authorize key", "Review"]);
+  assert.equal(html.match(/data-status="doing"/g)?.length, 1);
+  assert.equal(html.match(/data-status="todo"/g)?.length, 5);
+  assert.match(html, /Checking the install…/);
+  assert.match(html, /status-loader/);
+  assert.match(html, /class="btn storage-setup-guide-button btn-ghost"[^>]*>Cancel</);
+  assert.match(html, /title="Discards the entire local setup draft and all setup progress\. Any bucket already created in Cloudflare and any connected storage are kept\."[^>]*>[\s\S]*?Reset setup/);
+  assert.match(html, /Uses the Wrangler session; asks for a browser sign-in if there is none/);
+  assert.match(html, /Confirmed before anything is created or listed/);
+  assert.match(html, /Object Read &amp; Write · this bucket only/);
+  assert.match(html, /Test connection, then Finish setup/);
+  const existing = renderLane("existing", { phase: "check", running: true });
+  assert.match(existing, /class="r2-step-title">Buckets</);
+  assert.doesNotMatch(existing, /class="r2-step-title">Bucket</);
+  assert.doesNotMatch(renderLane("create", {}), /Reset setup|r2-steps/);
+});
+
+test("Wrangler dependency failures supply the install command and its agent message", () => {
+  const missing = renderLane("create", { phase: "check", failed: "wrangler_not_found" });
+  assert.match(missing, /data-status="failed"/);
+  assert.ok(missing.includes(WRANGLER_INSTALL_COMMAND));
+  assert.match(missing, /Not on PATH/);
+  assert.match(missing, /Copy command/);
+  assert.match(missing, /Copy agent message/);
+  assert.match(missing, /Try again/);
+  const runtime = renderLane("create", { phase: "check", failed: "wrangler_runtime_unavailable" });
+  assert.match(runtime, /Could not start · check the Node\.js and Wrangler installation/);
+  assert.match(runtime, /Try again/);
+  assert.doesNotMatch(runtime, /Copy command/);
+  assert.match(renderLane("create", { phase: "check", failed: "helper_unavailable" }), /The Mallard setup helper is missing · restart Mallard/);
+  const found = renderLane("create", { phase: "login", running: true, wrangler: { version: "4.125.0", path: "/opt/homebrew/bin/wrangler" } });
+  assert.match(found, /data-status="done"[\s\S]*?Wrangler[\s\S]*?4\.125\.0 · <code>\/opt\/homebrew\/bin\/wrangler<\/code>/);
+  assert.match(WRANGLER_INSTALL_AGENT_MESSAGE, /npm --version/);
+  assert.match(WRANGLER_INSTALL_AGENT_MESSAGE, /wrangler --version/);
+  assert.match(WRANGLER_INSTALL_AGENT_MESSAGE, /then stop/);
+  assert.doesNotMatch(WRANGLER_INSTALL_AGENT_MESSAGE, /draft-id|mallard-cli|secret|token|credential/);
+  assert.equal(r2SetupErrorCode({ code: "wrangler_not_found", message: "private-canary" }), "wrangler_not_found");
+  assert.equal(r2SetupErrorCode({ code: "private-canary" }), "setup_failed");
+  assert.equal(r2SetupErrorCode({ code: "constructor" }), "setup_failed");
+  assert.equal(r2SetupErrorCode("private-canary"), "setup_failed");
+  assert.equal(r2SetupErrorCode({ code: "cancelled" }), "cancelled");
+});
+
+test("browser steps hand the link over, count down its budget, and never open a browser themselves", () => {
+  const link = { stage: "login" as const, url: "https://example.test/private-link-canary" };
+  const login = renderLane("create", { phase: "login", running: true, link }, true);
+  assert.match(login, /Sign in to Cloudflare in a browser on this computer · <span class="r2-countdown">3:00<\/span>/);
+  assert.match(login, /<button[^>]*class="btn storage-setup-guide-button btn-primary"[^>]*>[\s\S]*?Copy login link</);
+  assert.match(login, /Open browser/);
+  assert.match(login, /class="btn storage-setup-guide-button btn-ghost"[^>]*>Cancel</);
+  const buttonFor = (html: string, label: string) => html.match(new RegExp(`<button[^>]*>(?:(?!<button)[\\s\\S])*?${label}</button>`))?.[0] ?? "";
+  for (const label of ["Copy login link", "Open browser", "Cancel"]) {
+    assert.ok(buttonFor(login, label) && !buttonFor(login, label).includes('disabled=""'), `${label} stays live`);
+  }
+  assert.ok(buttonFor(login, "Reset setup").includes('disabled=""'), "Reset waits for the run");
+  assert.doesNotMatch(login, /private-link-canary/);
+  const consent = renderLane("create", { phase: "authorize", running: true, link: { stage: "bucket", url: link.url } }, true);
+  assert.match(consent, /Approve access in a browser on this computer · <span class="r2-countdown">2:00<\/span>/);
+  assert.match(consent, /Copy authorization link/);
+  assert.match(consent, /Open browser/);
+  assert.doesNotMatch(consent, /3:00|Copy login link/);
+  // The same verbs serve the existing-bucket path.
+  const existingConsent = renderLane("existing", { phase: "authorize", running: true, account, scan: r2Scan(), chosen: r2Scan().candidates[1], link: { stage: "bucket", url: link.url } }, true);
+  assert.match(existingConsent, /Copy authorization link[\s\S]*?Open browser[\s\S]*?Cancel/);
+  const signingIn = renderLane("create", { phase: "login", running: true }, true);
+  assert.match(signingIn, /Starting sign-in…/);
+  assert.doesNotMatch(signingIn, /Open browser|Copy login link/);
+  const stopping = renderLane("create", { phase: "login", running: true, link, cancelling: true }, true);
+  assert.match(stopping, /<button[^>]*disabled=""[^>]*>Cancelling…</);
+  const stopped = renderLane("create", { phase: "login", cancelled: true });
+  assert.match(stopped, /data-status="stopped"/);
+  assert.match(stopped, /Stopped/);
+  assert.match(stopped, /Try again/);
+  assert.doesNotMatch(stopped, /Open browser|Copy login link/);
+  assert.match(renderLane("create", { phase: "login", failed: "sign_in_required" }), /Sign-in did not complete[\s\S]*?Try again/);
+  // The link is opened only by the Open browser button, never on arrival.
+  const source = readFileSync("src/components/project-sync/R2Setup.tsx", "utf8");
+  assert.equal(source.match(/openExternalUrl\(/g)?.length, 1);
+  assert.match(source, /Open browser<\/>, \(\) => void openExternalUrl\(url\)/);
+});
+
+test("the account is confirmed before anything is listed or made, with Change login beside Continue", () => {
+  const one = renderLane("create", { phase: "account", accounts: [account], account });
+  assert.match(one, /Personal · <code>11111111…11111111<\/code>/);
+  assert.doesNotMatch(one, /<select/);
+  assert.match(one, /<button[^>]*class="btn storage-setup-guide-button btn-primary"[^>]*>Continue</);
+  assert.doesNotMatch(one, /<button[^>]*disabled=""[^>]*>Continue/);
+  assert.equal(one.match(/Change login/g)?.length, 1, "one Change login, on the account line");
+  const choice = renderLane("existing", { phase: "account", accounts: [account, { id: "2".repeat(32), name: "Team" }] });
+  assert.match(choice, /2 accounts in this session/);
+  assert.match(choice, /<select[^>]*aria-label="Cloudflare account"/);
+  assert.match(choice, /Choose an account/);
+  assert.match(choice, /Personal · 11111111…11111111/);
+  assert.match(choice, /Team/);
+  assert.match(choice, /<button[^>]*disabled=""[^>]*>Continue/);
+  assert.equal(choice.match(/Change login/g)?.length, 1);
+  assert.doesNotMatch(choice, /storage-found-row|Looking across/, "nothing is listed before Continue");
+  const picked = renderLane("create", { phase: "bucket", accounts: [account], account, name: "mallard-fox", proposal: "mallard-fox" });
+  assert.match(picked, /data-status="done"[\s\S]*?Account[\s\S]*?Personal · <code>11111111…11111111<\/code>/);
+  assert.doesNotMatch(picked, /<select|>Continue</);
+  assert.match(picked, /role="radiogroup" aria-label="Jurisdiction"/);
+  for (const label of ["Default", "EU", "US", "FedRAMP"]) assert.match(picked, new RegExp(`role="radio" aria-checked="(?:true|false)"[^>]*>${label}<`));
+  assert.match(picked, /aria-checked="true"[^>]*>Default</);
+  assert.match(picked, /Create &amp; authorize/);
+  assert.match(picked, /class="r2-name-input"/);
+  assert.equal(picked.match(/Change login/g)?.length, 1, "past the confirmation it moves to the sign-in line");
+  const unavailable = renderLane("create", { phase: "account", failed: "account_unavailable", accounts: [account] });
+  assert.match(unavailable, /No longer available · check the login[\s\S]*?Try again[\s\S]*?Change login/);
+});
+
+test("the bucket line proposes a name in a field, takes a rename, and hands a taken one back", () => {
+  const proposed = renderLane("create", { phase: "bucket", account, name: "mallard-fox", proposal: "mallard-fox" });
+  assert.match(proposed, /<input[^>]*class="r2-name-input"/);
+  assert.match(proposed, /aria-label="Bucket name"/);
+  assert.match(proposed, /value="mallard-fox"/);
+  assert.doesNotMatch(proposed, /aria-invalid="true"/);
+  assert.match(proposed, /· proposed by Mallard/);
+  assert.equal(proposed.match(/Suggest another/g)?.length, 1);
+  assert.match(proposed, /<button[^>]*class="btn storage-setup-guide-button btn-primary"[^>]*>Create &amp; authorize/);
+  assert.doesNotMatch(proposed, /<button[^>]*disabled=""[^>]*>Create &amp; authorize/);
+  assert.doesNotMatch(proposed, /Try again|named by Mallard/);
+  const renamed = renderLane("create", { phase: "bucket", account, name: "team-backups", proposal: "mallard-fox" });
+  assert.match(renamed, /value="team-backups"/);
+  assert.match(renamed, /· renamed/);
+  const invalid = renderLane("create", { phase: "bucket", account, name: "Team_Backups", proposal: "mallard-fox" });
+  assert.match(invalid, /aria-invalid="true"/);
+  assert.match(invalid, /· lowercase letters, numbers or hyphens only/);
+  assert.match(invalid, /<button[^>]*disabled=""[^>]*>Create &amp; authorize/);
+  assert.match(renderLane("create", { phase: "bucket", account, name: "ab", proposal: "mallard-fox" }), /· 3–63 characters/);
+  assert.match(renderLane("create", { phase: "bucket", account, name: "team-", proposal: "mallard-fox" }), /· starts and ends with a letter or number/);
+  const taken = renderLane("create", { phase: "bucket", account, failed: "bucket_name_taken", name: "team-backups", proposal: "mallard-fox" });
+  assert.match(taken, /data-status="failed"[\s\S]*?Bucket/);
+  assert.match(taken, /value="team-backups"/);
+  assert.match(taken, /· already exists in this account · choose another name/);
+  assert.match(taken, /role="radiogroup" aria-label="Jurisdiction"/, "nothing was created: the jurisdiction stays open");
+  assert.match(taken, /<button[^>]*class="btn storage-setup-guide-button btn-primary"[^>]*>Create &amp; authorize/);
+  assert.doesNotMatch(taken, /Try again/);
+  const locked = renderLane("create", { phase: "bucket", account, name: "mallard-fox", proposal: "mallard-fox" }, true);
+  assert.match(locked, /<input[^>]*class="r2-name-input"[^>]*disabled=""/);
+  assert.match(locked, /<button[^>]*disabled=""[^>]*>Create &amp; authorize/);
+  const reconnect = renderLane("reconnect", { phase: "bucket", account }, false, "team-backup");
+  assert.doesNotMatch(reconnect, /r2-name-input|Suggest another|aria-label="Jurisdiction"/);
+  const failedProposal = renderLane("create", { phase: "bucket", account, failed: "setup_failed" });
+  assert.match(failedProposal, /Could not finish[\s\S]*?Try again/);
+  assert.doesNotMatch(failedProposal, /r2-name-input/);
+  for (const [name, issue] of [
+    ["mallard-fox", null], ["a-1", null], ["a1", "3–63 characters"], ["x".repeat(64), "3–63 characters"],
+    ["Team", "lowercase letters, numbers or hyphens only"], ["team backups", "lowercase letters, numbers or hyphens only"],
+    ["-team", "starts and ends with a letter or number"], ["team-", "starts and ends with a letter or number"],
+  ] as const) {
+    assert.equal(bucketNameIssue(name), issue, name);
+  }
+  // The create asks for the bucket already made, else the field's name.
+  const lane = readFileSync("src/components/project-sync/R2Setup.tsx", "utf8");
+  assert.match(lane, /const requested = bucket \?\? name\.trim\(\);/);
+  assert.match(lane, /api\.setupR2Storage\(saved\.draft_id, saved\.revision, account\.id, jurisdiction, requested, progressFor\(live\)\)/);
+});
+
+test("the bucket line keeps the created name through an expired consent and a stop", () => {
+  const creating = renderLane("create", { phase: "create", running: true, account, name: "mallard-fox", proposal: "mallard-fox" });
+  assert.match(creating, /Creating <code>mallard-fox<\/code>…/);
+  assert.doesNotMatch(creating, /r2-name-input/);
+  assert.match(creating, /<button[^>]*>Cancel</);
+  const created = renderLane("create", { phase: "create", running: true, account, bucket: "mallard-fox", jurisdiction: "eu" });
+  assert.match(created, /<code>mallard-fox<\/code> · EU · created/);
+  const expired = renderLane("create", { phase: "authorize", failed: "authorization_timeout", account, bucket: "mallard-fox" });
+  assert.match(expired, /Expired after 2 minutes · mallard-fox kept/);
+  assert.match(expired, /Try again/);
+  assert.match(expired, /<code>mallard-fox<\/code> · Default · created/);
+  const stopped = renderLane("create", { phase: "authorize", cancelled: true, account, bucket: "mallard-fox" });
+  assert.match(stopped, /Stopped · mallard-fox kept[\s\S]*?Try again/);
+  const unknown = renderLane("create", { phase: "create", failed: "creation_unknown", account });
+  assert.match(unknown, /Creation result unknown/);
+  assert.doesNotMatch(unknown, /Try again/);
+  assert.match(unknown, /Reset setup/);
+});
+
+test("the Buckets step lists the scan with the verb on the row and one Scan again", () => {
+  const html = renderLane("existing", { phase: "pick", account, scan: r2Scan() });
+  assert.match(html, /6 checked · read-only/);
+  assert.equal(html.match(/Scan again/g)?.length, 1);
+  assert.doesNotMatch(html, /type="radio"/);
+  assert.match(html, /class="storage-found-row with-verb"/);
+  assert.match(html, /<button[^>]*class="btn btn-primary storage-setup-guide-button"[^>]*aria-label="Use mallard-brave and authorize"[^>]*>Use &amp; authorize</);
+  assert.equal(html.match(/Use &amp; authorize/g)?.length, 1, "only the storage nobody is connected to carries the verb");
+  assert.match(html, /Connected · Cloud storage/);
+  assert.match(html, /class="btn btn-ghost"[^>]*>Open</);
+  const notice = html.match(/<div class="notice warning storage-found-notice"[\s\S]*?<\/p><\/div><\/div>/)?.[0] ?? "";
+  assert.match(notice, /Scan incomplete\.<\/strong> 1 bucket could not be read \(team-archive: access denied\)\. A Mallard storage there would not be listed\./);
+  assert.doesNotMatch(notice, /<button/, "the notice states; the Buckets line holds the verb");
+  for (const head of ["Mallard storages", "Needs a newer Mallard", "Other buckets — no Mallard data", "Could not be checked"]) {
+    assert.match(html, new RegExp(`<span>${head}</span>`));
+  }
+  assert.match(html, /<span>Jurisdiction<\/span><b>EU<\/b>/);
+  assert.match(html, /Could not read the marker · access denied/);
+  const finding = renderLane("existing", { phase: "find", running: true, account });
+  assert.match(finding, /Looking across Default, EU, US and FedRAMP · read-only/);
+  assert.match(finding, /<button[^>]*>Cancel</);
+  assert.doesNotMatch(finding, /Scan again/);
+  const empty = renderLane("existing", {
+    phase: "pick", account,
+    scan: r2Scan({ status: "complete", issues: [], candidates: r2Scan().candidates.filter((candidate) => candidate.marker === "missing") }),
+  });
+  assert.match(empty, /No Mallard storage in your Cloudflare account\./);
+  assert.match(empty, /2 buckets checked across Default, EU, US and FedRAMP\. Nothing was changed\./);
+  assert.match(empty, /Create a new bucket instead/);
+  const expiredScan = renderLane("existing", { phase: "find", failed: "draft_changed", account });
+  assert.match(expiredScan, /Scan expired[\s\S]*?Scan again/);
+  assert.doesNotMatch(expiredScan, /Try again|storage-found-row/);
+  const verifying = renderLane("existing", { phase: "verify", running: true, account, scan: r2Scan(), chosen: r2Scan().candidates[1] });
+  assert.match(verifying, /<code>mallard-brave<\/code> · EU/);
+  assert.match(verifying, /Checking <code>mallard-brave<\/code> is unchanged…/);
+  assert.doesNotMatch(verifying, /storage-found-row/, "the list folds into the line once a bucket is taken");
+});
+
+test("the ready line states the facts in chips and keeps Reset", () => {
+  const existing = renderLane("existing", { phase: "review", account, scan: r2Scan(), chosen: r2Scan().candidates[1] });
+  assert.match(existing, /Ready for review\./);
+  assert.match(existing, /<span>Bucket<\/span><b>mallard-brave<\/b>/);
+  assert.match(existing, /<span>Jurisdiction<\/span><b>EU<\/b>/);
+  assert.match(existing, /<span>Account<\/span><b>Personal<\/b>/);
+  assert.match(existing, /<span>Key<\/span><b>this bucket only<\/b>/);
+  assert.match(existing, /Reset setup/);
+  assert.doesNotMatch(existing, /r2-steps|Scan again/);
+  const created = renderLane("create", { phase: "review", account, bucket: "mallard-fox", jurisdiction: "us" });
+  assert.match(created, /<span>Bucket<\/span><b>mallard-fox<\/b>/);
+  assert.match(created, /<span>Jurisdiction<\/span><b>US<\/b>/);
+});
+
+test("the reconnect lane names the storage's bucket and authorizes without creating", () => {
+  const html = renderLane("reconnect", { phase: "bucket", account }, false, "team-backup");
+  assert.match(html, /<code>team-backup<\/code> · this storage’s bucket/);
+  assert.match(html, /<button[^>]*class="btn storage-setup-guide-button btn-primary"[^>]*>Authorize</);
+  assert.doesNotMatch(html, /aria-label="Jurisdiction"|Create &amp; authorize/);
+  assert.match(html, /Test connection, then Save storage/);
+  assert.match(renderLane("reconnect", { phase: "create", running: true, account, bucket: "team-backup" }, true, "team-backup"), /<code>team-backup<\/code> · kept/);
+});
+
+test("Wrangler completion loads the exact prepared draft without a watcher event", async () => {
+  const saved = cloudDraft({ revision: 4 });
+  const prepared = cloudDraft({ revision: 5 });
+  const calls: unknown[] = [];
+  const result = await loadPreparedR2Draft(saved, cloudProvider, () => true, {
+    getStorageSetupDraft: async (id) => { calls.push(id); return prepared; },
+  });
+  assert.equal(result, prepared);
+  assert.deepEqual(calls, [saved.draft_id]);
+});
+
+test("Wrangler completion cannot adopt a result after a form edit or navigation", async () => {
+  const saved = cloudDraft({ revision: 4 });
+  const prepared = cloudDraft({ revision: 5 });
+  for (const staleAt of ["before", "load"]) {
+    let current = staleAt !== "before";
+    let loads = 0;
+    const result = await loadPreparedR2Draft(saved, cloudProvider, () => current, {
+      getStorageSetupDraft: async () => { loads += 1; current = false; return prepared; },
+    });
+    assert.equal(result, null);
+    assert.equal(loads, staleAt === "load" ? 1 : 0);
+  }
+});
+
+test("Wrangler completion rejects a changed identity", async () => {
+  const saved = cloudDraft({ revision: 4 });
+  for (const prepared of [null, saved, cloudDraft({ revision: 5, provider: "another-provider" }), cloudDraft({ revision: 5, draft_id: "another-draft" })]) {
+    await assert.rejects(loadPreparedR2Draft(saved, cloudProvider, () => true, {
+      getStorageSetupDraft: async () => prepared,
+    }), { code: "draft_changed" });
+  }
+});
+
+test("R2 setup uses a synchronous busy guard and blocks conflicting actions", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /const run = async[^]*?if \(\(r2\.isRunning\(\) \|\| dropbox\.isRunning\(\)\)\) return;/);
+  assert.match(workspace, /const saveStorageDraftBeforeNavigation = async[^]*?if \(\(r2\.isRunning\(\) \|\| dropbox\.isRunning\(\)\)\) return false;/);
+  assert.match(workspace, /const formLocked = busy \|\| !!runningAction \|\| r2\.state\.running \|\| dropbox\.state\.running;/);
+  assert.match(workspace, /blocked: \(\) => busy \|\| !!runningAction,/);
+  // Every run pins the draft it started on and saves it first.
+  assert.match(workspace, /persist: \(\) => persistStorageSetupDraft\(session, editVersion\),/);
+  const api = readFileSync("src/components/project-sync/api.ts", "utf8");
+  assert.match(api, /invoke<void>\("setup_r2_storage", \{ draftId, expectedRevision, accountId, jurisdiction, bucket, onProgress: r2ProgressChannel\(onProgress\) \}\)/);
+  assert.match(api, /invoke<string>\("propose_r2_bucket_name"\)/);
+});
+
+test("R2 suggested names keep the prefix and preserve custom names", () => {
+  const descriptor: StorageProviderDescriptor = {
+    ...cloudProvider, local_setup: "wrangler", default_name: "R2 storage",
+    name_suggestion: { source: "bucket", pattern: "^\\s*(\\S.*?)\\s*$", group: 1 },
+  };
+  for (const name of ["", "R2 storage", "R2 storage 1"]) {
+    assert.equal(storageNameIsAuto(descriptor, { name, settings: {} }), true);
+  }
+  assert.equal(suggestStorageName(descriptor, { bucket: "mallard-otter" }), "R2 mallard-otter");
+  assert.equal(suggestStorageName(descriptor, { bucket: "team-backup" }), "R2 team-backup");
+  assert.equal(suggestStorageName(descriptor, { bucket: "" }), null);
+  assert.equal(storageNameIsAuto(descriptor, { name: "R2 mallard-otter", settings: { bucket: "mallard-otter" } }), true);
+  for (const name of ["Team backup", "R2 team archive"]) {
+    assert.equal(storageNameIsAuto(descriptor, { name, settings: { bucket: "mallard-otter" } }), false);
+  }
+  const automatic = { name: "R2 mallard-otter", settings: { bucket: "mallard-otter" } };
+  const renamed = storageNameForSettings(descriptor, automatic, { bucket: "team-backup" });
+  assert.equal(renamed, "R2 team-backup", "changing the bucket replaces the automatic name without another prefix");
+  const cleared = { name: storageNameForSettings(descriptor, automatic, { bucket: "" }), settings: { bucket: "" } };
+  assert.equal(cleared.name, "R2 storage");
+  assert.equal(storageNameForSettings(descriptor, cleared, { bucket: "team-backup" }), "R2 team-backup");
+  assert.equal(storageNameForSettings(descriptor, { ...automatic, name: "Team archive" }, { bucket: "team-backup" }), "Team archive");
+});
+
+// Dropbox uses the same setup rows, with direct browser authorization.
+import { DropboxSetupLane, dropboxFolderNameIssue, type useDropboxSetup } from "../../src/components/project-sync/DropboxSetup";
+type DropboxFlow = ReturnType<typeof useDropboxSetup>;
+function dropboxFlow(state: Partial<DropboxFlow["state"]>): DropboxFlow {
+  return {
+    state: { phase: "idle", running: false, cancelling: false, error: null, link: null, login: null, account: null, name: "", proposal: null, creationStarted: false, scan: null, chosen: null, ...state },
+    isRunning: () => false, start: noop, confirmAccount: noop, scan: noop, prepare: noop,
+    cancel: async () => undefined, dismiss: noop, suggest: noop, setName: noop,
+  };
+}
+function renderDropbox(state: Partial<DropboxFlow["state"]>, mode: "create" | "existing" | "reconnect" = "create") {
+  return renderToStaticMarkup(<DropboxSetupLane flow={dropboxFlow(state)} mode={mode} descriptor={dropboxProvider} storages={[]}
+    disabled={state.running ?? false} onOpenStorage={noop} onCreateInstead={noop} onNewSetup={noop} onReset={noop} />);
+}
+const dropboxLogin = { session_id: "opaque-session", account: { id: "dbid:test", name: "Test User", email: "test@example.test" }, folder_name: null, creation_started: false };
+
+test("Dropbox consent offers the link to copy or open with Cancel on the line, never printed", () => {
+  const html = renderDropbox({ phase: "login", running: true, link: "https://www.dropbox.com/oauth2/authorize?state=fixture" });
+  assert.doesNotMatch(html, /oauth2\/authorize\?state=fixture/);
+  for (const label of ["Copy authorization link", "Open browser", "Cancel"]) {
+    const [, attributes] = html.match(new RegExp(`<button([^>]*)>(?:<svg[^>]*>(?:(?!</svg>)[^])*</svg> )?${label}</button>`)) ?? [];
+    assert.ok(attributes !== undefined, `${label} button`);
+    assert.doesNotMatch(attributes, /disabled/);
+  }
+  assert.match(html, /Approve access in a browser on this computer · <span class="r2-countdown">3:00<\/span>/);
+  assert.match(html, /Reset setup/);
+  assert.doesNotMatch(html, /Run with|Access code|app secret|Switch account/);
+});
+test("Dropbox before start says what the lane does and that consent is account-wide", () => {
+  const html = renderDropbox({ phase: "idle" });
+  assert.match(html, /storage-setup-agent-cta[^>]*>(?:<svg[^]*?<\/svg>)? Connect Dropbox</);
+  assert.match(html, /covers your whole account, not only this folder/);
+  assert.match(renderDropbox({ phase: "idle" }, "existing"), /Find in my Dropbox/);
+  assert.match(renderDropbox({ phase: "idle" }, "reconnect"), /Reconnect Dropbox/);
+});
+test("Dropbox requires account confirmation, with Change login beside Continue", () => {
+  const html = renderDropbox({ phase: "account", login: dropboxLogin, account: dropboxLogin.account });
+  assert.match(html, /Test User · <code>test@example\.test<\/code>/);
+  assert.match(html, /btn-primary[^>]*>Continue</);
+  assert.match(html, /Change login/);
+  assert.doesNotMatch(html, /Create &amp; connect<|Use &amp; connect<|Switch account/);
+});
+test("Dropbox names are editable and a conflict never silently chooses a replacement", () => {
+  const html = renderDropbox({ phase: "prepare", error: "dropbox_folder_name_taken", name: "My backup", proposal: "Mallard fox", login: dropboxLogin, account: dropboxLogin.account, creationStarted: true });
+  assert.match(html, /class="r2-name-input"[^>]*value="My backup"/);
+  assert.match(html, /aria-label="Dropbox folder name"/);
+  assert.match(html, /Suggest another/);
+  assert.match(html, /btn-primary[^>]*>Create &amp; connect</);
+  assert.match(html, /already exists in your Dropbox/);
+  assert.match(html, /New setup for another account/);
+  assert.doesNotMatch(html, /storage-setup-guide-error/);
+  const proposed = renderDropbox({ phase: "folder", name: "Mallard fox", proposal: "Mallard fox", login: dropboxLogin, account: dropboxLogin.account });
+  assert.match(proposed, /· proposed by Mallard/);
+  const invalid = renderDropbox({ phase: "folder", name: "a/b", proposal: "Mallard fox", login: dropboxLogin, account: dropboxLogin.account });
+  assert.match(invalid, /aria-invalid="true"/);
+  assert.match(invalid, /<button[^>]*disabled=""[^>]*>Create &amp; connect</);
+});
+test("Dropbox folder validation rejects paths and bounds UTF-8 bytes", () => {
+  for (const name of ["", ".", "..", " a", "a ", "a/b", "a\\b", "a\u0085", "é".repeat(128)]) assert.ok(dropboxFolderNameIssue(name));
+  for (const name of ["My backup", "é".repeat(127)]) assert.equal(dropboxFolderNameIssue(name), null);
+});
+test("Dropbox discovery only offers valid unconnected Mallard folders, with Use & connect on the row", () => {
+  const scan = scanResult();
+  const html = renderDropbox({ phase: "pick", login: dropboxLogin, account: dropboxLogin.account, scan }, "existing");
+  assert.equal(html.match(/>Use &amp; connect<\/button>/g)?.length, 1);
+  assert.match(html, /Scan again/);
+  assert.match(html, /Change login/);
+  assert.match(html, /checked · read-only/);
+});
+test("Dropbox reconnect keeps the storage’s folder and ends at Save storage, the footer’s verb", () => {
+  const prepare = renderDropbox({ phase: "prepare", running: true, name: "", login: dropboxLogin, account: dropboxLogin.account }, "reconnect");
+  assert.match(prepare, /This storage’s folder · kept/);
+  assert.match(prepare, /Renewing access…/);
+  assert.match(prepare, /Test connection, then Save storage/);
+  assert.doesNotMatch(prepare, /Create &amp; connect|Dropbox folder name|Finish setup/);
+  const review = renderDropbox({ phase: "review", name: "", login: null, account: dropboxLogin.account }, "reconnect");
+  assert.match(review, /Ready for review\./);
+  assert.match(review, /Account<\/span><b>Test User<\/b>/);
+  assert.match(review, /Access<\/span><b>account-wide · renews<\/b>/);
+  assert.match(review, /Reset setup/);
+  assert.doesNotMatch(review, /r2-steps|Finish setup/);
+});
+test("Dropbox timeout and revoked-token states say the reason on the Sign in line and permit fresh authorization", () => {
+  for (const error of ["dropbox_authorization_timeout", "dropbox_reconnect_required"]) {
+    const html = renderDropbox({ phase: "login", error });
+    assert.match(html, /data-status="failed"[^]*?class="r2-step-fact" role="alert"/);
+    assert.match(html, /btn-primary[^>]*>Try again</);
+    assert.doesNotMatch(html, /Dropbox authorization link|Copy authorization link|Open browser|storage-setup-guide-error/);
+  }
+  const unknown = renderDropbox({ phase: "prepare", error: "dropbox_setup_outcome_unknown", name: "My backup", login: dropboxLogin, account: dropboxLogin.account, creationStarted: true });
+  assert.match(unknown, /did not confirm the folder operation · inspect Dropbox before a new setup · the created folder is kept/);
+  assert.doesNotMatch(unknown, /Try again/);
+  assert.match(unknown, /New setup for another account/);
 });

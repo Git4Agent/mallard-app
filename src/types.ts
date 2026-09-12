@@ -649,15 +649,76 @@ export interface StorageSecretDescriptor {
   help_url?: string | null;
 }
 
-export interface StorageSetupAssistantDescriptor {
-  label: string;
-  description: string;
-  /** Selects the managed credential field when that saved secret is present. */
-  managed_secret_id?: string | null;
+
+
+/** The provider can look in the signed-in account for destinations Mallard
+ *  already uses. Every sentence the Use-existing door and lane print comes
+ *  from here, so the page never names a provider. */
+export interface StorageDiscoveryDescriptor {
+  /** What one candidate is called: "bucket", "shared folder". */
+  unit: string;
+  unit_plural: string;
+  /** Where the look happens, for prose: "your Cloudflare account". */
+  place: string;
+  /** The Create-new door's sentence. */
+  create_hint: string;
+  /** The Use-existing door's sentence. */
+  existing_hint: string;
+  /** Optional access guide beside the Use-existing choice. */
+  existing_help?: { label: string; url: string } | null;
+  /** The lane's verb: "Find in my account". */
+  find_label: string;
+  /** What the look signs in with, and that it only reads. */
+  access_hint: string;
+  /** Printed while the scan runs. */
+  scanning_hint: string;
+  /** Printed after "Approve access to <name> in your browser." while the
+   *  chosen destination's credential is being issued. */
+  prepare_hint: string;
 }
 
-/** Serializable storage-provider facts. The UI renders these; it never
- *  holds a fixed provider array. */
+/** What the R2 setup helper reports while it works, as it happens: which
+ *  Wrangler passed the check, a page to visit in the browser, the bucket a
+ *  setup will authorize. Mirrors `R2SetupProgress`. */
+export type R2SetupProgress =
+  | { status: "wrangler_ready"; version: string; path: string }
+  | { status: "authorization_link"; stage: "login" | "bucket"; url: string }
+  | { status: "bucket_ready"; bucket: string };
+
+/** Account choices returned by the local Wrangler check. */
+export interface R2Account {
+  id: string;
+  name: string;
+}
+
+/** Where a bucket's data lives. Cloudflare fixes it when the bucket is
+ *  created; a scan lists buckets across all four. */
+export type R2Jurisdiction = "default" | "eu" | "us" | "fedramp";
+
+export type R2SetupErrorCode =
+  | "wrangler_not_found"
+  | "wrangler_runtime_unavailable"
+  | "wrangler_update_required"
+  | "sign_in_required"
+  | "authorization_timeout"
+  | "authorization_unavailable"
+  | "account_ambiguous"
+  | "account_unavailable"
+  | "draft_changed"
+  | "setup_busy"
+  | "creation_unknown"
+  | "permission_denied"
+  | "identity_mismatch"
+  | "bucket_name_taken"
+  | "cancelled"
+  | "helper_unavailable"
+  | "setup_timeout"
+  | "setup_failed";
+
+export interface R2SetupFailure {
+  code: R2SetupErrorCode;
+}
+
 export interface StorageProviderDescriptor {
   key: StorageProviderKey;
   config_version: number;
@@ -676,11 +737,60 @@ export interface StorageProviderDescriptor {
   clear_mode: "revision_checked" | "unconditional" | "unavailable";
   fields: StorageFieldDescriptor[];
   secrets: StorageSecretDescriptor[];
-  setup_assistant?: StorageSetupAssistantDescriptor | null;
+  managed_secret_id?: string | null;
+  local_setup?: "wrangler" | "dropbox" | null;
   /** The provider's setup documentation, offered as a "Setup guide" link. */
   setup_guide_url?: string | null;
   /** The sentence introducing the manual fields; defaults to a generic one. */
   manual_setup_hint?: string | null;
+  /** Absent for a provider that cannot look in an account: the New-storage
+   *  card then has no Use-existing door. */
+  discovery?: StorageDiscoveryDescriptor | null;
+}
+
+/** What the marker read at a candidate's root said. Kept apart on purpose:
+ *  a missing marker is not an unreadable one, and neither is a marker
+ *  written by a newer layout. */
+export type StorageDiscoveryMarker = "storage" | "missing" | "unsupported" | "invalid" | "unreadable";
+
+/** One provider fact a candidate row shows as a chip. */
+export interface StorageDiscoveryFact {
+  label: string;
+  value: string;
+}
+
+/** One destination a scan checked. `candidate_id` is a reference inside its
+ *  scan, never a storage id; the destination itself stays with the backend,
+ *  which re-verifies it before any credential is issued. */
+export interface StorageDiscoveryCandidate {
+  candidate_id: string;
+  /** The provider's label for the destination — not its identity. */
+  name: string;
+  /** The identity printed beside the name when the name alone is not one
+   *  (a namespace ID); null when the name is the identity within the scope. */
+  identity?: string | null;
+  marker: StorageDiscoveryMarker;
+  /** The layout version found, or the fixed read error. */
+  marker_detail?: string | null;
+  facts: StorageDiscoveryFact[];
+  /** Access limits the row states: a share not mounted, a role that cannot Push. */
+  cautions: string[];
+  /** The configured storage that already points at this destination. */
+  connected_storage_id?: string | null;
+}
+
+/** A read-only look at the account for the draft's provider. */
+export interface StorageDiscoveryResult {
+  /** Names this scan to the prepare step; a later scan retires it. */
+  scan_id: string;
+  /** Who and where was looked at: the account and jurisdictions, or the
+   *  signed-in user and the shares covered. */
+  scope: string;
+  /** `partial` when a page, a read, or a limit stopped the scan short: the
+   *  candidates found still stand, and `issues` says what was skipped. */
+  status: "complete" | "partial";
+  issues: string[];
+  candidates: StorageDiscoveryCandidate[];
 }
 
 /** One safe, redacted fact about a configured storage. */
@@ -1536,4 +1646,17 @@ export interface ProjectActivity {
   window_end: number;
   older?: OlderActivity | null;
   storage_sync: StorageSyncSummary[];
+}
+
+export type DropboxSetupMode = "create" | "existing" | "reconnect";
+export interface DropboxSetupLogin {
+  session_id: string;
+  account: { id: string; name: string; email: string };
+  folder_name: string | null;
+  creation_started: boolean;
+}
+export interface DropboxSetupProgress {
+  status: "authorization_link";
+  url: string;
+  expires_in: number;
 }

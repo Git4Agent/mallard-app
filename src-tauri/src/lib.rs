@@ -47,6 +47,8 @@ pub use storage_catalog::service::{
 #[cfg(not(test))]
 pub fn run() {
     tauri::Builder::default()
+        .manage(project_sync::r2_setup::R2SetupControl::default())
+        .manage(project_sync::dropbox_setup::DropboxSetupControl::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -93,8 +95,18 @@ pub fn run() {
             project_sync::commands::list_storage_providers,
             project_sync::commands::rename_storage,
             project_sync::commands::remove_storage,
-            project_sync::commands::get_storage_setup_assistant_instruction,
-            project_sync::commands::launch_storage_setup_assistant,
+            project_sync::commands::setup_r2_storage,
+            project_sync::commands::propose_r2_bucket_name,
+            project_sync::commands::get_r2_setup_accounts,
+            project_sync::dropbox_setup::authorize_dropbox_setup,
+            project_sync::dropbox_setup::propose_dropbox_folder_name,
+            project_sync::dropbox_setup::discover_dropbox_storage,
+            project_sync::dropbox_setup::prepare_dropbox_storage,
+            project_sync::dropbox_setup::cancel_dropbox_setup,
+
+            project_sync::commands::cancel_r2_storage_setup,
+            project_sync::commands::discover_r2_storage,
+            project_sync::commands::prepare_existing_r2_storage,
             project_sync::commands::get_host_identity_status,
             project_sync::commands::list_local_projects,
             project_sync::commands::recover_startup_state,

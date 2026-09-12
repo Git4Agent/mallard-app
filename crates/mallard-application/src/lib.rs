@@ -5,3 +5,4 @@
 //! mechanics remain in `mallard-infrastructure`.
 
 pub mod storage_setup;
+pub mod dropbox_setup;

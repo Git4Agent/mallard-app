@@ -2299,6 +2299,7 @@ mod activity_only_tests {
     ) -> LocalConversationBinding {
         LocalConversationBinding {
             installed_end: None,
+            pulled_children_excluded: false,
             installed_subagents: Default::default(),
             path_origins_ref: None,
             host_id: resolved.binding.host_id.clone(),
@@ -2956,6 +2957,7 @@ mod activity_only_tests {
             .mutate_conversation_bindings(|bindings| {
                 bindings.bindings.push(LocalConversationBinding {
                     installed_end: None,
+                    pulled_children_excluded: false,
                     installed_subagents: Default::default(),
                     path_origins_ref: None,
                     host_id: resolved.binding.host_id.clone(),

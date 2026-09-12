@@ -19,6 +19,10 @@ pub struct StorageMarker {
 }
 
 impl StorageMarker {
+    pub fn layout_version(&self) -> u32 {
+        self.layout_version
+    }
+
     pub fn current() -> Self {
         Self {
             format: STORAGE_MARKER_FORMAT.to_string(),
@@ -93,5 +97,32 @@ mod tests {
         .unwrap();
         let error = ensure_storage_marker(&store).unwrap_err();
         assert!(error.contains("layout version 2"));
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerState {
+    Storage,
+    Missing,
+    Unsupported,
+    Invalid,
+    Unreadable,
+}
+
+
+pub fn classify_storage_marker(bytes: &[u8]) -> (MarkerState, Option<String>) {
+    let Ok(marker) = serde_json::from_slice::<StorageMarker>(bytes) else {
+        return (MarkerState::Invalid, None);
+    };
+    let layout = Some(format!("layout {}", marker.layout_version()));
+    if marker.validate().is_ok() {
+        return (MarkerState::Storage, layout);
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null);
+    if value["format"] == "mallard-storage" {
+        (MarkerState::Unsupported, layout)
+    } else {
+        (MarkerState::Invalid, None)
     }
 }

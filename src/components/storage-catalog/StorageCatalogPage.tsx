@@ -193,7 +193,8 @@ function Metric({ icon, value, detail, muted }: { icon: IconName; value: string;
 
 /** The ⓘ, carrying what a session card's debug menu carries: the row's paths
  * and digests, each a click to copy. Same wrapper, same popover. */
-function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevision: number | null }) {
+function InfoMenu({ row, storageRevision, kindNoun }: { row: CatalogScopeRow; storageRevision: number | null; kindNoun: string }) {
+  const title = `${kindNoun.charAt(0).toUpperCase()}${kindNoun.slice(1)} info`;
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -275,8 +276,8 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
         ref={triggerRef}
         type="button"
         className="btn btn-ghost sync-history-session-detail-action"
-        title="Paths and digests"
-        aria-label={`Paths and digests for ${row.display_name}`}
+        title={title}
+        aria-label={`${title} for ${row.display_name}`}
         aria-haspopup="dialog"
         aria-controls={menuId}
         aria-expanded={open}
@@ -307,12 +308,11 @@ function InfoMenu({ row, storageRevision }: { row: CatalogScopeRow; storageRevis
                until then so it never shows at the window origin. */
             : { visibility: "hidden" }}
           role="dialog"
-          aria-label="Paths and digests"
+          aria-label={title}
           hidden={!open}
         >
           <header>
-            <strong>Paths and digests</strong>
-            <span>Click a value to copy it.</span>
+            <strong>{title}</strong>
           </header>
           <div className="sync-history-debug-values">
             {/* No aria-label: it would replace the row's content as the
@@ -703,7 +703,7 @@ function ResourceCard({
           {/* The rule parts the two readouts from the one button. */}
           <span className="sync-history-actions-divider" aria-hidden="true" />
           <div className="sync-history-row-clickables">
-            <InfoMenu row={row} storageRevision={storageRevision} />
+            <InfoMenu row={row} storageRevision={storageRevision} kindNoun={kindNoun} />
           </div>
           {/* The tooltip is the whole point of this stop — which time this is
               — so it has to be the accessible name too, or a screen reader

@@ -1805,6 +1805,10 @@ pub struct LocalConversationBinding {
     /// Local output byte cutoff from Pull. Native sources use explicit null.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub installed_end: Option<u64>,
+    /// The installed Pull version excluded child transcripts. Native threads
+    /// and bindings without this field keep agent cards visible.
+    #[serde(default)]
+    pub pulled_children_excluded: bool,
     pub installed_subagents: BTreeMap<SubagentKey, InstalledSubagent>,
     pub materialization_state: ConversationMaterializationState,
     pub revision: u64,
@@ -1820,6 +1824,8 @@ impl LocalConversationBinding {
             .is_some_and(|end| end == 0 || end > MAX_CONVERSATION_FILE_BYTES)
             || (self.installed_end.is_none() && !self.installed_subagents.is_empty())
             || (self.installed_end.is_some() && self.provider_thread_id.is_none())
+            || (self.pulled_children_excluded
+                && (self.installed_end.is_none() || !self.installed_subagents.is_empty()))
         {
             return Err("conversation binding has invalid installation cutoffs".to_string());
         }

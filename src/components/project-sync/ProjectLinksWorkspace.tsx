@@ -19,7 +19,6 @@ import type {
   ProjectBinding,
   ProjectStorageLink,
   ProviderDescriptor,
-  ProviderKey,
   ProviderProfileSummary,
   RemoteBundleSummary,
   SiblingBundleStatus,
@@ -44,7 +43,6 @@ import ProjectPicker from "./ProjectPicker";
 import type { SessionHeaderModel } from "./session-detail/SessionDetailPage";
 import type { PullRequiredCopy } from "./PushResourceWorkspace";
 import SyncOutcomeNotice from "./SyncOutcomeNotice";
-import { writeClipboardText } from "../sync-review/clipboard";
 import SiblingRepoNotice from "./SiblingRepoNotice";
 import { isIrrecoverableSyncError } from "./syncError";
 import type { SyncOutcome, SyncOutcomeAction } from "./syncOutcome";
@@ -53,6 +51,7 @@ import {
   connectionSuspends,
   draftSettingsFromForm,
   fieldsSet,
+  findDestinationConflict,
   findStorageProvider,
   formFromDraft,
   secretOperationsFromForm,
@@ -62,13 +61,17 @@ import {
   storageSubtitleIsPath,
   StorageEditor,
   storageNameIsAuto,
+  storageNameForSettings,
   type StorageEditorForm,
+  type StorageSetupMode,
 } from "./StorageSettings";
 import { storageCatalogApi } from "../storage-catalog/api";
 import { catalogPresentation, catalogStorageRepositoryViews } from "../storage-catalog/model";
 import type { CatalogStorageRepositoryView } from "../storage-catalog/types";
 import { projectSyncApi } from "./api";
 import { StorageDraftSaveQueue } from "./storageDraftSaveQueue";
+import { R2SetupLane, useR2Setup, type R2SetupMode, type R2SetupPort } from "./R2Setup";
+import { DropboxSetupLane, useDropboxSetup } from "./DropboxSetup";
 import {
   compactProjectPath,
   formatRelativeTime,
@@ -227,23 +230,22 @@ type StorageDraftSaveSnapshot = {
   typedSecrets: Record<string, string>;
 };
 
-/** What the page handed the agent: the exact draft revision the instruction
- *  names, and the name it was asked to prepare under. Credential-free. */
-export type AgentSetupMarker = {
+/** The exact saved draft passed to setup. Contains no credentials. */
+export type StorageSetupMarker = {
   draftId: string;
   revision: number;
   storageId: string;
   requestedName: string;
 };
 
-export type AgentSetupReconciliation =
+export type StorageSetupReconciliation =
   | { kind: "adopt"; draft: StorageSetupDraft }
   | { kind: "preserve"; reason: "no_update" | "invalid" };
 
-export function createAgentSetupMarker(
+export function createStorageSetupMarker(
   saved: Pick<StorageSetupDraft, "draft_id" | "revision" | "storage_id">,
   requestedName: string,
-): AgentSetupMarker {
+): StorageSetupMarker {
   return {
     draftId: saved.draft_id,
     revision: saved.revision,
@@ -256,17 +258,18 @@ export function createAgentSetupMarker(
  *  handed it. Name matching is deliberately insufficient: another draft can
  *  have the same label, and an older refresh must not look like CLI success.
  *  An edit in the form kills the marker before this is ever consulted. */
-export function reconcileAgentSetup(
-  marker: AgentSetupMarker,
-  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets" | "setup_assistant">,
+export function reconcileStorageSetup(
+  marker: StorageSetupMarker,
+  descriptor: Pick<StorageProviderDescriptor, "key" | "fields" | "secrets" | "managed_secret_id">,
   setupDrafts: readonly StorageSetupDraft[],
-): AgentSetupReconciliation {
+): StorageSetupReconciliation {
   const candidate = setupDrafts.find(({ draft_id }) => draft_id === marker.draftId);
   if (!candidate || candidate.revision <= marker.revision) {
     return { kind: "preserve", reason: "no_update" };
   }
   if (
-    candidate.storage_id !== marker.storageId
+    candidate.provider !== descriptor.key
+    || candidate.storage_id !== marker.storageId
     || candidate.name.trim() !== marker.requestedName
     || !storageDraftReady(descriptor, formFromDraft(descriptor, candidate), secretPresenceOf(candidate))
   ) {
@@ -275,15 +278,26 @@ export function reconcileAgentSetup(
   return { kind: "adopt", draft: candidate };
 }
 
+/** After the R2 helper reports the draft ready, load it at once — a fast CLI
+ *  must not depend on a later watcher event — and adopt it only if it is the
+ *  same draft, newer, and complete. */
+export async function loadPreparedR2Draft(
+  saved: StorageSetupDraft,
+  descriptor: StorageProviderDescriptor,
+  isCurrent: () => boolean,
+  api: Pick<typeof projectSyncApi, "getStorageSetupDraft"> = projectSyncApi,
+): Promise<StorageSetupDraft | null> {
+  if (!isCurrent()) return null;
+  const prepared = await api.getStorageSetupDraft(saved.draft_id);
+  if (!isCurrent()) return null;
+  const result = reconcileStorageSetup(createStorageSetupMarker(saved, saved.name), descriptor, prepared ? [prepared] : []);
+  if (result.kind !== "adopt") throw { code: "draft_changed" };
+  return result.draft;
+}
+
 /** What the guide row's agent slot is saying: an agent CLI was opened in a
  *  terminal, the copy landed and the page is listening, the CLI's draft was
  *  adopted for review, or the hand-off failed. */
-export type AgentSetupNotice =
-  | { kind: "listening" }
-  | { kind: "launched"; agent: string }
-  | { kind: "ready"; message: string }
-  | { kind: "error"; message: string };
-
 /** The fold: everything the storage listing knows about a repository beyond
  * its chips. Absent facts don't render — no dash placeholders. */
 export function StorageRepositoryDetails({ bundle, id }: { bundle: RemoteBundleSummary; id?: string }) {
@@ -525,18 +539,19 @@ export default function ProjectLinksWorkspace({
      ref mirrors it synchronously so queued saves read the latest form. */
   const [storageSession, setStorageSession] = useState<StorageDraftSession | null>(null);
   const storageSessionRef = useRef<StorageDraftSession | null>(null);
-  const [agentNotice, setAgentNotice] = useState<AgentSetupNotice | null>(null);
-  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
-  /* Which run button faces the split cluster: the last agent picked this
-     session, else the first registered launcher. */
-  const [preferredLauncher, setPreferredLauncher] = useState<ProviderKey | null>(null);
-  const [copyAgainFlashed, setCopyAgainFlashed] = useState(false);
   const [storageDetailsExpanded, setStorageDetailsExpanded] = useState(false);
   /* Opening a settled storage's settings asks the backend for an edit draft
      first; the panel shows its loading line until that draft arrives. */
   const [storageSessionLoading, setStorageSessionLoading] = useState(false);
   const [storageTestVerified, setStorageTestVerified] = useState(false);
   const [storageDraftActionError, setStorageDraftActionError] = useState<string | null>(null);
+  /* The New-storage question for a provider that can look in its account:
+     which door was taken, whether the fields were unfolded for a pasted
+     connection, what the look found, and which row is chosen. All of it
+     belongs to the open draft and goes with it; the request token retires a
+     look the user cancelled or that outlived its draft. */
+  const [storageSetupMode, setStorageSetupMode] = useState<StorageSetupMode | null>(null);
+  const [manualEntry, setManualEntry] = useState(false);
   /* The draft's server revision is bookkeeping read only at the head of the
      save queue; the session counter invalidates async draft work when the
      form's identity changes — the same job bundleRequestRef does for
@@ -571,6 +586,10 @@ export default function ProjectLinksWorkspace({
     setStorageTestVerified(false);
     setStorageDraftActionError(null);
     setStorageSessionLoading(false);
+    setStorageSetupMode(null);
+    setManualEntry(false);
+    r2.dismiss();
+    dropbox.dismiss();
   };
   /** Seat a backend draft in the form. The descriptor shapes the form; a
    *  draft this build has no descriptor for opens empty and uneditable. */
@@ -583,8 +602,6 @@ export default function ProjectLinksWorkspace({
         ? formFromDraft(descriptor, draft)
         : { name: draft.name, settings: {}, typedSecrets: {} },
     });
-    agentSetupMarkerRef.current = null;
-    setAgentNotice(null);
   };
   const [renamingStorageId, setRenamingStorageId] = useState<string | null>(null);
   const [storageNameDraft, setStorageNameDraft] = useState("");
@@ -636,14 +653,6 @@ export default function ProjectLinksWorkspace({
   const workspaceScrollRef = useRef<HTMLElement>(null);
   const overviewScrollPositionRef = useRef(0);
   const sessionDetailOriginRef = useRef<HTMLButtonElement | null>(null);
-  const agentSetupMarkerRef = useRef<AgentSetupMarker | null>(null);
-  const agentSetupBusyRef = useRef(false);
-  /* The exact instruction of the live hand-off, so Copy again re-copies the
-     same text the marker was armed for. */
-  const agentInstructionRef = useRef<string | null>(null);
-  const copyAgainTimerRef = useRef<number | null>(null);
-  const agentSplitRef = useRef<HTMLDivElement | null>(null);
-
   const openSessionDetail = (
     projectId: string,
     request: OpenSessionDetailRequest,
@@ -701,7 +710,6 @@ export default function ProjectLinksWorkspace({
 
   useEffect(() => {
     if (activeProjectSubview.kind !== "session_detail") return;
-    agentSetupMarkerRef.current = null;
     const frame = window.requestAnimationFrame(() => {
       workspaceScrollRef.current?.scrollTo({ top: 0, left: 0 });
     });
@@ -729,6 +737,56 @@ export default function ProjectLinksWorkspace({
      created; its page is the New-storage form. An edit draft shares its
      storage's id and rides that storage's page instead. */
   const creatingStorage = !!editingStorage && savedEditedStorage === null;
+  /* The R2 hand-off. The hook runs the packaged helper one step at a time
+     on the draft this page holds; the port below lends it the draft — saved
+     before every run, pinned by session and edit version — and the seat for
+     the draft the helper prepares. */
+  const r2Mode: R2SetupMode = !creatingStorage ? "reconnect" : storageSetupMode === "existing" ? "existing" : "create";
+  const setupPort: R2SetupPort = {
+      blocked: () => busy || !!runningAction,
+      beginRun: () => {
+        const session = draftSessionRef.current;
+        const editVersion = draftEditVersionRef.current;
+        return {
+          isCurrent: () => draftSessionRef.current === session && draftEditVersionRef.current === editVersion,
+          persist: () => persistStorageSetupDraft(session, editVersion),
+        };
+      },
+      onRunStarted: () => {
+        setStorageTestVerified(false);
+        setStorageDraftActionError(null);
+      },
+      adoptPrepared: async (saved, isCurrent) => {
+        const descriptor = descriptorFor(saved);
+        if (!descriptor) throw { code: "draft_changed" };
+        const prepared = await loadPreparedR2Draft(saved, descriptor, isCurrent);
+        if (!prepared) return false;
+        const suggestedName = !saved.edits_existing
+          ? storageNameForSettings(descriptor, formFromDraft(descriptor, saved), formFromDraft(descriptor, prepared).settings) : null;
+        openStorageSession(prepared, descriptor);
+        if (suggestedName && suggestedName !== prepared.name) {
+          // Use the normal draft autosave; close, Test, and Finish also flush it.
+          draftEditVersionRef.current += 1;
+          draftDirtyRef.current = true;
+          updateStorageSession((current) => ({ ...current, form: { ...current.form, name: suggestedName } }));
+        }
+        onStorageDraftsChanged?.();
+        return true;
+      },
+    };
+  const r2 = useR2Setup({
+    enabled: !!storageSession
+      && findStorageProvider(storageProviders, storageSession.draft.provider, storageSession.draft.config_version)?.local_setup === "wrangler",
+    draftId: storageSession?.draft.draft_id ?? null,
+    mode: r2Mode,
+    port: setupPort,
+  });
+  const dropbox = useDropboxSetup({
+    enabled: !!storageSession && findStorageProvider(storageProviders, storageSession.draft.provider, storageSession.draft.config_version)?.local_setup === "dropbox",
+    draftId: storageSession?.draft.draft_id ?? null,
+    mode: r2Mode,
+    port: setupPort,
+  });
   const orderedRemoteBundles = [...(remoteBundles ?? [])].sort((left, right) => {
     return (right.updated_at ?? 0) - (left.updated_at ?? 0);
   });
@@ -738,6 +796,7 @@ export default function ProjectLinksWorkspace({
     return (right.updated_at ?? 0) - (left.updated_at ?? 0);
   });
   const run = async (key: string, action: () => Promise<void> | void) => {
+    if ((r2.isRunning() || dropbox.isRunning())) return;
     setRunningAction(key);
     try {
       await action();
@@ -901,7 +960,7 @@ export default function ProjectLinksWorkspace({
   const persistStorageSetupDraftForAction = async (
     session: number,
     editVersion: number,
-    action: "testing the connection" | "finishing setup",
+    action: "testing the connection" | "finishing setup" | "preparing the connection",
   ): Promise<StorageSetupDraft | null> => {
     try {
       const saved = await persistStorageSetupDraft(session, editVersion);
@@ -928,6 +987,7 @@ export default function ProjectLinksWorkspace({
   };
 
   const saveStorageDraftBeforeNavigation = async (): Promise<boolean> => {
+    if ((r2.isRunning() || dropbox.isRunning())) return false;
     const session = draftSessionRef.current;
     const current = storageSessionRef.current;
     if (!current) return true;
@@ -997,12 +1057,10 @@ export default function ProjectLinksWorkspace({
 
   useEffect(() => {
     if (!storageEditorRequest) return;
-    agentSetupMarkerRef.current = null;
     if (storageEditorRequest.mode === "close") {
       resetStorageSession();
       clearStorageListing();
       setEditingStorage(null);
-      setAgentNotice(null);
       setStorageDetailsExpanded(false);
       onStorageEditorRequestHandled?.();
       return;
@@ -1030,7 +1088,6 @@ export default function ProjectLinksWorkspace({
     if (editingStorage?.storageId !== storage.storage_id) {
       resetStorageSession();
       setEditingStorage({ projectId: "", storageId: storage.storage_id });
-      setAgentNotice(null);
     }
     // Every open is a navigation onto the page, so the listing reloads —
     // a commit that just replaced the connection settings lands here too.
@@ -1065,10 +1122,8 @@ export default function ProjectLinksWorkspace({
     const switchingStorage = editingStorage?.storageId !== storage.storage_id;
     if (switchingStorage) {
       if (!(await saveStorageDraftBeforeNavigation())) return;
-      agentSetupMarkerRef.current = null;
       clearStorageListing();
       setEditingStorage({ projectId: "", storageId: storage.storage_id });
-      setAgentNotice(null);
     }
     setStorageDetailsExpanded(true);
     if (switchingStorage) await loadStorageBundles(storage);
@@ -1101,77 +1156,6 @@ export default function ProjectLinksWorkspace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageSetupDrafts, openDraftId]);
 
-  useEffect(() => {
-    const marker = agentSetupMarkerRef.current;
-    const session = storageSessionRef.current;
-    if (!marker || !session) return;
-    const descriptor = descriptorFor(session.draft);
-    if (!descriptor) return;
-    const reconciliation = reconcileAgentSetup(marker, descriptor, storageSetupDrafts);
-    if (reconciliation.kind === "preserve") {
-      if (reconciliation.reason === "invalid") {
-        agentSetupMarkerRef.current = null;
-        setAgentNotice({
-          kind: "error",
-          message: `Mallard received an incomplete ${descriptor.display_name} draft. Review the CLI result, then try the agent setup again.`,
-        });
-      }
-      return;
-    }
-
-    // Draft listings arrive in the background. Re-read the exact, pinned
-    // draft the CLI advanced, then revalidate every identity and
-    // form-session guard after the IPC read. Only settings and secret
-    // presence come back; no value ever does.
-    const token = draftSessionRef.current;
-    const editVersion = draftEditVersionRef.current;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const revealed = await projectSyncApi.getStorageSetupDraft(marker.draftId);
-        if (
-          cancelled
-          || agentSetupMarkerRef.current !== marker
-          || draftSessionRef.current !== token
-          || draftEditVersionRef.current !== editVersion
-        ) return;
-        const revealedReconciliation = revealed
-          ? reconcileAgentSetup(marker, descriptor, [revealed])
-          : { kind: "preserve", reason: "invalid" } as const;
-        if (!revealed || revealedReconciliation.kind !== "adopt") {
-          agentSetupMarkerRef.current = null;
-          setAgentNotice({
-            kind: "error",
-            message: "Mallard could not load the complete values prepared by the CLI. Copy fresh agent setup instructions and try again.",
-          });
-          return;
-        }
-        // Adopting reseats the form on the CLI's revision, which also
-        // invalidates any pending debounce from before the update. The form
-        // remains uncommitted until the user presses Finish setup.
-        openStorageSession(revealedReconciliation.draft, descriptor);
-        setAgentNotice({
-          kind: "ready",
-          message: `${descriptor.display_name} connection prepared. Review it, optionally test it, then select ${revealed.edits_existing ? "Save changes" : "Finish setup"}.`,
-        });
-      } catch {
-        if (
-          cancelled
-          || agentSetupMarkerRef.current !== marker
-          || draftSessionRef.current !== token
-          || draftEditVersionRef.current !== editVersion
-        ) return;
-        agentSetupMarkerRef.current = null;
-        setAgentNotice({
-          kind: "error",
-          message: "Mallard could not load the values prepared by the CLI. Copy fresh agent setup instructions and try again.",
-        });
-      }
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [storageSetupDrafts]);
-
   /* A removed settled storage leaves the page and its edit draft invalid. */
   useEffect(() => {
     if (!editingStorage) return;
@@ -1187,143 +1171,6 @@ export default function ProjectLinksWorkspace({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingStorage?.storageId, storages]);
-
-  const clearCopyAgainFlash = () => {
-    if (copyAgainTimerRef.current !== null) {
-      window.clearTimeout(copyAgainTimerRef.current);
-      copyAgainTimerRef.current = null;
-    }
-    setCopyAgainFlashed(false);
-  };
-  useEffect(() => () => {
-    if (copyAgainTimerRef.current !== null) window.clearTimeout(copyAgainTimerRef.current);
-  }, []);
-
-  /* The split cluster's menu closes like the path bar's: outside press or
-     Escape, without disturbing any review listening on window. */
-  useEffect(() => {
-    if (!agentMenuOpen) return;
-    const closeOnOutside = (event: MouseEvent) => {
-      const target = event.target;
-      if (target instanceof Node && agentSplitRef.current?.contains(target)) return;
-      setAgentMenuOpen(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.stopPropagation();
-      setAgentMenuOpen(false);
-    };
-    document.addEventListener("mousedown", closeOnOutside);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("mousedown", closeOnOutside);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [agentMenuOpen]);
-
-  /** Persist the exact form snapshot, run one hand-off verb against the
-   *  saved draft revision, then arm the listener. Both verbs share every
-   *  fence: the pending debounce is cancelled, the backend renders the
-   *  instruction for the persisted id and revision, and a form that changed
-   *  mid-flight refuses the marker. */
-  const runAgentSetupHandoff = async (
-    action: (storageProvider: string, draftId: string, expectedRevision: number) => Promise<void>,
-    failure: (reason: unknown) => string,
-    notice: AgentSetupNotice,
-  ) => {
-    const current = storageSessionRef.current;
-    const descriptor = current ? descriptorFor(current.draft) : null;
-    if (!current || !descriptor?.setup_assistant || agentSetupBusyRef.current) return;
-    agentSetupBusyRef.current = true;
-    setAgentMenuOpen(false);
-    clearCopyAgainFlash();
-    setAgentNotice(null);
-    const session = draftSessionRef.current;
-    const editVersion = draftEditVersionRef.current;
-    const requestedName = current.form.name;
-    try {
-      const saved = await persistStorageSetupDraft(session, editVersion);
-      if (
-        !saved
-        || draftSessionRef.current !== session
-        || draftEditVersionRef.current !== editVersion
-      ) {
-        throw new Error("the storage form changed before the agent handoff was ready");
-      }
-      await action(descriptor.key, saved.draft_id, saved.revision);
-      if (
-        draftSessionRef.current !== session
-        || draftEditVersionRef.current !== editVersion
-      ) {
-        throw new Error("the storage form changed during the agent handoff");
-      }
-      agentSetupMarkerRef.current = createAgentSetupMarker(saved, requestedName);
-      setAgentNotice(notice);
-    } catch (reason) {
-      setAgentNotice({ kind: "error", message: failure(reason) });
-    } finally {
-      agentSetupBusyRef.current = false;
-    }
-  };
-
-  const copyAgentSetupInstruction = () => runAgentSetupHandoff(
-    async (storageProvider, draftId, expectedRevision) => {
-      const instruction = await projectSyncApi.getStorageSetupAssistantInstruction(
-        storageProvider,
-        draftId,
-        expectedRevision,
-      );
-      await writeClipboardText(instruction);
-      agentInstructionRef.current = instruction;
-    },
-    (reason) => `Could not copy agent setup instructions: ${errorMessage(reason)}`,
-    { kind: "listening" },
-  );
-
-  const launchAgentSetup = (agentProvider: ProviderKey, agent: string) => runAgentSetupHandoff(
-    (storageProvider, draftId, expectedRevision) => projectSyncApi.launchStorageSetupAssistant(
-      storageProvider,
-      agentProvider,
-      draftId,
-      expectedRevision,
-    ),
-    (reason) => `Could not open ${agent}: ${errorMessage(reason)}`,
-    { kind: "launched", agent },
-  );
-
-  const copyAgentInstructionAgain = async () => {
-    const instruction = agentInstructionRef.current;
-    if (!instruction) return;
-    try {
-      await writeClipboardText(instruction);
-      clearCopyAgainFlash();
-      setCopyAgainFlashed(true);
-      copyAgainTimerRef.current = window.setTimeout(() => {
-        copyAgainTimerRef.current = null;
-        setCopyAgainFlashed(false);
-      }, 1100);
-    } catch (reason) {
-      setAgentNotice({ kind: "error", message: `Could not copy agent setup instructions: ${errorMessage(reason)}` });
-    }
-  };
-
-  const cancelAgentSetup = () => {
-    agentSetupMarkerRef.current = null;
-    agentInstructionRef.current = null;
-    clearCopyAgainFlash();
-    setAgentNotice(null);
-  };
-
-  /* The run buttons come from the registry: every provider shipping a CLI
-     launcher gets one, and Copy covers every other agent. */
-  const agentLaunchers = providers.flatMap((descriptor) => (
-    descriptor.cli_launcher
-      ? [{ key: descriptor.key, launcher: descriptor.cli_launcher }]
-      : []
-  ));
-  const defaultAgentLauncher = agentLaunchers.find(({ key }) => key === preferredLauncher)
-    ?? agentLaunchers[0]
-    ?? null;
 
   const activeProject = projects.find((project) => project.local_project_id === activeProjectId) ?? null;
   const workspaceProject = newProjectSetup ? null : activeProject;
@@ -1483,6 +1330,13 @@ export default function ProjectLinksWorkspace({
     const secretPresence = storageSession ? secretPresenceOf(storageSession.draft) : {};
     const storageReady = !!storageSession && !!descriptor
       && storageDraftReady(descriptor, storageSession.form, secretPresence);
+    /* A folder another storage already occupies is refused here, before a
+       verb is offered: the backend refuses the same folder on Test and Save
+       (its check also sees through symlinks), but by then the page would
+       have listed the other storage's repositories as this one's. */
+    const destinationConflict = storageSession && descriptor
+      ? findDestinationConflict(descriptor, storageSession.form, storages, pageStorageId)
+      : null;
     const progress = storageSession && descriptor
       ? fieldsSet(descriptor, storageSession.form, secretPresence)
       : null;
@@ -1503,12 +1357,11 @@ export default function ProjectLinksWorkspace({
     const storageLinkCount = links.filter((link) => link.storage_id === pageStorageId).length;
     const renamingStorage = renamingStorageId === pageStorageId;
     const pathFact = savedEditedStorage?.summary.find((field) => field.is_path) ?? null;
-    const formLocked = busy || !!runningAction;
+    const formLocked = busy || !!runningAction || r2.state.running || dropbox.state.running;
+    const storageActionBlocked = formLocked || !storageReady || destinationConflict !== null;
 
     const saveEditedStorage = () => run(`storage:${pageStorageId}`, async () => {
       if (!storageSession) return;
-      agentSetupMarkerRef.current = null;
-      setAgentNotice(null);
       const session = draftSessionRef.current;
       const editVersion = draftEditVersionRef.current;
       const savedDraft = await persistStorageSetupDraftForAction(
@@ -1534,8 +1387,6 @@ export default function ProjectLinksWorkspace({
        and close clears it. */
     const testStorageConnection = () => run(`test-storage:${pageStorageId}`, async () => {
       if (!storageSession) return;
-      agentSetupMarkerRef.current = null;
-      setAgentNotice(null);
       setStorageTestVerified(false);
       const session = draftSessionRef.current;
       const editVersion = draftEditVersionRef.current;
@@ -1572,6 +1423,27 @@ export default function ProjectLinksWorkspace({
       if (wasNew) onOpenStorageIndex();
     });
 
+    /* The door out of a taken folder: the draft that named it is dropped —
+       a fresh one has nothing worth keeping, an edit draft is reverted — and
+       the storage that owns the folder opens in its place. No confirmation:
+       the user chose the door over the field. */
+    const openConflictingStorage = (storage: StorageSummary) => run(`open-conflict:${pageStorageId}`, async () => {
+      const session = storageSessionRef.current;
+      if (!session) return;
+      try {
+        await storageDraftSaveQueue.enqueue(
+          () => projectSyncApi.discardStorageSetupDraft(session.draft.draft_id),
+        );
+      } catch (reason) {
+        setStorageDraftActionError(`Mallard could not discard the storage draft: ${errorMessage(reason)}`);
+        return;
+      }
+      resetStorageSession();
+      setStorageDetailsExpanded(false);
+      onStorageDraftsChanged?.();
+      onOpenStorage(storage.storage_id, false);
+    });
+
     /* The header's type switch restarts a new draft on another provider:
        the current draft goes, a typed name comes along, a default one is
        re-minted for the new type. */
@@ -1580,8 +1452,6 @@ export default function ProjectLinksWorkspace({
       if (!session || !descriptor) return;
       if (provider.key === descriptor.key && provider.config_version === descriptor.config_version) return;
       const keptName = storageNameIsAuto(descriptor, session.form) ? undefined : session.form.name;
-      agentSetupMarkerRef.current = null;
-      setAgentNotice(null);
       try {
         await storageDraftSaveQueue.enqueue(
           () => projectSyncApi.discardStorageSetupDraft(session.draft.draft_id),
@@ -1596,6 +1466,23 @@ export default function ProjectLinksWorkspace({
       await onCreateStorageDraft(provider.key, keptName);
     });
 
+    /* The New-storage doors. Create new is today's card; Use existing is a
+       read-only look at the account for the draft's provider, then one row
+       chosen and prepared. Taking a door drops whatever the other found. */
+    const chooseSetupMode = (mode: StorageSetupMode) => {
+      if (mode === storageSetupMode) return;
+      if (formLocked || (r2.isRunning() || dropbox.isRunning())) return;
+      r2.dismiss();
+    dropbox.dismiss();
+      setStorageSetupMode(mode);
+      setManualEntry(false);
+    };
+    /* The doors are asked of a blank new draft and stay as a switch once
+       taken; a draft that already holds values — resumed, or prepared by
+       the agent or the look — is past the question. */
+    const r2Ready = (r2.state.phase === "review" || dropbox.state.phase === "review");
+    const askingSetupMode = creatingStorage && !!descriptor?.discovery
+      && (storageSetupMode !== null || (progress?.set ?? 0) === 0) && !r2Ready;
     /* Hide keeps the draft: it is autosaved and listed on the rail, and the
        page's own Discard is the way to drop it. */
     const toggleStorageDetails = async () => {
@@ -1806,130 +1693,52 @@ export default function ProjectLinksWorkspace({
     /* On an existing storage the agent's job is regaining access to the
        same destination, so its verb says so whether or not access has
        been refused yet. */
-    const agentVerb = creatingStorage ? "Run with" : "Reconnect with";
-    const agentSlot = !storageSession || !descriptor?.setup_assistant
-      || !creatingStorage && !descriptor.setup_assistant.managed_secret_id
-      ? undefined
-      : agentNotice?.kind === "launched" ? (
-        <>
-          <span className="storage-setup-guide-wait" role="status">
-            <span className="status-loader" /> {agentNotice.agent} is running the setup — finish any sign-in it asks for when the browser opens…
-          </span>
-          <button type="button" className="btn-link" onClick={cancelAgentSetup}>Cancel</button>
-        </>
-      )
-      : agentNotice?.kind === "listening" ? (
-        <>
-          <span className="storage-setup-guide-connected" role="status">
-            <Icon name="check-circle" size={13} /> Copied.
-          </span>
-          <span className="storage-setup-guide-wait" role="status">
-            <span className="status-loader" /> Listening for your agent…
-          </span>
-          <button
-            type="button"
-            className={copyAgainFlashed
-              ? "btn storage-setup-guide-button storage-setup-copied-flash"
-              : "btn storage-setup-guide-button"}
-            onClick={() => void copyAgentInstructionAgain()}
-          >
-            <Icon name={copyAgainFlashed ? "check" : "copy"} size={13} /> {copyAgainFlashed ? "Copied" : "Copy again"}
-          </button>
-          <button type="button" className="btn-link" onClick={cancelAgentSetup}>Cancel</button>
-        </>
-      )
-      : agentNotice?.kind === "ready" ? (
-        <span className="storage-setup-guide-connected" role="status">
-          <Icon name="check-circle" size={13} /> {agentNotice.message}
-        </span>
-      )
-      : agentNotice?.kind === "error" ? (
-        <>
-          <span className="storage-setup-guide-error" role="alert">{agentNotice.message}</span>
-          <button
-            type="button"
-            className="btn storage-setup-guide-button"
-            disabled={busy}
-            onClick={() => void copyAgentSetupInstruction()}
-          >
-            <Icon name="copy" size={13} /> Copy agent instruction
-          </button>
-          <button type="button" className="btn-link" onClick={cancelAgentSetup}>Try again</button>
-        </>
-      )
-      : defaultAgentLauncher ? (
-        <div className="storage-setup-agent-split" ref={agentSplitRef}>
-          <button
-            type="button"
-            className="btn storage-setup-guide-button storage-setup-agent-cta"
-            disabled={busy}
-            title={`Opens ${defaultAgentLauncher.launcher.display_name} in a terminal window with the ${creatingStorage ? "setup" : "reconnection"} instruction as its prompt`}
-            onClick={() => void launchAgentSetup(defaultAgentLauncher.key, defaultAgentLauncher.launcher.display_name)}
-          >
-            <ProviderMark
-              provider={defaultAgentLauncher.key}
-              displayName={defaultAgentLauncher.launcher.display_name}
-              size={13}
-            /> {agentVerb} {defaultAgentLauncher.launcher.display_name}
-          </button>
-          <button
-            type="button"
-            className="btn storage-setup-guide-button storage-setup-agent-cta storage-setup-agent-split-arrow"
-            disabled={busy}
-            aria-haspopup="menu"
-            aria-expanded={agentMenuOpen}
-            aria-label="More agent setup routes"
-            onClick={() => setAgentMenuOpen((open) => !open)}
-          >
-            <Icon name="chevron-down" size={11} />
-          </button>
-          {agentMenuOpen && (
-            <div className="sync-path-menu end" role="menu">
-              {agentLaunchers
-                .filter(({ key }) => key !== defaultAgentLauncher.key)
-                .map(({ key, launcher }) => (
-                  <button
-                    key={key}
-                    type="button"
-                    className="sync-path-menu-item"
-                    role="menuitem"
-                    onClick={() => {
-                      setPreferredLauncher(key);
-                      void launchAgentSetup(key, launcher.display_name);
-                    }}
-                  >
-                    <ProviderMark provider={key} displayName={launcher.display_name} size={13} />
-                    <span className="storage-setup-agent-menu-text">
-                      {agentVerb} {launcher.display_name}
-                      <small>Opens a terminal window with the instruction as its prompt</small>
-                    </span>
-                  </button>
-                ))}
-              <button
-                type="button"
-                className="sync-path-menu-item"
-                role="menuitem"
-                onClick={() => void copyAgentSetupInstruction()}
-              >
-                <Icon name="copy" size={13} />
-                <span className="storage-setup-agent-menu-text">
-                  Copy agent instruction
-                  <small>Paste into any other coding agent yourself</small>
-                </span>
-              </button>
-            </div>
-          )}
-        </div>
-      ) : (
-        <button
-          type="button"
-          className="btn storage-setup-guide-button storage-setup-agent-cta"
-          disabled={busy}
-          onClick={() => void copyAgentSetupInstruction()}
-        >
-          <Icon name="copy" size={13} /> Copy agent instruction
-        </button>
-      );
+    /* Reset setup, for either lane: this draft and all of its progress go,
+       a fresh draft opens on the doors. A bucket or folder already created
+       at the provider and any connected storage are kept. */
+    const resetR2Setup = () => {
+      if (formLocked || (r2.isRunning() || dropbox.isRunning()) || !descriptor) return;
+      void run(`reset-r2:${pageStorageId}`, async () => {
+        const session = storageSessionRef.current;
+        if (!session) return;
+        try {
+          await storageDraftSaveQueue.enqueue(
+            () => projectSyncApi.discardStorageSetupDraft(session.draft.draft_id),
+          );
+        } catch {
+          setStorageDraftActionError("Mallard could not reset setup. Select Reset setup to try again.");
+          return;
+        }
+        resetStorageSession();
+        setStorageDetailsExpanded(false);
+        onStorageDraftsChanged?.();
+        await onCreateStorageDraft(descriptor.key, descriptor.default_name ?? undefined);
+      });
+    };
+    const setupSlot = storageSession && descriptor?.local_setup === "wrangler"
+      ? <R2SetupLane
+          mode={r2Mode}
+          flow={r2}
+          disabled={formLocked}
+          descriptor={descriptor}
+          storages={storages}
+          bucketName={storageSession.form.settings.bucket}
+          onOpenStorage={(storageId) => onOpenStorage(storageId, false)}
+          onCreateInstead={() => chooseSetupMode("create")}
+          onReset={resetR2Setup}
+        />
+      : storageSession && descriptor?.local_setup === "dropbox"
+        ? <DropboxSetupLane flow={dropbox} mode={r2Mode} disabled={formLocked} descriptor={descriptor} storages={storages}
+            onOpenStorage={(id) => onOpenStorage(id, false)} onCreateInstead={() => chooseSetupMode("create")}
+            onNewSetup={() => void run("new-dropbox-account", async () => {
+              // Preserve the original draft and its journal for recovery.
+              if (!(await saveStorageDraftBeforeNavigation())) return;
+              resetStorageSession();
+              await onCreateStorageDraft(descriptor.key);
+              onStorageDraftsChanged?.();
+            })}
+            onReset={resetR2Setup} />
+        : undefined;
 
     return (
       <>
@@ -2016,6 +1825,12 @@ export default function ProjectLinksWorkspace({
                   disabled={formLocked}
                   editsExisting={!creatingStorage}
                   connection={creatingStorage ? null : storageConnection}
+                  destinationConflict={destinationConflict
+                    ? { storage: destinationConflict, onOpen: () => void openConflictingStorage(destinationConflict) }
+                    : null}
+                  setupMode={askingSetupMode ? { mode: storageSetupMode, onChoose: chooseSetupMode } : undefined}
+                  manualEntry={manualEntry}
+                  setupDone={r2Ready}
                   onSwitchProvider={creatingStorage ? switchStorageProvider : undefined}
                   onRemove={!creatingStorage && storageLinkCount === 0 ? () => onRemoveStorage(pageStorageId) : undefined}
                   // A draft's create is the page's verb and lives in the
@@ -2026,7 +1841,7 @@ export default function ProjectLinksWorkspace({
                       <button
                         type="button"
                         className="btn"
-                        disabled={formLocked || !storageReady}
+                        disabled={storageActionBlocked}
                         onClick={() => void testStorageConnection()}
                       >
                         {runningAction === `test-storage:${pageStorageId}` ? "Testing…" : "Test connection"}
@@ -2034,7 +1849,7 @@ export default function ProjectLinksWorkspace({
                       <button
                         type="button"
                         className="btn btn-primary"
-                        disabled={formLocked || !storageReady}
+                        disabled={storageActionBlocked}
                         onClick={() => void saveEditedStorage()}
                       >
                         {runningAction === `storage:${pageStorageId}` ? "Saving…" : "Save storage"}
@@ -2042,15 +1857,10 @@ export default function ProjectLinksWorkspace({
                     </>
                   )}
                   onChange={(nextForm) => {
-                    // An edit orphans the copied instruction, so the marker
-                    // dies — and with it the row's claim to be listening.
+                    // An edit invalidates the current setup result.
                     draftEditVersionRef.current += 1;
-                    agentSetupMarkerRef.current = null;
-                    setAgentNotice((current) => (
-                      current?.kind === "listening" || current?.kind === "launched" || current?.kind === "ready"
-                        ? null
-                        : current
-                    ));
+                    r2.dismiss();
+                    dropbox.dismiss();
                     // The same edit stales a Test verdict and arms the
                     // draft autosave.
                     setStorageTestVerified(false);
@@ -2058,7 +1868,7 @@ export default function ProjectLinksWorkspace({
                     draftDirtyRef.current = true;
                     updateStorageSession((current) => ({ ...current, form: nextForm }));
                   }}
-                  agentSlot={agentSlot}
+                  setupSlot={setupSlot}
                 />
               )}
             </div>
@@ -2084,7 +1894,7 @@ export default function ProjectLinksWorkspace({
                   <button
                     type="button"
                     className="btn btn-ghost"
-                    disabled={busy}
+                    disabled={formLocked}
                     onClick={() => void discardStorageDraftAndClose()}
                   >
                     Discard draft…
@@ -2092,7 +1902,7 @@ export default function ProjectLinksWorkspace({
                   <button
                     type="button"
                     className="btn btn-ghost"
-                    disabled={busy}
+                    disabled={formLocked}
                     onClick={onOpenStorageIndex}
                     aria-label="Close setup; the draft is kept"
                   >
@@ -2101,21 +1911,23 @@ export default function ProjectLinksWorkspace({
                   <button
                     type="button"
                     className="btn"
-                    disabled={formLocked || !storageReady}
+                    disabled={storageActionBlocked}
                     onClick={() => void testStorageConnection()}
                   >
                     {runningAction === `test-storage:${pageStorageId}` ? "Testing…" : "Test connection"}
                   </button>
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    disabled={formLocked || !storageReady}
-                    onClick={() => void saveEditedStorage()}
-                  >
-                    {descriptor && (descriptor.secrets.length > 0 || descriptor.setup_assistant)
-                      ? runningAction === `storage:${pageStorageId}` ? "Finishing…" : "Finish setup"
-                      : runningAction === `storage:${pageStorageId}` ? "Creating…" : "Create storage"}
-                  </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={storageActionBlocked}
+                      onClick={() => void saveEditedStorage()}
+                    >
+                      {descriptor && (descriptor.secrets.length > 0 || descriptor.local_setup)
+                        ? runningAction === `storage:${pageStorageId}` ? "Finishing…" : "Finish setup"
+                        : runningAction === `storage:${pageStorageId}` ? "Creating…" : "Create storage"}
+                    </button>
+
                 </div>
               </footer>
             )}
@@ -2164,33 +1976,9 @@ export default function ProjectLinksWorkspace({
     );
   }
 
-  /* What the agent handover left behind, said once on each of the two
-   * screens that outlive the editor. Both surviving kinds are receipts — the
-   * CLI's draft is ready for user review, or the copy itself failed — so the
-   * non-error one is `success`, which is also the check-circle the row draws.
-   * Standing, not an event: neither screen can set `agentNotice`, because the
-   * copy button and the adoption effect both need the storage editor open and
-   * both of these render only once it is closed. By the time it is read here
-   * it is content the view already came with, so it must not announce. */
-  const agentSetupNotices: NoticeItem[] = agentNotice
-    && agentNotice.kind !== "listening"
-    && agentNotice.kind !== "launched"
-    ? [{
-        key: "agent-setup",
-        severity: agentNotice.kind === "error" ? "danger" : "success",
-        message: agentNotice.message,
-      }]
-    : [];
-
   if (!workspaceProject && !editingStorage && !newProjectSetup) {
     return (
       <main className="sync-main sync-project-links-page sync-landing-page">
-        <NoticeZone
-          items={agentSetupNotices}
-          subject="notes about storage setup"
-          timing="standing"
-          label="Notes about storage setup"
-        />
         <ProjectPicker
           projects={projects}
           profiles={profiles}
@@ -2682,15 +2470,11 @@ export default function ProjectLinksWorkspace({
   ) : null;
   const pathActions = syncPathActions;
 
-  /* The workspace's own two messages, in one box above the page. A refused
-   * reveal is an event — the user picked it out of a crumb menu a moment ago —
-   * and it re-times the box; the setup receipt beside it is standing, for the
-   * reason spelled out where `agentSetupNotices` is built. */
+  // A failed reveal is an event and starts a new notice timer.
   const workspaceNotices: NoticeItem[] = [];
   if (revealError) {
     workspaceNotices.push({ key: "reveal-failed", severity: "danger", message: revealError });
   }
-  workspaceNotices.push(...agentSetupNotices);
   const workspaceNoticeTiming: NoticeTiming = revealError
     ? { timing: "blocking" }
     : { timing: "standing", label: "Notes about this workspace" };

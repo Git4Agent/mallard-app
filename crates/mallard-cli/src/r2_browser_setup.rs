@@ -1,12 +1,12 @@
 use crate::error::CliError;
 use mallard_application::storage_setup::SecretString;
-use mallard_domain::{hex_lower, HostId};
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use mallard_domain::{HostId, SecretValue};
+use mallard_infrastructure::codex_binary::find_binary;
+use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -20,26 +20,20 @@ const BROKER_CALLBACK_ADDRESS: &str = "localhost:8976";
 const BROKER_WELCOME_URL: &str =
     "https://welcome.developers.workers.dev/wrangler-oauth-consent-granted";
 const MAX_WRANGLER_JSON_BYTES: u64 = 256 * 1024;
+const MAX_WRANGLER_VERSION_CHARS: usize = 32;
+const MAX_WRANGLER_PATH_CHARS: usize = 1024;
 const MAX_CALLBACK_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_CALLBACK_BODY_BYTES: usize = 512;
 const MAX_CALLBACK_CREDENTIAL_BYTES: usize = 4 * 1024;
 const MAX_CALLBACK_REQUESTS: usize = 16;
 const FLOW_TOKEN_BYTES: usize = 32;
 const FLOW_TOKEN_HEX_BYTES: usize = FLOW_TOKEN_BYTES * 2;
-const R2_BUCKET_MAX_BYTES: usize = 63;
-const R2_BUCKET_PREFIX: &str = "mallard-";
-const R2_BUCKET_SUFFIX_BYTES: usize = 12;
-const R2_BUCKET_SUFFIX_HEX_BYTES: usize = R2_BUCKET_SUFFIX_BYTES * 2;
-const R2_BUCKET_SLUG_MAX_BYTES: usize =
-    R2_BUCKET_MAX_BYTES - R2_BUCKET_PREFIX.len() - 1 - R2_BUCKET_SUFFIX_HEX_BYTES;
-const R2_BUCKET_FALLBACK_SLUG: &str = "storage";
 const START_PATH_PREFIX: &str = "/mallard/r2/start/";
 const COMPLETION_PATH: &str = "/mallard/r2/complete";
 const SAFE_CALLBACK_PATH: &str = "/mallard/r2/authorizing";
 const FLOW_SESSION_KEY: &str = "mallard:r2:browser-flow";
 const WHOAMI_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(180);
-const BUCKET_TIMEOUT: Duration = Duration::from_secs(120);
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(120);
 const CALLBACK_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const PENDING_CREDENTIAL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -72,12 +66,6 @@ const REMOVED_WRANGLER_ENVIRONMENT_VARIABLES: &[&str] = &[
     "WRANGLER_LOG",
 ];
 
-pub(crate) struct R2Destination {
-    pub account_id: String,
-    pub bucket: String,
-    pub api_url: String,
-}
-
 pub(crate) struct BrowserCredentials {
     access_key_id: Zeroizing<String>,
     secret_access_key: Zeroizing<String>,
@@ -95,12 +83,46 @@ impl BrowserCredentials {
 
 pub(crate) struct WranglerClient {
     program: OsString,
+    prefix_args: Vec<OsString>,
+    runtime_path: Option<OsString>,
     workdir: TempDir,
 }
 
 impl WranglerClient {
     pub fn new() -> Result<Self, CliError> {
-        Self::with_program(OsString::from("wrangler"))
+        #[cfg(not(windows))]
+        let mut client = {
+            let program = find_binary("wrangler")
+                .map_err(|_| map_wrangler_auth_process_error(ProcessFailure::Missing))?;
+            let program = program.canonicalize().map_err(|_| runtime_error())?;
+            Self::with_program(program.into_os_string())?
+        };
+        #[cfg(windows)]
+        let mut client = {
+            // npm installs a .cmd shim, which cannot be run with an argv-only
+            // process API. Run its installed JavaScript entry with Node.
+            let entry = std::env::var_os("PATH")
+                .into_iter()
+                .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+                .map(|directory| directory.join("node_modules/wrangler/bin/wrangler.js"))
+                .find(|path| path.is_file())
+                .ok_or_else(|| map_wrangler_auth_process_error(ProcessFailure::Missing))?;
+            let node = find_binary("node").map_err(|_| runtime_error())?;
+            let mut client = Self::with_program(node.into_os_string())?;
+            client.prefix_args.push(entry.into_os_string());
+            client
+        };
+        if let Ok(node) = find_binary("node") {
+            if let Some(directory) = node.parent() {
+                let mut paths = vec![directory.to_path_buf()];
+                paths.extend(std::env::split_paths(
+                    &std::env::var_os("PATH").unwrap_or_default(),
+                ));
+                client.runtime_path =
+                    Some(std::env::join_paths(paths).map_err(|_| runtime_error())?);
+            }
+        }
+        Ok(client)
     }
 
     fn with_program(program: OsString) -> Result<Self, CliError> {
@@ -108,24 +130,63 @@ impl WranglerClient {
             .prefix("mallard-wrangler-")
             .tempdir()
             .map_err(|_| CliError::persistence("Mallard could not prepare Cloudflare setup."))?;
-        Ok(Self { program, workdir })
+        Ok(Self {
+            program,
+            prefix_args: Vec::new(),
+            runtime_path: None,
+            workdir,
+        })
     }
 
-    pub fn authenticated_account_id(&self) -> Result<String, CliError> {
+    /// Confirm Wrangler starts and supports the commands setup needs, and
+    /// say which Wrangler that is: its version and where it was found.
+    pub fn check_dependency(&self) -> Result<WranglerInfo, CliError> {
+        let (status, output) = self
+            .run_json(&["--version"], WHOAMI_TIMEOUT)
+            .map_err(|_| runtime_error())?;
+        if !status.success() {
+            return Err(runtime_error());
+        }
+        let version = parse_wrangler_version(&output);
+        let (status, output) = self
+            .run_json(&["auth", "token", "--help"], WHOAMI_TIMEOUT)
+            .map_err(|_| runtime_error())?;
+        if !status.success() || !String::from_utf8_lossy(&output).contains("--json") {
+            return Err(CliError::invalid_code(
+                "wrangler_update_required",
+                "Update Wrangler to a version with auth token --json support.",
+            ));
+        }
+        let path = self
+            .prefix_args
+            .first()
+            .unwrap_or(&self.program)
+            .to_string_lossy()
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(MAX_WRANGLER_PATH_CHARS)
+            .collect();
+        Ok(WranglerInfo { version, path })
+    }
+
+    pub fn login(&self) -> Result<(), CliError> {
+        if self.run_login().map_err(map_wrangler_auth_process_error)? {
+            Ok(())
+        } else {
+            Err(CliError::remote(
+                "wrangler_login_failed",
+                "Cloudflare login was not completed.",
+            ))
+        }
+    }
+
+    pub fn authenticated_accounts(&self) -> Result<Vec<WranglerAccount>, CliError> {
         match self.whoami()? {
-            AuthState::Authenticated(account_id) => Ok(account_id),
+            AuthState::Authenticated(accounts) => Ok(accounts),
             AuthState::LoggedOut => {
-                let logged_in = self
-                    .run_status(&["login"], None, LOGIN_TIMEOUT)
-                    .map_err(map_wrangler_auth_process_error)?;
-                if !logged_in {
-                    return Err(CliError::remote(
-                        "wrangler_login_failed",
-                        "Cloudflare login was not completed.",
-                    ));
-                }
+                self.login()?;
                 match self.whoami()? {
-                    AuthState::Authenticated(account_id) => Ok(account_id),
+                    AuthState::Authenticated(accounts) => Ok(accounts),
                     AuthState::LoggedOut => Err(CliError::remote(
                         "wrangler_login_failed",
                         "Cloudflare login was not completed.",
@@ -135,33 +196,15 @@ impl WranglerClient {
         }
     }
 
-    pub fn ensure_bucket(&self, account_id: &str, bucket: &str) -> Result<(), CliError> {
-        let created = self
-            .run_status(
-                &["r2", "bucket", "create", bucket, "--update-config=false"],
-                Some(account_id),
-                BUCKET_TIMEOUT,
-            )
-            .map_err(map_wrangler_bucket_process_error)?;
-        if created {
-            return Ok(());
-        }
+    pub fn selected_account_id(&self, selected: Option<&str>) -> Result<String, CliError> {
+        select_account(self.authenticated_accounts()?, selected)
+    }
 
-        let exists = self
-            .run_status(
-                &["r2", "bucket", "info", bucket, "--json"],
-                Some(account_id),
-                BUCKET_TIMEOUT,
-            )
-            .map_err(map_wrangler_bucket_process_error)?;
-        if exists {
-            Ok(())
-        } else {
-            Err(CliError::remote(
-                "wrangler_r2_bucket_failed",
-                "Wrangler could not create or access the Cloudflare R2 bucket.",
-            ))
-        }
+    pub fn oauth_token(&self) -> Result<SecretValue, CliError> {
+        let (status, output) = self
+            .run_json(&["auth", "token", "--json"], WHOAMI_TIMEOUT)
+            .map_err(map_wrangler_auth_process_error)?;
+        parse_oauth_token(status.success(), &output)
     }
 
     fn whoami(&self) -> Result<AuthState, CliError> {
@@ -200,21 +243,21 @@ impl WranglerClient {
         Ok((status?, output?))
     }
 
-    fn run_status(
-        &self,
-        args: &[&str],
-        account_id: Option<&str>,
-        timeout: Duration,
-    ) -> Result<bool, ProcessFailure> {
-        let mut command = self.command(args, account_id);
-        command.stdout(Stdio::null());
+    fn run_login(&self) -> Result<bool, ProcessFailure> {
+        let mut command = self.command(&["login", "--browser=false"], None);
+        command.stdout(Stdio::piped());
         let mut child = command.spawn().map_err(map_spawn_failure)?;
-        wait_with_timeout(&mut child, timeout).map(|status| status.success())
+        let stdout = child.stdout.take().ok_or(ProcessFailure::Unavailable)?;
+        let reader = thread::spawn(move || forward_login_link(stdout));
+        let status = wait_with_timeout(&mut child, LOGIN_TIMEOUT);
+        reader.join().map_err(|_| ProcessFailure::Unavailable)??;
+        status.map(|status| status.success())
     }
 
     fn command(&self, args: &[&str], account_id: Option<&str>) -> Command {
         let mut command = Command::new(&self.program);
         command
+            .args(&self.prefix_args)
             .args(args)
             .current_dir(self.workdir.path())
             .stdin(Stdio::null())
@@ -225,7 +268,11 @@ impl WranglerClient {
             .env("WRANGLER_NO_SKILLS_UPDATE_PROMPTS", "true")
             .env("WRANGLER_WRITE_LOGS", "false")
             .env_remove("CI")
+            .env_remove("NODE_OPTIONS")
             .env_remove("WRANGLER_LOG_SANITIZE");
+        if let Some(path) = &self.runtime_path {
+            command.env("PATH", path);
+        }
         for variable in REMOVED_WRANGLER_ENVIRONMENT_VARIABLES {
             command.env_remove(variable);
         }
@@ -237,22 +284,128 @@ impl WranglerClient {
     }
 }
 
+// Only these structured progress records reach the desktop. Raw Wrangler
+// output and credentials stay out of the IPC stream and activity logs.
+fn publish_authorization_link(stage: &str, url: &Url) -> std::io::Result<()> {
+    publish_progress(&serde_json::json!({
+        "schema": 1, "status": "authorization_link", "stage": stage, "url": url.as_str()
+    }))
+}
+
+/// Which Wrangler passed the dependency check, said as soon as it did.
+pub(crate) fn publish_wrangler_ready(info: &WranglerInfo) -> std::io::Result<()> {
+    publish_progress(&serde_json::json!({
+        "schema": 1, "status": "wrangler_ready", "version": info.version, "path": info.path
+    }))
+}
+
+/// The bucket a setup will authorize, said as soon as it exists so the desktop
+/// can name it — and keep naming it if consent then expires.
+pub(crate) fn publish_bucket_ready(bucket: &str) -> std::io::Result<()> {
+    publish_progress(&serde_json::json!({
+        "schema": 1, "status": "bucket_ready", "bucket": bucket
+    }))
+}
+
+fn publish_progress(record: &serde_json::Value) -> std::io::Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, record)?;
+    writeln!(stdout)?;
+    stdout.flush()
+}
+
+/// The first version-shaped token Wrangler prints for `--version`, or nothing:
+/// the check does not depend on it, the setup lane only shows it.
+fn parse_wrangler_version(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .split_whitespace()
+        .find(|token| {
+            token.as_bytes().first().is_some_and(u8::is_ascii_digit)
+                && token.contains('.')
+                && token
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        })
+        .map(|token| token.chars().take(MAX_WRANGLER_VERSION_CHARS).collect())
+        .unwrap_or_default()
+}
+
+fn login_link(line: &str) -> Option<Url> {
+    let value = line
+        .split_whitespace()
+        .find(|part| part.starts_with("https://dash.cloudflare.com/oauth2/auth?"))?;
+    if value.len() > 8192 {
+        return None;
+    }
+    let url = Url::parse(value).ok()?;
+    (url.scheme() == "https"
+        && url.host_str() == Some("dash.cloudflare.com")
+        && url.port().is_none()
+        && url.path() == "/oauth2/auth"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none())
+    .then_some(url)
+}
+
+fn forward_login_link(reader: impl Read) -> Result<(), ProcessFailure> {
+    let mut reader = BufReader::new(reader.take(MAX_WRANGLER_JSON_BYTES + 1));
+    let mut total = 0;
+    let mut sent = false;
+    loop {
+        let mut line = Zeroizing::new(String::new());
+        let count = reader
+            .read_line(&mut line)
+            .map_err(|_| ProcessFailure::Unavailable)?;
+        if count == 0 {
+            return Ok(());
+        }
+        total += count as u64;
+        if total > MAX_WRANGLER_JSON_BYTES {
+            return Err(ProcessFailure::OutputTooLarge);
+        }
+        if !sent {
+            if let Some(url) = login_link(&line) {
+                publish_authorization_link("login", &url)
+                    .map_err(|_| ProcessFailure::Unavailable)?;
+                sent = true;
+            }
+        }
+    }
+}
+
+fn runtime_error() -> CliError {
+    CliError::invalid_code(
+        "wrangler_runtime_unavailable",
+        "Wrangler could not start. Check the Node.js and Wrangler installation.",
+    )
+}
+
 #[derive(Deserialize)]
 struct WhoamiDocument {
     #[serde(rename = "loggedIn")]
     logged_in: bool,
     #[serde(default)]
-    accounts: Vec<WhoamiAccount>,
+    accounts: Vec<WranglerAccount>,
 }
 
-#[derive(Deserialize)]
-struct WhoamiAccount {
-    id: String,
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct WranglerAccount {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// Which Wrangler the setup runs: shown on the setup lane's first step.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct WranglerInfo {
+    pub version: String,
+    pub path: String,
 }
 
 enum AuthState {
     LoggedOut,
-    Authenticated(String),
+    Authenticated(Vec<WranglerAccount>),
 }
 
 enum ProcessFailure {
@@ -262,13 +415,21 @@ enum ProcessFailure {
     Unavailable,
 }
 
+/// A session Wrangler cannot use is a session to replace. With no token it
+/// answers `{"loggedIn":false}`; with a token that expired and could not be
+/// refreshed without a terminal it answers an error and no document at all.
+/// Both send setup through login. Only a successful run whose output is not
+/// the document fails closed.
 fn parse_whoami(success: bool, bytes: &[u8]) -> Result<AuthState, CliError> {
-    let document = serde_json::from_slice::<WhoamiDocument>(bytes).map_err(|_| {
-        CliError::remote(
+    let Ok(document) = serde_json::from_slice::<WhoamiDocument>(bytes) else {
+        if !success {
+            return Ok(AuthState::LoggedOut);
+        }
+        return Err(CliError::remote(
             "wrangler_auth_unavailable",
             "Wrangler authentication could not be verified.",
-        )
-    })?;
+        ));
+    };
     if !document.logged_in {
         return Ok(AuthState::LoggedOut);
     }
@@ -280,28 +441,49 @@ fn parse_whoami(success: bool, bytes: &[u8]) -> Result<AuthState, CliError> {
     }
 
     let mut account_ids = BTreeSet::new();
+    let mut accounts = Vec::new();
     for mut account in document.accounts {
         if account.id.len() != 32 || !account.id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            account.id.zeroize();
             return Err(CliError::remote(
                 "wrangler_auth_unavailable",
                 "Wrangler authentication could not be verified.",
             ));
         }
-        account_ids.insert(account.id.to_ascii_lowercase());
-        account.id.zeroize();
+        account.id.make_ascii_lowercase();
+        // Display only bounded account labels. Never forward other whoami fields.
+        account.name = account
+            .name
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(64)
+            .collect();
+        while account.name.len() > 128 {
+            account.name.pop();
+        }
+        if account_ids.insert(account.id.clone()) {
+            accounts.push(account);
+        }
     }
-    if account_ids.len() != 1 {
+    Ok(AuthState::Authenticated(accounts))
+}
+
+fn select_account(
+    accounts: Vec<WranglerAccount>,
+    selected: Option<&str>,
+) -> Result<String, CliError> {
+    if let Some(id) = selected {
+        return accounts.into_iter().find(|account| account.id == id)
+            .map(|account| account.id)
+            .ok_or_else(|| CliError::invalid_code("wrangler_account_unavailable",
+                "The selected account is no longer available. Check the Wrangler login and select an account again."));
+    }
+    if accounts.len() != 1 {
         return Err(CliError::invalid_code(
             "wrangler_account_ambiguous",
-            "Wrangler is authenticated to multiple Cloudflare accounts, so Mallard cannot choose one automatically.",
+            "Select a Cloudflare account before continuing R2 setup.",
         ));
     }
-    Ok(AuthState::Authenticated(
-        account_ids
-            .pop_first()
-            .expect("one authenticated account remains"),
-    ))
+    Ok(accounts.into_iter().next().expect("one account").id)
 }
 
 fn map_spawn_failure(error: std::io::Error) -> ProcessFailure {
@@ -325,23 +507,6 @@ fn map_wrangler_auth_process_error(error: ProcessFailure) -> CliError {
         ProcessFailure::OutputTooLarge | ProcessFailure::Unavailable => CliError::remote(
             "wrangler_auth_unavailable",
             "Wrangler authentication could not be verified.",
-        ),
-    }
-}
-
-fn map_wrangler_bucket_process_error(error: ProcessFailure) -> CliError {
-    match error {
-        ProcessFailure::Missing => CliError::invalid_code(
-            "wrangler_not_found",
-            "Wrangler is required on PATH. Install Wrangler and run this command again.",
-        ),
-        ProcessFailure::TimedOut => CliError::remote(
-            "wrangler_r2_bucket_timeout",
-            "Wrangler timed out while preparing Cloudflare R2.",
-        ),
-        ProcessFailure::OutputTooLarge | ProcessFailure::Unavailable => CliError::remote(
-            "wrangler_r2_bucket_failed",
-            "Wrangler could not create or access the Cloudflare R2 bucket.",
         ),
     }
 }
@@ -378,51 +543,39 @@ fn read_bounded_stream(reader: impl Read) -> Result<Zeroizing<Vec<u8>>, ProcessF
     Ok(bytes)
 }
 
-pub(crate) fn derive_destination(account_id: &str, storage_name: &str) -> R2Destination {
-    let mut hasher = Sha256::new();
-    hasher.update(b"mallard-r2-bucket-v2\0");
-    hasher.update(account_id.as_bytes());
-    hasher.update([0]);
-    hasher.update(storage_name.as_bytes());
-    let digest = hasher.finalize();
-    let suffix = hex_lower(&digest[..R2_BUCKET_SUFFIX_BYTES]);
-    let readable_slug = readable_bucket_slug(storage_name);
-    let bucket = format!("{R2_BUCKET_PREFIX}{readable_slug}-{suffix}");
-    R2Destination {
-        account_id: account_id.to_string(),
-        api_url: format!("https://{account_id}.r2.cloudflarestorage.com/{bucket}"),
-        bucket,
+fn parse_oauth_token(success: bool, bytes: &[u8]) -> Result<SecretValue, CliError> {
+    #[derive(Deserialize)]
+    struct Token {
+        #[serde(rename = "type")]
+        kind: String,
+        token: String,
     }
-}
-
-fn readable_bucket_slug(storage_name: &str) -> String {
-    let mut slug = String::with_capacity(R2_BUCKET_SLUG_MAX_BYTES);
-    let mut separator_pending = false;
-
-    for byte in storage_name.bytes() {
-        if !byte.is_ascii_alphanumeric() {
-            separator_pending = !slug.is_empty();
-            continue;
+    impl Drop for Token {
+        fn drop(&mut self) {
+            self.token.zeroize();
         }
-
-        if separator_pending {
-            if slug.len() + 1 >= R2_BUCKET_SLUG_MAX_BYTES {
-                break;
-            }
-            slug.push('-');
-        }
-        if slug.len() >= R2_BUCKET_SLUG_MAX_BYTES {
-            break;
-        }
-        slug.push(byte.to_ascii_lowercase() as char);
-        separator_pending = false;
     }
-
-    if slug.is_empty() {
-        R2_BUCKET_FALLBACK_SLUG.to_string()
-    } else {
-        slug
+    let invalid = || {
+        CliError::invalid_code(
+        "wrangler_oauth_token_unavailable",
+        "Mallard requires Wrangler with auth token --json support and an active OAuth login. Update Wrangler and log in again.",
+    )
+    };
+    if !success {
+        return Err(invalid());
     }
+    let token: Token = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    if token.kind != "oauth"
+        || token.token.is_empty()
+        || token.token.len() > 4096
+        || !token
+            .token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-._~+/=".contains(&byte))
+    {
+        return Err(invalid());
+    }
+    SecretValue::parse(&token.token).map_err(|_| invalid())
 }
 
 pub(crate) fn authorize_bucket(
@@ -434,7 +587,7 @@ pub(crate) fn authorize_bucket(
     authorize_with_listener(
         listener,
         &url,
-        |url| open::that_detached(url.as_str()).map_err(|_| ()),
+        |url| publish_authorization_link("bucket", url).map_err(|_| ()),
         CALLBACK_TIMEOUT,
     )
 }
@@ -1135,103 +1288,100 @@ mod tests {
     }
 
     #[test]
-    fn destination_is_stable_canonical_and_name_scoped() {
-        let first = derive_destination(ACCOUNT, "R2 storage 1");
-        let retry = derive_destination(ACCOUNT, "R2 storage 1");
-        let other = derive_destination(ACCOUNT, "R2 storage 2");
-        let other_account = derive_destination("fedcba9876543210fedcba9876543210", "R2 storage 1");
-        assert_eq!(first.bucket, retry.bucket);
-        assert_eq!(first.api_url, retry.api_url);
-        assert_ne!(first.bucket, other.bucket);
-        assert_ne!(first.bucket, other_account.bucket);
-        assert!(first.bucket.starts_with("mallard-r2-storage-1-"));
-        let suffix = first.bucket.rsplit('-').next().unwrap();
-        assert_eq!(suffix.len(), R2_BUCKET_SUFFIX_HEX_BYTES);
-        assert!(suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    fn oauth_token_requires_the_supported_oauth_contract_and_redacts_errors() {
         assert_eq!(
-            first.api_url,
-            format!(
-                "https://{ACCOUNT}.r2.cloudflarestorage.com/{}",
-                first.bucket
-            )
+            parse_oauth_token(true, br#"{"type":"oauth","token":"fixture-token"}"#)
+                .unwrap()
+                .expose(),
+            "fixture-token"
         );
-        assert!(first
-            .bucket
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'));
+        for bytes in [
+            br#"{"type":"api_token","token":"secret-canary"}"#.as_slice(),
+            br#"{"type":"oauth","token":"secret-canary\n"}"#.as_slice(),
+            br#"{"type":"oauth","token":""}"#.as_slice(),
+            b"secret-canary".as_slice(),
+        ] {
+            let error = parse_oauth_token(true, bytes).unwrap_err();
+            assert_eq!(error.code(), "wrangler_oauth_token_unavailable");
+            assert!(!format!("{error:?}").contains("secret-canary"));
+        }
+        assert!(parse_oauth_token(false, br#"{"type":"oauth","token":"fixture-token"}"#).is_err());
     }
 
     #[test]
-    fn destination_uses_a_bounded_readable_slug_with_a_safe_fallback() {
-        let readable = derive_destination(ACCOUNT, "Team / Backup -- East!");
-        assert!(readable.bucket.starts_with("mallard-team-backup-east-"));
-
-        let long = derive_destination(ACCOUNT, &"Readable storage ".repeat(20));
-        assert_eq!(long.bucket.len(), R2_BUCKET_MAX_BYTES);
-        assert!(long
-            .bucket
-            .starts_with("mallard-readable-storage-readable-"));
-        assert!(long
-            .bucket
-            .as_bytes()
-            .last()
-            .unwrap()
-            .is_ascii_alphanumeric());
-
-        let fallback = derive_destination(ACCOUNT, "東京 🚀");
-        assert!(fallback.bucket.starts_with("mallard-storage-"));
-
-        let first_collision = derive_destination(ACCOUNT, "Team__Backup");
-        let second_collision = derive_destination(ACCOUNT, "team backup");
-        assert!(first_collision.bucket.starts_with("mallard-team-backup-"));
-        assert!(second_collision.bucket.starts_with("mallard-team-backup-"));
-        assert_ne!(first_collision.bucket, second_collision.bucket);
-
-        for destination in [readable, long, fallback, first_collision, second_collision] {
-            assert!((3..=R2_BUCKET_MAX_BYTES).contains(&destination.bucket.len()));
-            assert!(destination
-                .bucket
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'));
-            assert!(destination
-                .bucket
-                .as_bytes()
-                .first()
+    fn login_output_accepts_only_the_cloudflare_authorization_link() {
+        let expected = "https://dash.cloudflare.com/oauth2/auth?state=test&code_challenge=test";
+        assert_eq!(
+            login_link(&format!("Visit this link to authenticate: {expected}\n"))
                 .unwrap()
-                .is_ascii_alphanumeric());
-            assert!(destination
-                .bucket
-                .as_bytes()
-                .last()
-                .unwrap()
-                .is_ascii_alphanumeric());
-            let parsed = mallard_infrastructure::storage_providers::r2::parse_r2_api_url(
-                &destination.api_url,
-            )
-            .unwrap();
-            assert_eq!(parsed.bucket(), destination.bucket);
+                .as_str(),
+            expected
+        );
+        for line in [
+            "private-token-canary",
+            "https://evil.example/oauth2/auth?state=test",
+            "https://dash.cloudflare.com/oauth2/auth?state=test#fragment",
+            "https://dash.cloudflare.com/other?state=test",
+        ] {
+            assert!(login_link(line).is_none());
         }
     }
 
     #[test]
-    fn whoami_accepts_one_account_and_fails_closed_on_ambiguity() {
+    fn whoami_lists_accounts_and_setup_requires_an_available_selection() {
         let one = format!(
-            "{{\"loggedIn\":true,\"email\":\"private@example.test\",\"accounts\":[{{\"name\":\"Private\",\"id\":\"{ACCOUNT}\"}}]}}"
+            r#"{{"loggedIn":true,"email":"private@example.test","accounts":[{{"name":"Test account","id":"{ACCOUNT}"}}]}}"#
         );
-        let AuthState::Authenticated(account_id) = parse_whoami(true, one.as_bytes()).unwrap()
-        else {
-            panic!("expected an authenticated account");
+        let AuthState::Authenticated(accounts) = parse_whoami(true, one.as_bytes()).unwrap() else {
+            panic!("expected accounts")
         };
-        assert_eq!(account_id, ACCOUNT);
+        assert_eq!(accounts[0].name, "Test account");
+        assert!(!serde_json::to_string(&accounts)
+            .unwrap()
+            .contains("private@example.test"));
+        assert_eq!(select_account(accounts, None).unwrap(), ACCOUNT);
 
         let multiple = format!(
-            "{{\"loggedIn\":true,\"accounts\":[{{\"id\":\"{ACCOUNT}\"}},{{\"id\":\"ffffffffffffffffffffffffffffffff\"}}]}}"
+            r#"{{"loggedIn":true,"accounts":[{{"id":"{ACCOUNT}"}},{{"id":"ffffffffffffffffffffffffffffffff"}}]}}"#
         );
-        let Err(error) = parse_whoami(true, multiple.as_bytes()) else {
-            panic!("multiple accounts must fail closed");
+        for (selection, expected) in [
+            (None, Err("wrangler_account_ambiguous")),
+            (Some(ACCOUNT), Ok(ACCOUNT)),
+            (
+                Some("ffffffffffffffffffffffffffffffff"),
+                Ok("ffffffffffffffffffffffffffffffff"),
+            ),
+            (
+                Some("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+                Err("wrangler_account_unavailable"),
+            ),
+        ] {
+            let AuthState::Authenticated(accounts) =
+                parse_whoami(true, multiple.as_bytes()).unwrap()
+            else {
+                panic!("expected accounts")
+            };
+            assert_eq!(accounts.len(), 2);
+            assert_eq!(
+                select_account(accounts, selection).map_err(|e| e.code()),
+                expected.map(str::to_owned)
+            );
+        }
+    }
+
+    #[test]
+    fn account_labels_are_bounded_and_duplicate_ids_are_removed() {
+        let value = serde_json::json!({"loggedIn":true,"accounts":[
+            {"id":ACCOUNT,"name":format!("\n{}", "界".repeat(200))}, {"id":ACCOUNT,"name":"Duplicate"}
+        ]});
+        let AuthState::Authenticated(accounts) =
+            parse_whoami(true, &serde_json::to_vec(&value).unwrap()).unwrap()
+        else {
+            panic!("expected accounts")
         };
-        assert_eq!(error.code(), "wrangler_account_ambiguous");
-        assert!(!error.to_string().contains(ACCOUNT));
+        assert_eq!(accounts.len(), 1);
+        assert!(accounts[0].name.len() <= 128);
+        assert!(!accounts[0].name.contains('\n'));
     }
 
     #[test]
@@ -1240,6 +1390,17 @@ mod tests {
             parse_whoami(false, br#"{"loggedIn":false}"#).unwrap(),
             AuthState::LoggedOut
         ));
+        // An expired token that cannot be refreshed without a terminal ends
+        // whoami with an error and nothing on stdout: sign in again.
+        for output in [
+            b"".as_slice(),
+            b"private malformed wrangler output".as_slice(),
+        ] {
+            assert!(matches!(
+                parse_whoami(false, output).unwrap(),
+                AuthState::LoggedOut
+            ));
+        }
         for output in [
             br#"{"loggedIn":true,"accounts":[]}"#.as_slice(),
             br#"{"loggedIn":true,"accounts":[{"id":"not-an-account"}]}"#.as_slice(),
@@ -1301,6 +1462,77 @@ mod tests {
             read_bounded_stream(std::io::Cursor::new(output)),
             Err(ProcessFailure::OutputTooLarge)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_launcher_uses_resolved_node_for_dependency_checks_and_login() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("wrangler");
+        let node = directory.path().join("node");
+        std::fs::write(&program, "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(&node, "#!/bin/sh\nshift\nprintf '%s\\n' \"$*\" >> \"$0.calls\"\ncase \"$*\" in\n  '--version') printf '4.125.0';;\n  'auth token --help') printf '%s' '--json';;\n  'login --browser=false') exit 0;;\n  *) exit 1;;\nesac\n").unwrap();
+        for path in [&program, &node] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut client = WranglerClient::with_program(program.clone().into_os_string()).unwrap();
+        // A GUI can start with no Node in PATH. Only the resolved runtime is needed.
+        client.runtime_path = Some(directory.path().as_os_str().to_owned());
+        let info = client.check_dependency().unwrap();
+        assert_eq!(info.version, "4.125.0");
+        assert_eq!(info.path, program.to_string_lossy());
+        client.login().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("node.calls")).unwrap(),
+            "--version\nauth token --help\nlogin --browser=false\n"
+        );
+        assert!(client
+            .command(&["login"], None)
+            .get_envs()
+            .any(|(key, value)| key == "NODE_OPTIONS" && value.is_none()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dependency_errors_distinguish_runtime_and_command_support() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("wrangler");
+        let client = WranglerClient::with_program(program.clone().into_os_string()).unwrap();
+        for (script, expected) in [
+            ("#!/bin/sh\nexit 1\n", "wrangler_runtime_unavailable"),
+            ("#!/bin/sh\nexit 0\n", "wrangler_update_required"),
+        ] {
+            std::fs::write(&program, script).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(client.check_dependency().unwrap_err().code(), expected);
+        }
+        assert_eq!(
+            map_wrangler_auth_process_error(ProcessFailure::Missing).code(),
+            "wrangler_not_found"
+        );
+    }
+
+    #[test]
+    fn wrangler_version_is_the_first_version_shaped_token_and_stays_bounded() {
+        assert_eq!(parse_wrangler_version(b"4.125.0\n"), "4.125.0");
+        assert_eq!(
+            parse_wrangler_version(
+                "\n \u{26C5}\u{FE0F} wrangler 3.114.2\n-------------------\n".as_bytes()
+            ),
+            "3.114.2"
+        );
+        assert_eq!(
+            parse_wrangler_version(b"4.0.0-beta.3 (dev)"),
+            "4.0.0-beta.3"
+        );
+        assert_eq!(parse_wrangler_version(b"no version here"), "");
+        let long = format!("1.{}", "2".repeat(64));
+        assert_eq!(
+            parse_wrangler_version(long.as_bytes()).chars().count(),
+            MAX_WRANGLER_VERSION_CHARS
+        );
     }
 
     #[test]

@@ -252,13 +252,13 @@ test("file details reuse the project copyable popover", () => {
   const markup = renderView(inventoryWith([
     entry("file-design", "doc/test-design.md", "synced"),
   ]));
-  assert.match(markup, /aria-label="Show details for doc\/test-design\.md"/);
+  assert.match(markup, /aria-label="Show file info for doc\/test-design\.md"/);
   assert.match(markup, /aria-haspopup="dialog"/);
   const controlledPanel = markup.match(/aria-controls="([^"]+)"/)?.[1];
   assert.ok(controlledPanel);
   assert.match(markup, new RegExp(`id="${controlledPanel}"`));
-  assert.match(markup, /<strong>File details<\/strong>/);
-  assert.match(markup, /Click a value to copy it\./);
+  assert.match(markup, /<strong>File info<\/strong>/);
+  assert.doesNotMatch(markup, /Click a value to copy it\./);
   assert.match(markup, /<code>\/tmp\/project-a\/doc\/test-design\.md<\/code>/);
   assert.match(markup, />Copy all<\/button>/);
   assert.doesNotMatch(markup, /sync-project-file-details/);

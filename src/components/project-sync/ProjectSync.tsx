@@ -3518,6 +3518,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           <SettingsPage
             appActions={appActions}
             onLogsChanged={() => setLogRefreshEpoch((epoch) => epoch + 1)}
+            onDone={() => void closeWorkspaceSettings()}
+            doneTarget={activeSummary ? projectLabel(activeSummary) : "Projects"}
           />
         ) : storageProviderPickerOpen ? (
           <StorageProviderPicker

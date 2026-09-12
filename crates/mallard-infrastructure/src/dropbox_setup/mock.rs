@@ -5,11 +5,12 @@ use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, service::service_fn, Request, Response};
 use hyper_util::rt::TokioIo;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 pub struct State {
+    pub responses: BTreeMap<String, Vec<(u16, Value)>>,
     pub counts: BTreeMap<String, usize>,
     pub folder_path: Option<String>,
     pub shared: bool,
@@ -21,6 +22,11 @@ pub struct State {
     pub replacement: bool,
     pub account_changed: bool,
     pub redirect_token: bool,
+    pub create_conflicts: usize,
+    pub conflict_kind: Option<String>,
+    pub create_error: Option<(u16, Value)>,
+    pub create_paths: Vec<String>,
+    pub occupied_paths: BTreeSet<String>,
 }
 pub struct MockDropboxSetup {
     pub state: Arc<Mutex<State>>,
@@ -97,17 +103,54 @@ async fn serve(
     {
         return Ok(reply(401, Value::Null));
     }
+    if route == "files/download" {
+        let args: Value = serde_json::from_slice(parts.headers["dropbox-api-arg"].as_bytes()).unwrap();
+        assert_eq!(args["path"], "/.mallard/_storage.json");
+        let root: Value = serde_json::from_slice(parts.headers["dropbox-api-path-root"].as_bytes()).unwrap();
+        assert_eq!(root[".tag"], "namespace_id");
+        let key = format!("marker:{}", root["namespace_id"].as_str().unwrap());
+        if let Some(responses) = state.responses.get_mut(&key) {
+            let (status, value) = responses.remove(0);
+            return Ok(reply(status, value));
+        }
+        return Ok(reply(409, json!({"error":{".tag":"path", "path":{".tag":"not_found"}}})));
+    }
+    if let Some(responses) = state.responses.get_mut(route) {
+        let (status, value) = responses.remove(0);
+        return Ok(reply(status, value));
+    }
     let args: Value = serde_json::from_slice(&bytes).unwrap();
     let response = match route {
         "users/get_current_account" => {
-            json!({"account_id":if state.account_changed { "dbid:other" } else { "dbid:fixture" }, "root_info": {".tag":"user", "home_namespace_id":"home", "root_namespace_id":"home"}})
+            json!({"account_id":if state.account_changed { "dbid:other" } else { "dbid:fixture" }, "name":{"display_name":"Test User"}, "email":"test@example.test", "root_info": {".tag":"user", "home_namespace_id":"home", "root_namespace_id":"home"}})
         }
         "files/create_folder_v2" => {
             assert_eq!(args["autorename"], false);
-            assert!(
-                state.folder_path.is_none(),
-                "a second folder must never be created"
-            );
+            state
+                .create_paths
+                .push(args["path"].as_str().unwrap().to_string());
+            if let Some((status, body)) = &state.create_error {
+                return Ok(reply(*status, body.clone()));
+            }
+            if state.create_conflicts > 0 {
+                state.create_conflicts -= 1;
+                return Ok(reply(
+                    409,
+                    json!({"error": {".tag":"path", "path": {
+                        ".tag":"conflict", "conflict": {".tag": state.conflict_kind.as_deref().unwrap_or("folder")}
+                    }}}),
+                ));
+            }
+            let path = args["path"].as_str().unwrap().to_lowercase();
+            if !state.occupied_paths.insert(path) {
+                return Ok(reply(
+                    409,
+                    json!({"error": {".tag":"path", "path": {
+                        ".tag":"conflict", "conflict": {".tag":"folder"}
+                    }}}),
+                ));
+            }
+            state.shared = false;
             state.folder_path = Some(args["path"].as_str().unwrap().to_lowercase());
             json!({"metadata":{"id":"id:created", "name":"Mallard", "path_lower":state.folder_path}})
         }

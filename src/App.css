@@ -1574,7 +1574,8 @@ summary:focus-visible {
 .sync-provider-name span { color: var(--text-3); font-size: var(--type-2xs); }
 .sync-provider-card > small code { font-family: var(--font-mono); font-size: var(--type-2xs); }
 .sync-field-grid label,
-.sync-storage-fields label,
+.sync-storage-fields > label,
+.storage-provider-field,
 .sync-folder-field { min-width: 0; display: flex; flex-direction: column; gap: 4px; color: var(--text-2); font-size: var(--type-xs); }
 .sync-field-grid label > span,
 .sync-folder-field > span { color: var(--text-1); font-weight: var(--weight-semibold); }
@@ -2095,12 +2096,14 @@ summary:focus-visible {
 .sync-storage-card > header > .sync-storage-editor-provider { margin-left: auto; color: var(--text-3); font-size: var(--type-2xs); font-weight: var(--weight-semibold); white-space: nowrap; }
 .sync-storage-editor-title { margin: 0; color: var(--text-0); }
 .sync-storage-fields { padding: 13px 14px 15px; grid-template-columns: 1fr 1fr; }
-/* Field names are chrome micro-labels; the value below them carries the voice. */
+/* Field names are read, not scanned: sentence case in the display face,
+   one step under the value they name. */
 .sync-storage-card .sync-field-name {
-  color: var(--text-2);
-  font-size: var(--type-3xs);
-  letter-spacing: 1px;
-  text-transform: uppercase;
+  color: var(--text-1);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0;
+  text-transform: none;
 }
 .storage-setup-guide {
   padding: 9px 14px;
@@ -2113,6 +2116,14 @@ summary:focus-visible {
   font-size: var(--type-xs);
 }
 .storage-setup-guide > svg { flex: none; }
+
+/* A taken folder, refused where the folder is typed: the notice box the page
+   already draws, seated in the card at the folder field's own inset, with
+   its two doors on a row of their own so a narrow drawer never squeezes the
+   sentence. Neither door is the page's primary: the settled storage's Save,
+   or the draft's Create, keeps that. */
+.sync-storage-card > .storage-destination-conflict { margin: 0 14px 12px; flex-wrap: wrap; }
+.storage-destination-conflict-verbs { flex: 1 0 100%; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .storage-setup-guide-copy { min-width: 0; flex: 1 1 300px; }
 .storage-setup-guide > .btn-link { min-height: 24px; padding: 2px 0; flex: none; white-space: nowrap; }
 /* The agent action at the guide row's tail: a compact button in the accent's
@@ -2158,13 +2169,14 @@ summary:focus-visible {
   font-size: var(--type-xs);
 }
 /* The setup draft's two named routes: one quiet row per lane, the agent row
-   in a whisper of the accent tint. Zone labels reuse the field-name voice. */
+   in a whisper of the accent tint. Zone labels speak in the display face,
+   in sentence case — the voice of the doors above them — so a zone's name
+   reads before its hint. */
 .storage-setup-route-label {
-  color: var(--text-3);
-  font-size: var(--type-3xs);
-  font-weight: var(--weight-semibold);
-  letter-spacing: 1px;
-  text-transform: uppercase;
+  color: var(--text-0);
+  font-family: var(--font-display);
+  font-size: var(--type-lg);
+  font-weight: var(--weight-bold);
   white-space: nowrap;
 }
 .storage-setup-route-row {
@@ -2175,7 +2187,7 @@ summary:focus-visible {
   gap: 4px 9px;
   border-bottom: 1px solid var(--border);
   color: var(--text-2);
-  font-size: var(--type-xs);
+  font-size: var(--type-sm);
 }
 .storage-setup-route-row > svg { flex: none; }
 .storage-setup-route-row.agent { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
@@ -2189,6 +2201,271 @@ summary:focus-visible {
   gap: 5px;
   white-space: nowrap;
 }
+.storage-setup-route-row > .storage-manual-toggle {
+  width: 26px;
+  min-height: 26px;
+  padding: 0;
+  flex: none;
+  border: 1px solid var(--border-mid);
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+}
+.storage-setup-route-row > .storage-manual-toggle:hover:not(:disabled) { background: var(--bg-hover); }
+/* The New-storage question, as two doors in the card: dashed until chosen,
+   then the active-row fill and the strong edge — selection in the app's own
+   grammar. They stay as a switch until the draft holds values. */
+.storage-mode-doors {
+  padding: 12px 14px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.storage-mode-option { min-width: 0; position: relative; display: flex; }
+.storage-mode-option.has-help .storage-mode-door { padding-bottom: 34px; }
+.storage-mode-help {
+  position: absolute;
+  left: 14px;
+  bottom: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--type-xs);
+}
+.storage-mode-door {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 2px dashed var(--border-mid);
+  border-radius: var(--retro-panel-radius);
+  color: var(--text-2);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.storage-mode-door:hover:not(:disabled) { color: var(--text-0); background: var(--bg-hover); }
+.storage-mode-door:disabled { cursor: not-allowed; opacity: var(--button-disabled-opacity); }
+.storage-mode-door[aria-checked="true"] {
+  border-style: solid;
+  border-color: var(--border-strong);
+  color: var(--text-0);
+  background: var(--surface-row-active);
+}
+.storage-mode-door-title { display: flex; align-items: center; gap: 8px; }
+.storage-mode-door-title > svg { flex: none; }
+.storage-mode-door-title > strong { font-family: var(--font-display); font-size: var(--type-md); font-weight: var(--weight-bold); }
+.storage-mode-door-detail { font-size: var(--type-xs); line-height: 1.45; }
+/* The scan's scope line: who was looked at, how many, and the tally, in the
+   guide row's voice, with Scan again at the tail. */
+.storage-found-scope {
+  padding: 8px 14px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 9px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+  background: var(--surface-subtle);
+  font-size: var(--type-xs);
+}
+.storage-found-scope > svg { flex: none; }
+.storage-found-scope-text { min-width: 0; flex: 1 1 300px; display: flex; flex-direction: column; gap: 2px; }
+.storage-found-scope-text code { color: var(--text-3); font-family: var(--font-mono); font-size: var(--type-2xs); }
+.storage-found-scope > .btn-link {
+  min-height: 24px;
+  padding: 2px 0;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+/* A scan notice seated in the card at the field inset. */
+.sync-storage-card > .storage-found-notice { margin: 10px 14px; }
+/* Group heads in the field-name voice; a foldable one is a button. */
+.storage-found-list { border-bottom: 1px solid var(--border); }
+.storage-found-group-head {
+  width: 100%;
+  padding: 6px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-3);
+  background: var(--surface-subtle);
+  font: inherit;
+  font-size: var(--type-3xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  text-align: left;
+}
+.storage-found-group-head > b { color: var(--text-2); font-family: var(--font-mono); font-size: var(--type-2xs); }
+.storage-found-group-head > svg { margin-left: auto; }
+button.storage-found-group-head { cursor: pointer; }
+button.storage-found-group-head:hover { color: var(--text-1); background: var(--bg-hover); }
+/* One row per candidate: choice, glyph, name over its verdict, facts, verb.
+   The verdict is the marker's word, coloured by rung and never only by
+   colour — the glyph and the sentence carry it. The row is the radio's
+   label, so the choice is one click anywhere on it. */
+.storage-found-row {
+  min-height: 50px;
+  padding: 7px 14px;
+  display: grid;
+  grid-template-columns: auto 26px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  color: inherit;
+  background: var(--surface-row);
+  font-weight: inherit;
+  cursor: pointer;
+}
+.storage-found-row:last-child { border-bottom: 0; }
+.storage-found-row:hover { background: var(--surface-row-hover); }
+.storage-found-row.selected { background: var(--surface-row-active); }
+.storage-found-row:has(> input:disabled) { cursor: default; }
+.storage-found-row > input[type="radio"] { margin: 0; }
+.storage-found-row.muted .storage-found-name { color: var(--text-2); font-weight: var(--weight-medium); }
+.storage-found-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.storage-found-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-0);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.storage-found-name > code { margin-left: 7px; color: var(--text-3); font-family: var(--font-mono); font-size: var(--type-2xs); font-weight: var(--weight-regular); }
+.storage-found-verdict { display: inline-flex; align-items: center; gap: 5px; color: var(--text-3); font-size: var(--type-2xs); }
+.storage-found-verdict > svg { flex: none; }
+.storage-found-verdict.ok { color: var(--success-text); }
+.storage-found-verdict.warn { color: var(--warning-text); }
+.storage-found-verdict.bad { color: var(--danger-text); }
+.storage-found-facts { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.storage-found-caution {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--warning-text);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+.storage-found-verb { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.storage-found-connected {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--green) 45%, var(--border));
+  border-radius: var(--r-pill);
+  color: var(--success-text);
+  background: var(--success-soft);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+/* Nothing found: the mark, the fact, the way on. */
+.storage-found-empty {
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: var(--type-xs);
+  text-align: center;
+}
+.storage-found-empty > svg { margin-bottom: 4px; color: var(--text-3); }
+.storage-found-empty > strong { color: var(--text-0); font-size: var(--type-sm); }
+.storage-found-empty-verbs { margin-top: 6px; display: flex; gap: 6px; }
+/* The Wrangler lane, unfolded: one list under the label, in the lane's
+   tint. Each step is one line — glyph, title, fact, and the controls that
+   step owns — parted by the hairline every row in the app uses. The title
+   speaks in the display face and the fact in the text face, so which step
+   and what is happening are two voices, not two weights. A completed step
+   keeps its fact in plain text; only the glyph and a failed line's colour
+   say what state a step is in. Reset stands at the lane's tail. */
+.r2-lane > .btn-ghost { margin-left: auto; }
+.r2-steps { flex: 1 0 100%; list-style: none; margin: 2px 0 0; padding: 0; display: grid; }
+.r2-step {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  column-gap: 8px;
+  align-items: start;
+  padding: 8px 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  color: var(--text-2);
+  font-size: var(--type-sm);
+}
+.r2-step-mark { display: grid; place-items: center; width: 18px; height: 20px; color: var(--text-3); }
+.r2-step[data-status="done"] .r2-step-mark { color: var(--success-text); }
+.r2-step[data-status="failed"] .r2-step-mark { color: var(--danger-text); }
+.r2-step-dot { width: 9px; height: 9px; border: 1.5px solid var(--border-strong); border-radius: 50%; }
+.r2-step-body { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; line-height: 20px; }
+.r2-step-title { color: var(--text-0); font-family: var(--font-display); font-size: var(--type-lg); font-weight: var(--weight-bold); }
+.r2-step[data-status="todo"] .r2-step-title { color: var(--text-3); font-weight: var(--weight-semibold); }
+.r2-step[data-status="doing"] .r2-step-title { color: var(--text-0); }
+.r2-step[data-status="failed"] .r2-step-title,
+.r2-step[data-status="failed"] .r2-step-fact { color: var(--danger-text); }
+.r2-step[data-status="stopped"] .r2-step-fact { color: var(--text-3); }
+.r2-step-fact { color: var(--text-2); }
+.r2-step[data-status="todo"] .r2-step-fact { color: var(--text-3); }
+.r2-step-fact code { font-family: var(--font-mono); font-size: var(--type-xs); overflow-wrap: anywhere; }
+.r2-step-controls { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: auto; }
+.r2-step-controls > input { width: 100%; }
+.r2-countdown { color: var(--text-3); font-family: var(--font-mono); font-size: var(--type-xs); font-variant-numeric: tabular-nums; }
+/* The card header's segment, at the line's height. */
+.r2-segmented > button { height: 22px; padding: 0 8px; }
+/* The setup page's select shell, sized to the line rather than a form row. */
+.r2-select-shell { flex: none; width: 260px; }
+.r2-select-shell > select {
+  height: 26px;
+  padding: 0 28px 0 8px;
+  border: 1px solid var(--control-border);
+  border-radius: 7px;
+  color: var(--text-0);
+  background: var(--surface-row);
+  font: inherit;
+  font-size: var(--type-xs);
+}
+/* The bucket's name, proposed and editable in the fact slot: the select
+   shell's box at the line's height, in the mono face a bucket name is read
+   in, with Suggest another beside it. A name outside Cloudflare's rule wears
+   the danger edge while the note beside it spells the rule. */
+.r2-name-field { display: inline-flex; align-items: center; gap: 6px; }
+.r2-name-input {
+  width: 220px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--control-border);
+  border-radius: 7px;
+  color: var(--text-0);
+  background: var(--surface-row);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+.r2-name-input[aria-invalid="true"] { border-color: var(--danger-text); }
+/* The list a step opens, boxed under it; the rows keep the shipped grid
+   minus the radio column and carry their verb instead. */
+.r2-step-list { flex: 1 0 100%; margin-top: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-card); overflow: hidden; }
+.r2-step-list > .storage-found-list { border-bottom: 0; }
+.r2-step-list > .notice { margin: 8px 10px; }
+.storage-found-row.with-verb { grid-template-columns: 26px minmax(0, 1fr) auto auto; cursor: default; }
+/* The lane, done: the ready sentence and its facts in chips. */
+.r2-ready { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; flex: 1 1 300px; }
+.r2-facts { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.r2-facts > .sync-storage-repo-chip { font-size: var(--type-2xs); }
 /* The split cluster: the visible half runs the session's preferred agent,
    the arrow discloses the other launchers and the copy route in the path
    bar's own menu. It is one pill — the ink edge and the cast shadow belong
@@ -2225,7 +2502,7 @@ summary:focus-visible {
   gap: 12px 14px;
 }
 .storage-provider-url-field { grid-column: 1 / -1; }
-.storage-provider-fields label { gap: 5px; }
+.storage-provider-field { gap: 5px; }
 .storage-provider-fields .form-label-row { overflow: visible; }
 .sync-secret-input { position: relative; display: block; }
 .sync-secret-input > input { width: 100%; padding-right: 58px; }
@@ -3604,6 +3881,12 @@ span.sync-path-crumb {
   list-style: none;
 }
 
+/* The grid stretches each item to its row; the item hands that height to its
+   one box, so every box in a row reaches the tallest one's edge. */
+.landing-picker-grid > li {
+  display: flex;
+}
+
 /* One box per project, in the card grammar; the whole box is the door. */
 .landing-picker-card {
   width: 100%;
@@ -4040,11 +4323,15 @@ span.sync-path-crumb {
 /* The commit bar closes the draft's column the way the project setup page's
    footer closes its own: the page's verb sits under the fields it commits,
    parted from them by the same hairline that separates the bands above. */
+/* The 2px right and bottom pad is the buttons' hard shadow (--shadow-card
+   offsets). Without it the shadow hangs outside the footer's box, and when a
+   provider switch moves the footer up, WebKit repaints the old box but not
+   the overhang: two stray shadow slivers stayed where R2's buttons had been. */
 .sync-storage-setup-footer {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 13px 0 0;
+  padding: 13px 2px 2px 0;
   border-top: 1px solid var(--border);
   color: var(--text-2);
   font-size: var(--type-xs);
@@ -4546,6 +4833,73 @@ span.sync-path-crumb {
 
 .sync-settings-control .btn { min-height: 32px; font-size: var(--type-xs); }
 .sync-settings-control .danger { color: var(--danger-text); }
+
+/* Proof that a row saved. Every row applies the moment it changes, so the
+   stamp beside the control is the receipt: Saved; Saving… for a write still
+   running after 400 ms; Not saved when the write failed. The skin tweens
+   nothing (the `.sync-app *` transition rule), so a Saved stamp steps out:
+   dimmed for its last beat, then gone. The face comes from the display-face
+   list. */
+.sync-settings-receipt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--success-text);
+  font-size: var(--type-xs);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.sync-settings-receipt.saving { color: var(--text-2); }
+.sync-settings-receipt.failed { color: var(--danger-text); }
+.sync-settings-receipt.fading { opacity: 0.45; }
+
+/* The page's one status line, in the bar beside Done: the rule until
+   something changes, then the latest receipt, then when the visit last saved.
+   Titlebar chrome, so it holds its line rather than wrapping. */
+.sync-settings-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 4px;
+  color: var(--text-2);
+  font-size: var(--type-xs);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.sync-settings-status > svg,
+.sync-settings-status-jump > svg { flex: 0 0 auto; }
+.sync-settings-status[data-state="saved"] { color: var(--success-text); }
+.sync-settings-status[data-state="settled"] > svg { color: var(--success-text); }
+.sync-settings-status[data-state="failed"] { color: var(--danger-text); }
+
+.sync-settings-status time {
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A failure is the one state worth a click: it finds the row. */
+.sync-settings-status-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.sync-settings-status-jump:hover { text-decoration: underline; }
+
+.sync-settings-status-jump:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
 /* ── Reference-style settings footer ───────────── */
 
 @media (max-width: 1040px) {
@@ -8105,7 +8459,10 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   min-height: 34px;
 }
 
+/* As wide as its word. The tool column's fixed 88px is sized for
+   `exec_command`; on an agent row it was dead gutter before every name. */
 .session-detail-agent-stamp {
+  flex: 0 0 auto;
   color: var(--session-detail-agent);
 }
 
@@ -8154,9 +8511,24 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   color: var(--text-2);
 }
 
-.session-detail-agent-meta {
+/* Calls, length, status and chevron ride in one cluster, and only the cluster
+   takes the auto margin. When the meta and the chevron each took one, flex
+   split the free space between them and the length floated mid-row, at an x
+   that moved with the label. */
+.session-detail-agent-end {
   flex: 0 0 auto;
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.session-detail-agent-end > .session-detail-tool-chevron {
+  margin-left: 0;
+}
+
+.session-detail-agent-meta {
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   gap: 10px;
@@ -8165,6 +8537,14 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   font-size: var(--type-xs);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* The one number every row has, in a right-aligned slot a shade above the
+   calls, so a burst reads down: 9m, 6m, 5m. */
+.session-detail-agent-length {
+  min-width: 3.2ch;
+  color: var(--text-1);
+  text-align: right;
 }
 
 /* Printed only when the run is not simply done, on the tool status's shape:
@@ -8192,8 +8572,18 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   color: var(--session-detail-live);
 }
 
-/* The facts the row could not hold, one chip each, above the brief. */
+/* The pane's head band: the facts the row could not hold, one chip each, and
+   at the band's right edge the verb. The chips take the free width and wrap
+   under themselves; the verb keeps its width and never drops below them. */
+.session-detail-agent-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px 12px;
+}
+
 .session-detail-agent-facts {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
@@ -8224,18 +8614,14 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   font-style: italic;
 }
 
-.session-detail-agent-verbs {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.session-detail-agent-open {
-  height: 26px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 10px;
+/* The one verb, on the app's bordered pill — .btn, not the ghost, whose
+   missing edge left it reading as a caption under the report — one size under
+   the toolbar's 34px so it seats beside the 20px chips. Doubled with .btn so
+   it wins over the shared button rules that follow it in this file. */
+.btn.session-detail-agent-open {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 12px;
   font-size: var(--type-xs);
 }
 
@@ -8833,6 +9219,8 @@ body {
 .sync-draft-badge,
 .sync-eyebrow,
 .sync-settings-flag,
+.sync-settings-receipt,
+.sync-settings-status,
 .sync-path-crumb.section,
 .sync-path-menu-label,
 .sync-path-rename label,

@@ -17,7 +17,7 @@ use mallard_infrastructure::persistence::{
 use mallard_infrastructure::storage_core::{ConfiguredObjectStore, ConnectionHealth};
 use mallard_infrastructure::storage_providers::{
     StorageAdapterError, StorageAdapterErrorKind, StorageProviderAdapter,
-    StorageProviderDescriptor, StorageProviderRegistry, StorageSetupAssistantContext,
+    StorageProviderDescriptor, StorageProviderRegistry,
     StorageSummaryField,
 };
 use mallard_infrastructure::storage_setup_journal::{
@@ -84,7 +84,7 @@ pub struct StorageSetupError {
 }
 
 impl StorageSetupError {
-    fn fixed(kind: StorageSetupErrorKind, code: &'static str, message: &str) -> Self {
+    pub(crate) fn fixed(kind: StorageSetupErrorKind, code: &'static str, message: &str) -> Self {
         Self {
             kind,
             code,
@@ -262,7 +262,7 @@ pub struct StorageDraftSecretState {
     pub present: bool,
     /// The machine-local draft value, carried only by the exact fetch of a
     /// draft that creates a new storage, so the user can review what the
-    /// setup assistant minted. Listings, updates, and edit drafts of a
+    /// setup prepared. Listings, updates, and edit drafts of a
     /// committed storage never carry it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
@@ -536,9 +536,8 @@ pub fn update_storage_setup_draft(
         .map_err(|_| storage_unavailable())?;
     let descriptor = adapter.descriptor();
     let managed_id = descriptor
-        .setup_assistant
-        .as_ref()
-        .and_then(|assistant| assistant.managed_secret_id.as_ref());
+        .managed_secret_id
+        .as_ref();
     let managed = managed_id.is_some_and(|key| draft.storage.provider_config.secrets.contains(key));
     let declared = descriptor
         .secrets
@@ -558,7 +557,7 @@ pub fn update_storage_setup_draft(
         {
             return Err(StorageSetupError::invalid(
                 "storage_managed_credentials_locked",
-                "This connection uses a refresh token. Replace that token or reconnect with the setup assistant. The namespace cannot change.",
+                "This connection uses a refresh token. Replace that token or reconnect in Dropbox setup. The namespace cannot change.",
             ));
         }
     }
@@ -773,6 +772,18 @@ impl StorageSetupError {
             setup_id: None,
         }
     }
+
+    /// A conflict whose sentence carries a storage's display name: the one
+    /// value in the error that the user typed and can act on. Never a
+    /// setting, secret, or destination.
+    fn conflict_text(code: &'static str, message: String) -> Self {
+        Self {
+            kind: StorageSetupErrorKind::Conflict,
+            code,
+            message,
+            setup_id: None,
+        }
+    }
 }
 
 /// Rename one storage under a config revision check.
@@ -900,56 +911,12 @@ pub fn storage_provider_descriptors(
 
 /// Render the declared setup assistant's instruction for one exact draft.
 /// A provider that declares no assistant is refused.
-pub fn storage_setup_assistant_instruction(
-    repository: &LocalStateRepository,
-    registry: &StorageProviderRegistry,
-    provider: &StorageProviderKey,
-    draft_id: &StorageSetupDraftId,
-    expected_revision: u64,
-    cli_path: &str,
-) -> Result<String, StorageSetupError> {
-    let draft = load_storage_setup_draft_for_operation(repository, draft_id)?;
-    if draft.revision != expected_revision {
-        return Err(storage_setup_draft_revision_conflict());
-    }
-    if &draft.storage.provider != provider {
-        return Err(StorageSetupError::conflict(
-            "storage_setup_draft_provider_conflict",
-            "The storage setup draft belongs to a different provider.",
-        ));
-    }
-    let adapter = registry
-        .require(
-            &draft.storage.provider,
-            draft.storage.provider_config.version,
-        )
-        .map_err(|_| storage_unavailable())?;
-    if adapter.descriptor().setup_assistant.is_none() {
-        return Err(StorageSetupError::invalid(
-            "storage_setup_assistant_unavailable",
-            "This storage provider has no setup assistant.",
-        ));
-    }
-    adapter
-        .setup_assistant_instruction(&StorageSetupAssistantContext {
-            storage_name: &draft.storage.name,
-            cli_path,
-            draft_id: draft.draft_id.as_str(),
-            draft_revision: draft.revision,
-            reconnect: matches!(draft.source, StorageSetupDraftSource::Edit { .. }),
-        })
-        .map_err(|_| {
-            StorageSetupError::invalid(
-                "storage_setup_assistant_unavailable",
-                "This storage provider has no setup assistant.",
-            )
-        })
-}
+
 
 /// Exclusive host-operation token for preparing one existing setup draft
-/// from a setup assistant. The CLI keeps this value alive across its
+/// from direct setup. The caller keeps this value alive across its
 /// provider-specific work. The draft revision is pinned before that work so
-/// a concurrent form edit cannot be overwritten when the assistant finishes.
+/// a concurrent form edit cannot be overwritten when setup finishes.
 pub struct StorageDraftOperation {
     repository_root: PathBuf,
     draft_id: StorageSetupDraftId,
@@ -972,6 +939,10 @@ impl fmt::Debug for StorageDraftOperation {
 }
 
 impl StorageDraftOperation {
+    pub(crate) fn draft_id(&self) -> &StorageSetupDraftId {
+        &self.draft_id
+    }
+
     pub fn provider(&self) -> &StorageProviderKey {
         &self.provider
     }
@@ -985,7 +956,7 @@ impl StorageDraftOperation {
     }
 }
 
-/// Validate and pin the exact editable draft before an assistant does any
+/// Validate and pin the exact editable draft before setup does any
 /// provider-specific or browser work.
 pub fn begin_storage_draft_operation(
     repository: &LocalStateRepository,
@@ -1008,7 +979,7 @@ pub fn begin_storage_draft_operation(
     })
 }
 
-/// Assistant-minted settings and secrets for the pinned draft's provider.
+/// Prepared settings and secrets for the pinned draft's provider.
 /// Deliberately has no `Debug`, `Clone`, or `Serialize`.
 pub struct PreparedProviderConfig {
     pub settings: BoundedConfigObject,
@@ -1021,7 +992,7 @@ pub struct PrepareStorageDraftResult {
     pub draft_revision: u64,
 }
 
-/// Put assistant-minted values into the pinned draft without probing or
+/// Put prepared values into the pinned draft without probing or
 /// mutating the committed configuration. The user reviews, optionally
 /// tests, and explicitly commits in Mallard.
 pub fn prepare_storage_draft_in_operation(
@@ -1176,6 +1147,8 @@ fn continuity_identity(
 
 /// A destination may be connected once regardless of credentials or display
 /// name. The candidate's own id is excluded so an edit can keep its place.
+/// The refusal names the storage that holds the destination, so the page
+/// can send the user to it instead of leaving them at a dead field.
 fn ensure_destination_available(
     registry: &StorageProviderRegistry,
     config: &SyncConfig,
@@ -1188,9 +1161,12 @@ fn ensure_destination_available(
         .filter(|storage| storage.id != candidate.id && storage.provider == candidate.provider)
     {
         if continuity_identity(registry, storage)? == identity {
-            return Err(StorageSetupError::conflict(
+            return Err(StorageSetupError::conflict_text(
                 "storage_destination_conflict",
-                "That storage destination is already connected.",
+                format!(
+                    "That storage destination is already connected as \u{201c}{}\u{201d}.",
+                    storage.name
+                ),
             ));
         }
     }
@@ -1442,7 +1418,7 @@ mod tests {
     use super::*;
     use mallard_domain::LocalProjectId;
     use mallard_infrastructure::storage_providers::local::{
-        local_storage_config, provider_key as local_key,
+        local_storage_config,
     };
     use mallard_infrastructure::storage_providers::test_provider::{
         provider_key as test_key, test_storage_config,
@@ -1937,6 +1913,13 @@ mod tests {
 
         let error = ensure_destination_available(registry, &config, &candidate).unwrap_err();
         assert_eq!(error.code(), "storage_destination_conflict");
+        // The sentence names the storage that owns the folder, nothing else
+        // about it: no path, no id.
+        assert_eq!(
+            error.to_string(),
+            "That storage destination is already connected as \u{201c}Real\u{201d}."
+        );
+        assert!(!error.to_string().contains("store"));
     }
 
     #[test]
@@ -2183,62 +2166,6 @@ mod tests {
     }
 
     #[test]
-    fn assistant_instruction_requires_a_declared_assistant_and_the_exact_draft() {
-        let temp = tempfile::tempdir().unwrap();
-        let repository = repository(&temp);
-        let registry = StorageProviderRegistry::with_test_provider();
-        let local = create_storage_setup_draft(&repository, &registry, &local_key()).unwrap();
-        let refused = storage_setup_assistant_instruction(
-            &repository,
-            &registry,
-            &local_key(),
-            &local.draft_id,
-            local.revision,
-            "/bin/mallard-cli",
-        )
-        .unwrap_err();
-        assert_eq!(refused.code(), "storage_setup_assistant_unavailable");
-
-        let proof = create_storage_setup_draft(&repository, &registry, &test_key()).unwrap();
-        let proof = update_storage_setup_draft(
-            &repository,
-            &registry,
-            UpdateStorageSetupDraftRequest {
-                draft_id: proof.draft_id.clone(),
-                revision: proof.revision,
-                name: "Proof".to_string(),
-                settings: BoundedConfigObject::empty(),
-                secrets: BTreeMap::new(),
-            },
-        )
-        .unwrap();
-        let instruction = storage_setup_assistant_instruction(
-            &repository,
-            &registry,
-            &test_key(),
-            &proof.draft_id,
-            proof.revision,
-            "/bin/mallard-cli",
-        )
-        .unwrap();
-        assert!(instruction.contains(proof.draft_id.as_str()));
-        assert!(instruction.contains("/bin/mallard-cli"));
-        assert_eq!(
-            storage_setup_assistant_instruction(
-                &repository,
-                &registry,
-                &local_key(),
-                &proof.draft_id,
-                proof.revision,
-                "/bin/mallard-cli",
-            )
-            .unwrap_err()
-            .code(),
-            "storage_setup_draft_provider_conflict"
-        );
-    }
-
-    #[test]
     fn draft_operation_pins_the_exact_target_and_prepares_validated_values() {
         let temp = tempfile::tempdir().unwrap();
         let repository = repository(&temp);
@@ -2457,7 +2384,7 @@ mod dropbox_tests {
         assert_eq!(stored.storage.provider_config, prepared_config);
         assert_eq!(stored.storage.provider_config.version, 1);
         assert!(repository.load_config().unwrap().storages.is_empty());
-        assert!(DropboxAdapter.descriptor().setup_assistant.is_some());
+        assert!(DropboxAdapter.descriptor().local_setup == Some(mallard_infrastructure::storage_providers::traits::StorageLocalSetup::Dropbox));
     }
 
     fn storage(id: &str, namespace: &str, token: &str) -> StorageConfig {
@@ -2473,6 +2400,7 @@ mod dropbox_tests {
                 1,
                 BoundedConfigObject::encode(&DropboxSettingsV1 {
                     namespace_id: namespace.into(),
+                    folder_name: None,
                 })
                 .unwrap(),
                 secrets,
@@ -2523,6 +2451,7 @@ mod dropbox_tests {
         let draft = create_storage_setup_draft(&repository, &registry, &provider_key()).unwrap();
         let settings = BoundedConfigObject::encode(&DropboxSettingsV1 {
             namespace_id: "shared".into(),
+            folder_name: None,
         })
         .unwrap();
         let draft = update_storage_setup_draft(
@@ -2606,6 +2535,7 @@ mod dropbox_tests {
                 name: "Moved Dropbox".into(),
                 settings: BoundedConfigObject::encode(&DropboxSettingsV1 {
                     namespace_id: "other".into(),
+                    folder_name: None,
                 })
                 .unwrap(),
                 secrets: BTreeMap::new(),
@@ -2652,6 +2582,7 @@ mod dropbox_tests {
                 name: "Shared Dropbox".into(),
                 settings: BoundedConfigObject::encode(&DropboxSettingsV1 {
                     namespace_id: "shared".into(),
+                    folder_name: None,
                 })
                 .unwrap(),
                 secrets: BTreeMap::from([(
@@ -2749,6 +2680,7 @@ mod dropbox_tests {
         let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
         let namespace = BoundedConfigObject::encode(&DropboxSettingsV1 {
             namespace_id: "shared".into(),
+            folder_name: None,
         })
         .unwrap();
         let prepared = |token: &str| {

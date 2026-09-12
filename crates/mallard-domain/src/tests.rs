@@ -2437,6 +2437,7 @@ fn conversation_checkpoints_validate_layout_witness_and_mapping() {
 fn conversation_bindings_carry_validated_layouts() {
     let binding = LocalConversationBinding {
         installed_end: None,
+        pulled_children_excluded: false,
         installed_subagents: Default::default(),
         path_origins_ref: None,
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
@@ -2459,6 +2460,34 @@ fn conversation_bindings_carry_validated_layouts() {
         updated_at: 2,
     };
     binding.validate().unwrap();
+
+    let mut encoded = serde_json::to_value(&binding).unwrap();
+    encoded
+        .as_object_mut()
+        .unwrap()
+        .remove("pulled_children_excluded");
+    let without_exclusion: LocalConversationBinding = serde_json::from_value(encoded).unwrap();
+    assert!(!without_exclusion.pulled_children_excluded);
+    without_exclusion.validate().unwrap();
+    let mut excluded = binding.clone();
+    excluded.pulled_children_excluded = true;
+    assert!(
+        excluded.validate().is_err(),
+        "native threads cannot carry Pull exclusions"
+    );
+    excluded.installed_end = Some(128);
+    excluded.validate().unwrap();
+    excluded.installed_subagents.insert(
+        SubagentKey::child(None, "start").unwrap(),
+        InstalledSubagent {
+            provider_thread_id: "child-1".into(),
+            installed_end: 64,
+        },
+    );
+    assert!(
+        excluded.validate().is_err(),
+        "excluded children cannot be installed"
+    );
 
     let mut moved_whole = binding.clone();
     moved_whole.root_tail_layout = Some(RootTailLayout {
@@ -2562,6 +2591,7 @@ fn preserved_provenance_validates_on_every_carrier() {
     // provenance, so only the ordinal rule applies.
     let binding = LocalConversationBinding {
         installed_end: None,
+        pulled_children_excluded: false,
         installed_subagents: Default::default(),
         path_origins_ref: None,
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
@@ -3053,6 +3083,7 @@ fn reshaped_documents_reject_unknown_and_retired_keys() {
     // An unknown binding key fails closed without explicit enumeration.
     let binding = LocalConversationBinding {
         installed_end: None,
+        pulled_children_excluded: false,
         installed_subagents: Default::default(),
         path_origins_ref: None,
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
@@ -3160,6 +3191,7 @@ fn documents_fail_closed_on_missing_identity_keys() {
     // these keys mandatory. The fixtures omit the required identity keys.
     let binding = LocalConversationBinding {
         installed_end: None,
+        pulled_children_excluded: false,
         installed_subagents: Default::default(),
         path_origins_ref: None,
         host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
@@ -3254,6 +3286,7 @@ fn bindings_reject_duplicate_cloud_claims_per_scope() {
     let host = HostId::parse("00112233445566778899aabbccddeeff").unwrap();
     let row = |thread: &str, replica: &str, cloud: Option<&str>| LocalConversationBinding {
         installed_end: None,
+        pulled_children_excluded: false,
         installed_subagents: Default::default(),
         path_origins_ref: None,
         host_id: host.clone(),

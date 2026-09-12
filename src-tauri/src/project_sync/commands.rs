@@ -14,7 +14,7 @@ use super::service::{
     get_project_thread_sync_comparison_with_progress, get_project_with_repository,
     get_push_destination_status_with_repository, get_restore_readiness_with_repository,
     get_setup_draft_with_repository, get_storage_setup_draft_with_repository,
-    inspect_project_files_with_repository, launch_storage_setup_assistant_with_repository,
+    inspect_project_files_with_repository,
     list_local_projects_with_repository, list_project_bindings_with_repository,
     list_project_repository_kinds_with_repository, list_provider_profiles_with_repository,
     list_remote_bundle_snapshots_with_repository, list_setup_drafts_with_repository,
@@ -28,7 +28,7 @@ use super::service::{
     resolve_project_markdown_path_with_repository, save_project_binding_with_repository,
     save_project_link_with_repository, session_detail_error, should_log_history_scan,
     sibling_bundle_status_with_repository, storage_log_label, storage_provider_descriptors,
-    storage_setup_assistant_instruction_with_repository, test_storage_setup_draft_with_repository,
+     test_storage_setup_draft_with_repository,
     update_storage_setup_draft_with_repository, BundleReadiness, BundleSnapshotSummary,
     CommitStorageDraftResult, ConnectProjectBundleRequest, CreateSetupDraftResult,
     HostIdentityStatus, ProjectActivity, ProjectContentInventory, ProjectDetail,
@@ -381,42 +381,109 @@ pub async fn remove_storage(
 }
 
 #[tauri::command]
-pub async fn get_storage_setup_assistant_instruction(
-    storage_provider: StorageProviderKey,
+pub async fn get_r2_setup_accounts(
+    control: tauri::State<'_, super::r2_setup::R2SetupControl>,
     draft_id: StorageSetupDraftId,
     expected_revision: u64,
-) -> Result<String, String> {
-    let repository = repository()?;
-    run_blocking(move || {
-        storage_setup_assistant_instruction_with_repository(
-            &repository,
-            &storage_provider,
-            &draft_id,
-            expected_revision,
-        )
-    })
+    reauthenticate: bool,
+    on_progress: tauri::ipc::Channel<super::r2_setup::R2SetupProgress>,
+) -> Result<Vec<super::r2_setup::R2Account>, super::r2_setup::R2SetupFailure> {
+    let repository = repository().map_err(|_| super::r2_setup::R2SetupFailure::failed())?;
+    super::r2_setup::accounts(
+        &control,
+        repository,
+        draft_id,
+        expected_revision,
+        reauthenticate,
+        on_progress,
+    )
     .await
 }
 
 #[tauri::command]
-pub async fn launch_storage_setup_assistant(
-    storage_provider: StorageProviderKey,
-    agent_provider: ProviderKey,
+pub async fn setup_r2_storage(
+    control: tauri::State<'_, super::r2_setup::R2SetupControl>,
     draft_id: StorageSetupDraftId,
     expected_revision: u64,
-) -> Result<(), String> {
-    let repository = repository()?;
-    run_blocking(move || {
-        launch_storage_setup_assistant_with_repository(
-            &repository,
-            &storage_provider,
-            &agent_provider,
-            &draft_id,
-            expected_revision,
-        )
-    })
+    account_id: String,
+    jurisdiction: String,
+    bucket: String,
+    on_progress: tauri::ipc::Channel<super::r2_setup::R2SetupProgress>,
+) -> Result<(), super::r2_setup::R2SetupFailure> {
+    let repository = repository().map_err(|_| super::r2_setup::R2SetupFailure::failed())?;
+    super::r2_setup::setup(
+        &control,
+        repository,
+        draft_id,
+        expected_revision,
+        account_id,
+        jurisdiction,
+        bucket,
+        on_progress,
+    )
     .await
 }
+
+/// A readable name for the Bucket line to propose before a bucket is made.
+#[tauri::command]
+pub fn propose_r2_bucket_name() -> Result<String, super::r2_setup::R2SetupFailure> {
+    super::r2_setup::propose()
+}
+
+#[tauri::command]
+pub async fn discover_r2_storage(
+    control: tauri::State<'_, super::r2_setup::R2SetupControl>,
+    draft_id: StorageSetupDraftId,
+    expected_revision: u64,
+    account_id: String,
+    on_progress: tauri::ipc::Channel<super::r2_setup::R2SetupProgress>,
+) -> Result<super::r2_setup::DiscoveryResult, super::r2_setup::R2SetupFailure> {
+    let repository = repository().map_err(|_| super::r2_setup::R2SetupFailure::failed())?;
+    super::r2_setup::discover(
+        &control,
+        repository,
+        draft_id,
+        expected_revision,
+        account_id,
+        on_progress,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn prepare_existing_r2_storage(
+    control: tauri::State<'_, super::r2_setup::R2SetupControl>,
+    draft_id: StorageSetupDraftId,
+    expected_revision: u64,
+    scan_id: String,
+    candidate_id: String,
+    on_progress: tauri::ipc::Channel<super::r2_setup::R2SetupProgress>,
+) -> Result<(), super::r2_setup::R2SetupFailure> {
+    let repository = repository().map_err(|_| super::r2_setup::R2SetupFailure::failed())?;
+    super::r2_setup::prepare_existing(
+        &control,
+        repository,
+        draft_id,
+        expected_revision,
+        scan_id,
+        candidate_id,
+        on_progress,
+    )
+    .await
+}
+
+#[tauri::command]
+pub fn cancel_r2_storage_setup(
+    control: tauri::State<'_, super::r2_setup::R2SetupControl>,
+    draft_id: StorageSetupDraftId,
+    expected_revision: u64,
+) -> Result<(), super::r2_setup::R2SetupFailure> {
+    control.cancel(draft_id, expected_revision)
+}
+
+
+
+
 
 #[tauri::command]
 pub async fn get_host_identity_status() -> Result<HostIdentityStatus, String> {

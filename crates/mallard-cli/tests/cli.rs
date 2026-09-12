@@ -79,7 +79,7 @@ fn assert_tree_omits(root: &std::path::Path, canaries: &[&str]) {
 }
 
 #[test]
-fn help_exposes_only_browser_authorized_r2_setup() {
+fn help_exposes_account_check_and_browser_authorized_r2_setup() {
     let temp = tempfile::tempdir().unwrap();
     let output = command(temp.path())
         .args(["storage", "r2", "--help"])
@@ -88,13 +88,12 @@ fn help_exposes_only_browser_authorized_r2_setup() {
     assert!(output.status.success());
     let help = combined_output(&output);
     assert!(help.contains("setup"));
+    assert!(help.contains("accounts"));
     for removed in [
         "connect",
         "provision",
         "cleanup",
         "--account-id",
-        "--bucket",
-        "--jurisdiction",
         "--access-key-id",
         "--secret-stdin",
         "--bootstrap-token-stdin",
@@ -115,8 +114,9 @@ fn help_exposes_only_browser_authorized_r2_setup() {
     assert!(setup_help.contains("--draft-id"));
     assert!(setup_help.contains("--expected-revision"));
     assert!(!setup_help.to_ascii_lowercase().contains("secret"));
-    assert!(!setup_help.contains("--account-id"));
-    assert!(!setup_help.contains("--bucket"));
+    assert!(setup_help.contains("--account-id"));
+    assert!(setup_help.contains("--jurisdiction"));
+    assert!(setup_help.contains("--bucket"));
 }
 
 #[test]
@@ -172,9 +172,16 @@ fn invalid_setup_name_fails_before_wrangler_and_is_never_echoed_or_persisted() {
 }
 
 #[test]
-fn valid_setup_without_wrangler_has_a_fixed_sanitized_error() {
+fn valid_setup_with_unavailable_wrangler_has_a_fixed_sanitized_error() {
     let temp = tempfile::tempdir().unwrap();
     let empty_path = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        // Desktop discovery also checks global install locations. Supply explicit
+        // failing executables so this test cannot start the user's Wrangler.
+        std::os::unix::fs::symlink("/usr/bin/false", empty_path.path().join("wrangler")).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/false", empty_path.path().join("node")).unwrap();
+    }
     let name_canary = "Private destination canary";
     let draft = create_r2_draft(temp.path(), name_canary);
     let draft_id = draft.draft_id.to_string();
@@ -202,7 +209,14 @@ fn valid_setup_without_wrangler_has_a_fixed_sanitized_error() {
     assert_eq!(error["schema"], 1);
     assert_eq!(error["status"], "error");
     assert_eq!(error["exit_code"], 2);
-    assert_eq!(error["code"], "wrangler_not_found");
+    assert_eq!(
+        error["code"],
+        if cfg!(unix) {
+            "wrangler_runtime_unavailable"
+        } else {
+            "wrangler_not_found"
+        }
+    );
     assert!(error.get("setup_id").is_none());
     let combined = combined_output(&output);
     assert!(!combined.contains(name_canary));
@@ -276,42 +290,12 @@ fn setup_rejects_a_stale_draft_revision_before_wrangler() {
 }
 
 #[test]
-fn dropbox_setup_reads_the_draft_from_the_selected_home_before_authorization() {
-    let draft_home = tempfile::tempdir().unwrap();
-    let other_home = tempfile::tempdir().unwrap();
-    let draft = create_storage_draft(draft_home.path(), "Dropbox test storage", "dropbox");
-    let draft_id = draft.draft_id.to_string();
-    // A stale revision stops before browser login and proves the draft was read.
-    let stale_revision = draft.revision.saturating_add(1).to_string();
-    for (home, expected_exit, expected_code) in [
-        (
-            draft_home.path(),
-            3,
-            "storage_setup_draft_revision_conflict",
-        ),
-        (other_home.path(), 2, "storage_setup_draft_not_found"),
-    ] {
-        let output = command(home)
-            .args([
-                "storage",
-                "dropbox",
-                "setup",
-                "--name",
-                &draft.storage.name,
-                "--draft-id",
-                &draft_id,
-                "--expected-revision",
-                &stale_revision,
-                "--json",
-            ])
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(expected_exit));
-        assert!(output.stdout.is_empty());
-        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
-        assert_eq!(error["code"], expected_code);
-        assert!(!home.join(".mallard/dropbox_setup_journal").exists());
-    }
+fn removed_dropbox_setup_is_rejected_without_remote_work() {
+    let home = tempfile::tempdir().unwrap();
+    let output = command(home.path()).args(["storage", "dropbox", "setup", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(!home.path().join(".mallard/dropbox_setup_journal").exists());
 }
 
 #[test]
@@ -401,4 +385,116 @@ fn malformed_local_config_uses_the_stable_persistence_exit_status() {
     assert!(error.get("setup_id").is_none());
     assert!(!String::from_utf8_lossy(&output.stderr)
         .contains(&temp.path().to_string_lossy().to_string()));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_expired_wrangler_session_signs_in_again_before_listing_accounts() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let wrangler = bin.path().join("wrangler");
+    // Until login runs, whoami answers the way Wrangler does for a token that
+    // expired and could not be refreshed outside a terminal: an error and no
+    // document. Login records the new session in a side file.
+    fs::write(&wrangler, r#"#!/bin/sh
+case "$*" in
+  '--version') printf '4.125.0';;
+  'auth token --help') printf '%s' '--json';;
+  'login --browser=false') printf '%s\n' 'Visit this link to authenticate: https://dash.cloudflare.com/oauth2/auth?state=fixture'; : > "$0.session";;
+  'whoami --json') if [ -f "$0.session" ]; then printf '%s' '{"loggedIn":true,"accounts":[{"id":"11111111111111111111111111111111","name":"Test"}]}'; else printf '%s\n' 'ERROR Not logged in. Your auth token has expired and could not be refreshed.' >&2; exit 1; fi;;
+  *) exit 1;;
+esac
+"#).unwrap();
+    fs::set_permissions(&wrangler, fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/false", bin.path().join("node")).unwrap();
+    let output = command(home.path())
+        .env("PATH", bin.path())
+        .args(["--json", "storage", "r2", "accounts"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0]["status"], "wrangler_ready");
+    assert_eq!(lines[1]["status"], "authorization_link");
+    assert_eq!(lines[1]["stage"], "login");
+    assert_eq!(lines[2]["status"], "accounts");
+    assert_eq!(lines[2]["accounts"][0]["name"], "Test");
+    assert!(
+        !stdout.contains("expired"),
+        "Wrangler's own error text stays out of the stream"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn login_links_do_not_deadlock_against_the_final_json_writer() {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+    let home = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let wrangler = bin.path().join("wrangler");
+    fs::write(&wrangler, r#"#!/bin/sh
+case "$*" in
+  '--version') printf '4.125.0';;
+  'auth token --help') printf '%s' '--json';;
+  'login --browser=false') printf '%s\n' 'Visit this link to authenticate: https://dash.cloudflare.com/oauth2/auth?state=fixture';;
+  'whoami --json') printf '%s' '{"loggedIn":true,"accounts":[{"id":"11111111111111111111111111111111","name":"Test"}]}';;
+  *) exit 1;;
+esac
+"#).unwrap();
+    fs::set_permissions(&wrangler, fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/false", bin.path().join("node")).unwrap();
+    let mut child = command(home.path())
+        .env("PATH", bin.path())
+        .args(["--json", "storage", "r2", "accounts", "--login"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("login progress must not wait for a stdout lock held by the CLI");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success());
+    let mut output = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut output)
+        .unwrap();
+    let lines: Vec<serde_json::Value> = output
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0]["status"], "wrangler_ready");
+    assert_eq!(lines[0]["version"], "4.125.0");
+    // The path is the canonical one the CLI resolved (macOS keeps /var under /private).
+    assert_eq!(
+        lines[0]["path"],
+        wrangler.canonicalize().unwrap().to_string_lossy().as_ref()
+    );
+    assert_eq!(lines[1]["status"], "authorization_link");
+    assert_eq!(lines[1]["stage"], "login");
+    assert_eq!(lines[2]["status"], "accounts");
 }

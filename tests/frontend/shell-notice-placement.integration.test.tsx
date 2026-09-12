@@ -79,7 +79,7 @@ test("a path-bar screen flattens to bar, zone, page in the workspace column", ()
 
   const settings = renderToStaticMarkup(
     <PathBarBelow.Provider value={zone}>
-      <SettingsPage appActions={[]} onLogsChanged={() => undefined} />
+      <SettingsPage appActions={[]} onLogsChanged={() => undefined} onDone={() => undefined} doneTarget="Projects" />
     </PathBarBelow.Provider>,
   );
   assertOrder(settings, BAR, ZONE, PAGE);

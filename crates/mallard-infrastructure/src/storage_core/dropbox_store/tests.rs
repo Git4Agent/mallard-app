@@ -42,6 +42,7 @@ fn manual_config(id: &str) -> mallard_domain::StorageConfig {
             mallard_domain::BoundedConfigObject::encode(
                 &crate::storage_providers::dropbox::DropboxSettingsV1 {
                     namespace_id: "shared".into(),
+                    folder_name: None,
                 },
             )
             .unwrap(),

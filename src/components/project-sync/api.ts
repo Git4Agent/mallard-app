@@ -1,5 +1,9 @@
-import { invoke } from "../../ipc";
+import { Channel, invoke } from "../../ipc";
 import type {
+  DropboxSetupMode, DropboxSetupLogin, DropboxSetupProgress,
+  R2Account,
+  R2Jurisdiction,
+  R2SetupProgress,
   ActivityLogCleanupRequest,
   AppSettings,
   ActivityLogCleanupResult,
@@ -47,6 +51,7 @@ import type {
   SessionEventDetail,
   SiblingBundleStatus,
   CommitStorageDraftResult,
+  StorageDiscoveryResult,
   StorageProviderDescriptor,
   StorageProviderKey,
   StorageSetupDraft,
@@ -81,6 +86,12 @@ const projectSyncSingleFlight = createSingleFlight();
  * Current Tauri contract. Multi-word Rust parameters use Tauri's camel-case
  * JavaScript names, matching the existing command surface in App.tsx.
  */
+function r2ProgressChannel(onProgress?: (progress: R2SetupProgress) => void): Channel<R2SetupProgress> {
+  const channel = new Channel<R2SetupProgress>();
+  if (onProgress) channel.onmessage = onProgress;
+  return channel;
+}
+
 export const projectSyncApi = {
   queryActivityLogs: (query: ActivityLogQuery) =>
     invoke<ActivityLogPage>("query_activity_logs", { query }),
@@ -165,30 +176,34 @@ export const projectSyncApi = {
   removeStorage: (storageId: string, expectedConfigRevision: number) =>
     invoke<SyncConfig>("remove_storage", { storageId, expectedConfigRevision }),
 
-  /** The declared setup assistant's instruction for one exact draft. */
-  getStorageSetupAssistantInstruction: (
-    storageProvider: StorageProviderKey,
-    draftId: string,
-    expectedRevision: number,
-  ) => invoke<string>("get_storage_setup_assistant_instruction", {
-    storageProvider,
-    draftId,
-    expectedRevision,
-  }),
+  /** The R2 hand-off through local Wrangler, one helper run per step. Every
+   *  run reports progress on the channel as it happens. */
+  getR2SetupAccounts: (draftId: string, expectedRevision: number, reauthenticate = false, onProgress?: (progress: R2SetupProgress) => void) =>
+    invoke<R2Account[]>("get_r2_setup_accounts", { draftId, expectedRevision, reauthenticate, onProgress: r2ProgressChannel(onProgress) }),
+  /** A readable name for the Bucket line to propose; free or not is only
+   *  known at creation. */
+  proposeR2BucketName: () => invoke<string>("propose_r2_bucket_name"),
+  setupR2Storage: (draftId: string, expectedRevision: number, accountId: string, jurisdiction: R2Jurisdiction, bucket: string, onProgress?: (progress: R2SetupProgress) => void) =>
+    invoke<void>("setup_r2_storage", { draftId, expectedRevision, accountId, jurisdiction, bucket, onProgress: r2ProgressChannel(onProgress) }),
+  discoverR2Storage: (draftId: string, expectedRevision: number, accountId: string, onProgress?: (progress: R2SetupProgress) => void) =>
+    invoke<StorageDiscoveryResult>("discover_r2_storage", { draftId, expectedRevision, accountId, onProgress: r2ProgressChannel(onProgress) }),
+  prepareExistingR2Storage: (draftId: string, expectedRevision: number, scanId: string, candidateId: string, onProgress?: (progress: R2SetupProgress) => void) =>
+    invoke<void>("prepare_existing_r2_storage", { draftId, expectedRevision, scanId, candidateId, onProgress: r2ProgressChannel(onProgress) }),
+  cancelR2StorageSetup: (draftId: string, expectedRevision: number) =>
+    invoke<void>("cancel_r2_storage_setup", { draftId, expectedRevision }),
 
-  /** Open a terminal window running the agent provider's CLI with the
-   *  storage provider's setup-assistant instruction as its prompt. */
-  launchStorageSetupAssistant: (
-    storageProvider: StorageProviderKey,
-    agentProvider: ProviderKey,
-    draftId: string,
-    expectedRevision: number,
-  ) => invoke<void>("launch_storage_setup_assistant", {
-    storageProvider,
-    agentProvider,
-    draftId,
-    expectedRevision,
-  }),
+  authorizeDropboxSetup: (draftId: string, expectedRevision: number, mode: DropboxSetupMode, switchAccount: boolean, onProgress: (progress: DropboxSetupProgress) => void) => {
+    const channel = new Channel<DropboxSetupProgress>();
+    channel.onmessage = onProgress;
+    return invoke<DropboxSetupLogin>("authorize_dropbox_setup", { draftId, expectedRevision, mode, switchAccount, onProgress: channel });
+  },
+  proposeDropboxFolderName: () => invoke<string>("propose_dropbox_folder_name"),
+  discoverDropboxStorage: (draftId: string, expectedRevision: number, sessionId: string) =>
+    invoke<StorageDiscoveryResult>("discover_dropbox_storage", { draftId, expectedRevision, sessionId }),
+  prepareDropboxStorage: (draftId: string, expectedRevision: number, sessionId: string, folderName: string | null, scanId: string | null, candidateId: string | null) =>
+    invoke<void>("prepare_dropbox_storage", { draftId, expectedRevision, sessionId, folderName, scanId, candidateId }),
+  cancelDropboxSetup: (draftId: string, expectedRevision: number) =>
+    invoke<void>("cancel_dropbox_setup", { draftId, expectedRevision }),
 
   getHostIdentityStatus: () =>
     invoke<HostIdentityStatus>("get_host_identity_status"),
@@ -311,6 +326,8 @@ export const projectSyncApi = {
 
   testStorageSetupDraft: (draftId: string, expectedRevision: number) =>
     invoke<TestStorageDraftResult>("test_storage_setup_draft", { draftId, expectedRevision }),
+
+
 
   commitStorageSetupDraft: (
     draftId: string,

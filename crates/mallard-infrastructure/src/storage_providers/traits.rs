@@ -81,17 +81,45 @@ pub struct StorageSecretDescriptor {
     pub help_url: Option<String>,
 }
 
-/// A provider-declared setup assistant: an agent-driven flow that ends in an
-/// ordinary storage draft. The instruction itself is rendered by the adapter
-/// for one exact draft.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageLocalSetup {
+    Wrangler,
+    Dropbox,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct StorageSetupAssistantDescriptor {
+pub struct StorageDiscoveryHelp {
     pub label: String,
-    pub description: String,
-    /// Presence of this credential selects the managed setup route.
-    /// When present, the editor uses this declared secret field for review.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub managed_secret_id: Option<SecretKey>,
+    pub url: String,
+}
+
+/// A provider that can look in the signed-in account for destinations
+/// Mallard already uses. Every sentence the New-storage card's Use-existing
+/// door and lane print comes from here, so the page never names a provider.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StorageDiscoveryDescriptor {
+    /// What one candidate is called: "bucket", "shared folder".
+    pub unit: String,
+    pub unit_plural: String,
+    /// Where the look happens, for prose: "your Cloudflare account".
+    pub place: String,
+    /// The Create-new door's sentence.
+    pub create_hint: String,
+    /// The Use-existing door's sentence.
+    pub existing_hint: String,
+    /// Optional access guide beside the Use-existing choice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub existing_help: Option<StorageDiscoveryHelp>,
+    /// The lane's verb: "Find in my account".
+    pub find_label: String,
+    /// What the look signs in with, and that it only reads.
+    pub access_hint: String,
+    /// Printed while the scan runs.
+    pub scanning_hint: String,
+    /// Printed after "Approve access to <name> in your browser." while the
+    /// chosen destination's credential is being issued.
+    pub prepare_hint: String,
 }
 
 /// Storage-wide clear is separate from normal revision-checked deletion.
@@ -129,7 +157,9 @@ pub struct StorageProviderDescriptor {
     pub fields: Vec<StorageFieldDescriptor>,
     pub secrets: Vec<StorageSecretDescriptor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub setup_assistant: Option<StorageSetupAssistantDescriptor>,
+    pub managed_secret_id: Option<SecretKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_setup: Option<StorageLocalSetup>,
     /// The provider's own setup documentation, offered beside the manual
     /// fields as a "Setup guide" link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -138,6 +168,10 @@ pub struct StorageProviderDescriptor {
     /// generic one naming the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_setup_hint: Option<String>,
+    /// Absent for a provider that cannot look in an account: the New-storage
+    /// card then has no Use-existing door.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<StorageDiscoveryDescriptor>,
 }
 
 /// One safe, redacted fact about a configured storage.
@@ -148,17 +182,6 @@ pub struct StorageSummaryField {
     pub value: String,
     /// The value is a machine-local path the UI may reveal in Finder.
     pub is_path: bool,
-}
-
-/// The exact draft an assistant instruction is rendered for.
-pub struct StorageSetupAssistantContext<'a> {
-    pub storage_name: &'a str,
-    pub cli_path: &'a str,
-    pub draft_id: &'a str,
-    pub draft_revision: u64,
-    /// The draft edits a storage that already exists: the assistant regains
-    /// access to the same destination rather than creating one.
-    pub reconnect: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -290,12 +313,7 @@ pub trait StorageProviderAdapter: Send + Sync {
     ) -> Result<(), StorageAdapterError>;
 
     /// Render the declared setup assistant's instruction for one exact draft.
-    fn setup_assistant_instruction(
-        &self,
-        _context: &StorageSetupAssistantContext<'_>,
-    ) -> Result<String, String> {
-        Err("this storage provider has no setup assistant".to_string())
-    }
+
 
     /// Open the object store. Remote providers need the runtime handle.
     fn open(

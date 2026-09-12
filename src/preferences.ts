@@ -42,11 +42,17 @@ function readKey(key: string): string | null {
   }
 }
 
-function writeKey(key: string, value: string) {
+/**
+ * Whether the value persisted. Every reader goes back to storage, so a
+ * rejected write leaves the previous value in force — the Settings page says
+ * "Not saved" on the strength of this answer.
+ */
+function writeKey(key: string, value: string): boolean {
   try {
     window.localStorage.setItem(key, value);
+    return true;
   } catch {
-    // The in-memory value still notified; only persistence is lost.
+    return false;
   }
 }
 
@@ -78,19 +84,27 @@ export function applyThemeChoice(choice: ThemeChoice) {
   applyResolvedTheme(resolveTheme(choice));
 }
 
-export function setThemeChoice(choice: ThemeChoice) {
-  writeKey(THEME_KEY, choice);
-  applyThemeChoice(choice);
+/**
+ * Returns whether the choice was saved. The page paints from what storage
+ * holds afterwards, not from the request: a rejected write would otherwise
+ * leave the window in a theme the control does not show.
+ */
+export function setThemeChoice(choice: ThemeChoice): boolean {
+  const saved = writeKey(THEME_KEY, choice);
+  applyThemeChoice(saved ? choice : getThemeChoice());
   notify();
+  return saved;
 }
 
 export function getPreference(name: BooleanPreferenceName): boolean {
   return readKey(BOOLEAN_KEYS[name]) !== "off";
 }
 
-export function setPreference(name: BooleanPreferenceName, value: boolean) {
-  writeKey(BOOLEAN_KEYS[name], value ? "on" : "off");
+/** Returns whether the value was saved; subscribers re-read either way. */
+export function setPreference(name: BooleanPreferenceName, value: boolean): boolean {
+  const saved = writeKey(BOOLEAN_KEYS[name], value ? "on" : "off");
   notify();
+  return saved;
 }
 
 /**

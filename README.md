@@ -80,54 +80,85 @@ filesystem and storage backend used by these test flows.
 
 ### 2. Connect the shared Cloudflare R2 storage
 
-Install Cloudflare Wrangler and make sure `wrangler` is available on `PATH`.
-The copied agent instruction checks this first. If Wrangler is missing, it
-stops, asks for approval, and shows `npm install --global wrangler@latest`;
-it never installs the dependency without explicit approval. Mallard invokes
-`wrangler` directly, so a project-local-only install is not sufficient.
-Mallard uses Wrangler's authenticated Cloudflare session; the setup flow can
-open the system browser if sign-in or consent is required.
+1. In Mallard, add a **Cloudflare R2** storage and select **Set up with Wrangler**.
+   Mallard runs its packaged setup CLI directly. No agent is required.
+2. If Wrangler is missing, install it with:
 
-1. In Mallard, open storage settings and add a **Cloudflare R2** storage.
-2. Enter the connection fields directly, or select **Run with Codex/Claude**
-   under agent setup. Mallard passes the instruction directly to the agent.
-   Copying the instruction is also available.
-3. For agent setup, the agent may need separate one-time execution approval
-   before it starts the exact Mallard CLI setup command. This approval lets
-   that command write the current user's `~/.mallard` state and launch the
-   system browser; it does not authorize a shell, a broader command prefix,
-   or browser control. If approval is declined, setup stops instead of using
-   another home, temporary state, `sudo`, or direct configuration edits.
-4. In the system browser, personally review and complete Cloudflare login,
-   MFA, and consent. The agent does not control or inspect the browser and
-   never receives credentials.
-5. Wait for the CLI to fill the open Mallard setup draft. Review or edit the
-   populated connection values in Mallard, optionally choose **Test
-   connection**, and then personally choose **Finish setup**. The CLI does not
-   test or commit the storage. Mallard loads the Secret Access Key only for the
-   exact draft opened in the editor, where the existing **Show** control lets
-   you review it; background draft listings and committed storage snapshots
-   remain redacted.
+   ```sh
+   npm install --global wrangler@latest
+   ```
+
+   The setup row provides **Copy command**, **Copy agent message**, and
+   **Try again**. The agent message asks only to install and verify Wrangler.
+   Mallard does not install dependencies automatically. Node.js and npm are
+   required; a project-only Wrangler install is not sufficient.
+3. Check the Cloudflare account shown in Mallard. If Wrangler returns several
+   accounts, select one. **Change login** provides a fresh login link. Copy it
+   into the browser profile or private window for the required user. Select **Continue** to create the
+   bucket and complete browser consent. Both browser steps provide **Copy link**
+   and **Open browser**; neither opens automatically. Keep Mallard running and
+   use a browser on the same computer. Account checks do not create buckets.
+   A draft that has started provisioning stays tied to its original account;
+   use a new draft for a different account. Mallard uses Wrangler's OAuth session in memory. It does not
+   print or save that OAuth token. Wrangler must support `auth token --json`.
+4. If authorization expires, select **Try again**. Setup reuses a confirmed
+   bucket. If the saved login is unusable, select **Sign in again**. Each
+   attempt opens a new authorization flow.
+5. Review the connection values in Mallard, optionally select **Test
+   connection**, then select **Finish setup**. Setup prepares only the draft.
+   It does not test or commit storage. The Secret Access Key is loaded only
+   for the exact draft opened in the editor. Background draft listings and
+   committed storage snapshots remain redacted.
+
+Manual connection entry remains available. Setup can also prepare new
+credentials for an existing R2 destination without replacing the bucket.
+
+To reconnect a Mallard bucket on another machine, choose **Use existing**,
+then **Find in my account**. Confirm the Wrangler account, or select
+**Change login** and copy the login link into another browser profile on the
+same computer. The scan lists buckets in that account's **default
+jurisdiction** and reads only `.mallard/_storage.json`. Use manual entry for
+other jurisdictions. Results distinguish Mallard storage, missing or invalid
+markers, unsupported layouts, and read failures. Already-connected buckets
+cannot be selected again.
+
+Select a Mallard bucket, then choose **Use selected**. Mallard checks the
+bucket's creation date and marker before and after browser authorization.
+**Copy authorization link**, **Open browser**, and **Cancel setup** work as
+in the create flow; no browser opens automatically. Cancellation stops the
+local helper and callback listener. **Try again** repeats the stopped step;
+**Back to setup** clears the temporary scan and returns to **Find in my
+account**, keeping the draft. Finish by reviewing the prepared connection
+and selecting **Finish setup**. This flow does not create a bucket or write
+a storage marker.
+
+Select **Cancel setup** to stop an active setup. Mallard stops the setup helper
+and its child processes before it enables retry. The draft and any bucket
+already created remain. Close the authorization tab before you retry.
 
 Manual **Finish setup** and **Save storage** use the same exact R2 capability
 probe before committing connection changes. Leaving the Secret Access Key
 blank while editing an existing storage preserves the backend-held value.
 
-For **Dropbox**, select **Run with Codex/Claude** to create a new Mallard shared
-folder. The helper opens Dropbox consent, obtains the namespace, and saves a
-refresh credential in the exact local draft. No app key, authorization code,
-namespace, or token needs to be typed or pasted. Dropbox can still require
-login or MFA. New drafts show the saved refresh token with the same Show/Hide
-and replacement controls as R2. Review the connection and select **Finish
-setup**. Access renews automatically. The storage page says **Connected** only
-after a request to Dropbox has succeeded in this session.
+For **Dropbox**, choose **Create new** or **Use existing**. Mallard signs in
+through Dropbox directly. Each authorization step shows a selectable link,
+**Copy link**, **Open browser**, and **Cancel**. Complete consent within three
+minutes, or retry with a fresh link. Confirm the returned account, or select
+**Switch account**. No agent, Dropbox CLI, or pasted access code is required.
+
+For a new folder, edit the proposed name and select **Create folder**.
+For existing storage, Mallard lists accessible shared folders and team roots,
+then reads their storage markers without changing them. Select **Use folder**
+for a supported Mallard marker. Review the prepared connection, test it, and
+select **Finish setup**. Full Dropbox permission covers more than the chosen
+folder. Access renews automatically; **Connected** means a request succeeded.
 
 If Dropbox rejects the saved authorization, Mallard says so once, with the
 route, HTTP status, Dropbox error identifier, and request ID it can prove,
 and stops presenting that credential until it changes. The sidebar and the
 Storages index mark the storage **Reconnect**; the storage page, and a Push or
 Pull that failed on it, offer **Reconnect Dropbox**, which opens the same
-storage's settings. Select **Reconnect with Codex/Claude** there, or paste a
+storage's settings. Select **Reconnect Dropbox** there, or paste a
 replacement token, then **Save changes**. Reconnection keeps the namespace,
 the storage ID, and the project links, and creates no folder. A manual token
 that expired is reported the same way and needs a replacement. Access that
@@ -173,57 +204,71 @@ Credentials and machine-specific paths are stored only in Mallard's local
 metadata under `~/.mallard/`; they are never uploaded inside a portable
 project bundle.
 
-### Agent setup and packaged CLI
+### Direct setup and packaged CLI
 
-Builds produced from this source tree package `mallard-cli` inside both the
-macOS app and the Windows per-user installer. R2 and Dropbox use the same
-agent launch controls. Mallard saves the exact draft and passes the packaged
-CLI path, draft ID, name, and revision to the selected agent. The installer
-does not modify PATH.
+Builds package `mallard-cli` for R2 setup. The installer does not modify PATH.
+Dropbox setup runs directly in the desktop backend. There is no Dropbox CLI
+setup command or storage agent launch path.
 
-Dropbox has no external CLI dependency. Mallard includes its public Dropbox
-app key and uses PKCE with a registered loopback callback. Setup requests
-the four storage scopes above plus `sharing.write`; reconnection and refreshed
-access request only the storage scopes. Full Dropbox permission covers more
-than the selected folder. The helper creates no invitations or public links.
+Mallard includes its public Dropbox app key and uses PKCE with a registered
+loopback callback. Creation adds `sharing.write` to the four storage scopes.
+Discovery adds `sharing.read`; reconnection and refreshed access request only
+the storage scopes. Setup creates no invitations or public links.
 
-```sh
-mallard-cli storage dropbox setup --name "Dropbox storage 1" \
-  --draft-id "storagedraft-…" --expected-revision 3
-```
+A bounded local journal records creation intent, the acknowledged folder ID,
+sharing job, and namespace. Restart resumes an acknowledged stage. An unknown
+create or share result stops without repeating the request. A created folder
+remains after cancellation or failure. After creation starts, another account
+requires a new draft. The original draft and folder remain available.
+See [Dropbox direct setup](docs/PLAN_DROPBOX_DIRECT_SETUP.md).
 
-The agent runs that command. The user does not enter it. A bounded local
-provisioning journal records creation intent, the acknowledged folder ID,
-sharing job, and namespace. Restart can resume an acknowledged stage. An
-unknown create or share result stops without repeating the mutation. The
-folder remains after cancellation or failure. The journal contains no token.
-See [Dropbox agent setup](docs/PLAN_AGENT_ASSISTED_DROPBOX_SETUP.md).
+Mallard proposes `mallard-<word>` for a new R2 bucket and `Mallard <word>` for
+a new Dropbox folder, selecting from 1,155 distinct short words in the
+`petname` library's small English noun, adjective, and adverb lists. The
+display name does not select the destination.
 
-R2 has one setup command. The copied instruction first saves the exact open
-schema-1 setup draft and includes its non-secret ID and expected revision in
-the command. The CLI uses the current Wrangler login, selects the only
-available account, creates or reuses a deterministic bucket with a readable
-slug derived from the storage name, opens Cloudflare Pipelines' hosted
-credential-consent broker in the system browser,
-receives the callback on loopback, and revision-safely fills that same draft:
+For R2 the proposed name is shown in the setup lane's Bucket line before
+anything is created; the user can rename it under Cloudflare's rule (3 to 63
+lowercase letters, numbers, or hyphens, beginning and ending with a letter or
+number) or ask for another proposal. Setup passes the exact name to the CLI
+(`--bucket`). A name the account already has creates nothing and returns to
+the Bucket line as `bucket_name_taken`, with the name back in the field; the
+journal keeps that plan, so a renamed request replaces it, and the jurisdiction
+can still change until a bucket exists. Once one exists, the journal pins the
+account, jurisdiction, and name for that draft. Permission errors and unknown
+creation results never change the name.
+
+For Dropbox, a confirmed name conflict returns to the name field. Edit the
+name or select **Suggest another**, then approve creation again. Mallard
+never adopts a conflicting folder or silently changes the approved name.
+All schemas remain at `1`. There is no migration or legacy setup path.
+
+R2 setup saves the exact open schema-1 draft and passes its ID and revision
+to the CLI. `storage r2 accounts` lists the current Wrangler accounts;
+`--login` opens login again. The desktop waits for account selection and
+Continue before calling setup with `--account-id`, `--jurisdiction`, and the
+bucket name confirmed in the lane as `--bucket`. The CLI checks that the
+selected account is still available, creates the bucket through the R2 management API, and provides
+a link to Cloudflare Pipelines' hosted credential-consent broker.
+For a saved destination, it prepares credentials for that same bucket.
+It receives the callback on loopback and fills that same draft with a revision
+check. Without `--bucket`, the CLI proposes a name itself:
 
 ```sh
 mallard-cli storage r2 --help
-mallard-cli storage r2 setup --name "Team backup" \
+mallard-cli storage r2 setup --name "Team backup" --bucket team-backup \
   --draft-id "storagedraft-…" --expected-revision 3
 ```
 
-The user—not the agent—reviews browser login, MFA, and consent. Credentials
+The user reviews browser login, MFA, and consent. Credentials
 never appear in a command argument or environment variable, and the CLI does
-not print them. If Wrangler exposes multiple accounts, setup stops instead of
-guessing which account to use. When the command succeeds, the running app
+not print them. Terminal setup requires `--account-id` when Wrangler exposes
+multiple accounts. Without it, setup uses the only available account. When the command succeeds, the running app
 uses the redacted background update only as a signal, exact-loads that one
 draft into the editor, and leaves every field—including the revealable Secret
 Access Key—editable. The user may test the connection and is the only person
 who finishes the setup; that final in-app action performs the capability probe
-and commits the storage. The agent stops at the CLI success or failure result;
-it does not invoke Computer Use, take screenshots, automate the browser, or
-inspect Mallard's window to verify the draft.
+and commits the storage.
 Discarding the Mallard draft removes only the local draft. It does not revoke
 an R2 access key or delete a bucket that the user approved in Cloudflare; if
 the setup is abandoned, remove those resources from the Cloudflare dashboard.
@@ -867,3 +912,12 @@ execution phase uses a private network namespace with loopback only.
 See [the test procedure](docs/MIXED_PROVIDER_AIMOCK_E2E.md) for pins, test steps,
 benchmark limits, baseline qualification, and runner setup. See the
 [xlarge procedure](docs/MIXED_PROVIDER_AIMOCK_E2E_XLARGE.md) for the larger fixture.
+
+
+R2 setup emits an `authorization_link` JSON line while browser authorization
+is pending, followed by the existing final result. Mallard sends these links
+to the active setup row over an IPC channel. Raw Wrangler output is not
+forwarded. Authorization links are not saved in the draft or activity log;
+they disappear when the step ends or is cancelled. Bucket links retain the
+existing single-use loopback exchange. If authorization expires, retry to
+get a fresh link. Wrangler login uses `--browser=false`.

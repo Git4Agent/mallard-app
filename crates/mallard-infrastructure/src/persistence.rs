@@ -3534,6 +3534,7 @@ mod tests {
         repo.mutate_conversation_bindings(|bindings| {
             bindings.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
                 host_id: identity.host_id.clone(),
@@ -3676,6 +3677,7 @@ mod tests {
         repo.mutate_conversation_bindings(|bindings| {
             bindings.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
                 host_id: identity.host_id.clone(),
@@ -3857,6 +3859,7 @@ mod tests {
         repo.mutate_conversation_bindings(|bindings| {
             bindings.bindings.push(LocalConversationBinding {
                 installed_end: Some(128),
+                pulled_children_excluded: false,
                 installed_subagents: BTreeMap::from([(
                     child_key,
                     InstalledSubagent {
@@ -4059,6 +4062,7 @@ mod tests {
             repo.mutate_conversation_bindings(|conversations| {
                 conversations.bindings.push(LocalConversationBinding {
                     installed_end: None,
+                    pulled_children_excluded: false,
                     installed_subagents: Default::default(),
                     path_origins_ref: None,
                     host_id: identity.host_id.clone(),
@@ -4167,6 +4171,7 @@ mod tests {
         repo.mutate_conversation_bindings(|conversations| {
             conversations.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
                 host_id: identity.host_id.clone(),
@@ -4914,6 +4919,7 @@ mod tests {
         let replica_id = install_bound_project(repo, temp, &identity);
         let mut binding = LocalConversationBinding {
             installed_end: None,
+            pulled_children_excluded: false,
             installed_subagents: Default::default(),
             host_id: identity.host_id,
             replica_id,

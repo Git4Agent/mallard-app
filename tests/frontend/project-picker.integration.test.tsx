@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import ProjectPicker from "../../src/components/project-sync/ProjectPicker";
@@ -86,4 +87,14 @@ test("with no projects the landing is the filled page ghosted: the head, one doo
   assert.doesNotMatch(html, /mallard-logo-duck|No projects yet|landing-picker-empty/);
   assert.doesNotMatch(html, /Add a folder you run|sessions show up here|keeps them safe/);
   assert.doesNotMatch(html, /landing-picker-card"/);
+});
+
+test("every box in a landing row stands as tall as the row", () => {
+  // The grid stretches each item to its row, but a box inside a block item
+  // kept its content height: a card whose detail wrapped stood taller than its
+  // neighbours. The item hands the row's height on; the boxes fill its width.
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(css, /\.landing-picker-grid > li \{\s*display: flex;\s*\}/);
+  assert.match(css, /\.landing-picker-card \{\s*width: 100%;/);
+  assert.match(css, /\.landing-picker-door \{\s*width: 100%;/);
 });

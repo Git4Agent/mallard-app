@@ -365,7 +365,9 @@ test("a delegation is a tile and a row: AGENT stamp, label, role, length, status
   assert.match(html, /class="session-detail-agent-label" title="Research term marking">Research term marking</);
   assert.match(html, /class="session-detail-agent-pill">general-purpose</);
   assert.match(html, /class="session-detail-agent-pill mode">async</);
-  assert.match(html, /class="session-detail-agent-meta"><span>14m<\/span>/);
+  // Length and chevron share one end cluster, so the length sits against the
+  // chevron on every row rather than splitting the free space with it.
+  assert.match(html, /class="session-detail-agent-end"><span class="session-detail-agent-meta"><span class="session-detail-agent-length">14m<\/span><\/span><span class="session-detail-tool-chevron"/);
   // Done says nothing; the brief and report wait behind the row.
   assert.doesNotMatch(html, /session-detail-agent-status/);
   assert.doesNotMatch(html, /Open transcript|Here are the findings/);
@@ -375,6 +377,20 @@ test("a delegation is a tile and a row: AGENT stamp, label, role, length, status
   ]);
   assert.match(codexHtml, /session-detail-agent-label" title="Hilbert">Hilbert<\/span><span class="session-detail-agent-task" title="inspect_poc">inspect_poc</);
   assert.doesNotMatch(codexHtml, /session-detail-agent-pill mode/);
+});
+
+test("an agent row gives its free space to one end cluster, and its stamp is as wide as its word", () => {
+  // Two auto margins (meta and chevron) split the free space and floated the
+  // length mid-row; the stamp had inherited the tool column's 88px.
+  const css = readFileSync("src/App.css", "utf8");
+  const rule = (selector: string) => css.match(new RegExp(`\\n${selector} \\{([^}]*)\\}`))?.[1] ?? "";
+  assert.match(rule("\\.session-detail-agent-end"), /margin-left: auto;/);
+  assert.match(rule("\\.session-detail-agent-end > \\.session-detail-tool-chevron"), /margin-left: 0;/);
+  // Found before it is searched: a renamed rule must fail here, not pass empty.
+  const meta = rule("\\.session-detail-agent-meta");
+  assert.match(meta, /font-variant-numeric: tabular-nums;/);
+  assert.doesNotMatch(meta, /margin-left/);
+  assert.match(rule("\\.session-detail-agent-stamp"), /flex: 0 0 auto;/);
 });
 
 test("a run that is not simply done prints its status, and the tile takes its colour", () => {

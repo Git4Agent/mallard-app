@@ -1241,54 +1241,6 @@ pub(super) fn remove_storage_with_repository(
     load_project_sync_config_with_repository(repository)
 }
 
-/// The assistant instruction for one exact draft, rendered by the storage
-/// provider that declares the assistant.
-pub(super) fn storage_setup_assistant_instruction_with_repository(
-    repository: &LocalStateRepository,
-    storage_provider: &StorageProviderKey,
-    draft_id: &StorageSetupDraftId,
-    expected_revision: u64,
-) -> Result<String, String> {
-    let current = std::env::current_exe()
-        .map_err(|_| "Mallard cannot resolve its packaged CLI location.".to_string())?;
-    let cli_path = packaged_cli_path(&current)?
-        .to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| "Mallard cannot represent its packaged CLI path.".to_string())?;
-    storage_setup::storage_setup_assistant_instruction(
-        repository,
-        StorageProviderRegistry::production(),
-        storage_provider,
-        draft_id,
-        expected_revision,
-        &cli_path,
-    )
-    .map_err(setup_error)
-}
-
-/// Open the agent provider's CLI with the storage provider's assistant
-/// instruction. Both providers resolve through their registries.
-pub(super) fn launch_storage_setup_assistant_with_repository(
-    repository: &LocalStateRepository,
-    storage_provider: &StorageProviderKey,
-    agent_provider: &ProviderKey,
-    draft_id: &StorageSetupDraftId,
-    expected_revision: u64,
-) -> Result<(), String> {
-    let instruction = storage_setup_assistant_instruction_with_repository(
-        repository,
-        storage_provider,
-        draft_id,
-        expected_revision,
-    )?;
-    let descriptor = provider_descriptor(agent_provider)?;
-    let launcher = descriptor
-        .cli_launcher
-        .ok_or_else(|| format!("{} has no launchable agent CLI.", descriptor.display_name))?;
-    let script = agent_launch_script(&launcher.program, &launcher.display_name, &instruction);
-    open_agent_launch_script_in_terminal(&script)
-}
-
 /// Resolve the CLI beside the running desktop executable.
 pub(super) fn packaged_cli_path(current_executable: &Path) -> Result<PathBuf, String> {
     let directory = current_executable
@@ -1316,87 +1268,6 @@ pub(super) fn packaged_cli_path(current_executable: &Path) -> Result<PathBuf, St
         return Err("Mallard cannot resolve its packaged CLI location.".to_string());
     }
     Ok(canonical_candidate)
-}
-
-fn shell_single_quoted(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-/// The terminal hand-off script: a login-shell runnable that resolves the
-/// agent CLI on the user's own PATH (the GUI app's environment routinely
-/// lacks Homebrew paths) and replaces itself with the agent, prompt attached.
-/// A missing CLI reports inside the same window the user is already watching.
-pub(super) fn agent_launch_script(program: &str, display_name: &str, instruction: &str) -> String {
-    let quoted_program = shell_single_quoted(program);
-    let missing = shell_single_quoted(&format!(
-        "Mallard: the {display_name} CLI ({program}) was not found on this shell's PATH."
-    ));
-    let fallback =
-        shell_single_quoted("Install it, or use \"Copy agent instruction\" in Mallard instead.");
-    let quoted_instruction = shell_single_quoted(instruction);
-    format!(
-        "#!/bin/zsh\nif ! command -v {quoted_program} >/dev/null 2>&1; then\n  echo {missing} >&2\n  echo {fallback} >&2\n  exit 127\nfi\nexec {quoted_program} {quoted_instruction}\n"
-    )
-}
-
-#[cfg(target_os = "macos")]
-fn write_agent_launch_script(directory: &Path, script: &str) -> Result<PathBuf, String> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    for _ in 0..16 {
-        let filename = format!("{}.command", generated_named_id("mallardagentsetup")?);
-        let path = directory.join(filename);
-        let opened = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path);
-        let mut file = match opened {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(format!(
-                    "Mallard could not write the terminal launch script: {error}"
-                ));
-            }
-        };
-        if let Err(error) = file.write_all(script.as_bytes()) {
-            drop(file);
-            let _ = std::fs::remove_file(&path);
-            return Err(format!(
-                "Mallard could not write the terminal launch script: {error}"
-            ));
-        }
-        if let Err(error) = file.set_permissions(std::fs::Permissions::from_mode(0o700)) {
-            drop(file);
-            let _ = std::fs::remove_file(&path);
-            return Err(format!(
-                "Mallard could not secure the terminal launch script: {error}"
-            ));
-        }
-        return Ok(path);
-    }
-    Err("Mallard could not allocate a terminal launch script.".to_string())
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn open_agent_launch_script_in_terminal(script: &str) -> Result<(), String> {
-    let path = write_agent_launch_script(&std::env::temp_dir(), script)?;
-    let status = std::process::Command::new("/usr/bin/open")
-        .args(["-b", "com.apple.Terminal"])
-        .arg(&path)
-        .status()
-        .map_err(|error| format!("Mallard could not open Terminal: {error}"))?;
-    if !status.success() {
-        return Err("Mallard could not open Terminal.".to_string());
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(super) fn open_agent_launch_script_in_terminal(_script: &str) -> Result<(), String> {
-    Err("Launching a terminal window is only supported on macOS in this build.".to_string())
 }
 
 fn host_identity_status(identity: mallard_domain::HostIdentity) -> HostIdentityStatus {
@@ -9518,6 +9389,7 @@ fn build_publish_request(
             }
             None => running_bindings.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: Some(path_origins_ref),
                 host_id: operation.host_id.clone(),
@@ -10668,6 +10540,7 @@ fn build_restore_plan_for_apply(
 #[derive(Clone)]
 struct PreparedPullConversation {
     action: ConversationPlanAction,
+    pulled_children_excluded: bool,
     cloud_transcript: VerifiedBody,
     cloud_file_sha256: String,
     cloud_forked_from: Option<CloudThreadId>,
@@ -11031,6 +10904,7 @@ fn prepare_pull_conversation_actions(
         let local_display_name = local_view.map(|view| view.descriptor.display_name.clone());
         Ok(PreparedPullConversation {
             action: action.clone(),
+            pulled_children_excluded: thread.wire_children == ConversationWireChildren::Off,
             cloud_transcript,
             cloud_file_sha256,
             cloud_forked_from: thread.forked_from.clone(),
@@ -11931,6 +11805,7 @@ fn apply_prepared_pull_conversation(
                 // keeps its marker on every device.
                 document_after.bindings.push(LocalConversationBinding {
                     installed_end: Some(installed_bytes.len() as u64),
+                    pulled_children_excluded: prepared.pulled_children_excluded,
                     installed_subagents: installed_subagents.clone(),
                     path_origins_ref: Some(path_origins_ref.clone()),
                     host_id: binding.host_id.clone(),
@@ -11955,6 +11830,7 @@ fn apply_prepared_pull_conversation(
                 })?;
                 let row = &mut document_after.bindings[index];
                 row.installed_end = Some(installed_bytes.len() as u64);
+                row.pulled_children_excluded = prepared.pulled_children_excluded;
                 row.installed_subagents = installed_subagents.clone();
                 row.path_origins_ref = Some(path_origins_ref.clone());
                 row.provider_thread_id = Some(destination_provider_thread_id.clone());
@@ -11966,6 +11842,7 @@ fn apply_prepared_pull_conversation(
             (ConversationPlanActionType::CreateLocal, None) => {
                 document_after.bindings.push(LocalConversationBinding {
                     installed_end: Some(installed_bytes.len() as u64),
+                    pulled_children_excluded: prepared.pulled_children_excluded,
                     installed_subagents: installed_subagents.clone(),
                     path_origins_ref: Some(path_origins_ref.clone()),
                     host_id: binding.host_id.clone(),
@@ -15750,48 +15627,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_launch_script_quotes_the_prompt_for_the_shell() {
-        let script = agent_launch_script(
-            "claude",
-            "Claude Code",
-            "Set up 'R2 storage' — don't finish; run `wrangler --version` and \"stop\".",
-        );
-        assert!(script.starts_with("#!/bin/zsh\n"));
-        // The CLI is resolved by the opened login shell, not the GUI app.
-        assert!(script.contains("if ! command -v 'claude' >/dev/null 2>&1; then"));
-        assert!(script.contains("the Claude Code CLI (claude) was not found"));
-        assert!(script.contains("Copy agent instruction"));
-        // Single quotes inside the prompt survive the shell round-trip; the
-        // whole prompt travels as one literal argument.
-        assert!(script.ends_with(
-            "exec 'claude' 'Set up '\\''R2 storage'\\'' — don'\\''t finish; run `wrangler --version` and \"stop\".'\n"
-        ));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn agent_launch_scripts_use_distinct_private_files() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().unwrap();
-        let first = write_agent_launch_script(temp.path(), "first").unwrap();
-        let second = write_agent_launch_script(temp.path(), "second").unwrap();
-
-        assert_ne!(first, second);
-        assert_eq!(first.parent(), Some(temp.path()));
-        assert!(first
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("mallardagentsetup-"));
-        assert_eq!(std::fs::read(&first).unwrap(), b"first");
-        assert_eq!(
-            std::fs::metadata(&first).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-    }
-
-    #[test]
     fn every_registered_cli_launcher_is_terminal_safe() {
         // Both shipped agents launch; anything registered stays a bare
         // program name the login shell resolves, never a path or shell text.
@@ -17112,6 +16947,7 @@ mod tests {
         repo.mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
                 host_id: binding.host_id.clone(),
@@ -25134,6 +24970,7 @@ mod tests {
         repo.mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
                 host_id: binding.host_id.clone(),
@@ -25615,6 +25452,7 @@ mod tests {
         repo.mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
                 host_id: binding.host_id.clone(),
@@ -26395,6 +26233,7 @@ mod tests {
         repo.mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
                 host_id: binding.host_id.clone(),
@@ -28992,6 +28831,7 @@ mod tests {
         };
         let mut owner = LocalConversationBinding {
             installed_end: None,
+            pulled_children_excluded: false,
             installed_subagents: Default::default(),
             path_origins_ref: None,
             host_id,

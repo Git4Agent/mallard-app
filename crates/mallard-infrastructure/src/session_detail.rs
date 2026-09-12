@@ -228,6 +228,7 @@ struct ResolvedLocalSession {
     file_size: u64,
     modified_nanos: u64,
     is_active: bool,
+    pulled_children_excluded: bool,
     /// Set on a child transcript: whose child, and which one. The parent it
     /// was reached through is resolved alongside it.
     child: Option<SessionChildIdentity>,
@@ -328,6 +329,7 @@ fn resolve_session(
             file_size: metadata.len(),
             modified_nanos: modified_nanos(&metadata),
             is_active: now_secs().saturating_sub(modified_secs(&metadata)) < 300,
+            pulled_children_excluded: false,
             child: Some(child),
         };
         parent = Some(std::mem::replace(&mut session, next));
@@ -374,9 +376,8 @@ fn snapshot_id(session: &ResolvedLocalSession, timeline_version: u32) -> String 
     )
 }
 
-/// The limits join the snapshot identity: a tuning change invalidates open
-/// cursors through the existing `SnapshotChanged` refresh path, with no
-/// dedicated frontend handling.
+/// Limits and Pull exclusions join the snapshot identity, so changes invalidate
+/// open cursors through the existing `SnapshotChanged` refresh path.
 fn snapshot_id_with_limits(
     session: &ResolvedLocalSession,
     timeline_version: u32,
@@ -385,14 +386,15 @@ fn snapshot_id_with_limits(
 ) -> String {
     sha256_hex(
         format!(
-            "session-detail-v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            "session-detail-v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
             session.provider,
             session.resource_id,
             session.file_size,
             session.modified_nanos,
             timeline_version,
             preview_budget_bytes,
-            conversation_limit_bytes
+            conversation_limit_bytes,
+            session.pulled_children_excluded
         )
         .as_bytes(),
     )
@@ -968,15 +970,12 @@ fn resolve_local_session(
             "Mallard could not revalidate this session's local ownership.",
         )
     })?;
-    let session_for_thread = bindings
-        .bindings
-        .iter()
-        .find(|binding| {
-            binding.local_project_id == resolved.project_id
-                && binding.thread_id == thread_id
-                && binding.provider_profile_id == home.profile_id
-        })
-        .and_then(|binding| binding.provider_thread_id.clone());
+    let local_binding = bindings.bindings.iter().find(|binding| {
+        binding.local_project_id == resolved.project_id
+            && binding.thread_id == thread_id
+            && binding.provider_profile_id == home.profile_id
+    });
+    let session_for_thread = local_binding.and_then(|binding| binding.provider_thread_id.clone());
     let mut matches = Vec::new();
     for session in views.iter().filter(|session| session.provider == provider) {
         let identity_matches = session_for_thread
@@ -1074,6 +1073,8 @@ fn resolve_local_session(
             file_size: metadata.len(),
             modified_nanos: modified_nanos(&metadata),
             is_active: now_secs().saturating_sub(modified_secs(&metadata)) < 300,
+            pulled_children_excluded: local_binding
+                .is_some_and(|binding| binding.pulled_children_excluded),
             child: None,
         });
     }
@@ -1861,7 +1862,10 @@ pub fn get_project_session_detail(
             summary.ended_at,
         )?
     };
-    let event_counts = with_checkpoint_count(index.counts.clone(), &checkpoint);
+    let mut event_counts = with_checkpoint_count(index.counts.clone(), &checkpoint);
+    if session.pulled_children_excluded {
+        event_counts.agent_calls = SessionCount::exact(0);
+    }
     let tokens = match summary.total_tokens {
         Some(value) => SessionCount {
             value: Some(value),
@@ -2053,10 +2057,14 @@ pub fn get_project_session_timeline_page(
             "No registered provider can read this session.",
         )
     })?;
+    let mut included_event_kinds = request.included_event_kinds.clone();
+    if session.pulled_children_excluded {
+        included_event_kinds.remove(&SessionTimelineEventKind::AgentCall);
+    }
     let query = SessionTimelineQuery {
         start_index: Some(start_index),
         limit,
-        included_event_kinds: request.included_event_kinds.clone(),
+        included_event_kinds,
         included_tool_categories: request.included_tool_categories.clone(),
         turn_id: request.turn_id.clone(),
     };
@@ -2315,6 +2323,7 @@ mod tests {
             file_size: 0,
             modified_nanos: 0,
             is_active: false,
+            pulled_children_excluded: false,
             child: None,
         }
     }
@@ -2337,6 +2346,14 @@ mod tests {
             metrics_complete: false,
             is_internal_subagent: false,
         }
+    }
+
+    #[test]
+    fn pull_child_exclusion_changes_the_viewer_snapshot() {
+        let mut session = sanitization_session();
+        let before = snapshot_id(&session, 1);
+        session.pulled_children_excluded = true;
+        assert_ne!(snapshot_id(&session, 1), before);
     }
 
     fn cache_entry_fixture() -> TimelineCacheEntry {

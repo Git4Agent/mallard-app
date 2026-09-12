@@ -1,10 +1,12 @@
 //! Resumable, exact-folder Dropbox provisioning. This journal has no secrets.
+pub mod discovery;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock;
 #[cfg(test)]
 mod tests;
 use crate::dropbox_auth::{validate_id, AuthError, AuthorizationGrant, DropboxClient};
 use crate::persistence::LocalStateRepository;
+use crate::storage_names::{select_word, NameError};
 use crate::storage_setup_journal::{
     StorageSetupId, StorageSetupJournalEntry, StorageSetupJournalStore, StorageSetupStage,
 };
@@ -22,6 +24,8 @@ pub enum SetupError {
     Identity,
     Uncertain,
     Incomplete,
+    NamesExhausted,
+    NameTaken,
 }
 impl From<AuthError> for SetupError {
     fn from(value: AuthError) -> Self {
@@ -41,6 +45,8 @@ impl SetupError {
             Self::Identity => "dropbox_setup_identity_mismatch",
             Self::Uncertain => "dropbox_setup_outcome_unknown",
             Self::Incomplete => "dropbox_setup_share_pending",
+            Self::NamesExhausted => "dropbox_setup_names_exhausted",
+            Self::NameTaken => "dropbox_folder_name_taken",
         }
     }
     pub fn message(self) -> &'static str {
@@ -50,6 +56,8 @@ impl SetupError {
             Self::Identity => "The Dropbox account or folder does not match this setup. No replacement was accepted.",
             Self::Uncertain => "A Dropbox folder request has an unknown result. This draft will not create or share another folder. Inspect Dropbox before starting a new setup.",
             Self::Incomplete => "Dropbox is still preparing the shared folder. Run setup again to check the same job.",
+            Self::NamesExhausted => "Mallard could not allocate another Dropbox folder name.",
+            Self::NameTaken => "This folder name is already in use. Choose another name.",
         }
     }
 }
@@ -65,6 +73,7 @@ struct Facts {
 struct Recovery {
     account_id: String,
     home_namespace_id: String,
+    path: String,
     stage: FolderStage,
 }
 
@@ -72,6 +81,7 @@ struct Recovery {
 #[serde(tag = "stage", rename_all = "snake_case", deny_unknown_fields)]
 enum FolderStage {
     Planned,
+    Conflict,
     Creating,
     Created { folder_id: String },
     Sharing { folder_id: String },
@@ -123,28 +133,41 @@ impl DropboxSetupJournal {
         Ok(Self { store, entry })
     }
 
-    fn path(&self) -> String {
-        format!(
-            "/Mallard {}",
-            self.entry.setup_id.as_str().trim_start_matches("setup-")
-        )
-    }
-
-    fn recovery(&self, account: &Account) -> Result<Recovery, SetupError> {
+    fn recovery_named(&self, account: &Account, requested: &str) -> Result<Recovery, SetupError> {
+        if !valid_folder_name(requested) {
+            return Err(SetupError::Identity);
+        }
         if self.entry.recovery == BoundedConfigObject::empty() {
             return Ok(Recovery {
                 account_id: account.id.clone(),
                 home_namespace_id: account.home.clone(),
+                path: format!("/{requested}"),
                 stage: FolderStage::Planned,
             });
         }
-        let recovery: Recovery = self
+        let mut recovery: Recovery = self
             .entry
             .recovery
             .decode()
             .map_err(|_| SetupError::Journal)?;
         if recovery.account_id != account.id || recovery.home_namespace_id != account.home {
             return Err(SetupError::Identity);
+        }
+        {
+            if recovery.path != format!("/{requested}") {
+                if !matches!(recovery.stage, FolderStage::Planned | FolderStage::Conflict) {
+                    return Err(SetupError::Identity);
+                }
+                recovery.path = format!("/{requested}");
+                recovery.stage = FolderStage::Planned;
+            }
+        }
+        if !recovery
+            .path
+            .strip_prefix('/')
+            .is_some_and(valid_folder_name)
+        {
+            return Err(SetupError::Journal);
         }
         match &recovery.stage {
             FolderStage::Created { folder_id } | FolderStage::Sharing { folder_id } => {
@@ -155,9 +178,33 @@ impl DropboxSetupJournal {
             }
             FolderStage::Job { job_id } => validate_id(job_id)?,
             FolderStage::Shared { namespace_id } => validate_id(namespace_id)?,
-            FolderStage::Planned | FolderStage::Creating => {}
+            FolderStage::Planned | FolderStage::Conflict | FolderStage::Creating => {}
         }
         Ok(recovery)
+    }
+
+    pub fn pinned_account(&self) -> Result<Option<String>, SetupError> {
+        if self.entry.recovery == BoundedConfigObject::empty() {
+            return Ok(None);
+        }
+        let recovery: Recovery = self
+            .entry
+            .recovery
+            .decode()
+            .map_err(|_| SetupError::Journal)?;
+        Ok(Some(recovery.account_id))
+    }
+
+    pub fn folder_name(&self) -> Result<Option<String>, SetupError> {
+        if self.entry.recovery == BoundedConfigObject::empty() {
+            return Ok(None);
+        }
+        let recovery: Recovery = self
+            .entry
+            .recovery
+            .decode()
+            .map_err(|_| SetupError::Journal)?;
+        Ok(recovery.path.strip_prefix('/').map(str::to_string))
     }
 
     fn checkpoint(&mut self, recovery: &Recovery) -> Result<(), SetupError> {
@@ -174,6 +221,13 @@ impl DropboxSetupJournal {
             .remove(&self.entry.setup_id)
             .map(|_| ())
             .map_err(|_| SetupError::Journal)
+    }
+}
+
+fn name_error(error: NameError) -> SetupError {
+    match error {
+        NameError::Exhausted => SetupError::NamesExhausted,
+        NameError::Random => SetupError::Auth(AuthError::Local),
     }
 }
 
@@ -240,13 +294,27 @@ async fn verify_namespace(
     Ok(())
 }
 
-/// Authorize an existing namespace or create the one exact folder for a new
-/// draft. The caller holds the host operation lock through draft preparation.
+pub fn valid_folder_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && name.trim() == name
+        && name != "."
+        && name != ".."
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\'))
+}
+
+pub fn propose_folder_name() -> Result<String, SetupError> {
+    Ok(format!("Mallard {}", select_word(&[]).map_err(name_error)?))
+}
+
 pub async fn prepare_namespace(
     client: &DropboxClient,
     grant: &AuthorizationGrant,
     existing_namespace: Option<&str>,
     journal: &mut DropboxSetupJournal,
+    requested: Option<&str>,
 ) -> Result<String, SetupError> {
     let setup_account = account(client, &grant.access.token, &grant.account_id).await?;
     let root = home_root();
@@ -255,21 +323,48 @@ pub async fn prepare_namespace(
         validate_id(namespace)?;
         namespace.to_string()
     } else {
-        let path = journal.path();
-        let mut recovery = journal.recovery(&setup_account)?;
+        let mut recovery =
+            journal.recovery_named(&setup_account, requested.ok_or(SetupError::Identity)?)?;
         loop {
+            let path = recovery.path.clone();
             match recovery.stage.clone() {
+                FolderStage::Conflict => return Err(SetupError::NameTaken),
                 FolderStage::Planned => {
                     recovery.stage = FolderStage::Creating;
                     journal.checkpoint(&recovery)?;
                     let response = client
-                        .rpc(
+                        .rpc_evidenced(
                             "files/create_folder_v2",
                             json!({"path":path, "autorename":false}),
                             &grant.access.token,
                             Some(&root),
                         )
-                        .await?;
+                        .await;
+                    let response = match response {
+                        Ok(response) => response,
+                        Err(failure) => {
+                            let evidence = failure.evidence.as_ref();
+                            if evidence.is_some_and(|evidence| {
+                                matches!(
+                                    evidence.error_tag,
+                                    Some("path/conflict/file" | "path/conflict/folder")
+                                )
+                            }) {
+                                recovery.stage = FolderStage::Conflict;
+                                journal.checkpoint(&recovery)?;
+                                continue;
+                            }
+                            // A definite rejection permits a later retry of the same name.
+                            // Missing, malformed, and server responses keep Creating.
+                            if evidence.is_some_and(|evidence| {
+                                matches!(evidence.http_status, Some(400 | 401 | 403 | 409 | 429))
+                            }) {
+                                recovery.stage = FolderStage::Planned;
+                                journal.checkpoint(&recovery)?;
+                            }
+                            return Err(failure.into());
+                        }
+                    };
                     let metadata = &response["metadata"];
                     let folder_id = id(&metadata["id"])?;
                     if !folder_id.starts_with("id:")

@@ -282,12 +282,12 @@ function EventNode({
   );
 }
 
-/** What the pane says where a text would be, by what the run proves. */
-function agentBriefNote(agent: SessionAgentPreview): string {
-  return agent.mode === "spawn"
-    ? "The brief is not readable from the rollout; the child transcript opens with it."
-    : "No brief was recorded for this agent.";
-}
+/* What the pane says where a text would be, by what the run proves. A spawned
+   collaborator's brief is not readable from the parent rollout — the child
+   transcript opens with it — so that section is not drawn at all: the verb in
+   the head band is the way to it, and an apology in its place only sent the
+   reader looking for a second control. */
+const AGENT_BRIEF_NOTE = "No brief was recorded for this agent.";
 
 function agentReportNote(agent: SessionAgentPreview): string {
   switch (agent.status) {
@@ -302,10 +302,13 @@ function agentReportNote(agent: SessionAgentPreview): string {
 /**
  * A delegation row on the tool-row grammar with a 24px tile: `AGENT` stamp,
  * the task's label, the role, then calls and length. Status prints only when
- * the run is not simply done. Opening the row shows the facts, the brief and
- * the report as bounded payload boxes, and the one verb — Open transcript —
- * which makes the child its own session page. The row keeps its own open
- * state: nothing is fetched on expand, the page already carries the texts.
+ * the run is not simply done. Opening the row shows a head band — the facts
+ * as chips and, at its right edge, the one verb, Open transcript, on the
+ * app's bordered pill — then the brief and the report as bounded payload
+ * boxes. The verb leads because it is the only thing the pane can do; as a
+ * ghost under the report it was the last thing a reader found. The row keeps
+ * its own open state: nothing is fetched on expand, the page already carries
+ * the texts.
  */
 function AgentRow({
   event,
@@ -340,48 +343,64 @@ function AgentRow({
         {agent.task && <span className="session-detail-agent-task" title={agent.task}>{agent.task}</span>}
         {agent.role && <span className="session-detail-agent-pill">{agent.role}</span>}
         {agent.mode === "async" && <span className="session-detail-agent-pill mode">async</span>}
-        <span className="session-detail-agent-meta">
-          {agent.tool_calls != null && (
-            <span>{formatCompactNumber(agent.tool_calls)} {agent.tool_calls === 1 ? "call" : "calls"}</span>
-          )}
-          {length && <span>{length}</span>}
-        </span>
-        {agent.status !== "completed" && (
-          <span className={`session-detail-agent-status status-${agent.status}`}>
-            {SESSION_AGENT_STATUS_LABELS[agent.status]}
+        {/* One end cluster, so the length sits against the chevron on every
+            row instead of splitting the free space with it. */}
+        <span className="session-detail-agent-end">
+          <span className="session-detail-agent-meta">
+            {agent.tool_calls != null && (
+              <span>{formatCompactNumber(agent.tool_calls)} {agent.tool_calls === 1 ? "call" : "calls"}</span>
+            )}
+            {length && <span className="session-detail-agent-length">{length}</span>}
           </span>
-        )}
-        <span className="session-detail-tool-chevron" aria-hidden="true">
-          <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
+          {agent.status !== "completed" && (
+            <span className={`session-detail-agent-status status-${agent.status}`}>
+              {SESSION_AGENT_STATUS_LABELS[agent.status]}
+            </span>
+          )}
+          <span className="session-detail-tool-chevron" aria-hidden="true">
+            <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
+          </span>
         </span>
       </summary>
       {expanded && (
         <div className="session-detail-tool-body">
           <div className="session-detail-tool-payload">
-            {/* The facts the row could not hold, one chip each: role, model,
-                mode, the span, and what the parent recorded of the child's
-                own accounting. */}
-            <div className="session-detail-agent-facts">
-              {agent.role && <span><Icon name="git-fork" size={12} />{agent.role}</span>}
-              {agent.model && <span>{agent.model}</span>}
-              <span>{agent.mode}</span>
-              {start && (
-                <span>
-                  <Icon name="clock" size={12} />
-                  {start} → {end ?? "…"}{length ? ` · ${length}` : ""}
-                </span>
-              )}
-              {agent.tool_calls != null && (
-                <span>{formatCompactNumber(agent.tool_calls)} {agent.tool_calls === 1 ? "call" : "calls"}</span>
-              )}
-              {agent.tokens != null && <span>{formatCompactNumber(agent.tokens)} tokens</span>}
+            <div className="session-detail-agent-head">
+              {/* The facts the row could not hold, one chip each: role, model,
+                  mode, the span, and what the parent recorded of the child's
+                  own accounting. */}
+              <div className="session-detail-agent-facts">
+                {agent.role && <span><Icon name="git-fork" size={12} />{agent.role}</span>}
+                {agent.model && <span>{agent.model}</span>}
+                <span>{agent.mode}</span>
+                {start && (
+                  <span>
+                    <Icon name="clock" size={12} />
+                    {start} → {end ?? "…"}{length ? ` · ${length}` : ""}
+                  </span>
+                )}
+                {agent.tool_calls != null && (
+                  <span>{formatCompactNumber(agent.tool_calls)} {agent.tool_calls === 1 ? "call" : "calls"}</span>
+                )}
+                {agent.tokens != null && <span>{formatCompactNumber(agent.tokens)} tokens</span>}
+              </div>
+              <button
+                type="button"
+                className="btn session-detail-agent-open"
+                disabled={!transcript || !onOpenSession}
+                title={transcript ? "Open this agent's transcript as its own page" : "No transcript is available for this agent."}
+                onClick={() => { if (transcript) onOpenSession?.(transcript); }}
+              >
+                <Icon name="external-link" size={12} />
+                Open transcript
+              </button>
             </div>
             {agent.brief
               ? <PayloadSection label="Brief" value={agent.brief} truncated={agent.brief_truncated} />
-              : (
+              : agent.mode !== "spawn" && (
                 <section className="session-detail-payload-section">
                   <div className="session-detail-payload-head"><span className="session-detail-payload-label">Brief</span></div>
-                  <p className="session-detail-agent-note">{agentBriefNote(agent)}</p>
+                  <p className="session-detail-agent-note">{AGENT_BRIEF_NOTE}</p>
                 </section>
               )}
             {agent.report
@@ -392,18 +411,6 @@ function AgentRow({
                   <p className="session-detail-agent-note">{agentReportNote(agent)}</p>
                 </section>
               )}
-            <div className="session-detail-agent-verbs">
-              <button
-                type="button"
-                className="btn btn-ghost session-detail-agent-open"
-                disabled={!transcript || !onOpenSession}
-                title={transcript ? "Open this agent's transcript as its own page" : "No transcript is available for this agent."}
-                onClick={() => { if (transcript) onOpenSession?.(transcript); }}
-              >
-                <Icon name="external-link" size={12} />
-                Open transcript
-              </button>
-            </div>
           </div>
         </div>
       )}

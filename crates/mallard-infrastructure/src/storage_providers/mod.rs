@@ -16,7 +16,8 @@ pub mod traits;
 
 pub use registry::StorageProviderRegistry;
 pub use traits::{
-    StorageAdapterError, StorageAdapterErrorKind, StorageFieldDescriptor, StorageFieldKind,
-    StorageProviderAdapter, StorageProviderDescriptor, StorageSecretDescriptor,
-    StorageSetupAssistantContext, StorageSetupAssistantDescriptor, StorageSummaryField,
+    StorageAdapterError, StorageAdapterErrorKind, StorageDiscoveryDescriptor,
+    StorageFieldDescriptor, StorageFieldKind, StorageProviderAdapter, StorageProviderDescriptor,
+    StorageSecretDescriptor,
+    StorageSummaryField,
 };

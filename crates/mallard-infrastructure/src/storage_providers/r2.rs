@@ -3,14 +3,13 @@
 //! R2 is reached through its S3 API. The version-1 settings are the canonical
 //! S3 API URL (which names the account, jurisdiction, and bucket) and the
 //! access key ID; the secret access key is the one secret. The R2
-//! provisioning assistant — an agent runs the packaged Mallard CLI, which
-//! drives Cloudflare's Wrangler tooling — is declared here and delivers its
-//! result into an ordinary storage draft.
+//! setup action runs the packaged Mallard CLI with local Wrangler and
+//! prepares an ordinary storage draft for review.
 
 use super::traits::{
-    StorageAdapterError, StorageFieldDerivation, StorageFieldDescriptor, StorageFieldKind,
-    StorageNameSuggestion, StorageProviderAdapter, StorageProviderDescriptor,
-    StorageSecretDescriptor, StorageSetupAssistantContext, StorageSetupAssistantDescriptor,
+    StorageAdapterError, StorageDiscoveryDescriptor, StorageDiscoveryHelp, StorageFieldDerivation,
+    StorageFieldDescriptor, StorageFieldKind, StorageLocalSetup, StorageNameSuggestion,
+    StorageProviderAdapter, StorageProviderDescriptor, StorageSecretDescriptor,
     StorageSummaryField,
 };
 use crate::storage_core::{ObjectStore, R2CapabilityProbeErrorKind, S3Connection, S3ObjectStore};
@@ -68,21 +67,58 @@ const CLOUDFLARE_ACCOUNT_ID_DOC: &str =
 /// (group 1) from while the user types. `parse_r2_api_url` remains the
 /// authority at validation time.
 const R2_API_URL_DERIVATION_PATTERN: &str =
-    r"^https://([0-9a-fA-F]{32})(?:\.(eu|fedramp))?\.r2\.cloudflarestorage\.com/([^/?#%]+)$";
+    r"^https://([0-9a-fA-F]{32})(?:\.(eu|us|fedramp))?\.r2\.cloudflarestorage\.com/([^/?#%]+)$";
 
+/// Where a bucket's data may live. Cloudflare fixes it at creation; the S3
+/// endpoint host and the management API's `cf-r2-jurisdiction` header both
+/// name it by the same identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum R2Jurisdiction {
     Default,
     Eu,
+    Us,
     Fedramp,
 }
 
 impl R2Jurisdiction {
+    /// Every jurisdiction Mallard can create in and scan, in the order the
+    /// setup lane lists them.
+    pub const ALL: [R2Jurisdiction; 4] = [Self::Default, Self::Eu, Self::Us, Self::Fedramp];
+
+    /// The identifier Cloudflare uses in the API header and bucket listings.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Default => "default",
             Self::Eu => "eu",
+            Self::Us => "us",
             Self::Fedramp => "fedramp",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|jurisdiction| jurisdiction.as_str() == value)
+    }
+
+    /// The word the setup lane prints for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Eu => "EU",
+            Self::Us => "US",
+            Self::Fedramp => "FedRAMP",
+        }
+    }
+
+    /// The S3 endpoint for an account's buckets in this jurisdiction.
+    pub fn endpoint(self, account_id: &str) -> String {
+        match self {
+            Self::Default => format!("https://{account_id}.r2.cloudflarestorage.com"),
+            other => format!(
+                "https://{account_id}.{}.r2.cloudflarestorage.com",
+                other.as_str()
+            ),
         }
     }
 }
@@ -196,6 +232,7 @@ pub fn parse_r2_api_url(value: &str) -> Result<R2Destination, StorageAdapterErro
     let (account_id, jurisdiction) = match labels.as_slice() {
         [account, "r2", "cloudflarestorage", "com"] => (*account, R2Jurisdiction::Default),
         [account, "eu", "r2", "cloudflarestorage", "com"] => (*account, R2Jurisdiction::Eu),
+        [account, "us", "r2", "cloudflarestorage", "com"] => (*account, R2Jurisdiction::Us),
         [account, "fedramp", "r2", "cloudflarestorage", "com"] => {
             (*account, R2Jurisdiction::Fedramp)
         }
@@ -212,7 +249,7 @@ pub fn parse_r2_api_url(value: &str) -> Result<R2Destination, StorageAdapterErro
             "The R2 API URL account ID must be 32 hexadecimal characters.",
         ));
     }
-    if !valid_bucket(raw_bucket) {
+    if !valid_bucket_name(raw_bucket) {
         return Err(StorageAdapterError::invalid(
             "r2_bucket_name_invalid",
             "The R2 bucket name must use 3 to 63 lowercase letters, numbers, or hyphens and begin and end with a letter or number.",
@@ -220,17 +257,7 @@ pub fn parse_r2_api_url(value: &str) -> Result<R2Destination, StorageAdapterErro
     }
 
     let account_id = account_id.to_ascii_lowercase();
-    let endpoint = match jurisdiction {
-        R2Jurisdiction::Default => {
-            format!("https://{account_id}.r2.cloudflarestorage.com")
-        }
-        R2Jurisdiction::Eu => {
-            format!("https://{account_id}.eu.r2.cloudflarestorage.com")
-        }
-        R2Jurisdiction::Fedramp => {
-            format!("https://{account_id}.fedramp.r2.cloudflarestorage.com")
-        }
-    };
+    let endpoint = jurisdiction.endpoint(&account_id);
     Ok(R2Destination {
         jurisdiction,
         account_id,
@@ -240,7 +267,9 @@ pub fn parse_r2_api_url(value: &str) -> Result<R2Destination, StorageAdapterErro
     })
 }
 
-fn valid_bucket(bucket: &str) -> bool {
+/// Cloudflare's bucket rule: 3 to 63 lowercase letters, numbers or hyphens,
+/// beginning and ending with a letter or number.
+pub fn valid_bucket_name(bucket: &str) -> bool {
     (3..=63).contains(&bucket.len())
         && bucket
             .bytes()
@@ -465,13 +494,25 @@ impl StorageProviderAdapter for R2Adapter {
                 help: Some("How to create an R2 Secret Access Key".to_string()),
                 help_url: Some(R2_CREDENTIALS_DOC.to_string()),
             }],
-            setup_assistant: Some(StorageSetupAssistantDescriptor {
-                managed_secret_id: None,
-                label: "Agent setup".to_string(),
-                description: "Fills these values for your review — you complete Cloudflare sign-in, MFA, and consent in the browser, and finish setup yourself.".to_string(),
-            }),
+            managed_secret_id: None,
+            local_setup: Some(StorageLocalSetup::Wrangler),
             setup_guide_url: Some(R2_SETUP_DOC.to_string()),
             manual_setup_hint: Some("Enter an existing R2 connection in the fields below.".to_string()),
+            discovery: Some(StorageDiscoveryDescriptor {
+                unit: "bucket".to_string(),
+                unit_plural: "buckets".to_string(),
+                place: "your Cloudflare account".to_string(),
+                create_hint: "A new bucket in your Cloudflare account, created with Wrangler or by hand.".to_string(),
+                existing_hint: "Use a shared R2 bucket with your team, or connect your own.".to_string(),
+                existing_help: Some(StorageDiscoveryHelp {
+                    label: "Set up team access".to_string(),
+                    url: "https://developers.cloudflare.com/fundamentals/manage-members/manage/".to_string(),
+                }),
+                find_label: "Find in my account".to_string(),
+                access_hint: "Uses your Wrangler sign-in. Read-only: lists the buckets and reads one marker file in each.".to_string(),
+                scanning_hint: "Looking through your Cloudflare account…".to_string(),
+                prepare_hint: "Cloudflare issues an access key for this bucket only.".to_string(),
+            }),
         }
     }
 
@@ -574,13 +615,6 @@ impl StorageProviderAdapter for R2Adapter {
             .map_err(probe_error)
     }
 
-    fn setup_assistant_instruction(
-        &self,
-        context: &StorageSetupAssistantContext<'_>,
-    ) -> Result<String, String> {
-        Ok(assistant_instruction(context))
-    }
-
     fn open(
         &self,
         config: &StorageProviderConfig,
@@ -595,44 +629,6 @@ impl StorageProviderAdapter for R2Adapter {
 
 /// The instruction the agent receives: UI, browser consent, and credentials
 /// stay outside the agent; it only runs the CLI against the exact draft.
-fn assistant_instruction(context: &StorageSetupAssistantContext<'_>) -> String {
-    let requested_name = {
-        let trimmed = context.storage_name.trim();
-        if trimmed.is_empty() {
-            "Cloudflare R2"
-        } else {
-            trimmed
-        }
-    };
-    let draft_id = context.draft_id;
-    let draft_revision = context.draft_revision;
-    [
-        format!("Prepare the Cloudflare R2 storage “{requested_name}” draft through the Mallard CLI for my later review. Do not finish the setup for me. Do not invoke Computer Use for any purpose, including read-only verification."),
-        String::new(),
-        "Use this Mallard CLI:".to_string(),
-        context.cli_path.to_string(),
-        String::new(),
-        "Treat that as a literal executable path and quote it for the current shell; do not interpret it as shell syntax.".to_string(),
-        String::new(),
-        "First check the required runtime dependency without installing anything: run `wrangler --version` and confirm that `wrangler` is available on PATH.".to_string(),
-        String::new(),
-        "If Wrangler is missing or `wrangler --version` fails, stop before invoking Mallard setup. Tell me that Mallard requires a working `wrangler` command on PATH, ask me to approve installing it, and show me this exact command: `npm install --global wrangler@latest`. Do not run that installation unless I explicitly approve it. Before an approved installation, run `npm --version`; if npm is missing, report that separately and ask how I want to install Node.js and npm—do not choose or install a package manager on your own. After an approved installation, rerun `wrangler --version` and continue only if it succeeds. Mallard invokes `wrangler` directly, so do not substitute `npx wrangler` or a project-local-only installation.".to_string(),
-        String::new(),
-        "Once the Wrangler dependency check succeeds, run the Mallard CLI’s `storage r2 --help` command.".to_string(),
-        String::new(),
-        "Before invoking setup, check whether your command-execution environment restricts writing to the current user’s ~/.mallard directory or launching the system browser. If it does, ask me for one-time approval to run the exact, fully quoted Mallard setup command described next with permission to write to the current user’s ~/.mallard directory and launch the system browser. Request approval only for that exact setup command, not for a shell or a broader command prefix. Do not invoke setup until I explicitly approve it; if I decline, stop.".to_string(),
-        String::new(),
-        format!("Then run its `storage r2 setup` command with all three required options: `--name` with the exact storage name shown above as one literal argument, `--draft-id` with the exact literal value `{draft_id}`, and `--expected-revision` with the exact decimal value `{draft_revision}`. Quote the executable path, storage name, and draft ID correctly for the current shell; do not interpret any value as shell syntax."),
-        String::new(),
-        "The Mallard CLI uses the existing Wrangler login and may open the system browser. I—not the agent—will review and complete Cloudflare login, MFA, and consent. Do not control the browser or inspect its contents. Wait for the CLI to finish; the agent should observe only its success or failure result.".to_string(),
-        String::new(),
-        "Complete only the draft-preparation handoff through the CLI. Do not work around an execution restriction by changing HOME, using temporary or project-local Mallard state, using sudo, editing ~/.mallard, or editing Mallard’s open setup form. Do not request or handle credentials, put a secret in an argument or environment variable, or print credentials.".to_string(),
-        String::new(),
-        "The setup command only prepares the exact schema-1 draft named above; it does not test the connection or commit the storage. Mallard is listening for that draft and will automatically fill the existing editable setup form when the CLI finishes. The CLI success or failure result is the end of the agent’s task. Do not use screenshots, browser automation, UI automation, or direct inspection of Mallard’s window or form to confirm the update. Report only the CLI success or failure result, then stop. I will confirm that the fields appeared, review or edit them, optionally test the connection, and personally click Finish setup when I am ready.".to_string(),
-    ]
-    .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,6 +686,17 @@ mod tests {
             destination.api_url(),
             format!("https://{ACCOUNT}.r2.cloudflarestorage.com/bucket-1")
         );
+        for jurisdiction in R2Jurisdiction::ALL {
+            let url = format!("{}/bucket-1", jurisdiction.endpoint(ACCOUNT));
+            let parsed = parse_r2_api_url(&url).unwrap();
+            assert_eq!(parsed.jurisdiction(), jurisdiction);
+            assert_eq!(parsed.api_url(), url);
+            assert_eq!(
+                R2Jurisdiction::parse(jurisdiction.as_str()),
+                Some(jurisdiction)
+            );
+        }
+        assert_eq!(R2Jurisdiction::parse("fedramp-high"), None);
         for (url, code) in [
             (
                 format!("http://{ACCOUNT}.r2.cloudflarestorage.com/b-1"),
@@ -813,46 +820,9 @@ mod tests {
     }
 
     #[test]
-    fn assistant_instruction_keeps_ui_browser_consent_and_credentials_outside_the_agent() {
-        let adapter = R2Adapter;
-        assert!(adapter.descriptor().setup_assistant.is_some());
-        let instruction = adapter
-            .setup_assistant_instruction(&StorageSetupAssistantContext {
-                storage_name: "Team backup",
-                cli_path: "/Applications/Mallard.app/Contents/MacOS/mallard-cli",
-                draft_id: "draft-exact-123",
-                draft_revision: 7,
-                reconnect: false,
-            })
-            .unwrap();
-        for expected in [
-            "Team backup",
-            "/Applications/Mallard.app/Contents/MacOS/mallard-cli",
-            "storage r2 --help",
-            "wrangler --version",
-            "npm install --global wrangler@latest",
-            "storage r2 setup",
-            "--draft-id",
-            "draft-exact-123",
-            "exact decimal value `7`",
-            "Do not invoke Computer Use",
-            "Do not request or handle credentials",
-            "personally click Finish setup",
-        ] {
-            assert!(instruction.contains(expected), "missing {expected:?}");
-        }
-        assert!(
-            instruction.find("Do not invoke Computer Use").unwrap()
-                < instruction.find("wrangler --version").unwrap()
-        );
-        assert!(
-            instruction.find("storage r2 --help").unwrap()
-                < instruction.find("one-time approval").unwrap()
-        );
-        assert!(
-            instruction.find("one-time approval").unwrap()
-                < instruction.find("storage r2 setup").unwrap()
-        );
-        assert!(!instruction.contains("secret-canary"));
+    fn r2_declares_local_wrangler_setup_without_an_agent() {
+        let descriptor = R2Adapter.descriptor();
+        assert_eq!(descriptor.local_setup, Some(StorageLocalSetup::Wrangler));
+        assert!(descriptor.managed_secret_id.is_none());
     }
 }

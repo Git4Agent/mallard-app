@@ -17,6 +17,8 @@ pub const STORAGE_SCOPES: &str =
     "account_info.read files.metadata.read files.content.read files.content.write";
 pub const SETUP_SCOPES: &str =
     "account_info.read files.metadata.read files.content.read files.content.write sharing.write";
+pub const DISCOVERY_SCOPES: &str =
+    "account_info.read files.metadata.read files.content.read files.content.write sharing.read";
 const RESPONSE_LIMIT: usize = 1024 * 1024;
 
 pub struct AuthorizationRequest {
@@ -26,6 +28,10 @@ pub struct AuthorizationRequest {
 }
 impl AuthorizationRequest {
     pub fn new(scopes: &str) -> Result<Self, AuthError> {
+        Self::for_login(scopes, false)
+    }
+
+    pub fn for_login(scopes: &str, switch_account: bool) -> Result<Self, AuthError> {
         use sha2::{Digest, Sha256};
         let random = || -> Result<Zeroizing<String>, AuthError> {
             let mut bytes = Zeroizing::new([0u8; 32]);
@@ -50,6 +56,10 @@ impl AuthorizationRequest {
             ("code_challenge_method", "S256"),
             ("code_challenge", challenge.as_str()),
         ]);
+        if switch_account {
+            url.query_pairs_mut()
+                .append_pair("force_reauthentication", "true");
+        }
         Ok(Self {
             url,
             state,
@@ -197,10 +207,12 @@ pub struct AuthorizationGrant {
     pub account_id: String,
 }
 
+#[derive(Clone)]
 pub struct DropboxClient {
     client: Client,
     api: String,
     token_url: String,
+    content_api: String,
 }
 
 impl DropboxClient {
@@ -221,6 +233,11 @@ impl DropboxClient {
                 .map_err(|_| AuthError::Local)?,
             api: api.into(),
             token_url: token_url.into(),
+            content_api: if api.starts_with("http://127.0.0.1:") {
+                api.into()
+            } else {
+                "https://content.dropboxapi.com/2".into()
+            },
         })
     }
 
@@ -297,7 +314,11 @@ impl DropboxClient {
             return Err(fail(error, evidence(Some(401), tag, request_id)));
         }
         if !status.is_success() {
-            let tag = token_error_tag(&bytes);
+            let tag = if endpoint == "files/create_folder_v2" && status.as_u16() == 409 {
+                folder_conflict_tag(&bytes)
+            } else {
+                token_error_tag(&bytes)
+            };
             let error = match tag {
                 Some("invalid_grant") => AuthError::Reconnect,
                 Some("invalid_scope") => AuthError::Permission,
@@ -413,6 +434,62 @@ impl DropboxClient {
         })
     }
 
+    /// Read only the fixed storage marker. Never create or repair it here.
+    pub async fn read_storage_marker(
+        &self,
+        namespace: &str,
+        token: &SecretValue,
+    ) -> Result<Option<Vec<u8>>, AuthError> {
+        validate_id(namespace)?;
+        let mut response = self
+            .client
+            .post(format!("{}/files/download", self.content_api))
+            .header("Authorization", bearer(token)?)
+            .header(
+                "Dropbox-API-Path-Root",
+                serde_json::json!({".tag":"namespace_id", "namespace_id":namespace}).to_string(),
+            )
+            .header("Dropbox-API-Arg", "{\"path\":\"/.mallard/_storage.json\"}")
+            .send()
+            .await
+            .map_err(|_| AuthError::Remote)?;
+        let status = response.status();
+        let limit = if status.is_success() { 4096 } else { 16384 };
+        if response
+            .content_length()
+            .is_some_and(|len| len > limit as u64)
+        {
+            return Err(AuthError::Invalid);
+        }
+        let mut bytes = Zeroizing::new(Vec::new());
+        while let Some(chunk) = response.chunk().await.map_err(|_| AuthError::Remote)? {
+            if bytes.len().saturating_add(chunk.len()) > limit {
+                return Err(AuthError::Invalid);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if status.is_success() {
+            return Ok(Some(bytes.to_vec()));
+        }
+        if status.as_u16() == 409 {
+            let value: Value = serde_json::from_slice(&bytes).map_err(|_| AuthError::Invalid)?;
+            if value["error"][".tag"] == "path" && value["error"]["path"][".tag"] == "not_found" {
+                return Ok(None);
+            }
+        }
+        Err(match status.as_u16() {
+            401 if !matches!(
+                auth_error_tag(&bytes),
+                Some("missing_scope" | "user_suspended" | "route_access_denied")
+            ) =>
+            {
+                AuthError::Reconnect
+            }
+            401 | 403 => AuthError::Permission,
+            _ => AuthError::Remote,
+        })
+    }
+
     pub async fn rpc(
         &self,
         route: &'static str,
@@ -420,16 +497,45 @@ impl DropboxClient {
         token: &SecretValue,
         root: Option<&Value>,
     ) -> Result<Value, AuthError> {
+        self.rpc_evidenced(route, args, token, root)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    pub(crate) async fn rpc_evidenced(
+        &self,
+        route: &'static str,
+        args: Value,
+        token: &SecretValue,
+        root: Option<&Value>,
+    ) -> Result<Value, AuthFailure> {
+        let plain = |error| AuthFailure {
+            error,
+            evidence: None,
+        };
         let mut request = self
             .client
             .post(format!("{}/{route}", self.api))
-            .header("Authorization", bearer(token)?)
+            .header("Authorization", bearer(token).map_err(plain)?)
             .json(&args);
         if let Some(root) = root {
             request = request.header("Dropbox-API-Path-Root", root.to_string());
         }
         let bytes = self.response(route, request).await?;
-        serde_json::from_slice(&bytes).map_err(|_| AuthError::Invalid)
+        serde_json::from_slice(&bytes).map_err(|_| plain(AuthError::Invalid))
+    }
+}
+
+fn folder_conflict_tag(bytes: &[u8]) -> Option<&'static str> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
+    let error = &value["error"];
+    if error[".tag"] != "path" || error["path"][".tag"] != "conflict" {
+        return None;
+    }
+    match error["path"]["conflict"][".tag"].as_str()? {
+        "file" => Some("path/conflict/file"),
+        "folder" => Some("path/conflict/folder"),
+        _ => None,
     }
 }
 

@@ -1,5 +1,22 @@
-use crate::error::CliError;
-use mallard_infrastructure::dropbox_auth::{AuthorizationRequest, CALLBACK_URI};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(Debug)]
+pub struct CallbackError {
+    code: &'static str,
+    message: &'static str,
+}
+impl CallbackError {
+    fn remote(code: &'static str, message: &'static str) -> Self {
+        Self { code, message }
+    }
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+    pub fn message(&self) -> &'static str {
+        self.message
+    }
+}
+use crate::dropbox_auth::{AuthorizationRequest, CALLBACK_URI};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -8,17 +25,21 @@ use std::time::{Duration, Instant};
 use url::Url;
 use zeroize::Zeroizing;
 
-fn failure(code: &'static str, message: &'static str) -> CliError {
-    CliError::remote(code, message)
+fn failure(code: &'static str, message: &'static str) -> CallbackError {
+    CallbackError::remote(code, message)
 }
-fn invalid_callback() -> CliError {
+fn invalid_callback() -> CallbackError {
     failure(
         "dropbox_callback_invalid",
         "Dropbox authorization returned an invalid callback. Run setup again.",
     )
 }
 
-pub(crate) fn authorize(request: &AuthorizationRequest) -> Result<Zeroizing<String>, CliError> {
+pub fn authorize(
+    request: &AuthorizationRequest,
+    on_link: impl FnOnce(&Url) -> Result<(), ()>,
+    cancelled: &AtomicBool,
+) -> Result<Zeroizing<String>, CallbackError> {
     let callback = Url::parse(CALLBACK_URI).map_err(|_| invalid_callback())?;
     let address: SocketAddr = format!(
         "127.0.0.1:{}",
@@ -28,11 +49,12 @@ pub(crate) fn authorize(request: &AuthorizationRequest) -> Result<Zeroizing<Stri
     .map_err(|_| invalid_callback())?;
     let listener = bind(address).map_err(|_| failure("dropbox_callback_unavailable",
         "Mallard could not bind the Dropbox callback port. Close the other setup attempt and try again."))?;
-    receive(
+    receive_cancellable(
         listener,
         request,
-        |url| open::that_detached(url.as_str()).map_err(|_| ()),
+        on_link,
         Duration::from_secs(180),
+        cancelled,
     )
 }
 
@@ -47,12 +69,13 @@ fn bind(address: SocketAddr) -> std::io::Result<TcpListener> {
     Ok(socket.into())
 }
 
-fn receive(
+fn receive_cancellable(
     listener: TcpListener,
     request: &AuthorizationRequest,
     opener: impl FnOnce(&Url) -> Result<(), ()>,
     timeout: Duration,
-) -> Result<Zeroizing<String>, CliError> {
+    cancelled: &AtomicBool,
+) -> Result<Zeroizing<String>, CallbackError> {
     let address = listener.local_addr().map_err(|_| invalid_callback())?;
     if !address.ip().is_loopback() {
         return Err(invalid_callback());
@@ -69,6 +92,12 @@ fn receive(
     let deadline = Instant::now() + timeout;
     let mut attempts = 0;
     while Instant::now() < deadline && attempts < 32 {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(failure(
+                "dropbox_setup_cancelled",
+                "Dropbox setup was cancelled.",
+            ));
+        }
         match listener.accept() {
             Ok((mut stream, peer)) => {
                 attempts += 1;
@@ -112,11 +141,21 @@ fn receive(
     ))
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub fn receive(
+    listener: TcpListener,
+    request: &AuthorizationRequest,
+    opener: impl FnOnce(&Url) -> Result<(), ()>,
+    timeout: Duration,
+) -> Result<Zeroizing<String>, CallbackError> {
+    receive_cancellable(listener, request, opener, timeout, &AtomicBool::new(false))
+}
+
 fn read_callback(
     stream: &mut TcpStream,
     expected_host: &str,
     state: &str,
-) -> Result<Zeroizing<String>, CliError> {
+) -> Result<Zeroizing<String>, CallbackError> {
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .map_err(|_| invalid_callback())?;
@@ -148,7 +187,7 @@ fn parse_callback(
     bytes: &[u8],
     expected_host: &str,
     state: &str,
-) -> Result<Zeroizing<String>, CliError> {
+) -> Result<Zeroizing<String>, CallbackError> {
     if bytes.len() > 16 * 1024 {
         return Err(invalid_callback());
     }
@@ -252,8 +291,7 @@ mod tests {
     fn browser_callback_finishes_without_terminal_code_entry_or_code_in_response() {
         let listener = bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let address = listener.local_addr().unwrap();
-        let request =
-            AuthorizationRequest::new(mallard_infrastructure::dropbox_auth::SETUP_SCOPES).unwrap();
+        let request = AuthorizationRequest::new(crate::dropbox_auth::SETUP_SCOPES).unwrap();
         let state = request.state.to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         let code = receive(listener, &request, |_| {
@@ -281,13 +319,36 @@ mod tests {
     fn callback_bind_conflict_and_timeout_stop_cleanly() {
         let listener = bind("127.0.0.1:0".parse().unwrap()).unwrap();
         assert!(bind(listener.local_addr().unwrap()).is_err());
-        let request =
-            AuthorizationRequest::new(mallard_infrastructure::dropbox_auth::SETUP_SCOPES).unwrap();
+        let request = AuthorizationRequest::new(crate::dropbox_auth::SETUP_SCOPES).unwrap();
         assert_eq!(
             receive(listener, &request, |_| Ok(()), Duration::from_millis(1))
                 .unwrap_err()
                 .code(),
             "dropbox_authorization_timeout"
         );
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    #[test]
+    fn cancel_releases_the_listener_before_a_retry() {
+        let request = AuthorizationRequest::new(crate::dropbox_auth::SETUP_SCOPES).unwrap();
+        let listener = bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = listener.local_addr().unwrap();
+        let cancelled = AtomicBool::new(false);
+        let result = receive_cancellable(
+            listener,
+            &request,
+            |_| {
+                cancelled.store(true, Ordering::Release);
+                Ok(())
+            },
+            Duration::from_secs(5),
+            &cancelled,
+        );
+        assert_eq!(result.unwrap_err().code(), "dropbox_setup_cancelled");
+        assert!(bind(address).is_ok());
     }
 }

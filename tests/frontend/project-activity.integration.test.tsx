@@ -1243,9 +1243,9 @@ test("activity content renders commit and session rows without repeating project
   assert.match(html, /aria-label="Open in Codex"/);
   assert.match(html, /aria-label="Open in Terminal"/);
   // The action icon is keyed off the descriptor kind, not off a provider mark.
-  assert.match(html, /aria-label="Show session debug info"/);
+  assert.match(html, /aria-label="Show session info"/);
   assert.match(html, /aria-haspopup="dialog"/);
-  assert.match(html, /aria-label="Session debug info"/);
+  assert.match(html, /aria-label="Session info"/);
   // Each row is named from its own content — the label, then the value — so a
   // screen reader hears the path it is about to copy. An aria-label would
   // replace all of it with the verb, which is the one part already visible in
@@ -1275,7 +1275,7 @@ test("activity content renders commit and session rows without repeating project
     ];
     assert.ok(positions.every((position) => position >= 0), `cluster pieces missing: ${positions}`);
     assert.deepEqual(positions, [...positions].sort((a, b) => a - b), "cluster order is open, then terminal");
-    assert.doesNotMatch(cluster, /Show session debug info|View session details/);
+    assert.doesNotMatch(cluster, /Show session info|View session details/);
   }
   // Line 2 reads readouts │ debug detail ……… stamp: a rule parts the glyphs you
   // can only hover from the two you can click, and the stamp still closes the
@@ -1288,7 +1288,7 @@ test("activity content renders commit and session rows without repeating project
     const order = [
       row.indexOf('class="sync-history-thread-meta"'),
       row.indexOf("sync-history-actions-divider"),
-      row.indexOf('aria-label="Show session debug info"'),
+      row.indexOf('aria-label="Show session info"'),
       row.indexOf('aria-label="View session details"'),
       row.indexOf("sync-history-thread-time-end"),
     ];

@@ -4,6 +4,7 @@ import { openPath } from "@tauri-apps/plugin-opener";
 import type { ActivityLogPolicy, ActivityLogStats, AppSettings, LocalStateSummary } from "../../types";
 import Icon from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
+import { clockOptions } from "../../clock";
 import { formatBytes } from "../../format";
 import SyncPathBar, { type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import {
@@ -18,6 +19,7 @@ import {
 import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { LoadingBone } from "../LoadingScaffold";
+import { rowReceipt, statusLine, useSettingsReceipts, type RowReceipt, type StatusLine } from "./settingsReceipts";
 
 /**
  * The app-wide Settings page: a primary-nav destination like the Storages
@@ -28,6 +30,11 @@ import { LoadingBone } from "../LoadingScaffold";
  * ~/.mallard/logs/_policy.json, both applied on change (this page absorbed
  * LogManagerDialog, whose explicit Save existed only to keep its cleanup
  * button honest against a drafted select).
+ *
+ * Applying on change is the platform rule for settings, so there is no Save.
+ * What the page owes instead is proof: a receipt beside the control that
+ * changed and one status line in the bar. The bar's Done only leaves —
+ * nothing is left to save by then.
  */
 
 interface Props {
@@ -35,6 +42,10 @@ interface Props {
   appActions: PathBarMenuGroup[];
   /** The log drawer shows these events; cleanup changes what it should show. */
   onLogsChanged: () => void;
+  /** Leaves Settings. */
+  onDone: () => void;
+  /** Where Done lands — the open project, or the Projects landing. */
+  doneTarget: string;
 }
 
 const RETENTION_OPTIONS = [7, 30, 90, 180, 365];
@@ -50,6 +61,53 @@ const THEME_CHOICES: Array<{ value: ThemeChoice; label: string }> = [
   { value: "dark", label: "Dark" },
 ];
 
+/* A new write to a store clears that store's failures, the way the section's
+   error clears when its next apply starts. */
+const TUNING_KEYS = [
+  "credential_redaction_enabled",
+  "push_codex_children",
+  "push_claude_children",
+  "conversation_file_limit_bytes",
+  "timeline_preview_limit_bytes",
+  "comparison_workers",
+  "cloud_transfer_concurrency",
+] as const;
+const POLICY_KEYS = ["retention_days", "max_total_bytes"] as const;
+
+type TuningKey = (typeof TUNING_KEYS)[number];
+type PolicyKey = (typeof POLICY_KEYS)[number];
+type LocalKey = "theme" | BooleanPreferenceName;
+type SettingKey = LocalKey | TuningKey | PolicyKey;
+
+/** What the status region calls a setting once it saves: its row's label. */
+const SETTING_LABELS: Record<SettingKey, string> = {
+  theme: "Theme",
+  credential_redaction_enabled: "Credential redaction",
+  push_codex_children: "Push Codex children",
+  push_claude_children: "Push Claude children",
+  openLogsOnSync: "Open Logs on Push and Pull",
+  refreshOnFocus: "Refresh on window focus",
+  conversation_file_limit_bytes: "Thread size limit",
+  timeline_preview_limit_bytes: "Preview size limit",
+  comparison_workers: "Comparison workers",
+  cloud_transfer_concurrency: "Cloud transfers",
+  retention_days: "Keep events for",
+  max_total_bytes: "Size cap",
+  clock24: "24-hour clock",
+};
+
+/* Local preferences have no section error to explain a refused write, so the
+   stamp carries the reason. */
+const LOCAL_WRITE_REFUSED = "This machine refused to store the change, so the previous value stays.";
+
+const RECEIPT_TEXT: Record<RowReceipt["kind"], string> = {
+  saving: "Saving…",
+  saved: "Saved",
+  failed: "Not saved",
+};
+
+const rowId = (key: SettingKey) => `settings-row-${key}`;
+
 function formatOldest(timestamp?: number | null): string | null {
   if (!timestamp) return null;
   return new Date(timestamp).toLocaleDateString([], {
@@ -59,28 +117,70 @@ function formatOldest(timestamp?: number | null): string | null {
   });
 }
 
+/**
+ * The row's stamp. It stays one element from Saved through its dimmed last
+ * beat, so the dim is a class change, not a remount. Hidden from assistive
+ * technology: the page's status region speaks for every stamp.
+ */
+function SettingReceipt({ receipt, failureHint }: { receipt: RowReceipt | null; failureHint?: string }) {
+  if (!receipt) return null;
+  const fading = receipt.kind === "saved" && receipt.fading;
+  return (
+    <span
+      className={`sync-settings-receipt ${receipt.kind}${fading ? " fading" : ""}`}
+      title={receipt.kind === "failed" ? failureHint : undefined}
+      aria-hidden="true"
+    >
+      <Icon
+        name={receipt.kind === "saving" ? "refresh" : receipt.kind === "failed" ? "alert-triangle" : "check"}
+        size={12}
+        className={receipt.kind === "saving" ? "icon-spin" : undefined}
+      />
+      {RECEIPT_TEXT[receipt.kind]}
+    </span>
+  );
+}
+
 function SettingsRow({
   label,
   children,
   control,
+  setting,
+  receipt = null,
+  failureHint,
 }: {
   label: string;
   children: ReactNode;
   control: ReactNode;
+  /** A row that holds a setting keeps a receipt slot and an anchor the status line can find. */
+  setting?: SettingKey;
+  receipt?: RowReceipt | null;
+  failureHint?: string;
 }) {
   return (
-    <div className="sync-settings-row">
+    <div className="sync-settings-row" id={setting ? rowId(setting) : undefined}>
       <div className="sync-settings-copy">
         <strong>{label}</strong>
         <p>{children}</p>
       </div>
-      <div className="sync-settings-control">{control}</div>
+      <div className="sync-settings-control">
+        {setting && <SettingReceipt receipt={receipt} failureHint={failureHint} />}
+        {control}
+      </div>
     </div>
   );
 }
 
 /** A boolean preference as a drawn switch; state lives in preferences.ts. */
-function PreferenceSwitch({ name, label }: { name: BooleanPreferenceName; label: string }) {
+function PreferenceSwitch({
+  name,
+  label,
+  onSaved,
+}: {
+  name: BooleanPreferenceName;
+  label: string;
+  onSaved: (saved: boolean) => void;
+}) {
   const value = usePreference(name);
   return (
     <input
@@ -88,24 +188,66 @@ function PreferenceSwitch({ name, label }: { name: BooleanPreferenceName; label:
       role="switch"
       className="sync-settings-switch"
       checked={value}
-      onChange={(event) => setPreference(name, event.target.checked)}
+      onChange={(event) => onSaved(setPreference(name, event.target.checked))}
       aria-label={label}
     />
   );
 }
 
-export default function SettingsPage({ appActions, onLogsChanged }: Props) {
+/**
+ * The bar's status line: the rule, the latest receipt, then when the visit
+ * last saved. It is titlebar chrome, so its static parts carry the drag
+ * attribute like the rest of the bar. A failure turns it into a button that
+ * finds the row.
+ */
+function SettingsStatus({ line, onFindFailure }: { line: StatusLine; onFindFailure: () => void }) {
+  if (line.tone === "failed") {
+    return (
+      <span className="sync-settings-status" data-state="failed" data-tauri-drag-region>
+        <button
+          type="button"
+          className="sync-settings-status-jump"
+          onClick={onFindFailure}
+          title="Show the setting that didn’t save"
+        >
+          <Icon name="alert-triangle" size={12} />
+          <span>{line.text}</span>
+        </button>
+      </span>
+    );
+  }
+  return (
+    <span className="sync-settings-status" data-state={line.tone} data-tauri-drag-region>
+      {line.tone === "saving" && <Icon name="refresh" size={12} className="icon-spin" />}
+      {(line.tone === "saved" || line.tone === "settled") && <Icon name="check" size={12} />}
+      <span data-tauri-drag-region>{line.text}</span>
+      {/* The flex gap draws the space; this one is for anything that reads
+          the line as text. */}
+      {line.at !== null && " "}
+      {line.at !== null && (
+        <time dateTime={new Date(line.at).toISOString()} data-tauri-drag-region>
+          {new Date(line.at).toLocaleTimeString([], clockOptions())}
+        </time>
+      )}
+    </span>
+  );
+}
+
+export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTarget }: Props) {
   const themeChoice = useThemeChoice();
+  const receipts = useSettingsReceipts();
   const [stats, setStats] = useState<ActivityLogStats | null>(null);
   const [logsBusy, setLogsBusy] = useState(false);
   const [logsError, setLogsError] = useState<string | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
   const [logsNotice, setLogsNotice] = useState<string | null>(null);
+  const [pendingPolicy, setPendingPolicy] = useState<Partial<ActivityLogPolicy> | null>(null);
   const [tuning, setTuning] = useState<AppSettings | null>(null);
   const [tuningBusy, setTuningBusy] = useState(false);
   const [tuningError, setTuningError] = useState<string | null>(null);
   const [tuningSection, setTuningSection] = useState<"privacy" | "sync" | "performance">("privacy");
   const [tuningLoading, setTuningLoading] = useState(true);
+  const [pendingTuning, setPendingTuning] = useState<Partial<AppSettings> | null>(null);
   const [localSummary, setLocalSummary] = useState<LocalStateSummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [resetError, setResetError] = useState<string | null>(null);
@@ -173,18 +315,30 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
 
   useEffect(() => { void loadLocalSummary(); }, [loadLocalSummary]);
 
+  /** Local preferences write synchronously; the receipt is the write's own answer. */
+  const settleLocal = (key: LocalKey, saved: boolean) => {
+    receipts.settle(key, saved, `${SETTING_LABELS[key]} ${saved ? "saved" : "not saved"}`);
+  };
+
   /** Selects apply on change; the returned stats keep the readout current. */
   const applyPolicy = async (patch: Partial<ActivityLogPolicy>) => {
     if (!stats) return;
+    const key = Object.keys(patch)[0] as PolicyKey;
     setLogsBusy(true);
     setLogsFromAction(true);
     setLogsError(null);
     setLogsNotice(null);
+    setPendingPolicy(patch);
+    receipts.begin(key, POLICY_KEYS);
     try {
       setStats(await projectSyncApi.updateActivityLogPolicy({ ...stats.policy, ...patch }));
+      receipts.settle(key, true, `${SETTING_LABELS[key]} saved`);
     } catch (reason) {
       setLogsError(errorMessage(reason));
+      // The group's alert announces the failure; the status region stays quiet.
+      receipts.settle(key, false, null);
     } finally {
+      setPendingPolicy(null);
       setLogsBusy(false);
     }
   };
@@ -192,18 +346,36 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
   /** Selects apply on change; the returned settings are the saved truth. */
   const applyTuning = async (patch: Partial<AppSettings>) => {
     if (!tuning) return;
+    const key = Object.keys(patch)[0] as TuningKey;
     setTuningBusy(true);
     setTuningSection("credential_redaction_enabled" in patch ? "privacy"
       : "push_codex_children" in patch || "push_claude_children" in patch ? "sync" : "performance");
     setTuningFromAction(true);
     setTuningError(null);
+    setPendingTuning(patch);
+    receipts.begin(key, TUNING_KEYS);
     try {
       setTuning(await projectSyncApi.updateAppSettings({ ...tuning, ...patch }));
+      receipts.settle(key, true, `${SETTING_LABELS[key]} saved`);
     } catch (reason) {
       setTuningError(errorMessage(reason));
+      // The section's alert announces the failure; the status region stays quiet.
+      receipts.settle(key, false, null);
     } finally {
+      setPendingTuning(null);
       setTuningBusy(false);
     }
+  };
+
+  /** The red status line finds the row that did not save: scroll it into view
+      and hand its control the focus when one can take it. */
+  const findFailure = () => {
+    const [key] = receipts.state.failed;
+    const row = key ? document.getElementById(rowId(key as SettingKey)) : null;
+    if (!row) return;
+    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    row.querySelector<HTMLElement>("input:not(:disabled), select:not(:disabled), button:not(:disabled)")
+      ?.focus({ preventScroll: true });
   };
 
   const cleanupLogs = async (deleteAll: boolean) => {
@@ -284,6 +456,12 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
   };
 
   const oldest = formatOldest(stats?.oldest_ts);
+  // While a write runs, its control shows the value being written; a failure
+  // drops the pending patch and the control returns to the stored value.
+  const shownTuning = tuning && pendingTuning ? { ...tuning, ...pendingTuning } : tuning;
+  const shownPolicy = stats ? { ...stats.policy, ...(pendingPolicy ?? {}) } : null;
+  const receiptFor = (key: SettingKey) => rowReceipt(receipts.state, key);
+  const announcement = receipts.state.announcement;
 
   /* Each of the two groups below says at most two things — a failure and a
      receipt — and the two genuinely co-render: neither `loadStats` nor
@@ -318,8 +496,8 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
       ? { timing: "blocking" }
       : { timing: "progress" };
 
-  /* One thing to say: a load or apply failure. Applies post no receipt, like
-     the Logs selects — the select showing the new value is the receipt. */
+  /* One thing to say: a load or apply failure. An apply's receipt is the
+     row's stamp and the bar's status line, not a box. */
   const tuningNotices: NoticeItem[] = [];
   if (tuningError) {
     tuningNotices.push({
@@ -376,11 +554,29 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
     <>
       <SyncPathBar
         crumbs={[{ id: "settings", label: "Settings", icon: "settings", tone: "root" }]}
+        actions={(
+          <>
+            <SettingsStatus line={statusLine(receipts.state)} onFindFailure={findFailure} />
+            <button
+              type="button"
+              className="sync-path-sync"
+              onClick={onDone}
+              title={`Close Settings — back to ${doneTarget}`}
+            >
+              Done
+            </button>
+          </>
+        )}
         overflow={appActions}
         overflowLabel="App actions"
         ariaLabel="Settings path"
       />
       <main className="sync-main sync-project-links-page sync-settings-page">
+        {/* One polite region speaks for every stamp. Keyed by the save, so the
+            same sentence twice is still two announcements. */}
+        <p className="sync-visually-hidden" role="status">
+          {announcement && <span key={announcement.seq}>{announcement.text}</span>}
+        </p>
         <section className="profile-links-section" aria-label="Settings">
 
           <section className="sync-settings-group" aria-labelledby="settings-appearance">
@@ -390,6 +586,9 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
             <div className="sync-settings-card">
               <SettingsRow
                 label="Theme"
+                setting="theme"
+                receipt={receiptFor("theme")}
+                failureHint={LOCAL_WRITE_REFUSED}
                 control={(
                   <div className="sync-settings-segment" role="radiogroup" aria-label="Theme">
                     {THEME_CHOICES.map((choice) => (
@@ -399,7 +598,10 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
                         role="radio"
                         aria-checked={themeChoice === choice.value}
                         className={themeChoice === choice.value ? "active" : undefined}
-                        onClick={() => setThemeChoice(choice.value)}
+                        onClick={() => {
+                          if (themeChoice === choice.value) return;
+                          settleLocal("theme", setThemeChoice(choice.value));
+                        }}
                       >
                         {choice.label}
                       </button>
@@ -419,12 +621,14 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
             <div className="sync-settings-card">
               <SettingsRow
                 label="Credential redaction"
+                setting="credential_redaction_enabled"
+                receipt={receiptFor("credential_redaction_enabled")}
                 control={(
                   <input
                     type="checkbox"
                     role="switch"
                     className="sync-settings-switch"
-                    checked={tuning?.credential_redaction_enabled ?? true}
+                    checked={shownTuning?.credential_redaction_enabled ?? true}
                     disabled={tuningBusy || !tuning}
                     onChange={(event) => void applyTuning({ credential_redaction_enabled: event.target.checked })}
                     aria-label="Credential redaction"
@@ -445,12 +649,14 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
             <div className="sync-settings-card">
               <SettingsRow
                 label="Push Codex children"
+                setting="push_codex_children"
+                receipt={receiptFor("push_codex_children")}
                 control={
                   <input
                     type="checkbox"
                     role="switch"
                     className="sync-settings-switch"
-                    checked={tuning?.push_codex_children ?? true}
+                    checked={shownTuning?.push_codex_children ?? true}
                     disabled={tuningLoading || tuningBusy || !tuning}
                     onChange={(event) => void applyTuning({ push_codex_children: event.target.checked })}
                     aria-label="Push Codex children"
@@ -461,12 +667,14 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
               </SettingsRow>
               <SettingsRow
                 label="Push Claude children"
+                setting="push_claude_children"
+                receipt={receiptFor("push_claude_children")}
                 control={
                   <input
                     type="checkbox"
                     role="switch"
                     className="sync-settings-switch"
-                    checked={tuning?.push_claude_children ?? true}
+                    checked={shownTuning?.push_claude_children ?? true}
                     disabled={tuningLoading || tuningBusy || !tuning}
                     onChange={(event) => void applyTuning({ push_claude_children: event.target.checked })}
                     aria-label="Push Claude children"
@@ -477,14 +685,32 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
               </SettingsRow>
               <SettingsRow
                 label="Open Logs on Push and Pull"
-                control={<PreferenceSwitch name="openLogsOnSync" label="Open Logs on Push and Pull" />}
+                setting="openLogsOnSync"
+                receipt={receiptFor("openLogsOnSync")}
+                failureHint={LOCAL_WRITE_REFUSED}
+                control={(
+                  <PreferenceSwitch
+                    name="openLogsOnSync"
+                    label="Open Logs on Push and Pull"
+                    onSaved={(saved) => settleLocal("openLogsOnSync", saved)}
+                  />
+                )}
               >
                 Pop the Logs drawer whenever a transfer starts, so pushes and pulls
                 narrate themselves.
               </SettingsRow>
               <SettingsRow
                 label="Refresh on window focus"
-                control={<PreferenceSwitch name="refreshOnFocus" label="Refresh on window focus" />}
+                setting="refreshOnFocus"
+                receipt={receiptFor("refreshOnFocus")}
+                failureHint={LOCAL_WRITE_REFUSED}
+                control={(
+                  <PreferenceSwitch
+                    name="refreshOnFocus"
+                    label="Refresh on window focus"
+                    onSaved={(saved) => settleLocal("refreshOnFocus", saved)}
+                  />
+                )}
               >
                 Coming back to Mallard after a few seconds away re-reads every project
                 and storage.
@@ -500,19 +726,21 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
             <div className="sync-settings-card">
               <SettingsRow
                 label="Thread size limit"
+                setting="conversation_file_limit_bytes"
+                receipt={receiptFor("conversation_file_limit_bytes")}
                 control={(
                   <div className="sync-select-shell">
                     <select
-                      value={tuning ? Math.round(tuning.conversation_file_limit_bytes / (1024 * 1024)) : 100}
+                      value={shownTuning ? Math.round(shownTuning.conversation_file_limit_bytes / (1024 * 1024)) : 100}
                       disabled={tuningBusy || !tuning}
                       onChange={(event) => void applyTuning({
                         conversation_file_limit_bytes: Number(event.target.value) * 1024 * 1024,
                       })}
                       aria-label="Thread size limit"
                     >
-                      {tuning && !THREAD_CAP_OPTIONS_MB.includes(Math.round(tuning.conversation_file_limit_bytes / (1024 * 1024))) && (
-                        <option value={Math.round(tuning.conversation_file_limit_bytes / (1024 * 1024))}>
-                          {formatBytes(tuning.conversation_file_limit_bytes)}
+                      {shownTuning && !THREAD_CAP_OPTIONS_MB.includes(Math.round(shownTuning.conversation_file_limit_bytes / (1024 * 1024))) && (
+                        <option value={Math.round(shownTuning.conversation_file_limit_bytes / (1024 * 1024))}>
+                          {formatBytes(shownTuning.conversation_file_limit_bytes)}
                         </option>
                       )}
                       {THREAD_CAP_OPTIONS_MB.map((size) => <option key={size} value={size}>{size} MB</option>)}
@@ -525,19 +753,21 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
               </SettingsRow>
               <SettingsRow
                 label="Preview size limit"
+                setting="timeline_preview_limit_bytes"
+                receipt={receiptFor("timeline_preview_limit_bytes")}
                 control={(
                   <div className="sync-select-shell">
                     <select
-                      value={tuning ? Math.round(tuning.timeline_preview_limit_bytes / 1024) : 1024}
+                      value={shownTuning ? Math.round(shownTuning.timeline_preview_limit_bytes / 1024) : 1024}
                       disabled={tuningBusy || !tuning}
                       onChange={(event) => void applyTuning({
                         timeline_preview_limit_bytes: Number(event.target.value) * 1024,
                       })}
                       aria-label="Preview size limit"
                     >
-                      {tuning && !PREVIEW_OPTIONS_KB.includes(Math.round(tuning.timeline_preview_limit_bytes / 1024)) && (
-                        <option value={Math.round(tuning.timeline_preview_limit_bytes / 1024)}>
-                          {formatBytes(tuning.timeline_preview_limit_bytes)}
+                      {shownTuning && !PREVIEW_OPTIONS_KB.includes(Math.round(shownTuning.timeline_preview_limit_bytes / 1024)) && (
+                        <option value={Math.round(shownTuning.timeline_preview_limit_bytes / 1024)}>
+                          {formatBytes(shownTuning.timeline_preview_limit_bytes)}
                         </option>
                       )}
                       {PREVIEW_OPTIONS_KB.map((size) => (
@@ -555,17 +785,19 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
               </SettingsRow>
               <SettingsRow
                 label="Comparison workers"
+                setting="comparison_workers"
+                receipt={receiptFor("comparison_workers")}
                 control={(
                   <div className="sync-select-shell">
                     <select
-                      value={tuning?.comparison_workers ?? 4}
+                      value={shownTuning?.comparison_workers ?? 4}
                       disabled={tuningBusy || !tuning}
                       onChange={(event) => void applyTuning({ comparison_workers: Number(event.target.value) })}
                       aria-label="Comparison workers"
                     >
-                      {tuning && !WORKER_OPTIONS.includes(tuning.comparison_workers) && (
-                        <option value={tuning.comparison_workers}>
-                          {tuning.comparison_workers} worker{tuning.comparison_workers === 1 ? "" : "s"}
+                      {shownTuning && !WORKER_OPTIONS.includes(shownTuning.comparison_workers) && (
+                        <option value={shownTuning.comparison_workers}>
+                          {shownTuning.comparison_workers} worker{shownTuning.comparison_workers === 1 ? "" : "s"}
                         </option>
                       )}
                       {WORKER_OPTIONS.map((count) => (
@@ -580,17 +812,19 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
               </SettingsRow>
               <SettingsRow
                 label="Cloud transfers"
+                setting="cloud_transfer_concurrency"
+                receipt={receiptFor("cloud_transfer_concurrency")}
                 control={(
                   <div className="sync-select-shell">
                     <select
-                      value={tuning?.cloud_transfer_concurrency ?? 6}
+                      value={shownTuning?.cloud_transfer_concurrency ?? 6}
                       disabled={tuningBusy || !tuning}
                       onChange={(event) => void applyTuning({ cloud_transfer_concurrency: Number(event.target.value) })}
                       aria-label="Parallel cloud transfers"
                     >
-                      {tuning && !TRANSFER_OPTIONS.includes(tuning.cloud_transfer_concurrency) && (
-                        <option value={tuning.cloud_transfer_concurrency}>
-                          {tuning.cloud_transfer_concurrency} transfer{tuning.cloud_transfer_concurrency === 1 ? "" : "s"}
+                      {shownTuning && !TRANSFER_OPTIONS.includes(shownTuning.cloud_transfer_concurrency) && (
+                        <option value={shownTuning.cloud_transfer_concurrency}>
+                          {shownTuning.cloud_transfer_concurrency} transfer{shownTuning.cloud_transfer_concurrency === 1 ? "" : "s"}
                         </option>
                       )}
                       {TRANSFER_OPTIONS.map((count) => (
@@ -614,16 +848,18 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
             <div className="sync-settings-card">
               <SettingsRow
                 label="Keep events for"
+                setting="retention_days"
+                receipt={receiptFor("retention_days")}
                 control={(
                   <div className="sync-select-shell">
                     <select
-                      value={stats?.policy.retention_days ?? 30}
+                      value={shownPolicy?.retention_days ?? 30}
                       disabled={logsBusy || !stats}
                       onChange={(event) => void applyPolicy({ retention_days: Number(event.target.value) })}
                       aria-label="Keep log events for"
                     >
-                      {stats && !RETENTION_OPTIONS.includes(stats.policy.retention_days) && (
-                        <option value={stats.policy.retention_days}>{stats.policy.retention_days} days</option>
+                      {shownPolicy && !RETENTION_OPTIONS.includes(shownPolicy.retention_days) && (
+                        <option value={shownPolicy.retention_days}>{shownPolicy.retention_days} days</option>
                       )}
                       {RETENTION_OPTIONS.map((days) => <option key={days} value={days}>{days} days</option>)}
                     </select>
@@ -634,19 +870,21 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
               </SettingsRow>
               <SettingsRow
                 label="Size cap"
+                setting="max_total_bytes"
+                receipt={receiptFor("max_total_bytes")}
                 control={(
                   <div className="sync-select-shell">
                     <select
-                      value={stats ? Math.round(stats.policy.max_total_bytes / (1024 * 1024)) : 100}
+                      value={shownPolicy ? Math.round(shownPolicy.max_total_bytes / (1024 * 1024)) : 100}
                       disabled={logsBusy || !stats}
                       onChange={(event) => void applyPolicy({
                         max_total_bytes: Number(event.target.value) * 1024 * 1024,
                       })}
                       aria-label="Log size cap"
                     >
-                      {stats && !SIZE_OPTIONS_MB.includes(Math.round(stats.policy.max_total_bytes / (1024 * 1024))) && (
-                        <option value={Math.round(stats.policy.max_total_bytes / (1024 * 1024))}>
-                          {formatBytes(stats.policy.max_total_bytes)}
+                      {shownPolicy && !SIZE_OPTIONS_MB.includes(Math.round(shownPolicy.max_total_bytes / (1024 * 1024))) && (
+                        <option value={Math.round(shownPolicy.max_total_bytes / (1024 * 1024))}>
+                          {formatBytes(shownPolicy.max_total_bytes)}
                         </option>
                       )}
                       {SIZE_OPTIONS_MB.map((size) => <option key={size} value={size}>{size.toLocaleString()} MB</option>)}
@@ -710,7 +948,16 @@ export default function SettingsPage({ appActions, onLogsChanged }: Props) {
             <div className="sync-settings-card">
               <SettingsRow
                 label="24-hour clock"
-                control={<PreferenceSwitch name="clock24" label="24-hour clock" />}
+                setting="clock24"
+                receipt={receiptFor("clock24")}
+                failureHint={LOCAL_WRITE_REFUSED}
+                control={(
+                  <PreferenceSwitch
+                    name="clock24"
+                    label="24-hour clock"
+                    onSaved={(saved) => settleLocal("clock24", saved)}
+                  />
+                )}
               >
                 One clock on every timestamp — session timelines, logs, and the
                 catalog. Off follows the system locale.

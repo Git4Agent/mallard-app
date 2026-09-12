@@ -143,3 +143,42 @@ fn write_json(writer: &mut dyn Write, value: &impl Serialize) -> std::io::Result
     serde_json::to_writer(&mut *writer, value).map_err(std::io::Error::other)?;
     writeln!(writer)
 }
+
+pub(crate) fn accounts(
+    writer: &mut dyn Write,
+    json: bool,
+    accounts: &[crate::r2_browser_setup::WranglerAccount],
+) -> std::io::Result<()> {
+    if json {
+        write_json(
+            writer,
+            &serde_json::json!({"schema":1, "status":"accounts", "accounts":accounts}),
+        )
+    } else {
+        for account in accounts {
+            writeln!(writer, "{} — {}", account.id, account.name)?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn discovery(
+    writer: &mut dyn Write,
+    json: bool,
+    scan: &mallard_infrastructure::r2_setup::discovery::BucketScan,
+) -> std::io::Result<()> {
+    if json {
+        write_json(
+            writer,
+            &serde_json::json!({"schema":1,"status":"buckets","scan":scan}),
+        )
+    } else {
+        for bucket in &scan.buckets {
+            writeln!(writer, "{} — {:?}", bucket.name, bucket.marker)?;
+        }
+        if scan.partial {
+            writeln!(writer, "Scan incomplete.")?;
+        }
+        Ok(())
+    }
+}

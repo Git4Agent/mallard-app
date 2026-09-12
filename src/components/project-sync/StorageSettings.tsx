@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import type {
   SecretOperation,
   StorageConnectionHealth,
@@ -9,7 +9,7 @@ import type {
   StorageSetupDraft,
   StorageSummary,
 } from "../../types";
-import Icon, { iconNameFromHint } from "../Icons";
+import Icon, { iconNameFromHint, type IconName } from "../Icons";
 import { openExternalUrl } from "./externalLink";
 import { compactProjectPath } from "./model";
 
@@ -38,10 +38,10 @@ export interface StorageEditorForm {
 export type SecretPresence = Record<string, boolean>;
 
 export function hasManagedCredentials(
-  descriptor: Pick<StorageProviderDescriptor, "setup_assistant">,
+  descriptor: Pick<StorageProviderDescriptor, "managed_secret_id">,
   presence: SecretPresence,
 ): boolean {
-  const key = descriptor.setup_assistant?.managed_secret_id;
+  const key = descriptor.managed_secret_id;
   return !!key && !!presence[key];
 }
 
@@ -132,10 +132,10 @@ function secretSet(
 }
 
 function activeSecrets(
-  descriptor: Pick<StorageProviderDescriptor, "secrets" | "setup_assistant">,
+  descriptor: Pick<StorageProviderDescriptor, "secrets" | "managed_secret_id">,
   presence: SecretPresence,
 ) {
-  const managedId = descriptor.setup_assistant?.managed_secret_id;
+  const managedId = descriptor.managed_secret_id;
   return descriptor.secrets.filter((secret) => hasManagedCredentials(descriptor, presence)
     ? secret.secret_id === managedId
     : secret.secret_id !== managedId);
@@ -144,7 +144,7 @@ function activeSecrets(
 /** Test and Finish open once the name, every required field, and every
  *  required secret (stored or typed) are in. The backend validates again. */
 export function storageDraftReady(
-  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets" | "setup_assistant">,
+  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets" | "managed_secret_id">,
   form: StorageEditorForm,
   presence: SecretPresence,
 ): boolean {
@@ -156,7 +156,7 @@ export function storageDraftReady(
 /** The tally under the form: required fields plus required secrets, and how
  *  many of them are set. */
 export function fieldsSet(
-  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets" | "setup_assistant">,
+  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets" | "managed_secret_id">,
   form: StorageEditorForm,
   presence: SecretPresence,
 ): { set: number; total: number } {
@@ -242,7 +242,7 @@ function HelpMark({ text, url }: { text: string; url?: string | null }) {
 /** The name the descriptor's suggestion rule proposes for these settings,
  *  or null when the rule is absent, unmatched, or invalid. */
 export function suggestStorageName(
-  descriptor: Pick<StorageProviderDescriptor, "name_suggestion">,
+  descriptor: Pick<StorageProviderDescriptor, "name_suggestion" | "local_setup">,
   settings: Record<string, string>,
 ): string | null {
   const rule = descriptor.name_suggestion;
@@ -250,7 +250,7 @@ export function suggestStorageName(
   try {
     const matched = (settings[rule.source] ?? "").match(new RegExp(rule.pattern));
     const suggested = matched?.[rule.group]?.trim() ?? "";
-    return suggested.length > 0 ? suggested : null;
+    return suggested.length > 0 ? descriptor.local_setup === "wrangler" ? `R2 ${suggested}` : suggested : null;
   } catch {
     return null;
   }
@@ -264,14 +264,27 @@ function escapeRegExp(value: string): string {
  *  draft opens with, or the suggestion its current settings produce — so a
  *  later suggestion may replace it. A name the user typed is never touched. */
 export function storageNameIsAuto(
-  descriptor: Pick<StorageProviderDescriptor, "name_suggestion" | "default_name">,
+  descriptor: Pick<StorageProviderDescriptor, "name_suggestion" | "default_name" | "local_setup">,
   form: Pick<StorageEditorForm, "name" | "settings">,
 ): boolean {
   const name = form.name.trim();
   if (name.length === 0) return true;
   const stem = descriptor.default_name?.trim();
-  if (stem && new RegExp(`^${escapeRegExp(stem)} \\d+$`).test(name)) return true;
+  if (stem && (name === stem || new RegExp(`^${escapeRegExp(stem)} \\d+$`).test(name))) return true;
   return name === suggestStorageName(descriptor, form.settings);
+}
+
+/** Use the same naming rule for typed settings and a prepared Wrangler draft. */
+export function storageNameForSettings(
+  descriptor: Pick<StorageProviderDescriptor, "name_suggestion" | "default_name" | "local_setup">,
+  form: Pick<StorageEditorForm, "name" | "settings">,
+  settings: Record<string, string>,
+): string {
+  if (!storageNameIsAuto(descriptor, form)) return form.name;
+  // Clearing a bucket keeps the name automatic while its replacement is typed.
+  return suggestStorageName(descriptor, settings)
+    ?? (descriptor.local_setup === "wrangler" ? descriptor.default_name : null)
+    ?? form.name;
 }
 
 /** Apply every declared derivation whose source is `changedFieldId`: a match
@@ -297,6 +310,76 @@ export function applyFieldDerivations(
   return next;
 }
 
+/** A folder as two people would type it: trailing separators dropped, the
+ *  root kept. Case and symlinks are the backend's call — its canonical check
+ *  still runs on Test and Save — so the page only catches what it can see. */
+function comparableDirectory(value: string): string {
+  const trimmed = value.trim();
+  const stripped = trimmed.replace(/[\/\\]+$/, "");
+  return stripped === "" && trimmed !== "" ? trimmed[0] : stripped;
+}
+
+/** The connected storage that already occupies a folder the form names, if
+ *  any: same provider, same directory field, same folder as typed. The
+ *  storage being edited is not a conflict with itself. Only directory fields
+ *  are compared — a folder is the one destination the page can read off a
+ *  storage's summary facts. */
+export function findDestinationConflict(
+  descriptor: Pick<StorageProviderDescriptor, "key" | "fields">,
+  form: Pick<StorageEditorForm, "settings">,
+  storages: readonly StorageSummary[],
+  excludeStorageId: string | null,
+): StorageSummary | null {
+  for (const field of descriptor.fields) {
+    if (field.kind !== "directory") continue;
+    const typed = comparableDirectory(settingString(form.settings[field.field_id]));
+    if (!typed) continue;
+    const owner = storages.find((storage) => (
+      storage.storage_id !== excludeStorageId
+      && storage.provider === descriptor.key
+      && storage.summary.some((fact) => (
+        fact.field_id === field.field_id && fact.is_path && comparableDirectory(fact.value) === typed
+      ))
+    ));
+    if (owner) return owner;
+  }
+  return null;
+}
+
+/** The New-storage question: a fresh bucket or folder, or one Mallard
+ *  already writes to. Only asked on a provider that can look in its account. */
+export type StorageSetupMode = "create" | "existing";
+
+function ModeDoor({ icon, title, detail, help, checked, disabled, onChoose }: {
+  icon: IconName;
+  title: string;
+  detail: string;
+  help?: { label: string; url: string } | null;
+  checked: boolean;
+  disabled: boolean;
+  onChoose: () => void;
+}) {
+  return (
+    <div className={`storage-mode-option${help ? " has-help" : ""}`}>
+      <button type="button" className="storage-mode-door" role="radio" aria-checked={checked} disabled={disabled} onClick={onChoose}>
+        <span className="storage-mode-door-title"><Icon name={icon} size={17} /><strong>{title}</strong></span>
+        <span className="storage-mode-door-detail">{detail}</span>
+      </button>
+      {help && (
+        <a
+          className="btn-link storage-mode-help"
+          href={help.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(event) => { event.preventDefault(); void openExternalUrl(help.url); }}
+        >
+          {help.label} <Icon name="external-link" size={11} />
+        </a>
+      )}
+    </div>
+  );
+}
+
 export function StorageEditor({
   descriptor,
   providers,
@@ -308,8 +391,13 @@ export function StorageEditor({
   onSwitchProvider,
   onRemove,
   primaryAction,
-  agentSlot,
+  setupSlot,
   connection,
+  destinationConflict,
+  setupMode,
+  discoverySlot,
+  manualEntry,
+  setupDone = false,
 }: {
   descriptor: StorageProviderDescriptor;
   /** Every provider this build offers, in the backend's order: the header's
@@ -329,22 +417,38 @@ export function StorageEditor({
   onRemove?: () => void;
   /** An existing storage's save sits in the card's own footer. */
   primaryAction?: ReactNode;
-  /** The workspace owns the assistant hand-off and its lifecycle; the editor
-   *  only seats it, in the row the descriptor's assistant labels. */
-  agentSlot?: ReactNode;
+  /** The workspace owns setup and its lifecycle. */
+  setupSlot?: ReactNode;
   /** What the open transport last observed about an existing storage's
    *  credential. The guide row and the credential field read it; a new
    *  draft has none. */
   connection?: StorageConnectionHealth | null;
+  /** The connected storage that already occupies the folder the form names.
+   *  The editor states it under the folder field with a door to that
+   *  storage; the workspace, which owns the verbs, disables Test and Save
+   *  while it stands. */
+  destinationConflict?: { storage: StorageSummary; onOpen: () => void } | null;
+  /** The New-storage question for a provider that can look in its account:
+   *  the door that stands chosen, or null while it is still being asked.
+   *  The doors stay as a switch for as long as the workspace passes this. */
+  setupMode?: { mode: StorageSetupMode | null; onChoose: (mode: StorageSetupMode) => void };
+  /** The Use-existing lane, what it found, and the by-hand line: the
+   *  workspace owns the look and seats it here, where the lanes would be. */
+  discoverySlot?: ReactNode;
+  /** Expands manual fields for providers without a Wrangler setup lane. */
+  manualEntry?: boolean;
+  /** The setup lane reached the final connection review. */
+  setupDone?: boolean;
 }) {
+  const fieldIdPrefix = useId();
   const [secretVisible, setSecretVisible] = useState<Record<string, boolean>>({});
+  const [manualExpanded, setManualExpanded] = useState(false);
   const setName = (name: string) => onChange({ ...form, name });
   const setSetting = (fieldId: string, value: string) => {
     const settings = applyFieldDerivations(descriptor, { ...form.settings, [fieldId]: value }, fieldId);
     // The name follows the settings only while it is still Mallard's own;
     // a typed name stays, and the field stays editable either way.
-    const suggested = storageNameIsAuto(descriptor, form) ? suggestStorageName(descriptor, settings) : null;
-    onChange({ ...form, settings, name: suggested ?? form.name });
+    onChange({ ...form, settings, name: storageNameForSettings(descriptor, form, settings) });
   };
   const setSecret = (secretId: string, value: string) => onChange({
     ...form,
@@ -357,9 +461,24 @@ export function StorageEditor({
 
   const folderFields = descriptor.fields.filter((field) => field.kind === "directory");
   const gridFields = descriptor.fields.filter((field) => field.kind !== "directory");
-  const assistant = descriptor.setup_assistant ?? null;
   const managed = hasManagedCredentials(descriptor, secretPresence);
-  const credentialed = descriptor.secrets.length > 0 || assistant !== null;
+  const credentialed = descriptor.secrets.length > 0 || !!descriptor.local_setup;
+  /* A new draft on a provider that can look in its account is asked Create
+     new or Use existing before it shows a lane. The doors are the editor's;
+     what each door leads to is the workspace's. An existing storage, and a
+     provider that cannot look, are past the question. */
+  const doors = !editsExisting && setupMode && descriptor.discovery
+    ? { ...setupMode, discovery: descriptor.discovery }
+    : null;
+  const usingExisting = doors?.mode === "existing";
+  const showLanes = doors === null || doors.mode === "create";
+  /* Direct setup is available for both creation and discovery. */
+  const wranglerLane = !!descriptor.local_setup && !editsExisting && !managed;
+  // Keep review available when a prepared draft is reopened or edited.
+  const wranglerReviewReady = setupDone || descriptor.secrets.some((secret) => secretPresence[secret.secret_id]);
+  const showFields = wranglerLane
+    ? wranglerReviewReady || manualExpanded
+    : showLanes || (usingExisting && !!manualEntry);
   const suspended = connectionSuspends(connection);
   const observedConnected = connection?.state === "connected";
   /* "Connected" is said only after an observed success; a stored credential
@@ -369,7 +488,7 @@ export function StorageEditor({
     : managed
       ? observedConnected
         ? "Connected. Access renews automatically."
-        : "Access renews automatically. Test the connection to verify it, or use the agent to reconnect."
+        : "Access renews automatically. Test the connection to verify it, or reconnect below."
       : observedConnected
         ? "Connected. You can review or update the connection values below."
         : "Configured. You can review or update the connection values below.";
@@ -418,7 +537,29 @@ export function StorageEditor({
         )}
       </header>
 
-      {folderFields.map((field) => (
+      {doors && (
+        <div className="storage-mode-doors" role="radiogroup" aria-label="New or existing storage">
+          <ModeDoor
+            icon="plus"
+            title="Create new"
+            detail={doors.discovery.create_hint}
+            checked={doors.mode === "create"}
+            disabled={disabled}
+            onChoose={() => doors.onChoose("create")}
+          />
+          <ModeDoor
+            icon="search"
+            title="Use existing"
+            detail={doors.discovery.existing_hint}
+            help={doors.discovery.existing_help}
+            checked={doors.mode === "existing"}
+            disabled={disabled}
+            onChoose={() => doors.onChoose("existing")}
+          />
+        </div>
+      )}
+
+      {showFields && folderFields.map((field) => (
         <label key={field.field_id} className="sync-folder-field compact">
           <span className="sync-field-name">{field.label}</span>
           <div>
@@ -442,56 +583,96 @@ export function StorageEditor({
           {field.help && <small>{field.help}</small>}
         </label>
       ))}
+      {showFields && destinationConflict && folderFields.length > 0 && (
+        /* One folder is one storage. Said the moment the folder settles, in
+           the box grammar every other refusal wears, with the only two ways
+           on: the storage that owns the folder, or a different folder. */
+        <div className="notice danger storage-destination-conflict" role="alert">
+          <Icon name="alert-triangle" size={13} className="notice-mark" />
+          <div className="notice-body">
+            <p className="notice-line">
+              <strong className="notice-type">Error ·</strong>{" "}
+              <strong className="notice-lead">
+                This folder is already connected as {destinationConflict.storage.name}.
+              </strong>{" "}
+              A folder can be one storage. Open that storage, or choose another folder for this one.
+            </p>
+          </div>
+          <div className="storage-destination-conflict-verbs">
+            <button type="button" className="btn btn-primary" onClick={destinationConflict.onOpen} disabled={disabled}>
+              Open {destinationConflict.storage.name}
+            </button>
+            <button type="button" className="btn" onClick={() => void chooseFolder(folderFields[0].field_id)} disabled={disabled}>
+              <Icon name="folder" size={13} /> Choose another…
+            </button>
+          </div>
+        </div>
+      )}
 
-      {!editsExisting && !managed && (assistant || descriptor.manual_setup_hint || descriptor.setup_guide_url) && (
+      {wranglerLane && (showLanes || usingExisting) && (
+        <div className="storage-setup-route-row agent r2-lane" role="note">
+          <Icon name={descriptor.local_setup === "dropbox" ? "link" : "terminal"} size={13} />
+          <span className="storage-setup-route-label">{descriptor.local_setup === "dropbox" ? "Dropbox setup" : "Wrangler setup"}</span>
+          {setupSlot}
+        </div>
+      )}
+      {usingExisting && discoverySlot}
+      {(showLanes || usingExisting && wranglerLane) && !editsExisting && !managed && (wranglerLane || !setupDone) && (wranglerLane || descriptor.manual_setup_hint || descriptor.setup_guide_url) && (
         <>
-          {/* The two routes are named lanes, not one run-on sentence: the
-              agent lane carries the hand-off cluster and its lifecycle, the
-              manual lane introduces the fields it sits above. Both take their
-              words from the descriptor, never from a provider name. */}
-          {assistant && <div className="storage-setup-route-row agent" role="note">
-            <Icon name="terminal" size={13} />
-            <span className="storage-setup-route-label">{assistant.label}</span>
-            <span className="storage-setup-guide-copy">{assistant.description}</span>
-            {agentSlot}
-          </div>}
+
           <div className="storage-setup-route-row" role="note">
             <Icon name="info" size={13} />
             <span className="storage-setup-route-label">Manual setup</span>
             <span className="storage-setup-guide-copy">
-              {descriptor.manual_setup_hint ?? `Enter an existing ${descriptor.display_name} connection in the fields below.`}
+              {wranglerLane && !showFields
+                ? "Use your own connection credentials."
+                : descriptor.manual_setup_hint ?? `Enter an existing ${descriptor.display_name} connection in the fields below.`}
             </span>
             {descriptor.setup_guide_url && (
               <button type="button" className="btn-link" onClick={() => void openExternalUrl(descriptor.setup_guide_url!)}>
                 Setup guide <Icon name="external-link" size={11} />
               </button>
             )}
+            {wranglerLane && !wranglerReviewReady && (
+              <button
+                type="button"
+                className="btn storage-manual-toggle"
+                aria-expanded={manualExpanded}
+                aria-label={manualExpanded ? "Hide fields" : "Enter by hand"}
+                title={manualExpanded ? "Hide fields" : "Enter by hand"}
+                disabled={disabled}
+                onClick={() => setManualExpanded((expanded) => !expanded)}
+              >
+                <Icon name={manualExpanded ? "chevron-up" : "chevron-down"} size={12} />
+              </button>
+            )}
           </div>
         </>
       )}
       {(managed || editsExisting && credentialed) && (
-        <div className="storage-setup-guide" role={suspended ? "alert" : "note"}>
+        <div className={`storage-setup-guide${descriptor.local_setup ? " r2-lane" : ""}`} role={suspended ? "alert" : "note"}>
           <Icon name={suspended ? "alert-triangle" : "check-circle"} size={13} />
           <span className={suspended ? "storage-setup-guide-error" : "storage-setup-guide-copy"}>{guideCopy}</span>
           {descriptor.setup_guide_url && (
             <button type="button" className="btn-link" onClick={() => void openExternalUrl(descriptor.setup_guide_url!)}>Setup guide</button>
           )}
-          {agentSlot}
+          {setupSlot}
         </div>
       )}
 
-      {(gridFields.length > 0 || descriptor.secrets.length > 0) && (
+      {showFields && (gridFields.length > 0 || descriptor.secrets.length > 0) && (
         <div className="sync-storage-fields storage-provider-fields" aria-label={`${descriptor.display_name} connection details`}>
           {gridFields.map((field) => (
-            <label key={field.field_id} className={field.kind === "url" ? "storage-provider-url-field" : undefined}>
+            <div key={field.field_id} className={`storage-provider-field${field.kind === "url" ? " storage-provider-url-field" : ""}`}>
               <span className="form-label-row">
-                <span className="sync-field-name">{field.label}</span>
+                <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-field-${field.field_id}`}>{field.label}</label>
                 {(field.help || field.help_url) && (
                   <HelpMark text={field.help ?? field.label} url={field.help_url} />
                 )}
               </span>
               <input
                 type={field.kind === "url" ? "url" : "text"}
+                id={`${fieldIdPrefix}-field-${field.field_id}`}
                 value={form.settings[field.field_id] ?? ""}
                 onChange={(event) => setSetting(field.field_id, event.target.value)}
                 placeholder={field.placeholder ?? undefined}
@@ -503,15 +684,15 @@ export function StorageEditor({
                 autoCorrect="off"
                 autoComplete="off"
               />
-            </label>
+            </div>
           ))}
           {activeSecrets(descriptor, secretPresence).map((secret) => {
             const present = !!secretPresence[secret.secret_id];
             const visible = !!secretVisible[secret.secret_id];
             return (
-              <label key={secret.secret_id}>
+              <div key={secret.secret_id} className="storage-provider-field">
                 <span className="form-label-row">
-                  <span className="sync-field-name">{secret.label}</span>
+                  <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-secret-${secret.secret_id}`}>{secret.label}</label>
                   {(secret.help || secret.help_url) && (
                     <HelpMark text={secret.help ?? secret.label} url={secret.help_url} />
                   )}
@@ -522,6 +703,7 @@ export function StorageEditor({
                 <span className="sync-secret-input">
                   <input
                     type={visible ? "text" : "password"}
+                    id={`${fieldIdPrefix}-secret-${secret.secret_id}`}
                     value={form.typedSecrets[secret.secret_id] ?? ""}
                     onChange={(event) => setSecret(secret.secret_id, event.target.value)}
                     placeholder={present
@@ -541,7 +723,7 @@ export function StorageEditor({
                     {visible ? "Hide" : "Show"}
                   </button>
                 </span>
-              </label>
+              </div>
             );
           })}
         </div>

@@ -140,9 +140,11 @@ impl StorageProviderAdapter for LocalFolderAdapter {
                 derive: None,
             }],
             secrets: Vec::new(),
-            setup_assistant: None,
+            managed_secret_id: None,
+            local_setup: None,
             setup_guide_url: None,
             manual_setup_hint: None,
+            discovery: None,
         }
     }
 

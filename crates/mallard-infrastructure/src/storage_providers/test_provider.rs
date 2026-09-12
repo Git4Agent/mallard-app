@@ -4,8 +4,8 @@
 
 use super::traits::{
     StorageAdapterError, StorageFieldDescriptor, StorageFieldKind, StorageProviderAdapter,
-    StorageProviderDescriptor, StorageSecretDescriptor, StorageSetupAssistantContext,
-    StorageSetupAssistantDescriptor, StorageSummaryField,
+    StorageProviderDescriptor, StorageSecretDescriptor,
+     StorageSummaryField,
 };
 use crate::storage_core::{LocalObjectStore, ObjectStore};
 use mallard_domain::{
@@ -108,13 +108,11 @@ impl StorageProviderAdapter for TestStorageAdapter {
                 placeholder: None,
                 help_url: None,
             }],
-            setup_assistant: Some(StorageSetupAssistantDescriptor {
-                managed_secret_id: None,
-                label: "Set up with an agent".to_string(),
-                description: "Test assistant.".to_string(),
-            }),
+            local_setup: None,
+            managed_secret_id: None,
             setup_guide_url: None,
             manual_setup_hint: None,
+            discovery: None,
         }
     }
 
@@ -194,15 +192,7 @@ impl StorageProviderAdapter for TestStorageAdapter {
         Ok(())
     }
 
-    fn setup_assistant_instruction(
-        &self,
-        context: &StorageSetupAssistantContext<'_>,
-    ) -> Result<String, String> {
-        Ok(format!(
-            "Prepare test storage “{}” with {} for draft {} at revision {}.",
-            context.storage_name, context.cli_path, context.draft_id, context.draft_revision
-        ))
-    }
+
 
     fn open(
         &self,

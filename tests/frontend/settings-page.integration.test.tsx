@@ -22,7 +22,12 @@ const appActions = [{
 
 function renderPage(): string {
   return renderToStaticMarkup(
-    <SettingsPage appActions={appActions} onLogsChanged={() => undefined} />,
+    <SettingsPage
+      appActions={appActions}
+      onLogsChanged={() => undefined}
+      onDone={() => undefined}
+      doneTarget="mallard-app"
+    />,
   );
 }
 
