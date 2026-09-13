@@ -2948,7 +2948,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_codex_session_in_active_and_archive_is_ignored() {
+    fn duplicate_codex_session_without_distinct_filenames_is_one_blocked_row() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         let codex = temp.path().join("codex");
@@ -2981,11 +2981,47 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(matching.len(), 1);
-        assert!(matching[0].logical_paths[0].starts_with("state/providers/codex/sessions/"));
-        assert!(inventory
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("ignored duplicate Codex session 'duplicate-thread'")));
+        assert!(matching[0]
+            .blocked_reason
+            .as_deref()
+            .unwrap()
+            .contains("ambiguous filenames"));
+    }
+
+    #[test]
+    fn reverted_codex_discovery_selects_one_current_file_before_project_filtering() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let other = temp.path().join("other");
+        let codex = temp.path().join("codex");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let original = codex.join("sessions/rollout-2026-09-12T01-03-07-thread.jsonl");
+        let reverted = codex.join("sessions/rollout-2026-09-13T00-19-15-thread_revert1.jsonl");
+        let transcript = |cwd: &Path| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":"thread","cwd":cwd}})
+            )
+        };
+        write(&reverted, transcript(&project).as_bytes());
+        write(&original, transcript(&project).as_bytes());
+        let request = CaptureRequest {
+            project_root: project,
+            provider_homes: BTreeMap::from([(codex_key(), codex)]),
+            include_project_content: false,
+            excluded_content_roots: Vec::new(),
+        };
+        let discovery = discover_full(registry(), &request).unwrap();
+        let views = local_session_views(&discovery);
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].source_path, fs::canonicalize(&reverted).unwrap());
+        assert!(views[0].descriptor.blocked_reason.is_none());
+        // An old file in this project must not stand in for a selected file
+        // that now belongs to another project.
+        write(&reverted, transcript(&other).as_bytes());
+        let discovery = discover_full(registry(), &request).unwrap();
+        assert!(local_session_views(&discovery).is_empty());
     }
 
     #[test]

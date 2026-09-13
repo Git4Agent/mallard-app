@@ -459,11 +459,13 @@ mod tests {
 
     #[test]
     fn canonical_form_sorts_keys_and_drops_whitespace() {
-        let object =
-            config("{ \"b\" : 1 , \"a\" : { \"z\" : [ 1 , 2 ] , \"y\" : \"v\" } }").unwrap();
+        let object = config(
+            "{ \"b\" : 0.99177921181141328 , \"a\" : { \"z\" : [ 1 , 2 ] , \"y\" : \"v\" } }",
+        )
+        .unwrap();
         assert_eq!(
             String::from_utf8(object.canonical_json()).unwrap(),
-            "{\"a\":{\"y\":\"v\",\"z\":[1,2]},\"b\":1}"
+            "{\"a\":{\"y\":\"v\",\"z\":[1,2]},\"b\":0.9917792118114133}"
         );
         let reparsed = config(std::str::from_utf8(&object.canonical_json()).unwrap()).unwrap();
         assert_eq!(reparsed, object);

@@ -3,14 +3,16 @@
 //!
 //! This test makes deterministic Codex turns against one Rust-owned local
 //! aimock process, creates a native paginated fork graph through the Codex
-//! app-server, and reopens twenty-seven histories through public
-//! headless Codex CLI resumes.
+//! app-server, creates a native same-thread revert, and reopens twenty-eight
+//! histories through public headless Codex CLI resumes.
 //! It is ignored by default, separately environment-gated, and intended to run
 //! as the only test process so its temporary `HOME` override cannot affect
 //! other tests.
 
 #[path = "support/codex_failure_isolation.rs"]
 mod failure_isolation;
+#[path = "support/codex_reverted_rollouts.rs"]
+mod reverted_rollouts;
 mod support;
 
 use mallard_domain::{
@@ -125,14 +127,15 @@ const MAX_APP_SERVER_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_APP_SERVER_MESSAGES: usize = 4_096;
 const MAX_AIMOCK_CONTROL_BYTES: u64 = 512 * 1024;
 const AIMOCK_START_TIMEOUT: Duration = Duration::from_secs(30);
-const EXPECTED_CODEX_VERSION_PREFIX: &str = "codex-cli 0.152.";
+const EXPECTED_CODEX_VERSION_PREFIX: &str = "codex-cli 0.154.";
 const EXPECTED_SOURCE_CODEX_TURNS: usize = 5;
 const EXPECTED_GRAPH_APP_SERVER_TURNS: usize = 5;
 const EXPECTED_GRAPH_MUTATION_TURNS: usize = 7;
 const EXPECTED_HEADLESS_RESUMES: usize = 20;
 const EXPECTED_CODEX_CLI_TURNS: usize =
     EXPECTED_SOURCE_CODEX_TURNS + EXPECTED_GRAPH_MUTATION_TURNS + EXPECTED_HEADLESS_RESUMES;
-const EXPECTED_AIMOCK_REQUESTS: usize = 38 + failure_isolation::EXPECTED_TURNS;
+const EXPECTED_AIMOCK_REQUESTS: usize =
+    38 + failure_isolation::EXPECTED_TURNS + reverted_rollouts::EXPECTED_REQUESTS;
 
 const P0: &str = "019f7800-0000-7000-8000-000000000001";
 const P1: &str = "019f7800-0000-7000-8000-000000000002";
@@ -199,7 +202,7 @@ fn assert_supported_codex_version() {
     let version = String::from_utf8(output.stdout).expect("Codex version must be UTF-8");
     assert!(
         version.trim().starts_with(EXPECTED_CODEX_VERSION_PREFIX),
-        "the live fixture requires Codex 0.152.x; update the current-format writer before running against another version"
+        "the live fixture requires Codex 0.154.x; update the current-format writer before running against another version"
     );
     assert_codex_home_has_no_sensitive_state(&codex_home, &[]);
     assert_process_home_has_no_sensitive_state(&process_home, &[]);
@@ -514,7 +517,7 @@ impl CodexAppServer {
         Ok(thread_id.to_string())
     }
 
-    fn turn_start_and_wait(&mut self, thread_id: &str, prompt: &str) -> Result<(), &'static str> {
+    fn turn_start_and_wait(&mut self, thread_id: &str, prompt: &str) -> Result<String, &'static str> {
         validate_uuid_v7(thread_id).map_err(|_| "Codex turn source is not UUIDv7")?;
         validate_exact_marker(prompt).map_err(|_| "Codex app-server prompt is not a marker")?;
         let response = self.request(
@@ -553,7 +556,7 @@ impl CodexAppServer {
             {
                 return Err("Codex app-server turn did not complete successfully");
             }
-            return Ok(());
+            return Ok(turn_id);
         }
     }
 
@@ -1445,7 +1448,7 @@ fn run_codex(
             completed_file_changes, 1,
             "revision-1 Codex output lacked exactly one completed file-change item; events: {event_synopsis}; stderr: {stderr_synopsis}"
         );
-        let rollout = rollout_lookup(codex_home, &provider_thread_id)
+        let rollout = current_rollout_lookup(codex_home, &provider_thread_id)
             .unwrap_or_else(|_| {
                 panic!(
                     "revision-1 rollout discovery failed; events: {event_synopsis}; stderr: {stderr_synopsis}"
@@ -1841,6 +1844,7 @@ fn aimock_scenario_document(project_root: &Path, outside_root: &Path) -> AimockS
         }
     }
     scenarios.extend(failure_isolation::scenarios());
+    scenarios.extend(reverted_rollouts::scenarios());
     assert_eq!(scenarios.len(), EXPECTED_AIMOCK_REQUESTS);
     let ids = scenarios
         .iter()
@@ -1915,6 +1919,7 @@ struct AimockScenarioAudit {
 }
 
 struct AimockProcess {
+    expected_request_count: usize,
     child: Child,
     stdin: Option<ChildStdin>,
     stdout_reader: Option<std::thread::JoinHandle<Result<(), ()>>>,
@@ -2065,6 +2070,7 @@ impl AimockProcess {
                 stdout_reader: Some(stdout_reader),
                 stderr_reader: Some(stderr_reader),
                 audit_path,
+                expected_request_count: document.expected_request_count,
             },
             provider,
         ))
@@ -2124,7 +2130,7 @@ impl AimockProcess {
         }
         let audit: AimockAudit =
             serde_json::from_slice(&audit_bytes).map_err(|_| "aimock audit is malformed")?;
-        validate_aimock_audit(&audit)
+        validate_aimock_audit(&audit, self.expected_request_count)
     }
 }
 
@@ -2144,10 +2150,10 @@ impl Drop for AimockProcess {
     }
 }
 
-fn validate_aimock_audit(audit: &AimockAudit) -> Result<(), &'static str> {
+fn validate_aimock_audit(audit: &AimockAudit, expected_request_count: usize) -> Result<(), &'static str> {
     if audit.version != 1
-        || audit.expected_request_count != EXPECTED_AIMOCK_REQUESTS
-        || audit.request_count != EXPECTED_AIMOCK_REQUESTS
+        || audit.expected_request_count != expected_request_count
+        || audit.request_count != expected_request_count
         || audit.journal_saturated
         || !audit.post_only
         || !audit.responses_path_only
@@ -2161,7 +2167,7 @@ fn validate_aimock_audit(audit: &AimockAudit) -> Result<(), &'static str> {
         || audit.duplicate_request_count != 0
         || audit.unused_scenario_count != 0
         || !audit.all_scenarios_consumed_once
-        || audit.scenarios.len() != EXPECTED_AIMOCK_REQUESTS
+        || audit.scenarios.len() != expected_request_count
     {
         return Err("aimock aggregate audit failed");
     }
@@ -2277,7 +2283,7 @@ fn session_meta_record(
             "timestamp": "2026-08-18T00:00:00Z",
             "cwd": cwd.to_string_lossy(),
             "originator": "codex_exec",
-            "cli_version": "0.152.0",
+            "cli_version": "0.154.0",
             "source": "exec",
             "model_provider": PROVIDER_ID,
             "base_instructions": null,
@@ -2399,71 +2405,21 @@ fn encode_rollout_records(mut records: Vec<Value>) -> Vec<u8> {
 }
 
 fn rollout_path(codex_home: &Path, provider_thread_id: &str) -> PathBuf {
-    let suffix = format!("-{provider_thread_id}.jsonl");
-    let mut matches = Vec::new();
-    for root_name in ["sessions", "archived_sessions"] {
-        let root = codex_home.join(root_name);
-        if !root.exists() {
-            continue;
-        }
-        for entry in WalkDir::new(root).follow_links(false).max_depth(8) {
-            let entry = redacted(entry, "cannot inspect isolated Codex rollouts");
-            assert!(
-                !entry.file_type().is_symlink(),
-                "isolated Codex session tree contains a symlink"
-            );
-            if entry.file_type().is_file()
-                && entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.ends_with(&suffix))
-            {
-                matches.push(entry.path().to_path_buf());
-            }
-        }
-    }
-    assert_eq!(
-        matches.len(),
-        1,
-        "expected exactly one rollout with the provider thread ID"
-    );
-    matches.pop().expect("checked one rollout match")
+    current_rollout_lookup(codex_home, provider_thread_id)
+        .expect("cannot select current Codex rollout")
+        .expect("current Codex rollout is missing")
 }
 
-fn rollout_lookup(codex_home: &Path, thread_id: &str) -> Result<Option<PathBuf>, String> {
-    let suffix = format!("-{thread_id}.jsonl");
-    let mut match_path = None;
-    let mut visited = 0_usize;
-    for root_name in ["sessions", "archived_sessions"] {
-        let root = codex_home.join(root_name);
-        if !root.exists() {
-            continue;
-        }
-        for entry in WalkDir::new(root).follow_links(false).max_depth(8) {
-            let entry = entry.map_err(|_| "cannot inspect Codex rollout lookup".to_string())?;
-            visited += 1;
-            if visited > 4_096 {
-                return Err("Codex rollout lookup exceeded its entry bound".to_string());
-            }
-            if entry.file_type().is_symlink() {
-                return Err("Codex rollout lookup encountered a symlink".to_string());
-            }
-            if entry.file_type().is_file()
-                && entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.ends_with(&suffix))
-                && match_path.replace(entry.path().to_path_buf()).is_some()
-            {
-                return Err("Codex rollout lookup found duplicate identities".to_string());
-            }
-        }
-    }
-    Ok(match_path)
+fn current_rollout_lookup(codex_home: &Path, thread_id: &str) -> Result<Option<PathBuf>, String> {
+    mallard_infrastructure::codex_subagents::RolloutLookup::new(codex_home).find_current(thread_id)
+}
+
+fn historical_rollout_lookup(codex_home: &Path, rollout_id: &str) -> Result<Option<PathBuf>, String> {
+    mallard_infrastructure::codex_subagents::RolloutLookup::new(codex_home).find_rollout(rollout_id)
 }
 
 fn assert_rollout_provider(codex_home: &Path, provider_thread_id: &str) {
-    let path = rollout_lookup(codex_home, provider_thread_id)
+    let path = current_rollout_lookup(codex_home, provider_thread_id)
         .unwrap_or_else(|_| panic!("cannot inspect isolated Codex rollout provider"))
         .unwrap_or_else(|| panic!("isolated Codex rollout is unavailable"));
     let bytes = read_bounded_file(
@@ -2506,7 +2462,7 @@ fn validate_paginated_rollout(
     );
     assert_eq!(structure.current.id, node.provider_thread_id);
     assert_eq!(structure.current.history_mode.as_deref(), Some("paginated"));
-    let lookup = |thread_id: &str| rollout_lookup(codex_home, thread_id);
+    let lookup = |thread_id: &str| historical_rollout_lookup(codex_home, thread_id);
     let resolved = redacted(
         resolve_codex_root(&node.path, &lookup),
         "production graph resolver rejected generated paginated rollout",
@@ -2829,7 +2785,7 @@ fn append_paginated_turn(
     assistant_marker: &str,
 ) {
     let path = rollout_path(codex_home, provider_thread_id);
-    let lookup = |thread_id: &str| rollout_lookup(codex_home, thread_id);
+    let lookup = |thread_id: &str| historical_rollout_lookup(codex_home, thread_id);
     let before = read_bounded_file(
         &path,
         MAX_CONVERSATION_FILE_BYTES,
@@ -3207,7 +3163,7 @@ fn run_paginated_mutation(
         structure_after.current.forked_from_id,
         structure_before.current.forked_from_id
     );
-    let lookup = |thread_id: &str| rollout_lookup(codex_home, thread_id);
+    let lookup = |thread_id: &str| historical_rollout_lookup(codex_home, thread_id);
     let resolved = resolve_codex_root(&path, &lookup)
         .expect("production resolver rejected CLI-mutated paginated rollout");
     encode_standalone_codex_root(
@@ -3375,7 +3331,7 @@ fn timeline_history_from_standalone(
         provider_session_id: provider_thread_id,
         project_root: &canonical_project_root,
         project_root_aliases: &project_root_aliases,
-        provider_home: &canonical_project_root,
+        provider_home: temporary.path(),
         child: None,
     };
     let index = adapter
@@ -3509,11 +3465,11 @@ fn resolved_local_alias_history(
     history_index: usize,
 ) -> Vec<HistoryMarker> {
     let path = redacted(
-        rollout_lookup(codex_home, provider_thread_id),
+        current_rollout_lookup(codex_home, provider_thread_id),
         "cannot locate exact local history alias",
     )
     .unwrap_or_else(|| panic!("exact local history alias is unavailable"));
-    let lookup = |thread_id: &str| rollout_lookup(codex_home, thread_id);
+    let lookup = |thread_id: &str| historical_rollout_lookup(codex_home, thread_id);
     let resolved = redacted(
         resolve_codex_root(&path, &lookup),
         "production resolver rejected exact local history alias",
@@ -4927,7 +4883,7 @@ fn assert_pulled_standalone_rollout(
         (0..records.len() as u64).collect::<Vec<_>>()
     );
     assert_rollout_cwd(codex_home, provider_thread_id, project_root);
-    let lookup = |thread_id: &str| rollout_lookup(codex_home, thread_id);
+    let lookup = |thread_id: &str| historical_rollout_lookup(codex_home, thread_id);
     let resolved = redacted(
         resolve_codex_root(&path, &lookup),
         "production graph resolver rejected pulled standalone rollout",
@@ -5301,7 +5257,7 @@ fn assert_offline_path_timeline(
         provider_session_id: "offline-path-fixture",
         project_root,
         project_root_aliases: &[],
-        provider_home: project_root,
+        provider_home: rollout.parent().unwrap(),
         child: None,
     };
     let index = adapter
@@ -5355,7 +5311,7 @@ fn assert_offline_path_timeline(
         .expect("current Codex path fixture timeline did not load");
     assert_eq!(page.events.len(), 1);
     let detail = adapter
-        .read_event_detail(rollout, &index, &tool_entry.event_id)
+        .read_event_detail(rollout, &index, &tool_entry.event_id, &context)
         .expect("current Codex path fixture event did not expand");
     assert_eq!(detail.affected_paths, tool.affected_paths);
     let arguments = detail
@@ -5910,7 +5866,7 @@ fn current_codex_paginated_graph_fixture_passes_production_validators() {
     // intentionally retains the resolved history while no longer depending
     // on the source machine's native base file.
     let p2_path = graph.nodes["p2"].path.clone();
-    let lookup = |thread_id: &str| rollout_lookup(&codex_home, thread_id);
+    let lookup = |thread_id: &str| historical_rollout_lookup(&codex_home, thread_id);
     let resolved = resolve_codex_root(&p2_path, &lookup).expect("resolve native P2 fixture");
     let wire = encode_standalone_codex_root(
         &resolved,
@@ -6004,6 +5960,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     let scenario = aimock_scenario_document(&project1, &project1_external);
     let (aimock, provider) = AimockProcess::start(&aimock_control, &process_home, &scenario)
         .expect("start deterministic local aimock server");
+    reverted_rollouts::run(&provider);
     failure_isolation::run(&provider);
 
     let repository1 = redacted(

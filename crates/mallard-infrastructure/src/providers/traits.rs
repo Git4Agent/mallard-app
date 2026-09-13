@@ -507,8 +507,17 @@ pub struct SessionDetailWarning {
     pub severity: NoticeSeverity,
 }
 
+/// Ordered physical sources for a logical Codex timeline. Paths are relative
+/// to the provider home; only retained byte lengths enter the local cache.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SessionTimelineSource {
+    pub relative_path: String,
+    pub length: u64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SessionTimelineIndex {
+    pub sources: Vec<SessionTimelineSource>,
     pub parser_version: u32,
     pub events: Vec<SessionTimelineIndexEntry>,
     pub counts: SessionEventCounts,
@@ -908,6 +917,18 @@ pub trait SessionAdapter: Send + Sync {
         path: &Path,
         context: &SessionTimelineContext<'_>,
     ) -> Result<SessionTimelineIndex, String>;
+    /// Summarize the same retained sources used by the detail index.
+    fn summarize_timeline(
+        &self,
+        path: &Path,
+        _index: &SessionTimelineIndex,
+        context: &SessionTimelineContext<'_>,
+    ) -> Result<SessionFileSummary, String> {
+        match context.child {
+            Some(child) => self.summarize_child_file(path, child),
+            None => self.summarize_file(path),
+        }
+    }
     /// Read and normalize one filtered page from a validated index. Filtering
     /// happens before pagination. Agent rows are described here too: the
     /// call and result records, then the child's head and tail.
@@ -934,6 +955,7 @@ pub trait SessionAdapter: Send + Sync {
         path: &Path,
         index: &SessionTimelineIndex,
         event_id: &str,
+        context: &SessionTimelineContext<'_>,
     ) -> Result<SessionEventDetail, String>;
     fn available_actions(&self, context: &SessionActionContext<'_>)
         -> Vec<SessionActionDescriptor>;

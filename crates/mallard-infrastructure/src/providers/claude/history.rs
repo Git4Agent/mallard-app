@@ -840,6 +840,7 @@ impl ClaudeTimelineBuilder {
             self.inferred_responses,
         );
         SessionTimelineIndex {
+            sources: Vec::new(),
             parser_version: TIMELINE_PARSER_VERSION,
             events: entries,
             counts,

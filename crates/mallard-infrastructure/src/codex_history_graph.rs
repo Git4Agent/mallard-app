@@ -29,6 +29,8 @@ use mallard_domain::{
 /// One physical segment of a resolved logical root, base-most first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedSegment {
+    /// Physical source identity for record origins within this file.
+    pub rollout_id: String,
     pub provider_thread_id: String,
     pub path: PathBuf,
     /// Bytes consumed: the child's byte cutoff for ancestors, the safe end
@@ -199,7 +201,10 @@ pub fn resolve_captured_codex_root(
     let mut visited = std::collections::BTreeSet::new();
     let leaf_meta = authoritative_session_meta(&leaf_bytes).map_err(|error| error.to_string())?;
     let mut next_reference = leaf_meta.history_base.clone();
-    visited.insert(leaf_meta.id.clone());
+    visited.insert(crate::codex_rollout_selection::physical_id(
+        leaf_path,
+        &leaf_meta.id,
+    )?);
     let mut sources = CodexSourceSnapshots::new();
     sources.insert(leaf_path.to_path_buf(), (leaf_bytes, leaf_stamp));
     segments.push((
@@ -246,7 +251,7 @@ pub fn resolve_captured_codex_root(
         }
         let meta =
             authoritative_session_meta(&bytes[..cutoff]).map_err(|error| error.to_string())?;
-        if meta.id != reference.thread_id {
+        if crate::codex_rollout_selection::physical_id(&path, &meta.id)? != reference.thread_id {
             return Err(format!(
                 "Codex history base '{}' resolved to rollout '{}'",
                 reference.thread_id, meta.id
@@ -425,6 +430,10 @@ fn resolve_segments(
             boundary = builder.appended_len() as u64;
         }
         resolved_segments.push(ResolvedSegment {
+            rollout_id: crate::codex_rollout_selection::physical_id(
+                &segment.path,
+                &segment.meta.id,
+            )?,
             provider_thread_id: segment.meta.id.clone(),
             path: segment.path,
             consumed_byte_len: segment.consumed_byte_len,
@@ -934,6 +943,87 @@ mod tests {
             message_line("m5", "five"),
         ];
         graph.write("p2", &p2_lines)
+    }
+
+    #[test]
+    fn reverted_rollouts_keep_physical_identity_and_captured_cutoffs() {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = home.path().join("sessions");
+        fs::create_dir(&sessions).unwrap();
+        let original = sessions.join("rollout-2026-09-12T01-03-07-thread.jsonl");
+        let first = sessions.join("rollout-2026-09-13T00-19-15-thread_revert1.jsonl");
+        let current = sessions.join("rollout-2026-09-13T00-19-16-thread_revert2.jsonl");
+        let retained =
+            encode_paginated_lines(&[meta_line("thread", None), message_line("m1", "keep one")]);
+        let mut old_bytes = retained.clone();
+        append_paginated_line(&mut old_bytes, &message_line("discarded", "DISCARDED TURN"));
+        fs::write(&original, old_bytes).unwrap();
+        let first_bytes = encode_paginated_lines(&[
+            meta_line("thread", Some(("thread", 2, retained.len() as u64))),
+            message_line("m2", "keep two /tmp/project/source.rs"),
+        ]);
+        fs::write(&first, &first_bytes).unwrap();
+        let current_bytes = encode_paginated_lines(&[
+            meta_line("thread", Some(("revert1", 4, first_bytes.len() as u64))),
+            message_line("m3", "keep three"),
+        ]);
+        fs::write(&current, &current_bytes).unwrap();
+        let lookup = crate::codex_subagents::RolloutLookup::new(home.path());
+        let (bytes, stamp) = crate::jsonl_tail_io::read_snapshot(&current).unwrap();
+        let (resolved, sources) =
+            resolve_captured_codex_root(&current, bytes.into(), stamp, &|id| {
+                lookup.find_rollout(id)
+            })
+            .unwrap();
+        assert_eq!(resolved.segments.len(), 3);
+        assert!(resolved
+            .segments
+            .iter()
+            .all(|source| source.provider_thread_id == "thread"));
+        let encode = || {
+            crate::codex_standalone_builder::encode_codex_tree_member(
+                &resolved,
+                &sources,
+                "/tmp/project",
+                None,
+                None,
+                &mut crate::credential_redaction::shared().begin_run(),
+                &crate::session_path_origins::PathOrigins::default(),
+                &BTreeMap::from([("thread".into(), "mallard-main".into())]),
+            )
+            .unwrap()
+        };
+        let before = encode();
+        let repeated = crate::codex_standalone_builder::encode_codex_tree_member(
+            &resolved,
+            &sources,
+            "/tmp/project",
+            None,
+            None,
+            &mut crate::credential_redaction::shared().begin_run(),
+            &before.path_origins,
+            &BTreeMap::from([("thread".into(), "mallard-main".into())]),
+        )
+        .unwrap();
+        assert_eq!(before.root_bytes.as_bytes(), repeated.root_bytes.as_bytes());
+        let wire = std::str::from_utf8(before.root_bytes.as_bytes()).unwrap();
+        assert!(!wire.contains("DISCARDED TURN"));
+        assert!(!wire.contains("/tmp/project"));
+        assert!(
+            wire.contains("keep one") && wire.contains("keep two") && wire.contains("keep three")
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_str(wire.lines().next().unwrap()).unwrap();
+        assert!(metadata["payload"]["history_base"].is_null());
+        fs::write(&original, b"changed after capture").unwrap();
+        fs::remove_file(&first).unwrap();
+        let after = encode();
+        assert_eq!(before.root_bytes.as_bytes(), after.root_bytes.as_bytes());
+        assert_eq!(before.portable_tail, after.portable_tail);
+        assert!(resolve_codex_root(&current, &|id| lookup.find_rollout(id)).is_err());
+        sources[&current].1.verify(&current).unwrap();
+        fs::write(&current, b"changed current").unwrap();
+        assert!(sources[&current].1.verify(&current).is_err());
     }
 
     #[test]

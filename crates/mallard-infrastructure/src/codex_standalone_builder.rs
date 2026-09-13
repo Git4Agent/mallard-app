@@ -659,11 +659,11 @@ fn read_source_records<'a>(
                     )?;
                 }
             }
-            let prior = previous.record(&segment.provider_thread_id, record_number - 1);
+            let prior = previous.record(&segment.rollout_id, record_number - 1);
             if encode_mode {
                 if let Some(prior) = prior.filter(|origin| origin.derived) {
                     prior.verify_record(&value)?;
-                    origins.push(&segment.provider_thread_id, prior.clone());
+                    origins.push(&segment.rollout_id, prior.clone());
                     continue;
                 }
             }
@@ -674,7 +674,7 @@ fn read_source_records<'a>(
             let mut value = (|| -> Result<Value, String> {
                 if encode_mode {
                     let encoded = mapper.encode_record_with_origins(&value, prior)?;
-                    origins.push(&segment.provider_thread_id, encoded.origins);
+                    origins.push(&segment.rollout_id, encoded.origins);
                     redactor.redact_record_gated(&encoded.wire)
                 } else {
                     mapper.verify_wire_record(&value)?;

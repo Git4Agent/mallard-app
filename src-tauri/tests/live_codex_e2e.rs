@@ -107,7 +107,7 @@ const MAX_CAPTURE_HEADER_BYTES: usize = 32 * 1024;
 const MAX_CAPTURE_INPUT_ITEMS: usize = 4_096;
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_TIMEOUT: Duration = Duration::from_secs(180);
-const EXPECTED_CODEX_VERSION_PREFIX: &str = "codex-cli 0.152.";
+const EXPECTED_CODEX_VERSION_PREFIX: &str = "codex-cli 0.154.";
 const EXPECTED_PAID_CODEX_TURNS: usize = 5;
 const EXPECTED_HEADLESS_RESUMES: usize = 20;
 const EXPECTED_CODEX_CLI_TURNS: usize = EXPECTED_PAID_CODEX_TURNS + EXPECTED_HEADLESS_RESUMES;
@@ -177,7 +177,7 @@ fn assert_supported_codex_version() {
     let version = String::from_utf8(output.stdout).expect("Codex version must be UTF-8");
     assert!(
         version.trim().starts_with(EXPECTED_CODEX_VERSION_PREFIX),
-        "the live fixture requires Codex 0.152.x; update the current-format writer before running against another version"
+        "the live fixture requires Codex 0.154.x; update the current-format writer before running against another version"
     );
     assert_codex_home_has_no_sensitive_state(&codex_home, &[]);
     assert_process_home_has_no_sensitive_state(&process_home, &[]);
@@ -1816,7 +1816,7 @@ fn session_meta_record(
             "timestamp": "2026-08-18T00:00:00Z",
             "cwd": cwd.to_string_lossy(),
             "originator": "codex_exec",
-            "cli_version": "0.152.0",
+            "cli_version": "0.154.0",
             "source": "exec",
             "model_provider": PROVIDER_ID,
             "base_instructions": null,
@@ -2555,7 +2555,7 @@ fn timeline_history_from_standalone(
         provider_session_id: provider_thread_id,
         project_root: &canonical_project_root,
         project_root_aliases: &project_root_aliases,
-        provider_home: &canonical_project_root,
+        provider_home: temporary.path(),
         child: None,
     };
     let index = adapter
@@ -4444,7 +4444,7 @@ fn assert_offline_path_timeline(
         provider_session_id: "offline-path-fixture",
         project_root,
         project_root_aliases: &[],
-        provider_home: project_root,
+        provider_home: rollout.parent().unwrap(),
         child: None,
     };
     let index = adapter
@@ -4498,7 +4498,7 @@ fn assert_offline_path_timeline(
         .expect("current Codex path fixture timeline did not load");
     assert_eq!(page.events.len(), 1);
     let detail = adapter
-        .read_event_detail(rollout, &index, &tool_entry.event_id)
+        .read_event_detail(rollout, &index, &tool_entry.event_id, &context)
         .expect("current Codex path fixture event did not expand");
     assert_eq!(detail.affected_paths, tool.affected_paths);
     let arguments = detail

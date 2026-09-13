@@ -962,6 +962,7 @@ impl SessionWatchService {
             return served;
         };
         let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let lookup = mallard_infrastructure::codex_subagents::RolloutLookup::new(&home);
         for query in queries {
             let key = ObservationKey {
                 canonical_home: home.clone(),
@@ -972,7 +973,8 @@ impl SessionWatchService {
             let Some(cached) = inner.observations.get(&key) else {
                 continue;
             };
-            if cached.checkpoint_generation != query.observation.checkpoint_generation
+            if !cached.observation.matches_codex_selection(&lookup)
+                || cached.checkpoint_generation != query.observation.checkpoint_generation
                 || cached.binding_revision != query.observation.binding_revision
                 || !cached.observation.matches_push_capture(
                     query.source,
@@ -1014,6 +1016,7 @@ impl SessionWatchService {
             return served;
         };
         let dirty = profile.dirty_roots.clone();
+        let lookup = mallard_infrastructure::codex_subagents::RolloutLookup::new(canonical_home);
         let mut misses = Vec::new();
         for query in queries {
             let key = ObservationKey {
@@ -1026,7 +1029,9 @@ impl SessionWatchService {
                 misses.push((key, query));
                 continue;
             };
-            if cached.checkpoint_generation != query.checkpoint_generation
+            if (provider.as_str() == "codex"
+                && !cached.observation.matches_codex_selection(&lookup))
+                || cached.checkpoint_generation != query.checkpoint_generation
                 || cached.binding_revision != query.binding_revision
                 || cached.depends_on.iter().any(|path| dirty.contains(path))
             {
@@ -1044,7 +1049,9 @@ impl SessionWatchService {
             let Some(record) = inner.disk_entries(state_root).get(&key).cloned() else {
                 continue;
             };
-            if record.checkpoint_generation != query.checkpoint_generation
+            if (provider.as_str() == "codex"
+                && !record.observation.matches_codex_selection(&lookup))
+                || record.checkpoint_generation != query.checkpoint_generation
                 || record.binding_revision != query.binding_revision
             {
                 continue;

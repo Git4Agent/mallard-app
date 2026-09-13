@@ -3217,7 +3217,24 @@ fn relation_sync_state(relation: TailClassification) -> ThreadSyncState {
     }
 }
 
+type ReviewedCodexRoots = BTreeMap<
+    PathBuf,
+    (
+        codex_history_graph::ResolvedCodexRoot,
+        codex_history_graph::CodexSourceSnapshots,
+    ),
+>;
+
+struct PreparedCodexPublication {
+    root: codex_history_graph::ResolvedCodexRoot,
+    sources: codex_history_graph::CodexSourceSnapshots,
+    tree: codex_subagents::CapturedTree,
+}
+
+type PreparedCodexPublications = BTreeMap<ResourceId, Result<PreparedCodexPublication, String>>;
+
 struct ThreadReview {
+    prepared_codex: PreparedCodexPublications,
     entries: Vec<ThreadSyncEntry>,
     push_actions: Vec<ConversationPlanAction>,
     pull_actions: Vec<ConversationPlanAction>,
@@ -3346,6 +3363,7 @@ fn thread_review(
     settings: &AppSettings,
 ) -> Result<ThreadReview, String> {
     let mut merged = ThreadReview {
+        prepared_codex: BTreeMap::new(),
         entries: Vec::new(),
         push_actions: Vec::new(),
         pull_actions: Vec::new(),
@@ -3387,6 +3405,7 @@ fn thread_review(
         };
         match review {
             Ok(review) => {
+                merged.prepared_codex.extend(review.prepared_codex);
                 merged.entries.extend(review.entries);
                 merged.push_actions.extend(review.push_actions);
                 merged.pull_actions.extend(review.pull_actions);
@@ -3436,7 +3455,7 @@ pub(super) fn codex_rollout_lookup(
     provider_home: &Path,
 ) -> impl Fn(&str) -> Result<Option<PathBuf>, String> + '_ {
     let lookup = RolloutLookup::new(provider_home);
-    move |thread_id: &str| lookup.find(thread_id)
+    move |thread_id: &str| lookup.find_rollout(thread_id)
 }
 
 /// Applied receipts retain provider aliases when a binding moves to a fresh
@@ -3593,6 +3612,30 @@ struct PushObservationEvidence {
 }
 
 impl LocalTailObservation {
+    pub(crate) fn matches_codex_selection(&self, lookup: &RolloutLookup) -> bool {
+        let Some(owned_subagents::TreeObservation::Codex(tree)) = &self.subagents else {
+            return true;
+        };
+        // An excluded or missing child has no captured current mapping.
+        // Recompute its membership instead of trusting an old header path.
+        if !tree.missing.is_empty() || !tree.header_dependencies.is_empty() {
+            return false;
+        }
+        let matches = |mapping: &mallard_domain::RootPhysicalMapping| {
+            lookup
+                .find_current(&mapping.provider_thread_id)
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some(Path::new(&mapping.root_path))
+        };
+        matches(&tree.main.mapping)
+            && tree
+                .children
+                .values()
+                .all(|child| matches(&child.discovery.mapping))
+    }
+
     pub(crate) fn matches_push_capture(
         &self,
         source: &Path,
@@ -3781,6 +3824,7 @@ fn adopt_codex_artifact(
 /// verified origin edits; native records use the source binding matcher.
 #[allow(clippy::too_many_arguments)]
 fn observe_codex_local(
+    reviewed_roots: Option<&std::sync::Mutex<ReviewedCodexRoots>>,
     local: Option<&LocalThreadReview>,
     previous_discovery: Option<&codex_subagents::DiscoveryObservation>,
     checkpoint: Option<&ConversationCheckpoint>,
@@ -3809,6 +3853,7 @@ fn observe_codex_local(
         });
     };
     let source = local.source_path.clone();
+    RolloutLookup::new(provider_home).verify_current(&local.provider_thread_id, &source)?;
     let mut creations = previous_discovery
         .map(|previous| previous.creations.clone())
         .unwrap_or_default();
@@ -4010,26 +4055,36 @@ fn observe_codex_local(
     }
 
     // First contact or unusable cursor: fully resolve and seed.
-    let (resolved, sources) =
-        match jsonl_tail_io::read_snapshot(&source).and_then(|(bytes, stamp)| {
-            codex_history_graph::resolve_captured_codex_root(&source, bytes.into(), stamp, &lookup)
-        }) {
-            Ok(resolved) => resolved,
-            Err(_) => {
-                return Ok(ProviderLocalObservation {
-                    observation: LocalTailObservation {
-                        push_reuse: None,
-                        subagents: None,
-                        discovery: None,
-                        evidence: TailSideEvidence::Invalid,
-                        raw_range_pin: None,
-                        verified_acceptance: None,
-                    },
-                    seeded: None,
-                    depends_on: Vec::new(),
-                })
-            }
-        };
+    let (resolved, sources) = match (match (reviewed_roots, local.captured.as_ref()) {
+        (Some(_), Some(captured)) => Ok((
+            captured.transcript.bytes.clone(),
+            captured
+                .transcript
+                .source_stamp
+                .clone()
+                .ok_or("captured Codex source stamp is missing")?,
+        )),
+        _ => jsonl_tail_io::read_snapshot(&source).map(|(bytes, stamp)| (bytes.into(), stamp)),
+    })
+    .and_then(|(bytes, stamp)| {
+        codex_history_graph::resolve_captured_codex_root(&source, bytes, stamp, &lookup)
+    }) {
+        Ok(resolved) => resolved,
+        Err(_) => {
+            return Ok(ProviderLocalObservation {
+                observation: LocalTailObservation {
+                    push_reuse: None,
+                    subagents: None,
+                    discovery: None,
+                    evidence: TailSideEvidence::Invalid,
+                    raw_range_pin: None,
+                    verified_acceptance: None,
+                },
+                seeded: None,
+                depends_on: Vec::new(),
+            })
+        }
+    };
     // The stored layout stays authoritative — including a paginated layout
     // imported at Pull install over a null-base file; a derivation that
     // cannot agree with it is corruption, never a reseed.
@@ -4120,7 +4175,7 @@ fn observe_codex_local(
             .as_slice(),
         ),
     };
-    Ok(ProviderLocalObservation {
+    let outcome = ProviderLocalObservation {
         observation: LocalTailObservation {
             push_reuse: Some(PushObservationEvidence {
                 seeded: seeded.clone(),
@@ -4147,7 +4202,23 @@ fn observe_codex_local(
             .iter()
             .map(|segment| segment.path.clone())
             .collect(),
-    })
+    };
+    if let Some(roots) = reviewed_roots {
+        let mut roots = roots
+            .lock()
+            .map_err(|_| "Codex review snapshot lock failed")?;
+        let retained: u64 = roots
+            .values()
+            .flat_map(|(_, sources)| sources.values())
+            .map(|(bytes, _)| bytes.len() as u64)
+            .sum();
+        let size: u64 = sources.values().map(|(bytes, _)| bytes.len() as u64).sum();
+        if retained.saturating_add(size) > provider_capture::MAX_CAPTURE_BYTES {
+            return Err("Codex review exceeds the aggregate capture limit".into());
+        }
+        roots.insert(source, (resolved, sources));
+    }
+    Ok(outcome)
 }
 
 /// The Claude adoption refold: the cloud pin folds the **redacted wire
@@ -5082,6 +5153,7 @@ fn provider_thread_review(
         _ => None,
     };
     let child_lookup = RolloutLookup::new(provider_home);
+    let reviewed_roots = std::sync::Mutex::new(ReviewedCodexRoots::new());
     let mut entries = Vec::new();
     let mut push_actions = Vec::new();
     let mut pull_actions = Vec::new();
@@ -5256,6 +5328,7 @@ fn provider_thread_review(
                         };
                         let outcome = if reconstructs_graph {
                             observe_codex_local(
+                                (purpose == ReviewPurpose::PushPlan).then_some(&reviewed_roots),
                                 *local,
                                 previous_trees.get(*task_id).and_then(|tree| tree.codex()).filter(|tree| local.is_some_and(|local| local.provider_thread_id == tree.main.mapping.provider_thread_id)).map(|tree| &tree.main),
                                 *checkpoint,
@@ -5289,7 +5362,7 @@ fn provider_thread_review(
                                                 Some(previous) => codex_subagents::refresh_discovery(&previous.main)?,
                                                 None => {
                                                     let (bytes, stamp) = jsonl_tail_io::read_snapshot(&local.source_path)?;
-                                                    let (resolved, _) = codex_history_graph::resolve_captured_codex_root(&local.source_path, bytes.clone().into(), stamp.clone(), &|id| child_lookup.find(id))?;
+                                                    let (resolved, _) = codex_history_graph::resolve_captured_codex_root(&local.source_path, bytes.clone().into(), stamp.clone(), &|id| child_lookup.find_rollout(id))?;
                                                     let seeded = codex_history_graph::seed_codex_root(&resolved, &bytes, *layout)?;
                                                     codex_subagents::DiscoveryObservation { mapping: seeded.mapping, stamp, creations: resolved.leaf_creations }
                                                 }
@@ -5832,7 +5905,7 @@ fn provider_thread_review(
                         &local.source_path,
                         main_bytes.into(),
                         stamp,
-                        &|id| child_lookup.find(id),
+                        &|id| child_lookup.find_rollout(id),
                     )?;
                     let layout =
                         local_binding.and_then(|binding| binding.root_tail_layout.as_ref());
@@ -6542,7 +6615,79 @@ fn provider_thread_review(
             });
         }
     }
+    let mut prepared_codex = BTreeMap::new();
+    if reconstructs_graph && purpose == ReviewPurpose::PushPlan {
+        let mut roots = reviewed_roots
+            .into_inner()
+            .map_err(|_| "Codex review snapshot lock failed")?;
+        let mut retained_bytes = 0_u64;
+        for action in &push_actions {
+            let Some(resource_id) = action.source_resource_id.as_ref() else {
+                continue;
+            };
+            let prepared = (|| {
+                let local = action
+                    .thread_id
+                    .as_ref()
+                    .and_then(|id| local_threads.get(id))
+                    .ok_or("Codex review source is missing")?;
+                child_lookup.verify_current(&local.provider_thread_id, &local.source_path)?;
+                let (root, sources) = match roots.remove(&local.source_path) {
+                    Some(root) => root,
+                    None => {
+                        let transcript = &local
+                            .captured
+                            .as_ref()
+                            .ok_or("Codex review capture is missing")?
+                            .transcript;
+                        codex_history_graph::resolve_captured_codex_root(
+                            &local.source_path,
+                            transcript.bytes.clone(),
+                            transcript
+                                .source_stamp
+                                .clone()
+                                .ok_or("Codex review source stamp is missing")?,
+                            &|id| child_lookup.find_rollout(id),
+                        )?
+                    }
+                };
+                let tree = if action.pins.subagent_selection.wire_children
+                    == ConversationWireChildren::Off
+                {
+                    codex_subagents::CapturedTree::omitted()
+                } else {
+                    codex_subagents::capture_resolved_tree(
+                        &root,
+                        &sources,
+                        local.binding.as_ref(),
+                        &child_lookup,
+                    )?
+                };
+                let size = sources
+                    .values()
+                    .map(|(bytes, _)| bytes.len() as u64)
+                    .sum::<u64>()
+                    + tree
+                        .children
+                        .values()
+                        .flat_map(|child| child.sources.values())
+                        .map(|(bytes, _)| bytes.len() as u64)
+                        .sum::<u64>();
+                if retained_bytes.saturating_add(size) > provider_capture::MAX_CAPTURE_BYTES {
+                    return Err("Codex review exceeds the aggregate capture limit".into());
+                }
+                retained_bytes += size;
+                Ok(PreparedCodexPublication {
+                    root,
+                    sources,
+                    tree,
+                })
+            })();
+            prepared_codex.insert(resource_id.clone(), prepared);
+        }
+    }
     Ok(ThreadReview {
+        prepared_codex,
         entries,
         push_actions,
         pull_actions,
@@ -8226,6 +8371,7 @@ fn build_conversation_publication(
     action: &ConversationPlanAction,
     previous_thread: Option<ConversationThread>,
     captured: CapturedPublicationSource,
+    prepared_codex: Option<Result<PreparedCodexPublication, String>>,
     redaction_run: &mut credential_redaction::RedactionRun<'_>,
 ) -> Result<ConversationPublication, String> {
     let ConversationPublicationContext {
@@ -8397,27 +8543,27 @@ fn build_conversation_publication(
         })?;
         let source = captured_transcript_source(&conversation)?;
         let child_lookup = child_lookup.ok_or("Codex filename inventory is missing")?;
-        let lookup = |id: &str| child_lookup.find(id);
-        let stamp = transcript
-            .source_stamp
-            .clone()
-            .ok_or("captured Codex transcript lacks its source stamp")?;
-        let (resolved_root, sources) = codex_history_graph::resolve_captured_codex_root(
+        child_lookup.verify_current(
+            conversation
+                .source_thread_id
+                .as_deref()
+                .ok_or("Codex source identity is missing")?,
             &source,
-            transcript.bytes.clone(),
-            stamp,
-            &lookup,
         )?;
-        let tree = if action.pins.subagent_selection.wire_children == ConversationWireChildren::Off {
-            codex_subagents::CapturedTree::omitted()
-        } else {
-            codex_subagents::capture_resolved_tree(
-                &resolved_root,
-                &sources,
-                local_binding,
-                child_lookup,
-            )?
-        };
+        let PreparedCodexPublication {
+            root: resolved_root,
+            sources,
+            tree,
+        } = prepared_codex.ok_or("Codex reviewed snapshots are missing")??;
+        let (reviewed_bytes, reviewed_stamp) = sources
+            .get(&source)
+            .ok_or("Codex reviewed current source is missing")?;
+        if reviewed_bytes.sha256() != transcript.bytes.sha256()
+            || transcript.source_stamp.as_ref() != Some(reviewed_stamp)
+        {
+            return Err(owned_subagents::PUSH_CHANGED.into());
+        }
+        reviewed_stamp.verify(&source)?;
         let reviewed_keys = action.pins.subagent_selection.keys.clone();
         if tree.omitted != action.pins.subagent_selection.omitted
             || tree.children.keys().cloned().collect::<BTreeSet<_>>() != reviewed_keys
@@ -8924,7 +9070,21 @@ fn build_conversation_publication(
     if total > provider_capture::MAX_CAPTURE_BYTES {
         return Err("Codex tree exceeds capture limit".into());
     }
+    if let Some(tree) = &captured_tree {
+        let lookup = child_lookup.ok_or("Codex selection inventory is missing")?;
+        lookup.verify_current(
+            operation
+                .provider_thread_id
+                .as_deref()
+                .ok_or("Codex source identity is missing")?,
+            &captured_transcript_source(&conversation)?,
+        )?;
+        tree.verify_current(lookup)?;
+    }
     for (path, (_, stamp)) in &captured_sources {
+        if captured_tree.is_some() && path != &captured_transcript_source(&conversation)? {
+            continue;
+        }
         stamp
             .verify(path)
             .map_err(|_| owned_subagents::PUSH_CHANGED.to_string())?;
@@ -9015,6 +9175,7 @@ fn build_publish_request(
     previous: Option<&BundleSnapshot>,
     expected_head: PublishExpectation,
     actions: &[ConversationPlanAction],
+    mut prepared_codex: PreparedCodexPublications,
     updated_at: u64,
     credential_redaction_enabled: bool,
 ) -> Result<
@@ -9286,22 +9447,25 @@ fn build_publish_request(
             action,
             previous,
             take_captured_conversation_for_action(&mut captured, action),
+            action
+                .source_resource_id
+                .as_ref()
+                .and_then(|id| prepared_codex.remove(id)),
         ));
     }
     let workers = provider_capture::bounded_refresh_workers(jobs.len());
     let mut batch_error = None;
     // A job reserves the bytes its builder holds while it runs: the captured
-    // transcript and sidecars, plus the history base a Codex leaf declares
-    // and the build reads again. Reservations end when the builder returns.
-    // Ancestor reads retain their per-file/depth limits; the worker cap also
-    // bounds concurrent graph reconstruction and redaction caches. Results
+    // transcript and sidecars, plus its retained Codex history. Reservations
+    // end when the builder returns. Review snapshots have an aggregate byte
+    // bound; the worker cap bounds concurrent projection and redaction caches. Results
     // arrive in completion order: the state below is keyed by operation id,
     // and the failures are put back into action order after the loop.
     mallard_infrastructure::bounded_preparation::for_each_prepared(
         jobs,
         workers,
         mallard_infrastructure::bounded_preparation::PREPARATION_BYTE_BUDGET,
-        |(_, _, source)| {
+        |(_, _, source, _)| {
             source
                 .as_ref()
                 .map(|(conversation, transcript, sidecars)| {
@@ -9322,12 +9486,13 @@ fn build_publish_request(
                 })
                 .unwrap_or(0)
         },
-        |(action, previous, source)| {
+        |(action, previous, source, prepared)| {
             build_conversation_publication(
                 context,
                 action,
                 previous,
                 source?,
+                prepared,
                 &mut credential_redaction::shared()
                     .begin_run()
                     .with_enabled(action.pins.credential_redaction_enabled),
@@ -9583,6 +9748,7 @@ fn publish_reviewed(
         mallard_infrastructure::bundle_engine::HeadToken,
     )>,
     selected_actions: Vec<ConversationPlanAction>,
+    prepared_codex: PreparedCodexPublications,
     updated_at: u64,
     on_progress: &mut dyn FnMut(FetchProgress),
     on_phase: &mut dyn FnMut(&str, Duration),
@@ -9610,6 +9776,7 @@ fn publish_reviewed(
         previous,
         expected_head,
         &selected_actions,
+        prepared_codex,
         updated_at,
         credential_redaction_enabled,
     )?;
@@ -10084,6 +10251,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
     let ThreadReview {
         entries: reviewed_entries,
         push_actions: mut selected_actions,
+        prepared_codex,
         provider_errors,
         ..
     } = review;
@@ -10130,6 +10298,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
         capture,
         observed,
         selected_actions,
+        prepared_codex,
         pushed_at,
         on_progress,
         &mut *on_phase,
@@ -11210,7 +11379,7 @@ fn apply_prepared_pull_conversation(
                     main.parent().ok_or("parent directory is missing")?,
                 )?
             } else {
-                RolloutLookup::new(home).find(id)?.is_some()
+                RolloutLookup::new(home).find_current(id)?.is_some()
             };
             if present {
                 return Err("Missing child returned after review. Review Pull again.".into());
@@ -20932,7 +21101,7 @@ mod tests {
     }
 
     #[test]
-    fn push_observation_reuse_skips_first_contact_reads_and_parses() {
+    fn push_observation_reuse_resolves_once_and_hands_snapshots_to_builders() {
         let fixture = PushReuseFixture::new(41);
         let review = fixture.warm();
         let metrics = mallard_infrastructure::sync_metrics::register_root(&fixture.home);
@@ -20955,12 +21124,15 @@ mod tests {
         let work = review_work.unwrap();
         assert_eq!(work.observation_reuse_hits, 41);
         assert_eq!(work.transcript_bytes_read, 0);
-        assert_eq!(work.full_graph_resolves, 0);
-        assert_eq!(work.records_parsed, 0);
+        assert_eq!(work.full_graph_resolves, 41);
+        assert!(
+            work.records_parsed > 0,
+            "selected roots are resolved during review"
+        );
         assert_eq!(
             metrics.snapshot().full_graph_resolves,
             41,
-            "builders still resolve every selected root"
+            "builders reuse the roots resolved during review"
         );
     }
 
@@ -21016,11 +21188,11 @@ mod tests {
         let metrics = mallard_infrastructure::sync_metrics::register_root(&fixture.home);
         let cached = review();
         assert_eq!(metrics.snapshot().observation_reuse_hits, 1);
-        assert_eq!(metrics.snapshot().full_graph_resolves, 0);
+        assert_eq!(metrics.snapshot().full_graph_resolves, 1);
         super::super::session_watch_service::session_watch_service()
             .force_rebaseline(&fixture.home);
         let fresh = review();
-        assert_eq!(metrics.snapshot().full_graph_resolves, 1);
+        assert_eq!(metrics.snapshot().full_graph_resolves, 2);
         assert_eq!(cached.push_actions.len(), 1);
         assert_eq!(fresh.push_actions.len(), 1);
         assert_eq!(cached.push_actions[0].action, fresh.push_actions[0].action);
@@ -21119,6 +21291,110 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec(&cached).unwrap()).unwrap();
         assert!(decoded.push_reuse.is_none());
         assert!(!matches(&decoded));
+    }
+
+    fn add_reverted_rollout(fixture: &PushReuseFixture) -> PathBuf {
+        let old = std::fs::read(&fixture.source).unwrap();
+        let ordinal = old
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .count() as u64;
+        let mut bytes = Vec::new();
+        let new = command_test_transcript(
+            &fixture.provider_id,
+            &fixture._temp.path().join("project"),
+            &[("m-2", "user", "replacement turn")],
+        );
+        for (index, line) in new
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .enumerate()
+        {
+            let mut record: serde_json::Value = serde_json::from_slice(line).unwrap();
+            record["ordinal"] = serde_json::json!(ordinal + index as u64);
+            if index == 0 {
+                record["payload"]["history_base"] = serde_json::json!({
+                    "thread_id": fixture.provider_id,
+                    "end_ordinal_exclusive": ordinal,
+                    "end_byte_offset": old.len(),
+                });
+            }
+            serde_json::to_writer(&mut bytes, &record).unwrap();
+            bytes.push(b'\n');
+        }
+        let path = fixture.source.parent().unwrap().join(format!(
+            "rollout-2026-09-13T00-19-15-{}_revert1.jsonl",
+            fixture.provider_id
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn push_reverted_rollout_uses_historical_snapshot_after_review() {
+        let fixture = PushReuseFixture::new(1);
+        let current = add_reverted_rollout(&fixture);
+        let review = fixture.warm();
+        let mut removed = false;
+        let result = push_bundle_reviewed_with_progress(
+            &fixture.repo,
+            &fixture.project.local_project_id,
+            &fixture.storage,
+            recommended_review_recipe(&review, &fixture.storage),
+            empty_project_content_review(),
+            &mut |_| {},
+            &mut |phase, _| {
+                if phase == "review selected conversations" {
+                    std::fs::remove_file(&fixture.source).unwrap();
+                    removed = true;
+                }
+            },
+        )
+        .unwrap();
+        assert!(removed);
+        assert!(result.success, "{result:?}");
+        assert!(current.is_file());
+        let (_, engine) = storage_engine(&fixture.repo, &fixture.storage).unwrap();
+        let snapshot = engine.inspect(&fixture.project.bundle_id).unwrap();
+        assert_eq!(snapshot.manifest.all_conversations().count(), 1);
+    }
+
+    #[test]
+    fn push_rejects_a_new_current_filename_without_changes_to_the_old_file() {
+        let fixture = PushReuseFixture::new(1);
+        let review = fixture.warm();
+        let stamp = jsonl_tail_io::SourceStamp::read(&fixture.source).unwrap();
+        let result = push_bundle_reviewed_with_progress(
+            &fixture.repo,
+            &fixture.project.local_project_id,
+            &fixture.storage,
+            recommended_review_recipe(&review, &fixture.storage),
+            empty_project_content_review(),
+            &mut |_| {},
+            &mut |phase, _| {
+                if phase == "review selected conversations" {
+                    add_reverted_rollout(&fixture);
+                }
+            },
+        );
+        stamp.verify(&fixture.source).unwrap();
+        assert!(
+            result
+                .as_ref()
+                .map(|result| !result.success)
+                .unwrap_or(true),
+            "{result:?}"
+        );
+        let (_, engine) = storage_engine(&fixture.repo, &fixture.storage).unwrap();
+        assert_eq!(
+            engine
+                .inspect(&fixture.project.bundle_id)
+                .unwrap()
+                .manifest
+                .all_conversations()
+                .count(),
+            0
+        );
     }
 
     #[test]
@@ -21545,7 +21821,7 @@ mod tests {
         );
 
         // Quiet watcher: the next comparison serves inventory and
-        // observation from the caches with zero local filesystem work.
+        // observation from the caches, with a filename selection check.
         let before_quiet = metrics.snapshot();
         let quiet = get_project_thread_sync_comparison_with_repository(
             &repo,
@@ -21555,7 +21831,10 @@ mod tests {
         .unwrap();
         let delta = metrics.snapshot().delta_since(&before_quiet);
         assert_eq!(delta.files_head_read, 0, "inventory reused, no head scan");
-        assert_eq!(delta.directories_visited, 0, "no tree walk");
+        assert_eq!(
+            delta.directories_visited, 4,
+            "check current rollout selection without parsing"
+        );
         assert_eq!(delta.probe_bytes_read, 0, "observation reused, no probe");
         assert_eq!(delta.append_bytes_read, 0);
         assert_eq!(delta.transcript_bytes_read, 0);

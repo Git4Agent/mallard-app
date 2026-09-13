@@ -257,17 +257,16 @@ pub fn observe_tree(
             let previous = previous
                 .and_then(|tree| tree.children.get(&key))
                 .filter(|child| child.metadata.provider_thread_id == id);
-            let path = match previous {
-                Some(child) => PathBuf::from(&child.discovery.mapping.root_path),
-                None => match lookup.find(&id)? {
-                    Some(path) => path,
-                    None => {
-                        tree.missing.insert(key.clone());
-                        pending.push((Some(key), id, BTreeMap::new()));
-                        continue;
-                    }
-                },
+            let path = match lookup.find_current(&id)? {
+                Some(path) => path,
+                None => {
+                    tree.missing.insert(key.clone());
+                    pending.push((Some(key), id, BTreeMap::new()));
+                    continue;
+                }
             };
+            let previous =
+                previous.filter(|child| Path::new(&child.discovery.mapping.root_path) == path);
             if std::fs::symlink_metadata(&path)
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
             {
@@ -370,7 +369,7 @@ pub fn observe_tree(
                                 &path,
                                 bytes.clone(),
                                 stamp.clone(),
-                                &|id| lookup.find(id),
+                                &|id| lookup.find_rollout(id),
                             )?;
                         if !resolved_boundary(&metadata, &resolved) {
                             tree.header_dependencies.push(path);
@@ -510,6 +509,7 @@ pub fn rewrite_references(record: &mut Value, identities: &BTreeMap<String, Stri
 }
 
 /// One bounded filename inventory per operation. No unrelated body reads.
+/// One bounded provider inventory. Current selections follow native filename order; history references always name physical rollout IDs.
 pub struct RolloutLookup {
     home: PathBuf,
     paths: std::sync::OnceLock<Result<Vec<PathBuf>, String>>,
@@ -523,7 +523,7 @@ impl RolloutLookup {
         }
     }
 
-    pub fn find(&self, id: &str) -> Result<Option<PathBuf>, String> {
+    fn paths(&self) -> Result<&[PathBuf], String> {
         let paths = self
             .paths
             .get_or_init(|| {
@@ -569,17 +569,53 @@ impl RolloutLookup {
             })
             .as_ref()
             .map_err(Clone::clone)?;
-        let suffix = format!("-{id}.jsonl");
-        let mut matches = paths.iter().filter(|path| {
+        Ok(paths)
+    }
+
+    pub fn find_rollout(&self, id: &str) -> Result<Option<PathBuf>, String> {
+        let original = format!("-{id}.jsonl");
+        let reverted = format!("_{id}.jsonl");
+        let mut matches = self.paths()?.iter().filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(&suffix))
+                .is_some_and(|name| name.ends_with(&original) || name.ends_with(&reverted))
         });
         let found = matches.next().cloned();
         if matches.next().is_some() {
             return Err("Codex rollout identity has multiple files".into());
         }
         Ok(found)
+    }
+
+    pub fn find_current(&self, thread_id: &str) -> Result<Option<PathBuf>, String> {
+        let original = format!("-{thread_id}.jsonl");
+        let reverted = format!("-{thread_id}_");
+        let candidates: Vec<_> = self
+            .paths()?
+            .iter()
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(&original) || name.contains(&reverted))
+            })
+            .cloned()
+            .collect();
+        self.select_current(thread_id, &candidates)
+    }
+
+    pub fn select_current(
+        &self,
+        thread_id: &str,
+        candidates: &[PathBuf],
+    ) -> Result<Option<PathBuf>, String> {
+        crate::codex_rollout_selection::select_current(thread_id, candidates)
+    }
+
+    pub fn verify_current(&self, thread_id: &str, path: &Path) -> Result<(), String> {
+        if Self::new(&self.home).find_current(thread_id)?.as_deref() != Some(path) {
+            return Err(PUSH_CHANGED.into());
+        }
+        Ok(())
     }
 }
 
@@ -731,11 +767,28 @@ impl CapturedTree {
         }
         Ok(())
     }
+    /// Historical snapshots are immutable inputs after capture. Only each
+    /// child's current role retains a live-file freshness requirement.
     pub fn verify_sources(&self) -> Result<(), String> {
         for child in self.children.values() {
-            for (path, (_, stamp)) in &child.sources {
-                stamp.verify(path).map_err(|_| PUSH_CHANGED.to_string())?;
-            }
+            child
+                .sources
+                .get(&child.path)
+                .ok_or("child source stamp is missing")?
+                .1
+                .verify(&child.path)
+                .map_err(|_| PUSH_CHANGED.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn verify_current(&self, lookup: &RolloutLookup) -> Result<(), String> {
+        self.verify_sources()?;
+        for child in self.children.values() {
+            lookup.verify_current(&child.resolved.leaf_meta.id, &child.path)?;
+        }
+        for (path, metadata, _) in &self.headers {
+            lookup.verify_current(&metadata.provider_thread_id, path)?;
         }
         Ok(())
     }
@@ -886,7 +939,7 @@ fn capture_tree_references(
         let candidates = child_candidates(installed, owner_key.as_ref(), references)?;
         for (key, (id, required)) in candidates {
             let path = lookup
-                .find(&id)?
+                .find_current(&id)?
                 .ok_or("installed Codex child file is missing")?;
             let meta = read_child_metadata(&path, &id)?;
             if meta.spawning_parent_id.as_deref() != Some(owner_id.as_str()) {
@@ -922,7 +975,7 @@ fn capture_tree_references(
                 &path,
                 bytes.clone(),
                 stamp.clone(),
-                &|id| lookup.find(id),
+                &|id| lookup.find_rollout(id),
             )?;
             total = total
                 .checked_add(
@@ -1227,13 +1280,13 @@ mod tests {
                 ),
             );
         }
-        let path = lookup.find("T").unwrap().unwrap();
+        let path = lookup.find_current("T").unwrap().unwrap();
         let (bytes, stamp) = crate::jsonl_tail_io::read_snapshot(&path).unwrap();
         let (resolved, sources) = crate::codex_history_graph::resolve_captured_codex_root(
             &path,
             bytes.into(),
             stamp,
-            &|id| lookup.find(id),
+            &|id| lookup.find_rollout(id),
         )
         .unwrap();
         let main = crate::codex_standalone_builder::encode_codex_tree_member(
@@ -1506,7 +1559,7 @@ mod tests {
             &path,
             bytes.clone(),
             stamp.clone(),
-            &|id| lookup.find(id),
+            &|id| lookup.find_rollout(id),
         )
         .unwrap();
         let seeded = crate::codex_history_graph::seed_codex_root(&resolved, &bytes, None).unwrap();
@@ -1551,7 +1604,10 @@ mod tests {
         let work = metrics.snapshot().delta_since(&before);
         assert_eq!(work.transcript_bytes_read, 0);
         assert_eq!(work.full_graph_resolves, 0);
-        assert_eq!(work.directories_visited, 0);
+        assert_eq!(
+            work.directories_visited, 1,
+            "recheck current rollout filenames"
+        );
         let path = home.path().join("sessions/rollout-D.jsonl");
         let record = json!({"ordinal":2,"timestamp":"2026-09-08T00:01:00Z","type":"response_item","payload":{"type":"message","id":"follow-up","role":"user","content":"next"}});
         writeln!(

@@ -571,6 +571,33 @@ mod tests {
             let canonical = canonical_json(value);
             assert_eq!(canonical, expected.as_bytes(), "{input}");
             assert_eq!(sha256_hex(&canonical), digest, "{input}");
+            let reparsed: Value = serde_json::from_slice(&canonical).unwrap();
+            assert_eq!(canonical_json(reparsed), canonical, "{input}");
+        }
+    }
+
+    #[test]
+    fn canonical_json_preserves_float_bits_on_roundtrip() {
+        for input in [
+            "0.99177921181141328",
+            "51.248178375505404",
+            "-0.0",
+            "0.0",
+            "1.0",
+            "1e-6",
+            "1e20",
+            "1e99",
+            "5e-324",
+            "2.2250738585072014e-308",
+            "1.7976931348623157e308",
+        ] {
+            let value: Value = serde_json::from_str(input).unwrap();
+            let bits = value.as_f64().unwrap().to_bits();
+            let canonical = canonical_json(value);
+            let reparsed: Value = serde_json::from_slice(&canonical).unwrap();
+            // Float equality does not distinguish positive and negative zero.
+            assert_eq!(reparsed.as_f64().unwrap().to_bits(), bits, "{input}");
+            assert_eq!(canonical_json(reparsed), canonical, "{input}");
         }
     }
 

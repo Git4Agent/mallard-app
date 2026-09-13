@@ -6,6 +6,7 @@ pub mod actions;
 pub mod discovery;
 pub mod history;
 pub mod materialization;
+mod timeline_sources;
 
 use super::traits::{
     shell_quote, AfterPullActionOffer, MaintenanceActionDescriptor, MaintenanceActionScope,
@@ -359,7 +360,7 @@ impl SessionAdapter for CodexAdapter {
         child: &SessionChildIdentity,
     ) -> Result<Option<std::path::PathBuf>, String> {
         let Some(path) = crate::codex_subagents::RolloutLookup::new(provider_home)
-            .find(&child.provider_agent_id)?
+            .find_current(&child.provider_agent_id)?
         else {
             return Ok(None);
         };
@@ -378,6 +379,15 @@ impl SessionAdapter for CodexAdapter {
         context: &SessionTimelineContext<'_>,
     ) -> Result<SessionTimelineIndex, String> {
         history::build_timeline_index(path, context)
+    }
+
+    fn summarize_timeline(
+        &self,
+        path: &Path,
+        index: &SessionTimelineIndex,
+        context: &SessionTimelineContext<'_>,
+    ) -> Result<SessionFileSummary, String> {
+        history::summarize_timeline(path, index, context)
     }
 
     fn read_timeline_page(
@@ -404,8 +414,9 @@ impl SessionAdapter for CodexAdapter {
         path: &Path,
         index: &SessionTimelineIndex,
         event_id: &str,
+        context: &SessionTimelineContext<'_>,
     ) -> Result<SessionEventDetail, String> {
-        history::read_event_detail(path, index, event_id)
+        history::read_event_detail(path, index, event_id, context)
     }
 
     fn available_actions(

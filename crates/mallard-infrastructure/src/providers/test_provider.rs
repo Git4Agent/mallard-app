@@ -265,6 +265,7 @@ impl SessionAdapter for TestProviderAdapter {
         path: &Path,
         index: &SessionTimelineIndex,
         event_id: &str,
+        _context: &SessionTimelineContext<'_>,
     ) -> Result<SessionEventDetail, String> {
         super::claude::history::read_event_detail(path, index, event_id)
     }

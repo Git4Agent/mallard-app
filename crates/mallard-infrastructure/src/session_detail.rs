@@ -386,7 +386,7 @@ fn snapshot_id_with_limits(
 ) -> String {
     sha256_hex(
         format!(
-            "session-detail-v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            "session-detail-v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
             session.provider,
             session.resource_id,
             session.file_size,
@@ -394,7 +394,8 @@ fn snapshot_id_with_limits(
             timeline_version,
             preview_budget_bytes,
             conversation_limit_bytes,
-            session.pulled_children_excluded
+            session.pulled_children_excluded,
+            session.transcript_path.display()
         )
         .as_bytes(),
     )
@@ -607,6 +608,39 @@ fn sniff_markdown_image_mime(bytes: &[u8]) -> Option<&'static str> {
 }
 
 fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetailResult<()> {
+    let file_size = if index.sources.is_empty() {
+        file_size
+    } else {
+        if index.sources.len() > crate::codex_rollout::MAX_CODEX_FORK_DEPTH + 1 {
+            return Err(invalid_request(
+                "Timeline source count exceeds the history limit.",
+            ));
+        }
+        let mut total = 0u64;
+        let mut paths = BTreeSet::new();
+        for source in &index.sources {
+            if !safe_relative_path(&source.relative_path)
+                || source.relative_path.len() > 4096
+                || !paths.insert(&source.relative_path)
+            {
+                return Err(invalid_request("Timeline source path is invalid."));
+            }
+            total = total
+                .checked_add(source.length)
+                .filter(|total| *total <= crate::provider_capture::MAX_CAPTURE_BYTES)
+                .ok_or_else(|| {
+                    invalid_request("Timeline source bytes exceed the history limit.")
+                })?;
+        }
+        if index
+            .sources
+            .last()
+            .is_some_and(|source| source.length > file_size)
+        {
+            return Err(invalid_request("Timeline leaf exceeds the current file."));
+        }
+        total
+    };
     if index.events.len() > MAX_TIMELINE_EVENTS {
         return Err(SessionDetailError::new(
             SessionDetailErrorCode::ProviderError,
@@ -816,6 +850,7 @@ fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetail
     }
     Ok(())
 }
+
 
 fn validate_page_slice(
     slice: &SessionTimelinePageSlice,
@@ -1314,7 +1349,7 @@ fn load_or_build_index(
             ));
         }
         validate_index(&index, expected_size)?;
-        let summary = summarize_session(registry, session)?;
+        let summary = summarize_session(registry, session, &index)?;
         refresh_file_state(session)?;
         if session.file_size != expected_size || session.modified_nanos != expected_nanos {
             if attempt == 0 {
@@ -1606,6 +1641,7 @@ pub fn encode_session_event_detail_response(
 fn summarize_session(
     registry: &AgentProviderRegistry,
     session: &ResolvedLocalSession,
+    index: &SessionTimelineIndex,
 ) -> SessionDetailResult<crate::providers::SessionFileSummary> {
     let adapter = registry.require(&session.provider).map_err(|_| {
         SessionDetailError::new(
@@ -1613,16 +1649,14 @@ fn summarize_session(
             "No registered provider can read this session.",
         )
     })?;
-    let summary = match &session.child {
-        Some(child) => adapter.summarize_child_file(&session.transcript_path, child),
-        None => adapter.summarize_file(&session.transcript_path),
-    }
-    .map_err(|_| {
-        SessionDetailError::new(
-            SessionDetailErrorCode::ProviderError,
-            "The provider could not summarize this local session.",
-        )
-    })?;
+    let summary = adapter
+        .summarize_timeline(&session.transcript_path, index, &session.timeline_context())
+        .map_err(|_| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider could not summarize this local session.",
+            )
+        })?;
     if summary.session_id != session.provider_session_id
         || summary.is_internal_subagent != session.child.is_some()
     {
@@ -1633,6 +1667,7 @@ fn summarize_session(
     }
     Ok(summary)
 }
+
 
 fn sanitize_boundary_text(value: &str, session: &ResolvedLocalSession) -> String {
     let transcript = session.transcript_path.to_string_lossy();
@@ -2193,7 +2228,12 @@ pub fn get_project_session_event_detail(
         )
     })?;
     let mut detail = adapter
-        .read_event_detail(&session.transcript_path, &index, event_id)
+        .read_event_detail(
+            &session.transcript_path,
+            &index,
+            event_id,
+            &session.timeline_context(),
+        )
         .map_err(|_| {
             SessionDetailError::new(
                 SessionDetailErrorCode::ProviderError,
@@ -2277,6 +2317,7 @@ mod tests {
 
     fn index_with_path(path: &str) -> SessionTimelineIndex {
         SessionTimelineIndex {
+            sources: Vec::new(),
             parser_version: 1,
             events: vec![SessionTimelineIndexEntry {
                 event_id: "event-1".to_string(),
@@ -2427,7 +2468,7 @@ mod tests {
         // Rebuilding this fixture cannot produce a valid session summary.
         fs::write(&session.transcript_path, b"null").unwrap();
         refresh_file_state(&mut session).unwrap();
-        assert!(summarize_session(&registry, &session).is_err());
+        assert!(summarize_session(&registry, &session, &index_with_path("safe.txt")).is_err());
         let mut entry = cache_entry_fixture();
         entry.provider = session.provider.clone();
         entry.modified_nanos = session.modified_nanos;
@@ -2540,6 +2581,14 @@ mod tests {
             base,
             snapshot_id_with_limits(&session, 1, 1024 * 1024, 50 * 1024 * 1024)
         );
+    }
+
+    #[test]
+    fn selected_rollout_path_changes_snapshot_even_with_equal_file_metadata() {
+        let mut session = sanitization_session();
+        let before = snapshot_id(&session, 6);
+        session.transcript_path = session.provider_home.join("reverted.jsonl");
+        assert_ne!(snapshot_id(&session, 6), before);
     }
 
     #[test]

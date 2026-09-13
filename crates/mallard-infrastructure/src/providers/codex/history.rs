@@ -3,6 +3,7 @@
 //! The neutral activity engine reaches this parser only through the Codex
 //! adapter.
 
+use super::timeline_sources::{capture, TimelineSources};
 use crate::app_settings::{
     conversation_file_limit_bytes, timeline_message_preview_bytes, timeline_page_content_bytes,
     timeline_tool_preview_bytes,
@@ -37,8 +38,8 @@ pub(crate) fn max_line_bytes() -> usize {
 const MAX_SUMMARY_CHARS: usize = 180;
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_AFFECTED_PATHS_PER_TOOL: usize = 1_024;
-/// 5: subagent activity indexes as agent calls, with child rollout pointers.
-pub(crate) const TIMELINE_PARSER_VERSION: u32 = 5;
+/// 6: timeline spans cover retained historical sources and the current rollout.
+pub(crate) const TIMELINE_PARSER_VERSION: u32 = 6;
 /// The head and tail of a child rollout its row is read from: the
 /// `session_meta` naming the agent, and the final message.
 const CHILD_WINDOW_BYTES: u64 = 256 * 1024;
@@ -578,6 +579,49 @@ pub(crate) fn summarize_rollout_file(path: &Path) -> Result<SessionFileSummary, 
 
 pub(crate) fn summarize_rollout_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String> {
     summarize_rollout_reader(&mut std::io::Cursor::new(bytes), "captured transcript")
+}
+
+/// Summarize retained history, while taking identity only from the current file.
+pub(crate) fn summarize_timeline(
+    path: &Path,
+    index: &SessionTimelineIndex,
+    context: &SessionTimelineContext<'_>,
+) -> Result<SessionFileSummary, String> {
+    let sources = TimelineSources::open(path, index, context.provider_home)?;
+    let mut parser = RolloutParser::new();
+    let last = sources.files.len() - 1;
+    let mut bytes = Vec::new();
+    for (position, (file, length)) in sources.files.into_iter().enumerate() {
+        let mut reader = BufReader::new(file.take(length));
+        loop {
+            match read_bounded_line(&mut reader, &mut bytes, max_line_bytes())
+                .map_err(|_| "cannot read timeline summary")?
+            {
+                BoundedLine::Eof => break,
+                BoundedLine::Oversized => {
+                    parser.metrics_complete = false;
+                    continue;
+                }
+                BoundedLine::Line => {}
+            }
+            if bytes.is_empty() {
+                continue;
+            }
+            match serde_json::from_slice::<Value>(&bytes) {
+                Ok(value) => {
+                    if position != last
+                        && crate::codex_rollout::structural_record_type(&value)
+                            == Some("session_meta")
+                    {
+                        continue;
+                    }
+                    parser.consume(&value);
+                }
+                Err(_) => parser.metrics_complete = false,
+            }
+        }
+    }
+    parser.finish()
 }
 
 /// Share each parsed record with lineage analysis and presentation. Drain after
@@ -1205,6 +1249,7 @@ impl TimelineBuilder {
             self.inferred_intermediate,
         );
         SessionTimelineIndex {
+            sources: Vec::new(),
             parser_version: TIMELINE_PARSER_VERSION,
             events: entries,
             counts,
@@ -2143,163 +2188,145 @@ pub(crate) fn build_timeline_index(
     path: &Path,
     context: &SessionTimelineContext<'_>,
 ) -> Result<SessionTimelineIndex, String> {
-    let metadata = std::fs::metadata(path)
-        .map_err(|error| format!("inspect '{}': {error}", path.display()))?;
-    if metadata.len() > conversation_file_limit_bytes() {
-        return Err(format!(
-            "Codex transcript '{}' exceeds {} bytes",
-            path.display(),
-            conversation_file_limit_bytes()
-        ));
-    }
-    let file = File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
-    let mut reader = BufReader::new(file);
     let mut canonical = TimelineBuilder::default();
     let mut legacy = TimelineBuilder::default();
-    // One filename inventory per index build, taken only when a spawn is
-    // met; a rollout without children never walks the sessions tree.
+    // One bounded inventory for both history references and child pointers.
     let lookup = RolloutLookup::new(context.provider_home);
     let mut bytes = Vec::new();
     let mut record_count = 0usize;
-    loop {
-        let record_start = reader
-            .stream_position()
-            .map_err(|error| format!("read '{}': {error}", path.display()))?;
-        let line = read_bounded_line(&mut reader, &mut bytes, max_line_bytes())
-            .map_err(|error| format!("read '{}': {error}", path.display()))?;
-        if line == BoundedLine::Eof {
-            break;
-        }
-        let record_end = reader
-            .stream_position()
-            .map_err(|error| format!("read '{}': {error}", path.display()))?;
-        record_count = record_count.saturating_add(1);
-        if record_count > crate::codex_rollout::MAX_CODEX_RECORDS {
-            canonical.mark_all_lower_bound(
-                "record_limit",
-                "The Codex transcript contains more records than Mallard can index.",
-            );
-            legacy.mark_all_lower_bound(
-                "record_limit",
-                "The Codex transcript contains more records than Mallard can index.",
-            );
-            break;
-        }
-        if line == BoundedLine::Oversized {
-            canonical.mark_all_lower_bound(
-                "oversized_record",
-                "At least one Codex record exceeded the 100-MiB timeline parsing limit.",
-            );
-            legacy.mark_all_lower_bound(
-                "oversized_record",
-                "At least one Codex record exceeded the 100-MiB timeline parsing limit.",
-            );
-            continue;
-        }
-        if bytes.is_empty() {
-            continue;
-        }
-        let value = match serde_json::from_slice::<Value>(&bytes) {
-            Ok(value) => value,
-            Err(_) => {
+    let (sources, contents) = capture(path, context.provider_home, &lookup)?;
+    let mut source_offset = 0;
+    'segments: for (segment, content) in sources.iter().zip(&contents) {
+        let mut reader = std::io::Cursor::new(&content[..segment.length as usize]);
+        loop {
+            let record_start = reader
+                .stream_position()
+                .map_err(|error| format!("read '{}': {error}", path.display()))?;
+            let line = read_bounded_line(&mut reader, &mut bytes, max_line_bytes())
+                .map_err(|error| format!("read '{}': {error}", path.display()))?;
+            if line == BoundedLine::Eof {
+                break;
+            }
+            let record_end = reader
+                .stream_position()
+                .map_err(|error| format!("read '{}': {error}", path.display()))?;
+            record_count = record_count.saturating_add(1);
+            if record_count > crate::codex_rollout::MAX_CODEX_RECORDS {
                 canonical.mark_all_lower_bound(
-                    "malformed_record",
-                    "At least one Codex record was malformed and could not be indexed.",
+                    "record_limit",
+                    "The Codex transcript contains more records than Mallard can index.",
                 );
                 legacy.mark_all_lower_bound(
-                    "malformed_record",
-                    "At least one Codex record was malformed and could not be indexed.",
+                    "record_limit",
+                    "The Codex transcript contains more records than Mallard can index.",
+                );
+                break 'segments;
+            }
+            if line == BoundedLine::Oversized {
+                canonical.mark_all_lower_bound(
+                    "oversized_record",
+                    "At least one Codex record exceeded the 100-MiB timeline parsing limit.",
+                );
+                legacy.mark_all_lower_bound(
+                    "oversized_record",
+                    "At least one Codex record exceeded the 100-MiB timeline parsing limit.",
                 );
                 continue;
             }
-        };
-        let source = source_span(record_start, record_end);
-        let timestamp = record_timestamp(&value);
-        let outer_type = normalized_type(value.get("type").and_then(Value::as_str));
-        let payload = value.get("payload").unwrap_or(&value);
-        // Both activity shapes name the same lifecycle; the canonical item
-        // form belongs to the item family, the event form to the legacy one.
-        if let Ok(Some(activity)) = SubagentActivity::from_record(&value) {
-            let transcript = (activity.kind == SubagentActivityKind::Started)
-                .then(|| {
-                    child_rollout_pointer(
-                        &lookup,
-                        context.provider_home,
-                        &activity.provider_thread_id,
-                    )
-                })
-                .flatten();
-            let payload_type = normalized_type(payload.get("type").and_then(Value::as_str));
-            if payload_type == "itemcompleted" {
-                canonical.saw_family = true;
-                let turn_id = payload
-                    .get("item")
-                    .map(|item| canonical_turn_id(payload, item, source))
-                    .unwrap_or_else(|| canonical.turn_or_orphan());
-                canonical.observe_agent_activity(&activity, source, timestamp, turn_id, transcript);
-            } else {
-                let turn_id = legacy_turn(&mut legacy);
-                legacy.observe_agent_activity(&activity, source, timestamp, turn_id, transcript);
+            if bytes.is_empty() {
+                continue;
             }
-            continue;
-        }
-        match outer_type.as_str() {
-            "eventmsg" => {
-                let payload_type = normalized_type(payload.get("type").and_then(Value::as_str));
-                match payload_type.as_str() {
-                    "itemstarted" => consume_canonical_item(
-                        &mut canonical,
-                        payload,
-                        source,
-                        timestamp,
-                        false,
-                        context,
-                    ),
-                    "itemcompleted" => consume_canonical_item(
-                        &mut canonical,
-                        payload,
-                        source,
-                        timestamp,
-                        true,
-                        context,
-                    ),
-                    _ => consume_legacy_event(&mut legacy, payload, source, timestamp, context),
+            let value = match serde_json::from_slice::<Value>(&bytes) {
+                Ok(value) => value,
+                Err(_) => {
+                    canonical.mark_all_lower_bound(
+                        "malformed_record",
+                        "At least one Codex record was malformed and could not be indexed.",
+                    );
+                    legacy.mark_all_lower_bound(
+                        "malformed_record",
+                        "At least one Codex record was malformed and could not be indexed.",
+                    );
+                    continue;
                 }
+            };
+            let source = source_span(source_offset + record_start, source_offset + record_end);
+            let timestamp = record_timestamp(&value);
+            let outer_type = normalized_type(value.get("type").and_then(Value::as_str));
+            let payload = value.get("payload").unwrap_or(&value);
+            // Both activity shapes name the same lifecycle; the canonical item
+            // form belongs to the item family, the event form to the legacy one.
+            if let Ok(Some(activity)) = SubagentActivity::from_record(&value) {
+                let transcript = (activity.kind == SubagentActivityKind::Started)
+                    .then(|| {
+                        child_rollout_pointer(
+                            &lookup,
+                            context.provider_home,
+                            &activity.provider_thread_id,
+                        )
+                    })
+                    .flatten();
+                let payload_type = normalized_type(payload.get("type").and_then(Value::as_str));
+                if payload_type == "itemcompleted" {
+                    canonical.saw_family = true;
+                    let turn_id = payload
+                        .get("item")
+                        .map(|item| canonical_turn_id(payload, item, source))
+                        .unwrap_or_else(|| canonical.turn_or_orphan());
+                    canonical
+                        .observe_agent_activity(&activity, source, timestamp, turn_id, transcript);
+                } else {
+                    let turn_id = legacy_turn(&mut legacy);
+                    legacy
+                        .observe_agent_activity(&activity, source, timestamp, turn_id, transcript);
+                }
+                continue;
             }
-            "responseitem" => {
-                consume_legacy_response_item(&mut legacy, payload, source, timestamp, context)
+            match outer_type.as_str() {
+                "eventmsg" => {
+                    let payload_type = normalized_type(payload.get("type").and_then(Value::as_str));
+                    match payload_type.as_str() {
+                        "itemstarted" => consume_canonical_item(
+                            &mut canonical,
+                            payload,
+                            source,
+                            timestamp,
+                            false,
+                            context,
+                        ),
+                        "itemcompleted" => consume_canonical_item(
+                            &mut canonical,
+                            payload,
+                            source,
+                            timestamp,
+                            true,
+                            context,
+                        ),
+                        _ => consume_legacy_event(&mut legacy, payload, source, timestamp, context),
+                    }
+                }
+                "responseitem" => {
+                    consume_legacy_response_item(&mut legacy, payload, source, timestamp, context)
+                }
+                _ => {}
             }
-            _ => {}
         }
+        source_offset += segment.length;
     }
-    if canonical.saw_family {
-        Ok(canonical.finalize())
+    let mut index = if canonical.saw_family {
+        canonical.finalize()
     } else {
-        Ok(legacy.finalize())
-    }
+        legacy.finalize()
+    };
+    index.sources = sources;
+    Ok(index)
 }
 
-fn read_source_value(file: &mut File, span: SessionSourceSpan) -> Result<Value, String> {
-    if span.length == 0 || span.length > (max_line_bytes() as u64).saturating_add(2) {
-        return Err("timeline source span is outside the bounded record limit".to_string());
-    }
-    let file_len = file
-        .metadata()
-        .map_err(|error| format!("inspect timeline transcript: {error}"))?
-        .len();
-    let end = span
-        .offset
-        .checked_add(span.length)
-        .ok_or_else(|| "timeline source span overflowed".to_string())?;
-    if end > file_len {
-        return Err("timeline source span exceeds the current transcript".to_string());
-    }
-    file.seek(SeekFrom::Start(span.offset))
-        .map_err(|error| format!("seek timeline transcript: {error}"))?;
-    let mut bytes = vec![0u8; span.length as usize];
-    file.read_exact(&mut bytes)
-        .map_err(|error| format!("read timeline transcript: {error}"))?;
-    serde_json::from_slice(&bytes).map_err(|_| "timeline source record is malformed".to_string())
+fn read_source_value(
+    sources: &mut TimelineSources,
+    span: SessionSourceSpan,
+) -> Result<Value, String> {
+    sources.read_value(span)
 }
 
 fn timeline_text(value: &Value, kind: SessionTimelineEventKind) -> Option<String> {
@@ -2534,7 +2561,7 @@ fn bounded_text(value: Option<String>, limit: usize) -> (Option<String>, bool) {
 }
 
 fn tool_payloads(
-    file: &mut File,
+    file: &mut TimelineSources,
     entry: &SessionTimelineIndexEntry,
 ) -> Result<(Option<Value>, Option<String>), String> {
     let tool = entry
@@ -2593,8 +2620,7 @@ pub(crate) fn read_timeline_page(
     if index.parser_version != TIMELINE_PARSER_VERSION {
         return Err("Codex timeline index version is stale".to_string());
     }
-    let mut file =
-        File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
+    let mut file = TimelineSources::open(path, index, context.provider_home)?;
     let limit = query.limit.clamp(1, 50);
     let start = query.start_index.unwrap_or(0).min(index.events.len());
     let mut summaries = BTreeMap::<String, SessionTurnToolSummary>::new();
@@ -2735,7 +2761,7 @@ fn child_rollout_pointer(
     provider_home: &Path,
     thread_id: &str,
 ) -> Option<String> {
-    let path = lookup.find(thread_id).ok().flatten()?;
+    let path = lookup.find_current(thread_id).ok().flatten()?;
     let relative = path.strip_prefix(provider_home).ok()?;
     let mut pointer = String::new();
     for component in relative.components() {
@@ -3014,6 +3040,7 @@ pub(crate) fn read_event_detail(
     path: &Path,
     index: &SessionTimelineIndex,
     event_id: &str,
+    context: &SessionTimelineContext<'_>,
 ) -> Result<SessionEventDetail, String> {
     if index.parser_version != TIMELINE_PARSER_VERSION {
         return Err("Codex timeline index version is stale".to_string());
@@ -3027,8 +3054,7 @@ pub(crate) fn read_event_detail(
         .tool
         .as_ref()
         .ok_or_else(|| "only tool-call events have expandable detail".to_string())?;
-    let mut file =
-        File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
+    let mut file = TimelineSources::open(path, index, context.provider_home)?;
     let (arguments, result) = tool_payloads(&mut file, entry)?;
     // The pane shows the argument as written, pretty-printed; only the row's
     // one-line label reads its structure.
@@ -3069,8 +3095,169 @@ mod tests {
             provider_session_id: "session-1",
             project_root,
             project_root_aliases: &[],
-            provider_home: project_root,
+            provider_home: project_root.parent().unwrap_or(project_root),
             child: None,
+        }
+    }
+
+    fn paginated_bytes(start: u64, values: Vec<Value>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (i, mut value) in values.into_iter().enumerate() {
+            value["ordinal"] = json!(start + i as u64);
+            serde_json::to_writer(&mut bytes, &value).unwrap();
+            bytes.push(b'\n');
+        }
+        bytes
+    }
+
+    fn historical_fixture(home: &Path, reverted: bool) -> (PathBuf, PathBuf) {
+        let sessions = home.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let old = sessions.join("rollout-2026-09-12T01-00-00-base.jsonl");
+        let leaf_id = if reverted { "base" } else { "session-1" };
+        let current = sessions.join(format!(
+            "rollout-2026-09-13T01-00-00-{leaf_id}_current.jsonl"
+        ));
+        let retained = paginated_bytes(
+            0,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"base","cwd":home,"history_mode":"paginated"}}),
+                json!({"type":"event_msg","payload":{"type":"user_message","message":"Retained prompt"}}),
+                json!({"type":"response_item","payload":{"type":"function_call","id":"call-message","call_id":"call-1","name":"exec_command","arguments":"{\"cmd\":\"echo retained\"}"}}),
+            ],
+        );
+        let mut old_bytes = retained.clone();
+        old_bytes.extend(paginated_bytes(3, vec![
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"DISCARDED prompt"}}),
+        ]));
+        fs::write(&old, old_bytes).unwrap();
+        fs::write(&current, paginated_bytes(3, vec![
+            json!({"type":"session_meta","payload":{"id":leaf_id,"cwd":home,"history_mode":"paginated","history_base":{"thread_id":"base","end_ordinal_exclusive":3,"end_byte_offset":retained.len()}}}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","id":"result-message","call_id":"call-1","output":"Retained result"}}),
+            json!({"type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"Replacement response"}}),
+        ])).unwrap();
+        (old, current)
+    }
+
+    #[test]
+    fn historical_prefix_and_revert_use_one_timeline_and_cross_file_tool_result() {
+        for reverted in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let (old, current) = historical_fixture(temp.path(), reverted);
+            let mut context = context(temp.path());
+            context.provider_home = temp.path();
+            let index = build_timeline_index(&current, &context).unwrap();
+            assert_eq!(index.sources.len(), 2);
+            let cached: SessionTimelineIndex =
+                serde_json::from_slice(&serde_json::to_vec(&index).unwrap()).unwrap();
+            let mut query = SessionTimelineQuery {
+                start_index: None,
+                limit: 1,
+                included_event_kinds: BTreeSet::from([
+                    SessionTimelineEventKind::Prompt,
+                    SessionTimelineEventKind::Response,
+                    SessionTimelineEventKind::ToolCall,
+                ]),
+                included_tool_categories: BTreeSet::from([SessionToolCategory::Shell]),
+                turn_id: None,
+            };
+            let mut events = Vec::new();
+            loop {
+                let page = read_timeline_page(&current, &cached, &query, &context).unwrap();
+                events.extend(page.events);
+                match page.next_index {
+                    Some(next) => query.start_index = Some(next),
+                    None => break,
+                }
+            }
+            assert_eq!(events.len(), 3);
+            assert_eq!(events[0].text.as_deref(), Some("Retained prompt"));
+            assert_eq!(events[2].text.as_deref(), Some("Replacement response"));
+            assert_eq!(
+                events
+                    .iter()
+                    .map(|event| &event.event_id)
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                3
+            );
+            let tool = cached
+                .events
+                .iter()
+                .find(|event| event.kind == SessionTimelineEventKind::ToolCall)
+                .unwrap();
+            let detail = read_event_detail(&current, &cached, &tool.event_id, &context).unwrap();
+            assert!(detail.arguments.unwrap().contains("echo retained"));
+            assert_eq!(detail.result.as_deref(), Some("Retained result"));
+            let summary = summarize_timeline(&current, &cached, &context).unwrap();
+            assert_eq!(
+                summary.session_id,
+                if reverted { "base" } else { "session-1" }
+            );
+            assert_eq!(summary.user_rounds, 1);
+            assert_eq!(summary.agent_messages, 1);
+            assert_eq!(summary.summary.as_deref(), Some("Retained prompt"));
+            assert!(!serde_json::to_string(&events)
+                .unwrap()
+                .contains("DISCARDED"));
+            // Historical changes do not invalidate the cache. Bytes after the
+            // retained cutoff still cannot enter the timeline.
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&old)
+                .unwrap()
+                .write_all(b"discarded later append\n")
+                .unwrap();
+            assert!(read_timeline_page(&current, &cached, &query, &context).is_ok());
+            fs::write(&old, b"{}\n").unwrap();
+            assert!(read_timeline_page(&current, &cached, &query, &context).is_err());
+            fs::remove_file(&old).unwrap();
+            assert!(build_timeline_index(&current, &context).is_err());
+            assert!(read_event_detail(&current, &cached, &tool.event_id, &context).is_err());
+        }
+    }
+
+    #[test]
+    fn historical_timeline_rejects_invalid_cutoff_cycle_and_source_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let (old, current) = historical_fixture(temp.path(), true);
+        let mut context = context(temp.path());
+        context.provider_home = temp.path();
+        let bytes = fs::read(&current).unwrap();
+        let mut values: Vec<Value> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| serde_json::from_slice(raw).unwrap())
+            .collect();
+        values[0]["payload"]["history_base"]["end_byte_offset"] = json!(1);
+        fs::write(&current, paginated_bytes(3, values.clone())).unwrap();
+        assert!(build_timeline_index(&current, &context).is_err());
+        values[0]["payload"]["history_base"]["thread_id"] = json!("current");
+        fs::write(&current, paginated_bytes(3, values)).unwrap();
+        assert!(build_timeline_index(&current, &context)
+            .unwrap_err()
+            .contains("cycle"));
+        fs::write(&current, bytes).unwrap();
+        let mut index = build_timeline_index(&current, &context).unwrap();
+        let mut reader = TimelineSources::open(&current, &index, context.provider_home).unwrap();
+        assert!(reader
+            .read_value(SessionSourceSpan {
+                offset: index.sources[0].length - 1,
+                length: 2
+            })
+            .is_err());
+        let original_index = index.clone();
+        index.sources[0].relative_path = "../outside.jsonl".into();
+        assert!(TimelineSources::open(&current, &index, context.provider_home).is_err());
+        #[cfg(unix)]
+        {
+            fs::remove_file(&old).unwrap();
+            std::os::unix::fs::symlink(&current, &old).unwrap();
+            assert!(
+                TimelineSources::open(&current, &original_index, context.provider_home).is_err()
+            );
+            assert!(build_timeline_index(&current, &context).is_err());
         }
     }
 
@@ -3735,7 +3922,13 @@ mod tests {
             "the summary moves to the leading event that survives filtering"
         );
 
-        let detail = read_event_detail(&transcript, &index, &tool_entry.event_id).unwrap();
+        let detail = read_event_detail(
+            &transcript,
+            &index,
+            &tool_entry.event_id,
+            &context(&project_root),
+        )
+        .unwrap();
         assert!(detail.arguments.as_deref().unwrap().contains("src/lib.rs"));
         assert_eq!(detail.result.as_deref(), Some("file contents"));
     }
@@ -3829,7 +4022,13 @@ mod tests {
             .iter()
             .all(|path| !Path::new(path).is_absolute()));
 
-        let detail = read_event_detail(&transcript, &index, &tool_entry.event_id).unwrap();
+        let detail = read_event_detail(
+            &transcript,
+            &index,
+            &tool_entry.event_id,
+            &context(&project_root),
+        )
+        .unwrap();
         let arguments = detail.arguments.unwrap();
         assert!(arguments.contains(inside_alpha.to_string_lossy().as_ref()));
         assert!(arguments.contains(inside_beta.to_string_lossy().as_ref()));
@@ -3867,7 +4066,7 @@ mod tests {
             provider_session_id: "session-1",
             project_root: &canonical_root,
             project_root_aliases: &aliases,
-            provider_home: &canonical_root,
+            provider_home: temp.path(),
             child: None,
         };
 
@@ -3964,7 +4163,13 @@ mod tests {
         assert!(page.events[0].tool.as_ref().unwrap().result_truncated);
         assert!(preview.ends_with('…'));
         assert!(preview.len() <= timeline_tool_preview_bytes());
-        let detail = read_event_detail(&transcript, &index, &tool_entry.event_id).unwrap();
+        let detail = read_event_detail(
+            &transcript,
+            &index,
+            &tool_entry.event_id,
+            &context(&project_root),
+        )
+        .unwrap();
         let detail_result = detail.result.as_ref().unwrap();
         assert!(detail.result_truncated);
         assert!(detail_result.len() > 64 * 1024);
@@ -4041,7 +4246,13 @@ mod tests {
                     .is_some_and(|tool| tool.provider_call_id == "tool-1")
             })
             .unwrap();
-        let detail = read_event_detail(&transcript, &index, &first_entry.event_id).unwrap();
+        let detail = read_event_detail(
+            &transcript,
+            &index,
+            &first_entry.event_id,
+            &context(&project_root),
+        )
+        .unwrap();
         let detail_bytes = detail.arguments.as_ref().map_or(0, String::len)
             + detail.result.as_ref().map_or(0, String::len);
         assert!(detail.arguments_truncated);

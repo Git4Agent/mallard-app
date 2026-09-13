@@ -3117,7 +3117,7 @@ fn assert_transcript_structure_and_history(
     assert_eq!(tool.status, SessionToolCallStatus::Completed);
     assert!(tool.affected_paths.is_empty());
     let detail = adapter
-        .read_event_detail(&path, &index, &tools[0].event_id)
+        .read_event_detail(&path, &index, &tools[0].event_id, &context)
         .expect("cannot expand production Claude Read detail");
     let source_project_root = read_marker_path
         .parent()

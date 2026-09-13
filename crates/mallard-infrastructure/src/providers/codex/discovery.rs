@@ -23,6 +23,8 @@ pub(super) fn discover(
     let mut discovery = SessionDiscovery::default();
     let mut selected_thread_ids = BTreeSet::new();
     let mut by_session: BTreeMap<String, usize> = BTreeMap::new();
+    let mut candidates: BTreeMap<String, Vec<std::path::PathBuf>> = BTreeMap::new();
+    let mut metadata = BTreeMap::new();
     let mut canonical_homes = BTreeMap::new();
     let mut visited_entries = 0_usize;
     let mut visited_files = 0_usize;
@@ -65,50 +67,49 @@ pub(super) fn discover(
                     continue;
                 }
             };
-            if !session_home_is_project_root(
-                context.project_root,
-                &meta.authorized_home,
-                &mut canonical_homes,
-            ) {
-                continue;
-            }
-            if meta.is_internal_subagent {
-                // Parent-child rollout selection and ID rewrites are not atomic.
-                discovery
-                    .excluded_subagent_session_ids
-                    .insert(meta.session_id);
-                continue;
-            }
-            // Codex can briefly leave the same transcript in both `sessions`
-            // and `archived_sessions` while an archive operation settles. A
-            // session ID is the stable resource identity, so keep the active
-            // `sessions` copy discovered first and ignore later copies.
-            if directory == "archived_sessions" {
-                if let Some(existing) = by_session.get(&meta.session_id) {
-                    let existing_path = discovery.sessions[*existing].physical_path.clone();
-                    discovery.warnings.push(format!(
-                        "ignored duplicate Codex session '{}' at '{}'; using '{}'",
-                        meta.session_id,
-                        entry.path().display(),
-                        existing_path.display(),
-                    ));
-                    continue;
-                }
-            }
-            selected_thread_ids.insert(meta.session_id.clone());
-            by_session.insert(meta.session_id.clone(), discovery.sessions.len());
-            discovery.sessions.push(DiscoveredSession {
-                session_id: meta.session_id.clone(),
-                physical_path: entry.path().to_path_buf(),
-                display_name: meta.session_id,
-                blocked_reason: inspect_candidate_files_with_limit(
-                    &canonical_home,
-                    &[entry.path().to_path_buf()],
-                    crate::app_settings::conversation_file_limit_bytes(),
-                )
-                .err(),
-            });
+            candidates
+                .entry(meta.session_id.clone())
+                .or_default()
+                .push(entry.path().to_path_buf());
+            metadata.insert(entry.path().to_path_buf(), meta);
         }
+    }
+    let lookup = crate::codex_subagents::RolloutLookup::new(&canonical_home);
+    for (session_id, mut paths) in candidates {
+        paths.sort();
+        let (physical_path, selection_error) = match lookup.select_current(&session_id, &paths) {
+            Ok(Some(path)) => (path, None),
+            Ok(None) => continue,
+            Err(error) => (paths[0].clone(), Some(error)),
+        };
+        let meta = &metadata[&physical_path];
+        if !session_home_is_project_root(
+            context.project_root,
+            &meta.authorized_home,
+            &mut canonical_homes,
+        ) {
+            continue;
+        }
+        if meta.is_internal_subagent {
+            discovery.excluded_subagent_session_ids.insert(session_id);
+            continue;
+        }
+        selected_thread_ids.insert(session_id.clone());
+        by_session.insert(session_id.clone(), discovery.sessions.len());
+        let blocked_reason = selection_error.or_else(|| {
+            inspect_candidate_files_with_limit(
+                &canonical_home,
+                std::slice::from_ref(&physical_path),
+                crate::app_settings::conversation_file_limit_bytes(),
+            )
+            .err()
+        });
+        discovery.sessions.push(DiscoveredSession {
+            display_name: session_id.clone(),
+            session_id,
+            physical_path,
+            blocked_reason,
+        });
     }
 
     let index = canonical_home.join("session_index.jsonl");

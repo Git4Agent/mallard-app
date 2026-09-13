@@ -465,7 +465,7 @@ URL, and fails closed for a missing, malformed, symlinked, oversized, or
 over-permissive file. `.env.local` is covered by the repository's `*.local`
 ignore rule and must never be committed.
 
-The current rollout fixtures have a hard `codex-cli 0.152.x` prerequisite. The
+The current rollout fixtures have a hard `codex-cli 0.154.x` prerequisite. The
 test rejects another CLI version before making a model request; update the
 current-format fixture in place before moving the gate to another version.
 
@@ -510,10 +510,8 @@ response. Each verifier operates on a disposable snapshot because Codex 0.152
 appends a turn even with `--ephemeral`; both authoritative homes must remain
 byte-identical.
 
-The Codex 0.152 API gate passed on September 1, 2026: all five provider-backed
-turns and twenty loopback resumes completed in one 65.67-second Rust test run.
-The earlier Codex 0.147 gate completed the same turn count in 75.91 seconds on
-August 19, 2026.
+The Codex 0.154.0 API gate passed on September 12, 2026: all five provider-backed
+turns and twenty loopback resumes completed in one 49.99-second Rust test run.
 
 See [`docs/PLAN_LIVE_CODEX_INTEGRATION_TEST.md`](./docs/PLAN_LIVE_CODEX_INTEGRATION_TEST.md)
 for the API topology, POC evidence, revision matrix, and safety assertions.
@@ -601,8 +599,8 @@ initialize its nested sandbox; the test still keeps Codex itself at
 detects the known nested-Seatbelt failure with a bounded, no-provider preflight
 before starting Cargo and prints a fixed ordinary-Terminal instruction.
 Implementation, protocol POCs, and the complete ignored live gate are verified.
-The current native-format gate requires Codex CLI `0.152.x`. The exact keyless
-gate passed on August 31, 2026 with `1 passed, 0 failed, 7 filtered` in 53.60
+The current native-format gate requires Codex CLI `0.154.x`. The exact keyless
+gate passed on September 12, 2026 with `1 passed, 0 failed, 7 filtered` in 51.03
 seconds. Every model-shaped response came from the one local
 aimock child; the run used no provider account, credential, remote model, GPU,
 or external model request.
@@ -704,9 +702,20 @@ identities, unchanged completed content, accepted checkpoints, and the next
 review's remaining work. Pull retries approve Keep both for divergent local
 history and verify that the preserved branches keep every local message.
 Seven disposable history resumes verify the five final stored histories and
-two preserved branches. This adds 24 turns and requests, for exactly 62 local
-Responses requests in the complete suite. Each attempt reports its elapsed
-time. Pull also reports the source check count, byte count, and elapsed time.
+two preserved branches. This adds 24 turns and requests.
+
+A native revert flow retains the initial rollout and creates a suffixed
+replacement with the same thread ID. It warms discovery and Session Detail
+before the revert, checks that Mallard selects one current resource, and
+rejects the old timeline cursor. Paged Session Detail before Push and after
+Pull must show Turn 1 and the replacement Turn 2, with the discarded Turn 2
+excluded. A real Codex CLI resume on the destination verifies the exact restored
+history without the old source file. The old rollout remains byte-identical.
+This flow adds four requests, for exactly 66 local Responses requests in the
+complete suite.
+
+The retry flow reports each attempt's elapsed time. Pull also reports the
+source check count, byte count, and elapsed time.
 It verifies two semantic analyses per prepared transcript and reports summed
 preparation time, stage/commit time, and pipeline wall time.
 Per-source read and hash counters verify that each attempt checks each source

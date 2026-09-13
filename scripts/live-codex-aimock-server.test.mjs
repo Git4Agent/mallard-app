@@ -119,6 +119,16 @@ test("scenario parser rejects unknown fields, duplicate identities, and bad coun
   assert.throws(() => parse(unknownScenarioField), /scenario_0_fields/u);
 });
 
+test("scenario parser supports the expanded revert suite and retains a count bound", () => {
+  const scenarios = Array.from({ length: 129 }, (_, index) => textScenario({
+    id: `bounded_${index}`,
+    prompt_marker: `TEST_USER_${index}`,
+  }));
+  assert.equal(parse(documentFor(scenarios.slice(0, 66))).scenarios.length, 66);
+  assert.equal(parse(documentFor(scenarios.slice(0, 128))).scenarios.length, 128);
+  assert.throws(() => parse(documentFor(scenarios)), /scenario_count/u);
+});
+
 test("scenario parser rejects unsafe commands and invalid duplicate prompt pairs", () => {
   const unsafe = textScenario({
     response: {

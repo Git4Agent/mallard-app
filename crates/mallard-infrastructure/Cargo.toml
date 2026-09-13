@@ -8,7 +8,7 @@ description = "Mallard persistence, object stores, provider adapters, and platfo
 [dependencies]
 mallard-domain = { path = "../mallard-domain" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 dirs = "5"
 walkdir = "2"
 tokio = { version = "1", features = ["full"] }

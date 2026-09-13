@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const SCENARIO_VERSION = 1;
 const MAX_SCENARIO_BYTES = 4 * 1024 * 1024;
-const MAX_SCENARIOS = 64;
+const MAX_SCENARIOS = 128;
 const MAX_EXPECTED_HISTORY_ITEMS = 256;
 const MAX_INPUT_MESSAGES = 512;
 const MAX_COMMAND_BYTES = 4 * 1024;

@@ -2237,6 +2237,7 @@ mod activity_only_tests {
             _path: &Path,
             _index: &SessionTimelineIndex,
             _event_id: &str,
+            _context: &SessionTimelineContext<'_>,
         ) -> Result<SessionEventDetail, String> {
             self.timeline_calls.fetch_add(1, Ordering::SeqCst);
             Err("timeline must not run for Activity".to_string())

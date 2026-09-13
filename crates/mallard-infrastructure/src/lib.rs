@@ -13,6 +13,7 @@ pub mod codex_binary;
 pub mod codex_history_graph;
 pub mod codex_paginated_projection;
 pub mod codex_rollout;
+mod codex_rollout_selection;
 pub mod codex_standalone_builder;
 pub mod codex_subagents;
 pub mod owned_subagents;

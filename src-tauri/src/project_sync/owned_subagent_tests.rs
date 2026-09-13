@@ -147,10 +147,10 @@ fn native_owned_subagents_transport_bridge() {
     let main_id = installed.provider_thread_id.as_ref().unwrap();
     let lookup = RolloutLookup::new(&home);
     let children = installed.installed_subagents.values().map(|child| serde_json::json!({
-        "id":child.provider_thread_id, "path":lookup.find(&child.provider_thread_id).unwrap().unwrap()
+        "id":child.provider_thread_id, "path":lookup.find_current(&child.provider_thread_id).unwrap().unwrap()
     })).collect::<Vec<_>>();
     std::fs::write(root.join("transport.json"), serde_json::to_vec(&serde_json::json!({
-        "main_id":main_id, "main_path":lookup.find(main_id).unwrap().unwrap(), "children":children
+        "main_id":main_id, "main_path":lookup.find_current(main_id).unwrap().unwrap(), "children":children
     })).unwrap()).unwrap();
 }
 
@@ -295,7 +295,7 @@ fn owned_subagents_push_pull_compare_and_known_member_append() {
     let key = SubagentKey::parse("start-D").unwrap();
     let local_child_id = &installed.installed_subagents[&key].provider_thread_id;
     let local_child = RolloutLookup::new(&target_home)
-        .find(local_child_id)
+        .find_current(local_child_id)
         .unwrap()
         .unwrap();
     append_owned_message(&local_child, "continued-child");
