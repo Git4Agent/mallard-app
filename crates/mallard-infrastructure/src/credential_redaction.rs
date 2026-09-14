@@ -1126,7 +1126,7 @@ impl RedactionRuleset {
     /// changed leaf differing only by vocabulary-member substitutions, and
     /// that the output is a redaction fixpoint. Encoder bugs surface here
     /// as visible build failures, never as silent wire drift.
-    pub fn redact_record_gated(&self, record: &Value) -> Result<Value, String> {
+    pub fn redact_record_gated(&self, record: &Value) -> Result<(Value, bool), String> {
         self.uncached_run().redact_record_gated(record)
     }
 
@@ -1134,7 +1134,7 @@ impl RedactionRuleset {
         &self,
         record: &Value,
         cache: &mut DetectionCache,
-    ) -> Result<Value, String> {
+    ) -> Result<(Value, bool), String> {
         let (redacted, changed) = self.redact_value_with_cache(record, cache);
         if changed {
             verify_redaction_span_diff(record, &redacted)?;
@@ -1143,7 +1143,7 @@ impl RedactionRuleset {
                     format!("redaction_gate_failed: redacted record is not a fixpoint: {error}")
                 })?;
         }
-        Ok(redacted)
+        Ok((redacted, changed))
     }
 
     /// Wire self-check for one record: `redact(w) == w`. The leak
@@ -1298,7 +1298,7 @@ impl RedactionRuleset {
         spliced: &str,
         line: usize,
         cache: &mut DetectionCache,
-    ) -> Result<(), String> {
+    ) -> Result<Value, String> {
         let Ok(value) = serde_json::from_str::<Value>(spliced.trim()) else {
             return Err(format!(
                 "redaction_gate_failed: line {line} no longer parses after redaction splice"
@@ -1311,7 +1311,8 @@ impl RedactionRuleset {
             ));
         }
         verify_introduced_tokens(original, spliced)
-            .map_err(|token_error| format!("redaction_gate_failed: line {line}: {token_error}"))
+            .map_err(|token_error| format!("redaction_gate_failed: line {line}: {token_error}"))?;
+        Ok(value)
     }
 
     // ------------------------------------------------------------------
@@ -1465,9 +1466,9 @@ impl RedactionRun<'_> {
         self.ruleset.redact_value_with_cache(value, &mut self.cache)
     }
 
-    pub fn redact_record_gated(&mut self, record: &Value) -> Result<Value, String> {
+    pub fn redact_record_gated(&mut self, record: &Value) -> Result<(Value, bool), String> {
         if !self.enabled {
-            return Ok(record.clone());
+            return Ok((record.clone(), false));
         }
         self.ruleset
             .redact_record_gated_with_cache(record, &mut self.cache)
@@ -1479,6 +1480,28 @@ impl RedactionRun<'_> {
         }
         self.ruleset
             .verify_wire_value_with_cache(wire, &mut self.cache)
+    }
+
+    /// Redact a builder's serde-serialized value with the raw splice rules.
+    /// Reuse the parsed splice proof when changed; otherwise retain the input.
+    pub(crate) fn redact_serialized_record(
+        &mut self,
+        value: Value,
+        serialized: String,
+        line: usize,
+    ) -> Result<(String, Value, bool), String> {
+        if !self.enabled {
+            return Ok((serialized, value, false));
+        }
+        let replacements = self.ruleset.collect_replacements(&value, &mut self.cache);
+        if replacements.is_empty() {
+            return Ok((serialized, value, false));
+        }
+        let spliced = apply_json_replacements(&serialized, &replacements);
+        let value =
+            self.ruleset
+                .verify_spliced_line(&serialized, &spliced, line, &mut self.cache)?;
+        Ok((spliced, value, true))
     }
 
     pub fn redact_jsonl_text(&mut self, text: &str) -> Result<(String, usize), String> {
@@ -2569,9 +2592,63 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_value_flag_agrees_with_detector_skips_and_context() {
+        for value in [
+            json!({"ordinary": "hello", "number": 42, "null": null}),
+            json!({"type": "base64", "text": "sk-ant-api03-abcdefghijklmnop"}),
+            json!({"host": "example.test", "user": "alice", "password": "<password>"}),
+            json!(["hello", {"signature": "sk-ant-api03-abcdefghijklmnop"}]),
+        ] {
+            let (redacted, changed) = shared().redact_record_gated(&value).unwrap();
+            assert!(!changed);
+            assert_eq!(redacted, value);
+            shared().verify_wire_value(&value).unwrap();
+        }
+    }
+
+    #[test]
+    fn serialized_record_reuses_raw_splice_rules_and_final_value() {
+        let secret = "sk-ant-api03-abcdefghijklmnop";
+        let value = json!({
+            "visible": {"text": secret},
+            "skipped": {"type": "base64", "text": secret},
+            "numbers": [-0.0, 5e-324],
+            "escaped": "quote \" slash \\ newline\n"
+        });
+        let serialized = serde_json::to_string(&value).unwrap();
+        let (value_redacted, _) = shared().redact_record_gated(&value).unwrap();
+        for enabled in [false, true] {
+            let expected = shared()
+                .begin_run()
+                .with_enabled(enabled)
+                .redact_jsonl_text(&serialized)
+                .unwrap()
+                .0;
+            let (bytes, final_value, changed) = shared()
+                .begin_run()
+                .with_enabled(enabled)
+                .redact_serialized_record(value.clone(), serialized.clone(), 1)
+                .unwrap();
+            assert_eq!(bytes, expected);
+            assert_eq!(final_value, serde_json::from_str::<Value>(&bytes).unwrap());
+            assert_eq!(changed, enabled);
+            if enabled {
+                // Raw keyed replacements also reach the skipped copy.
+                assert_ne!(final_value, value_redacted);
+                assert_eq!(
+                    final_value["skipped"]["text"],
+                    final_value["visible"]["text"]
+                );
+                assert_eq!(value_redacted["skipped"]["text"], secret);
+            }
+        }
+    }
+
+    #[test]
     fn record_gate_passes_real_redactions_and_wire_check_catches_planted_secrets() {
         let record = json!({"content": "key sk-ant-api03-abcdefghijklmnop"});
-        let redacted = shared().redact_record_gated(&record).unwrap();
+        let (redacted, changed) = shared().redact_record_gated(&record).unwrap();
+        assert!(changed);
         shared().verify_wire_value(&redacted).unwrap();
         let error = shared().verify_wire_value(&record).unwrap_err();
         assert!(error.starts_with("wire_secret_detected:"), "{error}");
@@ -2773,7 +2850,10 @@ mod tests {
         let mut off = shared().begin_run().with_enabled(false);
         assert_eq!(off.redact_str(&text), None);
         assert_eq!(off.redact_value(&value), (value.clone(), false));
-        assert_eq!(off.redact_record_gated(&value).unwrap(), value);
+        assert_eq!(
+            off.redact_record_gated(&value).unwrap(),
+            (value.clone(), false)
+        );
         off.verify_wire_value(&value).unwrap();
         assert_eq!(off.redact_jsonl_text(&jsonl).unwrap(), (jsonl.clone(), 0));
         for bytes in [

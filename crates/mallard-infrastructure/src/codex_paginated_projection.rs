@@ -1653,7 +1653,7 @@ mod tests {
             agent("The result is ready."),
         ]
         .into_iter()
-        .map(|record| redactor.redact_record_gated(&record).unwrap())
+        .map(|record| redactor.redact_record_gated(&record).unwrap().0)
         .collect::<Vec<_>>();
         let mut inserted = Vec::new();
         let output = complete_paginated_item_projection(source.clone(), OUT, &mut |record| {
@@ -2077,7 +2077,7 @@ mod tests {
             ),
         ]
         .into_iter()
-        .map(|record| redactor.redact_record_gated(&record).unwrap())
+        .map(|record| redactor.redact_record_gated(&record).unwrap().0)
         .collect();
 
         let output = project(source);

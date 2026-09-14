@@ -24,9 +24,7 @@ use crate::codex_history_graph::{ResolvedCodexRoot, ResolvedSegment};
 use crate::codex_paginated_projection::project_with_sources;
 use crate::codex_paginated_projection::verify_projection_fixpoint;
 use crate::codex_rollout::{session_meta_id, structural_record_type};
-use crate::conversation_codec::{
-    analyze_codex_records, parsed_records, CodecLineage, CodexTranscriptAnalysis,
-};
+use crate::conversation_codec::{analyze_codex_records, CodecLineage, CodexTranscriptAnalysis};
 use crate::credential_redaction;
 use crate::jsonl_tail_io::read_bounded;
 use crate::payload::PayloadBytes;
@@ -356,6 +354,7 @@ fn reconstruct_codex_root(
     };
     crate::codex_subagents::rewrite_references(&mut authoritative, identities);
     let mut output = Vec::new();
+    let mut output_records = Vec::new();
     let mut output_boundary = None;
     let mut output_head = authoritative.clone();
     if encode_mode {
@@ -399,7 +398,7 @@ fn reconstruct_codex_root(
             crate::codex_subagents::rewrite_references(&mut wire, identities);
             normalize_item_identity(&mut wire, &output_root_id);
             mapper.verify_wire_record(&wire)?;
-            ordinal = append_output_record(&mut output, wire, ordinal)?;
+            ordinal = append_output_record(&mut output, &mut output_records, wire, ordinal)?;
         }
         output_boundary.get_or_insert(ordinal);
     } else {
@@ -452,7 +451,7 @@ fn reconstruct_codex_root(
             let mut origins = RecordPathOrigins::capture(&record, fields)?;
             origins.derived = derived;
             path_origins.push(&output_root_id, origins);
-            append_output_record(&mut output, record, (index + 1) as u64)?;
+            append_output_record(&mut output, &mut output_records, record, (index + 1) as u64)?;
         }
     }
     if child_boundary.is_some() {
@@ -461,7 +460,9 @@ fn reconstruct_codex_root(
         output_head["payload"]["subagent_history_start_ordinal"] = Value::from(boundary);
     }
     let mut with_head = Vec::new();
-    append_output_record(&mut with_head, output_head.clone(), 0)?;
+    let mut final_records = Vec::with_capacity(output_records.len() + 1);
+    append_output_record(&mut with_head, &mut final_records, output_head.clone(), 0)?;
+    final_records.extend(output_records);
     with_head.extend(output);
     output = with_head;
     if !encode_mode {
@@ -477,7 +478,7 @@ fn reconstruct_codex_root(
         return Err("standalone Codex output exceeds the bounded transcript limit".to_string());
     }
     let output_verification_started = Instant::now();
-    let analysis = analyze_standalone_output(&output)?;
+    let analysis = analyze_standalone_output(&output, final_records.into_iter().map(Ok))?;
     let output_record_count = analysis.record_count as u64;
     if child_boundary.is_some() {
         let boundary = output_head["payload"]["subagent_history_start_ordinal"].as_u64();
@@ -675,7 +676,11 @@ fn read_source_records<'a>(
                 if encode_mode {
                     let encoded = mapper.encode_record_with_origins(&value, prior)?;
                     origins.push(&segment.rollout_id, encoded.origins);
-                    redactor.redact_record_gated(&encoded.wire)
+                    let (wire, changed) = redactor.redact_record_gated(&encoded.wire)?;
+                    if changed {
+                        mapper.verify_wire_record(&wire)?;
+                    }
+                    Ok(wire)
                 } else {
                     mapper.verify_wire_record(&value)?;
                     redactor.verify_wire_value(&value)?;
@@ -799,6 +804,7 @@ fn rewrite_identity_fields(payload: &mut Map<String, Value>, output_root_id: &st
 
 fn append_output_record(
     output: &mut Vec<u8>,
+    records: &mut Vec<Value>,
     mut value: Value,
     ordinal: u64,
 ) -> Result<u64, String> {
@@ -809,17 +815,21 @@ fn append_output_record(
     serde_json::to_writer(&mut *output, &value)
         .map_err(|_| "serialize standalone Codex record".to_string())?;
     output.push(b'\n');
+    records.push(value);
     ordinal
         .checked_add(1)
         .ok_or_else(|| "standalone Codex ordinal overflow".to_string())
 }
 
-/// Check standalone layout and analyze the chain from the same parsed records.
-fn analyze_standalone_output(bytes: &[u8]) -> Result<CodexTranscriptAnalysis, String> {
+/// Check standalone layout and analyze the exact values serialized above.
+fn analyze_standalone_output(
+    bytes: &[u8],
+    input: impl Iterator<Item = Result<Value, serde_json::Error>>,
+) -> Result<CodexTranscriptAnalysis, String> {
     let mut expected_ordinal = 0_u64;
     let mut session_meta_count = 0_u64;
     let mut failure = None;
-    let records = parsed_records(bytes).inspect(|record| {
+    let records = input.inspect(|record| {
         if failure.is_some() {
             return;
         }
@@ -870,7 +880,7 @@ fn analyze_standalone_output(bytes: &[u8]) -> Result<CodexTranscriptAnalysis, St
 mod tests {
     use super::*;
     use crate::codex_history_graph::resolve_codex_root;
-    use crate::conversation_codec::analyze_codex_transcript;
+    use crate::conversation_codec::{analyze_codex_transcript, parsed_records};
     use crate::session_path_map::ROOT_TOKEN;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -908,9 +918,10 @@ mod tests {
         let meta: Value = serde_json::from_str(&meta_line("root", None)).unwrap();
         let message: Value = serde_json::from_str(&message_line("m1", "hello")).unwrap();
         let mut valid = Vec::new();
-        append_output_record(&mut valid, meta.clone(), 0).unwrap();
-        append_output_record(&mut valid, message.clone(), 1).unwrap();
-        let combined = analyze_standalone_output(&valid).unwrap();
+        let mut retained = Vec::new();
+        append_output_record(&mut valid, &mut retained, meta.clone(), 0).unwrap();
+        append_output_record(&mut valid, &mut retained, message.clone(), 1).unwrap();
+        let combined = analyze_standalone_output(&valid, retained.into_iter().map(Ok)).unwrap();
         let separate = analyze_codex_transcript(&valid);
         assert_eq!(combined.record_count, separate.record_count);
         assert_eq!(combined.lineage, separate.lineage);
@@ -928,11 +939,50 @@ mod tests {
         ] {
             let mut invalid = valid.clone();
             invalid.extend_from_slice(suffix.as_bytes());
-            assert!(analyze_standalone_output(&invalid).is_err());
+            assert!(analyze_standalone_output(&invalid, parsed_records(&invalid)).is_err());
         }
         let mut missing_head = Vec::new();
-        append_output_record(&mut missing_head, message, 0).unwrap();
-        assert!(analyze_standalone_output(&missing_head).is_err());
+        append_output_record(&mut missing_head, &mut Vec::new(), message, 0).unwrap();
+        assert!(analyze_standalone_output(&missing_head, parsed_records(&missing_head)).is_err());
+    }
+
+    #[test]
+    fn retained_output_values_match_serialized_ordinals_and_float_bits() {
+        let meta: Value = serde_json::from_str(&meta_line("root", None)).unwrap();
+        let mut message: Value = serde_json::from_str(&message_line("m1", "hello")).unwrap();
+        message["ordinal"] = json!(99);
+        message["numbers"] = serde_json::from_str::<Value>(
+            "[-0.0,0.99177921181141328,5e-324,1.7976931348623157e308]",
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        let mut retained = Vec::new();
+        append_output_record(&mut bytes, &mut retained, meta, 0).unwrap();
+        append_output_record(&mut bytes, &mut retained, message, 1).unwrap();
+        let reparsed = parsed_records(&bytes)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(retained[1]["ordinal"], json!(1));
+        for (before, after) in retained[1]["numbers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(reparsed[1]["numbers"].as_array().unwrap())
+        {
+            assert_eq!(
+                before.as_f64().unwrap().to_bits(),
+                after.as_f64().unwrap().to_bits()
+            );
+        }
+        let expected = retained
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>();
+        assert_eq!(bytes, expected.as_bytes());
+        let direct = analyze_standalone_output(&bytes, retained.into_iter().map(Ok)).unwrap();
+        let parsed = analyze_standalone_output(&bytes, reparsed.into_iter().map(Ok)).unwrap();
+        assert_eq!(direct.lineage, parsed.lineage);
+        assert_eq!(direct.record_count, parsed.record_count);
     }
 
     fn write(
@@ -1264,7 +1314,10 @@ mod tests {
         });
         let mut redactor = credential_redaction::shared().begin_run();
         // The encoded spelling is clean; XML decoding creates the finding.
-        assert_eq!(redactor.redact_record_gated(&hook).unwrap(), hook);
+        assert_eq!(
+            redactor.redact_record_gated(&hook).unwrap(),
+            (hook.clone(), false)
+        );
         let leaf = write(
             &directory,
             &mut files,

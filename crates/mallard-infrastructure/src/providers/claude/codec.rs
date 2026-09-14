@@ -801,7 +801,17 @@ pub(crate) fn analyze_claude_records_in_context(
     context: ClaudeRecordContext<'_>,
 ) -> SessionAnalysis {
     crate::sync_metrics::record_transcript_analysis(bytes.len() as u64);
-    if bytes.iter().all(u8::is_ascii_whitespace) {
+    analyze_claude_record_values(input, context, bytes.iter().all(u8::is_ascii_whitespace))
+}
+
+/// Shared analysis for parsed input and builders streaming finalized values.
+/// The caller accounts for the actual input bytes, including on failure.
+pub(crate) fn analyze_claude_record_values(
+    input: impl Iterator<Item = Result<Value, serde_json::Error>>,
+    context: ClaudeRecordContext<'_>,
+    empty: bool,
+) -> SessionAnalysis {
+    if empty {
         return unknown(None, None, 0, CodecUnknownReason::Empty);
     }
     let mut record_count = 0_usize;

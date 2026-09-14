@@ -535,6 +535,7 @@ pub fn capture_children(
             return Err(crate::owned_subagents::PUSH_CHANGED.into());
         }
         let mut output = String::with_capacity(bytes.len());
+        let mut output_records = Vec::new();
         let mut output_origins = crate::session_path_origins::PathOrigins::default();
         let mut ordinal = 0;
         let mut failure = None;
@@ -543,14 +544,20 @@ pub fn capture_children(
                 match mapper.encode_record_with_origins(record, origins.record(&id, ordinal)) {
                     Ok(mapped) => {
                         output_origins.push(&id, mapped.origins);
-                        match redaction
-                            .redact_record_gated(&mapped.wire)
-                            .and_then(|wire| {
-                                serde_json::to_string(&wire).map_err(|error| error.to_string())
-                            }) {
-                            Ok(line) => {
+                        match redaction.redact_record_gated(&mapped.wire).and_then(
+                            |(wire, changed)| {
+                                if changed {
+                                    mapper.verify_wire_record(&wire)?;
+                                }
+                                let line = serde_json::to_string(&wire)
+                                    .map_err(|error| error.to_string())?;
+                                Ok((line, wire))
+                            },
+                        ) {
+                            Ok((line, wire)) => {
                                 output.push_str(&line);
                                 output.push('\n');
+                                output_records.push(wire);
                             }
                             Err(error) => failure = Some(error.to_string()),
                         }
@@ -584,18 +591,9 @@ pub fn capture_children(
             return Err("encoded Claude child exceeds size limit".into());
         }
         let wire: crate::payload::PayloadBytes = output.into_bytes().into();
-        let mut wire_failure = None;
-        let records =
-            crate::conversation_codec::parsed_records(wire.as_bytes()).inspect(|record| {
-                if let Ok(record) = record {
-                    if let Err(error) = mapper.verify_wire_record(record) {
-                        wire_failure = Some(error);
-                    }
-                }
-            });
         let wire_analysis = analyze_claude_records_in_context(
             wire.as_bytes(),
-            records,
+            output_records.into_iter().map(Ok),
             ClaudeRecordContext::Child {
                 session_id: parent,
                 agent_id: &id,
@@ -613,9 +611,6 @@ pub fn capture_children(
                     cloud,
                 )
             });
-        if let Some(error) = wire_failure {
-            return Err(error);
-        }
         let accepted = mallard_domain::AcceptedSubagentState { local, normalized };
         accepted.validate()?;
         let source_mtime = stamp.mtime_secs();

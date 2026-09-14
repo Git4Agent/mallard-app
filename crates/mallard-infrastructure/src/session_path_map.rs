@@ -362,7 +362,11 @@ impl SessionPathMapper {
             let wire = self.walk(record, "", false, &mut fields)?;
             (wire, RecordPathOrigins::capture(record, fields)?)
         };
-        if self.decode_record(&wire)? != *record {
+        // Only fresh, untouched records are identity transforms by construction.
+        // Stored origins must still prove restoration, even with no fields.
+        if (previous.is_some() || !origins.fields.is_empty())
+            && self.decode_record(&wire)? != *record
+        {
             return Err("path encoding failed exact source restoration".into());
         }
         Ok(EncodedRecord {
@@ -653,6 +657,41 @@ mod tests {
         let mut encoded = mapper.encode_record(&source).unwrap();
         encoded.origins.fields[0].spans[0].start = 1;
         assert!(encoded.origins.replay(&source).is_err());
+    }
+
+    #[test]
+    fn fresh_unchanged_records_and_stored_empty_origins_have_distinct_gates() {
+        let mapper = mapper();
+        for source in [
+            json!({"plain": [null, false, 7, "hello"]}),
+            json!({"foreign": "/home-a/project space-more/file"}),
+            json!({"literal /__mallard_root__/invalid": "/__mallard_escape__/r"}),
+            json!({"text": "x/home-a/project space /__mallard_root__/invalid"}),
+        ] {
+            let encoded = mapper.encode_record(&source).unwrap();
+            assert_eq!(mapper.decode_record(&encoded.wire).unwrap(), source);
+            if source.to_string().contains("/__mallard_") {
+                assert!(encoded.changed);
+            } else {
+                assert!(!encoded.changed);
+            }
+        }
+        let plain = json!({"text": "hello"});
+        let stored = RecordPathOrigins::capture(&plain, Vec::new()).unwrap();
+        assert!(mapper
+            .encode_record_with_origins(&plain, Some(&stored))
+            .is_ok());
+        assert!(mapper
+            .encode_record_with_origins(&json!({"text":"edited"}), Some(&stored))
+            .is_err());
+        // A matching hash does not prove an empty stored field list is valid.
+        let token = json!({"text": ROOT_TOKEN});
+        let stored = RecordPathOrigins::capture(&token, Vec::new()).unwrap();
+        assert!(mapper
+            .encode_record_with_origins(&token, Some(&stored))
+            .err()
+            .unwrap()
+            .contains("exact source restoration"));
     }
 
     #[test]

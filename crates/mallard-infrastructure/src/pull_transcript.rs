@@ -431,7 +431,8 @@ mod tests {
             let value = credential_redaction::shared()
                 .begin_run()
                 .redact_record_gated(&value)
-                .unwrap();
+                .unwrap()
+                .0;
             let mut bytes = serde_json::to_vec(&value).unwrap();
             bytes.push(b'\n');
             Self::from_bytes(claude::provider_key(), bytes, 0)

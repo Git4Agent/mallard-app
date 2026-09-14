@@ -1,10 +1,32 @@
 # Plan: one derivation per byte in the Push builders
 
-Status: proposed 2026-09-11, awaiting review. Fixes finding 1 of
-`docs/SYNC_PATH_AUDIT_2026-09-11.md` (the Push builder proves its own output
-by re-parsing it; 66% of a local Push). Scope: the Claude and Codex Push
-builders and the review-to-builder handoff. The Pull decoder is not in scope
-except where one shared function loses its byte-based twin (noted below).
+Status: implemented with review corrections, 2026-09-13. The implementation
+notes below supersede the original proposal retained after this section.
+The original audit timings are historical; no new speedup is claimed.
+
+- Restoration is skipped only for fresh origins with no changed fields.
+  Stored origins retain hash, replay, and restoration checks, including
+  empty field lists.
+- Value redaction returns its existing changed flag. Changed records retain
+  span and fixpoint checks and pass path verification after redaction.
+- Claude main publication keeps raw-splice semantics. It collects edits from
+  the mapped value and reuses the splice gate's parsed final value. Unchanged
+  lines reuse the mapped value. Raw splicing and value redaction are not
+  interchangeable: a keyed splice can also change a skipped object's field.
+- Claude analysis streams final values, counts emitted bytes, preserves source
+  link offsets and wire watermark offsets, and drains after early analysis
+  failure before rejecting the result. Claude children retain serialized values.
+- Codex retains final values after ordinal insertion and successful serialization.
+  Head, projection, final path, and decode projection-fixpoint checks remain.
+- Resolved roots and captured sources already belong to the active Push review
+  and move into selected jobs. No graph is added to observation caches. Current
+  source digests, stamps, and filename selection remain checked. Historical
+  prefixes use the reviewed snapshots under the approved rollout policy.
+- Schema remains 1. There is no migration or compatibility execution path.
+  The separate Claude adoption-probe rewrite from original change 4 is outside
+  this minimal update.
+
+The sections below are the original design history, not execution instructions.
 
 ## Decision
 
