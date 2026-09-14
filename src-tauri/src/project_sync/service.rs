@@ -1405,6 +1405,79 @@ pub(super) fn get_project_activity_with_repository(
     )
 }
 
+/// Stages from one refresh. Local rows remain usable if storage or comparison fails.
+#[derive(Serialize, Clone, Debug)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+pub enum ProjectActivityRefreshEvent {
+    Activity { activity: ProjectActivity },
+    ActivityError { message: String },
+    Comparison { comparison: ThreadSyncComparison },
+    ComparisonError { message: String },
+}
+
+pub(super) fn refresh_project_activity_with_progress(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    branch: Option<&str>,
+    window_days: Option<u64>,
+    on_event: &mut dyn FnMut(ProjectActivityRefreshEvent) -> Result<(), String>,
+    on_phase: &mut dyn FnMut(&str, Duration),
+) -> Result<(), String> {
+    let metrics_before = mallard_infrastructure::sync_metrics::global_snapshot();
+    let started = Instant::now();
+    let state = repository.load_project_activity_state_snapshot()?;
+    let local = load_project_local_read_from_state(repository.root(), &state, local_project_id)?;
+    on_phase("load binding and discover local state", started.elapsed());
+    let mut send_activity = |snapshot: Option<&BundleSnapshot>, warnings: Vec<String>| {
+        match build_activity_from_local_read(
+            repository,
+            &state,
+            &local,
+            snapshot,
+            branch,
+            None,
+            window_days,
+            warnings,
+        ) {
+            Ok(activity) => on_event(ProjectActivityRefreshEvent::Activity { activity }),
+            Err(message) => on_event(ProjectActivityRefreshEvent::ActivityError { message }),
+        }
+    };
+    send_activity(None, Vec::new())?;
+    let started = Instant::now();
+    let remote = load_project_remote_read(repository, local_project_id, storage_id);
+    on_phase("inspect remote head", started.elapsed());
+    match remote {
+        Ok(remote) => {
+            send_activity(remote.current.as_ref(), Vec::new())?;
+            match build_comparison_from_reads(
+                repository,
+                local_project_id,
+                storage_id,
+                &local,
+                &remote,
+                on_phase,
+            ) {
+                Ok(comparison) => on_event(ProjectActivityRefreshEvent::Comparison { comparison })?,
+                Err(message) => on_event(ProjectActivityRefreshEvent::ComparisonError { message })?,
+            }
+        }
+        Err(message) => {
+            send_activity(
+                None,
+                vec![format!(
+                    "remote sessions are unavailable from '{}': {}",
+                    storage_id, message
+                )],
+            )?;
+            on_event(ProjectActivityRefreshEvent::ComparisonError { message })?;
+        }
+    }
+    mallard_infrastructure::sync_metrics::log_operation_delta("refresh", &metrics_before);
+    Ok(())
+}
+
 pub(super) fn session_detail_error(
     code: SessionDetailErrorCode,
     message: impl Into<String>,
@@ -9758,7 +9831,9 @@ fn publish_reviewed(
     let previous = observed.as_ref().map(|(snapshot, _)| snapshot);
     let expected_head = observed
         .as_ref()
-        .map(|(_, token)| PublishExpectation::Match(token.clone()))
+        .map(|(snapshot, token)| {
+            PublishExpectation::Match(Box::new(snapshot.clone()), token.clone())
+        })
         .unwrap_or(PublishExpectation::Absent);
     let plan_id = PlanId::parse(generated_named_id("apply")?)?;
     on_phase("build conversation actions", phase_started.elapsed());
@@ -17336,7 +17411,7 @@ mod tests {
                 origin,
                 20,
                 Some(&initial.manifest),
-                PublishExpectation::Match(head_token),
+                PublishExpectation::Match(Box::new(initial.clone()), head_token),
             ))
             .unwrap()
             .snapshot;
@@ -20433,6 +20508,95 @@ mod tests {
             transcript,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn refresh_sends_local_rows_before_remote_and_reuses_the_remote_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("refresh-shared-store").unwrap();
+        let store_root = temp.path().join("store");
+        add_local_storage(&repo, &storage_id, &store_root);
+        let project = register(&repo);
+        let root = temp.path().join("project");
+        let home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &root, &home);
+        write_codex_session(&home, "019f7500-0000-7000-8000-0000000000ab", &root);
+        let head_key = mallard_infrastructure::storage_core::repository_object_key(
+            &project.bundle_id,
+            "_head.json",
+        )
+        .unwrap();
+        let head_path = store_root.join(head_key.as_str());
+        let head_bytes = std::fs::read(&head_path).unwrap();
+        let mut events = Vec::new();
+        refresh_project_activity_with_progress(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+            None,
+            Some(3650),
+            &mut |event| {
+                if matches!(event, ProjectActivityRefreshEvent::Activity { .. })
+                    && events.len() == 1
+                {
+                    // Any second head read, including comparison, would now fail.
+                    std::fs::write(&head_path, b"invalid head after remote Activity").unwrap();
+                }
+                events.push(event);
+                Ok(())
+            },
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(events.len(), 3);
+        let ProjectActivityRefreshEvent::Activity { activity: local } = &events[0] else {
+            panic!("local rows first")
+        };
+        assert_eq!(local.sessions.len(), 1);
+        let ProjectActivityRefreshEvent::Activity { activity: remote } = &events[1] else {
+            panic!("remote rows second")
+        };
+        let ProjectActivityRefreshEvent::Comparison { comparison } = &events[2] else {
+            panic!("comparison must reuse snapshot")
+        };
+        assert_eq!(
+            remote.sessions[0].resource_id,
+            comparison.entries[0].conversation_resource_id.as_str()
+        );
+        std::fs::write(&head_path, &head_bytes).unwrap();
+
+        // Break storage only after local rows arrive. They must survive failure.
+        events.clear();
+        refresh_project_activity_with_progress(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+            None,
+            Some(3650),
+            &mut |event| {
+                if events.is_empty() {
+                    assert!(matches!(
+                        event,
+                        ProjectActivityRefreshEvent::Activity { .. }
+                    ));
+                    std::fs::write(&head_path, b"unavailable head").unwrap();
+                }
+                events.push(event);
+                Ok(())
+            },
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert!(matches!(
+            &events[2],
+            ProjectActivityRefreshEvent::ComparisonError { .. }
+        ));
+        let ProjectActivityRefreshEvent::Activity { activity } = &events[1] else {
+            panic!("local rows retained")
+        };
+        assert_eq!(activity.sessions.len(), 1);
+        assert!(!activity.warnings.is_empty());
     }
 
     #[test]
@@ -24632,6 +24796,7 @@ mod tests {
                         (scope.revision, scope.content_sha256.clone()),
                     )]),
                     expected_head: mallard_infrastructure::bundle_engine::PublishExpectation::Match(
+                        Box::new(snapshot.clone()),
                         head_token,
                     ),
                     updated_at: 99,
@@ -24814,6 +24979,7 @@ mod tests {
                         (scope.revision, scope.content_sha256.clone()),
                     )]),
                     expected_head: mallard_infrastructure::bundle_engine::PublishExpectation::Match(
+                        Box::new(snapshot.clone()),
                         head_token,
                     ),
                     updated_at: 99,
@@ -25011,9 +25177,9 @@ mod tests {
         bundle_id: &BundleId,
     ) -> PublishExpectation {
         engine
-            .read_head(bundle_id)
+            .inspect_optional_with_token(bundle_id)
             .unwrap()
-            .map(|(_, token)| PublishExpectation::Match(token))
+            .map(|(snapshot, token)| PublishExpectation::Match(Box::new(snapshot), token))
             .unwrap_or(PublishExpectation::Absent)
     }
 

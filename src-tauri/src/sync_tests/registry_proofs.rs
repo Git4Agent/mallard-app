@@ -328,7 +328,10 @@ fn registering_a_portable_coordinate_writes_nothing_and_publishing_at_it_preserv
         origin.clone(),
         11,
         Some(&first_published.snapshot.manifest),
-        PublishExpectation::Match(first_published.head_token.clone()),
+        PublishExpectation::Match(
+            Box::new(first_published.snapshot.clone()),
+            first_published.head_token.clone(),
+        ),
     );
     second.writable_scopes.clear();
     second.reviewed_scope_pins.clear();
@@ -414,7 +417,10 @@ fn registering_a_portable_coordinate_writes_nothing_and_publishing_at_it_preserv
         origin,
         12,
         Some(&second_published.snapshot.manifest),
-        PublishExpectation::Match(second_published.head_token.clone()),
+        PublishExpectation::Match(
+            Box::new(second_published.snapshot.clone()),
+            second_published.head_token.clone(),
+        ),
     );
     let third_published = publish_with_head(&engine, third).unwrap();
     assert_eq!(

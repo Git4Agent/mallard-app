@@ -41,7 +41,7 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         origin.clone(),
         20,
         Some(&initial.snapshot.manifest),
-        PublishExpectation::Match(initial.head_token),
+        PublishExpectation::Match(Box::new(initial.snapshot.clone()), initial.head_token),
     );
     delete_thread
         .writable_scopes
@@ -66,7 +66,7 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         origin.clone(),
         30,
         Some(&deleted.snapshot.manifest),
-        PublishExpectation::Match(deleted.head_token),
+        PublishExpectation::Match(Box::new(deleted.snapshot.clone()), deleted.head_token),
     );
     repeated
         .writable_scopes
@@ -101,7 +101,10 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
                 ..ScopePublishInput::default()
             },
         )]),
-        expected_head: PublishExpectation::Match(repeated.head_token),
+        expected_head: PublishExpectation::Match(
+            Box::new(repeated.snapshot.clone()),
+            repeated.head_token,
+        ),
         updated_at: 40,
     };
     let deleted_all = publish_with_head(&engine, delete_all).unwrap();
@@ -130,7 +133,10 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         world.origin(&world.repo_b, "replica-b"),
         50,
         Some(&deleted_all.snapshot.manifest),
-        PublishExpectation::Match(deleted_all.head_token),
+        PublishExpectation::Match(
+            Box::new(deleted_all.snapshot.clone()),
+            deleted_all.head_token,
+        ),
     );
     let resurrected = publish_with_head(&engine, resurrect).unwrap();
     assert!(resurrected.published);
@@ -152,7 +158,10 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
         world.origin(&world.repo_b, "replica-b"),
         60,
         Some(&resurrected.snapshot.manifest),
-        PublishExpectation::Match(resurrected.head_token),
+        PublishExpectation::Match(
+            Box::new(resurrected.snapshot.clone()),
+            resurrected.head_token,
+        ),
     );
     assert!(!engine.publish(fixed_point).unwrap().published);
 }

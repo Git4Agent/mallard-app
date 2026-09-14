@@ -55,7 +55,9 @@ pub struct HeadToken {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PublishExpectation {
     Absent,
-    Match(HeadToken),
+    /// The verified apply observation and its exact CAS token. It never
+    /// crosses the IPC or persistence boundary.
+    Match(Box<BundleSnapshot>, HeadToken),
 }
 
 #[derive(Clone, Debug)]
@@ -94,7 +96,8 @@ pub struct ScopePublishInput {
 /// A scoped publication. Only the named writable scopes may change; every
 /// other scope is carried from the verified current manifest with exactly
 /// the same revision and content digest (the mutation firewall). Apply reads
-/// the head once and makes one compare-and-swap attempt.
+/// the head once. Changed publication makes one CAS attempt; a no-op checks
+/// head freshness because it makes no write.
 #[derive(Clone, Debug)]
 pub struct PublishBundleRequest {
     pub identity: BundleIdentity,
@@ -730,20 +733,34 @@ impl<S: ObjectStore> BundleEngine<S> {
             }
         }
 
-        let current = self.read_head(&request.identity.bundle_id)?;
-        // A moved head is not by itself fatal: disjoint-scope publishers may
-        // land between review and push. The per-scope firewall below decides
-        // whether this publication can graft onto the winner.
-        match (&request.expected_head, &current) {
-            (PublishExpectation::Absent, Some(_)) => {
-                return Err("bundle head changed: expected an absent head".to_string())
+        // Apply owns the live read. A later publisher must lose at CAS, never
+        // silently replace the manifest used for the apply-time checks.
+        let (current, previous_manifest) = match request.expected_head {
+            PublishExpectation::Absent => (None, None),
+            PublishExpectation::Match(snapshot, token) => {
+                snapshot.validate()?;
+                let head = &snapshot.head;
+                if snapshot.storage_id != self.storage_id
+                    || head.bundle_id != request.identity.bundle_id
+                    || head.revision != token.revision
+                    || head.commit_id != token.commit_id
+                    || head.manifest_sha256 != token.manifest_sha256
+                    || head.manifest_size != token.manifest_size
+                    || token.etag.is_empty()
+                {
+                    return Err("publication snapshot and head token do not match".to_string());
+                }
+                let bytes = serde_json::to_vec(&snapshot.manifest)
+                    .map_err(|error| format!("serialize observed manifest: {error}"))?;
+                if bytes.len() as u64 != head.manifest_size
+                    || sha256_hex(&bytes) != head.manifest_sha256
+                {
+                    return Err("publication snapshot failed manifest verification".to_string());
+                }
+                (Some((snapshot.head, token)), Some(snapshot.manifest))
             }
-            (PublishExpectation::Match(_), None) => {
-                return Err("bundle head is missing; the remote repository was removed".to_string())
-            }
-            (PublishExpectation::Absent, None) | (PublishExpectation::Match(_), Some(_)) => {}
-        }
-        on_phase("publish: read head", phase_started.elapsed());
+        };
+        on_phase("publish: validate observation", phase_started.elapsed());
 
         // Capture already bound each immutable allocation to its digest.
         // Moving the body into its entry lets manifest construction and the
@@ -782,11 +799,6 @@ impl<S: ObjectStore> BundleEngine<S> {
 
         {
             let phase_started = Instant::now();
-            let previous_manifest = current
-                .as_ref()
-                .map(|(head, _)| self.read_manifest(head))
-                .transpose()?;
-
             // Mutation-firewall input check: every writable scope in the
             // verified current manifest must still match its reviewed pin.
             // Anything else means that scope advanced and needs a Pull.
@@ -904,9 +916,20 @@ impl<S: ObjectStore> BundleEngine<S> {
                 .map(|manifest| manifest.bundle != request.identity)
                 .unwrap_or(true);
             if !any_change && !identity_changed {
-                let (head, _) = current
+                let (head, token) = current
                     .as_ref()
                     .expect("a semantic noop requires a current head");
+                // No write means no CAS. Prove freshness before issuing a receipt.
+                let phase_started = Instant::now();
+                if self
+                    .read_head(&request.identity.bundle_id)?
+                    .as_ref()
+                    .map(|(_, token)| token)
+                    != Some(token)
+                {
+                    return Err("bundle head changed; compare again before pushing".to_string());
+                }
+                on_phase("publish: verify unchanged head", phase_started.elapsed());
                 return Ok(PublishedBundle {
                     published: false,
                     snapshot: BundleSnapshot {
@@ -1081,8 +1104,10 @@ impl<S: ObjectStore> BundleEngine<S> {
                 .compare_and_swap(&head_key, &cas_expectation, &head_bytes)?
             {
                 CasOutcome::Written { .. } => {
+                    on_phase("publish: head CAS", phase_started.elapsed());
+                    let phase_started = Instant::now();
                     let _ = self.publish_tag(&manifest);
-                    on_phase("publish: swing head", phase_started.elapsed());
+                    on_phase("publish: update tag", phase_started.elapsed());
                     Ok(PublishedBundle {
                         published: true,
                         snapshot: BundleSnapshot {
@@ -2258,7 +2283,17 @@ mod tests {
                 writable_scopes,
                 reviewed_scope_pins,
                 expected_head: observed
-                    .map(|(_, token)| PublishExpectation::Match(token))
+                    .map(|(head, token)| {
+                        PublishExpectation::Match(
+                            Box::new(BundleSnapshot {
+                                storage_id: engine.storage_id.clone(),
+                                head,
+                                manifest: previous.clone().unwrap(),
+                                fetched_at: updated_at,
+                            }),
+                            token,
+                        )
+                    })
                     .unwrap_or(PublishExpectation::Absent),
                 updated_at,
             },
@@ -3256,7 +3291,10 @@ mod tests {
                     SyncScopeKey::Project,
                     (first_scope.revision, first_scope.content_sha256.clone()),
                 )]),
-                expected_head: PublishExpectation::Match(first_token),
+                expected_head: PublishExpectation::Match(
+                    Box::new(first.snapshot.clone()),
+                    first_token,
+                ),
                 updated_at: 20,
             })
             .unwrap_err();
@@ -3427,8 +3465,7 @@ mod tests {
         assert_eq!(manifest_key_reads(&store), 1);
         assert_eq!(first.manifest.commit_id, second.manifest.commit_id);
 
-        // A publish against the inspected head re-reads the head, never the
-        // manifest it already holds.
+        // Publication reuses the observed head and its cached manifest.
         store.reset();
         write(&source.join("note.md"), b"cached manifest, changed");
         let observed = engine.read_head(&id).unwrap();
@@ -3588,6 +3625,203 @@ mod tests {
         .unwrap();
 
         assert_eq!(store.payload_put_pointers(), vec![capture_pointer]);
+    }
+
+    fn retained_publication(snapshot: &BundleSnapshot, token: &HeadToken) -> PublishBundleRequest {
+        PublishBundleRequest {
+            identity: snapshot.manifest.bundle.clone(),
+            published_by_origin: snapshot.manifest.published_by_origin.clone(),
+            writable_scopes: snapshot
+                .manifest
+                .scopes
+                .iter()
+                .map(|(key, scope)| {
+                    (
+                        key.clone(),
+                        ScopePublishInput {
+                            recipe: scope.recipe.clone(),
+                            captured_with: scope.captured_with.clone(),
+                            conversations: scope.conversations.clone(),
+                            resources: scope.resources.clone(),
+                            retained_files: scope.files.clone(),
+                            directories: scope.directories.clone(),
+                            tombstones: scope.tombstones.clone(),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+            reviewed_scope_pins: snapshot
+                .manifest
+                .scopes
+                .iter()
+                .map(|(key, scope)| (key.clone(), (scope.revision, scope.content_sha256.clone())))
+                .collect(),
+            expected_head: PublishExpectation::Match(Box::new(snapshot.clone()), token.clone()),
+            updated_at: snapshot.head.updated_at + 1,
+        }
+    }
+
+    #[test]
+    fn publication_reuses_verified_observation_and_rejects_late_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("project");
+        fs::create_dir_all(&source).unwrap();
+        write(&source.join("note.md"), b"retained bytes");
+        let mut capture_request = CaptureRequest::for_project(&source);
+        capture_request.include_project_content = true;
+        let inventory = discover_project(registry(), &capture_request).unwrap();
+        let recipe = recipe_for(inventory.resources.iter().map(|r| r.resource_id.clone()));
+        let store = CountingStore::open(&temp.path().join("store"));
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+        let id = bundle_id(94);
+        publish_captured(
+            &engine,
+            identity(id.clone(), "Observed"),
+            &recipe,
+            &capture_recipe(registry(), &capture_request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        store.reset();
+        let _review = engine.inspect(&id).unwrap();
+        let (snapshot, token) = engine.inspect_optional_with_token(&id).unwrap().unwrap();
+        let mut changed = retained_publication(&snapshot, &token);
+        changed.identity.display_name = "Changed".into();
+        let stale = changed.clone();
+        let mut phases = Vec::new();
+        engine
+            .publish_with_progress(changed, &mut |_| {}, &mut |phase, _| {
+                phases.push(phase.to_string())
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .keys
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|key| key.ends_with("/_head.json"))
+                .count(),
+            2,
+            "review and apply read the head; publication reuses the observation"
+        );
+        assert!(phases.iter().any(|phase| phase == "publish: head CAS"));
+        assert!(phases.iter().any(|phase| phase == "publish: update tag"));
+        store.reset();
+        assert!(engine.publish(stale).unwrap_err().contains("CAS conflict"));
+        assert_eq!(store.cas_count(), 1);
+        assert!(
+            store.keys.lock().unwrap().is_empty(),
+            "late change is rejected by CAS without a head read"
+        );
+        store.reset();
+        assert!(engine
+            .publish(retained_publication(&snapshot, &token))
+            .unwrap_err()
+            .contains("head changed"));
+        assert_eq!(store.put_count(), 0);
+        assert_eq!(store.cas_count(), 0);
+        assert_eq!(
+            store.keys.lock().unwrap().len(),
+            1,
+            "no-op verifies freshness"
+        );
+
+        let (current, token) = engine.inspect_optional_with_token(&id).unwrap().unwrap();
+        for corrupt in 0..4 {
+            let mut request = retained_publication(&current, &token);
+            if let PublishExpectation::Match(snapshot, token) = &mut request.expected_head {
+                match corrupt {
+                    0 => token.revision += 1,
+                    1 => snapshot.storage_id = StorageId::parse("another-store").unwrap(),
+                    2 => snapshot.manifest.bundle.display_name = "Tampered".into(),
+                    _ => request.identity.bundle_id = bundle_id(95),
+                }
+            }
+            store.reset();
+            assert!(engine.publish(request).is_err());
+            assert_eq!(store.put_count(), 0);
+            assert_eq!(store.cas_count(), 0);
+            assert!(store.keys.lock().unwrap().is_empty());
+        }
+        // A disjoint scope observed before apply is carried unchanged. A later
+        // disjoint update still requires a fresh comparison after CAS conflict.
+        let provider = SyncScopeKey::Provider(domain::ProviderKey::parse("claude").unwrap());
+        let mut disjoint = retained_publication(&current, &token);
+        let tombstone = Tombstone {
+            target: contracts::tombstone_resource(
+                &ResourceId::parse("claude:memory:removed").unwrap(),
+            )
+            .unwrap(),
+            last_sha256: None,
+            deleted_at: 12,
+        };
+        disjoint.writable_scopes = BTreeMap::from([(
+            provider.clone(),
+            ScopePublishInput {
+                tombstones: BTreeMap::from([(tombstone.structural_key(), tombstone)]),
+                ..Default::default()
+            },
+        )]);
+        disjoint.reviewed_scope_pins = BTreeMap::from([(provider.clone(), absent_scope_pin())]);
+        engine.publish(disjoint).unwrap();
+        let mut stale = retained_publication(&current, &token);
+        stale.identity.display_name = "Late writer".into();
+        assert!(engine.publish(stale).unwrap_err().contains("CAS conflict"));
+        let (latest, latest_token) = engine.inspect_optional_with_token(&id).unwrap().unwrap();
+        let mut carry = retained_publication(&latest, &latest_token);
+        carry.writable_scopes.remove(&provider);
+        carry.reviewed_scope_pins.remove(&provider);
+        carry.identity.display_name = "Carry disjoint scope".into();
+        let carried = engine.publish(carry).unwrap().snapshot;
+        assert_eq!(
+            carried.manifest.scopes[&provider],
+            latest.manifest.scopes[&provider]
+        );
+        let (current, token) = engine.inspect_optional_with_token(&id).unwrap().unwrap();
+
+        // Deletion after observation must fail for both changed and no-op requests.
+        let head_key = repository_object_key(&id, HEAD_FILE).unwrap();
+        store.inner.delete(&head_key, &token.etag).unwrap();
+        let mut changed = retained_publication(&current, &token);
+        changed.identity.display_name = "After deletion".into();
+        assert!(engine
+            .publish(changed)
+            .unwrap_err()
+            .contains("CAS conflict"));
+        assert!(engine
+            .publish(retained_publication(&current, &token))
+            .unwrap_err()
+            .contains("head changed"));
+        engine
+            .publish_registration(
+                &current.manifest.bundle,
+                &current.manifest.published_by_origin,
+                100,
+            )
+            .unwrap();
+        let mut recreated = retained_publication(&current, &token);
+        recreated.identity.display_name = "After recreation".into();
+        assert!(engine
+            .publish(recreated)
+            .unwrap_err()
+            .contains("CAS conflict"));
+        assert!(engine
+            .publish(retained_publication(&current, &token))
+            .unwrap_err()
+            .contains("head changed"));
+        assert!(publish_captured(
+            &engine,
+            identity(id, "Absent race"),
+            &recipe,
+            &capture_recipe(registry(), &capture_request, &recipe).unwrap(),
+            None,
+            110
+        )
+        .unwrap_err()
+        .contains("CAS conflict"));
     }
 
     #[test]

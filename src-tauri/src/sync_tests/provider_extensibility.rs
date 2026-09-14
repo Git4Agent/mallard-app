@@ -230,7 +230,10 @@ fn unregistered_provider_scope_is_carried_unchanged_through_a_publish() {
         origin,
         11,
         Some(&first_published.snapshot.manifest),
-        PublishExpectation::Match(first_published.head_token.clone()),
+        PublishExpectation::Match(
+            Box::new(first_published.snapshot.clone()),
+            first_published.head_token.clone(),
+        ),
     );
     assert!(
         !second.writable_scopes.contains_key(&future_scope_key),

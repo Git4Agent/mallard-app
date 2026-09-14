@@ -23,6 +23,7 @@ import type {
   MaintenanceActionRequest,
   MaintenanceActionResult,
   ProjectActivity,
+  ProjectActivityRefreshEvent,
   ProjectBinding,
   ProjectDetail,
   ProjectContentInventory,
@@ -61,7 +62,6 @@ import type {
   UpdateStorageSetupDraftRequest,
   StorageDataClearResult,
   SyncConfig,
-  ThreadSyncComparison,
 } from "../../types";
 
 export function createSingleFlight() {
@@ -82,6 +82,54 @@ export function createSingleFlight() {
 }
 
 const projectSyncSingleFlight = createSingleFlight();
+
+export interface ActivityRefreshRequest {
+  localProjectId: string;
+  storageId: string;
+  branch: string | null;
+  windowDays: number;
+  bindingRevision: number | null;
+  refreshEpoch: number;
+}
+
+// React remounts can join a running refresh. Replay its latest stages so each
+// caller receives local rows and the final result without a second remote read.
+export function createActivityRefresh(
+  start: (request: ActivityRefreshRequest, onEvent: (event: ProjectActivityRefreshEvent) => void) => Promise<void>,
+) {
+  const pending = new Map<string, {
+    events: Map<ProjectActivityRefreshEvent["stage"], ProjectActivityRefreshEvent>;
+    listeners: Set<(event: ProjectActivityRefreshEvent) => void>;
+    promise: Promise<void>;
+  }>();
+  return (request: ActivityRefreshRequest, onEvent: (event: ProjectActivityRefreshEvent) => void) => {
+    const key = JSON.stringify(request);
+    const existing = pending.get(key);
+    if (existing) {
+      existing.listeners.add(onEvent);
+      existing.events.forEach(onEvent);
+      return existing.promise;
+    }
+    const events = new Map<ProjectActivityRefreshEvent["stage"], ProjectActivityRefreshEvent>();
+    const listeners = new Set([onEvent]);
+    const promise = Promise.resolve().then(() => start(request, (event) => {
+      // An error replaces its result, and a recovered result replaces its error.
+      if (event.stage === "activity") events.delete("activity_error");
+      if (event.stage === "activity_error") events.delete("activity");
+      events.set(event.stage, event);
+      listeners.forEach((listener) => listener(event));
+    })).finally(() => { pending.delete(key); });
+    pending.set(key, { events, listeners, promise });
+    return promise;
+  };
+}
+
+const refreshProjectActivity = createActivityRefresh((request, onEvent) => {
+  const onProgress = new Channel<ProjectActivityRefreshEvent>();
+  onProgress.onmessage = onEvent;
+  const { localProjectId, storageId, branch, windowDays } = request;
+  return invoke<void>("refresh_project_activity", { localProjectId, storageId, branch, windowDays, onProgress });
+});
 
 /**
  * Current Tauri contract. Multi-word Rust parameters use Tauri's camel-case
@@ -366,13 +414,7 @@ export const projectSyncApi = {
     );
   },
 
-  getProjectThreadSyncComparison: (localProjectId: string, storageId: string) => {
-    const request = { localProjectId, storageId };
-    return projectSyncSingleFlight(
-      JSON.stringify(["get_project_thread_sync_comparison", request]),
-      () => invoke<ThreadSyncComparison>("get_project_thread_sync_comparison", request),
-    );
-  },
+  refreshProjectActivity,
 
   getProjectSessionDetail: (localProjectId: string, resourceId: string) => {
     const request = { localProjectId, resourceId };

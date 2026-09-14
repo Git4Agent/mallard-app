@@ -525,7 +525,9 @@ fn replay_child_wire_to_dropbox(
     source: &BundleSnapshot,
     engine: &BundleEngine<mallard_infrastructure::storage_core::dropbox_store::DropboxObjectStore>,
 ) -> (usize, u64) {
-    let observed = engine.read_head(&source.manifest.bundle.bundle_id).unwrap();
+    let observed = engine
+        .inspect_optional_with_token(&source.manifest.bundle.bundle_id)
+        .unwrap();
     let previous = observed.as_ref().map(|_| {
         engine
             .inspect(&source.manifest.bundle.bundle_id)
@@ -582,7 +584,7 @@ fn replay_child_wire_to_dropbox(
                 writable_scopes: scopes,
                 reviewed_scope_pins: pins,
                 expected_head: observed
-                    .map(|(_, token)| PublishExpectation::Match(token))
+                    .map(|(snapshot, token)| PublishExpectation::Match(Box::new(snapshot), token))
                     .unwrap_or(PublishExpectation::Absent),
                 updated_at: source.manifest.updated_at,
             },

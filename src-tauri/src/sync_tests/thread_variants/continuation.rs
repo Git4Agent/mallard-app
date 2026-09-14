@@ -837,7 +837,10 @@ fn publish_bound_thread(
         publisher,
         updated_at,
         Some(&current.manifest),
-        mallard_infrastructure::bundle_engine::PublishExpectation::Match(head_token),
+        mallard_infrastructure::bundle_engine::PublishExpectation::Match(
+            Box::new(current.clone()),
+            head_token,
+        ),
     );
     let bindings = repository.load_conversation_bindings().unwrap();
     let binding = bindings

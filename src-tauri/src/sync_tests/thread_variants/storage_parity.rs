@@ -34,7 +34,10 @@ fn local_store_rejects_unreviewed_remote_thread_loss_and_stale_cas() {
         origin.clone(),
         20,
         Some(&initial.snapshot.manifest),
-        PublishExpectation::Match(initial.head_token.clone()),
+        PublishExpectation::Match(
+            Box::new(initial.snapshot.clone()),
+            initial.head_token.clone(),
+        ),
     );
     let error = world.engine().publish(dropping).unwrap_err();
     assert!(error.contains("drops conversation thread"));
@@ -60,7 +63,10 @@ fn local_store_rejects_unreviewed_remote_thread_loss_and_stale_cas() {
         origin.clone(),
         20,
         Some(&initial.snapshot.manifest),
-        PublishExpectation::Match(initial.head_token.clone()),
+        PublishExpectation::Match(
+            Box::new(initial.snapshot.clone()),
+            initial.head_token.clone(),
+        ),
     );
     let stale_request = publish_request(
         world.bundle_id.clone(),
@@ -68,17 +74,15 @@ fn local_store_rejects_unreviewed_remote_thread_loss_and_stale_cas() {
         origin,
         21,
         Some(&initial.snapshot.manifest),
-        PublishExpectation::Match(initial.head_token),
+        PublishExpectation::Match(Box::new(initial.snapshot.clone()), initial.head_token),
     );
     world.engine().publish(first_request).unwrap();
-    // The lost update now fails through the per-scope firewall — the stale
-    // writer's reviewed Codex-scope pin no longer matches — instead of the
-    // repository-wide head CAS.
+    // Both requests used the same apply observation. The later write loses at CAS.
     assert!(world
         .engine()
         .publish(stale_request)
         .unwrap_err()
-        .contains("changed since review"));
+        .contains("CAS conflict"));
 }
 
 #[test]
@@ -122,7 +126,10 @@ fn local_store_immutable_and_head_failures_leave_a_retryable_fixed_point() {
         origin,
         20,
         Some(&initial.snapshot.manifest),
-        PublishExpectation::Match(initial.head_token.clone()),
+        PublishExpectation::Match(
+            Box::new(initial.snapshot.clone()),
+            initial.head_token.clone(),
+        ),
     );
     store.fail_next(StoreFailure::HeadCas);
     assert!(engine.publish(advanced_request.clone()).is_err());
@@ -187,7 +194,10 @@ async fn stub_s3_current_schema_noop_and_fast_forward_match_local_protocol() {
         world.origin(&world.repo_b, "replica-b"),
         20,
         Some(&initial.snapshot.manifest),
-        PublishExpectation::Match(initial.head_token.clone()),
+        PublishExpectation::Match(
+            Box::new(initial.snapshot.clone()),
+            initial.head_token.clone(),
+        ),
     );
     let noop_store = store.clone();
     let noop_storage = storage_id.clone();
@@ -209,7 +219,7 @@ async fn stub_s3_current_schema_noop_and_fast_forward_match_local_protocol() {
         origin,
         30,
         Some(&noop.snapshot.manifest),
-        PublishExpectation::Match(noop.head_token),
+        PublishExpectation::Match(Box::new(noop.snapshot.clone()), noop.head_token),
     );
     let advance_store = store.clone();
     let advance_storage = storage_id.clone();
@@ -314,7 +324,10 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
         origin_a,
         20,
         Some(&initial.snapshot.manifest),
-        PublishExpectation::Match(initial.head_token.clone()),
+        PublishExpectation::Match(
+            Box::new(initial.snapshot.clone()),
+            initial.head_token.clone(),
+        ),
     );
     let mut advanced_t2 = t2.clone();
     advanced_t2.transcript = chain(
@@ -333,7 +346,7 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
         origin_b.clone(),
         21,
         Some(&initial.snapshot.manifest),
-        PublishExpectation::Match(initial.head_token),
+        PublishExpectation::Match(Box::new(initial.snapshot.clone()), initial.head_token),
     );
     let writer_a_store = store.clone();
     let writer_a_storage = storage_id.clone();
@@ -353,12 +366,8 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
     })
     .await
     .unwrap();
-    // Both writers change the same Codex scope, so the stale writer is
-    // rejected by that scope's reviewed pin rather than the head CAS.
-    assert!(
-        stale_error.contains("changed since review") || stale_error.contains("conflict"),
-        "{stale_error}"
-    );
+    // A writer using the old apply observation must lose at CAS.
+    assert!(stale_error.contains("CAS conflict"), "{stale_error}");
 
     let t1_path = codex_scope(&after_a.snapshot.manifest).conversations[&t1_id].files[0]
         .logical_path
@@ -372,7 +381,7 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
         origin_b,
         30,
         Some(&after_a.snapshot.manifest),
-        PublishExpectation::Match(after_a.head_token),
+        PublishExpectation::Match(Box::new(after_a.snapshot.clone()), after_a.head_token),
     );
     let retry_store = store.clone();
     let retry_storage = storage_id.clone();

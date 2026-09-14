@@ -15,9 +15,10 @@ import {
 } from "../../src/components/project-sync/ProjectActivityPage";
 import ProjectSidebar from "../../src/components/project-sync/ProjectSidebar";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../../src/components/sync-review/ThreadStatusIcon";
-import { createSingleFlight } from "../../src/components/project-sync/api";
+import { createActivityRefresh, createSingleFlight } from "../../src/components/project-sync/api";
 import type {
   ConversationReviewAction,
+  ProjectActivityRefreshEvent,
   LocalProjectSummary,
   ProjectBinding,
   ThreadSyncComparison,
@@ -3227,4 +3228,53 @@ test("a lone card in a flat list keeps all four inner corners", () => {
   assert.match(first, new RegExp(`border-top-right-radius: ${inner}`));
   assert.match(last, new RegExp(`border-bottom-left-radius: ${inner}`));
   assert.match(last, new RegExp(`border-bottom-right-radius: ${inner}`));
+});
+
+
+test("activity refresh joins in-flight requests, replays rows, and clears completed requests", async () => {
+  let starts = 0;
+  let emit!: (event: ProjectActivityRefreshEvent) => void;
+  let finish!: () => void;
+  const refresh = createActivityRefresh(async (_request, onEvent) => {
+    starts += 1;
+    emit = onEvent;
+    await new Promise<void>((resolve) => { finish = resolve; });
+  });
+  const request = { localProjectId: "project-a", storageId: "store-a", branch: null, windowDays: 30, bindingRevision: 1, refreshEpoch: 0 };
+  const first: ProjectActivityRefreshEvent[] = [];
+  const second: ProjectActivityRefreshEvent[] = [];
+  const pending = refresh(request, (event) => first.push(event));
+  await Promise.resolve();
+  const local: ProjectActivityRefreshEvent = { stage: "activity", activity };
+  emit(local);
+  const joined = refresh(request, (event) => second.push(event));
+  assert.equal(joined, pending);
+  assert.deepEqual(second, [local]);
+  assert.equal(starts, 1);
+  emit({ stage: "comparison_error", message: "Storage unavailable" });
+  assert.deepEqual(second, first);
+  finish();
+  await pending;
+  const next = refresh(request, () => {});
+  await Promise.resolve();
+  assert.equal(starts, 2, "a later refresh must make a fresh read");
+  finish();
+  await next;
+});
+
+test("activity refresh isolates project, storage, and branch requests and clears failures", async () => {
+  let starts = 0;
+  const refresh = createActivityRefresh(async () => { starts += 1; throw new Error("offline"); });
+  const request = { localProjectId: "project-a", storageId: "store-a", branch: null, windowDays: 30, bindingRevision: 1, refreshEpoch: 0 };
+  await Promise.all([
+    request,
+    { ...request, localProjectId: "project-b" },
+    { ...request, storageId: "store-b" },
+    { ...request, branch: "main" },
+    { ...request, bindingRevision: 2 },
+    { ...request, refreshEpoch: 1 },
+  ].map((input) => assert.rejects(refresh(input, () => {}), /offline/)));
+  assert.equal(starts, 6);
+  await assert.rejects(refresh(request, () => {}), /offline/);
+  assert.equal(starts, 7);
 });

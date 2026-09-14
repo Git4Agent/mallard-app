@@ -1676,3 +1676,10 @@ export interface DropboxSetupProgress {
   url: string;
   expires_in: number;
 }
+
+/** Results from one local discovery and one remote observation. */
+export type ProjectActivityRefreshEvent =
+  | { stage: "activity"; activity: ProjectActivity }
+  | { stage: "activity_error"; message: string }
+  | { stage: "comparison"; comparison: ThreadSyncComparison }
+  | { stage: "comparison_error"; message: string };

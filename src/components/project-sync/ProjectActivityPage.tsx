@@ -2254,52 +2254,66 @@ export default function ProjectActivityPage({
     return requestId === requestRef.current;
   };
 
-  /* The comparison is its own invoke, deliberately apart from the session
-     list: the list costs a bounded scan while the comparison proves every
-     thread's tail, so one joined read held the whole page on the slower
-     half. Rows wear their "Comparing with …" badge until this lands, and
-     either read failing leaves the other's result standing. */
-  const loadComparison = async () => {
-    if (activeStorageId === null) {
-      comparisonRequestRef.current += 1;
-      setComparison(null);
-      setComparisonLoading(false);
-      setComparisonError(null);
-      return;
-    }
-    const comparisonRequestId = ++comparisonRequestRef.current;
-    setComparisonLoading(true);
-    setComparisonError(null);
-    try {
-      const next = await projectSyncApi.getProjectThreadSyncComparison(
-        project.local_project_id,
-        activeStorageId,
-      );
-      if (comparisonRequestId !== comparisonRequestRef.current) return;
-      setComparison(next);
-    } catch (reason) {
-      if (comparisonRequestId !== comparisonRequestRef.current) return;
-      setComparison(null);
-      setComparisonError(errorMessage(reason));
-    } finally {
-      if (comparisonRequestId === comparisonRequestRef.current) setComparisonLoading(false);
-    }
-  };
-
   const loadWorkspace = async (requestedBranch = branch) => {
-    if (comparisonOverride !== undefined) {
+    if (comparisonOverride !== undefined || activeStorageId === null) {
       comparisonRequestRef.current += 1;
-      setComparison(comparisonOverride);
+      setComparison(comparisonOverride ?? null);
       setComparisonLoading(false);
       setComparisonError(null);
       await load(null, requestedBranch);
       return;
     }
     if (!hasBoundProvider) return;
-    // Activity owns the cold provider discovery. Waiting for it here lets the
-    // comparison reuse that inventory instead of racing the same full scan.
-    const activityIsCurrent = await load(null, requestedBranch);
-    if (activityIsCurrent) await loadComparison();
+    const requestId = ++requestRef.current;
+    const comparisonRequestId = ++comparisonRequestRef.current;
+    setLoading(true);
+    setComparisonLoading(true);
+    setLoadError(null);
+    setComparisonError(null);
+    setActionError(null);
+    let receivedActivity = false;
+    try {
+      await projectSyncApi.refreshProjectActivity({
+        localProjectId: project.local_project_id,
+        storageId: activeStorageId,
+        branch: requestedBranch,
+        windowDays: 30,
+        bindingRevision: binding?.revision ?? null,
+        refreshEpoch,
+      }, (event) => {
+        if (event.stage === "activity" || event.stage === "activity_error") {
+          if (requestId !== requestRef.current) return;
+          if (event.stage === "activity") {
+            receivedActivity = true;
+            setPages([event.activity]);
+            setBranch(event.activity.git?.selected_branch ?? null);
+            setLoadError(null);
+          } else {
+            setLoadError(event.message);
+          }
+          setLoading(false);
+        } else {
+          if (comparisonRequestId !== comparisonRequestRef.current) return;
+          if (event.stage === "comparison") {
+            setComparison(event.comparison);
+            setComparisonError(null);
+          } else {
+            setComparison(null);
+            setComparisonError(event.message);
+          }
+          setComparisonLoading(false);
+        }
+      });
+    } catch (reason) {
+      if (requestId === requestRef.current && !receivedActivity) setLoadError(errorMessage(reason));
+      if (comparisonRequestId === comparisonRequestRef.current) {
+        setComparison(null);
+        setComparisonError(errorMessage(reason));
+      }
+    } finally {
+      if (requestId === requestRef.current) setLoading(false);
+      if (comparisonRequestId === comparisonRequestRef.current) setComparisonLoading(false);
+    }
   };
 
   useEffect(() => {

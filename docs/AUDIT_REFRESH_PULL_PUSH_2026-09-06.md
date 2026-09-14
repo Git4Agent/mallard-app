@@ -193,3 +193,31 @@ Fix order: Push selection, activity-cache ownership, Pull payload lifetime,
 refresh read sharing, then the early destination check. Add regression checks
 at the complete operation boundary. Record the time to local rows, time to
 comparison, payload bytes read, object-read count, and bytes serialized.
+
+
+**2026-09-14 implementation update — finding 4 and Push head reads**
+
+Full Activity refresh now sends local rows before remote inspection. One
+verified remote snapshot then supplies remote Activity rows and comparison.
+The page uses `refresh_project_activity` in place of the separate comparison
+command. Activity-only branch, pagination, and review reads remain in use.
+In-flight refresh requests are separated by project, storage, branch, binding
+revision, and refresh epoch. No head cache is persisted.
+
+Changed Push publication now consumes the verified apply snapshot and its
+CAS token. Review and apply still read the head. Publication makes one CAS
+attempt without another head read. Changes after the apply observation,
+including disjoint-scope changes, require comparison again. A no-change Push
+checks the head before success because it makes no CAS write.
+
+Tag publication retains its metadata read and CAS. Head CAS and tag update
+now have separate timing phases. All persisted schemas remain 1. No migration
+or legacy execution path was added.
+
+Fixture checks cover head-read counts, stale and invalid publication input,
+missing and recreated heads, disjoint-scope retention, no-change freshness,
+remote failure after local rows, and comparison after the head becomes invalid.
+The frontend checks cover shared requests, result replay, and revision isolation.
+Live Dropbox latency and an isolated native UI run remain unverified. The
+native QA launch displayed the normal workspace and was closed before any
+manual sync action.

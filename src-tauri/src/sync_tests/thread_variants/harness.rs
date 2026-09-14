@@ -133,10 +133,10 @@ impl VariantWorld {
         updated_at: u64,
     ) -> PublishedFixture {
         let engine = self.engine();
-        let current = engine.read_head(&self.bundle_id).unwrap();
+        let current = engine.inspect_optional_with_token(&self.bundle_id).unwrap();
         let previous = current
             .as_ref()
-            .map(|_| engine.inspect(&self.bundle_id).unwrap().manifest);
+            .map(|(snapshot, _)| snapshot.manifest.clone());
         let request = publish_request(
             self.bundle_id.clone(),
             threads,
@@ -144,7 +144,7 @@ impl VariantWorld {
             updated_at,
             previous.as_ref(),
             current
-                .map(|(_, token)| PublishExpectation::Match(token))
+                .map(|(snapshot, token)| PublishExpectation::Match(Box::new(snapshot), token))
                 .unwrap_or(PublishExpectation::Absent),
         );
         publish_with_head(&engine, request).unwrap()

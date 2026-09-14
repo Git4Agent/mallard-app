@@ -10,38 +10,37 @@ use super::service::{
     get_bundle_inventory_with_repository, get_host_identity_status_with_repository,
     get_project_activity_with_repository, get_project_session_detail_with_repository,
     get_project_session_event_detail_with_repository,
-    get_project_session_timeline_page_with_repository,
-    get_project_thread_sync_comparison_with_progress, get_project_with_repository,
+    get_project_session_timeline_page_with_repository, get_project_with_repository,
     get_push_destination_status_with_repository, get_restore_readiness_with_repository,
     get_setup_draft_with_repository, get_storage_setup_draft_with_repository,
-    inspect_project_files_with_repository,
-    list_local_projects_with_repository, list_project_bindings_with_repository,
-    list_project_repository_kinds_with_repository, list_provider_profiles_with_repository,
-    list_remote_bundle_snapshots_with_repository, list_setup_drafts_with_repository,
-    list_storage_setup_drafts_with_repository, load_project_sync_config_with_repository,
-    probe_provider_profile_with_repository, project_open_commands, project_storage_log_context,
-    pull_action_resource_label, pull_plan_action_counts, pull_review_resource_labels,
+    inspect_project_files_with_repository, list_local_projects_with_repository,
+    list_project_bindings_with_repository, list_project_repository_kinds_with_repository,
+    list_provider_profiles_with_repository, list_remote_bundle_snapshots_with_repository,
+    list_setup_drafts_with_repository, list_storage_setup_drafts_with_repository,
+    load_project_sync_config_with_repository, probe_provider_profile_with_repository,
+    project_open_commands, project_storage_log_context, pull_action_resource_label,
+    pull_plan_action_counts, pull_review_resource_labels,
     read_project_markdown_image_with_repository, recover_startup_state_with_repository,
-    remove_local_project_with_repository, remove_project_link_with_repository,
-    remove_storage_with_repository, rename_local_project_with_repository,
-    rename_storage_with_repository, repository, reset_project_sync_metadata_with_repository,
-    reveal_storage_secret_with_repository, test_storage_with_repository,
-    resolve_project_markdown_path_with_repository, save_project_binding_with_repository,
+    refresh_project_activity_with_progress, remove_local_project_with_repository,
+    remove_project_link_with_repository, remove_storage_with_repository,
+    rename_local_project_with_repository, rename_storage_with_repository, repository,
+    reset_project_sync_metadata_with_repository, resolve_project_markdown_path_with_repository,
+    reveal_storage_secret_with_repository, save_project_binding_with_repository,
     save_project_link_with_repository, session_detail_error, should_log_history_scan,
     sibling_bundle_status_with_repository, storage_log_label, storage_provider_descriptors,
-     test_storage_setup_draft_with_repository,
+    test_storage_setup_draft_with_repository, test_storage_with_repository,
     update_storage_setup_draft_with_repository, BundleReadiness, BundleSnapshotSummary,
     CommitStorageDraftResult, ConnectProjectBundleRequest, CreateSetupDraftResult,
-    HostIdentityStatus, ProjectActivity, ProjectContentInventory, ProjectDetail,
-    ProjectMarkdownImage, ProjectOperationResult, ProjectSessionTimelineRequest,
+    HostIdentityStatus, ProjectActivity, ProjectActivityRefreshEvent, ProjectContentInventory,
+    ProjectDetail, ProjectMarkdownImage, ProjectOperationResult, ProjectSessionTimelineRequest,
     ProjectSyncConfigView, ProjectSyncMetadataResetResult, ProjectSyncService, ProviderDescriptor,
     ProviderProfileProbe, ProviderProfileSummary, PushApproval, PushDestinationStatus,
     PushReviewContext, ResourceInventory, RestoreResult, SaveProjectBindingRequest,
     SaveProjectLinkRequest, SessionDetailError, SessionDetailErrorCode, SessionTimelineEventKind,
     SessionToolCategory, SetupDraftInspection, SetupDraftList, SiblingBundleStatus,
     StorageDataClearResult, StorageProviderDescriptor, StorageSetupDraftList,
-    StorageSetupDraftSummary, TestStorageDraftResult, ThreadSyncComparison, VerifyStorageResult,
-    UpdateStorageSetupDraftRequest, HISTORY_SCAN_LOGGED_AT,
+    StorageSetupDraftSummary, TestStorageDraftResult, UpdateStorageSetupDraftRequest,
+    VerifyStorageResult, HISTORY_SCAN_LOGGED_AT,
 };
 use crate::activity_log::{emit_typed_log, ActivityLogScope};
 use mallard_domain::{
@@ -654,11 +653,14 @@ pub async fn get_project_activity(
 }
 
 #[tauri::command]
-pub async fn get_project_thread_sync_comparison(
+pub async fn refresh_project_activity(
     app: tauri::AppHandle,
     local_project_id: LocalProjectId,
     storage_id: StorageId,
-) -> Result<ThreadSyncComparison, String> {
+    branch: Option<String>,
+    window_days: Option<u64>,
+    on_progress: tauri::ipc::Channel<ProjectActivityRefreshEvent>,
+) -> Result<(), String> {
     let repository = repository()?;
     let log = ActivityLogScope::new(ActivityLogType::History).project(&local_project_id, None);
     let log_routine_compare = HISTORY_SCAN_LOGGED_AT
@@ -675,10 +677,24 @@ pub async fn get_project_thread_sync_comparison(
     let phase_log = log.clone();
     let total_started = Instant::now();
     let result = run_blocking(move || {
-        get_project_thread_sync_comparison_with_progress(
+        refresh_project_activity_with_progress(
             &repository,
             &local_project_id,
             &storage_id,
+            branch.as_deref(),
+            window_days,
+            &mut |event| {
+                match &event {
+                    ProjectActivityRefreshEvent::ActivityError { message }
+                    | ProjectActivityRefreshEvent::ComparisonError { message } => {
+                        phase_log.emit(&phase_app, "warning", "history.refresh_warning", message)
+                    }
+                    _ => {}
+                }
+                on_progress
+                    .send(event)
+                    .map_err(|error| format!("send activity refresh: {error}"))
+            },
             &mut |phase, elapsed| {
                 if log_routine_compare {
                     phase_log.emit(
@@ -686,7 +702,7 @@ pub async fn get_project_thread_sync_comparison(
                         "info",
                         "history.compare_phase_timing",
                         &format!(
-                            "   Storage comparison phase — {phase}: {:.3}s",
+                            "Storage comparison phase — {phase}: {:.3}s",
                             elapsed.as_secs_f64()
                         ),
                     );
@@ -695,27 +711,18 @@ pub async fn get_project_thread_sync_comparison(
         )
     })
     .await;
-    match &result {
-        Ok(comparison) => {
-            if log_routine_compare {
-                log.emit(
-                    &app,
-                    "info",
-                    "history.compare_completed",
-                    &format!(
-                        "Storage comparison complete: {} threads in {:.3}s",
-                        comparison.entries.len(),
-                        total_started.elapsed().as_secs_f64()
-                    ),
-                );
-            }
-        }
-        Err(error) => log.emit(
+    if let Err(error) = &result {
+        log.emit(&app, "error", "history.refresh_failed", error);
+    } else if log_routine_compare {
+        log.emit(
             &app,
-            "error",
-            "history.compare_failed",
-            &format!("Storage comparison failed: {error}"),
-        ),
+            "info",
+            "history.refresh_completed",
+            &format!(
+                "Activity refresh complete in {:.3}s",
+                total_started.elapsed().as_secs_f64()
+            ),
+        );
     }
     result
 }
