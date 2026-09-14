@@ -4,7 +4,7 @@ import { fixture, fixtureIdentity, closure, body, scenarioDocument, textScenario
 import { options } from "./mixed-aimock/options.mjs";
 import * as codex from "./live-codex-aimock-server.mjs";
 import * as claude from "./live-claude-aimock-server.mjs";
-import { environment } from "./mixed-aimock/process.mjs";
+import { environment, inspectClaudeTranscript, CLAUDE_ISOLATION_ARGUMENTS } from "./mixed-aimock/process.mjs";
 
 const source = "/fixture/source/project";
 const destination = "/fixture/destination/project";
@@ -153,7 +153,7 @@ test("benchmark percentiles, injected slowdown, and baseline mismatch cannot pas
   assert.equal(compareBenchmark(benchmark(), missing).status, "invalid");
 });
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { startMock } from "./mixed-aimock/process.mjs";
@@ -228,4 +228,75 @@ test("incomplete benchmark runs and missing validation cannot pass", async () =>
   await assert.rejects(runBenchmark({ timelineClouds: targets }), /requires native restore validation/u);
   await assert.rejects(runBenchmark({ timelineClouds: targets, validateRestore() {}, samples: 19 }), /sample count/u);
   assert.equal(environment(source).CLAUDE_CODE_MAX_RETRIES, "0");
+});
+
+
+test("Claude transcript checks distinguish missing files, incomplete JSONL, and missing user messages", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mallard-claude-transcript-test-"));
+  const path = join(root, "session.jsonl");
+  const user = { type: "user", uuid: "user", message: { content: "MIXED_USER_1" } };
+  const assistant = { type: "assistant", uuid: "assistant", parentUuid: "user",
+    message: { content: [{ type: "text", text: "MIXED_RESPONSE_1" }] } };
+  const inspect = () => inspectClaudeTranscript(path, "MIXED_USER_1", "MIXED_RESPONSE_1");
+  try {
+    assert.equal((await inspect()).file_state, "missing");
+    await writeFile(path, JSON.stringify(user));
+    assert.equal((await inspect()).file_state, "incomplete");
+    await writeFile(path, "{invalid}\n");
+    assert.equal((await inspect()).file_state, "invalid_json");
+    // Reproduced native failure: successful assistant output, but no saved user.
+    await writeFile(path, `${JSON.stringify(assistant)}\n`);
+    const missingUser = await inspect();
+    assert.equal(missingUser.file_state, "valid");
+    assert.equal(missingUser.user_records, 0);
+    assert.equal(missingUser.assistant_records, 1);
+    assert.equal(missingUser.user_found, false);
+    assert.equal(missingUser.assistant_found, true);
+    const encode = (...records) => `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+    await writeFile(path, encode(user, { ...assistant, message: { content: "MIXED_RESPONSE_OLD" } }));
+    assert.equal((await inspect()).assistant_found, false);
+    await writeFile(path, encode(user, assistant));
+    const complete = await inspect();
+    assert.equal(complete.user_found, true);
+    assert.equal(complete.assistant_found, true);
+    await writeFile(path, encode(user, { ...assistant, parentUuid: "missing-parent" }));
+    await assert.rejects(inspect(), /missing message parent/u);
+    const link = join(root, "link.jsonl");
+    await symlink(path, link);
+    await assert.rejects(inspectClaudeTranscript(link, "MIXED_USER_1", "MIXED_RESPONSE_1"), /type or size/u);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Claude transcript failure reports allow only bounded counts and fixed check results", () => {
+  const error = new Error("claude_transcript_did_not_settle");
+  error.transcriptState = { file_state: "valid", bytes: 2334, records: 3, user_records: 0,
+    assistant_records: 1, user_found: false, assistant_found: true,
+    path: "/Users/private-user/project", content: CANARIES.key };
+  const failure = safeFailure(error, "native_generation");
+  assert.deepEqual(failure.transcript, { file_state: "valid", bytes: 2334, records: 3,
+    user_records: 0, assistant_records: 1, user_found: false, assistant_found: true });
+  const markdown = summary({ status: "failed", failure, elapsed_ms: 100 });
+  assert.ok(markdown.includes("expected user found: false"));
+  for (const forbidden of ["/Users", "private-user", ...Object.values(CANARIES)]) {
+    assert.ok(!JSON.stringify(failure).includes(forbidden));
+    assert.ok(!markdown.includes(forbidden));
+  }
+  for (const invalid of [{ file_state: CANARIES.key }, { bytes: Infinity }, { records: -1 }, { user_found: CANARIES.key }]) {
+    assert.equal(safeFailure({ ...error, message: error.message, transcriptState: { ...error.transcriptState, ...invalid } }, "native_generation").transcript, undefined);
+  }
+});
+
+
+test("Claude E2E uses awaited persistence without settings, hooks, skills, or MCP discovery", () => {
+  const args = CLAUDE_ISOLATION_ARGUMENTS;
+  const value = (flag) => args[args.indexOf(flag) + 1];
+  assert.ok(!args.includes("--bare"));
+  assert.ok(args.includes("--setting-sources"));
+  assert.equal(value("--setting-sources"), "");
+  assert.equal(JSON.parse(value("--settings")).disableAllHooks, true);
+  assert.deepEqual(JSON.parse(value("--settings")).enabledPlugins, {});
+  assert.ok(args.includes("--disable-slash-commands"));
+  assert.ok(args.includes("--strict-mcp-config"));
+  assert.deepEqual(JSON.parse(value("--mcp-config")).mcpServers, {});
+  assert.equal(environment(source).CLAUDE_CODE_SIMPLE, undefined);
 });

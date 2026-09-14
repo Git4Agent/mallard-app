@@ -3078,6 +3078,13 @@ test("a review shows the whole span at once: no paging, no fold, unlisted entrie
   assert.match(modeChange, /A thread no session row reaches/);
   assert.match(modeChange, />Export settings changed<\/span>/);
   assert.match(modeChange, /type="checkbox"/);
+  // A current session exported under earlier settings is Push work, not a
+  // synced check: it carries the local glyph and joins the Push count.
+  const changedPresentation = sessionSyncPresentation(changed, "Storage");
+  assert.equal(changedPresentation.status, "local-outstanding");
+  assert.equal(changedPresentation.className, "local");
+  assert.match(changedPresentation.label, /Pushed with your previous export settings\. Push to update Storage\./);
+  assert.equal(sessionSyncPresentation({ ...changed, push_decision: { action: "no_changes" as const, selectable: false } }, "Storage").status, "synced");
   // The standing page still pages.
   const standing = renderToStaticMarkup(
     <ProjectChatHistoryContent {...contentDefaults} activity={activity} />,

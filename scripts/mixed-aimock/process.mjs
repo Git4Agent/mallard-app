@@ -4,6 +4,13 @@ import { mkdir, readFile, writeFile, lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { MODELS } from "./scenario.mjs";
 
+// Claude 2.1.266 skips awaiting the initial transcript record in --bare mode.
+// Use the awaited path with explicit isolation for every test session.
+export const CLAUDE_ISOLATION_ARGUMENTS = Object.freeze([
+  "--setting-sources", "", "--settings", '{"disableAllHooks":true,"enabledPlugins":{}}',
+  "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands",
+]);
+
 const owned = new Set();
 export async function stopOwned() {
   const children = [...owned];
@@ -185,7 +192,7 @@ export async function codexServer(replica, url) {
 }
 
 export async function claudeTurn(replica, url, id, fresh, prompt, expected) {
-  const output = await runBounded("claude", ["--bare", "--print", "--output-format", "json", "--model", MODELS.claude,
+  const output = await runBounded("claude", [...CLAUDE_ISOLATION_ARGUMENTS, "--print", "--output-format", "json", "--model", MODELS.claude,
     "--permission-mode", "dontAsk", "--tools=Read", fresh ? "--session-id" : "--resume", id, prompt],
   { cwd: replica.project, env: environment(replica.home, { CLAUDE_CONFIG_DIR: replica.claude,
     ANTHROPIC_BASE_URL: url.replace(/\/v1$/u, ""), ANTHROPIC_API_KEY: "mallard-local-aimock-placeholder" }) });
@@ -196,23 +203,48 @@ export async function claudeTurn(replica, url, id, fresh, prompt, expected) {
   const transcript = join(replica.claude, "projects", replica.project.replace(/[^A-Za-z0-9]/gu, "-"), `${id}.jsonl`);
   const deadline = Date.now() + 5000;
   for (;;) {
-    let records = [];
-    try {
-      const metadata = await lstat(transcript);
-      assert.ok(metadata.isFile() && !metadata.isSymbolicLink() && metadata.size <= 16 * 1024 * 1024, "Claude transcript type or size");
-      const bytes = await readFile(transcript, "utf8");
-      if (bytes.endsWith("\n")) records = bytes.trimEnd().split("\n").map((line) => JSON.parse(line));
-    } catch (error) { if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error; }
-    const text = (record) => typeof record.message?.content === "string" ? record.message.content
-      : (record.message?.content ?? []).filter((part) => part.type === "text").map((part) => part.text).join("");
-    const user = records.find((record) => record.type === "user" && text(record).includes(prompt));
-    const assistant = records.find((record) => record.type === "assistant" && text(record) === expected);
-    if (user && assistant) {
-      const ids = new Set(records.map((record) => record.uuid).filter(Boolean));
-      assert.ok(!assistant.parentUuid || ids.has(assistant.parentUuid), "Claude persisted a missing message parent");
-      return;
+    const state = await inspectClaudeTranscript(transcript, prompt, expected);
+    if (state.user_found && state.assistant_found) return;
+    if (Date.now() >= deadline) {
+      const error = new Error("claude_transcript_did_not_settle");
+      error.transcriptState = state;
+      throw error;
     }
-    if (Date.now() >= deadline) throw new Error("claude_transcript_did_not_settle");
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
+}
+
+// Keep only counts and check results. Never export transcript content or paths.
+export async function inspectClaudeTranscript(transcript, prompt, expected) {
+  const state = { file_state: "missing", bytes: 0, records: 0, user_records: 0, assistant_records: 0,
+    user_found: false, assistant_found: false };
+  let records;
+  try {
+    const metadata = await lstat(transcript);
+    assert.ok(metadata.isFile() && !metadata.isSymbolicLink() && metadata.size <= 16 * 1024 * 1024, "Claude transcript type or size");
+    const bytes = await readFile(transcript, "utf8");
+    state.bytes = Buffer.byteLength(bytes);
+    state.file_state = "incomplete";
+    if (!bytes.endsWith("\n")) return state;
+    state.file_state = "invalid_json";
+    records = bytes.trimEnd().split("\n").map((line) => JSON.parse(line));
+  } catch (error) {
+    if (error.code === "ENOENT" || error instanceof SyntaxError) return state;
+    throw error;
+  }
+  state.file_state = "valid";
+  state.records = records.length;
+  state.user_records = records.filter((record) => record.type === "user").length;
+  state.assistant_records = records.filter((record) => record.type === "assistant").length;
+  const text = (record) => typeof record.message?.content === "string" ? record.message.content
+    : (record.message?.content ?? []).filter((part) => part.type === "text").map((part) => part.text).join("");
+  const user = records.find((record) => record.type === "user" && text(record).includes(prompt));
+  const assistant = records.find((record) => record.type === "assistant" && text(record) === expected);
+  state.user_found = !!user;
+  state.assistant_found = !!assistant;
+  if (user && assistant) {
+    const ids = new Set(records.map((record) => record.uuid).filter(Boolean));
+    assert.ok(!assistant.parentUuid || ids.has(assistant.parentUuid), "Claude persisted a missing message parent");
+  }
+  return state;
 }

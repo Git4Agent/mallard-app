@@ -71,7 +71,7 @@ impl StorageProviderAdapter for DropboxAdapter {
         let guide = "https://www.dropbox.com/developers/reference/auth-types";
         StorageProviderDescriptor {
             key:provider_key(),config_version:1,display_name:"Dropbox".into(),description:"A shared folder in your Dropbox, new or one you already use. Uploads up to 150 MiB per object.".into(),
-            default_name:"Dropbox storage".into(),name_suggestion:None,display_rank:30,icon:"cloud".into(),clear_mode:StorageClearMode::RevisionChecked,
+            default_name:"Dropbox storage".into(),name_suggestion:None,display_rank:20,icon:"cloud".into(),clear_mode:StorageClearMode::RevisionChecked,
             fields:vec![StorageFieldDescriptor {field_id:FieldKey::parse("namespace_id").expect("static key"),label:"Namespace ID".into(),kind:StorageFieldKind::Text,required:true,
                 placeholder:Some("Shared or team namespace ID".into()),help:Some("Use the same namespace ID on each machine. This value cannot change after setup.".into()),help_url:Some(guide.into()),derive:None}],
             secrets:vec![StorageSecretDescriptor {secret_id:token_key(),label:"Access token".into(),required:true,placeholder:Some("User-linked Dropbox access token".into()),

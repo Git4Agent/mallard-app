@@ -637,6 +637,8 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
               >
                 On replaces detected credentials in exported sessions and provider state.
                 Off can export API keys, tokens, and passwords. Applies to this machine.
+                Changing this re-uploads every synced session on your next Push. Copies already
+                pushed with redaction off stay readable in the storage’s history.
               </SettingsRow>
             </div>
             {tuningSection === "privacy" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
@@ -664,6 +666,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                 }
               >
                 Include child conversations in Push. Pull restores the files stored in the cloud.
+                Changing this re-uploads every synced Codex session on your next Push.
               </SettingsRow>
               <SettingsRow
                 label="Push Claude children"
@@ -682,6 +685,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                 }
               >
                 Include child conversations in Push. Pull restores the files stored in the cloud.
+                Changing this re-uploads every synced Claude session on your next Push.
               </SettingsRow>
               <SettingsRow
                 label="Open Logs on Push and Pull"

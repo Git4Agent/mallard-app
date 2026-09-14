@@ -491,6 +491,17 @@ export function sessionSyncPresentation(
   });
   switch (entry.state) {
     case "synced":
+      /* Current on both sides, but exported under settings that have since
+         changed (redaction, child sessions): the storage holds the earlier
+         copy until the next Push replaces it, so this is Push work and
+         counts as such — a synced check here would hide it. */
+      if (entry.push_decision?.action === "publish") {
+        return {
+          status: "local-outstanding",
+          className: "local",
+          label: `Pushed with your previous export settings. Push to update ${storageName}.`,
+        };
+      }
       return { status: "synced", className: "synced", label: entry.status_detail ?? `Up to date here and in ${storageName}.` };
     case "local_only":
       if (entry.push_decision?.action === "blocked") return blocked("push");

@@ -168,8 +168,8 @@ mod tests {
             keys,
             vec![
                 (10, "r2".to_string()),
-                (20, "local".to_string()),
-                (30, "dropbox".to_string()),
+                (20, "dropbox".to_string()),
+                (30, "local".to_string()),
                 (90, "teststore".to_string())
             ]
         );

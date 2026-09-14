@@ -1761,6 +1761,26 @@ mod tests {
 
     #[test]
     fn reusable_callback_listener_rebinds_after_an_accepted_connection() {
+        const CHILD_FLAG: &str = "MALLARD_CALLBACK_REBIND_TEST_CHILD";
+        if std::env::var_os(CHILD_FLAG).is_none() {
+            // A concurrent subprocess can retain this process's listener until
+            // exec, even with CLOEXEC set. Check immediate rebind in a process
+            // that runs only this test, without weakening the bind assertion.
+            let current = thread::current();
+            let test_name = current.name().expect("the test thread has a name");
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+                .env(CHILD_FLAG, "1")
+                .output()
+                .expect("start the isolated callback listener test");
+            assert!(
+                output.status.success(),
+                "isolated callback listener test failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
         let first = bind_reusable_listener("127.0.0.1:0".parse().unwrap()).unwrap();
         let address = first.local_addr().unwrap();
         let client = thread::spawn(move || {

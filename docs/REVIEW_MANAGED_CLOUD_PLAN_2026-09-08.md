@@ -2,8 +2,8 @@
 
 Date: September 8, 2026. Status: Recommendations for review.
 
-Scope: The full [Managed Cloud V1 plan](CLOUDFLARE_R2_MANAGED_CLOUD_ARCHITECTURE_V2.md),
-dated September 1. The filename contains V2; the document defines product V1.
+Scope: The September 1 draft of the [Managed Cloud V1 plan](CLOUDFLARE_R2_MANAGED_CLOUD_ARCHITECTURE.md).
+The reviewed draft was named V2. The active MVP plan is now kept in V1.
 This review proposes changes. It does not replace the plan's fixed decisions.
 
 **Recommendation.** Keep the Cloudflare architecture and the full product scope.

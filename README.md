@@ -565,9 +565,9 @@ privacy, and full-depth no-follow state scans. The USD caps are client-side
 estimates; Tuzi's final consumption log remains authoritative, including for
 failed or disconnected calls.
 
-The Claude Code 2.1.259 gate passed on September 1, 2026 with `1 passed, 0
-failed`; the Rust body completed in 32.33 seconds. The earlier Claude Code
-2.1.235 gate passed on August 19, 2026. No execution automatically retried.
+The Claude Code 2.1.266 gate passed on September 12, 2026 with `1 passed, 0
+failed`; the Rust body completed in 19.89 seconds with explicit launch isolation. No execution automatically
+retried.
 The Tuzi consumption log remains authoritative for the earlier development
 turns and the current three-turn certification run.
 
@@ -805,8 +805,11 @@ The current native-format gate requires exactly Claude Code `2.1.266`,
 `@copilotkit/aimock` `1.39.0`, Node.js 20.15.0 or newer, and the mock model
 identifier `claude-sonnet-4-6`. The runner strips inherited provider,
 provider-home, endpoint, and proxy state before Cargo starts. Each Claude
-turn uses `--bare`, `--permission-mode dontAsk`, and a one-tool `Read` allow
-list. Claude requires a non-empty `ANTHROPIC_API_KEY` for this custom endpoint,
+turn disables settings discovery, hooks, skills, plugins, and MCP discovery
+through explicit options. It uses `--permission-mode dontAsk` and a one-tool
+`Read` allow list. The test avoids `--bare`: Claude Code 2.1.266 does not await
+the initial transcript recording operation in that mode. Claude requires a
+non-empty `ANTHROPIC_API_KEY` for this custom endpoint,
 so the child receives the fixed non-secret placeholder
 `mallard-local-aimock-placeholder`. The mock requires that exact value in
 `X-Api-Key`; `Authorization` and alternate credential headers are forbidden.

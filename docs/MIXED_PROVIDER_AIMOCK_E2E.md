@@ -12,7 +12,7 @@ It tests service behavior. It does not measure the React UI or Tauri IPC.
 ## Requirements
 
 - Node 20.15 or later. Use one exact version for benchmark comparisons.
-- Codex CLI 0.152.x. Reports record the exact patch version.
+- Codex CLI 0.154.x. Reports record the exact patch version.
 - Claude Code 2.1.266.
 - aimock 1.39.0, installed by `npm ci`.
 - The repository Rust toolchain and native build dependencies.
@@ -22,6 +22,11 @@ Use temporary provider homes only. The runner removes inherited API keys,
 provider endpoints, proxies, and process injection settings from native child
 environments. Codex uses no API key. Claude uses the fixed mock placeholder.
 The mocks have no upstream or recording mode. Model retries are disabled.
+Claude uses explicit options to disable settings discovery, hooks, skills,
+plugins, and MCP discovery. It does not use `--bare`, which skips awaiting the
+initial transcript recording operation in Claude Code 2.1.266. Missing user or
+assistant records still fail the test; failure reports include safe transcript
+states and counts.
 
 On macOS, run outside a nested execution sandbox if the native Codex sandbox
 cannot start. Local commands set loopback model endpoints. They do not prove

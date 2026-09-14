@@ -125,7 +125,7 @@ impl StorageProviderAdapter for LocalFolderAdapter {
                 pattern: r"([^/\\]+)[/\\]*$".to_string(),
                 group: 1,
             }),
-            display_rank: 20,
+            display_rank: 30,
             icon: "drive".to_string(),
             clear_mode: super::traits::StorageClearMode::RevisionChecked,
             fields: vec![StorageFieldDescriptor {

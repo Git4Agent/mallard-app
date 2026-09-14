@@ -1,834 +1,1778 @@
-# Managed Cloud Architecture: Cloudflare R2, CDN, and a Worker Reverse Proxy
+# Mallard Managed Cloud Architecture V1
 
-> [!IMPORTANT]
-> This is a historical proposal and is not the implementation target. See
-> [Mallard Managed Cloud v2](CLOUDFLARE_R2_MANAGED_CLOUD_ARCHITECTURE_V2.md)
-> for the current production-foundation architecture.
+- **Status:** Implementation plan
+- **Date:** September 13, 2026
+- **Product target:** Managed Cloud MVP
+- **Supersedes:** the September 13 MVP draft of this document. Section 13
+  records what changed and why.
 
-Status: Proposal
-Project: Agent Sync
-Last updated: 2026-07-19
+This document is the build order for the first Managed Cloud release. It is
+self-contained: section 3 restates the desktop facts the plan builds on,
+section 10 restates every portable contract field by field, and the source
+pointers at the end are for readers who want to see the code, not
+prerequisites. Sections 5 to 7 are written so an engineer can start from
+them without another design pass.
 
-## English
+## 1. Scope
 
-### 1. Decision
+### 1.1 Fixed decisions
 
-This design is feasible and fits Agent Sync well.
+| Area | Decision |
+| --- | --- |
+| Content | Git projects, non-Git projects with reviewed files, and one item per Catalog repository |
+| Sign-in | GitHub OAuth; the Worker holds the client secret; one account, several machines |
+| Access | One Owner, Admins, Members; Owner-shared invitation codes; a separate Super Admin service role |
+| Private storage | One replaceable private snapshot per repository; no browsable private history |
+| Public release | The approved private snapshot becomes the next public revision as-is; no server-side merge |
+| Public history | Every public revision is retained within quota and readable by collaborators |
+| Approval | The Owner approves every release on the website; the first release also needs Super Admin |
+| Website | Anonymous browsing of public repositories, including every session, session details, and skill, plugin, and pet pages; signed-in review and approval |
+| Desktop | Managed Cloud is a storage provider behind the existing bundle engine; Push and Pull screens are unchanged |
+| Storage | One Worker for the API and website assets, D1 metadata, private R2 objects, one cron Worker |
+| Removal | Immediate controlled removal by Owner, Admin, or Super Admin; Super Admin can remove one public revision |
+| Recovery | D1 Time Travel, immutable R2 writes, a written runbook, one isolated restore test |
 
-The recommended managed service is a private Cloudflare R2 bucket behind a Cloudflare Worker on a custom domain. The Worker is both the public API and the reverse proxy/policy boundary. The open-source desktop app never receives the managed bucket credentials and never calls the managed R2 bucket directly.
+### 1.2 In the MVP
 
-The desktop app should continue supporting local folders and user-owned S3/R2 storage. The official managed cloud is a separate provider and is configured as the default endpoint for new installations.
+- GitHub sign-in on the desktop and the website; one managed storage per account per machine.
+- Private Push and Pull for Git and non-Git projects through the existing engine, including reviewed project files.
+- Catalog items: Codex and Claude skills, plugin install intent, Codex pets v1 and v2, one item per repository.
+- Session views: every pushed conversation ships a bounded timeline the website renders.
+- Collaborators, invitation codes, roles, leaving, removal.
+- Release requests, Owner approval, first-release Super Admin approval, public history.
+- Website: public listing, repository pages, session pages, catalog item pages, private snapshot review, approvals, Super Admin workspace.
+- Quota, cleanup, expiry, removal, audit, logs, and a tested manual recovery.
 
-The default configuration may contain this public endpoint:
+### 1.3 Not in the MVP
 
-```text
-https://api.agentsync.example.com
-```
+Google sign-in, account linking, device management, keychain storage of the
+desktop token, featured or ranked listings, search, slugs, export, Queues,
+dashboards, automatic repair, separate R2 backups, key rotation, billing,
+cross-repository deduplication, direct R2 uploads, session conflict
+resolution or merge, branches, private history, ownership transfer, per-file
+permissions, Git source hosting, project-file sync for Git projects, plugin
+binaries, Claude pets, pet format conversion, child-transcript pages on the
+website, application-level content encryption, a removal cancel window, a
+second managed storage per account. Add no dormant tables, routes, or fields
+for them.
 
-It must not contain a shared bearer token, R2 access key, or R2 secret key. A secret shipped in an open-source client is public.
+## 2. Terms
 
-### 2. Recommended topology
+| Term | Meaning |
+| --- | --- |
+| Storage | One configured backend on a machine: a local folder, a user-owned S3/R2 bucket, a Dropbox folder, or Managed Cloud. Identified by a `StorageId`. |
+| Bundle | The portable form of one project. Identified by a `BundleId`, a 32-hex-character ID owned by the project registration, not by any storage. |
+| Scope | One typed section of a bundle: `project` (reviewed files and directories) or `provider:<key>` (conversations and provider state for Codex or Claude). |
+| Manifest | The immutable JSON document naming every scope, resource, file, and object of one bundle revision. |
+| Head | The one mutable pointer per repository naming the current manifest. Advanced only by compare-and-swap. |
+| Commit ID | A random `commit-<hex>` ID minted by the desktop for each manifest. Never reused. |
+| Object | Content-addressed payload bytes, keyed by SHA-256, verified by exact length and digest. |
+| Repository | On the service: one project bundle or one catalog item with its members, private snapshot, and public history. Identified by an opaque `repo_…` ID. |
+| Publication | On the service: one manifest at one scope (`private` or `public`) with its object references. |
+| Private snapshot | The one current private publication of a repository. |
+| Public revision | One retained public publication; the newest is the public head. |
+| Session view | A bounded JSON timeline of one conversation, built by the desktop from wire bytes, rendered by the website. |
+| Link | The machine-local record joining a local project or catalog scope to a repository on a storage, holding accepted bases. |
+| Base | The manifest coordinates a replica last accepted for a scope: revision, commit ID, manifest digest and size. |
+| Wire form | Transcript bytes as they travel: credential-redacted and, for Claude, with in-project paths replaced by tokens. Local bytes differ. |
+| Coordinate | The catalog identity tuple `(provider, resource_kind, format, format_version)`. |
+| Resource ID | A stable `resource-<hex>` derived from a coordinate and the item's canonical identity; unchanged when content changes. |
+| Continuity | The desktop's classification of the relation between a replica's base and the observed head. |
 
-```mermaid
-flowchart LR
-    APP["Open-source Tauri app"]
-    EDGE["Cloudflare custom domain<br/>TLS + CDN + WAF + rate limiting"]
-    API["Cloudflare Worker<br/>API + authentication + authorization<br/>reverse proxy + policy enforcement"]
-    IDP["GitHub / Google / OIDC provider<br/>user identity"]
-    DB["D1<br/>users, identities, sessions, ownership,<br/>catalog, quotas, archive state, audit"]
-    R2P["Private R2 bucket<br/>user bundle objects"]
-    R2D["Demo R2 bucket<br/>curated read-only bundles"]
-    JOBS["Queues / scheduled Worker<br/>verification and retention cleanup"]
+## 3. The desktop today
 
-    APP -->|"HTTPS + user or guest token"| EDGE
-    EDGE --> API
-    API <-->|"OAuth/OIDC"| IDP
-    API --> DB
-    API -->|"R2 binding"| R2P
-    API -->|"R2 binding"| R2D
-    API --> JOBS
-    JOBS --> R2P
-```
+Everything in this section exists and is unchanged by the plan. Section 5
+plugs into it.
 
-For the first release, the Worker can serve all ordinary object reads and writes through an R2 binding. This is the simplest private design and requires no S3 credential inside the Worker.
+### 3.1 Storage providers and the object store
 
-If very large uploads later become a bottleneck, use a hybrid flow: the Worker authenticates and authorizes the upload, generates a short-lived presigned PUT URL for one immutable object, and finalizes the bundle head through the Worker. Cloudflare documents this direct-upload pattern for user-generated content. Presigned R2 URLs use the R2 S3 API hostname and do not work with a custom domain, so this should be an optimization rather than the core API contract.
+**Configuration.** A storage is a `StorageConfig { id, name, provider,
+provider_config }` inside `~/.mallard/sync_config.json`, a document
+`SyncConfig { schema, revision, storages, projects, links }` written with
+optimistic concurrency on `revision` under a cross-process lock that is never
+held across remote I/O. Secrets, including Dropbox's refresh token, live in
+the same file (mode 0600) in a `SecretMap`; there is no OS keychain.
 
-#### VM requirement
+**Adapters.** A provider is one adapter module implementing
+`StorageProviderAdapter` plus one entry in
+`StorageProviderRegistry::production()` (Local, R2, Dropbox today). The trait
+methods are `descriptor`, `validate_settings`, `validate_config`,
+`summary`, `continuity_coordinates`, `local_root`, `journal_facts`,
+`probe`, `reconcile_probe`, and `open`. A duplicate `(key, config_version)`
+is a startup error. Neutral setup code (drafts, test, commit, rename, remove)
+never names a provider.
 
-No VM or traditional host is required for this design. The Worker is the API server and reverse proxy; R2 stores objects; D1 stores application metadata and sessions; Queues and scheduled Workers handle background verification and retention cleanup; Cloudflare's edge supplies TLS, CDN, WAF, and rate limiting.
+**Descriptor.** The frontend renders `StorageProviderDescriptor` fields and
+holds no provider list: `key`, `config_version`, `display_name`,
+`description`, `default_name`, `name_suggestion`, `display_rank`, `icon`,
+`clear_mode` (`unconditional` or `revision_checked`), `fields`, `secrets`,
+`managed_secret_id`, `local_setup` (`wrangler` or `dropbox`),
+`setup_guide_url`, `manual_setup_hint`, `discovery`. `local_setup` is the
+one place the UI branches: it selects the setup lane component.
+`managed_secret_id` marks a credential the user must not edit by hand;
+the settings page then offers Reconnect instead.
 
-A VM should be introduced only if a measured requirement cannot fit the Workers model—for example, a long-running native binary, heavy archive or malware scanning, a persistent process, or another workload exceeding Worker execution or request limits. Large object transfer alone is not a reason to add a VM; use an authorized presigned upload path if needed.
+**Object store.** Every backend implements one trait:
 
-### 3. Why the Worker should be the reverse proxy
+| Method | Semantics |
+| --- | --- |
+| `get_metadata(key, max_bytes) -> Option<{bytes, etag}>` | Read a small mutable object with its backend revision token |
+| `stage_verified(key, {size, sha256}) -> Missing / Mismatch / Verified(body)` | Read an immutable object into a private temp file, verified by exact length and digest |
+| `put_immutable(key, bytes) -> Written / AlreadyPresent` | Create-only write; a present identical object satisfies the write |
+| `put_many(objects)` | Batch of `put_immutable` |
+| `compare_and_swap(key, Absent / Match(etag), bytes) -> Written{etag} / Conflict{current_etag}` | The only way a head moves |
+| `list(prefix, cursor, limit) -> page` | Used for discovery over the flat tags namespace and for clearing |
+| `supports_conditional_delete`, `delete(key, etag)` | Optional; R2 says no |
+| `clear_managed_data` | Wipe the Mallard namespace, marker re-verified first |
+| `local_root`, `connection_health` | Optional |
 
-The Worker provides a narrow application API instead of exposing an S3-compatible API to managed-cloud users. It must:
+`ConfiguredObjectStore` wraps an opened store in a process-wide table keyed
+by `StorageId` and pinned to the exact config; every call passes through a
+guard that short-circuits when the recorded `ConnectionHealth` suspends
+(`ReconnectRequired`, `TokenExpired`, `PermissionDenied`) and broadcasts
+state changes so the UI re-reads. Health evidence is bounded: a route
+literal, an HTTP status, an error tag, and a short request ID.
 
-- authenticate the user or read-only demo guest;
-- derive the tenant and R2 key prefix on the server;
-- verify bundle ownership on every request;
-- validate object type, size, hash, and allowed path;
-- enforce quotas and rate limits;
-- implement immutable writes and compare-and-swap updates;
-- omit a generic delete operation;
-- emit audit events; and
-- return safe cache headers.
+Before any use, a storage must carry the marker `.mallard/_storage.json`
+with `{ "format": "mallard-storage", "layout_version": 1 }`. Keys are
+validated: no leading or trailing slash, no `\`, `:` or control characters,
+no `.` or `..` components, components at most 255 bytes.
 
-The server must assume the open-source client is untrusted. Obscure bundle IDs, CORS, and UI restrictions are not authorization controls.
+### 3.2 The bundle engine
 
-Cloudflare Workers can access R2 through an R2 binding. This keeps the managed bucket private and avoids storing R2 access keys in the desktop app. A Worker custom domain also gives the API a stable production hostname with Cloudflare-managed DNS and TLS.
-
-### 4. CDN and caching policy
-
-Cloudflare CDN remains useful even when the Worker is the origin, but not every response should be cached.
-
-| Data | CDN policy | Reason |
-|---|---|---|
-| Public demo immutable files | Cache for a long time, preferably with content-addressed URLs | Same bytes for every user; ideal for edge caching |
-| Public demo manifests and commits | Cache when immutable | Safe after publication |
-| Demo catalog | Short TTL, such as 60–300 seconds | It changes occasionally |
-| `_head.json` or equivalent current pointer | `no-store` | Mutable and used for compare-and-swap correctness |
-| Authenticated user metadata | `private, no-store` | Prevent cross-user disclosure |
-| Authenticated user bundle content | Do not put in shared CDN cache for the MVP | Authorization mistakes in a shared cache can leak private data |
-| API errors and authentication responses | `no-store` | User-specific and potentially sensitive |
-
-Attach a custom domain or route to the Worker before relying on the Workers Cache API. Cloudflare notes that Cache API writes from `workers.dev` previews do not have production cache behavior.
-
-Recommended hostnames:
-
-```text
-api.agentsync.example.com       -> Worker API and private bundle gateway
-demo.agentsync.example.com      -> same Worker, read-only demo routes with CDN caching
-```
-
-Both hostnames can point to the same Worker initially. Keeping a separate demo hostname makes cache rules and security review easier.
-
-Do not attach the private user-data bucket directly to a public R2 custom domain. Doing so makes that bucket publicly addressable. If maximum direct-CDN performance is desired later, only a separate, intentionally public demo bucket should use a direct R2 custom domain.
-
-### 5. Storage model and compatibility with the current app
-
-Agent Sync schema 3 already has a suitable remote layout:
-
-```text
-.mallard/
-|-- _storage.json
-`-- v1/repositories/<bundle-id>/
-    |-- _tag.json
-    |-- _head.json
-    |-- _manifests/<revision>-<commit-id>.json
-    |-- _commits/<revision>-<commit-id>.json
-    `-- _uploads/<upload-id>/files/<logical-path>
-```
-
-The managed service should preserve these logical semantics:
-
-- manifests, commits, and uploaded file objects are immutable;
-- `_head.json` is the only authoritative mutable pointer;
-- updating the head requires compare-and-swap using the previous ETag/version;
-- a failed comparison returns `409 Conflict` rather than overwriting another machine's update; and
-- listing is limited to bundles visible to the authenticated tenant.
-
-The managed service does not need to expose the physical R2 key. The Worker can map a logical bundle key to an internal tenant-scoped key such as:
-
-```text
-tenants/<tenant-id>/.mallard/v1/repositories/<bundle-id>/...
-```
-
-The tenant prefix must always be generated by the Worker, never accepted from the client.
-
-For stronger deletion protection, immutable objects and mutable heads may be placed in separate R2 buckets or prefixes. R2 bucket locks prevent both deletion and overwrite, so a lock must not cover the mutable `_head.json` objects. One safe physical split is:
-
-```text
-agent-sync-private-immutable   # manifests, commits, uploads; optional retention lock
-agent-sync-private-mutable     # heads and tags; conditional writes, no retention lock
-agent-sync-demo               # curated read-only demo bundles
-```
-
-### 6. Desktop provider model
-
-Do not disguise the official service as a normal S3 provider. Add an explicit managed provider:
+**Key namespace.** Per project bundle under
+`.mallard/v1/repositories/<bundle_id>/`:
 
 ```text
-local       -> existing local-folder store
-s3         -> existing BYO S3/R2 store
-managed    -> official HTTPS API backed by the Worker and R2
+_head.json                               mutable head, compare-and-swap
+_manifests/<revision>-<commit_id>.json   immutable manifest
+_commits/<revision>-<commit_id>.json     immutable commit record
+_objects/<sha256>                        immutable payload
+_uploads/<setup_id>/…                    setup probe residue
 ```
 
-In the Rust backend, add a `ManagedBundleObjectStore` that implements the same object-store contract already used by the schema-3 bundle engine:
+plus one flat discovery namespace `.mallard/v1/repositories/_tags/<bundle_id>.json`
+(a listing costs bundle-count, never object-count), and per catalog
+repository under `.mallard/v1/library/<library-id>/` the same layout with
+`_tag.json` inside the repository and no `_uploads/`.
 
-```text
-get
-put_immutable
-compare_and_swap
-list
-```
+**Head file.** `BundleHead { schema_version: 1, bundle_id, kind: "project",
+revision, commit_id, manifest_key, manifest_sha256, manifest_size,
+updated_at }`. The engine reads it with a 64 KiB cap, rejects a head stored
+under another bundle, and carries the store's etag into a `HeadToken
+{ revision, commit_id, manifest_sha256, manifest_size, etag }`.
 
-There should be no general `delete` method. The managed adapter calls the Worker API, while the existing `S3BundleObjectStore` continues to call a user's own S3/R2 endpoint directly.
+**Tag file.** `BundleTag { schema_version, bundle_id, display_name, kind,
+revision, updated_at, resources, files, registration_only, providers }`.
+Advisory only; acting flows re-verify against the live head.
 
-The managed storage configuration should contain only non-secret settings, for example:
+**Publish sequence.** One entry point, `publish_with_progress(request)`,
+called from one production site in the project sync service:
+
+1. Read the head, then stage the current manifest against the head's size
+   and digest.
+2. Mutation firewall: every reviewed scope pin `(revision, content_sha256)`
+   must equal the live manifest's, else "changed since review; pull and
+   compare again".
+3. Start from the previous manifest's scopes. Unselected scopes are carried
+   forward with exactly the same revision and digest. Each writable scope is
+   rebuilt: retained files must match an `(object_key, sha256, size)` triple
+   in the reviewed previous scope; a path cannot be both retained and
+   captured; tombstones are minted inside the scope for explicit removals and
+   carried forward; the scope revision becomes `previous + 1`, or 1. If no
+   scope changed, publish returns `published: false` without writing.
+4. Upload payload objects to `_objects/<sha256>`, deduplicated by digest,
+   `cloud_transfer_concurrency()` at a time.
+5. Write the manifest and the commit record in one `put_many` of two.
+   The commit record holds `previous_commit_id`, file deltas, and the
+   publishing origin; nothing reads it back.
+6. Compare-and-swap `_head.json` with `Match(etag)` or `Absent`. Exactly one
+   attempt; a conflict is a hard error ("compare again before pushing").
+7. Best-effort tag update with up to four compare-and-swap retries; failure
+   is ignored.
+
+Linking a project registers it: `publish_registration` publishes an empty
+revision 1 so the bundle is discoverable before its first push; a head
+conflict there counts as success.
+
+**Reads.** `inspect` reads head and manifest only. `byte_source` stages
+payloads lazily, verified by size and digest, through a process-wide LRU of
+staged bodies (256 MiB, keyed by storage, bundle, digest, size).
+`inspect_manifest_version` and `fetch_manifest_version_optional` fetch a
+historical manifest by `_manifests/<revision>-<commit_id>.json` and the
+latter bypasses the cache because its purpose is to witness the remote store.
+`list_remote_bundles` reads the flat tags namespace once, capped at 10,000.
+
+### 3.3 Links, bases, review flows, and continuity
+
+**Project link.** `ProjectStorageLink { local_project_id, storage_id,
+bundle_id, recipe, scope_bases, project_content_preferences,
+conversation_checkpoints, pinned, created_at }`, machine-local. A
+`ScopeBase { scope, scope_revision, scope_sha256, reviewed_in:
+RepositoryBase, binding_revision, last_pull_at, last_push_at }` advances only
+after a successful push or pull of that scope. `RepositoryBase { revision,
+commit_id, manifest_sha256, manifest_size }`. The project's root and provider
+profiles live in `ProjectBinding` in `machine_projects.json`, which carries
+no storage ID.
+
+**Push.** `prepare_push_review(local_project_id, storage_id)` returns a
+`PushReviewContext` (inventory, destination status, thread comparison,
+project files, `credential_redaction_enabled`, `prepared_at`); nothing is
+stored between review and apply and there is no expiry. `push_bundle`
+carries `PushApproval { credential_redaction_enabled, subagent_selections,
+recipe, project_content_review_token, project_content_removal_ids,
+acknowledged_warning_digests }`. Bytes are captured at apply, not at review;
+freshness is proven by the content-hashed review token and by the redaction
+flag matching. Warnings are acknowledged by digest bound to the exact
+reviewed bytes.
+
+**Pull.** `plan_bundle_restore(storage_id, bundle_id, binding)` returns a
+`PullReview` (`plan_id`, storage, bundle, host and replica, revision,
+`commit_id`, `manifest_sha256`, `binding_revision`, `created_at`,
+`expires_at` = 24 hours, actions, conversation review rows, project-file
+eligibility, `remote_continuity`). `apply_bundle_restore(review,
+approved_action_ids)` rejects an expired review, rebuilds actions, verifies
+target digests immediately before each write, backs up, and replaces
+atomically. Deletion is opt-in with digest verification.
+
+**Wire form.** Each conversation entry carries `wire_redaction { codec,
+fingerprint }`: `mallard.redact.v1` plus the ruleset fingerprint when
+redaction is on, `mallard.redact.off.v1` plus 64 zeros when off. Codex and
+Claude both require the stamp; a mismatch blocks. Claude entries also carry
+`wire_path_map`. Tail comparisons are pin-relative: cloud bytes compare to
+the accepted wire pin, local bytes to the accepted local pin.
+
+**Continuity.** The shared plan phase classifies the repository from the
+observed head, the recorded base, and one probe:
+
+| # | Condition | Continuity |
+| --- | --- | --- |
+| 1 | No head, no base | `Fresh` |
+| 2 | No head, base recorded | `RemoteMissing` |
+| 3 | Head present, no base | `Unreviewed` |
+| 4 | Revisions equal, digests equal | `InSync` |
+| 5 | Revisions equal, digests differ | `Replaced` |
+| 6 | Head revision below base revision | `Replaced` |
+| 7 | Head revision above base revision, probe hits | `Advanced` |
+| 8 | Head revision above base revision, probe misses or mismatches | `Replaced` |
+
+The probe fetches `_manifests/{base.revision}-{base.commit_id}.json` from
+the store, never from the cache, and stages it against the base's size and
+digest. Row 8 is why a service must keep old manifests readable: absence of
+the base manifest is read as rewritten history.
+
+### 3.4 The catalog model
+
+A catalog scope is one local `(provider, profile)` under one coordinate.
+Registered coordinates:
+
+| Provider | Kind | Format | Version | Capture | Targets |
+| --- | --- | --- | --- | --- | --- |
+| `codex` | `agent_skill` | `agentskills.io.skill` | 1 | directory tree | `provider-home.skills`, `shared-user.skills` |
+| `codex` | `plugin_install_intent` | `mallard.plugin-install-intent` | 1 | provider inventory | `user.plugins` |
+| `codex` | `desktop_pet` | `openai.codex-pet` | 1 | directory tree | `desktop.pets` |
+| `codex` | `desktop_pet` | `openai.codex-pet` | 2 | directory tree | `desktop.pets` |
+| `claude` | `agent_skill` | `agentskills.io.skill` | 1 | directory tree | `provider-home.skills` |
+| `claude` | `plugin_install_intent` | `mallard.plugin-install-intent` | 1 | provider inventory | `user.plugins` |
+
+Identity: `CatalogResourceRepositoryId::for_coordinate` = `library-` plus
+32 hex characters derived from the coordinate only, so one storage holds one
+Library repository per coordinate with many items. `derive_resource_id` =
+`resource-` plus a digest over the coordinate and the item's canonical
+identity; content changes do not change it. A skill is identified by its
+name and must contain `SKILL.md`; plugin intent stores marketplace source,
+name, and resolution policy and never plugin code; a pet is identified by
+its name and format version and carries an atlas image with declared
+geometry and byte limits. Files travel as `CatalogPortableFile { path,
+sha256, size, mode }` with mode `0644` or `0755`, at `_objects/<sha256>`.
+
+The Library engine (`inspect`, `publish`) runs over the same object store
+and publishes the whole coordinate's selected resources as one
+`LibraryResourceManifest`. Links: `CatalogScopeLink { link_id, scope_id,
+storage_id, repository_id, accepted_head, accepted_resources, revision,
+created_at, updated_at }`. Commands: `prepare_catalog_scope_push(scope_id,
+storage_id)`, `apply_catalog_scope_push(plan_id, selected_resource_ids,
+acknowledged_warning_digests)`, `prepare_catalog_scope_pull(scope_id,
+storage_id, requested_copy_names)`, `apply_catalog_scope_pull(plan_id,
+choices, destructive_acknowledged)`; plans live in memory. Pull can preserve
+a divergent local skill or pet as a reviewed copy; plugin intent resolves
+through a provider operation or a manual action.
+
+### 3.5 The session detail model
+
+Provider adapters build a metadata-only, bounded `SessionTimelineIndex`
+from a transcript file (`build_timeline_index(path, context)`) and read
+filtered pages from it (`read_timeline_page`), where pages carry the visible
+text and previews the index deliberately omits. The desktop's session page
+renders `ProjectSessionDetail` plus pages of `SessionTimelineEvent` (fields
+in section 10.4) with the components under
+`src/components/project-sync/session-detail/`: `SessionDetailPage`
+(loads through IPC), `SessionDetailHeader`, `SessionDetailToolbar`,
+`SessionDetailTimeline`, `SessionDetailEvent`, `SessionDetailToolCall`, and
+the pure `sessionDetailModel.ts`. Text renders through `react-markdown` with
+`remark-gfm`. Event kinds are `prompt`, `response`, `intermediate_step`,
+`checkpoint`, `tool_call`, and `agent_call`; agent rows carry a preview of
+the child (`label`, `task`, `role`, `model`, `mode`).
+
+### 3.6 The sign-in precedent
+
+Dropbox setup is the template for a browser sign-in on the desktop:
+
+- PKCE S256: a 32-byte random verifier and state, hex-encoded, held in
+  zeroizing strings; the challenge is base64url of SHA-256 of the verifier.
+- Callback: a real listener bound to `127.0.0.1:53682` (address reuse on
+  Unix, exclusive on Windows, backlog 16), path `/dropbox/callback`,
+  180-second timeout, at most 32 accepts, loopback peers only, `state` and
+  single-occurrence query parameters validated. The response page carries a
+  strict Content-Security-Policy, `Cache-Control: no-store`, and one script
+  that rewrites the URL to `/dropbox/complete` so the code leaves browser
+  history. An unrelated request cannot consume the pending flow.
+- The Tauri command runs the receiver under `spawn_blocking`, pushes
+  `Progress::AuthorizationLink { url, expires_in: 180 }` over a channel so
+  the lane shows Copy link and Open browser (links are never opened
+  automatically), and always joins the receiver so cancel frees the port.
+- The refresh token is stored in the `SecretMap`; the runtime authorization
+  refreshes before dispatch, never replays an uncertain mutation, and records
+  `ReconnectRequired` on rejection, which suspends the store and surfaces
+  the Reconnect band. An edit draft of a managed credential is refused with
+  `storage_managed_credentials_locked`.
+- Setup modes are `Create`, `Existing`, and `Reconnect`; the last requires
+  an edit draft and pins the account.
+
+The lane UI is a step list: `StepView { key, title, status, fact?,
+controls?, body? }` with `status` in `todo`, `doing`, `done`, `failed`,
+`stopped`, rendered as an ordered list, driven by a hook that owns the flow
+state, a `Channel` of tagged progress events from Rust, a countdown helper,
+and a map from typed failure codes to copy. The lane receives a
+`R2SetupPort { blocked, beginRun, onRunStarted, adoptPrepared }` from the
+page.
+
+### 3.7 Conventions and gates
+
+- No backward compatibility: obsolete paths are removed in the same change;
+  the cutover integration test forbids pre-cutover commands.
+- DTOs change in Rust and `src/types.ts` together; commands are
+  `snake_case` with camelCase JavaScript argument keys and are registered in
+  `src-tauri/src/lib.rs`; every frontend call goes through
+  `projectSyncApi` or `storageCatalogApi` over `src/ipc.ts`, and a test
+  asserts that no other file imports the Tauri core.
+- `sync-review/` imports no feature DTOs and never calls Tauri;
+  `storage-catalog/` never imports project-sync code, and vice versa in Rust.
+- Every mutating command carries an expected revision; setup assistants
+  hold single-flight `*Control` state with a cancel command and return typed
+  failures with an error-code enum.
+- Frontend tests are `node:test` over `renderToStaticMarkup` with injected
+  fake APIs, plus source-text gates and a CSS hygiene gate that requires every
+  color to be declared per theme as plain hex. Rust runs `cargo test
+  --workspace --all-targets`; a `StorageProviderRegistry::with_test_provider()`
+  and the storage-parity thread variants prove that a new provider is one
+  registry entry with no common-flow change.
+- Never log credentials, tokens, or absolute paths; keep credentials and
+  checkout paths out of portable manifests; publication is immutable and
+  SHA-256 verified; heads move by compare-and-swap; pull is plan-based with
+  explicit approval and expiry; deletion is opt-in with digest verification.
+
+## 4. Product rules
+
+### 4.1 Repository classes and identity
+
+| Class | Service identity | Portable content |
+| --- | --- | --- |
+| `git_project` | `bundle_id` + `repository_fingerprint` | `BundleManifest` with provider scopes |
+| `non_git_project` | `bundle_id` | `BundleManifest` with provider scopes and a `project` scope of reviewed files |
+| `catalog` | `(provider, resource_kind, format, format_version, resource_id)` | `LibraryResourceManifest` with exactly one entry |
+
+Class and identity never change after creation. The service repository ID
+(`repo_…`) is opaque and distinct from `bundle_id` and `resource_id`. The Git
+fingerprint is SHA-256 of the normalized `origin` URL and is not unique across
+the service; the raw URL stays local.
+
+A project repository is created by the desktop the first time it publishes a
+bundle the service does not know (section 5.3). The desktop derives the class
+from the manifest: a `repository_fingerprint` makes it `git_project`,
+otherwise `non_git_project`.
+
+### 4.2 Private snapshot and public history
+
+| State | Meaning | Writer |
+| --- | --- | --- |
+| `private_publication_id`, `private_revision` | The one current private snapshot, or none | Desktop push through the engine's head compare-and-swap |
+| `public_publication_id`, `public_revision` | The current public revision, or none | Owner approval; Super Admin first-release approval; revision removal |
+| `public_admitted_at` | When Super Admin approved the first release | First-release decision |
+
+A push replaces the private snapshot. The previous private publication is
+retired at once: no route lists it, serves its payloads, or pulls it. Its
+manifest stays readable by collaborators as metadata for the continuity probe
+(section 3.3, row 8). The service keeps the last 32 retired private
+manifests per repository and erases older ones.
+
+Push semantics are the engine's (section 3.2): unselected scopes are carried
+forward with their revision and digest, reviewed retained files are kept,
+and tombstones are minted for explicit removals. The service stores
+manifests; it does not interpret scope semantics.
+
+A public release copies nothing. The new public publication row references
+the same manifest object and the same payload objects as the private
+publication it was released from. Payload bytes are charged once per
+repository. Public revisions form a linear history; anonymous readers see
+only the current public head.
+
+### 4.3 Roles and invitations
+
+| Capability | Member | Admin | Owner |
+| --- | --- | --- | --- |
+| Read the private snapshot and public history; Push; Pull | Yes | Yes | Yes |
+| Request a public release; discard the private snapshot | Yes | Yes | Yes |
+| Approve or reject a release | No | No | Yes |
+| Create and revoke invitation codes; remove Members and Admins; promote or demote | No | Yes | Yes |
+| Rename; make private; remove the repository | No | Yes | Yes |
+| Leave | Yes | Yes | No |
+
+Creation makes the creator the sole Owner. An Owner or Admin creates an
+invitation code on the website and sends it by any channel. The code is
+shown once, expires after seven days, and admits one account as Member. The
+recipient signs in on the website and enters the code. Acceptance requires an
+active repository and an inviter who is still Owner or Admin. The website
+lists pending codes by label; revoking one closes it.
+
+`users.service_role = 'super_admin'` is set by an operator with SQL (section
+11.3). It grants no repository membership and no Push right.
+
+### 4.4 Public release
+
+1. A collaborator requests a release from the desktop or the website. The
+   request pins the current private publication and the current public
+   publication (or none) and the repository revision. One open request per
+   repository; a newer private push invalidates it.
+2. The Owner opens the repository on the website, browses the private
+   snapshot (sessions, session details, files, or the catalog item), reads the
+   comparison with the current public version (added, changed, and removed
+   resources by identity and digest), and approves or rejects. Approval
+   acknowledges public disclosure of that exact snapshot.
+3. If the repository has never been public, Owner approval moves the request
+   to `pending_super_admin`. Super Admin approves or rejects on the website.
+   Later releases publish on Owner approval.
+4. Publication adds a public publication row, sets the public head, and makes
+   the repository public. The private snapshot is unchanged.
+
+Making the repository private disables anonymous reads and keeps the public
+head for the next comparison. Downloaded copies cannot be revoked.
+
+### 4.5 Discard and removal
+
+**Discard private snapshot** clears the private slot in one transaction,
+ends the open upload, and invalidates the open request. It deletes nothing
+local and changes nothing public.
+
+**Repository removal** is immediate. An Owner or Admin confirms the display
+name and the current revision. The transaction sets `state = 'deleting'`,
+makes the repository private, revokes codes, invalidates requests, and ends
+the open upload. The cron Worker writes the external removal record, erases
+every object and manifest of the repository, and marks it `removed`. Nothing
+is deleted on any machine. IDs and keys are never reused.
+
+### 4.6 Super Admin
+
+| Capability | Where |
+| --- | --- |
+| Inspect any repository, private or public; audited | Website Super Admin workspace |
+| Approve or reject a first release that the Owner approved | Same |
+| Remove any repository immediately | Same |
+| Remove one public revision | Same |
+
+Revision removal marks the public publication `removed`, drops its object
+references, and, if it was the head, clears the public head and makes the
+repository private. The row stays as a marker in history. Shared bytes remain
+while another available publication references them.
+
+### 4.7 What the website shows
+
+For a public project repository, anyone can open the repository page, the
+list of every session in the public head, each session's detail page, and the
+list of reviewed project files. For a public catalog repository, anyone can
+open the item page: a skill's `SKILL.md` and file list, a plugin intent's
+source and policy, or a pet's idle frame and metadata. Collaborators see the
+same pages for the private snapshot and for every retained public revision.
+
+Session pages render **session views** (section 5.4): bounded timelines the
+desktop builds from the redacted, path-mapped wire transcript at push time.
+The website never decodes provider transcripts.
+
+## 5. Desktop design
+
+### 5.1 The managed store behind `ObjectStore`
+
+The bundle engine publishes through the object store trait of section 3.1
+and never names a provider. Managed Cloud is a fourth implementation,
+`ManagedObjectStore`, so `publish_with_progress`, `inspect`, `byte_source`,
+`build_restore_plan_from_snapshot`, `list_remote_bundles`, the continuity
+probe, and every Push and Pull screen run unchanged. There is no second
+manifest builder.
+
+The store is opened per storage by the provider adapter with the service
+origin, the account token, and the caller's membership resolved lazily per
+repository. It maps keys to routes:
+
+| Engine key (bundle-relative) | Managed request | Notes |
+| --- | --- | --- |
+| `_head.json` read | `GET /v1/repositories/by-bundle/{bundle_id}/head` | Synthesizes `BundleHead` from the head the caller may read (section 5.3); `etag` = commit ID; unknown bundle = absent |
+| `_manifests/{rev}-{commit}.json` read | `GET /v1/repositories/{id}/manifests/{commit}` | Commit ID parsed from the key; retired manifests served to collaborators |
+| `_objects/{sha256}` read | `GET /v1/repositories/{id}/objects/{sha256}` | Streamed; the engine verifies size and digest |
+| `_objects/{sha256}` write | Buffered (section 5.2) | Returns `Written`; the object becomes visible only at commit |
+| `_manifests/…` write | Starts the upload (section 5.2) | The manifest reveals class and identity |
+| `_commits/…` write | Discarded | Nothing reads commit records; D1 holds the evidence |
+| `_head.json` compare-and-swap | `POST /v1/repositories/{id}/uploads/{upload}/commit` | `Match(etag)` → `expected_commit_id`; `Absent` → `null`; 409 → `Conflict` |
+| `_tags/{bundle_id}.json` read and list | `GET /v1/repositories?class=project` | Synthesizes `BundleTag` rows from publication summaries |
+| `_tags/…` compare-and-swap | No request; returns `Written` | Discovery is the repository list |
+| `_uploads/…` | Rejected | Probes are for user-owned stores |
+| `.mallard/v1/library/…` | Rejected with `managed_catalog_uses_item_adapter` | Section 5.5 |
+| `delete`, `clear_managed_data` | Unsupported | The descriptor advertises `clear_mode: none` |
+
+`connection_health` maps 401 to `TokenExpired`, 403 on the account to
+`PermissionDenied`, and network failure to `Unreachable`, so the configured
+store's guard suspends the store and the Reconnect band appears like
+Dropbox's.
+
+### 5.2 Staged write
+
+The engine writes objects first, then the manifest and commit record, then
+swings the head (section 3.2). The service needs the manifest before it can
+create a repository or reserve quota, so the store stages:
+
+1. `put_many(_objects/…)`: keep `(sha256, size, Bytes)` in the store. `Bytes`
+   is reference-counted, so this doubles no memory. Return `Written`.
+2. `put_many([_manifests/…, _commits/…])`: parse the manifest; build session
+   views (section 5.4); resolve or create the repository (section 5.3);
+   `POST /uploads` with the manifest bytes and the complete inventory
+   (payloads and views); receive `upload_id` and the `missing` digest list;
+   `PUT` each missing object with `Content-Length` and `X-Mallard-Sha256`,
+   `cloud_transfer_concurrency()` at a time; return `Written` for both keys.
+3. `compare_and_swap(_head.json)`: `POST …/commit` with `expected_commit_id`.
+   `200` → `Written { etag: new commit ID }`; `409 head_changed` →
+   `Conflict`; any other failure is an error. The engine reports a conflict
+   exactly as it does for R2.
+
+A store instance holds at most one staged upload. Any error after step 2
+leaves the upload open; it expires in 24 hours and the cron Worker cleans it.
+The next push starts a new upload; the service replies `upload_in_progress`
+until the old one is ended by `POST …/uploads/{upload}/abandon`, which the
+store calls first when it finds its own open upload.
+
+### 5.3 Repositories, discovery, and the public target
+
+**Creation.** In step 2 the store looks up the bundle. If the service has no
+repository for it, the store calls `POST /v1/repositories` with the class
+derived from the manifest, `display_name`, `bundle_id`, and the fingerprint
+when present. The engine's registration publish at link time (section 3.2)
+therefore creates the cloud repository the moment a project is linked, with
+an empty revision 1, and the repository appears in the list at once.
+
+**Discovery.** `list_remote_bundles` reads the synthesized `_tags`
+namespace. The service stores a summary per publication at upload creation
+(`display_name`, `kind`, `revision`, `updated_at`, resource and file counts,
+`providers`, `registration_only`) so a tag needs no manifest read. The
+existing connect flow (`connect_project_to_remote_bundle` and the bundle
+connection dialog) links a repository to a local folder on another machine;
+non-Git repositories are mapped to a folder the same way.
+
+**Which head a caller reads.** A collaborator always reads the private
+snapshot. A signed-in non-collaborator reads the public head of a public
+repository. There is no per-link target switch and no second accepted base.
+Anonymous access is the website's job; the desktop always signs in.
+
+**Revision numbers.** The manifest keeps the revision and commit ID the
+engine minted. The synthesized public `BundleHead` uses the manifest's own
+revision, so the engine's head-to-manifest check holds and public revisions
+seen by the desktop increase monotonically. The public sequence number
+(`public_revision`) is service metadata for history pages.
+
+### 5.4 Session views
+
+A session view is one JSON object per conversation resource:
 
 ```json
 {
-  "kind": "managed",
-  "name": "Agent Sync Cloud",
-  "base_url": "https://api.agentsync.example.com",
-  "account_id": "local-account-reference"
+  "schema_version": 1,
+  "resource_id": "resource-…",
+  "provider": "codex",
+  "provider_session_id": "…",
+  "title": "…",
+  "summary": null,
+  "started_at": 1757700000,
+  "ended_at": 1757703600,
+  "branch": "main",
+  "recorded_sha": null,
+  "tokens": { "value": 12345, "quality": "exact" },
+  "event_counts": { "prompts": { "value": 4, "quality": "exact" }, "…": "…" },
+  "events": [ "SessionTimelineEvent…" ],
+  "truncated": false,
+  "warnings": []
 }
 ```
 
-Access and refresh tokens should live in the operating-system keychain, not in `sync_config.json`. Managed HTTP calls and token handling should run in the Tauri Rust backend rather than in the WebView.
+`events` is a list of `SessionTimelineEvent`; `tokens` and `event_counts`
+are the existing `SessionCount` and `SessionEventCounts` (section 10.4). The
+store builds a view in step 2 for every conversation whose transcript bytes
+are in the staged upload: it writes the wire transcript to a private temp
+file and runs the provider adapter's `build_timeline_index` and
+`read_timeline_page` (section 3.5) page by page until the event cap or the
+byte cap (section 6.5) is reached, then sets `truncated`. Because the input
+is the wire form, redaction placeholders and path tokens appear exactly as
+they will on the website. Agent rows keep the parent's call and result
+preview; child transcript content is not in the MVP view.
 
-### 7. API surface
+Views travel in the upload inventory with `role: "view"`, `resource_id`, and
+`source_sha256` (the transcript object's digest). At commit the service
+carries forward the previous private publication's view for every
+conversation whose transcript digest is unchanged, so an unchanged session
+keeps its view without re-upload. A conversation without a view shows
+"No preview" on the website. Catalog repositories have no views.
 
-The exact routes may change, but the public surface should remain narrow and versioned.
+Views are ordinary content-addressed objects: charged once, cleaned up with
+the publications that reference them, and served only through the view
+routes.
 
-| Method and route | Purpose | Important controls |
-|---|---|---|
-| `POST /v1/auth/guest` | Create a limited demo session | Read-only by default, short expiry, rate limit |
-| `GET /v1/auth/start` | Begin OAuth/OIDC login | PKCE challenge, random state, allowlisted app callback |
-| `GET /v1/auth/callback` | Receive the provider callback | Fixed registered callback, state/nonce verification, provider code exchange |
-| `POST /v1/auth/exchange` | Exchange the one-time app code | PKCE verifier, single use, very short expiry |
-| `POST /v1/auth/refresh` | Rotate an application session | Hashed refresh-token lookup, replay detection, rotation |
-| `POST /v1/auth/logout` | Revoke the current refresh session | Authenticated, idempotent, audit event |
-| `GET /v1/demo/repos` | List curated demo repositories | Public/read-only, short CDN TTL |
-| `GET /v1/demo/repos/{id}/objects/{path}` | Read a demo object | Server-generated mapping, immutable objects cached |
-| `GET /v1/bundles` | List bundles owned by the caller | Tenant filter, cursor pagination |
-| `POST /v1/bundles` | Allocate a bundle ID | Quota and idempotency key |
-| `GET /v1/bundles/{id}/objects/{path}` | Read an authorized bundle object | Ownership check, range support, no shared cache |
-| `PUT /v1/bundles/{id}/immutable/{path}` | Create an immutable object | `If-None-Match: *`, length and SHA-256 validation |
-| `PUT /v1/bundles/{id}/head` | Publish a new current head | `If-Match` or `If-None-Match`, return `409` on conflict |
-| `GET /v1/bundles/{id}/objects` | List allowed bundle objects | Fixed bundle scope, cursor and maximum page size |
-| `POST /v1/bundles/{id}/archive` | Hide a bundle and begin retention | No immediate object deletion |
-| `POST /v1/bundles/{id}/restore` | Undo archive during retention | Ownership and retention checks |
+### 5.5 Catalog item adapter
 
-Avoid a route such as `DELETE /v1/objects/{arbitrary-key}` and avoid accepting raw bucket names or tenant prefixes.
+The Library engine publishes one repository per coordinate (section 3.4); a
+managed catalog repository holds one item. The managed catalog path is
+therefore a small adapter in `managed_cloud/catalog.rs` rather than the
+engine:
 
-### 8. Request flows
+- **Push:** `prepare_catalog_scope_push` and `apply_catalog_scope_push`
+  branch on the storage provider. For managed storage, the selected
+  resource's `CatalogResourceEnvelope` and `PublishedResourceEntry` are
+  wrapped in a `LibraryResourceManifest` whose `resources` map has one entry
+  and whose `repository_id` is the coordinate's
+  `CatalogResourceRepositoryId`. The adapter uploads the entry's files as
+  objects and commits with the same upload protocol. The service repository is
+  created on first push with the item's coordinate and derived `resource_id`;
+  a different item is refused.
+- **Pull:** fetch the head manifest, verify each file object, and hand the
+  envelope and bytes to the existing provider/format apply path. Skills and
+  pets keep the reviewed-copy behavior; plugin intent keeps provider or manual
+  actions.
+- **Link:** a managed item link is `CatalogItemLink { link_id, scope_id,
+  storage_id, repository_id (service), resource_id, accepted_head, revision,
+  created_at, updated_at }` beside `CatalogScopeLink`. One local scope can
+  link several managed items.
 
-#### User OAuth and application sessions
+The existing codecs define identity, validation, and limits. The service
+accepts only the coordinates in section 3.4.
 
-Cloudflare hosts the application side of authentication, so OAuth does not add a VM. Cloudflare is not the public user's identity provider in the recommended design: GitHub, Google, or another OIDC provider authenticates the person, while the Worker acts as the OAuth broker and issues Agent Sync application sessions. GitHub is the simplest first provider for a developer-focused product; Google or another OIDC provider can be added later.
+### 5.6 Provider adapter, configuration, setup lane
 
-The Tauri app is a public native client and cannot keep a client secret. Use the Authorization Code flow with PKCE and the user's system browser, not an embedded WebView. For desktop callbacks, prefer a temporary loopback listener bound only to `127.0.0.1` on a random port; a registered application deep link is an alternative for packaged clients.
+- `ManagedCloudAdapter` implements `StorageProviderAdapter` and is the fourth
+  entry in `StorageProviderRegistry::production()`. Key `managed`, config
+  version 1.
+- Settings: `service_origin` (fixed default, editable only in development
+  builds), `account_login` (display). Secret: `account_token`, stored in the
+  `SecretMap` of `sync_config.json` like Dropbox's refresh token;
+  `managed_secret_id = Some(account_token)` so the locked settings page
+  offers Reconnect instead of editing.
+- `StorageLocalSetup` gains a `ManagedCloud` variant in Rust and in
+  `src/types.ts`, and the links workspace gets a third lane branch beside
+  `wrangler` and `dropbox`.
+- The lane, `ManagedCloudSetup.tsx`, follows the Dropbox lane (section 3.6):
+  step 1 shows the sign-in link with Copy link and Open browser and a 180 s
+  countdown; step 2 shows the GitHub login with Continue and Change login;
+  step 3 names the storage (default "Mallard Cloud") and saves. No folder,
+  bucket, or discovery step. A second managed storage for the same account is
+  refused with `storage_managed_account_exists`.
+- Sign-in reuses the loopback receiver of section 3.6, generalized from
+  `dropbox_browser.rs` into `loopback_browser.rs` with the callback path as
+  a parameter. Port 53682 stays fixed; one browser flow runs at a time. Tauri
+  commands: `authorize_managed_cloud_setup`, `cancel_managed_cloud_setup`,
+  registered in `src-tauri/src/lib.rs` beside the Dropbox block.
 
-```text
-Tauri Rust backend
-  1. generate state + PKCE verifier/challenge
-  2. listen on 127.0.0.1:<random-port>
-  3. open the system browser at /v1/auth/start
-        -> Worker -> GitHub/Google authorization page
-        -> provider -> fixed Worker /v1/auth/callback
-        -> Worker -> loopback callback with one-time app code
-  4. POST one-time code + PKCE verifier to /v1/auth/exchange
-  5. receive Agent Sync access token + rotating refresh token
-```
-
-The Worker should perform the following steps:
-
-1. Accept the PKCE challenge and an allowlisted loopback/deep-link callback, create a random provider `state`, and store a short-lived login transaction in D1.
-2. Redirect the system browser to the provider.
-3. On the fixed Worker callback, verify `state` and OIDC `nonce` when applicable, then exchange the provider code using an OAuth client secret stored in Cloudflare Worker Secrets.
-4. Upsert the identity by `(issuer, provider_subject)`. Never link accounts using email alone because email addresses can change or be represented differently by providers.
-5. Create a single-use app code bound to the PKCE challenge and redirect the browser to the local app callback. Do not put provider tokens or Agent Sync bearer tokens in the redirect URL.
-6. Accept the app code and PKCE verifier at `/v1/auth/exchange`, mark the code consumed, and issue an Agent Sync access token plus refresh token.
-
-Recommended session rules:
-
-- access tokens are audience-restricted, scope-restricted, and short-lived, approximately 10–15 minutes;
-- refresh tokens are random opaque values, stored only in the OS keychain on the client and stored only as hashes in D1;
-- every refresh rotates the token, and replay of an old token revokes that session family;
-- D1 contains `users`, `identities`, `oauth_transactions`, and `refresh_sessions`, with expiry and revocation timestamps;
-- the provider access token stays inside the Worker and should be discarded after identity lookup when no later provider API access is required;
-- API authorization uses the Worker-issued Agent Sync token, not the GitHub or Google access token; and
-- logout revokes the refresh session; access tokens expire naturally after their short TTL.
-
-Use separate authentication modes for separate audiences:
-
-| Audience | Recommended authentication |
-|---|---|
-| Public Agent Sync users | GitHub/Google/OIDC through the Worker, followed by Agent Sync tokens |
-| Anonymous demo users | Short-lived `demo:read` guest token; no upload or archive scope |
-| Judges needing write access | Expiring account/tenant with a small quota and restricted scopes |
-| Administrators and internal tools | Cloudflare Access in front of dedicated admin routes |
-
-Cloudflare Access is useful for administrators, internal tools, and a controlled judging environment. It can place a signed Access JWT on authenticated requests and now also supports Managed OAuth for protected resources. It is not the preferred public desktop-user account system because its normal HTTP-application flow is browser-cookie centered and public product lifecycle requirements—account linking, refresh-token rotation, quotas, deletion, and support—still belong to Agent Sync. If Access protects an admin origin, the Worker must validate the JWT signature, issuer, audience, and expiry rather than trusting the presence of a header.
-
-#### Google OAuth as a provider
-
-Google supports OpenID Connect, Authorization Code, PKCE, and loopback redirects for desktop applications. For the recommended Worker-broker architecture, create a **Web application** OAuth client in Google Cloud and register one exact callback:
+Module layout:
 
 ```text
-https://api.agentsync.example.com/v1/auth/google/callback
+crates/mallard-infrastructure/src/managed_cloud/
+  mod.rs        ManagedCloudAdapter, descriptor, config types
+  client.rs     HTTP client: origin, bearer token, typed routes, error mapping, ConnectionHealth
+  store.rs      ManagedObjectStore: key mapping, staged upload, head synthesis
+  views.rs      session view builder
+  catalog.rs    item push and pull adapter (step 3)
+crates/mallard-infrastructure/src/loopback_browser.rs   generalized from dropbox_browser.rs
+src-tauri/src/project_sync/managed_cloud_setup.rs      Tauri commands, Control state, Progress, Failure
+src/components/project-sync/ManagedCloudSetup.tsx      hook + lane
 ```
 
-Google requires the redirect URI to match the registered URI exactly. The Worker receives that fixed callback, performs the Google code exchange using `GOOGLE_CLIENT_SECRET` in Worker Secrets, then redirects a single-use Agent Sync code to the app's allowlisted loopback callback. The dynamic loopback callback is therefore not a Google redirect URI.
+### 5.7 Desktop screens
 
-Request identity-only scopes unless the product has a concrete Google API feature:
+Push and Pull are the existing screens. The storage card for a managed link
+adds:
+
+- **Request public release** after a successful push, calling
+  `request_public_release(local_project_id, storage_id)`, and a status chip
+  (`Waiting for Owner`, `Waiting for Super Admin`, `Public`, `Rejected`,
+  `Snapshot changed`) refreshed when the view opens, on focus, and on
+  Refresh.
+- **Open on website**, an external link to `{origin}/repositories/{id}` with
+  no token.
+
+Members, invitations, approvals, discard, removal, and Super Admin live on
+the website only. The desktop has no account UI in Settings; the account is
+the storage.
+
+## 6. Service design
+
+### 6.1 Layout and configuration
 
 ```text
-openid email profile
+services/managed-cloud/          # implemented at mallardInternal/cloudflare/managed-cloud
+  wrangler.toml
+  package.json                 # workers-types, wrangler, vitest, miniflare
+  migrations/0001_init.sql     # section 6.3
+  src/
+    index.ts                   # fetch + scheduled entry; route table; asset fallthrough
+    env.ts                     # bindings and secrets
+    auth/{github.ts, sessions.ts, desktop.ts, web.ts}
+    db/{guards.ts, tx.ts, queries.ts}
+    routes/{account.ts, public.ts, repositories.ts, members.ts, invitations.ts,
+            content.ts, uploads.ts, releases.ts, removal.ts, super_admin.ts}
+    validate/{manifest.ts, catalog.ts, view.ts, limits.ts}
+    jobs/{expire.ts, cleanup.ts, removal.ts}
+    errors.ts
+    audit.ts
+  fixtures/                    # generated from Rust (section 10.5)
+  test/                        # vitest against miniflare D1 and R2
+  web/                         # React website (section 8), built into dist/
 ```
 
-Validate the Google ID token signature and its `iss`, `aud`, `exp`, and `nonce` claims. Use the immutable Google `sub` claim as the identity key; do not use email as the user identifier. Do not request Drive, Calendar, or other sensitive scopes merely for sign-in.
+```toml
+name = "mallard-managed-cloud"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
 
-For a judge-only demo, keep the Google consent screen in Testing and add the judges as test users. Google currently limits an External app in Testing to 100 listed test users. Before public launch, publish the consent screen and prepare the required homepage, privacy policy, branding, and any verification. Basic identity scopes avoid the heavier verification associated with sensitive or restricted Google APIs, though public branding can still require review.
+[assets]
+directory = "./web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = true          # the Worker redirects www. and sets the page CSP
 
-#### Email/password decision
+[[d1_databases]]
+binding = "DB"
+database_name = "mallard-managed-cloud"
+database_id = "<set per environment>"
 
-Email/password changes the recommendation. Do not implement password storage or reset flows in a Worker/D1 application. Password authentication also needs secure password hashing, email verification, reset/recovery, leaked-password protection, rate limits, MFA, session revocation, and careful account-linking behavior.
+[[r2_buckets]]
+binding = "OBJECTS"
+bucket_name = "mallard-managed-cloud"
 
-| Requirement | Recommended approach | Trade-off |
-|---|---|---|
-| GitHub/Google-only public login | Direct OAuth/OIDC through the Worker | No additional auth service |
-| Public email/password plus social login | Supabase Auth | Adds a managed authentication service and its managed Postgres, while D1 remains the Agent Sync application database |
-| Public email/password with a richer identity UI and MFA features | Clerk | Adds a managed identity dependency and desktop-flow integration work |
-| Internal users or a small judge allowlist by email | Cloudflare Access One-time PIN | Good for controlled access; not a public account system |
-| Cloudflare-only public product | Prefer GitHub/Google OAuth or a passwordless design | Cloudflare Access OTP should not be opened to all email addresses |
+[triggers]
+crons = ["*/5 * * * *"]
 
-If email/password becomes a product requirement, Supabase Auth is a reasonable fit: it supports password sign-up/sign-in, email confirmation, password reset, social providers, and JWTs. The Worker validates the Supabase JWT/JWKS and maps the stable Supabase `sub` to the local D1 user and R2 tenant. Passwords and password-reset tokens never pass through Agent Sync's Worker.
+[vars]
+SERVICE_ORIGIN = "https://cloud.mallard.example"
+GITHUB_CLIENT_ID = "<public>"
+# secrets via `wrangler secret put`: GITHUB_CLIENT_SECRET, TOKEN_PEPPER
+```
 
-Cloudflare Access can email a one-time PIN to approved addresses, which is useful for internal administrators or judges. It is not the recommended public signup flow: Cloudflare explicitly warns that an Access policy allowing all valid email-login methods can grant access to anyone with an email address. Do not build a public email/password system by storing password hashes in D1.
+Development and tests use separate databases, buckets, and a separate GitHub
+OAuth app. The Workers Paid plan is required for the cron CPU budget and the
+D1 size limit. Zone rate limiting rules protect `/v1/auth/*`,
+`/v1/invitations/accept`, and `/v1/repositories/*/uploads` per IP and per
+account; the Worker has no rate-limit code.
 
-#### Read a public demo repository
+Platform facts the design relies on: a D1 `batch()` runs its statements
+sequentially in one transaction and rolls the whole batch back when any
+statement errors; D1 allows 100 bound parameters per statement, 2 MB per
+row, 30 seconds per query; R2 `put` accepts a `sha256` option and rejects a
+mismatch; the request body limit is 100 MB on the Free and Pro zone plans;
+a Worker isolate has 128 MB; a cron invocation has 15 minutes of wall
+clock; static assets are served after the Worker for paths listed in
+`run_worker_first`.
 
-1. The app calls the demo catalog without a permanent embedded credential.
-2. The Worker returns approved demo bundle metadata.
-3. The app requests an immutable demo object through the demo hostname.
-4. Cloudflare checks the CDN cache.
-5. On a miss, the Worker reads the object through the demo R2 binding and places the safe response in cache.
-
-#### Push a private bundle
-
-1. The app signs in using a browser-based OAuth/OIDC flow with PKCE, or obtains a tightly limited judge session.
-2. The Rust backend sends the access token to the Worker.
-3. The Worker verifies identity, ownership, quota, object size, and the logical path.
-4. Immutable objects are written with create-only semantics.
-5. The app submits the new manifest and commit.
-6. The app conditionally updates the head using the previously observed ETag/version.
-7. The Worker records the action and returns the new version.
-
-#### Archive and delete
-
-1. A user archive request changes database state immediately but does not delete R2 objects.
-2. The bundle remains recoverable for a defined period, for example 30 days.
-3. A scheduled Worker or Queue consumer deletes eligible objects after retention.
-4. Permanent deletion remains available to the data owner for privacy compliance, but is deliberate, audited, and delayed.
-
-### 9. Demo repository design
-
-Preloaded repositories should be a separate read-only catalog, not ordinary user-owned bundles.
-
-- Seed them through an admin or CI publishing tool, never through a secret embedded in the app.
-- Scan every demo for credentials, personal conversations, absolute machine paths, and private source code.
-- Confirm that all included code and content may legally be redistributed.
-- Give each release an immutable version so judging remains reproducible.
-- Let users choose **Import demo** to copy the selected bundle into their own namespace.
-- If judges need write access, create a small temporary tenant with a strict quota and automatic expiry.
-
-### 10. Security requirements
-
-- Keep every managed R2 bucket private by default.
-- Give the Worker access through bucket bindings with the least required permissions.
-- Never put managed R2 credentials or an administrative API token in the desktop application.
-- Authenticate every private request and authorize every bundle independently.
-- Reject traversal, encoded traversal, control characters, oversized keys, and unknown logical roots.
-- Enforce maximum object, request, bundle, and tenant sizes on the server.
-- Verify SHA-256 before accepting a completed object or manifest.
-- Use create-only writes for immutable objects and conditional writes for the head.
-- Use short-lived access tokens and rotate refresh tokens.
-- Require OAuth `state`, PKCE, exact provider callback matching, and OIDC `nonce` where applicable.
-- Restrict native-app callbacks to loopback IP literals or registered application links; never implement an arbitrary redirect endpoint.
-- Keep OAuth client secrets and session-signing material in Worker Secrets or Secrets Store bindings, never plaintext `vars`.
-- Store only hashes of refresh tokens and one-time app codes in D1, and make every code single-use.
-- Store desktop credentials in the OS keychain.
-- Add per-user and per-IP rate limits, abuse controls, structured audit logs, and alerts.
-- Return generic external errors and keep internal R2 keys and stack traces out of responses.
-- Configure explicit CORS origins only if the WebView talks to the API directly. Prefer Rust-backend HTTP calls, which do not depend on browser CORS.
-
-R2 encrypts objects at rest, but that does not prevent the service operator from reading plaintext. Because Agent Sync may carry conversations and configuration, client-side encryption should be added for private payloads. The server should retain only the minimum searchable metadata needed for ownership, quotas, and the demo catalog. Known credentials must remain excluded before encryption and upload.
-
-### 11. Recommended Cloudflare resources
-
-Minimum MVP:
-
-- one Cloudflare Worker on a custom domain;
-- one private R2 bucket for user data;
-- one separate R2 bucket or prefix for demos;
-- D1 for users, identities, OAuth transactions, refresh sessions, ownership, catalog, quotas, archive state, and audit indexes;
-- Worker Secrets or Secrets Store bindings for OAuth provider secrets and signing keys;
-- a registered GitHub OAuth application or OIDC provider; and
-- Cloudflare rate limiting/WAF rules.
-
-Recommended production additions:
-
-- a second R2 bucket separating immutable content from mutable heads;
-- R2 bucket-lock rules for immutable data only;
-- Queues for post-upload verification and deletion jobs;
-- scheduled Workers for retention cleanup;
-- Turnstile or equivalent abuse protection for anonymous guest creation; and
-- monitoring for authentication failures, quota abuse, CAS conflicts, and R2 errors.
-
-### 12. MVP delivery order
-
-1. Deploy a private R2 bucket and a Worker with R2 binding on a custom domain.
-2. Add the read-only demo catalog and pre-seed two or three safe bundles.
-3. Add `managed` and `ManagedBundleObjectStore` to the desktop app.
-4. Make the managed endpoint the default storage suggestion, without embedding credentials.
-5. Add GitHub OAuth through the Worker using system-browser PKCE, rotating sessions, tenant ownership, quota enforcement, and private push/pull.
-6. Add archive/restore and delayed permanent deletion.
-7. Add client-side encryption.
-8. Add the optional direct-presigned upload path only if measurements justify it.
-
-### 13. Acceptance criteria
-
-- A fresh installation can browse and import demo repositories without setup.
-- The app contains no managed R2 access key, secret key, or shared permanent token.
-- The app contains no OAuth client secret and completes login through the system browser with PKCE.
-- OAuth callbacks reject invalid/replayed `state`, invalid PKCE verifiers, reused app codes, and unapproved redirect targets.
-- Refresh tokens are stored in the OS keychain, hashed in D1, rotated on use, and revoked on replay or logout.
-- Direct unauthenticated access to the private bucket fails.
-- A user cannot read, list, overwrite, archive, or restore another tenant's bundle.
-- Immutable object overwrite attempts fail.
-- Concurrent head updates produce one success and one `409 Conflict`, not lost data.
-- The public demo route shows CDN cache hits after the first request.
-- Private responses are absent from the shared CDN cache.
-- Archive is reversible during retention; permanent deletion is delayed and audited.
-- Existing local-folder and BYO S3/R2 providers continue to work.
-
-### 14. Official references
-
-- [Use R2 from Workers](https://developers.cloudflare.com/r2/api/workers/workers-api-usage/)
-- [Workers custom domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)
-- [Use the Cache API with R2](https://developers.cloudflare.com/r2/examples/cache-api/)
-- [Enable Cloudflare cache for R2](https://developers.cloudflare.com/cache/interaction-cloudflare-products/r2/)
-- [R2 presigned URLs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/)
-- [R2 CORS configuration](https://developers.cloudflare.com/r2/buckets/cors/)
-- [R2 conditional operations](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/)
-- [R2 bucket locks](https://developers.cloudflare.com/r2/buckets/bucket-locks/)
-- [R2 data security](https://developers.cloudflare.com/r2/reference/data-security/)
-- [Cloudflare reference architecture for user-generated content](https://developers.cloudflare.com/reference-architecture/diagrams/storage/storing-user-generated-content/)
-- [Cloudflare Worker Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)
-- [Cloudflare Access application tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/application-token/)
-- [Cloudflare Access authentication for coding agents and Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/authenticate-agents/)
-- [RFC 8252: OAuth 2.0 for Native Apps](https://www.rfc-editor.org/rfc/rfc8252)
-- [Google OAuth for iOS and desktop apps](https://developers.google.com/identity/protocols/oauth2/native-app)
-- [Google OpenID Connect](https://developers.google.com/identity/openid-connect/openid-connect)
-- [Google OpenID Connect API reference (`sub` as the stable user identifier)](https://developers.google.com/identity/openid-connect/reference)
-- [Google OAuth consent-screen publication and test-user limits](https://support.google.com/cloud/answer/13461325)
-- [Supabase password authentication](https://supabase.com/docs/guides/auth/passwords)
-- [Supabase password security](https://supabase.com/docs/guides/auth/password-security)
-- [Clerk custom email/password authentication](https://clerk.com/docs/guides/development/custom-flows/authentication/email-password)
-- [Cloudflare Access One-time PIN login](https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/one-time-pin/)
-
----
-
-## 中文
-
-### 1. 架构结论
-
-这个方案可行，而且很适合 Agent Sync。
-
-建议把官方托管服务设计成：私有 Cloudflare R2 Bucket 放在 Cloudflare Worker 后面，Worker 绑定自定义域名，同时承担公开 API、反向代理和权限边界。开源桌面 App 永远拿不到官方 Bucket 的凭据，也不直接访问官方 R2 Bucket。
-
-桌面 App 继续支持本地目录以及用户自带的 S3/R2。官方托管云作为一个独立的存储 Provider，并在新安装中提供为默认推荐的服务地址。
-
-默认配置可以包含下面这个公开地址：
+### 6.2 R2 keys
 
 ```text
-https://api.agentsync.example.com
+repos/<repository_id>/objects/<sha256>/<upload_id>
+repos/<repository_id>/manifests/<commit_id>.json
+removals/<repository_id>/<removal_id>.json
 ```
 
-但绝不能包含共享 Bearer Token、R2 Access Key 或 R2 Secret Key。任何打包进开源客户端的秘密实际上都是公开信息。
+Every write is create-only because every key embeds a never-reused ID. The
+Worker builds keys from validated IDs; clients never send keys. Public and
+private publications reference the same keys. A listing is used only by the
+removal job to verify that a repository prefix is empty.
 
-### 2. 推荐拓扑
+### 6.3 D1 schema
 
-```mermaid
-flowchart LR
-    APP["开源 Tauri App"]
-    EDGE["Cloudflare 自定义域名<br/>TLS + CDN + WAF + 限流"]
-    API["Cloudflare Worker<br/>API + 身份认证 + 权限校验<br/>反向代理 + 策略执行"]
-    IDP["GitHub / Google / OIDC Provider<br/>用户身份"]
-    DB["D1<br/>用户、身份、Session、归属、<br/>Catalog、配额、归档状态、审计"]
-    R2P["私有 R2 Bucket<br/>用户 Bundle 对象"]
-    R2D["Demo R2 Bucket<br/>精选只读 Bundle"]
-    JOBS["Queues / 定时 Worker<br/>校验和保留期清理"]
+```sql
+-- One column per API error code, each with a NAMED check constraint, so the
+-- SQLite message of a failed guard names the code ("CHECK constraint failed:
+-- revision_conflict") and the Worker maps it without a re-read.
+CREATE TABLE guard_check (
+  revision_conflict INTEGER CONSTRAINT revision_conflict CHECK (revision_conflict IS NULL),
+  head_changed      INTEGER CONSTRAINT head_changed      CHECK (head_changed IS NULL)
+  -- … one such column for every code in section 7.1
+);
 
-    APP -->|"HTTPS + 用户或访客 Token"| EDGE
-    EDGE --> API
-    API <-->|"OAuth/OIDC"| IDP
-    API --> DB
-    API -->|"R2 Binding"| R2P
-    API -->|"R2 Binding"| R2D
-    API --> JOBS
-    JOBS --> R2P
+CREATE TABLE users (
+  id            TEXT PRIMARY KEY,                 -- usr_<random>
+  github_id     INTEGER NOT NULL UNIQUE,
+  github_login  TEXT NOT NULL,                     -- display only, refreshed at sign-in
+  state         TEXT NOT NULL CHECK (state IN ('active','suspended')),
+  service_role  TEXT NOT NULL DEFAULT 'user' CHECK (service_role IN ('user','super_admin')),
+  created_at    INTEGER NOT NULL,
+  last_sign_in_at INTEGER NOT NULL
+);
+
+CREATE TABLE sessions (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  client      TEXT NOT NULL CHECK (client IN ('desktop','web')),
+  token_hash  TEXT NOT NULL UNIQUE,                -- sha256(pepper || token)
+  expires_at  INTEGER NOT NULL,
+  created_at  INTEGER NOT NULL,
+  revoked_at  INTEGER
+);
+
+CREATE TABLE auth_attempts (
+  state           TEXT PRIMARY KEY,
+  client          TEXT NOT NULL CHECK (client IN ('desktop','web')),
+  code_challenge  TEXT,                            -- desktop: S256 challenge
+  loopback_port   INTEGER,                         -- desktop
+  return_path     TEXT,                            -- web: must start with '/'
+  grant_hash      TEXT,                            -- desktop: set at callback, one use
+  user_id         TEXT,
+  expires_at      INTEGER NOT NULL
+);
+
+CREATE TABLE repositories (
+  id                     TEXT PRIMARY KEY,         -- repo_<random>
+  class                  TEXT NOT NULL CHECK (class IN ('git_project','non_git_project','catalog')),
+  display_name           TEXT NOT NULL,
+  bundle_id              TEXT,
+  repository_fingerprint TEXT,
+  catalog_provider       TEXT, catalog_resource_kind TEXT, catalog_format TEXT,
+  catalog_format_version INTEGER, catalog_resource_id TEXT,
+  revision               INTEGER NOT NULL DEFAULT 1,
+  state                  TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','deleting','removed')),
+  visibility             TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','public')),
+  private_publication_id TEXT,
+  private_revision       INTEGER NOT NULL DEFAULT 0,
+  public_publication_id  TEXT,
+  public_revision        INTEGER NOT NULL DEFAULT 0,
+  public_admitted_at     INTEGER,
+  committed_bytes        INTEGER NOT NULL DEFAULT 0 CHECK (committed_bytes >= 0),
+  created_by             TEXT NOT NULL REFERENCES users(id),
+  created_at             INTEGER NOT NULL,
+  updated_at             INTEGER NOT NULL,
+  CHECK (
+    (class = 'git_project'     AND bundle_id IS NOT NULL AND repository_fingerprint IS NOT NULL AND catalog_resource_id IS NULL) OR
+    (class = 'non_git_project' AND bundle_id IS NOT NULL AND repository_fingerprint IS NULL     AND catalog_resource_id IS NULL) OR
+    (class = 'catalog'         AND bundle_id IS NULL     AND catalog_resource_id IS NOT NULL)
+  )
+);
+CREATE INDEX repositories_bundle ON repositories(bundle_id) WHERE bundle_id IS NOT NULL;
+
+CREATE TABLE repository_members (
+  repository_id TEXT NOT NULL REFERENCES repositories(id),
+  user_id       TEXT NOT NULL REFERENCES users(id),
+  role          TEXT NOT NULL CHECK (role IN ('owner','admin','member')),
+  created_at    INTEGER NOT NULL,
+  PRIMARY KEY (repository_id, user_id)
+);
+CREATE UNIQUE INDEX repository_single_owner ON repository_members(repository_id) WHERE role = 'owner';
+
+CREATE TABLE invitations (
+  id            TEXT PRIMARY KEY,
+  repository_id TEXT NOT NULL REFERENCES repositories(id),
+  code_hash     TEXT NOT NULL UNIQUE,
+  label         TEXT NOT NULL,                     -- inviter's note, <= 80 chars
+  created_by    TEXT NOT NULL REFERENCES users(id),
+  state         TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','accepted','revoked','expired')),
+  expires_at    INTEGER NOT NULL,
+  accepted_by   TEXT REFERENCES users(id),
+  accepted_at   INTEGER,
+  created_at    INTEGER NOT NULL
+);
+
+CREATE TABLE objects (
+  id            TEXT PRIMARY KEY,                  -- obj_<random>
+  repository_id TEXT NOT NULL REFERENCES repositories(id),
+  sha256        TEXT NOT NULL,
+  size          INTEGER NOT NULL CHECK (size >= 0),
+  key           TEXT NOT NULL UNIQUE,
+  upload_id     TEXT NOT NULL,
+  state         TEXT NOT NULL CHECK (state IN ('writing','ready','deleting','deleted')),
+  created_at    INTEGER NOT NULL,
+  claimed_at    INTEGER,
+  UNIQUE (repository_id, sha256, upload_id)
+);
+CREATE INDEX objects_ready ON objects(repository_id, sha256) WHERE state = 'ready';
+
+CREATE TABLE uploads (
+  id                           TEXT PRIMARY KEY,   -- upl_<random>
+  repository_id                TEXT NOT NULL REFERENCES repositories(id),
+  user_id                      TEXT NOT NULL REFERENCES users(id),
+  state                        TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','committed','expired','abandoned')),
+  expected_repository_revision INTEGER NOT NULL,
+  expected_private_revision    INTEGER NOT NULL,
+  commit_id                    TEXT NOT NULL,      -- from the manifest
+  manifest_key                 TEXT NOT NULL,
+  manifest_sha256              TEXT NOT NULL,
+  manifest_size                INTEGER NOT NULL,
+  summary_json                 TEXT NOT NULL,      -- tag summary computed at creation
+  reserved_bytes               INTEGER NOT NULL CHECK (reserved_bytes >= 0),
+  expires_at                   INTEGER NOT NULL,
+  created_at                   INTEGER NOT NULL,
+  closed_at                    INTEGER
+);
+CREATE UNIQUE INDEX uploads_one_open ON uploads(repository_id) WHERE state = 'open';
+-- A commit id is claimed by an open or committed upload only; an abandoned or
+-- expired upload may be retried with the same manifest.
+CREATE UNIQUE INDEX uploads_commit_claimed ON uploads(repository_id, commit_id)
+  WHERE state IN ('open','committed');
+
+CREATE TABLE upload_objects (
+  upload_id     TEXT NOT NULL REFERENCES uploads(id),
+  sha256        TEXT NOT NULL,
+  size          INTEGER NOT NULL,
+  role          TEXT NOT NULL CHECK (role IN ('payload','view')),
+  resource_id   TEXT,                              -- view: conversation resource
+  source_sha256 TEXT,                              -- view: transcript digest
+  object_id     TEXT REFERENCES objects(id),       -- set when matched or written
+  PRIMARY KEY (upload_id, sha256)
+);
+
+CREATE TABLE publications (
+  id              TEXT PRIMARY KEY,                -- pub_<random>
+  repository_id   TEXT NOT NULL REFERENCES repositories(id),
+  scope           TEXT NOT NULL CHECK (scope IN ('private','public')),
+  revision        INTEGER NOT NULL,                -- private_revision or public_revision
+  commit_id       TEXT NOT NULL,
+  manifest_key    TEXT NOT NULL,
+  manifest_sha256 TEXT NOT NULL,
+  manifest_size   INTEGER NOT NULL,
+  manifest_revision INTEGER NOT NULL,              -- the manifest's own revision field
+  summary_json    TEXT NOT NULL,
+  state           TEXT NOT NULL DEFAULT 'available' CHECK (state IN ('available','retired','removed')),
+  source_publication_id TEXT,                      -- public: released private publication
+  released_by     TEXT, owner_approved_by TEXT, super_admin_approved_by TEXT,
+  created_by      TEXT NOT NULL REFERENCES users(id),
+  created_at      INTEGER NOT NULL,
+  retired_at      INTEGER,
+  UNIQUE (repository_id, scope, revision)
+);
+CREATE INDEX publications_commit ON publications(repository_id, commit_id);
+
+CREATE TABLE publication_objects (
+  publication_id TEXT NOT NULL REFERENCES publications(id),
+  object_id      TEXT NOT NULL REFERENCES objects(id),
+  role           TEXT NOT NULL CHECK (role IN ('payload','view')),
+  resource_id    TEXT,
+  source_sha256  TEXT,
+  PRIMARY KEY (publication_id, object_id)
+);
+CREATE INDEX publication_objects_object ON publication_objects(object_id);
+
+CREATE TABLE release_requests (
+  id                           TEXT PRIMARY KEY,
+  repository_id                TEXT NOT NULL REFERENCES repositories(id),
+  private_publication_id       TEXT NOT NULL REFERENCES publications(id),
+  expected_public_publication_id TEXT,
+  expected_repository_revision INTEGER NOT NULL,
+  state                        TEXT NOT NULL CHECK (state IN ('pending_owner','pending_super_admin','published','rejected','withdrawn','invalidated')),
+  requested_by                 TEXT NOT NULL REFERENCES users(id),
+  owner_decided_by             TEXT, owner_decided_at INTEGER,
+  super_admin_decided_by       TEXT, super_admin_decided_at INTEGER,
+  published_publication_id     TEXT,
+  reason                       TEXT,
+  created_at                   INTEGER NOT NULL,
+  closed_at                    INTEGER
+);
+CREATE UNIQUE INDEX release_requests_one_open ON release_requests(repository_id)
+  WHERE state IN ('pending_owner','pending_super_admin');
+
+CREATE TABLE removals (
+  id             TEXT PRIMARY KEY,
+  repository_id  TEXT NOT NULL,
+  target         TEXT NOT NULL CHECK (target IN ('repository','revision')),
+  publication_id TEXT,
+  authority      TEXT NOT NULL CHECK (authority IN ('owner_admin','super_admin')),
+  requested_by   TEXT NOT NULL,
+  reason         TEXT,
+  state          TEXT NOT NULL DEFAULT 'deleting' CHECK (state IN ('deleting','done','failed')),
+  record_written INTEGER NOT NULL DEFAULT 0,
+  created_at     INTEGER NOT NULL,
+  completed_at   INTEGER,
+  last_error     TEXT
+);
+
+CREATE TABLE idempotency (
+  user_id       TEXT NOT NULL,
+  operation     TEXT NOT NULL,
+  key_hash      TEXT NOT NULL,
+  request_hash  TEXT NOT NULL,
+  status        INTEGER NOT NULL,
+  response_json TEXT NOT NULL,
+  expires_at    INTEGER NOT NULL,
+  PRIMARY KEY (user_id, operation, key_hash)
+);
+
+CREATE TABLE audit_events (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  at            INTEGER NOT NULL,
+  actor_user_id TEXT,
+  repository_id TEXT,
+  action        TEXT NOT NULL,
+  target        TEXT,
+  result        TEXT NOT NULL,
+  reason        TEXT,
+  request_id    TEXT
+);
 ```
 
-第一版可以让 Worker 通过 R2 Binding 代理所有普通对象的读取和写入。这个方案最简单、Bucket 保持私有，而且 Worker 内也不需要保存 S3 Access Key。
+Manifests, views, and payloads never enter D1 (the row limit is 2 MB).
+Timestamps are integer Unix seconds, as in the Rust DTOs.
 
-如果未来超大文件上传成为瓶颈，可以升级为混合流程：Worker 先认证用户、校验权限，再为单个不可变对象生成短时有效的 presigned PUT URL，最后仍通过 Worker 提交 Bundle Head。Cloudflare 官方也推荐用这种方式处理大体积用户上传。需要注意，R2 presigned URL 只能使用 R2 的 S3 API 域名，不能使用自定义域名，因此它应该是后续性能优化，而不是核心 API 契约。
+### 6.4 Guard idiom and transactions
 
-#### 是否需要 VM
+D1 `batch()` runs its statements in one transaction and rolls back the whole
+batch when any statement fails, but an `UPDATE` that matches zero rows is not
+a failure. Every guarded batch therefore starts with assertion statements of
+this form:
 
-这个方案不需要 VM 或传统主机。Worker 就是 API Server 和反向代理；R2 保存对象；D1 保存应用元数据和 Session；Queues 与定时 Worker 处理后台校验和保留期清理；Cloudflare Edge 提供 TLS、CDN、WAF 和限流。
-
-只有经过测量确认某项需求无法适应 Workers 模型时才应增加 VM，例如必须运行长时间的 Native Binary、重型压缩包或恶意软件扫描、常驻进程，或者超过 Worker 执行及请求限制的任务。大文件传输本身不是增加 VM 的理由；需要时使用经过 Worker 授权的 Presigned Upload 即可。
-
-### 3. 为什么用 Worker 做反向代理
-
-Worker 对外提供的是收敛后的业务 API，而不是把一个完整的 S3 兼容 API 暴露给官方云用户。它必须负责：
-
-- 认证正式用户或只读 Demo 访客；
-- 在服务端推导租户和 R2 Key 前缀；
-- 每次请求都校验 Bundle 归属；
-- 校验对象类型、大小、哈希和允许的逻辑路径；
-- 执行配额和限流；
-- 实现不可变写入以及 Compare-and-Swap 更新；
-- 不提供通用删除接口；
-- 生成审计事件；
-- 返回安全的缓存响应头。
-
-服务端必须把开源客户端视为不可信客户端。难猜的 Bundle ID、CORS 以及 UI 上隐藏按钮都不能代替服务端授权。
-
-Cloudflare Worker 可以通过 R2 Binding 直接访问 Bucket。这样官方 Bucket 可以保持私有，也不需要把 R2 Access Key 放进桌面 App。Worker 自定义域名还能提供稳定的生产地址，并由 Cloudflare 管理 DNS 和 TLS。
-
-### 4. CDN 与缓存策略
-
-即使 Worker 是源站，Cloudflare CDN 仍然有价值，但不能缓存所有响应。
-
-| 数据 | CDN 策略 | 原因 |
-|---|---|---|
-| 公共 Demo 的不可变文件 | 长时间缓存，最好使用内容寻址 URL | 所有用户拿到相同字节，非常适合边缘缓存 |
-| 公共 Demo 的 Manifest 和 Commit | 确认不可变后缓存 | 发布后内容不会变化 |
-| Demo Catalog | 短 TTL，例如 60–300 秒 | 偶尔需要更新 |
-| `_head.json` 或等价的当前指针 | `no-store` | 内容可变，而且关系到 CAS 正确性 |
-| 已认证用户的元数据 | `private, no-store` | 防止跨用户泄露 |
-| 已认证用户的 Bundle 内容 | MVP 阶段不进入共享 CDN 缓存 | 共享缓存 Key 配置错误可能泄露私有数据 |
-| API 错误和认证响应 | `no-store` | 与用户相关，且可能包含敏感信息 |
-
-在依赖 Workers Cache API 之前，必须给 Worker 绑定自定义域名或 Route。Cloudflare 文档明确说明，`workers.dev` 预览环境中的 Cache API 写入不具备正式生产缓存效果。
-
-推荐域名：
-
-```text
-api.agentsync.example.com       -> Worker API 与私有 Bundle 网关
-demo.agentsync.example.com      -> 同一个 Worker，提供可被 CDN 缓存的只读 Demo 路由
+```sql
+INSERT INTO guard_check(revision_conflict)
+SELECT 1 WHERE NOT EXISTS (
+  SELECT 1 FROM repositories
+  WHERE id = ?1 AND state = 'active' AND revision = ?2 AND private_revision = ?3
+);
 ```
 
-第一版两个域名可以指向同一个 Worker。把 Demo 单独放在一个域名上，会让缓存规则和安全审查更清晰。
+A failed condition inserts a non-null value, violates the named `CHECK`, and
+aborts the batch with a message that names the column, which is the error
+code the route answers; a passed condition inserts nothing. Guards read transaction-time state. No
+R2 I/O or JSON parsing happens inside a batch. Copies between tables use
+`INSERT … SELECT` so the 100-parameter limit never applies to row counts.
 
-不要把存放用户私有数据的 R2 Bucket 直接绑定到公开的 R2 自定义域名，否则该 Bucket 会变成可公开寻址。如果未来确实需要最高的直连 CDN 性能，只允许一个独立、明确公开的 Demo Bucket 使用 R2 直连自定义域名。
+| Operation | Guards | Writes |
+| --- | --- | --- |
+| Create repository | actor active; identity unused; repository count under limit | repositories, owner membership, audit |
+| Create upload | member; repository active and revision matches; `private_revision` matches; no open upload; `commit_id` unused; quota admits `reserved_bytes` | uploads, upload_objects (matched `object_id` for ready digests), audit |
+| Register object write | upload open and not expired; digest listed; not yet ready | objects (`writing`), upload_objects.object_id |
+| Mark object ready | object `writing`; size matches | objects (`ready`) |
+| Commit upload | upload open and not expired; every upload_object has a `ready` object; repository active, revision and `private_revision` unchanged; `expected_commit_id` equals the current private commit or both are null; actor still a member | publications (private, `private_revision + 1`); publication_objects from upload_objects plus carried-forward views; previous private publication → `retired`; repositories head and `private_revision`; open release request → `invalidated`; `committed_bytes += bytes of objects written by this upload`; uploads → `committed`; idempotency; audit |
+| Abandon or expire upload | upload open | uploads → `abandoned` or `expired` |
+| Discard private snapshot | member; `private_revision` and commit match | private publication → `retired`; head cleared; `private_revision + 1`; open upload → `abandoned`; open request → `invalidated`; audit |
+| Create invitation | Owner or Admin; revision matches; pending count under limit | invitations, revision + 1, audit |
+| Revoke invitation | Owner or Admin; invitation pending | invitations → `revoked`, audit |
+| Accept invitation | actor active; code pending and unexpired; inviter still Owner or Admin; repository active | membership (Member, unless already higher), invitations → `accepted`, revision + 1, open request → `invalidated`, audit |
+| Change role, remove member, leave | authority per section 4.3; Owner row untouched; revision matches | membership, revision + 1, open request → `invalidated`, audit |
+| Rename, make private | Owner or Admin; revision matches | repositories, revision + 1, open request → `invalidated` (make private only), audit |
+| Request release | member; repository active; private head present; revision matches; no open request; the private publication is not already the public head's source | release_requests (`pending_owner`), idempotency, audit |
+| Owner decision | Owner; request `pending_owner`; pins unchanged | reject → `rejected`; approve and never public → `pending_super_admin`; approve otherwise → publish |
+| Super Admin decision | `super_admin`; request `pending_super_admin`; pins unchanged | reject → `rejected`; approve → publish and `public_admitted_at` |
+| Publish (inside a decision) | pins unchanged; private publication available | publications (public, `public_revision + 1`, same manifest, `source_publication_id`); publication_objects copied from the private publication; repositories public head, `public_revision`, `visibility = 'public'`, revision + 1; request → `published`; audit |
+| Withdraw request | requester or Owner; request open | request → `withdrawn`, audit |
+| Remove repository | Owner, Admin, or Super Admin; name confirmed; revision matches | repositories → `deleting`, private; invitations → `revoked`; requests → `invalidated`; open upload → `abandoned`; removals; audit |
+| Remove public revision | Super Admin; publication public and available | publication → `removed`; its publication_objects deleted; if head: head cleared and `visibility = 'private'`; revision + 1; removals (`revision`); audit |
+| Claim object for deletion | object `ready`; no publication_objects row from an `available` publication; no upload_objects row from an `open` upload | objects → `deleting`, `claimed_at` |
+| Finish deletion | object `deleting` | objects → `deleted`; `committed_bytes -= size` |
 
-### 5. 存储模型及与当前 App 的兼容方式
+Every guarded mutation returns `revision_conflict` when a revision guard
+fails, `head_changed` when a commit-ID guard fails, and the specific code
+otherwise.
 
-Agent Sync schema 3 已经有适合这个服务的远端布局：
+### 6.5 Upload protocol and limits
 
-```text
-.mallard/
-|-- _storage.json
-`-- v1/repositories/<bundle-id>/
-    |-- _tag.json
-    |-- _head.json
-    |-- _manifests/<revision>-<commit-id>.json
-    |-- _commits/<revision>-<commit-id>.json
-    `-- _uploads/<upload-id>/files/<logical-path>
+1. `POST /v1/repositories/{id}/uploads` as `multipart/form-data` with a
+   `request` part (the JSON inventory below) and a `manifest` part holding the
+   manifest bytes exactly as the desktop serialized them; the service stores
+   those bytes unchanged because the engine later stages fetched manifests
+   against the digest it computed locally. The Worker validates the manifest (section 10), checks that the
+   payload inventory equals the set of object references in the manifest,
+   checks every view's `resource_id` against the manifest's conversations,
+   computes the manifest digest and the tag summary, writes
+   `manifests/<commit_id>.json` to R2, then runs the create-upload batch. It
+   replies with `upload_id`, `expires_at`, and `missing`, the digests with no
+   ready object.
+2. `PUT /v1/repositories/{id}/uploads/{upload}/objects/{sha256}` with
+   `Content-Length` and `X-Mallard-Sha256`. The Worker registers the write,
+   streams the body to R2 with `put(key, body, { sha256 })` so R2 rejects a
+   digest mismatch, checks the stored size, and marks the object ready. A
+   failed write leaves the row in `writing` for cleanup and the client
+   retries under the same digest; the retry gets a new object key.
+3. `POST /v1/repositories/{id}/uploads/{upload}/commit` with
+   `expected_commit_id`. The commit batch runs; the response carries the new
+   private head.
+
+| Limit | Value |
+| --- | --- |
+| Object size | 90 MiB; larger is refused at upload creation with `object_too_large` |
+| Manifest size | 8 MiB |
+| Session view size | 8 MiB or 20,000 events, then `truncated` |
+| Objects per upload | 20,000 |
+| Repository quota | 4 GiB committed plus reserved |
+| Repositories per account | 100 |
+| Members per repository | 50; pending invitations 20 |
+| Upload lifetime | 24 hours |
+
+The 90 MiB object cap sits under the 100 MB request body limit of the Free
+and Pro zone plans. Step 1 of section 12 verifies a 90 MiB upload on the
+deployed plan before anything else is built. A conversation the desktop
+allows locally but the service refuses fails the push with a clear item
+error; nothing is truncated.
+
+### 6.6 Reads and authorization
+
+Every read resolves the caller: a desktop bearer token or a web session
+cookie, else anonymous. Then:
+
+- A collaborator may read the private head, every `available` public
+  publication, retired private manifests, and any `ready` object or view of
+  the repository.
+- Super Admin may read the same, audited.
+- A signed-in non-collaborator and an anonymous caller may read only a public
+  repository's current public head, its manifest, and the objects and views
+  that publication references. `commit_id` in the request must equal the
+  current public commit, else `not_found`. Responses carry
+  `Cache-Control: no-store`.
+- Missing and hidden repositories both answer `not_found`.
+
+Objects stream from R2 with `Content-Length` and the stored SHA-256 in
+`X-Mallard-Sha256`; the desktop verifies both.
+
+### 6.7 Cleanup, expiry, and removal worker
+
+The cron Worker runs every five minutes and derives its work from state
+columns; there is no job table. Each run is bounded and every step is safe to
+repeat:
+
+1. Expire `open` uploads past `expires_at`, `pending` invitations past
+   `expires_at`, `auth_attempts`, `sessions`, and `idempotency` rows.
+2. Delete `writing` objects whose upload is no longer `open` (key delete,
+   then `deleted`).
+3. Claim up to 200 unreferenced `ready` objects (section 6.4), delete each
+   key, and finish the deletion. Uncertainty keeps the claim for the next
+   run. An object referenced again before the claim cannot be claimed; an
+   object claimed before a new upload lists it is reported as missing and
+   re-uploaded under a new key.
+4. For each `removals` row in `deleting`: write `removals/<repo>/<id>.json`
+   if `record_written = 0`; delete every object and manifest key of the
+   repository (repository target) or the objects that became unreferenced
+   (revision target); list the repository prefix to verify it is empty
+   (repository target); mark objects `deleted`, publications `removed`,
+   the repository `removed` with `committed_bytes = 0`, and the removal
+   `done`. A failing step records `last_error` and stays `deleting`.
+5. Erase retired private manifests beyond the newest 32 per repository.
+
+The worker stays within the 15-minute cron budget by taking at most 500
+R2 operations per run. An operator can trigger it with
+`curl "$ORIGIN/cdn-cgi/local/scheduled"` in development and with a
+protected `POST /v1/super-admin/jobs/run` in production.
+
+### 6.8 Idempotency
+
+`Idempotency-Key` is required on create repository, create upload, commit
+upload, request release, and create invitation. The Worker stores a hash of
+the key and of the canonical request body for 24 hours and replays the
+recorded response for the same pair; a different body under the same key
+answers `idempotency_mismatch`. Every other mutation is protected by its
+revision or commit guard, and a retry that lost its response re-reads state.
+
+## 7. API
+
+### 7.1 Conventions and errors
+
+Base path `/v1`, JSON `snake_case`, integer seconds. Desktop requests send
+`Authorization: Bearer <token>`. Website requests send the session cookie
+plus `X-Requested-With: mallard-web`; the Worker rejects a browser mutation
+whose `Origin` is not the service origin. Every mutation that can race
+carries `expected_repository_revision`.
+
+Error body: `{ "error": "<code>", "detail": "<bounded text>", "request_id": "…" }`.
+
+Codes: `authentication_required`, `forbidden`, `not_found`,
+`invalid_request`, `manifest_invalid`, `revision_conflict`, `head_changed`,
+`upload_in_progress`, `upload_expired`, `object_too_large`,
+`object_integrity_failed`, `quota_exceeded`, `release_request_pending`,
+`release_request_invalid`, `owner_required`, `super_admin_required`,
+`invitation_invalid`, `idempotency_mismatch`, `repository_removed`,
+`storage_managed_account_exists`, `temporarily_unavailable`.
+`manifest_invalid` carries the specific reason in `detail` (class mismatch,
+identity mismatch, unregistered coordinate, missing reference, bound
+exceeded). Errors never reveal private existence, content, or local paths.
+
+### 7.2 Auth
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/v1/auth/desktop/start` | `{code_challenge, loopback_port}` → `{state, authorize_url}` |
+| `GET` | `/v1/auth/github/callback` | GitHub redirect target for both clients; exchanges the code with the client secret, reads `/user`, upserts the account |
+| `POST` | `/v1/auth/desktop/exchange` | `{state, grant, code_verifier}` → `{token, expires_at, user}` |
+| `GET` | `/auth/github/start?return=/path` | Website sign-in; sets the state cookie and redirects to GitHub |
+| `POST` | `/v1/auth/logout` | Revokes the current session |
+| `GET` | `/v1/me` | Account, service role, limits |
+
+Desktop flow: the lane calls `start`, shows `authorize_url`, and listens on
+the loopback port. GitHub redirects the browser to the Worker callback; the
+Worker verifies `state`, exchanges the code, stores a one-use grant hash on
+the attempt, and redirects the browser to
+`http://127.0.0.1:{loopback_port}/mallard/callback?state=…&grant=…`. The
+lane posts `exchange` with the verifier; the Worker checks the S256
+challenge, deletes the attempt, and issues an opaque token valid for 90 days.
+Website flow: the callback sets the session cookie and redirects to
+`return`, which must be a relative path.
+
+GitHub's web application flow: the authorize URL is
+`https://github.com/login/oauth/authorize` with `client_id`,
+`redirect_uri`, `scope`, and `state`; the code exchange is a `POST` to
+`https://github.com/login/oauth/access_token` with `client_id`,
+`client_secret`, `code`, and `redirect_uri`; the account is read from
+`GET https://api.github.com/user` (`id`, `login`). GitHub scope is
+`read:user` only. The GitHub access token is used for that one call and
+discarded.
+
+### 7.3 Account and public routes
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET` | `/v1/repositories?class=` | Joined repositories with both head summaries, role, usage, release status |
+| `GET` | `/v1/repositories/by-bundle/{bundle_id}/head` | The head the caller may read for that bundle, or `204` when unknown |
+| `GET` | `/v1/public/repositories?class=&provider=&kind=&cursor=` | Bounded public listing, 50 per page |
+| `GET` | `/v1/public/repositories/{id}` | Public summary: class, name, public head, counts |
+| `GET` | `/v1/public/repositories/{id}/manifest` | Current public manifest |
+| `GET` | `/v1/public/repositories/{id}/views/{resource_id}?commit_id=` | Session view |
+| `GET` | `/v1/public/repositories/{id}/objects/{sha256}?commit_id=` | Payload referenced by the public head |
+
+Head body (both head routes):
+
+```json
+{ "scope": "private", "revision": 12, "commit_id": "commit-…",
+  "manifest_sha256": "…", "manifest_size": 48213, "updated_at": 1757700000,
+  "kind": "project", "bundle_id": "…" }
 ```
 
-官方托管服务应保持现有逻辑语义：
+### 7.4 Repositories, members, invitations
 
-- Manifest、Commit 和上传文件对象不可变；
-- `_head.json` 是唯一权威的可变指针；
-- 更新 Head 时必须携带上一次读取到的 ETag/版本并执行 CAS；
-- 比较失败返回 `409 Conflict`，不能覆盖另一台机器刚刚提交的更新；
-- List 只能返回当前已认证租户可见的 Bundle。
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/v1/repositories` | Create; body below |
+| `GET`, `PATCH` | `/v1/repositories/{id}` | Summary with both heads, revisions, role, usage, open request; rename |
+| `POST` | `/v1/repositories/{id}/visibility` | `{visibility: "private", expected_repository_revision}` |
+| `GET` | `/v1/repositories/{id}/members` | Collaborators; Owners and Admins also see pending invitations |
+| `PATCH`, `DELETE` | `/v1/repositories/{id}/members/{user_id}` | Change role; remove; a non-Owner deletes their own row to leave |
+| `POST` | `/v1/repositories/{id}/invitations` | `{label, expected_repository_revision}` → `{invitation_id, code, expires_at}`; the code is returned once |
+| `POST` | `/v1/repositories/{id}/invitations/{invitation_id}/revoke` | Revoke |
+| `POST` | `/v1/invitations/accept` | `{code}` → repository summary |
 
-托管服务不需要把实际 R2 Key 暴露给客户端。Worker 可以把逻辑 Bundle Key 映射为内部租户路径，例如：
+Create bodies:
 
-```text
-tenants/<tenant-id>/.mallard/v1/repositories/<bundle-id>/...
+```json
+{ "repository_class": "git_project", "display_name": "Mallard Desktop",
+  "bundle_id": "…", "repository_fingerprint": "sha256_hex" }
 ```
 
-租户前缀必须始终由 Worker 生成，不能从客户端参数中直接接收。
-
-如果需要更强的防删除保护，可以把不可变对象和可变 Head 放进不同的 R2 Bucket 或物理前缀。R2 Bucket Lock 会同时禁止删除和覆盖，所以不能让锁规则覆盖可变的 `_head.json`。一种安全的拆分方式是：
-
-```text
-agent-sync-private-immutable   # manifests、commits、uploads；可配置保留锁
-agent-sync-private-mutable     # heads 和 tags；使用条件写，不配置保留锁
-agent-sync-demo               # 精选只读 Demo Bundle
+```json
+{ "repository_class": "non_git_project", "display_name": "Research Notes", "bundle_id": "…" }
 ```
 
-### 6. 桌面端 Provider 模型
-
-不要把官方服务伪装成普通 S3 Provider。应该新增一个明确的官方托管 Provider：
-
-```text
-local       -> 现有本地目录 Store
-s3         -> 现有 BYO S3/R2 Store
-managed    -> 由 Worker + R2 支撑的官方 HTTPS API
+```json
+{ "repository_class": "catalog", "display_name": "Rika",
+  "provider": "codex", "resource_kind": "desktop_pet",
+  "format": "openai.codex-pet", "format_version": 2, "resource_id": "resource-…" }
 ```
 
-在 Rust 后端新增 `ManagedBundleObjectStore`，实现 schema-3 Bundle Engine 已经使用的同一组对象存储契约：
+### 7.5 Content
 
-```text
-get
-put_immutable
-compare_and_swap
-list
-```
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET` | `/v1/repositories/{id}/head` | The head the caller may read (body as in section 7.3); `204` when absent |
+| `GET` | `/v1/repositories/{id}/history` | Public publications newest first, including `removed` markers |
+| `GET` | `/v1/repositories/{id}/manifests/{commit_id}` | Manifest bytes |
+| `GET` | `/v1/repositories/{id}/objects/{sha256}` | Payload bytes for collaborators |
+| `GET` | `/v1/repositories/{id}/views/{resource_id}?commit_id=` | Session view for collaborators |
+| `POST` | `/v1/repositories/{id}/uploads` | Section 6.5 step 1 |
+| `PUT` | `/v1/repositories/{id}/uploads/{upload}/objects/{sha256}` | Step 2 |
+| `POST` | `/v1/repositories/{id}/uploads/{upload}/commit` | Step 3 |
+| `POST` | `/v1/repositories/{id}/uploads/{upload}/abandon` | End an open upload |
+| `POST` | `/v1/repositories/{id}/private-snapshot/discard` | `{expected_private_revision, expected_commit_id, confirm: true}` |
 
-不增加通用 `delete` 方法。Managed Adapter 调用 Worker API，已有 `S3BundleObjectStore` 则继续直接调用用户自己的 S3/R2 Endpoint。
-
-Managed Storage 配置只保存非敏感字段，例如：
+Upload creation: `multipart/form-data`; part `manifest` carries the raw
+manifest bytes, part `request` carries this JSON:
 
 ```json
 {
-  "kind": "managed",
-  "name": "Agent Sync Cloud",
-  "base_url": "https://api.agentsync.example.com",
-  "account_id": "local-account-reference"
+  "expected_repository_revision": 7,
+  "expected_private_revision": 3,
+  "objects": [
+    { "sha256": "…", "size": 1234, "role": "payload" },
+    { "sha256": "…", "size": 5678, "role": "view", "resource_id": "resource-…", "source_sha256": "…" }
+  ]
 }
 ```
 
-Access Token 和 Refresh Token 应保存在操作系统钥匙串中，而不是 `sync_config.json`。Managed HTTP 请求以及 Token 管理应放在 Tauri Rust 后端，不放在 WebView 前端。
+### 7.6 Release requests
 
-### 7. API 范围
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET`, `POST` | `/v1/repositories/{id}/release-requests` | Read the open request and its comparison; create `{expected_repository_revision}` |
+| `POST` | `/v1/repositories/{id}/release-requests/{request}/decision` | `{decision: "approve" or "reject" or "withdraw", private_commit_id, acknowledge_disclosure, reason}` |
 
-具体路由可以调整，但对外 API 应保持收敛并带版本号。
+The comparison is computed on read from the two manifests: resources present
+on one side, present on both with different digests, and identical. It is a
+listing, not a merge.
 
-| 方法与路由 | 用途 | 关键限制 |
-|---|---|---|
-| `POST /v1/auth/guest` | 创建受限 Demo Session | 默认只读、短有效期、限流 |
-| `GET /v1/auth/start` | 开始 OAuth/OIDC 登录 | PKCE Challenge、随机 State、允许的 App Callback |
-| `GET /v1/auth/callback` | 接收 Provider Callback | 固定注册 Callback、State/Nonce 校验、Provider Code Exchange |
-| `POST /v1/auth/exchange` | 交换一次性 App Code | PKCE Verifier、仅使用一次、极短有效期 |
-| `POST /v1/auth/refresh` | 轮换应用 Session | Refresh Token 哈希查询、重放检测、Token Rotation |
-| `POST /v1/auth/logout` | 撤销当前 Refresh Session | 已认证、幂等、审计事件 |
-| `GET /v1/demo/repos` | 列出精选 Demo Repo | 公开只读、较短 CDN TTL |
-| `GET /v1/demo/repos/{id}/objects/{path}` | 读取 Demo 对象 | 服务端映射路径，不可变对象可缓存 |
-| `GET /v1/bundles` | 列出调用者拥有的 Bundle | 租户过滤、游标分页 |
-| `POST /v1/bundles` | 分配 Bundle ID | 配额、Idempotency Key |
-| `GET /v1/bundles/{id}/objects/{path}` | 读取有权限的 Bundle 对象 | 归属校验、Range 支持、禁止共享缓存 |
-| `PUT /v1/bundles/{id}/immutable/{path}` | 创建不可变对象 | `If-None-Match: *`、长度及 SHA-256 校验 |
-| `PUT /v1/bundles/{id}/head` | 发布新的当前 Head | `If-Match` 或 `If-None-Match`；冲突返回 `409` |
-| `GET /v1/bundles/{id}/objects` | 列出允许访问的 Bundle 对象 | 固定 Bundle 范围、游标和最大页大小 |
-| `POST /v1/bundles/{id}/archive` | 隐藏 Bundle 并开始保留期 | 不立即删除对象 |
-| `POST /v1/bundles/{id}/restore` | 在保留期内撤销归档 | 归属和保留期校验 |
+### 7.7 Removal and Super Admin
 
-不要提供类似 `DELETE /v1/objects/{arbitrary-key}` 的路由，也不要接受任意 Bucket 名称或租户前缀。
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET`, `POST` | `/v1/repositories/{id}/removal` | Preview (name, revision, both heads, bytes); confirm `{confirmed_display_name, expected_repository_revision}` |
+| `GET` | `/v1/super-admin/repositories?cursor=` | All repositories |
+| `GET` | `/v1/super-admin/release-requests` | Requests in `pending_super_admin` |
+| `POST` | `/v1/super-admin/release-requests/{request}/decision` | Approve or reject a first release |
+| `POST` | `/v1/super-admin/repositories/{id}/removal` | Immediate removal `{confirmed_display_name, reason}` |
+| `POST` | `/v1/super-admin/repositories/{id}/publications/{commit_id}/removal` | Remove one public revision `{reason}` |
+| `GET` | `/v1/super-admin/removals/{removal_id}` | Progress |
+| `POST` | `/v1/super-admin/jobs/run` | Run the cron work now |
 
-### 8. 请求流程
+Super Admin reads reuse the collaborator routes with the service role and an
+audit row per repository opened.
 
-#### 用户 OAuth 与应用 Session
+## 8. Website
 
-Cloudflare 托管认证流程的应用侧，因此 OAuth 不会带来 VM 需求。在推荐设计中，Cloudflare 不是公众用户的 Identity Provider：GitHub、Google 或其他 OIDC Provider 负责确认用户身份，Worker 作为 OAuth Broker，并签发 Agent Sync 自己的应用 Session。对于面向开发者的产品，第一版使用 GitHub 最简单，之后可以增加 Google 或其他 OIDC Provider。
+The website is a React single-page app under `services/managed-cloud/web`,
+served by the Worker's static assets with `run_worker_first` for `/v1/*` and
+`/auth/*`. It shares components with the desktop through a Vite alias to
+`src/`: `session-detail/SessionDetailTimeline.tsx`, `SessionDetailEvent.tsx`,
+`SessionDetailToolCall.tsx`, `sessionDetailModel.ts`, `Icons.tsx`,
+`sync-review/ProviderMark.tsx`, and `notice/Notice.tsx`. Two helpers must
+gain a browser fallback first: `externalLink.ts` (uses
+`@tauri-apps/plugin-opener`) and `sync-review/clipboard.ts`. The website
+never imports `ipc.ts` or either `api.ts`; it has its own `client.ts` over
+`fetch`.
 
-Tauri App 属于无法保守秘密的 Public Native Client，不能内置 Client Secret。使用 Authorization Code + PKCE，并在用户的系统浏览器中完成登录，不能使用嵌入式 WebView。桌面端 Callback 优先使用仅监听 `127.0.0.1` 随机端口的临时 Loopback Listener；打包后的客户端也可以使用已注册的 App Deep Link。
+| Route | Anonymous | Signed in |
+| --- | --- | --- |
+| `/` | Public listing with class, provider, and kind filters | Joined repositories and the listing |
+| `/repositories/:id` | Public head: session list, project files, or catalog item | Tabs: Private snapshot, Public version, History, Members, Settings |
+| `/repositories/:id/sessions/:resource_id?commit=` | Session view | Same, for private and historical commits |
+| `/repositories/:id/release` | Not available | Request, comparison, Owner decision, status |
+| `/invitations` | Sign-in prompt | Enter a code |
+| `/super-admin` | Not available | Queue, inspection, removals; `super_admin` only |
 
-```text
-Tauri Rust 后端
-  1. 生成 State + PKCE Verifier/Challenge
-  2. 监听 127.0.0.1:<随机端口>
-  3. 在系统浏览器打开 /v1/auth/start
-        -> Worker -> GitHub/Google 授权页面
-        -> Provider -> 固定的 Worker /v1/auth/callback
-        -> Worker -> 携带一次性 App Code 的 Loopback Callback
-  4. 把一次性 Code + PKCE Verifier POST 到 /v1/auth/exchange
-  5. 获得 Agent Sync Access Token + 可轮换 Refresh Token
+The session list on a repository page comes from the manifest: for each
+provider scope, each `conversations` entry's `display_title`,
+`presentation`, `message_count`, and `updated_at`. The project-file list
+comes from the `project` scope's `files` and `directories`. A catalog item
+page comes from the single `PublishedResourceEntry`.
+
+Catalog item pages: a skill page renders `SKILL.md` with `react-markdown`
+and `remark-gfm` (no raw HTML) and lists files with sizes; a plugin page
+shows the marketplace source, name, and resolution policy from the
+descriptor; a pet page shows the idle frame cropped from the atlas with the
+descriptor's geometry, as the desktop's pet preview does, plus format version
+and dimensions. Nothing on the website executes stored content or performs a
+provider action.
+
+The Owner's review page shows the private snapshot with the same session and
+item pages, the comparison from section 7.6, the disclosure text from
+section 11.5, and Approve or Reject. Super Admin's queue shows the same page
+with the Owner's decision recorded.
+
+## 9. Identity and security
+
+- **Sessions.** Desktop tokens are opaque, 90 days, revocable by logout or by
+  an operator, stored hashed with a pepper from the secret store. Website
+  sessions are opaque cookies, 30 days, `Secure`, `HttpOnly`,
+  `SameSite=Lax`, host-only. Neither is refreshed or rotated in the MVP; a
+  compromised token is revoked. Membership and role revocation take effect on
+  the next request.
+- **Authorization.** Every request resolves the account and checks
+  `users.state`, repository state, and membership in the same D1 read; the
+  guarded batch rechecks inside the transaction.
+- **Plaintext content.** Content is not encrypted by Mallard. HTTPS, a
+  private bucket, platform encryption, hashed tokens and codes, secrets in
+  the Workers secret store, and audited operator access are the controls.
+- **Content checks.** The desktop applies capture bounds, path validation,
+  redaction, and review before upload. The Worker independently rejects
+  manifests that fail section 10, absolute or traversing paths, unknown
+  resource kinds, unregistered catalog coordinates, catalog content that
+  differs from its bound identity, references outside the upload or the
+  repository, and digest or length mismatches. Secret detection is
+  best-effort.
+- **Plugins.** The service stores intent; the desktop builds provider
+  actions after Pull review; strings never select an executable.
+- **Logging.** Logs, metrics, and audit hold opaque IDs, request IDs, error
+  codes, byte counts, and digests. Never tokens, codes, OAuth material, object
+  content, conversation text, skill content, pet bytes, or local paths.
+
+## 10. Portable contracts and fixtures
+
+The service accepts the current Rust encodings unchanged. All documents are
+schema 1, UTF-8 JSON, integer Unix seconds, lowercase SHA-256 hex. "Optional"
+means the field is omitted when absent, never `null`. Maps are JSON objects
+with sorted keys (Rust `BTreeMap`). Types marked `closed` reject unknown
+fields; the others ignore them, but a dropped field surfaces as a digest
+mismatch on the desktop.
+
+### 10.1 Project bundle
+
+**`BundleManifest`**
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schema_version` | integer | 1 |
+| `revision` | integer | Minted by the desktop: previous + 1 |
+| `commit_id` | string | `commit-<hex>`, never reused |
+| `updated_at` | integer | |
+| `bundle` | `BundleIdentity` | |
+| `published_by_origin` | `PortableOrigin` | |
+| `scopes` | map `scope key → BundleScope` | Key `"project"` or `"provider:<key>"`; at most 64 provider scopes |
+
+**`BundleIdentity`**: `bundle_id` (32 hex characters), `display_name`,
+`kind` (`"project"`), optional `repository_fingerprint` (SHA-256 hex).
+
+**`PortableOrigin`**: `origin_host_token`, `origin_replica_token`,
+optional `shared_label`.
+
+**`BundleScope`**
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `revision` | integer | Per-scope, increments independently |
+| `content_sha256` | string | Digest over the canonical view below, excluding itself |
+| `recipe` | `BundleRecipe` | `{ schema_version, revision, entries: map resource_id → { resource_id, apply_policy, required } }` |
+| `captured_with` | `CapturedWith` | `{ app_version, provider_versions: map, codec_versions: map }` |
+| `conversations` | map thread id → `ConversationThread` | Provider scopes only |
+| `resources` | map resource id → `ResourceDescriptor` | |
+| `files` | map logical path → `BundleFileEntry` | |
+| `directories` | map logical path → `BundleDirectoryEntry` | |
+| `tombstones` | list of `Tombstone` | Serialized as a list ordered by structural key |
+
+The canonical digest view serializes, in this order: `scope` (the key
+string), `revision`, `recipe`, `captured_with`, `conversations`,
+`resources`, `files`, `directories`, `tombstones` (as a list). The project
+scope holds no conversations; conversation and provider-state resources
+live in provider scopes; file and directory resources live in `project`.
+
+**`ConversationThread`** (one conversation entry)
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `thread_id` | string | Stable cloud thread ID, the map key |
+| `provider` | string | `codex` or `claude` |
+| `display_title` | string, optional | |
+| `presentation` | `SessionPresentation` | Display metadata and metrics |
+| `resource_id` | string | Derived from provider and thread ID |
+| `files` | list of `ConversationFileRef` | `{ logical_path, role }` |
+| `lineage_status` | string | Closed enum |
+| `lineage_codec` | string | |
+| `head_message_id` | string, optional | |
+| `message_count` | integer | |
+| `lineage_digest`, `semantic_digest` | string | |
+| `portable_tail` | object, optional | `{ codec, partition_kind, start_record_count, accepted_end_record_count, accepted_tail_state }` |
+| `wire_children` | string | `on` or `off`; required |
+| `wire_redaction` | object, optional | `{ codec, fingerprint }`; required for codex and claude |
+| `wire_path_map` | object, optional | Required for claude |
+| `forked_from` | string, optional | |
+| `preserved` | object, optional | Preserved provenance |
+| `source_thread_id` | string, optional | Content fact, never identity |
+| `created_by_origin`, `last_updated_by_origin` | `PortableOrigin`, optional | |
+| `created_at`, `updated_at` | integer | |
+
+`ConversationFileRef.role` is tagged by `kind`: `transcript`,
+`provider_index_fragment`, `sidecar { sidecar_kind }`, or
+`subagent_transcript { child_key, normalized: { message_count, sha256 } }`.
+Logical paths are `state/conversations/{provider}/{thread_id}/…`; sidecars
+under `…/sidecars/`, child transcripts at `…/subagents/{child_key}.jsonl`.
+The transcript file's `BundleFileEntry` names the object the session view is
+built from.
+
+**`BundleFileEntry`**: `resource_id`, `sha256`, `size`, `source_mtime`,
+`object_key` (`_objects/<sha256>`), optional `mode`.
+**`BundleDirectoryEntry`**: `resource_id`, optional `mode`, `source_mtime`.
+**`Tombstone`**: `target { kind, version, identity }`, optional
+`last_sha256`, `deleted_at`; target kinds `resource`, `file`,
+`project_content_file`, `project_content_directory`, `conversation_thread`,
+all version 1.
+**`ResourceDescriptor`**: `resource_id`, `kind { key, version }`, optional
+`provider`, optional `provider_resource_type`, `display_name`,
+`provenance { kind, version, fields }`, `apply_policy { key, version }`,
+`codec_version`, `attributes`. Kinds: `conversation`, `provider_state`,
+`project_content_file`, `project_content_directory`, `requirement`.
+Policies: `safe_file`, `merge`, `explicit_review`, `manual_only`, `never`.
+
+**`BundleHead`** (synthesized by the managed store, never stored by the
+service): `schema_version`, `bundle_id`, `kind`, `revision`, `commit_id`,
+`manifest_key`, `manifest_sha256`, `manifest_size`, `updated_at`.
+
+### 10.2 Catalog item
+
+**`LibraryResourceManifest`** (closed): `schema_version` 1,
+`repository_id` (`library-` plus 32 hex, the coordinate's ID), `revision`,
+`commit_id`, `updated_at`, `captured_with { app, version }`,
+`published_by_origin { origin_host_token, origin_replica_token }`,
+`resources` (map resource id → `PublishedResourceEntry`). The managed
+validator requires exactly one entry.
+
+**`PublishedResourceEntry`** (closed): `resource { CatalogResourceEnvelope }`,
+`updated_at`.
+
+**`CatalogResourceEnvelope`** (closed): `resource_id`, `provider`,
+`resource_kind`, `format`, `format_version` (nonzero), `identity` (bounded
+object), `descriptor` (bounded object), `content_sha256`, `files` (list of
+`{ path, sha256, size, mode }`, omitted when empty; mode `420` or `493`,
+that is `0644` or `0755`).
+
+The service checks that `provider`, `resource_kind`, `format`,
+`format_version`, and `resource_id` equal the repository's bound coordinate
+and ID, that the coordinate is registered (section 3.4), and that every
+file's digest is in the upload inventory.
+
+### 10.3 Session view
+
+`SessionView` is defined in section 5.4. Its `events` entries and the
+count types are the desktop's session-detail types below.
+
+### 10.4 Session detail types
+
+**`SessionCount`**: optional `value` (integer), `quality` (`exact`,
+`inferred`, `unsupported`), optional `explanation`.
+
+**`SessionEventCounts`**: `prompts`, `responses`, `intermediate_steps`,
+`checkpoints`, `tool_calls`, `file_edits`, `shell_calls`, `reads`,
+`other_tools`, `agent_calls`, each a `SessionCount`.
+
+**`SessionTimelineEvent`**
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `event_id` | string | |
+| `ordinal` | integer | |
+| `timestamp` | integer, optional | |
+| `kind` | string | `prompt`, `response`, `intermediate_step`, `checkpoint`, `tool_call`, `agent_call` |
+| `quality` | string | As `SessionCount.quality` |
+| `turn_id` | string, optional | |
+| `turn_tool_summary` | object, optional | `{ turn_id, tool_calls: SessionCount }` |
+| `parent_event_id` | string, optional | |
+| `text` | string, optional | Prompt or response text, markdown |
+| `tool` | `SessionToolCallPreview`, optional | |
+| `checkpoint` | object, optional | `{ sha, short_sha, subject, committed_at, branch }` |
+| `agent` | object, optional | `{ provider_agent_id?, label, task?, role?, model?, mode }`, mode `sync`, `async`, or `spawn` |
+
+**`SessionToolCallPreview`**: `provider_call_id`, `native_name`,
+`category` (closed enum of tool categories), `status`, `summary`, optional
+`argument_preview`, `argument_truncated`, optional `result_preview`,
+`result_truncated`.
+
+**`ProjectSessionDetail`** (the desktop header, mirrored by the view's
+top-level fields): `resource_id`, `provider`, `provider_display_name`,
+`provider_session_id`, `title`, optional `summary`, optional `started_at`,
+optional `ended_at`, `is_active`, optional `branch`, optional
+`recorded_sha`, `tokens`, `event_counts`, `actions`, optional
+`github_repository_url`, `snapshot_id`, `warnings`, optional `agent`.
+The view omits `actions`, `snapshot_id`, `is_active`, and
+`github_repository_url`.
+
+### 10.5 Validation and fixtures
+
+Validation in the Worker checks shape, closed enum values, bounds, class
+binding, identity, and references. It does not recompute `content_sha256`
+or the catalog canonical digests; the desktop verifies those on Pull, and the
+Worker's job is admission, not authorship. Manifests over 8 MiB, more than
+64 provider scopes, or more than 20,000 references are refused.
+
+Fixtures are generated, not written: a Rust test under
+`crates/mallard-domain` and `src-tauri/src/storage_catalog` behind the
+`fixtures` feature writes valid and invalid JSON documents to
+`services/managed-cloud/fixtures/`, including omitted optional fields, empty
+maps, integer boundaries, an unregistered coordinate, a foreign identity, a
+misplaced project file, and a manifest referencing an unlisted object. The
+Worker's validator tests load that directory and must accept and reject the
+same files. Regenerating fixtures is part of any DTO change.
+
+## 11. Operations
+
+### 11.1 Retention
+
+| Data | Rule |
+| --- | --- |
+| Current private snapshot | Until replaced, discarded, or removed |
+| Retired private manifests | Newest 32 per repository, metadata only |
+| Public publications | Until revision or repository removal, within quota |
+| Open upload | 24 hours |
+| Unreferenced objects | Deleted by the next cleanup runs |
+| Invitation code | 7 days pending; closed rows 30 days |
+| Idempotency, auth attempts | 24 hours; 10 minutes |
+| Audit | 90 days |
+| External removal record | At least 30 days after erasure |
+
+### 11.2 Audit and alerts
+
+Audit rows record sign-in and logout, repository creation, invitation
+create, revoke, and accept, membership changes, release decisions, private
+replacement and discard, removals, Super Admin reads, and role grants. Before
+external beta an operator must be able to find, from platform logs, failed
+requests by `request_id`, integrity failures, quota totals that do not match
+`objects`, and removals stuck in `deleting`. Alerts: error-rate and any
+removal older than one hour in `deleting`.
+
+### 11.3 Operator procedures
+
+All run with `wrangler d1 execute` against production and are recorded in
+the runbook with the operator and the date:
+
+- Grant or revoke `super_admin`: `UPDATE users SET service_role = … WHERE github_login = …`.
+- Suspend an account: `UPDATE users SET state = 'suspended' …` and delete its sessions.
+- Revoke every session of an account.
+- Run the cron work now (`POST /v1/super-admin/jobs/run`).
+
+### 11.4 Recovery
+
+Use D1 Time Travel to restore metadata; R2 keeps immutable bytes. Before
+reopening traffic:
+
+1. Apply every `removals/` record newer than the restore point: keep those
+   repositories and revisions inaccessible.
+2. Clear every restored private head and open upload, and invalidate open
+   release requests. Private snapshots are not recovered; users push again.
+3. Make every repository private, revoke invitations and sessions, and
+   confirm `super_admin` grants against the runbook.
+4. Verify each public publication's manifest and objects against R2 by size
+   and digest; keep damaged publications unavailable. Recompute
+   `committed_bytes` from `objects`.
+5. Resume the cron Worker. Public access resumes only through a new Owner
+   approval after a new push.
+
+One isolated restore test with synthetic data runs before external beta and
+covers a public revision, a later revision removal, a replaced private
+snapshot, an interrupted upload, and a revoked member.
+
+### 11.5 Required disclosure
+
+Shown on the desktop before the first managed push and on the website before
+Owner approval:
+
+- Mallard stores selected content without end-to-end encryption; controlled
+  operators and Super Admins can inspect it.
+- The repository's Owner, Admins, and Members can read the private snapshot
+  and public history.
+- Only one private snapshot is kept; a later push replaces it. Service
+  recovery clears private snapshots.
+- Anyone can read the public version and every session in it. Downloaded
+  copies cannot be revoked.
+- A public release needs Owner approval on the website; the first also needs
+  Super Admin approval. Super Admins can remove any revision or repository.
+- Credentials and complete provider homes must not be selected.
+
+## 12. Delivery
+
+### 12.1 Steps
+
+**Step 1: Private project sync.** Service: schema, guards, auth, repositories,
+uploads, commit, head and object reads, cleanup and expiry. Desktop:
+`ManagedCloudAdapter`, `ManagedObjectStore` with the staged write, the
+setup lane, `loopback_browser.rs`. Exit: one account on two machines links a
+Git project and a non-Git project, pushes, pulls, sees continuity classified
+correctly after the other machine pushes, and a 90 MiB object round-trips on
+the deployed plan. Section 12.2 rows 1 to 4 pass.
+
+**Step 2: Website, collaboration, release.** Service: members, invitations,
+release requests, decisions, history, views, public routes, removal, Super
+Admin routes. Desktop: session views in the store, Request public release,
+Open on website. Website: every route in section 8 for project
+repositories. Exit: two accounts share a private repository by code; a
+release is requested, approved by the Owner and Super Admin, and an anonymous
+browser reads every session and its details; a later push leaves the public
+version unchanged; a removal erases the repository; rows 5 to 12 pass.
+
+**Step 3: Catalog items.** Desktop: `managed_cloud/catalog.rs`,
+`CatalogItemLink`, the branch in the catalog push and pull commands. Service:
+catalog validation. Website: skill, plugin, and pet pages. Exit: one skill,
+one plugin intent, and one pet each round-trip privately and publish; rows 13
+and 14 pass.
+
+**Step 4: Beta readiness.** Alerts, audit review, the restore test, the
+runbook, disclosure copy, quota tuning from measured usage. Exit: rows 15 and
+16 pass and an operator is named.
+
+### 12.2 Required checks
+
+| # | Contract | Evidence |
+| --- | --- | --- |
+| 1 | Guards | Injected failures and zero-row updates abort whole batches; concurrent commits have one winner; the loser has no side effects |
+| 2 | Upload protocol | Missing list correct; digest mismatch refused by R2; expiry cleans objects; abandon and retry work; `upload_in_progress` on a second store |
+| 3 | Engine parity | Every `ObjectStore` behavior the R2 store passes in the storage-parity thread variants (section 3.7) passes against a miniflare service, except delete and clear |
+| 4 | Continuity | Rows 4, 7, and 8 of the table in section 3.3 classify correctly after another collaborator's push; retired manifests serve; the 33rd retired manifest is gone |
+| 5 | Identity | Desktop and website sign-in; state and challenge checks; revoked token or membership fails on the next request |
+| 6 | Roles | Section 4.3 matrix; Owner row cannot be changed or removed; leave |
+| 7 | Invitations | One use; expiry; revoke; inviter demoted before acceptance; replay grants nothing |
+| 8 | Release | Owner approval required, first release also Super Admin; a newer push invalidates; a published revision references the same objects; private discard leaves public unchanged |
+| 9 | Public reads | Anonymous reads exactly the public head's manifest, views, and objects; a stale `commit_id` and a private repository answer `not_found` |
+| 10 | Views | Built from wire bytes: a redacted secret shows its placeholder; unchanged sessions keep their view; truncation flag at the cap; a conversation without a view renders "No preview" |
+| 11 | Removal | Repository and revision removal deny reads immediately, erase keys, verify the prefix, and release quota once; the external record exists before erasure |
+| 12 | Cleanup races | Claim before commit and commit before claim both leave accepted content intact |
+| 13 | Catalog isolation | A local scope with three items publishes one; the service refuses a sibling or foreign identity; pull applies through the existing path |
+| 14 | Catalog pages | Skill markdown renders without raw HTML; pet idle frame matches the desktop preview |
+| 15 | Recovery | The restore test serves no cleared private snapshot or removed content and restores no revoked access |
+| 16 | Frontend and Rust gates | `npm run build`, `npm run test:frontend-integration`, `cargo test --workspace --all-targets`, and `cd services/managed-cloud && npm test` are green |
+
+### 12.3 Commands
+
+```bash
+cd services/managed-cloud && npm install && npx wrangler d1 migrations apply mallard-managed-cloud --local && npm run dev
 ```
 
-Worker 应执行以下步骤：
-
-1. 接收 PKCE Challenge 和允许的 Loopback/Deep-Link Callback，生成随机 Provider `state`，并在 D1 中保存短有效期 Login Transaction。
-2. 把系统浏览器重定向到 OAuth Provider。
-3. 在固定 Worker Callback 上校验 `state`，在适用时校验 OIDC `nonce`，再使用保存在 Cloudflare Worker Secrets 中的 OAuth Client Secret 交换 Provider Code。
-4. 使用 `(issuer, provider_subject)` 创建或更新身份。不能仅凭 Email 关联账号，因为 Email 可能变化，不同 Provider 的表达方式也可能不同。
-5. 生成绑定 PKCE Challenge 的一次性 App Code，然后把浏览器重定向到本地 App Callback。不能把 Provider Token 或 Agent Sync Bearer Token 放进重定向 URL。
-6. `/v1/auth/exchange` 接收 App Code 与 PKCE Verifier，将 Code 标记为已消费，并签发 Agent Sync Access Token 和 Refresh Token。
-
-推荐 Session 规则：
-
-- Access Token 必须限制 Audience 和 Scope，并采用约 10–15 分钟的短有效期；
-- Refresh Token 是随机 Opaque Value，客户端只把原值保存在系统钥匙串中，D1 只保存哈希；
-- 每次 Refresh 都轮换 Token，旧 Token 被重放时撤销整个 Session Family；
-- D1 保存带过期和撤销时间的 `users`、`identities`、`oauth_transactions` 与 `refresh_sessions`；
-- Provider Access Token 只留在 Worker 内；如果身份查询后不再调用 Provider API，就应丢弃；
-- API 授权使用 Worker 签发的 Agent Sync Token，而不是 GitHub 或 Google Access Token；
-- Logout 撤销 Refresh Session，短有效期 Access Token 自然过期。
-
-不同受众使用不同认证方式：
-
-| 受众 | 推荐认证方式 |
-|---|---|
-| Agent Sync 公众用户 | 通过 Worker 完成 GitHub/Google/OIDC，再换取 Agent Sync Token |
-| 匿名 Demo 用户 | 短有效期 `demo:read` Guest Token；没有 Upload 或 Archive Scope |
-| 需要写权限的评委 | 自动过期、小配额、Scope 受限的账号/租户 |
-| 管理员和内部工具 | 在独立 Admin Route 前使用 Cloudflare Access |
-
-Cloudflare Access 适合管理员、内部工具和受控评审环境。它可以在认证后的请求上附带签名 Access JWT，目前也支持面向受保护资源的 Managed OAuth。但不建议把它作为公众桌面用户的主要账号系统：常规 HTTP Application Flow 以浏览器 Cookie 为中心，而账号关联、Refresh Token 轮换、配额、删除和客服支持等公众产品生命周期仍属于 Agent Sync。如果 Admin Origin 使用 Access 保护，Worker 必须校验 JWT Signature、Issuer、Audience 和 Expiry，不能只检查某个 Header 是否存在。
-
-#### 将 Google OAuth 作为 Provider
-
-Google 支持 OpenID Connect、Authorization Code、PKCE，以及桌面应用的 Loopback Redirect。在推荐的 Worker Broker 架构中，应在 Google Cloud 创建 **Web application** OAuth Client，并注册一个精确匹配的 Callback：
-
-```text
-https://api.agentsync.example.com/v1/auth/google/callback
+```bash
+cd services/managed-cloud && npm test
 ```
 
-Google 要求 `redirect_uri` 与已注册 URI 完全匹配。Worker 接收这个固定 Callback，使用保存在 Worker Secrets 中的 `GOOGLE_CLIENT_SECRET` 交换 Google Code，然后把一次性 Agent Sync Code 重定向到 App 允许的 Loopback Callback。因此动态 Loopback Callback 并不是 Google 的 Redirect URI。
-
-除非产品明确需要调用 Google API，否则只请求身份相关 Scope：
-
-```text
-openid email profile
+```bash
+cargo test -p mallard-domain --features fixtures -- write_managed_cloud_fixtures
 ```
 
-必须校验 Google ID Token 的 Signature、`iss`、`aud`、`exp` 与 `nonce` Claim。身份主键使用不可变的 Google `sub`，不能使用 Email。仅登录时不要请求 Drive、Calendar 或其他 Sensitive Scope。
+## 13. Decision record
 
-评委 Demo 可以把 Google Consent Screen 保持在 Testing，并把评委加入 Test User。Google 目前把处于 Testing 的 External App 限制为最多 100 个已列出的 Test User。公开发布前，应发布 Consent Screen，并准备所需的主页、隐私政策、品牌信息和可能的 Verification。基础身份 Scope 可以避免 Sensitive 或 Restricted Google API 所需的较重审核，但公开品牌信息仍可能需要审核。
+Changes from the September 13 draft, with the reason. Section numbers in the
+first column are the draft's.
 
-#### Email/Password 的决策
+| Draft | Now | Why |
+| --- | --- | --- |
+| Server-side session merge with chain comparison and divergence blocking (draft 3.3) | Whole-snapshot release | Removed a port of about 5,700 lines of codec logic to the Worker and a third comparator the desktop deliberately does not have |
+| Dedicated desktop upload adapter beside the engine (draft 3.6, 4.4) | `ManagedObjectStore` behind `ObjectStore`; engine unchanged | The engine's carry-forward, retained-file, tombstone, and continuity logic are not reimplemented |
+| Email invitations with delivery status, email HMACs, verified-email freshness (draft 2.5) | Owner-shared codes | No email provider, no `user:email` scope, no delivery state |
+| Recent-authentication rules, refresh-token rotation, session families (draft 9.1) | Opaque 90-day tokens, revocation | Fewer moving parts for one client kind per session |
+| Seven-day removal cancel window, deadline claims, takeover (draft 2.8) | Immediate removal | Nothing local is deleted; the window protected nothing |
+| Public commit objects, rewritten public manifests (draft 6.3) | Public rows reference the private manifest object | No byte rewriting in the Worker; one manifest per commit |
+| Client review digest and expiry on the upload (draft 3.6) | Only the manifest and inventory | The service cannot verify a review; the desktop already gates it |
+| Idempotency on every mutation (draft 6.6) | Five operations | Revision guards make the rest safe to retry |
+| Worker recomputes scope digests (draft 3.4) | Shape and reference validation only | Byte-exact canonical JSON in TypeScript bought nothing the desktop does not verify |
+| No private history at all (draft 1.1) | Newest 32 retired private manifests readable as metadata | Continuity row 8 would otherwise report rewritten history after every collaborator push |
+| Website for approval only (draft 11.7) | Website is the public product surface | Sessions, session details, and catalog items are browsable by anyone; the Owner reviews the private snapshot there |
+| Session details decoded on the website | Session views built by the desktop from wire bytes | One transcript decoder, in Rust; redaction and path mapping apply by construction |
+| Catalog item container type (draft 5.5) | `LibraryResourceManifest` with one entry | Reuses the existing type and fixtures |
+| Desktop collaborator and invitation screens (draft 11.5) | Website only | The desktop adds one lane and two buttons |
 
-一旦支持 Email/Password，推荐方案就改变了。不要在 Worker/D1 应用中自行实现 Password Storage 或 Password Reset。Password 认证还需要安全 Password Hashing、Email Verification、Reset/Recovery、泄露密码检测、限流、MFA、Session Revocation 和严谨的 Account Linking。
+Kept from the draft: one private slot, retained public history, Owner plus
+first-release Super Admin approval, one item per catalog repository, the
+cleanup claim protocol, `publication_objects` for read authorization,
+content-addressed create-only objects, GitHub sign-in through the Worker,
+the disclosure list, and the restore test. The one-item catalog boundary is
+the only reason the catalog path needs its own adapter; a later release may
+revisit it if per-item public sharing is not used.
 
-| 需求 | 推荐方式 | 代价 |
-|---|---|---|
-| 只支持 GitHub/Google 的公众登录 | 通过 Worker 直接实现 OAuth/OIDC | 不增加认证服务 |
-| 公众 Email/Password 加 Social Login | Supabase Auth | 增加托管认证服务及其托管 Postgres；D1 仍是 Agent Sync 的应用数据库 |
-| 公众 Email/Password，且需要更完善的身份 UI 和 MFA 功能 | Clerk | 增加托管身份依赖与桌面流程集成工作 |
-| 内部用户或少量评委按 Email 登录 | Cloudflare Access One-time PIN | 适用于受控访问，不是公众账号系统 |
-| 必须是 Cloudflare-only 的公众产品 | 优先 GitHub/Google OAuth 或 Passwordless 设计 | 不能把 Access OTP 向所有 Email 地址开放 |
+## Source pointers
 
-如果 Email/Password 成为产品需求，Supabase Auth 是合理选择：它提供 Password Sign-up/Sign-in、Email Confirmation、Password Reset、Social Provider 和 JWT。Worker 只需验证 Supabase JWT/JWKS，并把稳定的 Supabase `sub` 映射到本地 D1 User 及 R2 Tenant。Password 与 Password Reset Token 永远不经过 Agent Sync Worker。
+Where the facts in section 3 live, for readers who want the code:
 
-Cloudflare Access 可以向已批准 Email 发送 One-time PIN，适合内部管理员或评委，但不适合作为公众注册入口：Cloudflare 明确警告，如果 Access Policy 允许所有有效的 Email Login Method，任何拥有 Email 地址的人都可能获得访问权。不要通过在 D1 存 Password Hash 的方式自建公众 Email/Password 系统。
-
-#### 读取公共 Demo Repo
-
-1. App 在没有永久内置凭据的情况下请求 Demo Catalog。
-2. Worker 返回通过审核的 Demo Bundle 元数据。
-3. App 通过 Demo 域名请求不可变对象。
-4. Cloudflare 先检查 CDN 缓存。
-5. 缓存未命中时，Worker 通过 Demo R2 Binding 读取对象，并把安全响应写入缓存。
-
-#### Push 私有 Bundle
-
-1. App 使用基于浏览器的 OAuth/OIDC + PKCE 登录，或者获得权限严格受限的评委 Session。
-2. Rust 后端把 Access Token 发给 Worker。
-3. Worker 校验身份、Bundle 归属、配额、对象大小和逻辑路径。
-4. 不可变对象使用仅创建语义写入。
-5. App 提交新的 Manifest 和 Commit。
-6. App 使用之前看到的 ETag/版本对 Head 执行条件更新。
-7. Worker 写入审计记录并返回新版本。
-
-#### 归档与删除
-
-1. 用户发起归档后，数据库状态立即改变，但 R2 对象不会马上删除。
-2. Bundle 在定义好的保留期内仍可恢复，例如 30 天。
-3. 定时 Worker 或 Queue Consumer 在保留期结束后删除符合条件的对象。
-4. 为满足隐私法规，数据所有者最终仍可永久删除自己的数据，但该操作应明确、可审计并延迟执行。
-
-### 9. Demo Repo 设计
-
-预置 Repo 应是一个独立的只读 Catalog，而不是普通用户拥有的 Bundle。
-
-- 通过管理员工具或 CI 发布，不能依赖 App 中内置的秘密。
-- 每个 Demo 都要扫描凭据、私人对话、机器绝对路径和私有源码。
-- 确认所有代码和内容都允许再分发。
-- 每次发布使用不可变版本，保证评委验收可复现。
-- 提供 **Import demo**，把选中的 Bundle 复制到用户自己的命名空间。
-- 如果评委需要写入权限，为其创建小配额、自动过期的临时租户。
-
-### 10. 安全要求
-
-- 所有官方 R2 Bucket 默认保持私有。
-- Worker 通过 Bucket Binding 获得最小必要权限。
-- 桌面 App 中绝不保存官方 R2 凭据或管理员 API Token。
-- 每个私有请求都必须认证，每个 Bundle 都必须单独授权。
-- 拒绝路径穿越、编码后的路径穿越、控制字符、超长 Key 和未知逻辑根目录。
-- 服务端限制单对象、单请求、单 Bundle 和单租户的最大体积。
-- 在接受完成的对象或 Manifest 前验证 SHA-256。
-- 不可变对象使用仅创建写入，Head 使用条件写入。
-- 使用短有效期 Access Token，并轮换 Refresh Token。
-- OAuth 必须使用 `state`、PKCE、严格匹配 Provider Callback，并在适用时校验 OIDC `nonce`。
-- Native App Callback 只能是 Loopback IP Literal 或已注册的 App Link；不能实现任意 Redirect Endpoint。
-- OAuth Client Secret 和 Session Signing Material 必须放入 Worker Secrets 或 Secrets Store Binding，不能使用明文 `vars`。
-- D1 只保存 Refresh Token 和一次性 App Code 的哈希，而且每个 Code 只能使用一次。
-- 桌面凭据保存在操作系统钥匙串。
-- 增加按用户和 IP 的限流、滥用保护、结构化审计日志及告警。
-- 对外返回通用错误，不在响应中泄露内部 R2 Key 或 Stack Trace。
-- 只有 WebView 直接请求 API 时才需要配置明确的 CORS Origin。优先由 Rust 后端发起 HTTP 请求，从而不依赖浏览器 CORS。
-
-R2 会对静态数据自动加密，但这并不能阻止服务运营方读取明文。Agent Sync 可能同步对话和配置，因此私有 Payload 应增加客户端加密。服务端只保留归属、配额和 Demo Catalog 所需的最少可搜索元数据。已知凭据在加密和上传之前仍必须排除。
-
-### 11. 推荐的 Cloudflare 资源
-
-最低可用 MVP：
-
-- 一个绑定自定义域名的 Cloudflare Worker；
-- 一个存放用户数据的私有 R2 Bucket；
-- 一个独立 Demo R2 Bucket 或 Demo 前缀；
-- 使用 D1 保存用户、身份、OAuth Transaction、Refresh Session、归属、Catalog、配额、归档状态和审计索引；
-- 使用 Worker Secrets 或 Secrets Store Binding 保存 OAuth Provider Secret 和 Signing Key；
-- 注册一个 GitHub OAuth Application 或其他 OIDC Provider；
-- Cloudflare 限流和 WAF 规则。
-
-生产环境建议增加：
-
-- 第二个 R2 Bucket，把不可变内容和可变 Head 分开；
-- 只对不可变数据设置 R2 Bucket Lock；
-- 使用 Queues 处理上传后校验和删除任务；
-- 使用定时 Worker 清理过期数据；
-- 使用 Turnstile 或等价方案保护匿名访客创建接口；
-- 监控认证失败、配额滥用、CAS 冲突和 R2 错误。
-
-### 12. MVP 实施顺序
-
-1. 部署私有 R2 Bucket，以及通过 R2 Binding 访问它并绑定自定义域名的 Worker。
-2. 增加只读 Demo Catalog，并预置两到三个安全 Bundle。
-3. 在桌面 App 中增加 `managed` 和 `ManagedBundleObjectStore`。
-4. 把官方托管 Endpoint 设为默认推荐，但不内置任何凭据。
-5. 通过 Worker 增加 GitHub OAuth，采用系统浏览器 PKCE、可轮换 Session、租户归属、配额限制和私有 Push/Pull。
-6. 增加归档/恢复以及延迟永久删除。
-7. 增加客户端加密。
-8. 只有性能测量证明有必要时，才增加可选的 presigned 直传路径。
-
-### 13. 验收标准
-
-- 全新安装无需配置即可浏览和导入 Demo Repo。
-- App 中不存在官方 R2 Access Key、Secret Key 或共享永久 Token。
-- App 中不存在 OAuth Client Secret，并通过系统浏览器和 PKCE 完成登录。
-- OAuth Callback 会拒绝无效或重放的 `state`、错误 PKCE Verifier、已使用的 App Code 和未经允许的 Redirect Target。
-- Refresh Token 在客户端保存在系统钥匙串，在 D1 中只保存哈希，每次使用都会轮换，并在重放或 Logout 时撤销。
-- 未认证用户无法直接访问私有 Bucket。
-- 用户不能读取、列出、覆盖、归档或恢复其他租户的 Bundle。
-- 覆盖不可变对象的请求会失败。
-- 两个并发 Head 更新只能有一个成功，另一个返回 `409 Conflict`，不会静默丢数据。
-- 公共 Demo 路由第一次请求后能够观察到 CDN Cache Hit。
-- 私有响应不会进入共享 CDN 缓存。
-- 归档在保留期内可以恢复；永久删除延迟执行并留下审计记录。
-- 现有本地目录和 BYO S3/R2 Provider 继续工作。
-
-### 14. 官方参考资料
-
-- [在 Workers 中使用 R2](https://developers.cloudflare.com/r2/api/workers/workers-api-usage/)
-- [Workers 自定义域名](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)
-- [通过 Cache API 缓存 R2 对象](https://developers.cloudflare.com/r2/examples/cache-api/)
-- [为 R2 启用 Cloudflare Cache](https://developers.cloudflare.com/cache/interaction-cloudflare-products/r2/)
-- [R2 Presigned URL](https://developers.cloudflare.com/r2/api/s3/presigned-urls/)
-- [R2 CORS 配置](https://developers.cloudflare.com/r2/buckets/cors/)
-- [R2 条件操作](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/)
-- [R2 Bucket Lock](https://developers.cloudflare.com/r2/buckets/bucket-locks/)
-- [R2 数据安全](https://developers.cloudflare.com/r2/reference/data-security/)
-- [Cloudflare 用户生成内容参考架构](https://developers.cloudflare.com/reference-architecture/diagrams/storage/storing-user-generated-content/)
-- [Cloudflare Worker Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)
-- [Cloudflare Access Application Token](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/application-token/)
-- [Cloudflare Access：Coding Agent 认证与 Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/authenticate-agents/)
-- [RFC 8252：Native App 的 OAuth 2.0](https://www.rfc-editor.org/rfc/rfc8252)
-- [Google：iOS 和桌面应用 OAuth](https://developers.google.com/identity/protocols/oauth2/native-app)
-- [Google OpenID Connect](https://developers.google.com/identity/openid-connect/openid-connect)
-- [Google OpenID Connect API Reference（`sub` 是稳定用户标识）](https://developers.google.com/identity/openid-connect/reference)
-- [Google OAuth Consent Screen 发布及 Test User 限制](https://support.google.com/cloud/answer/13461325)
-- [Supabase Password Authentication](https://supabase.com/docs/guides/auth/passwords)
-- [Supabase Password Security](https://supabase.com/docs/guides/auth/password-security)
-- [Clerk 自定义 Email/Password Authentication](https://clerk.com/docs/guides/development/custom-flows/authentication/email-password)
-- [Cloudflare Access One-time PIN Login](https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/one-time-pin/)
+| Topic | Location |
+| --- | --- |
+| Object store trait, configured store, keys, marker | `crates/mallard-infrastructure/src/storage_core/{object_store.rs, mod.rs, marker.rs, connection.rs}` |
+| Provider adapter trait, descriptor, registry | `crates/mallard-infrastructure/src/storage_providers/{traits.rs, registry.rs}` |
+| Bundle engine | `crates/mallard-infrastructure/src/bundle_engine.rs` |
+| Portable DTOs | `crates/mallard-domain/src/{lib.rs, portable.rs, conversation_tail.rs, subagents.rs}` |
+| Continuity | `docs/DESIGN_REMOTE_HISTORY_CONTINUITY.md`, `crates/mallard-domain/src/lib.rs` (`classify_remote_continuity`) |
+| Push and Pull service | `src-tauri/src/project_sync/{service.rs, commands.rs}` |
+| Catalog domain, registry, codecs, engine, commands | `src-tauri/src/storage_catalog/{domain.rs, registry.rs, agent_skill.rs, plugin_intent.rs, codex_pet.rs, resource_engine.rs, resource_commands.rs}` |
+| Session detail | `crates/mallard-infrastructure/src/{session_detail.rs, providers/traits.rs}`, `src/components/project-sync/session-detail/` |
+| Dropbox sign-in | `crates/mallard-infrastructure/src/{dropbox_auth.rs, dropbox_browser.rs}`, `crates/mallard-application/src/dropbox_setup.rs`, `src-tauri/src/project_sync/dropbox_setup.rs`, `src/components/project-sync/DropboxSetup.tsx` |
+| Lane UI pieces | `src/components/project-sync/{R2Setup.tsx, StorageSetupStep.tsx, StorageSettings.tsx, ProjectLinksWorkspace.tsx}` |
+| Conventions | `AGENTS.md`, `tests/frontend/{ipc, project-sync-cutover, css-hygiene}.integration.test.tsx`, `src-tauri/src/sync_tests/` |
+| Platform | D1 Worker API and limits, D1 Time Travel, R2 Workers API, Workers static assets, Workers limits, Cron Triggers, GitHub OAuth authorization, RFC 8252 |

@@ -207,3 +207,13 @@ test("Performance settings persist through the backend tuning document", () => {
   assert.match(lib, /install_app_settings\(/);
   assert.match(reset, /install_app_settings\(\s*&mallard_infrastructure::app_settings::AppSettings::default\(\)/);
 });
+
+test("every export-shaping setting says that changing it re-uploads synced sessions, and Off says what stays behind", () => {
+  // H05: the switch is easy, the consequence is not — the next Push republishes
+  // every synced session, and revisions are immutable, so copies pushed with
+  // redaction off remain readable in the storage's history.
+  const source = readFileSync("src/components/project-sync/SettingsPage.tsx", "utf8");
+  assert.match(source, /Off can export API keys, tokens, and passwords\. Applies to this machine\.\s*Changing this re-uploads every synced session on your next Push\. Copies already\s*pushed with redaction off stay readable in the storage’s history\./);
+  assert.match(source, /Changing this re-uploads every synced Codex session on your next Push\./);
+  assert.match(source, /Changing this re-uploads every synced Claude session on your next Push\./);
+});

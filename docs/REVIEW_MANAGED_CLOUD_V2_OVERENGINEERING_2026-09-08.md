@@ -2,9 +2,9 @@
 
 - **Date:** September 8, 2026
 - **Status:** Recommendations for review
-- **Scope:** [CLOUDFLARE_R2_MANAGED_CLOUD_ARCHITECTURE_V2.md](CLOUDFLARE_R2_MANAGED_CLOUD_ARCHITECTURE_V2.md),
-  working tree of September 8 (1,864 lines; the committed September 1 draft is
-  1,464 lines)
+- **Scope:** The V2 draft in the working tree of September 8 (1,864 lines; the
+  committed September 1 draft is 1,464 lines). The active plan is now consolidated
+  in [Managed Cloud V1](CLOUDFLARE_R2_MANAGED_CLOUD_ARCHITECTURE.md).
 - **Method:** full read of the plan; comparison with the committed draft and
   with [today's plan review](REVIEW_MANAGED_CLOUD_PLAN_2026-09-08.md); checks of
   the plan's format tables against the current Rust registry and codecs. No

@@ -77,6 +77,18 @@ const EXPECTED_AIMOCK_REQUESTS: usize = 13;
 const EXPECTED_AIMOCK_RAW_REQUESTS: usize =
     EXPECTED_AIMOCK_REQUESTS + EXPECTED_CURSOR_APPEND_PROCESSES;
 
+// Claude 2.1.266 does not await the initial transcript record in --bare mode.
+// Both local and paid tests use the awaited path with explicit isolation.
+const CLAUDE_ISOLATION_ARGUMENTS: [&str; 8] = [
+    "--setting-sources",
+    "",
+    "--settings",
+    r#"{"disableAllHooks":true,"enabledPlugins":{}}"#,
+    "--strict-mcp-config",
+    "--mcp-config",
+    r#"{"mcpServers":{}}"#,
+    "--disable-slash-commands",
+];
 const MAX_COMMAND_ARGUMENTS: usize = 32;
 const MAX_COMMAND_ARGUMENT_BYTES: usize = 4096;
 const MAX_PROMPT_BYTES: usize = 512;
@@ -1385,20 +1397,20 @@ fn run_claude(
         "Claude roots must be no-follow directories"
     );
 
-    let mut arguments = [
-        "--bare",
-        "--print",
-        "--output-format",
-        "json",
-        "--model",
-        MODEL,
-        "--permission-mode",
-        "dontAsk",
-        "--tools=Read",
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect::<Vec<_>>();
+    let mut arguments = CLAUDE_ISOLATION_ARGUMENTS
+        .into_iter()
+        .chain([
+            "--print",
+            "--output-format",
+            "json",
+            "--model",
+            MODEL,
+            "--permission-mode",
+            "dontAsk",
+            "--tools=Read",
+        ])
+        .map(OsString::from)
+        .collect::<Vec<_>>();
     if new_session {
         arguments.extend([OsString::from("--session-id"), OsString::from(session_id)]);
     } else {
@@ -1581,29 +1593,29 @@ fn run_live_tuzi_claude(
     let system_prompt =
         "Return only the exact MALLARD_CLAUDE_LIVE response marker requested by the user.";
     assert!(prompt.len() <= MAX_PROMPT_BYTES);
-    let mut arguments = [
-        "--bare",
-        "--print",
-        "--output-format",
-        "json",
-        "--model",
-        LIVE_TUZI_MODEL,
-        "--effort",
-        "low",
-        "--max-budget-usd",
-        "0.05",
-        "--max-turns",
-        "1",
-        "--permission-mode",
-        "dontAsk",
-        "--tools=",
-        "--no-chrome",
-        "--system-prompt",
-        system_prompt,
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect::<Vec<_>>();
+    let mut arguments = CLAUDE_ISOLATION_ARGUMENTS
+        .into_iter()
+        .chain([
+            "--print",
+            "--output-format",
+            "json",
+            "--model",
+            LIVE_TUZI_MODEL,
+            "--effort",
+            "low",
+            "--max-budget-usd",
+            "0.05",
+            "--max-turns",
+            "1",
+            "--permission-mode",
+            "dontAsk",
+            "--tools=",
+            "--no-chrome",
+            "--system-prompt",
+            system_prompt,
+        ])
+        .map(OsString::from)
+        .collect::<Vec<_>>();
     if new_session {
         arguments.extend([OsString::from("--session-id"), OsString::from(session_id)]);
     } else {
@@ -3021,6 +3033,71 @@ fn claude_record_shape_synopsis(bytes: &[u8]) -> String {
         .join(",")
 }
 
+// Native attachment records participate in ancestry but are not conversation
+// messages. Count messages by their IDs so attachments cannot hide a lost turn.
+fn active_message_record_count(
+    bytes: &[u8],
+    lineage: &mallard_infrastructure::conversation_codec::CodecLineage,
+) -> usize {
+    let message_ids = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| serde_json::from_slice::<Value>(raw).expect("Claude transcript line is JSON"))
+        .filter(|record| {
+            matches!(
+                record.get("type").and_then(Value::as_str),
+                Some("user" | "assistant")
+            )
+        })
+        .map(|record| {
+            record
+                .get("uuid")
+                .and_then(Value::as_str)
+                .expect("Claude message has an ID")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    lineage
+        .chain()
+        .expect("Claude lineage is complete")
+        .iter()
+        .filter(|record| message_ids.contains(record.message_id.as_str()))
+        .count()
+}
+
+#[test]
+fn active_message_count_excludes_attachments_and_detects_a_missing_user() {
+    let records = [
+        serde_json::json!({"type":"attachment","uuid":"attachment-1","parentUuid":null,"sessionId":"11111111-1111-4111-8111-111111111111","cwd":"/fixture/project","attachment":{"type":"deferred_tools_delta","enabled":[]}}),
+        serde_json::json!({"type":"user","uuid":"user-1","parentUuid":"attachment-1","sessionId":"11111111-1111-4111-8111-111111111111","cwd":"/fixture/project","message":{"role":"user","content":"prompt"}}),
+        serde_json::json!({"type":"assistant","uuid":"assistant-1","parentUuid":"user-1","sessionId":"11111111-1111-4111-8111-111111111111","cwd":"/fixture/project","message":{"role":"assistant","content":[{"type":"text","text":"response"}]}}),
+    ];
+    let encode = |records: &[Value]| {
+        format!(
+            "{}\n",
+            records
+                .iter()
+                .map(|record| serde_json::to_string(record).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+        .into_bytes()
+    };
+    let bytes = encode(&records);
+    let analysis = ClaudeAdapter::new().analyze(&bytes);
+    assert_eq!(analysis.lineage.chain().unwrap().len(), 3);
+    assert_eq!(active_message_record_count(&bytes, &analysis.lineage), 2);
+    let mut assistant = records[2].clone();
+    assistant["parentUuid"] = serde_json::json!("attachment-1");
+    let missing_user = encode(&[records[0].clone(), assistant]);
+    let analysis = ClaudeAdapter::new().analyze(&missing_user);
+    assert_eq!(analysis.lineage.chain().unwrap().len(), 2);
+    assert_eq!(
+        active_message_record_count(&missing_user, &analysis.lineage),
+        1
+    );
+}
+
 fn assert_transcript_structure_and_history(
     claude_home: &Path,
     project_root: &Path,
@@ -3067,11 +3144,7 @@ fn assert_transcript_structure_and_history(
         Some(provider_thread_id)
     );
     assert_eq!(analysis.source_cwd.as_deref(), Some(cwd.as_ref()));
-    let durable_records = analysis
-        .lineage
-        .chain()
-        .expect("Claude lineage is complete")
-        .len();
+    let durable_records = active_message_record_count(&bytes, &analysis.lineage);
     // Claude Code 2.1.266 can link the final tool-round response either
     // through the tool-result row or directly through the tool-use row. The
     // latter leaves exactly that result off the active ancestry; the timeline
@@ -3079,7 +3152,7 @@ fn assert_transcript_structure_and_history(
     assert!(
         durable_records == expected_durable_records
             || durable_records.saturating_add(1) == expected_durable_records,
-        "Claude active-lineage record count changed: expected {} or {}, got {}; shapes: {}",
+        "Claude active-lineage message count changed: expected {} or {}, got {}; shapes: {}",
         expected_durable_records.saturating_sub(1),
         expected_durable_records,
         durable_records,
@@ -3380,11 +3453,7 @@ fn assert_live_text_transcript(
     );
     assert_eq!(analysis.source_cwd.as_deref(), Some(cwd.as_ref()));
     assert_eq!(
-        analysis
-            .lineage
-            .chain()
-            .expect("paid Claude lineage is complete")
-            .len(),
+        active_message_record_count(&bytes, &analysis.lineage),
         expected_durable_records
     );
     assert_eq!(
@@ -4856,12 +4925,8 @@ fn live_claude_aimock_setup_push_pull_divergence() {
     let primary_local_a = local_thread_of_cloud(&repository_a, &project_id_a, &cloud_primary);
     let primary_provider_id_a = provider_thread_id(&repository_a, &project_id_a, &primary_local_a);
     let base_transcript = transcript_bytes(&claude_home_a, &project_a, &primary_provider_id_a);
-    let base_chain_len = match lineage_of(&base_transcript) {
-        mallard_infrastructure::conversation_codec::CodecLineage::Complete { chain, .. } => {
-            chain.len()
-        }
-        other => panic!("primary transcript lineage is not complete: {other:?}"),
-    };
+    let base_message_count =
+        active_message_record_count(&base_transcript, &lineage_of(&base_transcript));
     let primary_resource_a =
         mallard_domain::conversation_resource_id(&claude_key(), &primary_local_a)
             .expect("derive primary cursor-append Activity resource ID");
@@ -4959,16 +5024,11 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         ThreadSyncState::LocalAhead,
         "a resumed turn is locally outstanding"
     );
-    match lineage_of(&extended_transcript) {
-        mallard_infrastructure::conversation_codec::CodecLineage::Complete { chain, .. } => {
-            assert_eq!(
-                chain.len(),
-                base_chain_len + 2,
-                "one resumed turn appends exactly one user and one assistant record"
-            );
-        }
-        other => panic!("extended transcript lineage is not complete: {other:?}"),
-    }
+    assert_eq!(
+        active_message_record_count(&extended_transcript, &lineage_of(&extended_transcript)),
+        base_message_count + 2,
+        "one resumed turn appends exactly one user and one assistant record"
+    );
     // The persisted cursor serves the next comparison with zero reads and
     // identical rows — incremental and from-scratch agree.
     let before_settled = metrics.snapshot();
