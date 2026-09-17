@@ -188,7 +188,7 @@ pub fn prepare_pull_transcript_with_identities(
         // pull-side leak/tamper certificate) and must refold to the
         // accepted cloud pin; only then is it decoded per line — wire
         // self-check, token paths to the destination root, leaf
-        // `sessionId` restamped — and the installed bytes are re-analyzed
+        // `sessionId` restamped — and the final values are analyzed
         // as the genuine local form, whose fold becomes
         // `accepted_local_tail`. Local and wire folds are distinct.
         redaction
@@ -242,49 +242,78 @@ pub fn prepare_pull_transcript_with_identities(
         let mut path_origins = PathOrigins::default();
         let mut child_links = crate::providers::claude::subagents::ChildLinks::new();
         let mut offset = 0_u64;
-        for (index, line) in wire_text.split('\n').enumerate() {
-            let record_offset = offset;
-            offset += line.len() as u64 + 1;
-            if index > 0 {
-                decoded_text.push('\n');
-            }
-            if line.trim().is_empty() {
-                decoded_text.push_str(line);
-                continue;
-            }
-            let mut wire: serde_json::Value = serde_json::from_str(line)
-                .map_err(|_| "wire transcript record is not valid JSON")?;
-            crate::providers::claude::subagents::record_link(
-                &mut child_links,
-                &wire,
-                record_offset,
-                &cloud_provider_thread_id,
-            )?;
-            // Identity changes precede origin capture. The record hash then
-            // covers the exact value installed in the provider transcript.
-            if let Some(session_id) = wire.get_mut("sessionId") {
-                if session_id.as_str() == Some(cloud_provider_thread_id.as_str()) {
-                    *session_id = serde_json::Value::String(destination_provider_thread_id.clone());
+        let mut failure = None;
+        let mut records = wire_text
+            .split('\n')
+            .enumerate()
+            .filter_map(|(index, line)| {
+                let record_offset = offset;
+                offset += line.len() as u64 + 1;
+                if index > 0 {
+                    decoded_text.push('\n');
                 }
-            }
-            let decoded = mapper.decode_record_with_origins(&wire).map_err(|error| {
-                format!(
-                    "conversation '{}' record {}: {error}",
-                    cloud_thread_id,
-                    index + 1
-                )
-            })?;
-            path_origins.push(&destination_provider_thread_id, decoded.origins);
-            let value = decoded.local;
-            let serialized = serde_json::to_string(&value)
-                .map_err(|error| format!("serialize decoded conversation record: {error}"))?;
-            decoded_text.push_str(&serialized);
+                if line.trim().is_empty() {
+                    decoded_text.push_str(line);
+                    // Match parsed_records: only empty lines (after removing CR)
+                    // are skipped; a nonempty whitespace line is invalid JSON.
+                    let line = line.strip_suffix('\r').unwrap_or(line);
+                    return (!line.is_empty()).then(|| serde_json::from_str(line));
+                }
+                let result = (|| -> Result<serde_json::Value, String> {
+                    let mut wire: serde_json::Value = serde_json::from_str(line)
+                        .map_err(|_| "wire transcript record is not valid JSON")?;
+                    crate::providers::claude::subagents::record_link(
+                        &mut child_links,
+                        &wire,
+                        record_offset,
+                        &cloud_provider_thread_id,
+                    )?;
+                    // Identity changes precede origin capture. The record hash then
+                    // covers the exact value installed in the provider transcript.
+                    if let Some(session_id) = wire.get_mut("sessionId") {
+                        if session_id.as_str() == Some(cloud_provider_thread_id.as_str()) {
+                            *session_id =
+                                serde_json::Value::String(destination_provider_thread_id.clone());
+                        }
+                    }
+                    let decoded = mapper.decode_record_with_origins(&wire).map_err(|error| {
+                        format!(
+                            "conversation '{}' record {}: {error}",
+                            cloud_thread_id,
+                            index + 1
+                        )
+                    })?;
+                    path_origins.push(&destination_provider_thread_id, decoded.origins);
+                    let value = decoded.local;
+                    let serialized = serde_json::to_string(&value).map_err(|error| {
+                        format!("serialize decoded conversation record: {error}")
+                    })?;
+                    decoded_text.push_str(&serialized);
+                    Ok(value)
+                })();
+                Some(result.map_err(|error| {
+                    failure.get_or_insert(error);
+                    serde_json::Error::io(std::io::Error::other("Claude local construction failed"))
+                }))
+            });
+        let staged = crate::providers::claude::codec::analyze_claude_record_values(
+            records.by_ref(),
+            crate::providers::claude::codec::ClaudeRecordContext::Main,
+            cloud_bytes.iter().all(u8::is_ascii_whitespace),
+        );
+        // An early analysis failure must not hide construction errors later
+        // in the input or leave the output accounting incomplete.
+        for _ in records {}
+        crate::sync_metrics::record_transcript_analysis(decoded_text.len() as u64);
+        if let Some(error) = failure {
+            return Err(error);
         }
         child_references = crate::owned_subagents::ChildReferences::Claude(child_links);
         let rewritten = decoded_text.into_bytes();
+        // Local analysis now runs inside reconstruction. The remaining output
+        // phase checks its result, folds the tail, and hashes the final bytes.
         reconstruction_elapsed = reconstruction_started.elapsed();
         let output_verification_started = Instant::now();
-        let staged = crate::providers::claude::analyze_claude_transcript(&rewritten);
         let CodecLineage::Complete {
             chain,
             lineage_digest,
@@ -515,6 +544,107 @@ mod tests {
                 results
             };
             assert_eq!(run(1), run(4));
+        }
+    }
+
+    #[test]
+    fn claude_streamed_decode_matches_emitted_bytes_and_local_analysis() {
+        let destination = "22222222-2222-4222-8222-222222222222";
+        let base = WireFixture::claude();
+        let mut record: serde_json::Value = serde_json::from_slice(&base.bytes).unwrap();
+        let source_id = record["sessionId"].as_str().unwrap().to_string();
+        record["numbers"] =
+            serde_json::from_str("[-0.0,0.99177921181141328,5e-324,1.7976931348623157e308]")
+                .unwrap();
+        let mut copied = record.clone();
+        copied["sessionId"] = json!("33333333-3333-4333-8333-333333333333");
+        let mut leaf = record.clone();
+        leaf["uuid"] = json!("m2");
+        // Cover repeated IDs, copied history, and missing-parent stitching.
+        for parent in ["m1", "missing"] {
+            leaf["parentUuid"] = json!(parent);
+            for ending in ["", "\n", "\r\n", "\n\n\r\n"] {
+                let wire = format!("\n\r\n{copied}\n{record}\r\n{leaf}{ending}");
+                let fixture = WireFixture::from_bytes(claude::provider_key(), wire.into_bytes(), 0);
+                let output = fixture.prepare(destination).unwrap();
+                let mapper = SessionPathMapper::new("/fixture/destination", None, None).unwrap();
+                let mut expected_origins = PathOrigins::default();
+                let expected = std::str::from_utf8(&fixture.bytes)
+                    .unwrap()
+                    .split('\n')
+                    .map(|line| {
+                        if line.trim().is_empty() {
+                            return line.to_string();
+                        }
+                        let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+                        if value["sessionId"].as_str() == Some(source_id.as_str()) {
+                            value["sessionId"] = json!(destination);
+                        }
+                        let decoded = mapper.decode_record_with_origins(&value).unwrap();
+                        expected_origins.push(destination, decoded.origins);
+                        serde_json::to_string(&decoded.local).unwrap()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert_eq!(output.transcript.bytes().as_bytes(), expected.as_bytes());
+                assert_eq!(output.path_origins, expected_origins);
+                let separate = claude::analyze_claude_transcript(expected.as_bytes());
+                assert_eq!(
+                    separate.source_provider_session_id.as_deref(),
+                    Some(destination)
+                );
+                assert_eq!(separate.record_count, 3);
+                let CodecLineage::Complete {
+                    chain,
+                    lineage_digest,
+                    semantic_digest,
+                } = separate.lineage
+                else {
+                    panic!("emitted local transcript failed analysis");
+                };
+                assert_eq!(chain.len(), 2);
+                assert_eq!(output.checkpoint.lineage_digest, lineage_digest);
+                assert_eq!(output.checkpoint.semantic_digest, semantic_digest);
+                assert_eq!(
+                    output.checkpoint.accepted_local_tail,
+                    compute_portable_conversation_tail_with_codec(
+                        mallard_domain::CLAUDE_PORTABLE_TAIL_CODEC_V1,
+                        TailPartitionKind::WholeThread,
+                        0,
+                        &chain,
+                    )
+                    .unwrap()
+                );
+                assert_eq!(
+                    output.checkpoint.artifact_sha256,
+                    mallard_domain::sha256_hex(expected.as_bytes())
+                );
+                for parsed in crate::conversation_codec::parsed_records(expected.as_bytes()) {
+                    let parsed = parsed.unwrap();
+                    for (before, after) in record["numbers"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .zip(parsed["numbers"].as_array().unwrap())
+                    {
+                        assert_eq!(
+                            before.as_f64().unwrap().to_bits(),
+                            after.as_f64().unwrap().to_bits()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn claude_wire_rejects_nonempty_whitespace_and_malformed_suffixes() {
+        for suffix in [" \n", "\t\r\n", "{malformed\n"] {
+            let mut fixture = WireFixture::claude();
+            let mut bytes = fixture.bytes.to_vec();
+            bytes.extend_from_slice(suffix.as_bytes());
+            fixture.bytes = bytes.into();
+            assert!(fixture.prepare("fresh").is_err());
         }
     }
 

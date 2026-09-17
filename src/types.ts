@@ -707,6 +707,11 @@ export type R2SetupErrorCode =
   | "setup_busy"
   | "creation_unknown"
   | "permission_denied"
+  | "r2_not_enabled"
+  | "authentication_failed"
+  | "rate_limited"
+  | "service_unavailable"
+  | "request_rejected"
   | "identity_mismatch"
   | "bucket_name_taken"
   | "cancelled"
@@ -737,7 +742,7 @@ export interface StorageProviderDescriptor {
   fields: StorageFieldDescriptor[];
   secrets: StorageSecretDescriptor[];
   managed_secret_id?: string | null;
-  local_setup?: "wrangler" | "dropbox" | null;
+  local_setup?: "wrangler" | "dropbox" | "managed_cloud" | null;
   /** The provider's setup documentation, offered as a "Setup guide" link. */
   setup_guide_url?: string | null;
   /** The sentence introducing the manual fields; defaults to a generic one. */
@@ -1676,6 +1681,91 @@ export interface DropboxSetupProgress {
   url: string;
   expires_in: number;
 }
+
+/** The Mallard Cloud sign-in: a new storage takes whichever GitHub account
+ *  signs in; a reconnect keeps the storage's account. */
+export type ManagedCloudSetupMode = "create" | "reconnect";
+export interface ManagedCloudSetupLogin {
+  session_id: string;
+  account: { id: string; login: string };
+  service_origin: string;
+}
+export interface ManagedCloudSetupProgress {
+  status: "authorization_link";
+  url: string;
+  expires_in: number;
+}
+
+/** Where a project's Mallard Cloud release stands (section 4.3 of the
+ *  architecture): read from the service when the project opens. */
+export type ManagedCloudReleaseState =
+  | { kind: "not_pushed" }
+  | { kind: "private" }
+  | { kind: "waiting_owner"; requested_by: string }
+  | { kind: "waiting_super_admin" }
+  | { kind: "public" }
+  | { kind: "snapshot_changed" }
+  | { kind: "rejected"; reason?: string | null };
+export interface ManagedCloudLink {
+  repository_id: string;
+  /** `{origin}/{owner_login}/{name}`: the repository's page on the website. */
+  website_url: string;
+  owner_login: string;
+  name: string;
+  release: ManagedCloudReleaseState;
+  repository_revision: number;
+  can_request_release: boolean;
+  /** The account's membership role; null for a public repository the
+   *  account does not belong to, where it still pushes as a contributor. */
+  role: string | null;
+  /** Whether Push is accepted: a collaborator, or anyone signed in on a
+   *  public repository. */
+  can_push: boolean;
+}
+
+/** How a cloud repository's Git remote compares with the local project's:
+ *  the same remote (or both without one), a different one (or one side
+ *  without), or withheld by the service. */
+export type ManagedCloudGitRemote = "matches" | "differs" | "unknown";
+
+/** One Mallard Cloud repository as the address picker lists or resolves
+ *  it. The address is the copy; the bundle id only rides along for the
+ *  connect request. */
+export interface ManagedCloudRepository {
+  repository_id: string;
+  owner_login: string;
+  name: string;
+  /** `{owner_login}/{name}` in the service's spelling. */
+  address: string;
+  website_url: string;
+  bundle_id: string | null;
+  repository_class: string;
+  visibility: string;
+  /** The account's role; null when it is not a collaborator. */
+  role: string | null;
+  /** Whether Push is accepted: a collaborator, or anyone signed in on a
+   *  public repository. */
+  can_push: boolean;
+  /** The remote's fingerprint when the service lets this account know it. */
+  repository_fingerprint: string | null;
+  git_remote: ManagedCloudGitRemote;
+  revision: number;
+  updated_at: number;
+  resources: number;
+  registration_only: boolean;
+}
+
+/** What one pasted address resolves to on a Mallard Cloud storage, and
+ *  what one entered invitation code joins. A public repository takes
+ *  pushes from anyone signed in, so both found kinds can be connected. */
+export type ManagedCloudRepositoryResolution =
+  | { kind: "collaborator"; repository: ManagedCloudRepository }
+  | { kind: "public"; repository: ManagedCloudRepository }
+  | { kind: "not_found"; address: string }
+  | { kind: "not_a_project"; repository: ManagedCloudRepository }
+  | { kind: "wrong_service"; host: string; expected: string }
+  | { kind: "github" }
+  | { kind: "invalid" };
 
 /** Results from one local discovery and one remote observation. */
 export type ProjectActivityRefreshEvent =

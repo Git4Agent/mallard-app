@@ -101,6 +101,11 @@ pub enum R2SetupErrorCode {
     SetupBusy,
     CreationUnknown,
     PermissionDenied,
+    R2NotEnabled,
+    AuthenticationFailed,
+    RateLimited,
+    ServiceUnavailable,
+    RequestRejected,
     IdentityMismatch,
     BucketNameTaken,
     Cancelled,
@@ -147,6 +152,11 @@ impl R2SetupFailure {
                 | "storage_setup_draft_not_r2" => DraftChanged,
                 "r2_setup_outcome_unknown" => CreationUnknown,
                 "r2_setup_permission_denied" => PermissionDenied,
+                "r2_setup_not_enabled" => R2NotEnabled,
+                "r2_setup_authentication_failed" => AuthenticationFailed,
+                "r2_setup_rate_limited" => RateLimited,
+                "r2_setup_unavailable" => ServiceUnavailable,
+                "r2_setup_request_rejected" => RequestRejected,
                 "r2_setup_identity_mismatch" => IdentityMismatch,
                 "r2_bucket_name_taken" => BucketNameTaken,
                 "r2_bucket_already_connected" => DraftChanged,
@@ -1113,6 +1123,27 @@ mod tests {
         assert_eq!(jurisdiction_phrase(&["default".into()]), "Default");
         assert_eq!(creation_label("2026-09-02T10:11:12.123Z"), "Sep 2, 2026");
         assert_eq!(creation_label("not a date"), "not a date");
+    }
+
+    #[test]
+    fn cli_r2_errors_reach_the_frontend_without_provider_text() {
+        for (code, expected) in [
+            ("r2_setup_not_enabled", "r2_not_enabled"),
+            ("r2_setup_authentication_failed", "authentication_failed"),
+            ("r2_setup_permission_denied", "permission_denied"),
+            ("r2_setup_rate_limited", "rate_limited"),
+            ("r2_setup_unavailable", "service_unavailable"),
+            ("r2_setup_request_rejected", "request_rejected"),
+            ("r2_setup_outcome_unknown", "creation_unknown"),
+        ] {
+            let failure = serde_json::json!({"schema":1,"status":"error","exit_code":2,"code":code,"message":"private-canary"});
+            let error =
+                parse_result(Some(2), b"", &serde_json::to_vec(&failure).unwrap()).unwrap_err();
+            assert_eq!(
+                serde_json::to_value(error).unwrap(),
+                serde_json::json!({"code":expected})
+            );
+        }
     }
 
     #[test]

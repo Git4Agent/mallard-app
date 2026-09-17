@@ -1341,7 +1341,7 @@ test("changed storage history explains the recovery path and exposes only unlink
   );
 
   assert.match(html, />Storage history changed</);
-  assert.match(html, /sync history in Local storage 1 is different from the one Mallard last synced for this project \(revision 1\)/);
+  assert.match(html, /sync history in Local storage 1 is different from the one Mallard last synced for this project \(version 1\)/);
   assert.match(html, /sync data in that storage was deleted and created again/);
   assert.match(html, /session statuses below use the replacement/);
   assert.match(html, /Unlinking does not delete files/);
@@ -3277,4 +3277,73 @@ test("activity refresh isolates project, storage, and branch requests and clears
   assert.equal(starts, 6);
   await assert.rejects(refresh(request, () => {}), /offline/);
   assert.equal(starts, 7);
+});
+
+
+test("name search matches literal words in any order and ignores case and whitespace", async () => {
+  const { nameMatchesSearch } = await import("../../src/components/sync-review/nameSearch");
+  for (const query of ["api fix", "  FIX   api  ", "", "   ", "timeout"]) {
+    assert.equal(nameMatchesSearch("Fix API timeout", query), true, query);
+  }
+  assert.equal(nameMatchesSearch("Fix API timeout", "api cache"), false);
+  assert.equal(nameMatchesSearch("Fix API timeout", ".*"), false);
+  assert.equal(nameMatchesSearch("Fix [API] timeout", "[api]"), true);
+  assert.equal(nameMatchesSearch("修复登录超时", "登录 修复"), true);
+});
+
+test("session search filters names and empty Git groups, while retaining history paging", () => {
+  const render = (query: string) => renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={activity} searchQuery={query} />,
+  );
+  const matched = render("mapping git");
+  assert.match(matched, /Add Git history mapping/);
+  assert.match(matched, /Add project-scoped history/);
+  assert.match(matched, /Search loaded sessions/);
+  for (const query of ["nonexistent", "first-parent", "project-scoped"]) {
+    const html = render(query);
+    assert.match(html, /No matching loaded sessions/);
+    assert.match(html, /Load earlier/);
+    assert.doesNotMatch(html, /Add Git history mapping|Add project-scoped history|No commits yet|No sessions yet/);
+  }
+});
+
+test("loading another history page makes its names searchable", () => {
+  const older = { ...codexSession, resource_id: "codex:conversation:older", title: "Earlier API repair" };
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} searchQuery="repair earlier" activity={{
+      ...activity, git: null, sessions: [...activity.sessions, older],
+    }} />,
+  );
+  assert.match(html, /Earlier API repair/);
+  assert.doesNotMatch(html, /Add Git history mapping/);
+  assert.match(html, /Load earlier/);
+});
+
+test("review search does not reintroduce a hidden activity row through its comparison name", () => {
+  const entry: ThreadSyncEntry = {
+    provider: "codex", provider_display_name: "Codex", access: "bound_ready",
+    thread_id: CODEX_SESSION_ID, conversation_resource_id: codexResourceId,
+    resource_id: codexResourceId, display_name: "Comparison alias",
+    state: "local_only", local_present: true, storage_present: false,
+    compared_against_storage: true,
+    subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
+    push_decision: { action: "create_cloud", selectable: true },
+    pull_decision: { action: "no_changes", selectable: false },
+  };
+  const orphan = { ...entry, thread_id: "orphan", resource_id: "orphan", conversation_resource_id: "orphan", display_name: "Fix remote API" };
+  const props = {
+    ...contentDefaults, activity, selectionMode: "push" as const,
+    comparison: emptyComparison({ entries: [entry, orphan] }),
+    selectedResourceIds: new Set([codexResourceId, "orphan"]),
+  };
+  const hidden = renderToStaticMarkup(<ProjectChatHistoryContent {...props} searchQuery="alias" />);
+  assert.match(hidden, /No matching sessions/);
+  assert.match(hidden, /2 selected hidden by search/);
+  assert.doesNotMatch(hidden, /Comparison alias|Nothing to push|Add Git history mapping|Fix remote API/);
+  const matched = renderToStaticMarkup(<ProjectChatHistoryContent {...props} searchQuery="api fix" />);
+  assert.match(matched, /Fix remote API/);
+  assert.match(matched, /1 selected hidden by search/);
+  assert.match(matched, /aria-label="Sessions without an activity row"/);
+  assert.doesNotMatch(matched, /Add Git history mapping/);
+  assert.equal(props.selectedResourceIds.size, 2);
 });

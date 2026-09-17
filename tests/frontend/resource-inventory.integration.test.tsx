@@ -618,7 +618,7 @@ test("an unreviewed storage and a changed binding each get their own plain sente
   const unreviewed = pullRequiredCopy("remote_without_base", "R2 storage 1", 6, undefined);
   assert.equal(unreviewed.title, "Storage has unreviewed data");
   assert.equal(unreviewed.body, "R2 storage 1 holds data never reviewed on this computer.");
-  assert.equal(unreviewed.detail, "Revision 6 · never reviewed");
+  assert.equal(unreviewed.detail, "Version 6 · never reviewed");
 
   const rebound = pullRequiredCopy("binding_changed", null, 6, 5);
   assert.equal(rebound.title, "Project changed since last sync");
@@ -854,4 +854,15 @@ test("a selected item that cannot be captured reports in the footer, not above t
   const footer = selected.match(/<footer class="sync-inline-action-footer[^"]*">[\s\S]*?<\/footer>/)?.[0] ?? "";
   assert.match(footer, CANNOT_CAPTURE);
   assert.match(footer, /disabled=""/, "Push stays blocked while the item is selected");
+});
+
+
+test("search can expose matching resources in a collapsed inventory group", () => {
+  const resource = conversation("codex:session:search-match");
+  const html = renderToStaticMarkup(
+    <ResourceInventory resources={[resource]} selected={new Set()} defaultCollapsed forceExpanded onToggle={() => undefined} />,
+  );
+  assert.match(html, /class="sync-resource-list"/);
+  assert.match(html, /aria-expanded="true"/);
+  assert.match(html, /aria-label="Include /);
 });

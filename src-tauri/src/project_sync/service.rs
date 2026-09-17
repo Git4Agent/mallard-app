@@ -7705,7 +7705,7 @@ fn push_destination_error(status: &PushDestinationStatus) -> Option<String> {
             base_manifest_sha256,
             remote_manifest_sha256,
         } => Some(format!(
-            "remote history at this storage was replaced: remote revision {} (manifest {}) does not contain this replica's base revision {} (manifest {}); pull and review to adopt the new history, or unlink and relink the storage",
+            "remote history at this storage was replaced: remote version {} (manifest {}) does not contain this replica's base version {} (manifest {}); pull and review to adopt the new history, or unlink and relink the storage",
             remote_revision,
             short_digest(remote_manifest_sha256),
             base_revision,
@@ -7735,7 +7735,7 @@ fn push_destination_error(status: &PushDestinationStatus) -> Option<String> {
             base_revision,
             blocking_scopes,
         } => Some(format!(
-            "this storage has changes saved after this computer last synced ({}); pull and review them before pushing (base revision {}, remote revision {})",
+            "this storage has changes saved after this computer last synced ({}); pull and review them before pushing (base version {}, remote version {})",
             blocking_scopes.join(", "),
             base_revision
                 .map(|revision| revision.to_string())
@@ -10537,14 +10537,14 @@ pub(super) fn push_bundle_reviewed_with_progress(
     results.extend(thread_results);
     let sessions = |count: usize| if count == 1 { "session" } else { "sessions" };
     let message = match (was_published, failed) {
-        (true, 0) => format!("Published revision {}", revision),
+        (true, 0) => format!("Published version {}", revision),
         (true, failed) => format!(
-            "Published revision {} — {} {} not pushed",
+            "Published version {} — {} {} not pushed",
             revision,
             failed,
             sessions(failed)
         ),
-        (false, 0) => format!("Already up to date — revision {}", revision),
+        (false, 0) => format!("Already up to date — version {}", revision),
         (false, failed) => format!("Nothing published — {} {} failed", failed, sessions(failed)),
     };
     Ok(ProjectOperationResult {
@@ -14347,7 +14347,7 @@ fn save_project_binding_guarded(
                 })?;
                 if expected != current.revision {
                     return Err(format!(
-                        "project binding changed (expected revision {}, current {})",
+                        "project binding changed (expected version {}, current {})",
                         expected, current.revision
                     ));
                 }
@@ -14630,7 +14630,7 @@ pub(super) fn rename_local_project_with_repository(
             .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
         if project.revision != expected_revision {
             return Err(format!(
-                "project changed (expected revision {}, current {})",
+                "project changed (expected version {}, current {})",
                 expected_revision, project.revision
             ));
         }
@@ -14785,6 +14785,19 @@ fn draft_references_are_present(
     profiles_present && storage_present
 }
 
+fn suggested_project_name(project_root: &Path) -> String {
+    project_activity::discover_github_repository_url(project_root)
+        .and_then(|url| url.rsplit('/').next().map(str::to_owned))
+        .unwrap_or_else(|| {
+            project_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or("Project")
+                .to_string()
+        })
+}
+
 pub(super) fn create_setup_draft_with_repository(
     repository: &LocalStateRepository,
     project_root: &str,
@@ -14859,12 +14872,7 @@ pub(super) fn create_setup_draft_with_repository(
     } else {
         None
     };
-    let display_name = canonical
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or("Project")
-        .to_string();
+    let display_name = suggested_project_name(&canonical);
     let now = now_secs();
     let draft = ProjectSetupDraft {
         schema: SETUP_DRAFT_SCHEMA,
@@ -14905,6 +14913,16 @@ pub(super) fn update_setup_draft_with_repository(
             submitted.project_root
         ));
     }
+    // A new folder gets a new suggestion unless this edit also supplies an
+    // explicit name. Subsequent edits to Name remain the user's choice.
+    let display_name = if canonical.to_string_lossy() != stored.canonical_project_root
+        && submitted.repository == DraftRepositoryChoice::New
+        && submitted.display_name == stored.display_name
+    {
+        suggested_project_name(&canonical)
+    } else {
+        submitted.display_name
+    };
     // Editable fields come from the client; identity, timestamps, and derived
     // path facts stay server-owned.
     let draft = ProjectSetupDraft {
@@ -14914,7 +14932,7 @@ pub(super) fn update_setup_draft_with_repository(
         new_bundle_id: stored.new_bundle_id,
         project_root: submitted.project_root,
         canonical_project_root: canonical.to_string_lossy().into_owned(),
-        display_name: submitted.display_name,
+        display_name,
         repository_fingerprint: repository_fingerprint(&canonical),
         profiles: submitted.profiles,
         storage: submitted.storage,
@@ -15672,7 +15690,7 @@ pub(super) fn finalize_project_setup_with_repository(
     }
     if draft.revision != expected_revision {
         return Err(format!(
-            "setup draft changed (expected revision {}, current {})",
+            "setup draft changed (expected version {}, current {})",
             expected_revision, draft.revision
         ));
     }
@@ -16502,8 +16520,8 @@ mod tests {
         );
         let message = push_destination_error(&replaced).unwrap();
         assert!(message.contains("was replaced"));
-        assert!(message.contains("base revision 3"));
-        assert!(message.contains("remote revision 4"));
+        assert!(message.contains("base version 3"));
+        assert!(message.contains("remote version 4"));
         assert!(message.contains(&digest_a[..8]));
         assert!(message.contains(&digest_b[..8]));
         assert!(message.contains("pull and review"));
@@ -16519,8 +16537,8 @@ mod tests {
             &mut |_: &RepositoryBase| Ok::<_, String>(true),
         );
         let message = push_destination_error(&advanced).unwrap();
-        assert!(message.contains("base revision 3"));
-        assert!(message.contains("remote revision 4"));
+        assert!(message.contains("base version 3"));
+        assert!(message.contains("remote version 4"));
         assert!(message.contains("provider:codex"));
     }
 
@@ -18366,7 +18384,7 @@ mod tests {
         assert!(published.success);
         assert_eq!(
             published.message,
-            format!("Published revision {}", published.revision.unwrap())
+            format!("Published version {}", published.revision.unwrap())
         );
     }
 
@@ -19930,7 +19948,7 @@ mod tests {
         assert!(first.success);
         assert_eq!(first.revision, Some(2));
         assert!(
-            first.message.contains("Published revision 2"),
+            first.message.contains("Published version 2"),
             "{}",
             first.message
         );
@@ -22241,7 +22259,7 @@ mod tests {
         assert_eq!(appended, 1);
         assert!(!first.success, "{}", first.message);
         assert!(
-            first.message.starts_with("Published revision"),
+            first.message.starts_with("Published version"),
             "{}",
             first.message
         );
@@ -28058,6 +28076,149 @@ mod tests {
         });
         draft.repository = DraftRepositoryChoice::New;
         update_setup_draft_with_repository(&fixture.repo, draft).unwrap()
+    }
+
+    #[test]
+    fn setup_name_uses_github_origin_and_keeps_explicit_edits() {
+        let fixture = setup_fixture();
+        for url in [
+            "https://github.com/owner/My--Repo.git",
+            "git@github.com:owner/My--Repo.git",
+        ] {
+            naming_test_git(&fixture.project_dir, &["init", "--initial-branch=main"]);
+            naming_test_git(
+                &fixture.project_dir,
+                &[
+                    "config",
+                    "remote.upstream.url",
+                    "https://github.com/other/Upstream.git",
+                ],
+            );
+            naming_test_git(&fixture.project_dir, &["config", "remote.origin.url", url]);
+            assert_eq!(suggested_project_name(&fixture.project_dir), "My--Repo");
+        }
+        let mut draft = draft_ready_to_finalize(&fixture);
+        assert_eq!(draft.display_name, "My--Repo");
+        draft.display_name = "Explicit name".into();
+        let saved = update_setup_draft_with_repository(&fixture.repo, draft).unwrap();
+        assert_eq!(saved.display_name, "Explicit name");
+        let detail =
+            finalize_project_setup_with_repository(&fixture.repo, &saved.draft_id, saved.revision)
+                .unwrap();
+        assert_eq!(detail.project.display_name, "Explicit name");
+        let (_, engine) = storage_engine(&fixture.repo, &detail.links[0].storage_id).unwrap();
+        assert_eq!(
+            engine
+                .inspect(&detail.project.bundle_id)
+                .unwrap()
+                .manifest
+                .bundle
+                .display_name,
+            "Explicit name"
+        );
+    }
+
+    fn naming_test_git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgSign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn setup_name_reads_a_linked_worktree_gitfile() {
+        let fixture = setup_fixture();
+        naming_test_git(&fixture.project_dir, &["init", "--initial-branch=main"]);
+        naming_test_git(
+            &fixture.project_dir,
+            &[
+                "config",
+                "remote.origin.url",
+                "git@github.com:owner/Worktree--Repo.git",
+            ],
+        );
+        naming_test_git(
+            &fixture.project_dir,
+            &[
+                "-c",
+                "user.name=Mallard Test",
+                "-c",
+                "user.email=mallard@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Initial",
+            ],
+        );
+        let worktree = fixture._temp.path().join("different-folder");
+        naming_test_git(
+            &fixture.project_dir,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "test-naming",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        assert!(worktree.join(".git").is_file());
+        let created =
+            create_setup_draft_with_repository(&fixture.repo, worktree.to_str().unwrap()).unwrap();
+        assert_eq!(created.draft.display_name, "Worktree--Repo");
+    }
+
+    #[test]
+    fn setup_name_refreshes_on_folder_change_and_uses_folder_without_github() {
+        let fixture = setup_fixture();
+        let draft = draft_ready_to_finalize(&fixture);
+        assert_eq!(draft.display_name, "app");
+        let new_folder = fixture._temp.path().join("another-folder");
+        fs::create_dir_all(&new_folder).unwrap();
+        naming_test_git(&new_folder, &["init", "--initial-branch=main"]);
+        naming_test_git(
+            &new_folder,
+            &[
+                "config",
+                "remote.origin.url",
+                "https://github.com/owner/RemoteName.git",
+            ],
+        );
+        let mut changed = draft.clone();
+        changed.project_root = new_folder.to_string_lossy().into_owned();
+        let mut saved = update_setup_draft_with_repository(&fixture.repo, changed).unwrap();
+        assert_eq!(saved.display_name, "RemoteName");
+        saved.display_name = "My choice".into();
+        let mut saved = update_setup_draft_with_repository(&fixture.repo, saved).unwrap();
+        assert_eq!(saved.display_name, "My choice");
+        saved.project_root = draft.project_root;
+        assert_eq!(
+            update_setup_draft_with_repository(&fixture.repo, saved)
+                .unwrap()
+                .display_name,
+            "app"
+        );
+        naming_test_git(
+            &new_folder,
+            &[
+                "config",
+                "remote.origin.url",
+                "https://example.test/owner/Other.git",
+            ],
+        );
+        assert_eq!(suggested_project_name(&new_folder), "another-folder");
     }
 
     #[test]

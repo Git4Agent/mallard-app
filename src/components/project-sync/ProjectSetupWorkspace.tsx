@@ -28,6 +28,11 @@ import {
   repositoryFingerprintMatches,
   repositoryFingerprintsRequireAcknowledgement,
 } from "./model";
+import RepositoryAddressPicker, {
+  isManagedCloudStorage,
+  useManagedCloudRepositories,
+  type RepositorySelection,
+} from "./RepositoryAddressPicker";
 
 interface Props {
   draftId: string;
@@ -49,6 +54,26 @@ interface Props {
 type SaveState = "idle" | "saving" | "saved" | "error";
 
 const AUTOSAVE_DELAY_MS = 700;
+
+/** Adopt the name derived for a changed folder without losing newer edits. */
+export function mergeSavedSetupDraft(
+  current: ProjectSetupDraft,
+  submitted: ProjectSetupDraft,
+  saved: ProjectSetupDraft,
+): ProjectSetupDraft {
+  const sameFolder = current.project_root === submitted.project_root;
+  return {
+    ...current,
+    revision: saved.revision,
+    updated_at: saved.updated_at,
+    ...(sameFolder ? {
+      canonical_project_root: saved.canonical_project_root,
+      repository_fingerprint: saved.repository_fingerprint,
+      display_name: current.display_name === submitted.display_name ? saved.display_name : current.display_name,
+    } : {}),
+  };
+}
+
 /* Shorter than the autosave: the path field is judged while you type, and a
    probe only reads the filesystem. */
 const PATH_PROBE_DELAY_MS = 350;
@@ -243,7 +268,6 @@ export default function ProjectSetupWorkspace({
   const dirtyRef = useRef(false);
   const savingRef = useRef(false);
   const inspectRequest = useRef(0);
-  const repoAutoSelected = useRef(false);
   const mountedRef = useRef(true);
   const workflowIsActive = () => (
     mountedRef.current && isWorkflowCurrent(workflowEpoch)
@@ -310,13 +334,7 @@ export default function ProjectSetupWorkspace({
           // Keep local edits that raced the save; only adopt server-owned
           // fields and the advanced revision.
           setDraft((current) => current
-            ? {
-              ...current,
-              revision: saved.revision,
-              canonical_project_root: saved.canonical_project_root,
-              repository_fingerprint: saved.repository_fingerprint,
-              updated_at: saved.updated_at,
-            }
+            ? mergeSavedSetupDraft(current, draft, saved)
             : saved);
           void refreshInspection(draftId);
         } catch (reason) {
@@ -344,10 +362,13 @@ export default function ProjectSetupWorkspace({
     return storages.find((candidate) => candidate.storage_id === draft.storage?.storage_id) ?? null;
   }, [draft?.storage, storages]);
   const chosenStorageId = draft?.storage?.storage_id ?? null;
+  // A Mallard Cloud storage is not listed by bundle: its repositories are
+  // named by address, and the picker reads them itself.
+  const managedStorage = isManagedCloudStorage(selectedStorage);
   useEffect(() => {
     let cancelled = false;
     if (!workflowIsActive()) return () => { cancelled = true; };
-    if (!chosenStorageId) {
+    if (!chosenStorageId || managedStorage) {
       setRemoteBundles([]);
       setBundlesError(null);
       setBundlesLoading(false);
@@ -369,44 +390,18 @@ export default function ProjectSetupWorkspace({
         if (!cancelled && workflowIsActive()) setBundlesLoading(false);
       });
     return () => { cancelled = true; };
-  }, [chosenStorageId]);
+  }, [chosenStorageId, managedStorage]);
 
   const repositoryFingerprint = inspection?.draft.repository_fingerprint
     ?? draft?.repository_fingerprint
     ?? null;
-
-  // Auto-select a single exact Git match once, without overriding an
-  // explicit user choice; otherwise the default stays "create new repo".
-  useEffect(() => {
-    if (!draft || repoAutoSelected.current || bundlesLoading) return;
-    if (draft.repository.kind !== "new" || !repositoryFingerprint) return;
-    const matches = remoteBundles.filter((bundle) => (
-      repositoryFingerprintMatches(
-        bundle.repository_fingerprint,
-        repositoryFingerprint,
-      )
-    ));
-    if (matches.length === 1 && chosenStorageId) {
-      repoAutoSelected.current = true;
-      edit((current) => ({
-        ...current,
-        repository: {
-          kind: "existing",
-          storage_id: chosenStorageId,
-          bundle_id: matches[0].bundle_id,
-          display_name: matches[0].display_name,
-          repository_fingerprint: matches[0].repository_fingerprint ?? null,
-          mismatch_acknowledged: false,
-        },
-      }));
-    }
-  }, [
-    bundlesLoading,
-    draft,
-    chosenStorageId,
-    remoteBundles,
+  // No silent pick: a Git match is a badge on its row, the choice is a
+  // click, and the draft's own default (New repository) stands until then.
+  const managedListing = useManagedCloudRepositories(
+    managedStorage ? chosenStorageId : null,
     repositoryFingerprint,
-  ]);
+    workflowIsActive,
+  );
 
   const probeTargets = useMemo<ProfileProbeTarget[]>(() => (
     providers.flatMap((descriptor) => {
@@ -479,7 +474,7 @@ export default function ProjectSetupWorkspace({
       try {
         const saved = await projectSyncApi.updateSetupDraft(draft);
         if (!workflowIsActive()) return;
-        setDraft((current) => current ? { ...current, revision: saved.revision } : saved);
+        setDraft((current) => current ? mergeSavedSetupDraft(current, draft, saved) : saved);
         expectedRevision = saved.revision;
       } catch (reason) {
         if (workflowIsActive()) setError(errorMessage(reason));
@@ -559,6 +554,7 @@ export default function ProjectSetupWorkspace({
     && !profileNeedsSelection
     && !working
     && !bundlesLoading
+    && !(managedStorage && managedListing.state === "loading")
     && saveState !== "saving"
     && saveState !== "error";
   // The repository decision is always explicit once a storage is chosen:
@@ -889,7 +885,7 @@ export default function ProjectSetupWorkspace({
         </section>
 
         {showRepositoryChoice && (
-          <section className="sync-setup-section">
+          <section className={`sync-setup-section${managedStorage ? " repo-connect" : ""}`}>
             <div className="sync-card-heading">
               <div><strong>Repository</strong></div>
               {sectionBadge(repositorySection)}
@@ -897,7 +893,39 @@ export default function ProjectSetupWorkspace({
             {repositorySection?.message && repositorySection.state === "blocked" && (
               <div id={repositoryErrorId} className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {repositorySection.message}</div>
             )}
-            {bundlesError ? (
+            {managedStorage && selectedStorage ? (
+              /* Mallard Cloud: the repository is named by its website
+                 address, or picked from the rows the account belongs to; the
+                 project name above is the requested name for a new one, and
+                 the New row previews the address it makes. */
+              <RepositoryAddressPicker
+                storage={selectedStorage}
+                projectName={draft.display_name || "project"}
+                localFingerprint={repositoryFingerprint}
+                listing={managedListing}
+                selection={draft.repository.kind === "existing"
+                  ? {
+                    kind: "existing",
+                    bundle_id: draft.repository.bundle_id,
+                    display_name: draft.repository.display_name,
+                    repository_fingerprint: draft.repository.repository_fingerprint ?? null,
+                    mismatch_acknowledged: draft.repository.mismatch_acknowledged,
+                  }
+                  : { kind: "new" }}
+                rows="match-option"
+                offerNew
+                disabled={working}
+                describedBy={repositoryErrorId}
+                /* An address that names nothing leaves the draft at its own
+                   default, New repository, which the rows show as selected. */
+                onSelect={(selection: RepositorySelection | null) => edit((current) => ({
+                  ...current,
+                  repository: !selection || selection.kind === "new"
+                    ? { kind: "new" }
+                    : { ...selection, storage_id: selectedStorage.storage_id },
+                }))}
+              />
+            ) : bundlesError ? (
               /* Not a field error despite the company it keeps: no radiogroup
                  renders alongside this failure, so there is no control to
                  describe. Listing the storage's repos is what choosing a
@@ -976,7 +1004,7 @@ export default function ProjectSetupWorkspace({
                 })}
               </div>
             )}
-            {usesExistingRepo && draft.repository.kind === "existing"
+            {!managedStorage && usesExistingRepo && draft.repository.kind === "existing"
               && repositoryFingerprintsRequireAcknowledgement(
                 draft.repository.repository_fingerprint,
                 repositoryFingerprint,

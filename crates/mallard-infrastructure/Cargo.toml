@@ -31,7 +31,7 @@ zeroize = "1"
 url = "2"
 socket2 = "0.6"
 httparse = "1.10"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "multipart"] }
 
 # Reusable loopback server is compiled only with test support.
 hyper = { version = "1", features = ["server", "http1"], optional = true }

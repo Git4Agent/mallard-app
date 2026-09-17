@@ -21,11 +21,11 @@ them without another design pass.
 | --- | --- |
 | Content | Git projects, non-Git projects with reviewed files, and one item per Catalog repository |
 | Sign-in | GitHub OAuth; the Worker holds the client secret; one account, several machines |
-| Access | One Owner, Admins, Members; Owner-shared invitation codes; a separate Super Admin service role |
+| Access | One Owner, Admins, Members; anyone signed in pushes to a public repository; one Owner-set invitation code per private repository; a separate Super Admin service role |
 | Private storage | One replaceable private snapshot per repository; no browsable private history |
 | Public release | The approved private snapshot becomes the next public revision as-is; no server-side merge |
 | Public history | Every public revision is retained within quota and readable by collaborators |
-| Approval | The Owner approves every release on the website; the first release also needs Super Admin |
+| Approval | The Owner approves every release on the website; absent or revoked admission also requires Super Admin |
 | Website | Anonymous browsing of public repositories, including every session, session details, and skill, plugin, and pet pages; signed-in review and approval |
 | Desktop | Managed Cloud is a storage provider behind the existing bundle engine; Push and Pull screens are unchanged |
 | Storage | One Worker for the API and website assets, D1 metadata, private R2 objects, one cron Worker |
@@ -38,15 +38,15 @@ them without another design pass.
 - Private Push and Pull for Git and non-Git projects through the existing engine, including reviewed project files.
 - Catalog items: Codex and Claude skills, plugin install intent, Codex pets v1 and v2, one item per repository.
 - Session views: every pushed conversation ships a bounded timeline the website renders.
-- Collaborators, invitation codes, roles, leaving, removal.
-- Release requests, Owner approval, first-release Super Admin approval, public history.
+- Collaborators, the repository invitation code, open push on public repositories, roles, leaving, removal.
+- Release requests, Owner approval, Super Admin approval when admission is absent, public history.
 - Website: public listing, repository pages, session pages, catalog item pages, private snapshot review, approvals, Super Admin workspace.
 - Quota, cleanup, expiry, removal, audit, logs, and a tested manual recovery.
 
 ### 1.3 Not in the MVP
 
 Google sign-in, account linking, device management, keychain storage of the
-desktop token, featured or ranked listings, search, slugs, export, Queues,
+desktop token, featured or ranked listings, search, export, Queues,
 dashboards, automatic repair, separate R2 backups, key rotation, billing,
 cross-repository deduplication, direct R2 uploads, session conflict
 resolution or merge, branches, private history, ownership transfer, per-file
@@ -387,6 +387,20 @@ Class and identity never change after creation. The service repository ID
 fingerprint is SHA-256 of the normalized `origin` URL and is not unique across
 the service; the raw URL stays local.
 
+**Address.** Separate from its identity, every repository has a GitHub-style
+address `{owner}/{name}`: the Owner's current GitHub login and a `name` of
+GitHub's character set (`[A-Za-z0-9._-]`, at most 100 characters, not `.` or
+`..`), unique per Owner case-insensitively and freed when the repository is
+removed. The service derives `name` from the requested one at creation
+("Horror Game" becomes `Horror-Game`, a title with nothing usable becomes
+`repository`) and suffixes `-2`, `-3`, … while the Owner already holds it;
+a rename (section 7.4) is strict and moves the address without a redirect.
+The website (section 8) and the desktop's Open on website link use the
+address; the API keeps the id, and `GET /v1/repositories/by-name/{owner}/{name}`
+resolves an address to a summary. A GitHub login rename moves the account's
+addresses after its next sign-in; when GitHub has handed a login to another
+account, the most recently signed-in row holds it.
+
 A project repository is created by the desktop the first time it publishes a
 bundle the service does not know (section 5.3). The desktop derives the class
 from the manifest: a `repository_fingerprint` makes it `git_project`,
@@ -396,9 +410,9 @@ otherwise `non_git_project`.
 
 | State | Meaning | Writer |
 | --- | --- | --- |
-| `private_publication_id`, `private_revision` | The one current private snapshot, or none | Desktop push through the engine's head compare-and-swap |
-| `public_publication_id`, `public_revision` | The current public revision, or none | Owner approval; Super Admin first-release approval; revision removal |
-| `public_admitted_at` | When Super Admin approved the first release | First-release decision |
+| `private_publication_id`, `private_revision` | The one current private snapshot, or none | Desktop push by any writer (section 4.3) through the engine's head compare-and-swap |
+| `public_publication_id`, `public_revision` | The current public revision, or none | Owner approval; Super Admin approval when required; revision removal |
+| `public_admitted_at` | Timestamp of current Super Admin approval; null requires approval before publishing | Super Admin release approval sets it; Super Admin Make private clears it |
 
 A push replaces the private snapshot. The previous private publication is
 retired at once: no route lists it, serves its payloads, or pulls it. Its
@@ -419,29 +433,50 @@ only the current public head.
 
 ### 4.3 Roles and invitations
 
-| Capability | Member | Admin | Owner |
-| --- | --- | --- | --- |
-| Read the private snapshot and public history; Push; Pull | Yes | Yes | Yes |
-| Request a public release; discard the private snapshot | Yes | Yes | Yes |
-| Approve or reject a release | No | No | Yes |
-| Create and revoke invitation codes; remove Members and Admins; promote or demote | No | Yes | Yes |
-| Rename; make private; remove the repository | No | Yes | Yes |
-| Leave | Yes | Yes | No |
+Two rules (2026-09-16). **A public repository takes pushes from anyone
+signed in**: no invitation; whoever is signed in reads its latest push,
+pushes over it under the head compare-and-swap of section 6.5, pulls it, and
+may request a release. The Owner decides every request. A Super Admin also
+decides when admission is absent or revoked. **A private repository is entered by its one invitation
+code**, which belongs to the repository: the Owner or an Admin creates,
+rotates, or revokes it, and whoever enters it joins as a Member for as long
+as it stands. "Public" keeps section 4.4's meaning (a release was approved
+and a public head exists), so before its first release every repository is
+private and only the code admits anyone.
 
-Creation makes the creator the sole Owner. An Owner or Admin creates an
-invitation code on the website and sends it by any channel. The code is
-shown once, expires after seven days, and admits one account as Member. The
-recipient signs in on the website and enters the code. Acceptance requires an
-active repository and an inviter who is still Owner or Admin. The website
-lists pending codes by label; revoking one closes it.
+A *writer* is a collaborator, or any signed-in account on a public
+repository. A signed-in non-collaborator of a public repository is called a
+*contributor* on the website and the desktop; pushing grants no membership,
+and `pushed_by` (section 8) is the only record of them.
+
+| Capability | Contributor | Member | Admin | Owner |
+| --- | --- | --- | --- | --- |
+| Read the private snapshot and public history; Push; Pull; request a public release | Yes, while the repository is public | Yes | Yes | Yes |
+| Discard the private snapshot; list members; leave | No | Yes | Yes | Yes (not leave) |
+| Approve or reject a release | No | No | No | Yes |
+| Set, rotate, and revoke the invitation code; remove Members and Admins; promote or demote | No | No | Yes | Yes |
+| Rename; make private; remove the repository | No | No | Yes | Yes |
+
+Creation makes the creator the sole Owner. The Owner or an Admin sets the
+repository's code on the website's Members tab and sends it by any channel;
+it is shown once, never expires, and stands until it is rotated (which
+closes the old code at once) or revoked. A recipient enters it on the
+website or in the desktop's address picker. Entering it needs an active
+repository and fewer than 50 members; entering it again, or as an existing
+collaborator, changes nothing. Removing or demoting someone does not change
+the code: rotate it when a person who knows it should no longer be able to
+join. Making a public repository private closes it to contributors at once
+(their next read answers `not_found`; an upload they opened cannot commit).
 
 `users.service_role = 'super_admin'` is set by an operator with SQL (section
-11.3). It grants no repository membership and no Push right.
+11.3). It grants no repository membership and no Push right on a private
+repository; on a public one a Super Admin is a signed-in account like any
+other.
 
 ### 4.4 Public release
 
-1. A collaborator requests a release from the desktop or the website. The
-   request pins the current private publication and the current public
+1. A writer (section 4.3) requests a release from the desktop or the website.
+   The request pins the current private publication and the current public
    publication (or none) and the repository revision. One open request per
    repository; a newer private push invalidates it.
 2. The Owner opens the repository on the website, browses the private
@@ -449,14 +484,24 @@ lists pending codes by label; revoking one closes it.
    comparison with the current public version (added, changed, and removed
    resources by identity and digest), and approves or rejects. Approval
    acknowledges public disclosure of that exact snapshot.
-3. If the repository has never been public, Owner approval moves the request
-   to `pending_super_admin`. Super Admin approves or rejects on the website.
-   Later releases publish on Owner approval.
+3. If `public_admitted_at` is null, Owner approval moves the request to
+   `pending_super_admin`. This applies before the first release and after
+   Super Admin makes the repository private. Super Admin approves or rejects
+   on the website. Releases with current admission publish on Owner approval.
+   The API returns `requires_super_admin_approval`.
 4. Publication adds a public publication row, sets the public head, and makes
-   the repository public. The private snapshot is unchanged.
+   the repository public. If a private repository submits the exact source
+   snapshot of its retained public head, approval restores that head without
+   a new public revision or copied object references. The private snapshot
+   is unchanged. If it was discarded, push a snapshot before requesting release.
 
-Making the repository private disables anonymous reads and keeps the public
-head for the next comparison. Downloaded copies cannot be revoked.
+Making the repository private stops public reads and access by contributors
+without membership. It keeps both heads, history, members, stars, and stored
+objects. Owner/Admin Make private preserves current admission. Super Admin
+Make private clears `public_admitted_at`, requires a reason and the current
+repository revision, invalidates open release requests, and records the actor
+and reason in the audit log. The repository remains active. Publish decisions
+check admission inside their transaction. Downloaded copies cannot be revoked.
 
 ### 4.5 Discard and removal
 
@@ -476,7 +521,8 @@ is deleted on any machine. IDs and keys are never reused.
 | Capability | Where |
 | --- | --- |
 | Inspect any repository, private or public; audited | Website Super Admin workspace |
-| Approve or reject a first release that the Owner approved | Same |
+| Approve or reject an Owner-approved release when admission is absent or revoked | Same |
+| Make an active public repository private and revoke admission; no membership required | Same; reason and current repository revision required |
 | Remove any repository immediately | Same |
 | Remove one public revision | Same |
 
@@ -497,6 +543,25 @@ same pages for the private snapshot and for every retained public revision.
 Session pages render **session views** (section 5.4): bounded timelines the
 desktop builds from the redacted, path-mapped wire transcript at push time.
 The website never decodes provider transcripts.
+
+### 4.8 Stars
+
+Any signed-in account can star a repository it can read: a public one with
+a public head, or one it collaborates on. Anonymous readers see the count
+and get a sign-in link. A star is a personal mark, not repository state: it
+never bumps `revision` or `updated_at`, so it cannot cause a revision
+conflict for a pusher or reorder the listing, and it writes no audit row.
+
+Stars persist through visibility changes and membership changes. Read access
+applies when the Starred list is read: a star on a repository the account
+can no longer read stays in the table but is not listed until the repository
+is readable again, and the count keeps every row. GitHub erases stars when a
+repository goes private; Mallard keeps history, so a re-release restores the
+count. Only repository removal deletes star rows.
+
+Every listing row and repository summary carries `star_count` and, for the
+caller, `viewer_starred`. `GET /v1/me/starred` lists the caller's stars
+newest first; collaborators see their private head on their own repositories.
 
 ## 5. Desktop design
 
@@ -528,10 +593,11 @@ repository. It maps keys to routes:
 | `.mallard/v1/library/…` | Rejected with `managed_catalog_uses_item_adapter` | Section 5.5 |
 | `delete`, `clear_managed_data` | Unsupported | The descriptor advertises `clear_mode: none` |
 
-`connection_health` maps 401 to `TokenExpired`, 403 on the account to
-`PermissionDenied`, and network failure to `Unreachable`, so the configured
-store's guard suspends the store and the Reconnect band appears like
-Dropbox's.
+`connection_health` maps 401 to `ReconnectRequired` (a revoked or expired
+session is renewed by signing in again, never by pasting a token), 403 on
+`/v1/me` to `PermissionDenied`, and network failure to `Unreachable`, so the
+configured store's guard suspends the store and the Reconnect band appears
+like Dropbox's.
 
 ### 5.2 Staged write
 
@@ -554,18 +620,24 @@ create a repository or reserve quota, so the store stages:
 
 A store instance holds at most one staged upload. Any error after step 2
 leaves the upload open; it expires in 24 hours and the cron Worker cleans it.
-The next push starts a new upload; the service replies `upload_in_progress`
-until the old one is ended by `POST …/uploads/{upload}/abandon`, which the
-store calls first when it finds its own open upload.
+Uploads run side by side on the service, so the next push simply starts a new
+one. The store first ends an own open upload of the same manifest (the service
+claims a commit id per open upload), creates the new upload, then ends its own
+stale uploads, those whose pins no longer match, by
+`POST …/uploads/{upload}/abandon`; the new upload already references the
+objects they carried, so nothing is re-sent. Another account's upload is never
+touched.
 
 ### 5.3 Repositories, discovery, and the public target
 
 **Creation.** In step 2 the store looks up the bundle. If the service has no
 repository for it, the store calls `POST /v1/repositories` with the class
-derived from the manifest, `display_name`, `bundle_id`, and the fingerprint
-when present. The engine's registration publish at link time (section 3.2)
-therefore creates the cloud repository the moment a project is linked, with
-an empty revision 1, and the repository appears in the list at once.
+derived from the manifest, the manifest's `display_name` as the requested
+`name` (section 4.1: the service normalizes it), `bundle_id`, and the
+fingerprint when present. The engine's registration publish at link time
+(section 3.2) therefore creates the cloud repository the moment a project is
+linked, with an empty revision 1, and the repository appears in the list at
+once.
 
 **Discovery.** `list_remote_bundles` reads the synthesized `_tags`
 namespace. The service stores a summary per publication at upload creation
@@ -575,10 +647,15 @@ existing connect flow (`connect_project_to_remote_bundle` and the bundle
 connection dialog) links a repository to a local folder on another machine;
 non-Git repositories are mapped to a folder the same way.
 
-**Which head a caller reads.** A collaborator always reads the private
-snapshot. A signed-in non-collaborator reads the public head of a public
+**Which head a caller reads.** A writer (section 4.3: a collaborator, or
+any signed-in account on a public repository) reads the private snapshot,
+the latest push; `GET /v1/repositories/by-bundle/{bundle_id}/head` answers
+it for the caller's own repository first, else for a public one under the
+same bundle. A signed-in caller who is neither sees nothing for a private
 repository. There is no per-link target switch and no second accepted base.
-Anonymous access is the website's job; the desktop always signs in.
+Anonymous access is the website's job; the desktop always signs in. The
+desktop connects to a repository by its website address or, for a private
+one, by entering its invitation code (`accept_managed_cloud_invitation`).
 
 **Revision numbers.** The manifest keeps the revision and commit ID the
 engine minted. The synthesized public `BundleHead` uses the manifest's own
@@ -704,17 +781,54 @@ src/components/project-sync/ManagedCloudSetup.tsx      hook + lane
 Push and Pull are the existing screens. The storage card for a managed link
 adds:
 
-- **Request public release** after a successful push, calling
-  `request_public_release(local_project_id, storage_id)`, and a status chip
-  (`Waiting for Owner`, `Waiting for Super Admin`, `Public`, `Rejected`,
-  `Snapshot changed`) refreshed when the view opens, on focus, and on
-  Refresh.
-- **Open on website**, an external link to `{origin}/repositories/{id}` with
-  no token.
+- **Request public release**, calling
+  `request_managed_cloud_release(local_project_id, storage_id,
+  expected_repository_revision)`, and a status chip (`Not pushed`, `Private`,
+  `Waiting for Owner`, `Waiting for Super Admin`, `Public`, `Rejected`,
+  `Snapshot changed`) from `get_managed_cloud_link(local_project_id,
+  storage_id)`, refreshed when the pair opens, on window focus, and after
+  every Push or Pull ends. Both live in the project path bar beside Push
+  and Pull; the request button shows only when the service would accept it.
+- **Open on website**, an external link to the repository's address
+  `{origin}/{owner_login}/{name}` (section 4.1) with no token.
 
 Members, invitations, approvals, discard, removal, and Super Admin live on
 the website only. The desktop has no account UI in Settings; the account is
 the storage.
+
+### 5.8 Implementation notes (2026-09-14)
+
+The desktop side of this section shipped as
+`MANAGED_CLOUD_DESKTOP_WIRING_PLAN.md` describes, with these deltas:
+
+- Provider key `managed_cloud`, display name "Mallard Cloud", first in the
+  picker (`display_rank` 5). Settings `service_origin`, `account_id`,
+  `account_login`; one secret `account_token`, declared as the managed
+  secret. The descriptor declares no manual fields: the lane is the only
+  way in, and a draft is ready only once the lane produced the token.
+- Release builds accept the production origin only; development builds may
+  point at a local Worker or staging through `MALLARD_MANAGED_CLOUD_ORIGIN`.
+- The loopback receiver is shared: `loopback_browser.rs` serves both the
+  Dropbox and the Mallard Cloud callbacks; the Mallard Cloud sign-in binds
+  an ephemeral port, starts the attempt with it, and exchanges the grant.
+- Views are built inside the store from the wire bytes of every transcript
+  in the staged upload (`managed_cloud/views.rs`), in a private temporary
+  provider home with an empty project root, so cloud views carry no
+  checkpoint rows and no child tail facts. Unchanged transcripts get no
+  view; the service carries the previous one forward.
+- The store never touches another account's open uploads. It ends an own
+  upload of the same manifest before creating a new one and its own stale
+  uploads after. A commit refused with `head_changed` is reported as a CAS
+  conflict; the upload stays open until the next push replaces it or it
+  expires.
+- Tag reads and the tag listing come from one repository listing reused for
+  a minute; tag writes are no-ops.
+- Tests run against an in-process stub of the Worker
+  (`managed_cloud/stub.rs`, compiled with `test-support`) with the same guard
+  semantics; the engine parity test lives beside the S3 one.
+- Catalog items (section 5.5) are not implemented: Library reads answer
+  absent and Library writes are refused with
+  `managed_catalog_uses_item_adapter`.
 
 ## 6. Service design
 
@@ -813,12 +927,15 @@ CREATE TABLE guard_check (
 CREATE TABLE users (
   id            TEXT PRIMARY KEY,                 -- usr_<random>
   github_id     INTEGER NOT NULL UNIQUE,
-  github_login  TEXT NOT NULL,                     -- display only, refreshed at sign-in
+  github_login  TEXT NOT NULL,                     -- the {owner} address segment; refreshed at sign-in
   state         TEXT NOT NULL CHECK (state IN ('active','suspended')),
   service_role  TEXT NOT NULL DEFAULT 'user' CHECK (service_role IN ('user','super_admin')),
   created_at    INTEGER NOT NULL,
   last_sign_in_at INTEGER NOT NULL
 );
+-- Address lookups compare logins case-insensitively; the most recently
+-- signed-in row holds a login GitHub has handed to another account.
+CREATE INDEX users_login ON users(github_login COLLATE NOCASE);
 
 CREATE TABLE sessions (
   id          TEXT PRIMARY KEY,
@@ -844,7 +961,7 @@ CREATE TABLE auth_attempts (
 CREATE TABLE repositories (
   id                     TEXT PRIMARY KEY,         -- repo_<random>
   class                  TEXT NOT NULL CHECK (class IN ('git_project','non_git_project','catalog')),
-  display_name           TEXT NOT NULL,
+  name                   TEXT NOT NULL,             -- [A-Za-z0-9._-]{1,100}; the address is {owner login}/{name}
   bundle_id              TEXT,
   repository_fingerprint TEXT,
   catalog_provider       TEXT, catalog_resource_kind TEXT, catalog_format TEXT,
@@ -856,17 +973,26 @@ CREATE TABLE repositories (
   private_revision       INTEGER NOT NULL DEFAULT 0,
   public_publication_id  TEXT,
   public_revision        INTEGER NOT NULL DEFAULT 0,
-  public_admitted_at     INTEGER,
+  public_admitted_at     INTEGER, -- current Super Admin approval; null requires approval before publishing
   committed_bytes        INTEGER NOT NULL DEFAULT 0 CHECK (committed_bytes >= 0),
-  created_by             TEXT NOT NULL REFERENCES users(id),
+  star_count             INTEGER NOT NULL DEFAULT 0 CHECK (star_count >= 0),  -- migration 0002
+  -- The repository's one invitation code (section 4.3): sha256(pepper || code),
+  -- who set it, and when; rotating replaces it, revoking clears all three.
+  invite_code_hash       TEXT UNIQUE,
+  invite_code_set_by     TEXT REFERENCES users(id),
+  invite_code_set_at     INTEGER,
+  created_by             TEXT NOT NULL REFERENCES users(id), -- the Owner; ownership never transfers, so this is the address namespace
   created_at             INTEGER NOT NULL,
   updated_at             INTEGER NOT NULL,
+  CHECK ((invite_code_hash IS NULL) = (invite_code_set_by IS NULL) AND (invite_code_hash IS NULL) = (invite_code_set_at IS NULL)),
   CHECK (
     (class = 'git_project'     AND bundle_id IS NOT NULL AND repository_fingerprint IS NOT NULL AND catalog_resource_id IS NULL) OR
     (class = 'non_git_project' AND bundle_id IS NOT NULL AND repository_fingerprint IS NULL     AND catalog_resource_id IS NULL) OR
     (class = 'catalog'         AND bundle_id IS NULL     AND catalog_resource_id IS NOT NULL)
   )
 );
+-- One name per Owner, compared case-insensitively; a removed repository frees its name.
+CREATE UNIQUE INDEX repositories_owner_name ON repositories(created_by, name COLLATE NOCASE) WHERE state <> 'removed';
 CREATE INDEX repositories_bundle ON repositories(bundle_id) WHERE bundle_id IS NOT NULL;
 
 CREATE TABLE repository_members (
@@ -878,18 +1004,15 @@ CREATE TABLE repository_members (
 );
 CREATE UNIQUE INDEX repository_single_owner ON repository_members(repository_id) WHERE role = 'owner';
 
-CREATE TABLE invitations (
-  id            TEXT PRIMARY KEY,
+-- Migration 0002 (section 4.8). `star_count` is kept in step inside the batch
+-- that inserts or deletes a row; the Starred listing applies read access.
+CREATE TABLE repository_stars (
   repository_id TEXT NOT NULL REFERENCES repositories(id),
-  code_hash     TEXT NOT NULL UNIQUE,
-  label         TEXT NOT NULL,                     -- inviter's note, <= 80 chars
-  created_by    TEXT NOT NULL REFERENCES users(id),
-  state         TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','accepted','revoked','expired')),
-  expires_at    INTEGER NOT NULL,
-  accepted_by   TEXT REFERENCES users(id),
-  accepted_at   INTEGER,
-  created_at    INTEGER NOT NULL
+  user_id       TEXT NOT NULL REFERENCES users(id),
+  created_at    INTEGER NOT NULL,
+  PRIMARY KEY (repository_id, user_id)
 );
+CREATE INDEX repository_stars_user ON repository_stars(user_id, created_at, repository_id);
 
 CREATE TABLE objects (
   id            TEXT PRIMARY KEY,                  -- obj_<random>
@@ -922,7 +1045,8 @@ CREATE TABLE uploads (
   created_at                   INTEGER NOT NULL,
   closed_at                    INTEGER
 );
-CREATE UNIQUE INDEX uploads_one_open ON uploads(repository_id) WHERE state = 'open';
+-- Uploads run side by side; the commit batch is the only compare-and-swap.
+CREATE INDEX uploads_open ON uploads(repository_id) WHERE state = 'open';
 -- A commit id is claimed by an open or committed upload only; an abandoned or
 -- expired upload may be retried with the same manifest.
 CREATE UNIQUE INDEX uploads_commit_claimed ON uploads(repository_id, commit_id)
@@ -1053,27 +1177,29 @@ R2 I/O or JSON parsing happens inside a batch. Copies between tables use
 
 | Operation | Guards | Writes |
 | --- | --- | --- |
-| Create repository | actor active; identity unused; repository count under limit | repositories, owner membership, audit |
-| Create upload | member; repository active and revision matches; `private_revision` matches; no open upload; `commit_id` unused; quota admits `reserved_bytes` | uploads, upload_objects (matched `object_id` for ready digests), audit |
+| Create repository | actor active; identity unused; repository count under limit; `name` = the requested name normalized, suffixed past the Owner's existing names (the unique index `repositories_owner_name` settles a race as `repository_name_taken`, retried once) | repositories, owner membership, audit |
+| Create upload | writer (section 4.3: a member, or anyone on a public repository with a public head); repository active and revision matches; `private_revision` matches; fewer than 64 of the pusher's own uploads open; `commit_id` unused; quota admits `reserved_bytes` on top of every open upload's reservation | uploads, upload_objects (matched `object_id` for ready digests), audit |
 | Register object write | upload open and not expired; digest listed; not yet ready | objects (`writing`), upload_objects.object_id |
 | Mark object ready | object `writing`; size matches | objects (`ready`) |
-| Commit upload | upload open and not expired; every upload_object has a `ready` object; repository active, revision and `private_revision` unchanged; `expected_commit_id` equals the current private commit or both are null; actor still a member | publications (private, `private_revision + 1`); publication_objects from upload_objects plus carried-forward views; previous private publication → `retired`; repositories head and `private_revision`; open release request → `invalidated`; `committed_bytes += bytes of objects written by this upload`; uploads → `committed`; idempotency; audit |
+| Commit upload | upload open and not expired; every upload_object has a `ready` object; repository active, revision and `private_revision` unchanged; `expected_commit_id` equals the current private commit or both are null; actor still a writer | publications (private, `private_revision + 1`); publication_objects from upload_objects plus carried-forward views; previous private publication → `retired`; repositories head and `private_revision`; open release request → `invalidated`; `committed_bytes += bytes of objects entering a publication for the first time`; uploads → `committed`; idempotency; audit |
 | Abandon or expire upload | upload open | uploads → `abandoned` or `expired` |
-| Discard private snapshot | member; `private_revision` and commit match | private publication → `retired`; head cleared; `private_revision + 1`; open upload → `abandoned`; open request → `invalidated`; audit |
-| Create invitation | Owner or Admin; revision matches; pending count under limit | invitations, revision + 1, audit |
-| Revoke invitation | Owner or Admin; invitation pending | invitations → `revoked`, audit |
-| Accept invitation | actor active; code pending and unexpired; inviter still Owner or Admin; repository active | membership (Member, unless already higher), invitations → `accepted`, revision + 1, open request → `invalidated`, audit |
+| Discard private snapshot | member; `private_revision` and commit match | private publication → `retired`; head cleared; `private_revision + 1`; open request → `invalidated`; audit (open uploads stay open and answer `head_changed` at commit) |
+| Set or rotate the invitation code | Owner or Admin; revision matches | repositories `invite_code_*`, revision + 1, audit |
+| Revoke the invitation code | Owner or Admin; revision matches (a repository without a code answers ok too) | repositories `invite_code_*` cleared, revision + 1, audit |
+| Enter the invitation code | actor active; the code is the repository's current one; repository active; members under 50 or already a member | membership (Member; an existing collaborator is unchanged and the batch is skipped), revision + 1, open request → `invalidated`, audit |
 | Change role, remove member, leave | authority per section 4.3; Owner row untouched; revision matches | membership, revision + 1, open request → `invalidated`, audit |
-| Rename, make private | Owner or Admin; revision matches | repositories, revision + 1, open request → `invalidated` (make private only), audit |
-| Request release | member; repository active; private head present; revision matches; no open request; the private publication is not already the public head's source | release_requests (`pending_owner`), idempotency, audit |
-| Owner decision | Owner; request `pending_owner`; pins unchanged | reject → `rejected`; approve and never public → `pending_super_admin`; approve otherwise → publish |
+| Rename, make private | Owner or Admin; revision matches; rename: `name` well-formed and held by no other repository of the Owner's in any spelling (`repository_name_taken`) | repositories, revision + 1, open request → `invalidated` (make private only), audit |
+| Request release | writer; repository active; private head present; revision matches; no open request; while public, the private publication is not already the public head's source | release_requests (`pending_owner`), idempotency, audit |
+| Owner decision | Owner; request `pending_owner`; pins unchanged | reject → `rejected`; approve and admission absent → `pending_super_admin`; approve otherwise → publish |
 | Super Admin decision | `super_admin`; request `pending_super_admin`; pins unchanged | reject → `rejected`; approve → publish and `public_admitted_at` |
-| Publish (inside a decision) | pins unchanged; private publication available | publications (public, `public_revision + 1`, same manifest, `source_publication_id`); publication_objects copied from the private publication; repositories public head, `public_revision`, `visibility = 'public'`, revision + 1; request → `published`; audit |
+| Publish (inside a decision) | pins unchanged; private publication available; admission matches the decision authority | publications (public, `public_revision + 1`, same manifest, `source_publication_id`); publication_objects copied from the private publication; repositories public head, `public_revision`, `visibility = 'public'`, revision + 1; request → `published`; audit |
+| Super Admin Make private | service role active; repository active and public; revision matches; reason required | visibility private; admission cleared; revision + 1; open request → `invalidated`; `super_admin.make_private` audit |
+| Restore retained public head (inside a decision) | publish guards; visibility private; public head available and its source is the pinned private publication | visibility public; repository revision + 1; request → `published` with the retained publication id; `release.restore` audit; public revision unchanged |
 | Withdraw request | requester or Owner; request open | request → `withdrawn`, audit |
-| Remove repository | Owner, Admin, or Super Admin; name confirmed; revision matches | repositories → `deleting`, private; invitations → `revoked`; requests → `invalidated`; open upload → `abandoned`; removals; audit |
+| Remove repository | Owner, Admin, or Super Admin; name confirmed; revision matches | repositories → `deleting`, private, invitation code cleared; requests → `invalidated`; open uploads → `abandoned`; removals; audit |
 | Remove public revision | Super Admin; publication public and available | publication → `removed`; its publication_objects deleted; if head: head cleared and `visibility = 'private'`; revision + 1; removals (`revision`); audit |
 | Claim object for deletion | object `ready`; no publication_objects row from an `available` publication; no upload_objects row from an `open` upload | objects → `deleting`, `claimed_at` |
-| Finish deletion | object `deleting` | objects → `deleted`; `committed_bytes -= size` |
+| Finish deletion | object `deleting` | objects → `deleted`; `committed_bytes -= size` when the object was ever published |
 
 Every guarded mutation returns `revision_conflict` when a revision guard
 fails, `head_changed` when a commit-ID guard fails, and the specific code
@@ -1110,7 +1236,7 @@ otherwise.
 | Objects per upload | 20,000 |
 | Repository quota | 4 GiB committed plus reserved |
 | Repositories per account | 100 |
-| Members per repository | 50; pending invitations 20 |
+| Members per repository | 50 |
 | Upload lifetime | 24 hours |
 
 The 90 MiB object cap sits under the 100 MB request body limit of the Free
@@ -1124,16 +1250,19 @@ error; nothing is truncated.
 Every read resolves the caller: a desktop bearer token or a web session
 cookie, else anonymous. Then:
 
-- A collaborator may read the private head, every `available` public
-  publication, retired private manifests, and any `ready` object or view of
-  the repository.
+- A writer (section 4.3: a collaborator, or any signed-in account on a
+  public repository with a public head) may read the private head, every
+  `available` public publication, retired private manifests, and any `ready`
+  object or view of the repository. The summary carries `writer: true` for
+  them, and `GET …/by-name/{owner}/{name}` answers the summary rather than
+  the public face.
 - Super Admin may read the same, audited.
-- A signed-in non-collaborator and an anonymous caller may read only a public
-  repository's current public head, its manifest, and the objects and views
-  that publication references. `commit_id` in the request must equal the
-  current public commit, else `not_found`. Responses carry
-  `Cache-Control: no-store`.
-- Missing and hidden repositories both answer `not_found`.
+- An anonymous caller may read only a public repository's current public
+  head, its manifest, and the objects and views that publication references.
+  `commit_id` in the request must equal the current public commit, else
+  `not_found`. Responses carry `Cache-Control: no-store`.
+- Missing and hidden repositories both answer `not_found`; a private
+  repository is hidden from every non-collaborator.
 
 Objects stream from R2 with `Content-Length` and the stored SHA-256 in
 `X-Mallard-Sha256`; the desktop verifies both.
@@ -1144,8 +1273,8 @@ The cron Worker runs every five minutes and derives its work from state
 columns; there is no job table. Each run is bounded and every step is safe to
 repeat:
 
-1. Expire `open` uploads past `expires_at`, `pending` invitations past
-   `expires_at`, `auth_attempts`, `sessions`, and `idempotency` rows.
+1. Expire `open` uploads past `expires_at`, and `auth_attempts`, `sessions`,
+   and `idempotency` rows.
 2. Delete `writing` objects whose upload is no longer `open` (key delete,
    then `deleted`).
 3. Claim up to 200 unreferenced `ready` objects (section 6.4), delete each
@@ -1170,7 +1299,7 @@ protected `POST /v1/super-admin/jobs/run` in production.
 ### 6.8 Idempotency
 
 `Idempotency-Key` is required on create repository, create upload, commit
-upload, request release, and create invitation. The Worker stores a hash of
+upload, and request release. The Worker stores a hash of
 the key and of the canonical request body for 24 hours and replays the
 recorded response for the same pair; a different body under the same key
 answers `idempotency_mismatch`. Every other mutation is protected by its
@@ -1235,8 +1364,11 @@ discarded.
 | --- | --- | --- |
 | `GET` | `/v1/repositories?class=` | Joined repositories with both head summaries, role, usage, release status |
 | `GET` | `/v1/repositories/by-bundle/{bundle_id}/head` | The head the caller may read for that bundle, or `204` when unknown |
+| `GET` | `/v1/repositories/by-name/{owner}/{name}` | The repository at that address (section 4.1): the collaborator's summary, else the public face, else `404`; both segments compare case-insensitively |
+| `GET` | `/v1/users/{login}` | Profile: `{user: {user_id, github_login, avatar_url, created_at}, repositories}`, the repositories the account owns that the caller may read, rows as in the Starred listing |
+| `GET` | `/v1/me/starred?cursor=` | The caller's stars, newest first, 50 per page; rows carry `owner`, `name`, `visibility`, `starred_at`, and the readable `head` (section 4.8) |
 | `GET` | `/v1/public/repositories?class=&provider=&kind=&cursor=` | Bounded public listing, 50 per page |
-| `GET` | `/v1/public/repositories/{id}` | Public summary: class, name, public head, counts |
+| `GET` | `/v1/public/repositories/{id}` | Public summary: class, `owner`, `name`, public head, counts |
 | `GET` | `/v1/public/repositories/{id}/manifest` | Current public manifest |
 | `GET` | `/v1/public/repositories/{id}/views/{resource_id}?commit_id=` | Session view |
 | `GET` | `/v1/public/repositories/{id}/objects/{sha256}?commit_id=` | Payload referenced by the public head |
@@ -1246,35 +1378,47 @@ Head body (both head routes):
 ```json
 { "scope": "private", "revision": 12, "commit_id": "commit-…",
   "manifest_sha256": "…", "manifest_size": 48213, "updated_at": 1757700000,
-  "kind": "project", "bundle_id": "…" }
+  "kind": "project", "bundle_id": "…",
+  "pushed_by": { "user_id": "usr_…", "github_login": "octocat",
+                 "avatar_url": "https://avatars.githubusercontent.com/u/583231?v=4" } }
 ```
 
-### 7.4 Repositories, members, invitations
+`pushed_by` is the collaborator whose push created the snapshot: the private
+publication's `created_by`, followed through `source_publication_id` for a
+public head, so a release credits the pusher rather than the approver. The
+same object sits on every row of the public listing and of `/history`. The
+avatar URL is built from the GitHub account id (stable across renames); the
+website adds `s=` for the size it renders. It is `null` only when the user
+row cannot be joined.
+
+### 7.4 Repositories, members, the invitation code
 
 | Method | Route | Purpose |
 | --- | --- | --- |
 | `POST` | `/v1/repositories` | Create; body below |
-| `GET`, `PATCH` | `/v1/repositories/{id}` | Summary with both heads, revisions, role, usage, open request; rename |
+| `GET`, `PATCH` | `/v1/repositories/{id}` | Summary with `owner`, `name`, both heads, revisions, role, usage, open request; rename `{name, expected_repository_revision}` (strict; the address moves, nothing redirects) |
 | `POST` | `/v1/repositories/{id}/visibility` | `{visibility: "private", expected_repository_revision}` |
-| `GET` | `/v1/repositories/{id}/members` | Collaborators; Owners and Admins also see pending invitations |
+| `PUT`, `DELETE` | `/v1/repositories/{id}/star` | Star or unstar (section 4.8); idempotent, no Idempotency-Key; → `{repository_id, starred, star_count}` |
+| `GET` | `/v1/repositories/{id}/members` | Collaborators and Super Admin; `invitation: {set_by, set_by_login, set_at} \| null` says whether a code stands, never the code |
 | `PATCH`, `DELETE` | `/v1/repositories/{id}/members/{user_id}` | Change role; remove; a non-Owner deletes their own row to leave |
-| `POST` | `/v1/repositories/{id}/invitations` | `{label, expected_repository_revision}` → `{invitation_id, code, expires_at}`; the code is returned once |
-| `POST` | `/v1/repositories/{id}/invitations/{invitation_id}/revoke` | Revoke |
-| `POST` | `/v1/invitations/accept` | `{code}` → repository summary |
+| `PUT` | `/v1/repositories/{id}/invitation` | Owner or Admin; `{expected_repository_revision}` → `{code, set_by, set_by_login, set_at, repository_revision}`; creates or rotates the repository's one code, returned once |
+| `DELETE` | `/v1/repositories/{id}/invitation` | Owner or Admin; `expected_repository_revision` in the body or query → `{ok, repository_revision}` |
+| `POST` | `/v1/invitations/accept` | `{code}` → repository summary; joins as Member, idempotent, no Idempotency-Key |
 
-Create bodies:
+Create bodies (`name` is the requested name; the stored one is normalized as
+section 4.1 says, so these become `Mallard-Desktop`, `Research-Notes`, `Rika`):
 
 ```json
-{ "repository_class": "git_project", "display_name": "Mallard Desktop",
+{ "repository_class": "git_project", "name": "Mallard Desktop",
   "bundle_id": "…", "repository_fingerprint": "sha256_hex" }
 ```
 
 ```json
-{ "repository_class": "non_git_project", "display_name": "Research Notes", "bundle_id": "…" }
+{ "repository_class": "non_git_project", "name": "Research Notes", "bundle_id": "…" }
 ```
 
 ```json
-{ "repository_class": "catalog", "display_name": "Rika",
+{ "repository_class": "catalog", "name": "Rika",
   "provider": "codex", "resource_kind": "desktop_pet",
   "format": "openai.codex-pet", "format_version": 2, "resource_id": "resource-…" }
 ```
@@ -1323,11 +1467,12 @@ listing, not a merge.
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `GET`, `POST` | `/v1/repositories/{id}/removal` | Preview (name, revision, both heads, bytes); confirm `{confirmed_display_name, expected_repository_revision}` |
+| `GET`, `POST` | `/v1/repositories/{id}/removal` | Preview (owner, name, revision, both heads, bytes); confirm `{confirmed_name, expected_repository_revision}` |
 | `GET` | `/v1/super-admin/repositories?cursor=` | All repositories |
 | `GET` | `/v1/super-admin/release-requests` | Requests in `pending_super_admin` |
-| `POST` | `/v1/super-admin/release-requests/{request}/decision` | Approve or reject a first release |
-| `POST` | `/v1/super-admin/repositories/{id}/removal` | Immediate removal `{confirmed_display_name, reason}` |
+| `POST` | `/v1/super-admin/release-requests/{request}/decision` | Approve or reject a release that requires admission |
+| `POST` | `/v1/super-admin/repositories/{id}/visibility` | Make private and revoke admission `{visibility: "private", expected_repository_revision, reason}` |
+| `POST` | `/v1/super-admin/repositories/{id}/removal` | Immediate removal `{confirmed_name, reason}` |
 | `POST` | `/v1/super-admin/repositories/{id}/publications/{commit_id}/removal` | Remove one public revision `{reason}` |
 | `GET` | `/v1/super-admin/removals/{removal_id}` | Progress |
 | `POST` | `/v1/super-admin/jobs/run` | Run the cron work now |
@@ -1350,18 +1495,32 @@ never imports `ipc.ts` or either `api.ts`; it has its own `client.ts` over
 
 | Route | Anonymous | Signed in |
 | --- | --- | --- |
-| `/` | Public listing with class, provider, and kind filters | Joined repositories and the listing |
-| `/repositories/:id` | Public head: session list, project files, or catalog item | Tabs: Private snapshot, Public version, History, Members, Settings |
-| `/repositories/:id/sessions/:resource_id?commit=` | Session view | Same, for private and historical commits |
-| `/repositories/:id/release` | Not available | Request, comparison, Owner decision, status |
-| `/invitations` | Sign-in prompt | Enter a code |
+| `/` | Public listing with class, provider, and kind filters | Yours, Starred, and Public scopes over the same cards |
+| `/:owner` | Profile: the account and the public repositories it owns | Plus the private ones the viewer collaborates on |
+| `/:owner/:name` | Public head: session list, project files, or catalog item | Writers (section 4.3): Latest push and Public version, History, Request public release; collaborators also Members and Settings; About says "contributor" for a signed-in non-collaborator of a public repository |
+| `/:owner/:name/sessions/:resource_id?commit=` | Session view | Same, for private and historical commits |
+| `/:owner/:name/release` | Not available | Request, comparison, Owner decision, status |
+| `/invitations` | Sign-in prompt | Enter a private repository's code |
 | `/super-admin` | Not available | Queue, inspection, removals; `super_admin` only |
+
+Addresses are section 4.1's `{owner}/{name}`; the page resolves one through
+`GET /v1/repositories/by-name/{owner}/{name}` and reads content by the id it
+answers. The static routes above outrank `/:owner`, so a login spelled
+`invitations` or `super-admin` (or the Worker's `v1`, `auth`) has no profile
+page.
 
 The session list on a repository page comes from the manifest: for each
 provider scope, each `conversations` entry's `display_title`,
 `presentation`, `message_count`, and `updated_at`. The project-file list
 comes from the `project` scope's `files` and `directories`. A catalog item
 page comes from the single `PublishedResourceEntry`.
+
+A session page puts the pusher's GitHub avatar on prompt tiles, where the
+desktop shows "You", with the login in the tile's tooltip. It reads
+`pushed_by` from the head (or, for a collaborator's historical commit, the
+history entry) whose commit the page shows; when that cannot be resolved the
+tile falls back to "you". Public pages therefore disclose the pusher's
+GitHub login and picture.
 
 Catalog item pages: a skill page renders `SKILL.md` with `react-markdown`
 and `remark-gfm` (no raw HTML) and lists files with sizes; a plugin page
@@ -1599,7 +1758,7 @@ same files. Regenerating fixtures is part of any DTO change.
 | Public publications | Until revision or repository removal, within quota |
 | Open upload | 24 hours |
 | Unreferenced objects | Deleted by the next cleanup runs |
-| Invitation code | 7 days pending; closed rows 30 days |
+| Invitation code | Until rotated, revoked, or the repository is removed |
 | Idempotency, auth attempts | 24 hours; 10 minutes |
 | Audit | 90 days |
 | External removal record | At least 30 days after erasure |
@@ -1633,8 +1792,8 @@ reopening traffic:
    repositories and revisions inaccessible.
 2. Clear every restored private head and open upload, and invalidate open
    release requests. Private snapshots are not recovered; users push again.
-3. Make every repository private, revoke invitations and sessions, and
-   confirm `super_admin` grants against the runbook.
+3. Make every repository private, clear every invitation code, revoke
+   sessions, and confirm `super_admin` grants against the runbook.
 4. Verify each public publication's manifest and objects against R2 by size
    and digest; keep damaged publications unavailable. Recompute
    `committed_bytes` from `objects`.
@@ -1656,10 +1815,12 @@ Owner approval:
   and public history.
 - Only one private snapshot is kept; a later push replaces it. Service
   recovery clears private snapshots.
-- Anyone can read the public version and every session in it. Downloaded
-  copies cannot be revoked.
-- A public release needs Owner approval on the website; the first also needs
-  Super Admin approval. Super Admins can remove any revision or repository.
+- Anyone can read the public version and every session in it, and sees the
+  GitHub name and picture of whoever pushed it. Downloaded copies cannot be
+  revoked.
+- A public release needs Owner approval on the website. Super Admin approval
+  is also required before the first release and after a Super Admin makes
+  the repository private. Super Admins can remove any revision or repository.
 - Credentials and complete provider homes must not be selected.
 
 ## 12. Delivery
@@ -1698,13 +1859,13 @@ runbook, disclosure copy, quota tuning from measured usage. Exit: rows 15 and
 | # | Contract | Evidence |
 | --- | --- | --- |
 | 1 | Guards | Injected failures and zero-row updates abort whole batches; concurrent commits have one winner; the loser has no side effects |
-| 2 | Upload protocol | Missing list correct; digest mismatch refused by R2; expiry cleans objects; abandon and retry work; `upload_in_progress` on a second store |
+| 2 | Upload protocol | Missing list correct; digest mismatch refused by R2; expiry cleans objects; abandon and retry work; two stores' uploads coexist and the later commit answers `head_changed`; `upload_in_progress` only past the per-member cap |
 | 3 | Engine parity | Every `ObjectStore` behavior the R2 store passes in the storage-parity thread variants (section 3.7) passes against a miniflare service, except delete and clear |
 | 4 | Continuity | Rows 4, 7, and 8 of the table in section 3.3 classify correctly after another collaborator's push; retired manifests serve; the 33rd retired manifest is gone |
 | 5 | Identity | Desktop and website sign-in; state and challenge checks; revoked token or membership fails on the next request |
 | 6 | Roles | Section 4.3 matrix; Owner row cannot be changed or removed; leave |
 | 7 | Invitations | One use; expiry; revoke; inviter demoted before acceptance; replay grants nothing |
-| 8 | Release | Owner approval required, first release also Super Admin; a newer push invalidates; a published revision references the same objects; private discard leaves public unchanged |
+| 8 | Release | Owner approval required; absent or revoked admission also requires Super Admin; a newer push invalidates; a published revision references the same objects; private discard leaves public unchanged |
 | 9 | Public reads | Anonymous reads exactly the public head's manifest, views, and objects; a stale `commit_id` and a private repository answer `not_found` |
 | 10 | Views | Built from wire bytes: a redacted secret shows its placeholder; unchanged sessions keep their view; truncation flag at the cap; a conversation without a view renders "No preview" |
 | 11 | Removal | Repository and revision removal deny reads immediately, erase keys, verify the prefix, and release quota once; the external record exists before erasure |
@@ -1749,9 +1910,11 @@ first column are the draft's.
 | Session details decoded on the website | Session views built by the desktop from wire bytes | One transcript decoder, in Rust; redaction and path mapping apply by construction |
 | Catalog item container type (draft 5.5) | `LibraryResourceManifest` with one entry | Reuses the existing type and fixtures |
 | Desktop collaborator and invitation screens (draft 11.5) | Website only | The desktop adds one lane and two buttons |
+| (added 2026-09-14) Stars erased when a repository goes private, as GitHub does | Stars persist; read access applies when the Starred list is read | One predicate at query time instead of cascades on make-private, member removal, and leave; a re-release restores the count |
+| (added 2026-09-16) Membership gates every push; per-person single-use invitation codes | Anyone signed in pushes to a public repository (`Access.writer`, `G.writer`); a private repository has one standing code on its row (`repositories.invite_code_*`), set, rotated, or revoked by the Owner or an Admin | Public work needs no invitations, and the Owner still decides every release; one code per repository is what "invite at the repo level" asked for, and it drops a table, a quota, an expiry job, and a label |
 
 Kept from the draft: one private slot, retained public history, Owner plus
-first-release Super Admin approval, one item per catalog repository, the
+Super Admin approval when admission is absent, one item per catalog repository, the
 cleanup claim protocol, `publication_objects` for read authorization,
 content-addressed create-only objects, GitHub sign-in through the Worker,
 the disclosure list, and the restore test. The one-item catalog boundary is

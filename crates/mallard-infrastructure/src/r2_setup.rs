@@ -21,7 +21,11 @@ pub enum SetupError {
     Local,
     Journal,
     Identity,
+    Authentication,
     Permission,
+    R2NotEnabled,
+    RateLimited,
+    Unavailable,
     Rejected,
     Uncertain,
     Taken,
@@ -33,7 +37,11 @@ impl SetupError {
             Self::Local => "r2_setup_client_failed",
             Self::Journal => "r2_setup_journal_failed",
             Self::Identity => "r2_setup_identity_mismatch",
+            Self::Authentication => "r2_setup_authentication_failed",
             Self::Permission => "r2_setup_permission_denied",
+            Self::R2NotEnabled => "r2_setup_not_enabled",
+            Self::RateLimited => "r2_setup_rate_limited",
+            Self::Unavailable => "r2_setup_unavailable",
             Self::Rejected => "r2_setup_request_rejected",
             Self::Uncertain => "r2_setup_outcome_unknown",
             Self::Taken => "r2_bucket_name_taken",
@@ -45,11 +53,39 @@ impl SetupError {
             Self::Local => "Mallard could not start R2 setup.",
             Self::Journal => "Mallard could not read or save R2 setup recovery state.",
             Self::Identity => "The Cloudflare account or bucket does not match this setup. No replacement was accepted.",
+            Self::Authentication => "Cloudflare could not verify the sign-in. Select Change login, then sign in again.",
             Self::Permission => "Cloudflare denied R2 setup access. Check the account permissions and Wrangler login.",
+            Self::R2NotEnabled => "R2 is not enabled for this account. Complete R2 setup in the Cloudflare dashboard, then try again.",
+            Self::RateLimited => "Cloudflare received too many requests. Wait, then try again.",
+            Self::Unavailable => "Could not reach Cloudflare or its service is temporarily unavailable. Check your connection, then try again.",
             Self::Rejected => "Cloudflare rejected the R2 setup request. No new name was selected.",
             Self::Uncertain => "An R2 creation request has an unknown result. This draft will not create another bucket. Inspect Cloudflare before starting a new setup.",
             Self::Taken => "A bucket with this name already exists in the account. Choose another name.",
         }
+    }
+}
+
+/// Read only the provider's error code; never expose its response text.
+fn response_error(status: u16, bytes: &[u8]) -> Option<SetupError> {
+    if (400..500).contains(&status) {
+        if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
+            if value["success"] == false
+                && value["errors"].as_array().is_some_and(|errors| {
+                    errors
+                        .iter()
+                        .any(|error| error["code"].as_u64() == Some(10042))
+                })
+            {
+                return Some(SetupError::R2NotEnabled);
+            }
+        }
+    }
+    match status {
+        401 => Some(SetupError::Authentication),
+        403 => Some(SetupError::Permission),
+        429 => Some(SetupError::RateLimited),
+        408 | 500..=599 => Some(SetupError::Unavailable),
+        _ => None,
     }
 }
 
@@ -258,19 +294,29 @@ impl R2SetupClient {
         if method == Method::POST {
             request = request.json(&json!({"name":bucket}));
         }
-        let mut response = request.send().await.map_err(|_| SetupError::Uncertain)?;
+        // A failed read can be retried. A failed creation may have succeeded.
+        let transport_error = if method == Method::GET {
+            SetupError::Unavailable
+        } else {
+            SetupError::Uncertain
+        };
+        let mut response = request.send().await.map_err(|_| transport_error)?;
         let status = response.status().as_u16();
-        if matches!(status, 401 | 403) {
-            return Err(SetupError::Permission);
+        if status == 408 || (500..600).contains(&status) {
+            return Err(transport_error);
         }
+        let read_error = response_error(status, &[]).unwrap_or(transport_error);
         let mut bytes = Zeroizing::new(Vec::new());
-        while let Some(chunk) = response.chunk().await.map_err(|_| SetupError::Uncertain)? {
+        while let Some(chunk) = response.chunk().await.map_err(|_| read_error)? {
             if bytes.len().saturating_add(chunk.len()) > 256 * 1024 {
-                return Err(SetupError::Uncertain);
+                return Err(read_error);
             }
             bytes.extend_from_slice(&chunk);
         }
-        let value = serde_json::from_slice(&bytes).map_err(|_| SetupError::Uncertain)?;
+        if let Some(error) = response_error(status, &bytes) {
+            return Err(error);
+        }
+        let value = serde_json::from_slice(&bytes).map_err(|_| transport_error)?;
         Ok((status, value))
     }
 
@@ -395,7 +441,14 @@ pub async fn prepare_bucket(
             Err(SetupError::Taken)
         }
         Err(error) => {
-            if matches!(error, SetupError::Permission | SetupError::Rejected) {
+            if matches!(
+                error,
+                SetupError::Authentication
+                    | SetupError::Permission
+                    | SetupError::R2NotEnabled
+                    | SetupError::RateLimited
+                    | SetupError::Rejected
+            ) {
                 recovery.stage = BucketStage::Planned;
                 journal.checkpoint(&recovery)?;
             }

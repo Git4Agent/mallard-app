@@ -497,7 +497,7 @@ function AfterPush({ pushed, pushedBytes, left }: { pushed: number; pushedBytes:
         label="Push outcome"
         action={<button type="button" className="btn btn-ghost"><Icon name="upload" size={13} />Push again</button>}
       >
-        {formatBytes(pushedBytes)} · Attic R2 revision 12. {left} sessions didn&apos;t fit — push again to continue.
+        {formatBytes(pushedBytes)} · Attic R2 version 12. {left} sessions didn&apos;t fit — push again to continue.
       </Notice>
       <p className="mk-note">In the app this is the storage card&apos;s outcome banner. &quot;Push again&quot; opens Push review as usual; the new review recomputes what fits from the current state.</p>
     </div>

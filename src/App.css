@@ -3377,6 +3377,44 @@ span.sync-path-crumb {
   outline-offset: 1px;
 }
 
+/* The chips are focus stops because their words live in the tooltip — the
+   count's reasons, and the release state once the Cloud chip is down to its
+   mark. The metric tooltip's recipe, turned to open downward and inward: the
+   bar is the top of the window and these chips sit at its right end. */
+.sync-path-attention[data-tooltip] {
+  position: relative;
+  cursor: help;
+}
+
+.sync-path-attention[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 7px);
+  right: -6px;
+  width: max-content;
+  max-width: 280px;
+  padding: 5px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface-popover);
+  box-shadow: var(--shadow-popover);
+  color: var(--text-0);
+  font-family: var(--font-sans);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-medium);
+  line-height: 1.3;
+  text-align: left;
+  white-space: normal;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.sync-path-attention[data-tooltip]:hover::after,
+.sync-path-attention[data-tooltip]:focus-visible::after {
+  visibility: visible;
+}
+
 /* Refresh: maintenance, not one of the two verbs, so it keeps the row without
    taking a button's weight in it. */
 .sync-path-icon-action {
@@ -3472,6 +3510,40 @@ span.sync-path-crumb {
 
   .sync-pathbar .sync-history-branch-trigger {
     max-width: 44px;
+  }
+
+  /* The trail has nothing left to give here, and the action cluster does not
+     shrink, so the air between the actions is what goes. Measured on a Git
+     page at 580px: 24px back, which is what the Mallard Cloud mark costs. */
+  .sync-pathbar {
+    gap: 6px;
+  }
+
+  .sync-path-actions {
+    gap: 4px;
+  }
+
+  .sync-path-action-group {
+    gap: 6px;
+  }
+
+  .sync-path-divider {
+    margin: 0 1px;
+  }
+
+  .sync-path-sync {
+    padding: 0 6px;
+  }
+
+  /* The triangle is the same glyph for a warning and a danger count; the tint
+     says which, so at the floor the count keeps its tint and gives up the
+     glyph. The Cloud chip is the one chip whose glyph is all it has left. */
+  .sync-path-attention:not(.sync-path-cloud-status) {
+    padding: 0 7px;
+  }
+
+  .sync-path-attention:not(.sync-path-cloud-status) > svg {
+    display: none;
   }
 }
 
@@ -7359,6 +7431,73 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-project-files-search input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .sync-project-files-search > span { color: var(--text-3); font-size: var(--type-2xs); white-space: nowrap; }
 
+.sync-name-search {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  min-height: 38px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sync-name-search-input {
+  display: flex;
+  flex: 1 1 200px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 36px;
+  color: var(--text-2);
+}
+
+.sync-name-search-input:focus-within {
+  color: var(--text-0);
+  box-shadow: 0 1px 0 var(--focus-ring);
+}
+
+.sync-name-search input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  outline: none;
+  color: var(--text-0);
+  background: transparent;
+  font: inherit;
+  font-size: var(--type-xs);
+}
+.sync-name-search input::-webkit-search-cancel-button { display: none; }
+.sync-name-search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.sync-name-search-clear:hover:not(:disabled) { color: var(--text-0); background: var(--surface-muted); }
+.sync-name-search-results {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 6px 0;
+  margin-left: auto;
+  color: var(--text-2);
+  font-size: var(--type-2xs);
+}
+.sync-name-search-count { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sync-name-search-count b { color: var(--text-0); font-weight: var(--weight-medium); }
+.sync-name-search-hidden { color: var(--warning-text); }
+
 .sync-project-file-warning {
   font-size: var(--type-2xs);
   white-space: nowrap;
@@ -9228,7 +9367,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   /* The chevron-down glyph from Icons.tsx, as a mask so it paints in
      currentColor. Lets a control that cannot hold an <svg> child — a native
      select — still draw the same arrow every other control in the app uses. */
-  --retro-chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M20 8v2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-4v-1H9v-1H8v-1H7v-1H6v-1H5v-1H4V8h2v1h1v1h1v1h1v1h1v1h4v-1h1v-1h1v-1h1V9h1V8h2Z'/%3E%3C/svg%3E");
+  --retro-chevron-down: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M13%2016h-2v-2h2v2Zm-2-2H9v-2h2v2Zm4%200h-2v-2h2v2Zm-6-2H7v-2h2v2Zm8%200h-2v-2h2v2ZM7%2010H5V8h2v2Zm12%200h-2V8h2v2Z%22%2F%3E%3C%2Fsvg%3E");
   /* The darkest surface, and still warm: Material's rule against true
      black keeps the tiles' shadows readable on it. */
   --retro-frame-gutter: #0c0a08;
@@ -9741,6 +9880,17 @@ summary {
 .sync-app textarea::placeholder {
   color: var(--text-3);
 }
+
+/* The search row owns the divider and focus underline. */
+.sync-app .sync-name-search input[type="search"] {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+}
+
+.sync-app .sync-name-search input::placeholder { color: var(--text-2); }
 
 /* The storage editor states each example once, as the placeholder — which
    makes it content, not a hint behind a visible value. --text-3 measures
@@ -10326,6 +10476,56 @@ summary {
   transform: translate(1px, 1px);
 }
 
+/* The Mallard Cloud release state: the one Cloud fact the bar carries. Its
+   verbs live in the project menu, because the action cluster never shrinks —
+   whatever it takes, the trail loses, and past the trail's floor the crumbs
+   paint under the chips. */
+.sync-path-cloud-status {
+  gap: 6px;
+  padding-inline: 9px;
+  border-color: var(--accent);
+  color: var(--text-0);
+  box-shadow: var(--shadow-card);
+}
+
+/* The label is data ("Waiting for Super Admin"), so it is capped rather than
+   trusted; the whole state stays in the tooltip and the accessible name. */
+.sync-path-cloud-status > b {
+  min-width: 0;
+  max-width: 17ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The chip goes down to its mark well before the crumbs do. Measured with an
+   attention count on a session page, the trail has 55px to spare at an 800px
+   bar and 125px at 900 — less than it has at 760, where the crumb ladder
+   below has already cut the ancestors to icons — and a capped label costs
+   147px. Tinted states still read as tinted with the words gone. */
+@container sync-pathbar (max-width: 960px) {
+  .sync-path-cloud-status {
+    padding-inline: 6px;
+  }
+
+  .sync-path-cloud-status > b {
+    display: none;
+  }
+}
+
+/* At the floor an attention count and the release mark do not both fit. The
+   count outranks the mark: it is about threads on this machine, and the mark
+   comes back as soon as the bar is wider. */
+@container sync-pathbar (max-width: 640px) {
+  .sync-path-cloud-status {
+    padding-inline: 4px;
+  }
+
+  .sync-path-actions:has(> .sync-path-attention:not(.sync-path-cloud-status)) > .sync-path-cloud-status {
+    display: none;
+  }
+}
+
 /* Counts and the attention tally are measurements: mono, tabular, holding
    their width as the numbers change, the same as every other figure here. */
 .sync-path-count,
@@ -10687,8 +10887,7 @@ summary {
 
 .sync-history-commit-icon > svg,
 .sync-history-commit-link > svg,
-.sync-history-thread-meta > span > svg,
-.sync-history-debug-trigger > svg {
+.sync-history-thread-meta > span > svg:not(.session-row-icon) {
   width: 12px;
   height: 12px;
 }
@@ -11178,7 +11377,7 @@ summary {
 }
 
 .sync-history-thread-meta {
-  gap: 4px 10px;
+  gap: 4px 14px;
   font-size: var(--type-xs);
 }
 
@@ -11187,11 +11386,16 @@ summary {
 .sync-history-thread-meta > span {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
 }
 
-/* A translucent block is a smudge, not a pixel. The metrics are held back with
-   colour instead, so every block stays solid at its own value. */
+/* The session row uses one outline weight and a fixed optical size. */
+.session-row-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+
 .sync-history-thread-metric svg {
   opacity: 1;
   color: var(--text-3);
@@ -12049,7 +12253,7 @@ summary {
 }
 
 .sync-history-debug-menu + .sync-history-session-detail-action {
-  margin-left: -3px;
+  margin-left: 0;
 }
 
 .sync-history-thread-card:hover .sync-history-session-detail-action {
@@ -12087,3 +12291,25 @@ summary {
 .sync-child-omission-tooltip { display: none; position: absolute; z-index: 20; right: 0; bottom: calc(100% + 6px); width: 260px; padding: 8px 10px; border-radius: 6px; background: var(--surface-card); color: var(--text-1); box-shadow: 0 2px 12px #0003; font-size: 12px; font-weight: normal; }
 .sync-child-omission:hover .sync-child-omission-tooltip,
 .sync-child-omission:focus .sync-child-omission-tooltip { display: block; }
+
+/* Connect by address (Mallard Cloud). The picker's parts stack with the
+   page's gap; the option rows' second line is prose (an address, a role),
+   not an id, so it takes the text face; and in the 680px dialog the found
+   row's facts take the line under the name, where on the wide setup page
+   the row keeps its one-line shape. */
+.repo-connect { display: flex; flex-direction: column; gap: 10px; }
+.repo-connect > .r2-step-list { margin-top: 0; }
+.repo-rows .sync-bundle-choice-copy span,
+.repo-rows .sync-bundle-match-copy span { font-family: var(--font); }
+.repo-rows .repo-new-address {
+  color: var(--text-0);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-semibold);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.sync-bundle-connection-dialog .storage-found-row.with-verb { grid-template-columns: 26px minmax(0, 1fr) auto; row-gap: 6px; }
+.sync-bundle-connection-dialog .storage-found-row.with-verb > .sync-storage-repository-icon { grid-row: 1; grid-column: 1; }
+.sync-bundle-connection-dialog .storage-found-row.with-verb > .storage-found-text { grid-row: 1; grid-column: 2; }
+.sync-bundle-connection-dialog .storage-found-row.with-verb > .storage-found-facts { grid-row: 2; grid-column: 2 / -1; justify-content: flex-start; }
+.sync-bundle-connection-dialog .storage-found-row.with-verb > .storage-found-verb { grid-row: 1; grid-column: 3; }

@@ -22,6 +22,7 @@ struct State {
     conflict_on_create: usize,
     fail_after_create: bool,
     reject: Option<u16>,
+    failure: Option<(Method, String, u16, Value)>,
     requests: usize,
     markers: BTreeMap<String, (u16, Value)>,
     repeat_cursor: bool,
@@ -61,6 +62,11 @@ async fn serve(
     assert!(R2Jurisdiction::parse(&jurisdiction).is_some());
     let mut state = state.lock().unwrap();
     state.requests += 1;
+    if let Some((method, suffix, status, value)) = &state.failure {
+        if parts.method == *method && parts.uri.path().ends_with(suffix) {
+            return Ok(reply(*status, value.clone()));
+        }
+    }
     if parts.method == Method::GET {
         if parts.uri.path().ends_with("/buckets") {
             if state.deny_list {
@@ -361,6 +367,139 @@ fn unknown_creation_is_never_repeated_after_restart() {
 }
 
 #[test]
+fn r2_activation_errors_preserve_the_bucket_plan_for_retry() {
+    for method in [Method::GET, Method::POST] {
+        let mock = Mock::new();
+        mock.state.lock().unwrap().failure = Some((
+            method.clone(),
+            if method == Method::GET {
+                "/mallard-otter"
+            } else {
+                "/buckets"
+            }
+            .into(),
+            403,
+            json!({"success":false,"errors":[{"code":10042,"message":"secret-canary"}]}),
+        ));
+        let temp = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        let mut journal = open(&repository);
+        let error = mock.prepare(&mut journal, "mallard-otter").unwrap_err();
+        assert_eq!(error, SetupError::R2NotEnabled);
+        assert_eq!(error.code(), "r2_setup_not_enabled");
+        assert!(!error.message().contains("secret-canary"));
+        let saved = journal.recovery().unwrap().unwrap();
+        assert_eq!(saved.bucket, "mallard-otter");
+        assert!(matches!(saved.stage, BucketStage::Planned));
+        assert!(mock.state.lock().unwrap().buckets.is_empty());
+        assert_eq!(
+            mock.state.lock().unwrap().requests,
+            if method == Method::GET { 1 } else { 2 }
+        );
+
+        mock.state.lock().unwrap().failure = None;
+        mock.prepare(&mut open(&repository), "mallard-otter")
+            .unwrap();
+        assert_eq!(mock.state.lock().unwrap().attempted, ["mallard-otter"]);
+    }
+}
+
+#[test]
+fn discovery_reports_r2_activation_errors() {
+    let mock = Mock::new();
+    mock.state.lock().unwrap().failure = Some((
+        Method::GET,
+        "/buckets".into(),
+        403,
+        json!({"success":false,"errors":[{"code":10042}]}),
+    ));
+    assert_eq!(mock.discover().unwrap_err(), SetupError::R2NotEnabled);
+    assert_eq!(mock.state.lock().unwrap().requests, 1);
+}
+
+#[test]
+fn activation_classification_requires_a_provider_error_code() {
+    let activation = br#"{"success":false,"errors":[{"code":10042}]}"#;
+    assert_eq!(
+        response_error(400, activation),
+        Some(SetupError::R2NotEnabled)
+    );
+    assert_eq!(response_error(200, activation), None);
+    assert_eq!(
+        response_error(500, activation),
+        Some(SetupError::Unavailable)
+    );
+    for bytes in [
+        b"".as_slice(),
+        b"not json",
+        br#"{"success":false,"errors":[{"code":10001}]}"#,
+        br#"{"success":false,"errors":[{"code":"10042"}]}"#,
+        br#"{"success":true,"errors":[{"code":10042}]}"#,
+        br#"{"success":false,"errors":[{"message":"Please enable R2 through the Cloudflare Dashboard."}]}"#,
+    ] {
+        assert_eq!(response_error(401, bytes), Some(SetupError::Authentication));
+        assert_eq!(response_error(403, bytes), Some(SetupError::Permission));
+    }
+}
+
+#[test]
+fn cloudflare_errors_distinguish_safe_reads_from_unknown_creation_results() {
+    for (status, read_error, create_error) in [
+        (401, SetupError::Authentication, SetupError::Authentication),
+        (403, SetupError::Permission, SetupError::Permission),
+        (429, SetupError::RateLimited, SetupError::RateLimited),
+        (408, SetupError::Unavailable, SetupError::Uncertain),
+        (500, SetupError::Unavailable, SetupError::Uncertain),
+        (503, SetupError::Unavailable, SetupError::Uncertain),
+    ] {
+        let mock = Mock::new();
+        for (method, suffix, expected) in [
+            (Method::GET, "/mallard-otter", read_error),
+            (Method::POST, "/buckets", create_error),
+        ] {
+            mock.state.lock().unwrap().failure = Some((
+                method,
+                suffix.into(),
+                status,
+                json!({"success":false,"errors":[{"code":10001,"message":"secret-canary"}]}),
+            ));
+            let temp = tempfile::tempdir().unwrap();
+            let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+            let mut journal = open(&repository);
+            let error = mock.prepare(&mut journal, "mallard-otter").unwrap_err();
+            assert_eq!(error, expected);
+            assert!(!error.message().contains("secret-canary"));
+            let saved = journal.recovery().unwrap().unwrap();
+            assert_eq!(saved.bucket, "mallard-otter");
+            if expected == SetupError::Uncertain {
+                assert!(matches!(saved.stage, BucketStage::Creating));
+                let requests = mock.state.lock().unwrap().requests;
+                assert_eq!(
+                    mock.prepare(&mut open(&repository), "mallard-otter")
+                        .unwrap_err(),
+                    SetupError::Uncertain
+                );
+                assert_eq!(mock.state.lock().unwrap().requests, requests);
+            } else {
+                assert!(matches!(saved.stage, BucketStage::Planned));
+            }
+        }
+        mock.state.lock().unwrap().failure = Some((
+            Method::GET,
+            "/buckets".into(),
+            status,
+            json!({"success":false}),
+        ));
+        assert_eq!(mock.discover().unwrap_err(), read_error);
+    }
+    // Even a non-JSON rate-limit response is a rate limit.
+    assert_eq!(
+        response_error(429, b"not json"),
+        Some(SetupError::RateLimited)
+    );
+}
+
+#[test]
 fn other_errors_keep_the_name_and_do_not_retry_automatically() {
     for status in [400, 401, 403, 409, 429, 500] {
         let mock = Mock::new();
@@ -371,6 +510,11 @@ fn other_errors_keep_the_name_and_do_not_retry_automatically() {
         let error = mock.prepare(&mut journal, "mallard-otter").unwrap_err();
         assert!(!format!("{error:?}").contains("secret-canary"));
         assert_ne!(error, SetupError::Taken);
+        if status == 401 {
+            assert_eq!(error, SetupError::Authentication);
+        } else if status == 403 {
+            assert_eq!(error, SetupError::Permission);
+        }
         let saved = journal.recovery().unwrap().unwrap();
         assert_eq!(saved.bucket, "mallard-otter");
         assert_eq!(mock.state.lock().unwrap().attempted.len(), 1);

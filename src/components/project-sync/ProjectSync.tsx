@@ -44,7 +44,8 @@ import type {
 import { PROJECT_SYNC_SCHEMA } from "../../types";
 import Icon from "../Icons";
 import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
-import BundleConnectionDialog from "./BundleConnectionDialog";
+import BundleConnectionDialog, { type BundleConnectionChoice } from "./BundleConnectionDialog";
+import { isManagedCloudStorage } from "./RepositoryAddressPicker";
 import ActivityLogDrawer from "./ActivityLogDrawer";
 import SettingsPage from "./SettingsPage";
 import { getPreference } from "../../preferences";
@@ -1700,6 +1701,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     try {
       const project = registrations.find((candidate) => candidate.local_project_id === projectId);
       if (!project) throw new Error("The selected local project no longer exists.");
+      // Mallard Cloud: the repository is chosen by its address, every time.
+      // The dialog lists and resolves the account's repositories itself, so
+      // an empty account is a choice to make, never a silent creation.
+      if (isManagedCloudStorage(config.storages.find((candidate) => candidate.storage_id === storageId))) {
+        setPendingBundleConnection({ projectId, storageId, matches: [], reason: "link" });
+        return;
+      }
       const bundles = await projectSyncApi.listRemoteBundleSnapshots(storageId);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       bundles.sort((left, right) => {
@@ -2240,7 +2248,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         }
         setReviewSupportLoading(false);
         setRestoreBinding(null);
-        notify(`${displayName} is up to date (revision ${review.restorePlan.revision}).`);
+        notify(`${displayName} is up to date (version ${review.restorePlan.revision}).`);
         return null;
       }
       setRestorePlan(review.restorePlan);
@@ -2411,6 +2419,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       );
       if (!failure) return;
       if (failure.includes("does not exist")) {
+        if (isManagedCloudStorage(config.storages.find((candidate) => candidate.storage_id === storageId))) {
+          // The address picker is the feedback: the repository to pull from
+          // is named by its address, or picked from the account's rows.
+          setPendingBundleConnection({ projectId, storageId, matches: [], reason: "missing" });
+          return;
+        }
         const bundles = await projectSyncApi.listRemoteBundleSnapshots(storageId);
         if (hostWorkflowEpoch.current !== workflowEpoch) return;
         if (bundles.length > 0) {
@@ -2453,17 +2467,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  const connectPendingBundle = async (match: BundleSnapshotSummary) => {
+  const connectPendingBundle = async (choice: BundleConnectionChoice) => {
     if (!pendingBundleConnection) return;
     const pending = pendingBundleConnection;
-    const project = registrations.find((candidate) => candidate.local_project_id === pending.projectId);
-    const allowRepositoryMismatch = !!project?.repository_fingerprint
-      && project.repository_fingerprint !== match.repository_fingerprint;
     await connectStorageBundle(
       pending.projectId,
       pending.storageId,
-      match.bundle_id,
-      allowRepositoryMismatch,
+      choice.bundleId,
+      choice.allowRepositoryMismatch,
     );
   };
 
@@ -3716,7 +3727,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
       {pendingBundleConnection && pendingConnectionProject && pendingConnectionStorage && (
         <BundleConnectionDialog
-          projectName={projectLabel(pendingConnectionProject)}
+          projectName={pendingConnectionProject.display_name}
           currentBundleId={pendingConnectionProject.bundle_id}
           projectFingerprint={pendingConnectionProject.repository_fingerprint}
           storage={pendingConnectionStorage}
@@ -3725,7 +3736,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           busy={busy}
           error={error}
           onCancel={() => setPendingBundleConnection(null)}
-          onUseExisting={(match) => void connectPendingBundle(match)}
+          onUseExisting={(choice) => void connectPendingBundle(choice)}
           onKeepCurrent={() => void keepPendingBundle()}
         />
       )}

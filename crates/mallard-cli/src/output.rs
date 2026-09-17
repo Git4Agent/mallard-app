@@ -113,7 +113,7 @@ pub(crate) fn verify(
         writeln!(writer, "Verified storage {}.", outcome.storage_id)?;
         writeln!(
             writer,
-            "Mallard config revision: {}",
+            "Mallard config version: {}",
             outcome.config_revision
         )?;
         writeln!(writer, "Remote capability probe: passed")

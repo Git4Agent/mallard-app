@@ -1,0 +1,296 @@
+<title>Mallard Cloud Listing Standards</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@400..800&display=swap">
+<style>
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SFMono-Regular", "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  --font-display: "Baloo 2", "Arial Rounded MT Bold", var(--font-sans);
+  --shade: #b8a794;
+  --shadow-card: 3px 3px 0 var(--shade); --shadow-control: 2px 2px 0 var(--shade);
+  --box-border: 2px solid var(--accent);
+  --bg-0: #fefbf6; --bg-3: #f2e8dd; --bg-4: #fffdf9; --bg-hover: rgba(82, 58, 43, 0.045);
+  --border: #d8cec4; --border-mid: #aa998d; --border-strong: #66574f;
+  --button-bg: #fdf8f1; --button-primary-bg: #8a6347; --button-primary-text: #fffaf4;
+  --app-shell: #f6eee5; --surface-card: #fcf7f0; --surface-row: #fdf9f3; --surface-row-hover: #faf2e9; --surface-subtle: rgba(82, 58, 43, 0.025);
+  --chip-bg: rgba(82, 58, 43, 0.065); --chip-strong-bg: rgba(82, 58, 43, 0.12); --accent-soft: rgba(82, 58, 43, 0.075); --accent-contrast: #fffaf4;
+  --success-soft: rgba(75, 150, 97, 0.09);
+  --text-0: #1e1817; --text-1: #3d332e; --text-2: #6f6159; --text-3: #8a7c72; --accent: #2a211d;
+  --success-text: #397149; --warning-text: #885e06;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --shade: rgba(0, 0, 0, 0.5);
+    --bg-0: #15120f; --bg-3: #2c2722; --bg-4: #171310; --bg-hover: rgba(255, 238, 217, 0.065);
+    --border: #34302a; --border-mid: #4a433b; --border-strong: #867b6f;
+    --button-bg: #1d1915; --button-primary-bg: #bf9169; --button-primary-text: #1b1612;
+    --app-shell: #0c0a08; --surface-card: #1d1915; --surface-row: #1a1613; --surface-row-hover: #251f1b; --surface-subtle: rgba(255, 238, 217, 0.035);
+    --chip-bg: rgba(255, 238, 217, 0.08); --chip-strong-bg: rgba(255, 238, 217, 0.13); --accent-soft: rgba(240, 232, 213, 0.1); --accent-contrast: #15120f;
+    --success-soft: rgba(126, 212, 154, 0.12);
+    --text-0: #f3ede1; --text-1: #d3cbbc; --text-2: #a79e90; --text-3: #8d8477; --accent: #f0e8d5;
+    --success-text: #7ed49a; --warning-text: #f2c369;
+  }
+}
+:root[data-theme="dark"] {
+  --shade: rgba(0, 0, 0, 0.5);
+  --bg-0: #15120f; --bg-3: #2c2722; --bg-4: #171310; --bg-hover: rgba(255, 238, 217, 0.065);
+  --border: #34302a; --border-mid: #4a433b; --border-strong: #867b6f;
+  --button-bg: #1d1915; --button-primary-bg: #bf9169; --button-primary-text: #1b1612;
+  --app-shell: #0c0a08; --surface-card: #1d1915; --surface-row: #1a1613; --surface-row-hover: #251f1b; --surface-subtle: rgba(255, 238, 217, 0.035);
+  --chip-bg: rgba(255, 238, 217, 0.08); --chip-strong-bg: rgba(255, 238, 217, 0.13); --accent-soft: rgba(240, 232, 213, 0.1); --accent-contrast: #15120f;
+  --success-soft: rgba(126, 212, 154, 0.12);
+  --text-0: #f3ede1; --text-1: #d3cbbc; --text-2: #a79e90; --text-3: #8d8477; --accent: #f0e8d5;
+  --success-text: #7ed49a; --warning-text: #f2c369;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--app-shell); color: var(--text-0); font-family: var(--font-sans); font-size: 13px; line-height: 1.5; padding-inline: 16px; padding-block: 12px 72px; }
+a { color: inherit; text-decoration: none; }
+time, .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+svg.px { width: 16px; height: 16px; fill: currentColor; shape-rendering: crispEdges; flex: 0 0 auto; }
+svg.px.s18 { width: 18px; height: 18px; }
+svg.px.s12 { width: 12px; height: 12px; }
+svg.mk { width: 13px; height: 13px; fill: currentColor; shape-rendering: geometricPrecision; flex: 0 0 auto; }
+.duck { width: 36px; height: 36px; fill: var(--accent); shape-rendering: crispEdges; flex: 0 0 auto; }
+
+.spec { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 34px; }
+.spec-bar { position: sticky; top: 8px; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 8px 14px; border: var(--box-border); border-radius: 14px; background: var(--surface-card); box-shadow: var(--shadow-card); }
+.spec-title { font: 800 15px var(--font-display); margin-right: auto; display: inline-flex; align-items: center; gap: 8px; }
+.spec-title .duck { width: 26px; height: 26px; }
+.ctl { display: inline-flex; align-items: center; gap: 6px; }
+.ctl-label { font: 700 10.5px var(--font-display); letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); }
+.seg { display: inline-flex; gap: 2px; padding: 3px; border: var(--box-border); border-radius: 999px; background: var(--surface-card); }
+.seg button { height: 24px; padding: 0 11px; border: 0; border-radius: 999px; background: transparent; color: var(--text-2); font: 700 12px var(--font-display); cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-contrast); }
+.jump { display: inline-flex; gap: 4px; }
+.jump a { padding: 3px 10px; border-radius: 999px; font: 700 12px var(--font-display); color: var(--text-1); background: var(--chip-bg); }
+.intro { max-width: 72ch; color: var(--text-1); }
+.intro h1 { font: 800 26px/1.2 var(--font-display); margin: 0 0 6px; text-wrap: balance; color: var(--text-0); }
+.intro p { margin: 0 0 8px; }
+.intro b { color: var(--text-0); }
+.anatomy { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; margin: 6px 0 0; padding: 0; list-style: none; font-size: 12.5px; }
+.anatomy li { padding: 10px 12px; border: 1px solid var(--border-mid); border-radius: 10px; background: var(--surface-subtle); }
+.anatomy li b { display: block; color: var(--text-0); font-family: var(--font-display); margin-bottom: 2px; }
+.anatomy li span { color: var(--text-2); }
+.direction { display: flex; flex-direction: column; gap: 10px; scroll-margin-top: 72px; }
+.direction h2 { font: 800 22px/1.2 var(--font-display); margin: 0; display: flex; align-items: baseline; gap: 10px; }
+.direction h2 .k { display: inline-grid; place-items: center; width: 34px; height: 30px; border: var(--box-border); border-radius: 9px; background: var(--accent); color: var(--accent-contrast); font-size: 14px; box-shadow: var(--shadow-control); }
+.direction h2 small { font: 600 13px var(--font-display); color: var(--text-2); }
+.lede { max-width: 72ch; margin: 0; color: var(--text-1); }
+.lede b { color: var(--text-0); }
+.pros { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px; list-style: none; margin: 0; padding: 0; font-size: 12px; color: var(--text-1); }
+.pros li { padding: 7px 10px; border: 1px solid var(--border-mid); border-radius: 9px; background: var(--surface-subtle); }
+.pros li b { color: var(--text-0); font-family: var(--font-display); }
+.pros li.con b { color: var(--warning-text); }
+.board-wrap { overflow-x: auto; padding: 12px 0 10px; }
+.board { position: relative; width: 1120px; border: 1px dashed var(--border-mid); border-radius: 18px; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.board-tag { position: absolute; top: -9px; left: 16px; padding: 0 8px; background: var(--app-shell); font: 700 10.5px var(--font-display); letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); }
+
+/* Shared grammar */
+.page { width: 1120px; max-width: 100%; margin: 0 auto; padding: 4px 0 6px; display: flex; flex-direction: column; gap: 12px; }
+.head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 0 4px; }
+.head h1 { margin: 0; font: 800 17px var(--font-display); }
+.head .count { color: var(--text-3); font: 11px var(--font-mono); }
+.head .end { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.tabs { display: inline-flex; gap: 2px; padding: 3px; border: var(--box-border); border-radius: 999px; background: var(--surface-card); box-shadow: var(--shadow-control); }
+.tabs span { height: 26px; padding: 0 12px; border-radius: 999px; color: var(--text-2); font: 500 12px/26px var(--font-display); }
+.tabs span.on { background: var(--accent); color: var(--accent-contrast); font-weight: 700; }
+.btn { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 12px; border: var(--box-border); border-radius: 999px; background: var(--button-bg); color: var(--text-1); box-shadow: var(--shadow-control); font: 700 12px var(--font-display); white-space: nowrap; }
+.btn .px { width: 12px; height: 12px; color: var(--text-2); }
+.field { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 10px; border: 2px solid var(--border-strong); border-radius: 6px; background: var(--bg-4); color: var(--text-3); font-size: 13px; }
+.field .px { width: 14px; height: 14px; color: var(--text-2); }
+.avatar { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 5px; background: var(--accent); color: var(--accent-contrast); font: 800 7px var(--font-display); flex: 0 0 auto; }
+.avatar.ss { background: var(--bg-3); color: var(--text-0); border: 1px solid var(--border-mid); }
+.badge { display: inline-flex; align-items: center; padding: 0 7px; border: 1px solid var(--border-mid); border-radius: 999px; color: var(--text-2); font: 600 10.5px/17px var(--font-display); white-space: nowrap; flex: 0 0 auto; }
+.card { min-width: 0; border: var(--box-border); border-radius: 14px; background: var(--surface-row); box-shadow: var(--shadow-card); color: inherit; transition: background 90ms steps(2, end); }
+.card:hover { background: var(--surface-row-hover); }
+.grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.dots { color: var(--text-2); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dots b { color: var(--text-1); font-weight: 600; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.dots i { font-style: normal; color: var(--border-mid); margin: 0 5px; }
+.dots .px { width: 12px; height: 12px; vertical-align: -2px; margin-right: 3px; color: var(--text-2); }
+
+/* E1 · GitHub repository card */
+.gh { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px 11px; }
+.gh-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.gh-title > .px { color: var(--text-2); }
+.gh-title strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 700 14px/1.3 var(--font-display); color: var(--text-0); }
+.gh-desc { color: var(--text-1); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gh-foot { display: flex; align-items: center; gap: 6px; margin-top: 4px; color: var(--text-2); font-size: 11.5px; min-width: 0; }
+.gh-foot .who { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gh-foot time { margin-left: auto; white-space: nowrap; font-size: 11px; color: var(--text-3); }
+.group { display: flex; align-items: baseline; gap: 8px; margin: 4px 4px -2px; font: 700 11px var(--font-display); letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); }
+.group .n { font: 700 10.5px var(--font-mono); color: var(--text-3); }
+
+/* E2 · Hugging Face model card */
+.hf { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 3px 9px; align-items: center; padding: 11px 14px 10px; }
+.hf > .px { grid-row: 1; color: var(--text-2); }
+.hf-name { grid-row: 1; grid-column: 2; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; white-space: nowrap; font: 700 14px/1.3 var(--font-display); }
+.hf-name .owner { color: var(--text-2); font-weight: 500; }
+.hf-name .sl { color: var(--border-mid); font-weight: 400; }
+.hf-name strong { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.hf-name .lock { margin-left: auto; color: var(--text-2); }
+.hf .dots { grid-row: 2; grid-column: 2; }
+
+/* E3 · GitHub repositories list row */
+.rows { display: flex; flex-direction: column; border: var(--box-border); border-radius: 14px; background: var(--surface-row); box-shadow: var(--shadow-card); overflow: hidden; }
+.row { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 2px 10px; padding: 12px 16px 11px; align-items: start; }
+.row + .row { border-top: 1px solid var(--border); }
+.row:hover { background: var(--surface-row-hover); }
+.row > .px { grid-row: 1; margin-top: 3px; color: var(--text-2); }
+.row-title { grid-row: 1; grid-column: 2; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.row-title strong { font: 700 15px/1.3 var(--font-display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.row-desc { grid-row: 2; grid-column: 2; color: var(--text-1); font-size: 12.5px; }
+.row-meta { grid-row: 3; grid-column: 2; margin-top: 2px; }
+.row-end { grid-row: 1 / 4; grid-column: 3; display: flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 11.5px; white-space: nowrap; padding-top: 2px; }
+.row-end time { color: var(--text-3); font-size: 11px; }
+
+.verdict { padding: 14px 18px; display: flex; flex-direction: column; gap: 6px; border: var(--box-border); border-radius: 14px; background: var(--surface-card); box-shadow: var(--shadow-card); }
+.verdict h2 { margin: 0; font: 800 18px var(--font-display); }
+.verdict p { margin: 0; max-width: 78ch; color: var(--text-1); }
+.verdict b { color: var(--text-0); }
+@media (max-width: 640px) { .spec-bar { position: static; } }
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="duck" viewBox="0 0 20 20"><path d="M13 3h3v1h-3ZM12 4h5v2h-5ZM12 6h7v1h-7ZM12 7h3v3h-3ZM7 10h9v1h-9ZM2 11h15v1h-15ZM1 12h16v2h-16ZM2 14h15v1h-15ZM3 15h13v1h-13ZM5 16h10v1h-10Z"/></symbol>
+  <symbol id="folder" viewBox="0 0 24 24"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/></symbol>
+  <symbol id="git-folder" viewBox="0 0 24 24"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/><path d="M7 10h2v2H7ZM9 12h2v2H9ZM7 14h2v2H7ZM12 14h5v2h-5Z"/></symbol>
+  <symbol id="lightbulb" viewBox="0 0 24 24"><path d="M8 2h8v2H8ZM6 4h2v2H6ZM16 4h2v2H16ZM4 6h2v6H4ZM18 6h2v6H18ZM6 12h2v2H6ZM16 12h2v2H16ZM8 14h8v4H8ZM10 18h4v2H10Z"/></symbol>
+  <symbol id="paw" viewBox="0 0 24 24"><path d="M6 2h4v4H6ZM14 2h4v4H14ZM2 8h4v4H2ZM18 8h4v4H18ZM8 12h8v8H8ZM4 14h4v4H4ZM16 14h4v4H16ZM6 18h2v2H6ZM16 18h2v2H16Z"/></symbol>
+  <symbol id="message" viewBox="0 0 24 24"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></symbol>
+  <symbol id="file" viewBox="0 0 24 24"><path d="M18 1v1h1v1h1v1h1v1h1v1h1v16h-1v1H5v-1H4V2h1V1h13Zm-1 2H6v18h15V8h-4V3Zm2 1v2h2V5h-1V4h-1Z"/></symbol>
+  <symbol id="storage" viewBox="0 0 24 24"><path d="M6 7h4v2H6zm0 8h4v2H6zM2 5h2v14H2zm18 0h2v14h-2zM4 19h16v2H4zM4 3h16v2H4zm0 8h16v2H4z"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><path d="M21 12v-1h-3V5h-1V3h-1V2h-2V1h-4v1H8v1H7v2H6v6H3v1H2v10h1v1h18v-1h1V12h-1Zm-1 1v8H4v-8h16ZM9 5V4h1V3h4v1h1v1h1v6H8V5h1Z"/></symbol>
+  <symbol id="chevron-down" viewBox="0 0 24 24"><path d="M20 8v2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-4v-1H9v-1H8v-1H7v-1H6v-1H5v-1H4V8h2v1h1v1h1v1h1v1h1v1h4v-1h1v-1h1v-1h1V9h1V8h2Z"/></symbol>
+  <symbol id="search" viewBox="0 0 24 24"><path d="M6 2h8v2H6ZM4 4h2v2H4ZM14 4h2v2h-2ZM2 6h2v6H2ZM16 6h2v6h-2ZM4 12h2v2H4ZM14 12h2v2h-2ZM6 14h8v2H6ZM16 14h2v2h-2ZM18 16h2v2h-2ZM20 18h2v2h-2Z"/></symbol>
+</svg>
+
+<div class="spec">
+  <header class="spec-bar" role="toolbar" aria-label="Specimen controls">
+    <span class="spec-title"><svg class="duck"><use href="#duck"/></svg> Mallard Cloud · listing standards</span>
+    <span class="ctl"><span class="ctl-label">Theme</span>
+      <span class="seg" id="theme-seg"><button type="button" data-theme-pick="light" aria-pressed="true">Light</button><button type="button" data-theme-pick="dark" aria-pressed="false">Dark</button></span></span>
+    <span class="jump"><a href="#e1">E1</a><a href="#e2">E2</a><a href="#e3">E3</a></span>
+  </header>
+
+  <div class="intro">
+    <h1>What the standards actually do</h1>
+    <p>The listings people use every day agree on three things, and the cards I shipped broke all of them. <b>Everything is left-aligned in a stack</b>; nothing is right-aligned inside a card except a single badge. <b>Each line has one job</b>: a name line, a description line, a facts line, and each card has the same number of lines so heights match. <b>Icons are few</b>: one kind glyph, then text with dot separators, not a cluster of marks fighting the name.</p>
+    <ul class="anatomy">
+      <li><b>GitHub repository card</b><span>name · one visibility badge at the right / description / footer: language dot, stars, forks, "Updated 3 days ago". Two per row on a profile.</span></li>
+      <li><b>Hugging Face model card</b><span>task icon · owner/name / one muted line: "Text Generation • Updated 3 days ago • ↓ 1.2M • ♥ 2.3k". Private shows a lock, public shows nothing.</span></li>
+      <li><b>GitHub repositories list</b><span>rows on hairlines: name + badge / description / meta with dots; one action at the right. The page every developer already reads.</span></li>
+    </ul>
+    <p>Also from the standards: your own repositories are a <b>view</b> ("Your repositories" vs "Explore"), never a per-card badge. So the switch becomes <b>Yours · Public</b> and the "yours" pill disappears. Provider glyphs leave the title and become words in the description, where Hugging Face puts the task.</p>
+  </div>
+
+  <!-- ================================================================ E1 -->
+  <section class="direction" id="e1">
+    <h2><span class="k">E1</span> GitHub card <small>four across, four lines each</small></h2>
+    <p class="lede">Line 1: kind glyph, <b>name</b>, one outline badge for visibility. Line 2: description in words ("Git project · Codex, Claude"). Line 3: facts with dot separators and small glyphs. Line 4: who pushed it and when, the way GitHub's footer says "Updated 3 days ago". Every card has four lines, so every row is one height.</p>
+    <ul class="pros">
+      <li><b>Name gets 170px.</b> The badge is the only thing beside it.</li>
+      <li><b>Left-aligned stack.</b> Nothing collides because nothing is pinned right except the date.</li>
+      <li><b>Reads top-down.</b> What, what kind, how much, who and when.</li>
+      <li class="con"><b>Four lines.</b> ~112px per card; three rows before scrolling at this height.</li>
+    </ul>
+    <div class="board-wrap"><div class="board"><span class="board-tag">E1 · signed in, Yours view</span>
+      <div class="page">
+        <div class="head"><h1>Repositories</h1><span class="count">4</span><span class="tabs"><span class="on">Yours</span><span>Public</span></span><span class="end"><span class="field" style="width:220px"><svg class="px"><use href="#search"/></svg> Find a repository</span><span class="btn">Type <svg class="px"><use href="#chevron-down"/></svg></span><span class="btn">Provider <svg class="px"><use href="#chevron-down"/></svg></span><span class="btn">Sort <svg class="px"><use href="#chevron-down"/></svg></span></span></div>
+        <div class="grid4">
+          <a class="card gh" href="#e1"><span class="gh-title"><svg class="px s18"><use href="#git-folder"/></svg><strong>HorrorGame</strong><span class="badge">Public</span></span><span class="gh-desc">Git project · Codex, Claude</span><span class="dots"><svg class="px"><use href="#message"/></svg><b>3</b> sessions<i>·</i><svg class="px"><use href="#file"/></svg><b>8</b> files<i>·</i><svg class="px"><use href="#storage"/></svg><b>16.4 KiB</b></span><span class="gh-foot"><span class="who"><span class="avatar">RI</span>Rika321</span><time>Sep 14, 2026</time></span></a>
+          <a class="card gh" href="#e1"><span class="gh-title"><svg class="px s18"><use href="#paw"/></svg><strong>Mossy</strong><span class="badge">Public</span></span><span class="gh-desc">Desktop pet · Codex</span><span class="dots"><svg class="px"><use href="#file"/></svg><b>1</b> file<i>·</i><svg class="px"><use href="#storage"/></svg><b>23.6 KiB</b></span><span class="gh-foot"><span class="who"><span class="avatar">RI</span>Rika321</span><time>Sep 14, 2026</time></span></a>
+          <a class="card gh" href="#e1"><span class="gh-title"><svg class="px s18"><use href="#lightbulb"/></svg><strong>release-notes</strong><span class="badge">Public</span></span><span class="gh-desc">Skill · Claude</span><span class="dots"><svg class="px"><use href="#file"/></svg><b>2</b> files<i>·</i><svg class="px"><use href="#storage"/></svg><b>628 B</b></span><span class="gh-foot"><span class="who"><span class="avatar">RI</span>Rika321</span><time>Sep 14, 2026</time></span></a>
+          <a class="card gh" href="#e1"><span class="gh-title"><svg class="px s18"><use href="#lightbulb"/></svg><strong>godot-scene-lint</strong><span class="badge">Public</span></span><span class="gh-desc">Skill · Codex</span><span class="dots"><svg class="px"><use href="#file"/></svg><b>2</b> files<i>·</i><svg class="px"><use href="#storage"/></svg><b>1.1 KiB</b></span><span class="gh-foot"><span class="who"><span class="avatar">RI</span>Rika321</span><time>Sep 14, 2026</time></span></a>
+        </div>
+      </div>
+    </div></div>
+    <div class="board-wrap"><div class="board"><span class="board-tag">E1 · Public view (what a visitor sees)</span>
+      <div class="page">
+        <div class="head"><h1>Repositories</h1><span class="count">5</span><span class="tabs"><span>Yours</span><span class="on">Public</span></span><span class="end"><span class="field" style="width:220px"><svg class="px"><use href="#search"/></svg> Find a repository</span><span class="btn">Type <svg class="px"><use href="#chevron-down"/></svg></span><span class="btn">Provider <svg class="px"><use href="#chevron-down"/></svg></span><span class="btn">Sort <svg class="px"><use href="#chevron-down"/></svg></span></span></div>
+        <div class="grid4">
+          <a class="card gh" href="#e1"><span class="gh-title"><svg class="px s18"><use href="#paw"/></svg><strong>Mossy</strong></span><span class="gh-desc">Desktop pet · Codex</span><span class="dots"><svg class="px"><use href="#file"/></svg><b>1</b> file</span><span class="gh-foot"><span class="who"><span class="avatar">RI</span>Rika321</span><time>Sep 14, 2026</time></span></a>
+          <a class="card gh" href="#e1"><span class="gh-title"><svg class="px s18"><use href="#lightbulb"/></svg><strong>release-notes</strong></span><span class="gh-desc">Skill · Claude</span><span class="dots"><svg class="px"><use href="#file"/></svg><b>2</b> files</span><span class="gh-foot"><span class="who"><span class="avatar">RI</span>Rika321</span><time>Sep 14, 2026</time></span></a>
+          <a class="card gh" href="#e1"><span class="gh-title"><svg class="px s18"><use href="#lightbulb"/></svg><strong>godot-scene-lint</strong></span><span class="gh-desc">Skill · Codex</span><span class="dots"><svg class="px"><use href="#file"/></svg><b>2</b> files</span><span class="gh-foot"><span class="who"><span class="avatar">RI</span>Rika321</span><time>Sep 14, 2026</time></span></a>
+          <a class="card gh" href="#e1"><span class="gh-title"><svg class="px s18"><use href="#git-folder"/></svg><strong>HorrorGame</strong></span><span class="gh-desc">Git project · Codex, Claude</span><span class="dots"><svg class="px"><use href="#message"/></svg><b>3</b> sessions<i>·</i><svg class="px"><use href="#file"/></svg><b>8</b> files</span><span class="gh-foot"><span class="who"><span class="avatar">RI</span>Rika321</span><time>Sep 14, 2026</time></span></a>
+          <a class="card gh" href="#e1"><span class="gh-title"><svg class="px s18"><use href="#folder"/></svg><strong>Staging smoke</strong></span><span class="gh-desc">Project · Codex</span><span class="dots"><svg class="px"><use href="#message"/></svg><b>1</b> session<i>·</i><svg class="px"><use href="#file"/></svg><b>2</b> files</span><span class="gh-foot"><span class="who"><span class="avatar ss">SS</span>staging-smoke</span><time>Sep 13, 2026</time></span></a>
+        </div>
+      </div>
+    </div></div>
+  </section>
+
+  <!-- ================================================================ E2 -->
+  <section class="direction" id="e2">
+    <h2><span class="k">E2</span> Hugging Face card <small>three across, two lines each</small></h2>
+    <p class="lede">Line 1: task icon, then <b>owner / name</b> in one run, a lock only when private. Line 2: <b>one muted line</b> with dot separators: kind, pushed date, facts. It is the densest honest card there is: two lines, nothing pinned right, and the owner is part of the name the way it is on the Hub.</p>
+    <ul class="pros">
+      <li><b>Two lines.</b> The shortest card that still says who, what, and how much.</li>
+      <li><b>Owner in the name.</b> "Rika321 / HorrorGame" is how people cite it elsewhere.</li>
+      <li><b>No badge for public.</b> Public is the default state; only private earns a mark.</li>
+      <li class="con"><b>Three across.</b> Owner + name need the width; four across would cut names again.</li>
+    </ul>
+    <div class="board-wrap"><div class="board"><span class="board-tag">E2 · signed in, Yours view</span>
+      <div class="page">
+        <div class="head"><h1>Repositories</h1><span class="count">4</span><span class="tabs"><span class="on">Yours</span><span>Public</span></span><span class="end"><span class="field" style="width:220px"><svg class="px"><use href="#search"/></svg> Find a repository</span><span class="btn">Type <svg class="px"><use href="#chevron-down"/></svg></span><span class="btn">Provider <svg class="px"><use href="#chevron-down"/></svg></span><span class="btn">Sort <svg class="px"><use href="#chevron-down"/></svg></span></span></div>
+        <div class="grid3">
+          <a class="card hf" href="#e2"><svg class="px s18"><use href="#git-folder"/></svg><span class="hf-name"><span class="owner">Rika321</span><span class="sl">/</span><strong>HorrorGame</strong></span><span class="dots">Git project<i>·</i>Codex, Claude<i>·</i>pushed Sep 14, 2026<i>·</i><b>3</b> sessions<i>·</i><b>8</b> files<i>·</i><b>16.4 KiB</b></span></a>
+          <a class="card hf" href="#e2"><svg class="px s18"><use href="#paw"/></svg><span class="hf-name"><span class="owner">Rika321</span><span class="sl">/</span><strong>Mossy</strong></span><span class="dots">Desktop pet<i>·</i>Codex<i>·</i>pushed Sep 14, 2026<i>·</i><b>1</b> file<i>·</i><b>23.6 KiB</b></span></a>
+          <a class="card hf" href="#e2"><svg class="px s18"><use href="#lightbulb"/></svg><span class="hf-name"><span class="owner">Rika321</span><span class="sl">/</span><strong>release-notes</strong></span><span class="dots">Skill<i>·</i>Claude<i>·</i>pushed Sep 14, 2026<i>·</i><b>2</b> files<i>·</i><b>628 B</b></span></a>
+          <a class="card hf" href="#e2"><svg class="px s18"><use href="#lightbulb"/></svg><span class="hf-name"><span class="owner">Rika321</span><span class="sl">/</span><strong>godot-scene-lint</strong></span><span class="dots">Skill<i>·</i>Codex<i>·</i>pushed Sep 14, 2026<i>·</i><b>2</b> files<i>·</i><b>1.1 KiB</b></span></a>
+          <a class="card hf" href="#e2"><svg class="px s18"><use href="#folder"/></svg><span class="hf-name"><span class="owner">Rika321</span><span class="sl">/</span><strong>Notes</strong><svg class="px lock"><use href="#lock"/></svg></span><span class="dots">Project<i>·</i>private<i>·</i>nothing pushed yet</span></a>
+        </div>
+      </div>
+    </div></div>
+  </section>
+
+  <!-- ================================================================ E3 -->
+  <section class="direction" id="e3">
+    <h2><span class="k">E3</span> GitHub list <small>rows on hairlines, one column</small></h2>
+    <p class="lede">The repositories page itself: rows in one tile, each with <b>name and badge</b>, a description, and a facts line with dots; the pusher and date at the right, where GitHub keeps its one action. Rows never fight for width, so nothing is ever cut, and the eye runs down one column of names.</p>
+    <ul class="pros">
+      <li><b>Nothing truncates.</b> Names and descriptions have the whole width.</li>
+      <li><b>Scans like a table.</b> Facts line up under each other down the page.</li>
+      <li><b>Most familiar.</b> Every developer has read this page.</li>
+      <li class="con"><b>Not a grid.</b> Five rows use the height four-across cards would give ten.</li>
+    </ul>
+    <div class="board-wrap"><div class="board"><span class="board-tag">E3 · signed in, Yours view</span>
+      <div class="page">
+        <div class="head"><h1>Repositories</h1><span class="count">4</span><span class="tabs"><span class="on">Yours</span><span>Public</span></span><span class="end"><span class="field" style="width:220px"><svg class="px"><use href="#search"/></svg> Find a repository</span><span class="btn">Type <svg class="px"><use href="#chevron-down"/></svg></span><span class="btn">Provider <svg class="px"><use href="#chevron-down"/></svg></span><span class="btn">Sort <svg class="px"><use href="#chevron-down"/></svg></span></span></div>
+        <div class="rows">
+          <a class="row" href="#e3"><svg class="px s18"><use href="#git-folder"/></svg><span class="row-title"><strong>HorrorGame</strong><span class="badge">Public</span></span><span class="row-desc">Git project · Codex, Claude</span><span class="dots row-meta"><svg class="px"><use href="#message"/></svg><b>3</b> sessions<i>·</i><svg class="px"><use href="#file"/></svg><b>8</b> files<i>·</i><svg class="px"><use href="#storage"/></svg><b>16.4 KiB</b></span><span class="row-end"><span class="avatar">RI</span>Rika321<i class="sl" style="color:var(--border-mid)">·</i><time>Sep 14, 2026</time></span></a>
+          <a class="row" href="#e3"><svg class="px s18"><use href="#paw"/></svg><span class="row-title"><strong>Mossy</strong><span class="badge">Public</span></span><span class="row-desc">Desktop pet · Codex</span><span class="dots row-meta"><svg class="px"><use href="#file"/></svg><b>1</b> file<i>·</i><svg class="px"><use href="#storage"/></svg><b>23.6 KiB</b></span><span class="row-end"><span class="avatar">RI</span>Rika321<i class="sl" style="color:var(--border-mid)">·</i><time>Sep 14, 2026</time></span></a>
+          <a class="row" href="#e3"><svg class="px s18"><use href="#lightbulb"/></svg><span class="row-title"><strong>release-notes</strong><span class="badge">Public</span></span><span class="row-desc">Skill · Claude</span><span class="dots row-meta"><svg class="px"><use href="#file"/></svg><b>2</b> files<i>·</i><svg class="px"><use href="#storage"/></svg><b>628 B</b></span><span class="row-end"><span class="avatar">RI</span>Rika321<i class="sl" style="color:var(--border-mid)">·</i><time>Sep 14, 2026</time></span></a>
+          <a class="row" href="#e3"><svg class="px s18"><use href="#lightbulb"/></svg><span class="row-title"><strong>godot-scene-lint</strong><span class="badge">Public</span></span><span class="row-desc">Skill · Codex</span><span class="dots row-meta"><svg class="px"><use href="#file"/></svg><b>2</b> files<i>·</i><svg class="px"><use href="#storage"/></svg><b>1.1 KiB</b></span><span class="row-end"><span class="avatar">RI</span>Rika321<i class="sl" style="color:var(--border-mid)">·</i><time>Sep 14, 2026</time></span></a>
+        </div>
+      </div>
+    </div></div>
+  </section>
+
+  <section class="verdict">
+    <h2>Where I would land</h2>
+    <p><b>E1, the GitHub card.</b> It keeps four across, and it is orderly for the reason GitHub's is: one badge on the name line, then a stack of single-purpose lines, all left-aligned, always four of them. The provider marks and the "yours" pill are the two things that made the last version messy, and the standard simply does not put them on a card: providers become words in the description, and "yours" becomes the view you are in. <b>E3</b> is the answer if you would rather trade the grid for zero truncation; <b>E2</b> if two-line density matters more than four per row.</p>
+  </section>
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var KEY = "mallard-cloud-standards-spec";
+  var state = { theme: "light" };
+  try { Object.assign(state, JSON.parse(localStorage.getItem(KEY) || "{}")); } catch (e) {}
+  function apply() {
+    root.dataset.theme = state.theme;
+    Array.prototype.forEach.call(document.querySelectorAll("#theme-seg button"), function (b) { b.setAttribute("aria-pressed", String(b.dataset.themePick === state.theme)); });
+    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
+  }
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-theme-pick]");
+    if (!b) return;
+    state.theme = b.dataset.themePick;
+    apply();
+  });
+  apply();
+})();
+</script>

@@ -886,7 +886,7 @@ impl ScopeBase {
     pub fn validate(&self) -> Result<(), String> {
         validate_sha256("scope base content", &self.scope_sha256)?;
         if self.scope_revision == 0 {
-            return Err("scope base revision must be nonzero".to_string());
+            return Err("scope base version must be nonzero".to_string());
         }
         self.reviewed_in.validate()
     }
@@ -4097,7 +4097,7 @@ impl BundleScope {
 
     fn validate(&self, scope: &SyncScopeKey) -> Result<(), String> {
         if self.revision == 0 {
-            return Err(format!("scope '{}' has a zero revision", scope));
+            return Err(format!("scope '{}' has a zero version", scope));
         }
         validate_sha256("scope content", &self.content_sha256)?;
         let computed = self.compute_content_sha256(scope)?;

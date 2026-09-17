@@ -17,6 +17,7 @@ export default function SyncReviewSelectionBar({
   onRecommended,
   clearDisabled,
   onClear,
+  searchActive = false,
   close,
 }: {
   count: number;
@@ -28,6 +29,7 @@ export default function SyncReviewSelectionBar({
   onRecommended: () => void;
   clearDisabled: boolean;
   onClear: () => void;
+  searchActive?: boolean;
   close?: {
     ariaLabel: string;
     onClose: () => void;
@@ -63,8 +65,8 @@ export default function SyncReviewSelectionBar({
         className="btn btn-ghost sync-sync-review-icon-action"
         onClick={onClear}
         disabled={busy || clearDisabled}
-        title="Clear current selection"
-        aria-label="Clear current selection"
+        title={searchActive ? "Clear matching selection" : "Clear current selection"}
+        aria-label={searchActive ? "Clear matching selection" : "Clear current selection"}
       >
         <Icon name="trash" size={15} />
       </button>

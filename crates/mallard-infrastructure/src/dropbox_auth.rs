@@ -13,6 +13,40 @@ use zeroize::Zeroizing;
 // Public client ID for the registered Dropbox app "mallard-app"; not an app secret.
 pub const APP_KEY: &str = "ex00srwhe5f5m5m";
 pub const CALLBACK_URI: &str = "http://127.0.0.1:53682/dropbox/callback";
+pub const CALLBACK_PORT: u16 = 53682;
+/// The Dropbox callback shape for the shared loopback receiver.
+pub const DROPBOX_CALLBACK: crate::loopback_browser::LoopbackCallback =
+    crate::loopback_browser::LoopbackCallback {
+        path: "/dropbox/callback",
+        result_key: "code",
+        completion_path: "/dropbox/complete",
+        title: "Dropbox authorization",
+        received_message: "Dropbox authorization received. Return to Mallard and wait for setup to finish.",
+        failed_message: "Dropbox authorization was not completed. Return to Mallard.",
+        errors: crate::loopback_browser::LoopbackErrors {
+            invalid: (
+                "dropbox_callback_invalid",
+                "Dropbox authorization returned an invalid callback. Run setup again.",
+            ),
+            unavailable: (
+                "dropbox_callback_unavailable",
+                "Mallard could not bind the Dropbox callback port. Close the other setup attempt and try again.",
+            ),
+            browser_failed: (
+                "dropbox_browser_failed",
+                "Mallard could not open the Dropbox authorization page.",
+            ),
+            cancelled: ("dropbox_setup_cancelled", "Dropbox setup was cancelled."),
+            denied: (
+                "dropbox_consent_denied",
+                "Dropbox access was not approved. Setup stopped.",
+            ),
+            timeout: (
+                "dropbox_authorization_timeout",
+                "Dropbox authorization timed out. Run setup again when you are ready.",
+            ),
+        },
+    };
 pub const STORAGE_SCOPES: &str =
     "account_info.read files.metadata.read files.content.read files.content.write";
 pub const SETUP_SCOPES: &str =

@@ -4,7 +4,10 @@
     {
       "name": "mallard-vite",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
       "port": 1420,
       "autoPort": false
     },
@@ -12,6 +15,16 @@
       "name": "mallard-vite-attach",
       "url": "http://localhost:1420",
       "port": 1420
+    },
+    {
+      "name": "managed-cloud-dev",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-lc",
+        "cd ../mallardInternal/cloudflare/managed-cloud && export PATH=\"$HOME/.nvm/versions/node/v22.22.0/bin:$PATH\" && npm run db:migrate:local && npm run build:web && npx wrangler dev --port 8787"
+      ],
+      "port": 8787,
+      "autoPort": false
     }
   ]
 }

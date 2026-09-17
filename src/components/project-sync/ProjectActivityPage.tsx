@@ -13,6 +13,7 @@ import type {
   ThreadSyncEntry,
 } from "../../types";
 import Icon, { type IconName } from "../Icons";
+import SessionRowIcon from "./SessionRowIcon";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import { formatDuration, formatFullDateTime } from "../../clock";
 import { formatBytes } from "../../format";
@@ -20,6 +21,8 @@ import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { githubCommitUrl, openExternalUrl } from "./externalLink";
 import LoadingScaffold from "../LoadingScaffold";
+import NameSearchField from "../sync-review/NameSearchField";
+import { nameMatchesSearch, type NameSearchResults } from "../sync-review/nameSearch";
 import { projectLabel } from "./model";
 import ProviderMark from "../sync-review/ProviderMark";
 import { writeClipboardText } from "../sync-review/clipboard";
@@ -51,7 +54,13 @@ export interface ActivityHeaderModel {
   onRefresh: () => void;
 }
 
-interface PageProps {
+interface SessionSearchProps {
+  searchQuery?: string;
+  onSearchQueryChange?: (query: string) => void;
+  onSearchResultsChange?: (results: NameSearchResults) => void;
+}
+
+interface PageProps extends SessionSearchProps {
   project: LocalProjectSummary;
   binding: ProjectBinding | null;
   refreshEpoch: number;
@@ -88,7 +97,7 @@ interface PageProps {
   onHeaderModelChange?: (model: ActivityHeaderModel | null) => void;
 }
 
-interface ContentProps {
+interface ContentProps extends SessionSearchProps {
   project: LocalProjectSummary;
   binding: ProjectBinding | null;
   activity: ProjectActivity | null;
@@ -711,13 +720,13 @@ export function SessionMetrics({
         did, then what it cost, then how long it took. */}
     {/* One message count sums prompts and final replies. The tooltip shows the
         split, one value per line. */}
-    <span className="sync-history-thread-metric" data-tooltip={`Prompts · ${session.user_round_count}\nReplies · ${session.agent_message_count}`} aria-label={`Messages: ${session.user_round_count + session.agent_message_count}. Prompts: ${session.user_round_count}. Replies: ${session.agent_message_count}`} tabIndex={0}><Icon name="message" size={12} /><b>{session.user_round_count + session.agent_message_count}</b></span>
-    {session.tool_call_count > 0 && <span className="sync-history-thread-metric" data-tooltip={`Tool calls · ${session.tool_call_count}`} aria-label={`Tool calls: ${session.tool_call_count}`} tabIndex={0}><Icon name="tool" size={12} /><b>{session.tool_call_count}</b></span>}
-    <span className="sync-history-thread-metric" data-tooltip={`Total input · ${totalInputTokens}\nTotal output · ${totalOutputTokens}`} aria-label={`Total tokens: ${totalTokens}. Total input: ${totalInputTokens}. Total output: ${totalOutputTokens}`} tabIndex={0}><Icon name="token" size={12} /><b>{totalTokens}</b></span>
+    <span className="sync-history-thread-metric" data-tooltip={`Prompts · ${session.user_round_count}\nReplies · ${session.agent_message_count}`} aria-label={`Messages: ${session.user_round_count + session.agent_message_count}. Prompts: ${session.user_round_count}. Replies: ${session.agent_message_count}`} tabIndex={0}><SessionRowIcon name="message" /><b>{session.user_round_count + session.agent_message_count}</b></span>
+    {session.tool_call_count > 0 && <span className="sync-history-thread-metric" data-tooltip={`Tool calls · ${session.tool_call_count}`} aria-label={`Tool calls: ${session.tool_call_count}`} tabIndex={0}><SessionRowIcon name="tool" /><b>{session.tool_call_count}</b></span>}
+    <span className="sync-history-thread-metric" data-tooltip={`Total input · ${totalInputTokens}\nTotal output · ${totalOutputTokens}`} aria-label={`Total tokens: ${totalTokens}. Total input: ${totalInputTokens}. Total output: ${totalOutputTokens}`} tabIndex={0}><SessionRowIcon name="token" /><b>{totalTokens}</b></span>
     {!session.metrics_complete && <span className="sync-history-thread-metric sync-history-partial" data-tooltip="Some session metrics are unavailable" aria-label="Some session metrics are unavailable" tabIndex={0}><Icon name="alert-triangle" size={12} /></span>}
     {durationText && (
       <span className="sync-history-thread-metric sync-history-thread-duration" data-tooltip={durationLabel} aria-label={durationLabel} tabIndex={0}>
-        <Icon name={session.is_active ? "activity" : "clock"} size={12} /><b>{durationText}</b>
+        <SessionRowIcon name={session.is_active ? "activity" : "clock"} /><b>{durationText}</b>
       </span>
     )}
     {captureBytes != null && (
@@ -945,7 +954,7 @@ function SessionDebugMenu({
         aria-controls={menuId}
         onClick={() => open ? closeMenu() : setOpen(true)}
       >
-        <Icon name="info" size={14} />
+        <SessionRowIcon name="info" />
       </button>
       {/* On body, not in the row. Nothing in the list can bound it there:
           not the row's card, not the commit rail's stacking context, and
@@ -1405,7 +1414,7 @@ function SessionCard({
                 title="View session details"
                 onClick={(clickEvent) => openSessionDetail(clickEvent.currentTarget)}
               >
-                <Icon name="chevron-right" size={13} />
+                <SessionRowIcon name="chevron-right" />
               </button>
             )}
           </div>
@@ -1592,10 +1601,16 @@ export function ProjectChatHistoryContent({
   selectionDisabled = false, onToggleResource, onReviewPull, onUnlinkStorage,
   onChooseAgentProfile,
   continuityActionBusy = false,
+  searchQuery, onSearchQueryChange, onSearchResultsChange,
 }: ContentProps) {
+  const [localQuery, setLocalQuery] = useState("");
+  const query = searchQuery ?? localQuery;
+  const searching = query.trim().length > 0;
   const [collapsedCommitShas, setCollapsedCommitShas] = useState<Set<string>>(new Set());
-  const [branchUnmappedCollapsed, setBranchUnmappedCollapsed] = useState(false);
-  const [storageOnlyCollapsed, setStorageOnlyCollapsed] = useState(false);
+  const [branchUnmappedFolded, setBranchUnmappedCollapsed] = useState(false);
+  const [storageOnlyFolded, setStorageOnlyCollapsed] = useState(false);
+  const branchUnmappedCollapsed = !searching && branchUnmappedFolded;
+  const storageOnlyCollapsed = !searching && storageOnlyFolded;
   const label = projectLabel(project);
   const allSessions = useMemo(
     () => [...(activity?.sessions ?? [])].sort(compareSessions),
@@ -1605,7 +1620,7 @@ export function ProjectChatHistoryContent({
     () => indexSessionSyncEntries(comparison?.entries ?? []),
     [comparison?.entries],
   );
-  const sessions = useMemo(() => {
+  const reviewSessions = useMemo(() => {
     if (!selectionMode) return allSessions;
     return allSessions.filter((session) => {
       const entry = syncEntryForSession(session, syncIndex);
@@ -1616,6 +1631,10 @@ export function ProjectChatHistoryContent({
         : isPushReviewRow(status, entry.push_decision);
     });
   }, [allSessions, selectionMode, syncIndex]);
+  const sessions = useMemo(
+    () => reviewSessions.filter((session) => nameMatchesSearch(session.title || "Untitled session", query)),
+    [reviewSessions, query],
+  );
   const sessionsByResource = useMemo(
     () => new Map(sessions.map((session) => [session.resource_id, session])),
     [sessions],
@@ -1653,23 +1672,18 @@ export function ProjectChatHistoryContent({
      render its session. Presence in `activity.sessions` is not enough: a
      missing commit/unmapped reference would otherwise hide a planned Push or
      Pull row from both the Git rail and the fallback list. */
-  const renderedSessionIds = useMemo(() => {
-    if (!activity?.git) return new Set(sessions.map((session) => session.resource_id));
-    return new Set([
-      ...activity.git.commits.flatMap((commit) => (
-        commit.session_refs.map((reference) => reference.resource_id)
-      )),
-      ...(activity.unmapped ?? []).map((reference) => reference.resource_id),
-    ].filter((resourceId) => sessionsByResource.has(resourceId)));
-  }, [activity, sessions, sessionsByResource]);
   const renderedSyncEntryIds = useMemo(() => {
-    const entryIds = new Set<string>();
-    for (const resourceId of renderedSessionIds) {
-      const entry = syncBySessionResource.get(resourceId);
-      if (entry) entryIds.add(entry.resource_id);
-    }
-    return entryIds;
-  }, [renderedSessionIds, syncBySessionResource]);
+    // Use the unfiltered projection here. Search must not turn an excluded
+    // activity row into a comparison-only row with another name.
+    const representedIds = activity?.git ? new Set([
+      ...activity.git.commits.flatMap((commit) => commit.session_refs.map((ref) => ref.resource_id)),
+      ...(activity.unmapped ?? []).map((ref) => ref.resource_id),
+    ]) : new Set(reviewSessions.map((session) => session.resource_id));
+    return new Set(reviewSessions.flatMap((session) => {
+      const entry = syncEntryForSession(session, syncIndex);
+      return representedIds.has(session.resource_id) && entry ? [entry.resource_id] : [];
+    }));
+  }, [activity, reviewSessions, syncIndex]);
   /* The non-git flat list's own split of the same fact, session-typed rather
      than reference-typed because that list renders sessions directly. */
   const cloudSessions = sessions.filter((session) => session.source === "remote_only");
@@ -1679,7 +1693,7 @@ export function ProjectChatHistoryContent({
      whole span at once, so this is only what no activity row can ever reach;
      a review must still offer it or it would drop candidates silently. It
      renders as plain rows at the foot of the same list — never a box. */
-  const unlistedEntries = useMemo(() => {
+  const allUnlistedEntries = useMemo(() => {
     if (!selectionMode) return [];
     return (comparison?.entries ?? []).filter((entry) => (
       (entry.local_present || entry.storage_present)
@@ -1689,6 +1703,25 @@ export function ProjectChatHistoryContent({
       && !renderedSyncEntryIds.has(entry.resource_id)
     ));
   }, [comparison?.entries, selectionMode, renderedSyncEntryIds]);
+  const unlistedEntries = useMemo(() => allUnlistedEntries.filter((entry) => (
+    nameMatchesSearch(entry.display_name.trim() && entry.display_name !== entry.thread_id
+      ? entry.display_name : "Untitled thread", query)
+  )), [allUnlistedEntries, query]);
+  const searchResults = useMemo<NameSearchResults>(() => ({
+    query,
+    resourceIds: new Set([
+      ...sessions.map((session) => syncEntryForSession(session, syncIndex)?.resource_id ?? session.resource_id),
+      ...unlistedEntries.map((entry) => entry.resource_id),
+    ]),
+  }), [query, sessions, syncIndex, unlistedEntries]);
+  useEffect(() => { onSearchResultsChange?.(searchResults); }, [onSearchResultsChange, searchResults]);
+  const searchableIds = new Set([
+    ...reviewSessions.map((session) => syncEntryForSession(session, syncIndex)?.resource_id ?? session.resource_id),
+    ...allUnlistedEntries.map((entry) => entry.resource_id),
+  ]);
+  const hiddenSelected = searching ? [...searchableIds].filter((id) => (
+    selectedResourceIds.has(id) && !searchResults.resourceIds.has(id)
+  )).length : 0;
   const hasBoundProvider = Object.keys(binding?.profile_ids ?? {}).length > 0;
   // Resolved once for the page: every row without a comparison entry draws this
   // instead of drawing nothing.
@@ -1750,13 +1783,13 @@ export function ProjectChatHistoryContent({
     });
   const commits = useMemo(() => {
     const candidates = activity?.git?.commits ?? [];
-    if (!selectionMode) return candidates;
+    if (!selectionMode && !searching) return candidates;
     return candidates.filter((commit) => (
       commit.session_refs.some((reference) => sessionsByResource.has(reference.resource_id))
     ));
-  }, [activity?.git?.commits, selectionMode, sessionsByResource]);
+  }, [activity?.git?.commits, selectionMode, searching, sessionsByResource]);
   // A review holds the whole span at once, so an empty one is truly empty.
-  const selectionReviewEmpty = selectionMode != null
+  const selectionReviewEmpty = !searching && selectionMode != null
     && comparison != null
     && sessions.length === 0
     && unlistedEntries.length === 0;
@@ -1800,7 +1833,7 @@ export function ProjectChatHistoryContent({
       key: "continuity-replaced",
       severity: "warning",
       title: "Storage history changed",
-      message: `The sync history in ${comparisonStorageName} is different from the one Mallard last synced for this project (revision ${comparison.remote_continuity.base_revision}). This usually means Mallard's sync data in that storage was deleted and created again. The session statuses below use the replacement. Unlink this storage and link it again to start fresh. Unlinking does not delete files, but anything saved only in the previous storage history cannot be recovered from this machine.`,
+      message: `The sync history in ${comparisonStorageName} is different from the one Mallard last synced for this project (version ${comparison.remote_continuity.base_revision}). This usually means Mallard's sync data in that storage was deleted and created again. The session statuses below use the replacement. Unlink this storage and link it again to start fresh. Unlinking does not delete files, but anything saved only in the previous storage history cannot be recovered from this machine.`,
       // The recovery is one verb, and only when the host offers it.
       action: onUnlinkStorage ? (
         <button type="button" className="btn btn-ghost danger" onClick={onUnlinkStorage} disabled={continuityActionBusy}>
@@ -1867,6 +1900,11 @@ export function ProjectChatHistoryContent({
           className="sync-history-notices"
           {...noticeTiming}
         />
+        {hasBoundProvider && (
+          <NameSearchField query={query} onChange={onSearchQueryChange ?? setLocalQuery}
+            label={selectionMode ? "Search sessions" : "Search loaded sessions"}
+            matches={searchResults.resourceIds.size} total={searchableIds.size} hiddenSelected={hiddenSelected} />
+        )}
         {!hasBoundProvider ? (
           <div className="sync-history-state sync-history-profile-state">
             <Icon name="alert-triangle" size={18} />
@@ -1918,6 +1956,9 @@ export function ProjectChatHistoryContent({
           ) : null
         ) : (
           <>
+            {searching && searchResults.resourceIds.size === 0 && (
+              <div className="sync-history-state">{selectionMode ? "No matching sessions." : "No matching loaded sessions."}</div>
+            )}
             {selectionReviewEmpty && (
               <div className="sync-pull-empty">
                 <Icon name="check-circle" size={16} />
@@ -1942,6 +1983,7 @@ export function ProjectChatHistoryContent({
                 <SectionFold
                   collapsed={storageOnlyCollapsed}
                   controls="storage-only-list"
+                  disabled={searching}
                   label={`${storageOnlyCollapsed ? "Expand" : "Collapse"} ${storageOnlyReferences.length} session${storageOnlyReferences.length === 1 ? "" : "s"} only in ${storageOnlyName}`}
                   onToggle={() => setStorageOnlyCollapsed(!storageOnlyCollapsed)}
                 />
@@ -1961,6 +2003,7 @@ export function ProjectChatHistoryContent({
                     <SectionFold
                       collapsed={branchUnmappedCollapsed}
                       controls="branch-unmapped-list"
+                      disabled={searching}
                       label={`${branchUnmappedCollapsed ? "Expand" : "Collapse"} ${branchUnmappedReferences.length} uncommitted session${branchUnmappedReferences.length === 1 ? "" : "s"}`}
                       onToggle={() => setBranchUnmappedCollapsed(!branchUnmappedCollapsed)}
                     />
@@ -1972,7 +2015,7 @@ export function ProjectChatHistoryContent({
                     )}
                   </section>
                 )}
-                {(selectionMode !== "pull" || commits.length > 0) && (
+                {((!searching && selectionMode !== "pull") || commits.length > 0) && (
                   <section className="sync-history-commit-section" aria-label={`First-parent commits on ${activity.git.selected_branch}`}>
                   {commits.length === 0 ? (
                     /* An empty rail is still the rail: the gap draws as a card
@@ -2003,7 +2046,7 @@ export function ProjectChatHistoryContent({
                     <ol className="sync-history-commit-rail">{commits.map((commit) => {
                       const commitUrl = githubCommitUrl(activity.git?.github_repository_url, commit.sha);
                       const references = orderedReferences(commit.session_refs);
-                      const collapsed = collapsedCommitShas.has(commit.sha);
+                      const collapsed = !searching && collapsedCommitShas.has(commit.sha);
                       const displaySha = commit.short_sha.slice(0, 7);
                       const sessionListId = `commit-sessions-${commit.short_sha}`;
                       return (
@@ -2012,7 +2055,7 @@ export function ProjectChatHistoryContent({
                             collapsed={collapsed}
                             controls={sessionListId}
                             label={`${collapsed ? "Expand" : "Collapse"} commit ${displaySha}`}
-                            disabled={references.length === 0}
+                            disabled={searching || references.length === 0}
                             onToggle={() => toggleCommit(commit.sha)}
                           />
                           <div className="sync-history-commit-heading">
@@ -2069,7 +2112,7 @@ export function ProjectChatHistoryContent({
                     plain section heading — no frame, no fold, no count — and
                     the local half takes a heading only while the partition
                     exists; alone, the leaf crumb already names it. */}
-                {sessions.length === 0 ? (
+                {sessions.length === 0 ? (searching ? null : (
                   <div className="sync-history-thread-list flat">
                     {/* Same rule as the empty rail: the window is named only
                         when paging past it could still turn something up. A
@@ -2080,7 +2123,7 @@ export function ProjectChatHistoryContent({
                       {(activity.older?.sessions ?? 0) > 0 ? `No sessions in ${windowRange}.` : "No sessions yet."}
                     </div>
                   </div>
-                ) : (
+                )) : (
                   <>
                     {cloudSessions.length > 0 && (
                       <>
@@ -2206,6 +2249,7 @@ export default function ProjectActivityPage({
   onReviewListReadyChange,
   onHeaderModelChange,
   onOpenSessionDetail,
+  searchQuery, onSearchQueryChange, onSearchResultsChange,
 }: PageProps) {
   /* Keep loaded windows as a stack so Show less is a pop instead of a refetch. */
   const [pages, setPages] = useState<ProjectActivity[]>([]);
@@ -2427,5 +2471,5 @@ export default function ProjectActivityPage({
       setActionBusyActionId(null);
     }
   };
-  return <ProjectChatHistoryContent project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} />;
+  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} />;
 }

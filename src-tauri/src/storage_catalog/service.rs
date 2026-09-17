@@ -1904,7 +1904,7 @@ fn apply_push_with_repositories(
         published: published.published,
         revision: Some(published.head.revision),
         message: if published.published {
-            format!("Published revision {}", published.head.revision)
+            format!("Published version {}", published.head.revision)
         } else {
             "The linked storage already had this content".to_string()
         },

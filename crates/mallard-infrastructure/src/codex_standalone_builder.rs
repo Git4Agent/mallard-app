@@ -478,6 +478,9 @@ fn reconstruct_codex_root(
         return Err("standalone Codex output exceeds the bounded transcript limit".to_string());
     }
     let output_verification_started = Instant::now();
+    if !encode_mode {
+        validate_projection_fixpoint(&final_records, &output_root_id)?;
+    }
     let analysis = analyze_standalone_output(&output, final_records.into_iter().map(Ok))?;
     let output_record_count = analysis.record_count as u64;
     if child_boundary.is_some() {
@@ -485,9 +488,6 @@ fn reconstruct_codex_root(
         if !boundary.is_some_and(|boundary| boundary > 0 && boundary <= output_record_count) {
             return Err("standalone child output has an invalid native boundary".into());
         }
-    }
-    if !encode_mode {
-        validate_projection_fixpoint(&output, &output_root_id)?;
     }
 
     // Full verification: the output must re-analyze to a canonical chain
@@ -562,20 +562,15 @@ fn reconstruct_codex_root(
     })
 }
 
-/// Prove the serialized output is a fixpoint of the projection pass: parsing
-/// the body back and projecting it again must change nothing.
-fn validate_projection_fixpoint(bytes: &[u8], output_root_id: &str) -> Result<(), String> {
+/// Prove the exact serialized values are a projection fixpoint. The complete
+/// records retain their ordinals for the separate standalone layout check.
+fn validate_projection_fixpoint(output: &[Value], output_root_id: &str) -> Result<(), String> {
     let mut records = Vec::new();
-    for raw in bytes.split(|byte| *byte == b'\n') {
-        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-        if raw.is_empty() {
+    for value in output {
+        if structural_record_type(value) == Some("session_meta") {
             continue;
         }
-        let mut value: Value = serde_json::from_slice(raw)
-            .map_err(|_| "standalone Codex output contains malformed JSON".to_string())?;
-        if structural_record_type(&value) == Some("session_meta") {
-            continue;
-        }
+        let mut value = value.clone();
         if let Some(record) = value.as_object_mut() {
             record.remove("ordinal");
         }
@@ -944,6 +939,57 @@ mod tests {
         let mut missing_head = Vec::new();
         append_output_record(&mut missing_head, &mut Vec::new(), message, 0).unwrap();
         assert!(analyze_standalone_output(&missing_head, parsed_records(&missing_head)).is_err());
+    }
+
+    #[test]
+    fn retained_projection_check_matches_serialized_output_and_rejects_missing_display_records() {
+        let wire = include_bytes!("fixtures/standalone_codex_wire.jsonl");
+        let resolved = crate::codex_history_graph::resolve_standalone_codex_bytes(wire).unwrap();
+        let artifact = decode_codex_tree_member(
+            &resolved,
+            wire,
+            "fresh-root",
+            "/fixture/destination",
+            None,
+            &mallard_domain::RootTailLayout {
+                codec: PORTABLE_TAIL_CODEC_V1.into(),
+                partition_kind: mallard_domain::TailPartitionKind::WholeThread,
+                start_record_count: 0,
+            },
+            &BTreeMap::new(),
+            &mut credential_redaction::shared().begin_run(),
+        )
+        .unwrap();
+        let records = parsed_records(&artifact.root_bytes)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let before = records.clone();
+        validate_projection_fixpoint(&records, "fresh-root").unwrap();
+        assert_eq!(records, before);
+        let normalized: Vec<_> = records
+            .iter()
+            .filter(|record| structural_record_type(record) != Some("session_meta"))
+            .cloned()
+            .map(|mut record| {
+                record.as_object_mut().unwrap().remove("ordinal");
+                record
+            })
+            .collect();
+        verify_projection_fixpoint(&normalized, "fresh-root").unwrap();
+        let mut missing_display = records;
+        for payload in [
+            json!({"type": "task_started", "turn_id": "turn-1"}),
+            json!({"type": "user_message", "message": "Hello", "images": [],
+                "local_images": [], "text_elements": []}),
+        ] {
+            missing_display.push(json!({
+                "ordinal": missing_display.len(),
+                "timestamp": "2026-08-12T10:01:00Z", "type": "event_msg", "payload": payload,
+            }));
+        }
+        assert!(validate_projection_fixpoint(&missing_display, "fresh-root")
+            .unwrap_err()
+            .contains("not a fixpoint"));
     }
 
     #[test]

@@ -89,7 +89,7 @@ export default function ThreadStatusIcon({
       fill="none"
       focusable="false"
       height={size}
-      shapeRendering="crispEdges"
+      shapeRendering={size % 24 === 0 ? "crispEdges" : "geometricPrecision"}
       viewBox="0 0 24 24"
       width={size}
       {...props}

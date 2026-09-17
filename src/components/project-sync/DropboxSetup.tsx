@@ -5,8 +5,7 @@ import { projectSyncApi } from "./api";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import Icon from "../Icons";
 import { CandidateGroups, CandidateRow, candidateSelectable, DiscoveryEmpty, ScanIncompleteNotice } from "./StorageDiscovery";
-import { Step, useCountdown, type StepStatus, type StepView } from "./StorageSetupStep";
-import type { R2SetupPort } from "./R2Setup";
+import { Step, useCountdown, type StepStatus, type StepView, type StorageSetupPort } from "./StorageSetupStep";
 
 type Phase = "idle" | "login" | "account" | "folder" | "find" | "pick" | "prepare" | "review";
 interface State {
@@ -61,7 +60,7 @@ function errorCode(reason: unknown): string {
 const FINAL_CODES = new Set(["dropbox_setup_outcome_unknown", "dropbox_new_setup_required"]);
 
 export function useDropboxSetup({ enabled, draftId, mode, port, api = projectSyncApi }: {
-  enabled: boolean; draftId: string | null; mode: DropboxSetupMode; port: R2SetupPort; api?: Api;
+  enabled: boolean; draftId: string | null; mode: DropboxSetupMode; port: StorageSetupPort; api?: Api;
 }) {
   const [state, setState] = useState<State>(idle);
   const current = useRef(state);

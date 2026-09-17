@@ -1,4 +1,4 @@
-import { Step, useCountdown, type StepView, type StepStatus } from "./StorageSetupStep";
+import { Step, useCountdown, type StepView, type StepStatus, type StorageSetupPort } from "./StorageSetupStep";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   R2Account,
@@ -116,6 +116,11 @@ const FAILURE_FACTS: Record<R2SetupErrorCode, string> = {
   setup_busy: "Another storage operation is running · wait, then try again",
   creation_unknown: "Creation result unknown · check the bucket in Cloudflare before continuing",
   permission_denied: "Cloudflare refused access · check the account permissions",
+  r2_not_enabled: "R2 is not enabled for this account. Complete R2 setup in the Cloudflare dashboard, then try again.",
+  authentication_failed: "Cloudflare could not verify the sign-in. Select Change login, then sign in again.",
+  rate_limited: "Cloudflare received too many requests. Wait, then try again.",
+  service_unavailable: "Could not reach Cloudflare or its service is temporarily unavailable. Check your connection, then try again.",
+  request_rejected: "Cloudflare rejected the request. Check the account, bucket name, and jurisdiction.",
   identity_mismatch: "The account or bucket differs from this draft · reset to start over",
   bucket_name_taken: "Already exists in this account · choose another name",
   cancelled: "Stopped",
@@ -147,18 +152,6 @@ function failedPhase(code: R2SetupErrorCode, phase: R2Phase, mode: R2SetupMode):
   if (code === "bucket_name_taken") return "bucket";
   if (mode === "existing" && (code === "draft_changed" || code === "identity_mismatch") && (phase === "verify" || phase === "authorize")) return "find";
   return phase === "idle" ? "check" : phase;
-}
-
-/** What the workspace lends the hook: the draft to run on, and the seat for
- *  the draft the helper prepares. */
-export interface R2SetupPort {
-  /** Something else holds the page: no run may start. */
-  blocked: () => boolean;
-  /** Pin the open draft for one run: a save, and whether it still stands. */
-  beginRun: () => { isCurrent: () => boolean; persist: () => Promise<StorageSetupDraft | null> };
-  onRunStarted: () => void;
-  /** Load and seat the prepared draft; false when the page moved on first. */
-  adoptPrepared: (saved: StorageSetupDraft, isCurrent: () => boolean) => Promise<boolean>;
 }
 
 type R2Api = Pick<typeof projectSyncApi,
@@ -193,7 +186,7 @@ export function useR2Setup({ enabled, draftId, mode, port, api = projectSyncApi 
   /** A different draft starts from nothing. */
   draftId: string | null;
   mode: R2SetupMode;
-  port: R2SetupPort;
+  port: StorageSetupPort;
   api?: R2Api;
 }): R2SetupFlow {
   const [state, setState] = useState<R2SetupState>(idleR2State);

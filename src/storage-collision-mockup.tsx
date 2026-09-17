@@ -96,7 +96,7 @@ function RepoRow({ repo }: { repo: Repo }) {
         </span>
         <strong className="sync-storage-repository-name">{repo.name}</strong>
         <span className="sync-storage-repository-chips">
-          <span className="sync-storage-repo-chip"><span>Revision</span><b>{repo.revision}</b></span>
+          <span className="sync-storage-repo-chip"><span>Version</span><b>{repo.revision}</b></span>
           <span className="sync-storage-repo-chip"><span>Updated</span><b>{repo.updated}</b></span>
         </span>
         <button type="button" className="sync-history-commit-toggle" aria-label={`Show details for ${repo.name}`}>

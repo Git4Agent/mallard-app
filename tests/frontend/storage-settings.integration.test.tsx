@@ -534,7 +534,7 @@ test("repository rows spell their chips and fold full details behind the history
   assert.match(html, /sync-storage-repository-row/);
   assert.match(html, /mallardInternal/);
   // Chips spell their words — no Rev/Upd abbreviations anywhere on the row.
-  assert.match(html, /sync-storage-repo-chip[^>]*><span>Revision<\/span><b>3<\/b>/);
+  assert.match(html, /sync-storage-repo-chip[^>]*><span>Version<\/span><b>3<\/b>/);
   assert.match(html, /sync-storage-repo-chip[^>]*><span>Updated<\/span><b>29m ago<\/b>/);
   assert.doesNotMatch(html, /<span>Rev<\/span>/);
   assert.doesNotMatch(html, /<span>Upd<\/span>/);
@@ -600,7 +600,7 @@ test("Catalog kind repositories join the listing in the project row's grammar", 
   assert.match(html, /sync-storage-repository-row/);
   assert.match(html, /Skills · Codex/);
   assert.match(html, /data-icon="lightbulb"/);
-  assert.match(html, /sync-storage-repo-chip[^>]*><span>Revision<\/span><b>10<\/b>/);
+  assert.match(html, /sync-storage-repo-chip[^>]*><span>Version<\/span><b>10<\/b>/);
   assert.match(html, /sync-storage-repo-chip[^>]*><span>Updated<\/span><b>29m ago<\/b>/);
   assert.match(html, /sync-history-commit-toggle/);
   assert.match(html, /aria-expanded="false"/);
@@ -635,7 +635,7 @@ test("an unreadable Catalog repository states its refusal instead of chips", () 
   assert.match(html, /sync-storage-repository-icon danger/);
   // No chips on a refusal row — the phrase takes their place — and the
   // backend's sentence waits in the fold.
-  assert.doesNotMatch(html, /<span>Revision<\/span>/);
+  assert.doesNotMatch(html, /<span>Version<\/span>/);
   assert.doesNotMatch(html, /<span>Updated<\/span>/);
   assert.doesNotMatch(html, /provider and kind derivation/);
 });
@@ -1841,6 +1841,36 @@ test("the bucket line proposes a name in a field, takes a rename, and hands a ta
   assert.match(lane, /api\.setupR2Storage\(saved\.draft_id, saved\.revision, account\.id, jurisdiction, requested, progressFor\(live\)\)/);
 });
 
+test("R2 activation failures explain dashboard setup and keep retry available", () => {
+  const failed = r2SetupErrorCode({ code: "r2_not_enabled", message: "private-canary" });
+  assert.equal(failed, "r2_not_enabled");
+  for (const [mode, phase] of [["create", "create"], ["existing", "find"]] as const) {
+    const html = renderLane(mode, { phase, failed, account, name: "mallard-fox" });
+    assert.match(html, /R2 is not enabled for this account\. Complete R2 setup in the Cloudflare dashboard, then try again\./);
+    assert.match(html, /Try again/);
+    assert.doesNotMatch(html, /check the account permissions|private-canary/);
+  }
+  assert.match(renderLane("create", { phase: "create", failed: "permission_denied", account }), /Cloudflare refused access · check the account permissions/);
+});
+
+test("R2 setup gives specific recovery steps for Cloudflare failures", () => {
+  for (const [code, message] of [
+    ["authentication_failed", /Cloudflare could not verify the sign-in/],
+    ["rate_limited", /Cloudflare received too many requests\. Wait, then try again\./],
+    ["service_unavailable", /Could not reach Cloudflare or its service is temporarily unavailable/],
+    ["request_rejected", /Cloudflare rejected the request\. Check the account, bucket name, and jurisdiction\./],
+  ] as const) {
+    assert.equal(r2SetupErrorCode({ code }), code);
+    for (const [mode, phase] of [["create", "create"], ["existing", "find"]] as const) {
+      const html = renderLane(mode, { phase, failed: code, account });
+      assert.match(html, message);
+      assert.match(html, /Try again/);
+      if (code === "authentication_failed") assert.match(html, /<button[^>]*>[^]*?Change login<\/button>/);
+      assert.doesNotMatch(html, /Creation result unknown/);
+    }
+  }
+});
+
 test("the bucket line keeps the created name through an expired consent and a stop", () => {
   const creating = renderLane("create", { phase: "create", running: true, account, name: "mallard-fox", proposal: "mallard-fox" });
   assert.match(creating, /Creating <code>mallard-fox<\/code>…/);
@@ -1957,8 +1987,8 @@ test("Wrangler completion rejects a changed identity", async () => {
 
 test("R2 setup uses a synchronous busy guard and blocks conflicting actions", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
-  assert.match(workspace, /const run = async[^]*?if \(\(r2\.isRunning\(\) \|\| dropbox\.isRunning\(\)\)\) return;/);
-  assert.match(workspace, /const saveStorageDraftBeforeNavigation = async[^]*?if \(\(r2\.isRunning\(\) \|\| dropbox\.isRunning\(\)\)\) return false;/);
+  assert.match(workspace, /const run = async[^]*?if \(r2\.isRunning\(\) \|\| dropbox\.isRunning\(\) \|\| managedCloud\.isRunning\(\)\) return;/);
+  assert.match(workspace, /const saveStorageDraftBeforeNavigation = async[^]*?if \(r2\.isRunning\(\) \|\| dropbox\.isRunning\(\) \|\| managedCloud\.isRunning\(\)\) return false;/);
   assert.match(workspace, /const formLocked = busy \|\| !!runningAction \|\| r2\.state\.running \|\| dropbox\.state\.running;/);
   assert.match(workspace, /blocked: \(\) => busy \|\| !!runningAction,/);
   // Every run pins the draft it started on and saves it first.
@@ -2085,4 +2115,123 @@ test("Dropbox timeout and revoked-token states say the reason on the Sign in lin
   assert.match(unknown, /did not confirm the folder operation · inspect Dropbox before a new setup · the created folder is kept/);
   assert.doesNotMatch(unknown, /Try again/);
   assert.match(unknown, /New setup for another account/);
+});
+
+// Mallard Cloud signs in with GitHub and keeps the session as its only secret.
+import { ManagedCloudSetupLane, type useManagedCloudSetup } from "../../src/components/project-sync/ManagedCloudSetup";
+import { setupRouteIcon, setupRouteLabel } from "../../src/components/project-sync/StorageSettings";
+const managedCloudProvider: StorageProviderDescriptor = {
+    key: "managed_cloud", config_version: 1, display_name: "Mallard Cloud", description: "Mallard's own service",
+    display_rank: 5, icon: "cloud", clear_mode: "unavailable", default_name: "Mallard Cloud",
+    fields: [],
+    secrets: [{ secret_id: "account_token", label: "Sign-in token", required: true }],
+    managed_secret_id: "account_token", local_setup: "managed_cloud",
+};
+type ManagedCloudFlow = ReturnType<typeof useManagedCloudSetup>;
+function managedCloudFlow(state: Partial<ManagedCloudFlow["state"]>): ManagedCloudFlow {
+  return {
+    state: { phase: "idle", running: false, cancelling: false, error: null, link: null, login: null, account: null, serviceOrigin: null, ...state },
+    isRunning: () => false, start: noop, confirmAccount: noop, cancel: async () => undefined, dismiss: noop,
+  };
+}
+function renderManagedCloud(state: Partial<ManagedCloudFlow["state"]>, mode: "create" | "reconnect" = "create", storages: StorageSummary[] = []) {
+  return renderToStaticMarkup(<ManagedCloudSetupLane flow={managedCloudFlow(state)} mode={mode} storages={storages}
+    disabled={state.running ?? false} onOpenStorage={noop} onReset={noop} />);
+}
+const managedCloudLogin = { session_id: "opaque-session", account: { id: "user_1", login: "octocat" }, service_origin: "https://mallard-ai.com" };
+
+test("Mallard Cloud declares a sign-in lane, no manual fields, and one managed secret", () => {
+  const form = { name: "Mallard Cloud", settings: {}, typedSecrets: {} };
+  const fresh = renderToStaticMarkup(
+    <StorageEditor descriptor={managedCloudProvider} form={form} secretPresence={{}}
+      disabled={false} onChange={() => {}}
+      setupSlot={<button type="button">Sign in with GitHub</button>} />,
+  );
+  assert.match(fresh, /Mallard Cloud setup/);
+  assert.match(fresh, /Sign in with GitHub/);
+  assert.doesNotMatch(fresh, /Manual setup|Enter by hand|Setup guide/);
+  assert.deepEqual(fieldsSet(managedCloudProvider, form, {}), { set: 0, total: 1 });
+  assert.equal(storageDraftReady(managedCloudProvider, form, {}), false);
+  assert.equal(storageDraftReady(managedCloudProvider, form, { account_token: true }), true);
+  assert.equal(setupRouteIcon("managed_cloud"), "cloud");
+  assert.equal(setupRouteLabel("managed_cloud", "sign-in"), "Mallard Cloud sign-in");
+  assert.equal(setupRouteLabel("dropbox", "setup"), "Dropbox setup");
+  assert.equal(setupRouteLabel("wrangler", "sign-in"), "Wrangler setup");
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /<ManagedCloudSetupLane/);
+  assert.match(workspace, /local_setup === "managed_cloud"/);
+});
+test("Mallard Cloud before start says what the lane does and who can read a push", () => {
+  const html = renderManagedCloud({ phase: "idle" });
+  assert.match(html, /storage-setup-agent-cta[^>]*>(?:<svg[^]*?<\/svg>)? Sign in with GitHub</);
+  assert.match(html, /private to you and the collaborators you invite/);
+  assert.match(html, /public only when you request a release/);
+  assert.match(renderManagedCloud({ phase: "idle" }, "reconnect"), /Reconnect Mallard Cloud/);
+});
+test("Mallard Cloud sign-in offers the link to copy or open with Cancel on the line, never printed", () => {
+  const html = renderManagedCloud({ phase: "login", running: true, link: "https://github.com/login/oauth/authorize?state=fixture" });
+  assert.doesNotMatch(html, /oauth\/authorize\?state=fixture/);
+  for (const label of ["Copy sign-in link", "Open browser", "Cancel"]) {
+    const [, attributes] = html.match(new RegExp(`<button([^>]*)>(?:<svg[^>]*>(?:(?!</svg>)[^])*</svg> )?${label}</button>`)) ?? [];
+    assert.ok(attributes !== undefined, `${label} button`);
+    assert.doesNotMatch(attributes, /disabled/);
+  }
+  assert.match(html, /Sign in with GitHub in a browser on this computer · <span class="r2-countdown">3:00<\/span>/);
+  assert.match(html, /Reset setup/);
+});
+test("Mallard Cloud confirms the account before saving, with Change login beside Continue", () => {
+  const html = renderManagedCloud({ phase: "account", login: managedCloudLogin, account: managedCloudLogin.account, serviceOrigin: managedCloudLogin.service_origin });
+  assert.match(html, /<code>octocat<\/code> on GitHub/);
+  assert.match(html, /btn-primary[^>]*>Continue</);
+  assert.match(html, /Change login/);
+  assert.match(html, /A 90-day session · private to you and your collaborators/);
+  const taken = renderManagedCloud(
+    { phase: "account", error: "storage_managed_account_exists", login: managedCloudLogin, account: managedCloudLogin.account },
+    "create",
+    [cloudSummary({ storage_id: "storage-cloud", name: "Team cloud", provider: "managed_cloud", provider_label: "Mallard Cloud", settings: { account_id: "user_1", service_origin: "https://mallard-ai.com", account_login: "octocat" }, secrets: [] })],
+  );
+  assert.match(taken, /already connected · open its storage/);
+  assert.match(taken, /btn-primary[^>]*>Open Team cloud</);
+});
+test("Mallard Cloud review names the account and the service, and reconnect ends at Save storage", () => {
+  const review = renderManagedCloud({ phase: "review", account: managedCloudLogin.account, serviceOrigin: managedCloudLogin.service_origin });
+  assert.match(review, /Ready for review\./);
+  assert.match(review, /Account<\/span><b>octocat<\/b>/);
+  assert.match(review, /Service<\/span><b>mallard-ai\.com<\/b>/);
+  assert.doesNotMatch(review, /r2-steps/);
+  const reconnect = renderManagedCloud({ phase: "access", running: true, account: managedCloudLogin.account, login: managedCloudLogin }, "reconnect");
+  assert.match(reconnect, /this storage’s account/);
+  assert.match(reconnect, /Saving the session…/);
+  assert.match(reconnect, /Test connection, then Save storage/);
+  const mismatch = renderManagedCloud({ phase: "account", error: "managed_cloud_account_mismatch", login: managedCloudLogin, account: managedCloudLogin.account }, "reconnect");
+  assert.match(mismatch, /data-status="failed"[^]*?belongs to another GitHub account/);
+});
+
+// The website bridge: one chip in the path bar for the release state; Open on
+// Mallard Cloud and Request public release (only when a request would be
+// accepted) in the project crumb's menu.
+import { releaseChip } from "../../src/components/project-sync/managedCloudLink";
+test("Mallard Cloud release chips name each state and only a rejection reads as danger", () => {
+  assert.deepEqual(releaseChip({ kind: "public" }).label, "Public");
+  assert.deepEqual(releaseChip({ kind: "waiting_owner", requested_by: "user_2" }), {
+    label: "Pending approval",
+    severity: "plain",
+    detail: "Public release awaits Owner approval.",
+  });
+  assert.deepEqual(releaseChip({ kind: "waiting_super_admin" }), {
+    label: "Pending approval",
+    severity: "plain",
+    detail: "Public release awaits Admin approval.",
+  });
+  assert.equal(releaseChip({ kind: "snapshot_changed" }).severity, "warning");
+  assert.equal(releaseChip({ kind: "rejected", reason: "Not yet" }).severity, "danger");
+  assert.match(releaseChip({ kind: "rejected", reason: "Not yet" }).detail, /Not yet/);
+  assert.equal(releaseChip({ kind: "private" }).severity, "plain");
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /projectSyncApi\.getManagedCloudLink\(projectId, storageId\)/);
+  assert.match(workspace, /label: "Open on Mallard Cloud"[^]*?openExternalUrl\(link\.website_url\)/);
+  assert.match(workspace, /if \(link\.can_request_release\) \{[^]*?requestManagedCloudRelease\(/);
+  assert.match(workspace, /\.\.\.managedCloudMenuItems,/);
+  assert.doesNotMatch(workspace, /sync-path-cloud-controls/);
+  assert.match(workspace, /window\.addEventListener\("focus", load\)/);
 });

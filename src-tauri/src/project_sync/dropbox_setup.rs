@@ -3,10 +3,10 @@ use mallard_application::storage_setup::begin_storage_draft_operation;
 use mallard_domain::{now_secs, HostId, StorageSetupDraft, StorageSetupDraftId};
 use mallard_infrastructure::{
     dropbox_auth::{
-        AuthError, AuthorizationGrant, AuthorizationRequest, DropboxClient, DISCOVERY_SCOPES,
-        SETUP_SCOPES, STORAGE_SCOPES,
+        AuthError, AuthorizationGrant, AuthorizationRequest, DropboxClient, CALLBACK_PORT,
+        DISCOVERY_SCOPES, DROPBOX_CALLBACK, SETUP_SCOPES, STORAGE_SCOPES,
     },
-    dropbox_browser,
+    loopback_browser,
     dropbox_setup::{
         discovery::{self, Account, Scan},
         DropboxSetupJournal,
@@ -282,8 +282,11 @@ pub async fn authorize_dropbox_setup(
     let cancel = run.cancel.clone();
     // Always join the receiver. Cancellation must release the fixed port before retry.
     let (code, verifier) = tauri::async_runtime::spawn_blocking(move || {
-        let code = dropbox_browser::authorize(
-            &request,
+        let code = loopback_browser::authorize(
+            &DROPBOX_CALLBACK,
+            &request.url,
+            &request.state,
+            CALLBACK_PORT,
             |url| {
                 on_progress
                     .send(Progress::AuthorizationLink {

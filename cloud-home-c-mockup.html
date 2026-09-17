@@ -1,0 +1,365 @@
+<title>Mallard Cloud Card Faces</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@400..800&display=swap">
+<style>
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SFMono-Regular", "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  --font-display: "Baloo 2", "Arial Rounded MT Bold", var(--font-sans);
+  --shade: #b8a794;
+  --shadow-card: 3px 3px 0 var(--shade); --shadow-control: 2px 2px 0 var(--shade);
+  --box-border: 2px solid var(--accent);
+  --bg-0: #fefbf6; --bg-3: #f2e8dd; --bg-4: #fffdf9; --bg-hover: rgba(82, 58, 43, 0.045);
+  --border: #d8cec4; --border-mid: #aa998d; --border-strong: #66574f;
+  --button-bg: #fdf8f1; --button-primary-bg: #8a6347; --button-primary-text: #fffaf4;
+  --app-shell: #f6eee5; --surface-card: #fcf7f0; --surface-row: #fdf9f3; --surface-row-hover: #faf2e9; --surface-subtle: rgba(82, 58, 43, 0.025);
+  --chip-bg: rgba(82, 58, 43, 0.065); --chip-strong-bg: rgba(82, 58, 43, 0.12); --accent-soft: rgba(82, 58, 43, 0.075); --accent-contrast: #fffaf4;
+  --success-soft: rgba(75, 150, 97, 0.09);
+  --text-0: #1e1817; --text-1: #3d332e; --text-2: #6f6159; --text-3: #8a7c72; --accent: #2a211d;
+  --success-text: #397149; --warning-text: #885e06; --info-text: #256c90;
+  --claude: #b4653a; --openai: #1e1817;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --shade: rgba(0, 0, 0, 0.5);
+    --bg-0: #15120f; --bg-3: #2c2722; --bg-4: #171310; --bg-hover: rgba(255, 238, 217, 0.065);
+    --border: #34302a; --border-mid: #4a433b; --border-strong: #867b6f;
+    --button-bg: #1d1915; --button-primary-bg: #bf9169; --button-primary-text: #1b1612;
+    --app-shell: #0c0a08; --surface-card: #1d1915; --surface-row: #1a1613; --surface-row-hover: #251f1b; --surface-subtle: rgba(255, 238, 217, 0.035);
+    --chip-bg: rgba(255, 238, 217, 0.08); --chip-strong-bg: rgba(255, 238, 217, 0.13); --accent-soft: rgba(240, 232, 213, 0.1); --accent-contrast: #15120f;
+    --success-soft: rgba(126, 212, 154, 0.12);
+    --text-0: #f3ede1; --text-1: #d3cbbc; --text-2: #a79e90; --text-3: #8d8477; --accent: #f0e8d5;
+    --success-text: #7ed49a; --warning-text: #f2c369; --info-text: #8ccff3;
+    --claude: #e0a07a; --openai: #f3ede1;
+  }
+}
+:root[data-theme="dark"] {
+  --shade: rgba(0, 0, 0, 0.5);
+  --bg-0: #15120f; --bg-3: #2c2722; --bg-4: #171310; --bg-hover: rgba(255, 238, 217, 0.065);
+  --border: #34302a; --border-mid: #4a433b; --border-strong: #867b6f;
+  --button-bg: #1d1915; --button-primary-bg: #bf9169; --button-primary-text: #1b1612;
+  --app-shell: #0c0a08; --surface-card: #1d1915; --surface-row: #1a1613; --surface-row-hover: #251f1b; --surface-subtle: rgba(255, 238, 217, 0.035);
+  --chip-bg: rgba(255, 238, 217, 0.08); --chip-strong-bg: rgba(255, 238, 217, 0.13); --accent-soft: rgba(240, 232, 213, 0.1); --accent-contrast: #15120f;
+  --success-soft: rgba(126, 212, 154, 0.12);
+  --text-0: #f3ede1; --text-1: #d3cbbc; --text-2: #a79e90; --text-3: #8d8477; --accent: #f0e8d5;
+  --success-text: #7ed49a; --warning-text: #f2c369; --info-text: #8ccff3;
+  --claude: #e0a07a; --openai: #f3ede1;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--app-shell); color: var(--text-0); font-family: var(--font-sans); font-size: 13px; line-height: 1.5; padding-inline: 16px; padding-block: 12px 72px; }
+a { color: inherit; text-decoration: none; }
+time, .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* The desktop's pixel icons: 24-unit grid, filled, crisp edges; the two provider marks are vector. */
+svg.px { width: 16px; height: 16px; fill: currentColor; shape-rendering: crispEdges; flex: 0 0 auto; }
+svg.px.s18 { width: 18px; height: 18px; }
+svg.px.s20 { width: 20px; height: 20px; }
+svg.px.s12 { width: 12px; height: 12px; }
+svg.mk { width: 14px; height: 14px; fill: currentColor; shape-rendering: geometricPrecision; flex: 0 0 auto; }
+svg.mk.claude { color: var(--claude); }
+svg.mk.openai { color: var(--openai); }
+.duck { width: 36px; height: 36px; fill: var(--accent); shape-rendering: crispEdges; flex: 0 0 auto; }
+
+.spec { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 34px; }
+.spec-bar { position: sticky; top: 8px; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 8px 14px; border: var(--box-border); border-radius: 14px; background: var(--surface-card); box-shadow: var(--shadow-card); }
+.spec-title { font: 800 15px var(--font-display); margin-right: auto; display: inline-flex; align-items: center; gap: 8px; }
+.spec-title .duck { width: 26px; height: 26px; }
+.ctl { display: inline-flex; align-items: center; gap: 6px; }
+.ctl-label { font: 700 10.5px var(--font-display); letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); }
+.seg { display: inline-flex; gap: 2px; padding: 3px; border: var(--box-border); border-radius: 999px; background: var(--surface-card); }
+.seg button { height: 24px; padding: 0 11px; border: 0; border-radius: 999px; background: transparent; color: var(--text-2); font: 700 12px var(--font-display); cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-contrast); }
+.jump { display: inline-flex; gap: 4px; }
+.jump a { padding: 3px 10px; border-radius: 999px; font: 700 12px var(--font-display); color: var(--text-1); background: var(--chip-bg); }
+.intro { max-width: 70ch; color: var(--text-1); }
+.intro h1 { font: 800 26px/1.2 var(--font-display); margin: 0 0 6px; text-wrap: balance; color: var(--text-0); }
+.intro p { margin: 0 0 8px; }
+.direction { display: flex; flex-direction: column; gap: 10px; scroll-margin-top: 72px; }
+.direction h2 { font: 800 22px/1.2 var(--font-display); margin: 0; display: flex; align-items: baseline; gap: 10px; }
+.direction h2 .k { display: inline-grid; place-items: center; width: 34px; height: 30px; border: var(--box-border); border-radius: 9px; background: var(--accent); color: var(--accent-contrast); font-size: 14px; box-shadow: var(--shadow-control); }
+.direction h2 small { font: 600 13px var(--font-display); color: var(--text-2); }
+.lede { max-width: 70ch; margin: 0; color: var(--text-1); }
+.lede b { color: var(--text-0); }
+.pros { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px; list-style: none; margin: 0; padding: 0; font-size: 12px; color: var(--text-1); }
+.pros li { padding: 7px 10px; border: 1px solid var(--border-mid); border-radius: 9px; background: var(--surface-subtle); }
+.pros li b { color: var(--text-0); font-family: var(--font-display); }
+.pros li.con b { color: var(--warning-text); }
+.board-wrap { overflow-x: auto; padding: 12px 0 10px; }
+.board { position: relative; width: 1120px; border: 1px dashed var(--border-mid); border-radius: 18px; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.board-tag { position: absolute; top: -9px; left: 16px; padding: 0 8px; background: var(--app-shell); font: 700 10.5px var(--font-display); letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); }
+
+/* Shared Mallard grammar */
+.tile { background: var(--surface-card); border: var(--box-border); border-radius: 14px; box-shadow: var(--shadow-card); }
+.topbar { display: flex; align-items: center; gap: 18px; min-height: 52px; padding: 8px 14px; }
+.topbar .end { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.brand { display: inline-flex; align-items: center; gap: 8px; font: 800 17px var(--font-display); }
+.nav { display: flex; gap: 4px; }
+.nav a { padding: 4px 10px; border-radius: 999px; color: var(--text-2); font: 500 12px var(--font-display); }
+.nav a.on { background: var(--accent); color: var(--accent-contrast); font-weight: 700; }
+.theme { display: inline-flex; gap: 2px; padding: 2px; border: var(--box-border); border-radius: 999px; }
+.theme span { height: 20px; padding: 0 8px; border-radius: 999px; font: 700 11px/20px var(--font-display); color: var(--text-2); }
+.theme span.on { background: var(--accent); color: var(--accent-contrast); }
+.acct { font: 700 13px var(--font-display); }
+.ghost { color: var(--text-2); font: 500 12px var(--font-display); }
+.page { width: 1120px; max-width: 100%; margin: 0 auto; padding: 8px 0 8px; display: flex; flex-direction: column; gap: 12px; }
+.pill { display: inline-flex; align-items: center; gap: 4px; padding: 1px 9px; border-radius: 999px; background: var(--chip-bg); color: var(--text-1); font: 500 11px var(--font-display); white-space: nowrap; }
+.pill-mine { background: var(--accent); color: var(--accent-contrast); font-weight: 700; padding: 0 8px; font-size: 10.5px; }
+.avatar { display: inline-grid; place-items: center; width: 22px; height: 22px; border: 2px solid var(--accent); border-radius: 7px; background: var(--accent); color: var(--accent-contrast); font: 800 8.5px var(--font-display); flex: 0 0 auto; }
+.avatar.ss { background: var(--bg-3); color: var(--text-0); }
+
+/* The desktop's controls: segmented tabs, pill buttons with a cast shade, an ink-edged field. */
+.tabs { display: inline-flex; gap: 2px; padding: 3px; border: var(--box-border); border-radius: 999px; background: var(--surface-card); box-shadow: var(--shadow-control); }
+.tabs span { height: 26px; padding: 0 12px; border-radius: 999px; color: var(--text-2); font: 500 12px/26px var(--font-display); }
+.tabs span.on { background: var(--accent); color: var(--accent-contrast); font-weight: 700; }
+.btn { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 12px; border: var(--box-border); border-radius: 999px; background: var(--button-bg); color: var(--text-1); box-shadow: var(--shadow-control); font: 700 12px var(--font-display); white-space: nowrap; }
+.btn .px { width: 12px; height: 12px; color: var(--text-2); }
+.field { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 10px; border: 2px solid var(--border-strong); border-radius: 6px; background: var(--bg-4); color: var(--text-3); font-size: 13px; }
+.field .px { width: 14px; height: 14px; color: var(--text-2); }
+.head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 0 4px; }
+.head h1 { margin: 0; font: 800 17px var(--font-display); }
+.head .count { color: var(--text-3); font: 11px var(--font-mono); }
+.head .end { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.marks { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; color: var(--text-2); }
+
+/* C1 · picker cards */
+.pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+.pgrid > li { display: flex; }
+.pcard { width: 100%; min-width: 0; display: flex; flex-direction: column; gap: 6px; padding: 13px 16px 12px; border: var(--box-border); border-radius: 14px; background: var(--surface-row); box-shadow: var(--shadow-card); color: inherit; text-align: left; transition: background 90ms steps(2, end); }
+.pcard:hover { background: var(--surface-row-hover); }
+.pcard:active { box-shadow: none; transform: translate(1px, 1px); }
+.pcard-title { min-width: 0; display: flex; align-items: center; gap: 9px; }
+.pcard-title > .px { color: var(--text-2); }
+.pcard-title > strong { min-width: 0; overflow: hidden; color: var(--text-0); font: 700 14.5px var(--font-display); text-overflow: ellipsis; white-space: nowrap; }
+.pcard-loc { overflow: hidden; color: var(--text-3); font: 10.5px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.pcard-detail { display: inline-flex; align-items: center; gap: 12px; margin-top: 2px; color: var(--text-2); font: 500 11.5px var(--font-display); }
+.pcard-detail span { display: inline-flex; align-items: center; gap: 5px; }
+.pcard-detail .px { width: 13px; height: 13px; }
+
+/* C2 · activity cards */
+.agrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.acard { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title actions" "meta meta"; align-items: center; gap: 3px 12px; padding: 8px 12px 9px; border: var(--box-border); border-radius: 14px; background: var(--surface-row); box-shadow: var(--shadow-card); }
+.acard-title { grid-area: title; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.acard-title > .px { color: var(--text-2); }
+.acard-title > strong { min-width: 0; overflow: hidden; flex: 1; color: var(--text-0); font: 600 13px/1.35 var(--font-display); text-overflow: ellipsis; white-space: nowrap; }
+.acard-actions { grid-area: actions; display: inline-flex; align-items: center; gap: 10px; color: var(--text-2); }
+.acard-meta { grid-area: meta; display: flex; align-items: center; gap: 12px; padding-left: 26px; color: var(--text-3); font: 11.5px var(--font-mono); font-variant-numeric: tabular-nums; }
+.acard-meta .met { display: inline-flex; align-items: center; gap: 12px; }
+.acard-meta .met span { display: inline-flex; align-items: center; gap: 4px; color: var(--text-2); }
+.acard-meta .met b { color: var(--text-0); font-weight: 600; }
+.acard-meta .sep { width: 1px; height: 12px; background: var(--border-mid); }
+.acard-meta time { margin-left: auto; }
+
+/* C3 · framed tiles */
+.tgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.tcard { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 14px 10px 10px; border: var(--box-border); border-radius: 14px; background: var(--surface-row); box-shadow: var(--shadow-card); }
+.tframe { display: inline-grid; place-items: center; width: 40px; height: 40px; border: var(--box-border); border-radius: 10px; background: var(--bg-3); color: var(--text-1); box-shadow: var(--shadow-control); }
+.tcard-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tcard-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tcard-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 700 14.5px var(--font-display); }
+.tcard-meta { color: var(--text-2); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tcard-end { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; color: var(--text-3); font: 11px var(--font-mono); }
+.tcard-end .marks { margin-left: 0; }
+
+.verdict { padding: 14px 18px; display: flex; flex-direction: column; gap: 6px; }
+.verdict h2 { margin: 0; font: 800 18px var(--font-display); }
+.verdict p { margin: 0; max-width: 78ch; color: var(--text-1); }
+.verdict b { color: var(--text-0); }
+@media (max-width: 640px) { .spec-bar { position: static; } }
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="duck" viewBox="0 0 20 20"><path d="M13 3h3v1h-3ZM12 4h5v2h-5ZM12 6h7v1h-7ZM12 7h3v3h-3ZM7 10h9v1h-9ZM2 11h15v1h-15ZM1 12h16v2h-16ZM2 14h15v1h-15ZM3 15h13v1h-13ZM5 16h10v1h-10Z"/></symbol>
+  <symbol id="folder" viewBox="0 0 24 24"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/></symbol>
+  <symbol id="git-folder" viewBox="0 0 24 24"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/><path d="M7 10h2v2H7ZM9 12h2v2H9ZM7 14h2v2H7ZM12 14h5v2h-5Z"/></symbol>
+  <symbol id="lightbulb" viewBox="0 0 24 24"><path d="M8 2h8v2H8ZM6 4h2v2H6ZM16 4h2v2H16ZM4 6h2v6H4ZM18 6h2v6H18ZM6 12h2v2H6ZM16 12h2v2H16ZM8 14h8v4H8ZM10 18h4v2H10Z"/></symbol>
+  <symbol id="paw" viewBox="0 0 24 24"><path d="M6 2h4v4H6ZM14 2h4v4H14ZM2 8h4v4H2ZM18 8h4v4H18ZM8 12h8v8H8ZM4 14h4v4H4ZM16 14h4v4H16ZM6 18h2v2H6ZM16 18h2v2H16Z"/></symbol>
+  <symbol id="puzzle" viewBox="0 0 24 24"><path d="M2 2h16v2H2ZM2 4h2v6H2ZM16 4h2v6H16ZM4 8h4v2H4ZM18 8h4v2H18ZM6 10h2v6H6ZM20 10h2v6H20ZM2 14h4v2H2ZM16 14h4v2H16ZM2 16h2v6H2ZM16 16h2v6H16ZM4 20h12v2H4Z"/></symbol>
+  <symbol id="message" viewBox="0 0 24 24"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></symbol>
+  <symbol id="file" viewBox="0 0 24 24"><path d="M18 1v1h1v1h1v1h1v1h1v1h1v16h-1v1H5v-1H4V2h1V1h13Zm-1 2H6v18h15V8h-4V3Zm2 1v2h2V5h-1V4h-1Z"/></symbol>
+  <symbol id="storage" viewBox="0 0 24 24"><path d="M6 7h4v2H6zm0 8h4v2H6zM2 5h2v14H2zm18 0h2v14h-2zM4 19h16v2H4zM4 3h16v2H4zm0 8h16v2H4z"/></symbol>
+  <symbol id="clock" viewBox="0 0 24 24"><path d="M22 9V7h-1V5h-1V4h-1V3h-2V2h-2V1H9v1H7v1H5v1H4v1H3v2H2v2H1v6h1v2h1v2h1v1h1v1h2v1h2v1h6v-1h2v-1h2v-1h1v-1h1v-2h1v-2h1V9h-1Zm-1 6h-1v2h-1v2h-2v1h-2v1H9v-1H7v-1H5v-2H4v-2H3V9h1V7h1V5h2V4h2V3h6v1h2v1h2v2h1v2h1v6Z"/><path d="M16 15v1h-1v1h-1v-1h-1v-1h-1v-1h-1V5h2v8h1v1h1v1h1Z"/></symbol>
+  <symbol id="tool" viewBox="0 0 24 24"><path d="M10 2h4v8h-4ZM6 6h4v12H6ZM14 6h4v12h-4ZM2 10h4v4H2ZM18 10h4v4h-4ZM10 14h4v8h-4Z"/></symbol>
+  <symbol id="chevron-right" viewBox="0 0 24 24"><path d="M8 4h2v1h1v1h1v1h1v1h1v1h1v1h1v4h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H8v-2h1v-1h1v-1h1v-1h1v-1h1v-4h-1V9h-1V8h-1V7H9V6H8V4Z"/></symbol>
+  <symbol id="chevron-down" viewBox="0 0 24 24"><path d="M20 8v2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-4v-1H9v-1H8v-1H7v-1H6v-1H5v-1H4V8h2v1h1v1h1v1h1v1h1v1h4v-1h1v-1h1v-1h1V9h1V8h2Z"/></symbol>
+  <symbol id="search" viewBox="0 0 24 24"><path d="M6 2h8v2H6ZM4 4h2v2H4ZM14 4h2v2h-2ZM2 6h2v6H2ZM16 6h2v6h-2ZM4 12h2v2H4ZM14 12h2v2h-2ZM6 14h8v2H6ZM16 14h2v2h-2ZM18 16h2v2h-2ZM20 18h2v2h-2Z"/></symbol>
+  <symbol id="claude-mark" viewBox="0 0 24 24"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></symbol>
+  <symbol id="openai" viewBox="0 0 24 24"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></symbol>
+</svg>
+
+<div class="spec">
+  <header class="spec-bar" role="toolbar" aria-label="Specimen controls">
+    <span class="spec-title"><svg class="duck"><use href="#duck"/></svg> Mallard Cloud · card faces</span>
+    <span class="ctl"><span class="ctl-label">Theme</span>
+      <span class="seg" id="theme-seg"><button type="button" data-theme-pick="light" aria-pressed="true">Light</button><button type="button" data-theme-pick="dark" aria-pressed="false">Dark</button></span></span>
+    <span class="jump"><a href="#c1">C1</a><a href="#c2">C2</a><a href="#c3">C3</a></span>
+  </header>
+
+  <div class="intro">
+    <h1>Direction C, in the app's own grammar</h1>
+    <p>Three card faces the desktop already ships, applied to the home page. All three cast the 3px shade on the card and 2px on controls, use the app's pixel glyphs for kind (git folder, folder, bulb for a skill, paw for a pet), its ChatGPT and Claude marks for providers, Baloo 2 for names, and mono for figures and dates. The controls above the grid are the desktop's: the segmented switch, pill buttons that sink when pressed, an ink-edged field. No note, no footer.</p>
+  </div>
+
+  <!-- ================================================================ C1 -->
+  <section class="direction" id="c1">
+    <h2><span class="k">C1</span> Picker cards <small>the desktop's Projects and Catalog landing</small></h2>
+    <p class="lede">The card that opens a project in the app: <b>glyph, name, marks</b> on the first line, a <b>mono location line</b> underneath, and a <b>detail line</b> of facts. Three across at this width, every card in a row the same height. The provider marks and the pusher sit at the end of the title, where the desktop keeps its marks.</p>
+    <ul class="pros">
+      <li><b>Same face as the app.</b> Someone who opens projects in Mallard recognises the door.</li>
+      <li><b>Three lines carry everything.</b> Identity, location, facts, each in its own voice.</li>
+      <li><b>Wide grid.</b> Three across; skills and pets sit beside projects without a second layout.</li>
+      <li class="con"><b>Location line needs a real identifier.</b> Here it carries the version and pusher; the app puts a path there.</li>
+    </ul>
+    <div class="board-wrap"><div class="board"><span class="board-tag">C1 · signed in</span>
+      <div class="tile topbar">
+        <span class="brand"><svg class="duck"><use href="#duck"/></svg> Mallard Cloud</span>
+        <nav class="nav"><a class="on">Repositories</a><a>Invitations</a><a>Super Admin</a></nav>
+        <span class="end"><span class="theme"><span>Auto</span><span class="on">Light</span><span>Dark</span></span><span class="acct">Rika321</span><span class="ghost">Sign out</span></span>
+      </div>
+      <div class="page">
+        <div class="head">
+          <h1>Repositories</h1><span class="count">5</span>
+          <span class="tabs"><span class="on">All</span><span>Yours</span><span>Public</span></span>
+          <span class="end">
+            <span class="field" style="width:220px"><svg class="px"><use href="#search"/></svg> Filter by name</span>
+            <span class="btn">Class <svg class="px"><use href="#chevron-down"/></svg></span>
+            <span class="btn">Provider <svg class="px"><use href="#chevron-down"/></svg></span>
+            <span class="btn">Kind <svg class="px"><use href="#chevron-down"/></svg></span>
+            <span class="btn">Newest <svg class="px"><use href="#chevron-down"/></svg></span>
+          </span>
+        </div>
+        <ul class="pgrid">
+          <li><a class="pcard" href="#c1">
+            <div class="pcard-title"><svg class="px s18"><use href="#git-folder"/></svg><strong>HorrorGame</strong><span class="pill pill-mine">yours</span><span class="marks"><svg class="mk claude"><use href="#claude-mark"/></svg><svg class="mk openai"><use href="#openai"/></svg><span class="avatar">RI</span></span></div>
+            <div class="pcard-loc">git project · public v1 · Sep 14, 2026</div>
+            <div class="pcard-detail"><span><svg class="px"><use href="#message"/></svg>3 sessions</span><span><svg class="px"><use href="#file"/></svg>8 files</span><span><svg class="px"><use href="#storage"/></svg>16.4 KiB</span></div>
+          </a></li>
+          <li><a class="pcard" href="#c1">
+            <div class="pcard-title"><svg class="px s18"><use href="#paw"/></svg><strong>Mossy</strong><span class="pill pill-mine">yours</span><span class="marks"><svg class="mk openai"><use href="#openai"/></svg><span class="avatar">RI</span></span></div>
+            <div class="pcard-loc">desktop pet · public v1 · Sep 14, 2026</div>
+            <div class="pcard-detail"><span><svg class="px"><use href="#file"/></svg>1 file</span><span><svg class="px"><use href="#storage"/></svg>23.6 KiB</span></div>
+          </a></li>
+          <li><a class="pcard" href="#c1">
+            <div class="pcard-title"><svg class="px s18"><use href="#lightbulb"/></svg><strong>release-notes</strong><span class="pill pill-mine">yours</span><span class="marks"><svg class="mk claude"><use href="#claude-mark"/></svg><span class="avatar">RI</span></span></div>
+            <div class="pcard-loc">skill · public v1 · Sep 14, 2026</div>
+            <div class="pcard-detail"><span><svg class="px"><use href="#file"/></svg>2 files</span><span><svg class="px"><use href="#storage"/></svg>628 B</span></div>
+          </a></li>
+          <li><a class="pcard" href="#c1">
+            <div class="pcard-title"><svg class="px s18"><use href="#lightbulb"/></svg><strong>godot-scene-lint</strong><span class="pill pill-mine">yours</span><span class="marks"><svg class="mk openai"><use href="#openai"/></svg><span class="avatar">RI</span></span></div>
+            <div class="pcard-loc">skill · public v1 · Sep 14, 2026</div>
+            <div class="pcard-detail"><span><svg class="px"><use href="#file"/></svg>2 files</span><span><svg class="px"><use href="#storage"/></svg>1.1 KiB</span></div>
+          </a></li>
+          <li><a class="pcard" href="#c1">
+            <div class="pcard-title"><svg class="px s18"><use href="#folder"/></svg><strong>Staging smoke</strong><span class="marks"><svg class="mk openai"><use href="#openai"/></svg><span class="avatar ss">SS</span></span></div>
+            <div class="pcard-loc">project · public v1 · Sep 13, 2026</div>
+            <div class="pcard-detail"><span><svg class="px"><use href="#message"/></svg>1 session</span><span><svg class="px"><use href="#file"/></svg>2 files</span><span><svg class="px"><use href="#storage"/></svg>3.2 KiB</span></div>
+          </a></li>
+        </ul>
+      </div>
+    </div></div>
+  </section>
+
+  <!-- ================================================================ C2 -->
+  <section class="direction" id="c2">
+    <h2><span class="k">C2</span> Activity cards <small>the desktop's Git history rows</small></h2>
+    <p class="lede">The session card from your screenshot, one per repository: a <b>title line</b> with the kind glyph and an end cluster of marks and a chevron, then a <b>meta line</b> of mono readouts with the date at the far end. Two across; the meta line reads as a table down the column.</p>
+    <ul class="pros">
+      <li><b>Figures line up.</b> Sessions, files, size, and date sit in the same place on every card.</li>
+      <li><b>Compact.</b> Two lines per card; ten repositories fit in one screen.</li>
+      <li><b>Chevron says "opens".</b> The row is a door, as in the app.</li>
+      <li class="con"><b>Less identity.</b> The name is set smaller than in C1 and there is no room for a location line.</li>
+    </ul>
+    <div class="board-wrap"><div class="board"><span class="board-tag">C2 · signed in</span>
+      <div class="tile topbar">
+        <span class="brand"><svg class="duck"><use href="#duck"/></svg> Mallard Cloud</span>
+        <nav class="nav"><a class="on">Repositories</a><a>Invitations</a><a>Super Admin</a></nav>
+        <span class="end"><span class="theme"><span>Auto</span><span class="on">Light</span><span>Dark</span></span><span class="acct">Rika321</span><span class="ghost">Sign out</span></span>
+      </div>
+      <div class="page">
+        <div class="head">
+          <h1>Repositories</h1><span class="count">5</span>
+          <span class="tabs"><span class="on">All</span><span>Yours</span><span>Public</span></span>
+          <span class="end">
+            <span class="field" style="width:220px"><svg class="px"><use href="#search"/></svg> Filter by name</span>
+            <span class="btn">Class <svg class="px"><use href="#chevron-down"/></svg></span>
+            <span class="btn">Provider <svg class="px"><use href="#chevron-down"/></svg></span>
+            <span class="btn">Kind <svg class="px"><use href="#chevron-down"/></svg></span>
+            <span class="btn">Newest <svg class="px"><use href="#chevron-down"/></svg></span>
+          </span>
+        </div>
+        <div class="agrid">
+          <div class="acard"><div class="acard-title"><svg class="px s18"><use href="#git-folder"/></svg><strong>HorrorGame</strong><span class="pill pill-mine">yours</span></div><span class="acard-actions"><svg class="mk claude"><use href="#claude-mark"/></svg><svg class="mk openai"><use href="#openai"/></svg><span class="avatar">RI</span><svg class="px s12"><use href="#chevron-right"/></svg></span><div class="acard-meta"><span class="met"><span><svg class="px s12"><use href="#message"/></svg><b>3</b></span><span><svg class="px s12"><use href="#file"/></svg><b>8</b></span><span><svg class="px s12"><use href="#storage"/></svg><b>16.4K</b></span><span class="sep"></span><span>git project</span></span><time>Sep 14, 2026 at 01:09</time></div></div>
+          <div class="acard"><div class="acard-title"><svg class="px s18"><use href="#paw"/></svg><strong>Mossy</strong><span class="pill pill-mine">yours</span></div><span class="acard-actions"><svg class="mk openai"><use href="#openai"/></svg><span class="avatar">RI</span><svg class="px s12"><use href="#chevron-right"/></svg></span><div class="acard-meta"><span class="met"><span><svg class="px s12"><use href="#file"/></svg><b>1</b></span><span><svg class="px s12"><use href="#storage"/></svg><b>23.6K</b></span><span class="sep"></span><span>desktop pet</span></span><time>Sep 14, 2026 at 01:00</time></div></div>
+          <div class="acard"><div class="acard-title"><svg class="px s18"><use href="#lightbulb"/></svg><strong>release-notes</strong><span class="pill pill-mine">yours</span></div><span class="acard-actions"><svg class="mk claude"><use href="#claude-mark"/></svg><span class="avatar">RI</span><svg class="px s12"><use href="#chevron-right"/></svg></span><div class="acard-meta"><span class="met"><span><svg class="px s12"><use href="#file"/></svg><b>2</b></span><span><svg class="px s12"><use href="#storage"/></svg><b>628</b></span><span class="sep"></span><span>skill</span></span><time>Sep 14, 2026 at 01:00</time></div></div>
+          <div class="acard"><div class="acard-title"><svg class="px s18"><use href="#lightbulb"/></svg><strong>godot-scene-lint</strong><span class="pill pill-mine">yours</span></div><span class="acard-actions"><svg class="mk openai"><use href="#openai"/></svg><span class="avatar">RI</span><svg class="px s12"><use href="#chevron-right"/></svg></span><div class="acard-meta"><span class="met"><span><svg class="px s12"><use href="#file"/></svg><b>2</b></span><span><svg class="px s12"><use href="#storage"/></svg><b>1.1K</b></span><span class="sep"></span><span>skill</span></span><time>Sep 14, 2026 at 01:00</time></div></div>
+          <div class="acard"><div class="acard-title"><svg class="px s18"><use href="#folder"/></svg><strong>Staging smoke</strong></div><span class="acard-actions"><svg class="mk openai"><use href="#openai"/></svg><span class="avatar ss">SS</span><svg class="px s12"><use href="#chevron-right"/></svg></span><div class="acard-meta"><span class="met"><span><svg class="px s12"><use href="#message"/></svg><b>1</b></span><span><svg class="px s12"><use href="#file"/></svg><b>2</b></span><span><svg class="px s12"><use href="#storage"/></svg><b>3.2K</b></span><span class="sep"></span><span>project</span></span><time>Sep 13, 2026 at 22:58</time></div></div>
+        </div>
+      </div>
+    </div></div>
+  </section>
+
+  <!-- ================================================================ C3 -->
+  <section class="direction" id="c3">
+    <h2><span class="k">C3</span> Framed tiles <small>the desktop's file activity face</small></h2>
+    <p class="lede">A <b>framed glyph tile</b> at the left, its own ink edge and 2px shade, then name and a one-line description, then the marks stacked at the end. The frame gives each kind a badge that reads before the name does; two across.</p>
+    <ul class="pros">
+      <li><b>Kind reads first.</b> Bulb, paw, folder: the frame makes the glyph a badge.</li>
+      <li><b>One description line.</b> Plain words instead of icon readouts.</li>
+      <li><b>Room for the end cluster.</b> Marks above, date below, nothing crowds the title.</li>
+      <li class="con"><b>Heaviest ink.</b> Two boxes per card; the grid gets busy past ten items.</li>
+    </ul>
+    <div class="board-wrap"><div class="board"><span class="board-tag">C3 · signed in</span>
+      <div class="tile topbar">
+        <span class="brand"><svg class="duck"><use href="#duck"/></svg> Mallard Cloud</span>
+        <nav class="nav"><a class="on">Repositories</a><a>Invitations</a><a>Super Admin</a></nav>
+        <span class="end"><span class="theme"><span>Auto</span><span class="on">Light</span><span>Dark</span></span><span class="acct">Rika321</span><span class="ghost">Sign out</span></span>
+      </div>
+      <div class="page">
+        <div class="head">
+          <h1>Repositories</h1><span class="count">5</span>
+          <span class="tabs"><span class="on">All</span><span>Yours</span><span>Public</span></span>
+          <span class="end">
+            <span class="field" style="width:220px"><svg class="px"><use href="#search"/></svg> Filter by name</span>
+            <span class="btn">Class <svg class="px"><use href="#chevron-down"/></svg></span>
+            <span class="btn">Provider <svg class="px"><use href="#chevron-down"/></svg></span>
+            <span class="btn">Kind <svg class="px"><use href="#chevron-down"/></svg></span>
+            <span class="btn">Newest <svg class="px"><use href="#chevron-down"/></svg></span>
+          </span>
+        </div>
+        <div class="tgrid">
+          <div class="tcard"><span class="tframe"><svg class="px s20"><use href="#git-folder"/></svg></span><div class="tcard-body"><div class="tcard-title"><strong>HorrorGame</strong><span class="pill pill-mine">yours</span></div><div class="tcard-meta">Git project · 3 sessions · 8 files · 16.4 KiB</div></div><div class="tcard-end"><span class="marks"><svg class="mk claude"><use href="#claude-mark"/></svg><svg class="mk openai"><use href="#openai"/></svg><span class="avatar">RI</span></span><time>Sep 14, 2026</time></div></div>
+          <div class="tcard"><span class="tframe"><svg class="px s20"><use href="#paw"/></svg></span><div class="tcard-body"><div class="tcard-title"><strong>Mossy</strong><span class="pill pill-mine">yours</span></div><div class="tcard-meta">Desktop pet · 1 file · 23.6 KiB</div></div><div class="tcard-end"><span class="marks"><svg class="mk openai"><use href="#openai"/></svg><span class="avatar">RI</span></span><time>Sep 14, 2026</time></div></div>
+          <div class="tcard"><span class="tframe"><svg class="px s20"><use href="#lightbulb"/></svg></span><div class="tcard-body"><div class="tcard-title"><strong>release-notes</strong><span class="pill pill-mine">yours</span></div><div class="tcard-meta">Skill · 2 files · 628 B</div></div><div class="tcard-end"><span class="marks"><svg class="mk claude"><use href="#claude-mark"/></svg><span class="avatar">RI</span></span><time>Sep 14, 2026</time></div></div>
+          <div class="tcard"><span class="tframe"><svg class="px s20"><use href="#lightbulb"/></svg></span><div class="tcard-body"><div class="tcard-title"><strong>godot-scene-lint</strong><span class="pill pill-mine">yours</span></div><div class="tcard-meta">Skill · 2 files · 1.1 KiB</div></div><div class="tcard-end"><span class="marks"><svg class="mk openai"><use href="#openai"/></svg><span class="avatar">RI</span></span><time>Sep 14, 2026</time></div></div>
+          <div class="tcard"><span class="tframe"><svg class="px s20"><use href="#folder"/></svg></span><div class="tcard-body"><div class="tcard-title"><strong>Staging smoke</strong></div><div class="tcard-meta">Project · 1 session · 2 files · 3.2 KiB</div></div><div class="tcard-end"><span class="marks"><svg class="mk openai"><use href="#openai"/></svg><span class="avatar ss">SS</span></span><time>Sep 13, 2026</time></div></div>
+        </div>
+      </div>
+    </div></div>
+  </section>
+
+  <section class="tile verdict">
+    <h2>Where I would land</h2>
+    <p><b>C1.</b> It is the card the app already uses for the same job, opening a project or a catalog item, so the site and the desktop share one door. Three across gives skills and pets a home without a second layout, and the mono location line is where the version and pusher belong. C2 is the choice if figures matter more than names; C3 if kind should read before anything else.</p>
+  </section>
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var KEY = "mallard-cloud-cards-spec";
+  var state = { theme: "light" };
+  try { Object.assign(state, JSON.parse(localStorage.getItem(KEY) || "{}")); } catch (e) {}
+  function apply() {
+    root.dataset.theme = state.theme;
+    Array.prototype.forEach.call(document.querySelectorAll("#theme-seg button"), function (b) { b.setAttribute("aria-pressed", String(b.dataset.themePick === state.theme)); });
+    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
+  }
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-theme-pick]");
+    if (!b) return;
+    state.theme = b.dataset.themePick;
+    apply();
+  });
+  apply();
+})();
+</script>

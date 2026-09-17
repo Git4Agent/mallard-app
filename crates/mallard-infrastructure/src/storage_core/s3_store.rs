@@ -845,7 +845,7 @@ impl S3ObjectStore {
                         .e_tag()
                         .ok_or_else(|| {
                             format!(
-                                "S3 list '{}' returned an object without a revision",
+                                "S3 list '{}' returned an object without a version",
                                 prefix.as_str()
                             )
                         })

@@ -166,7 +166,7 @@ impl ConversationPublicationState {
             || self.bindings_after.revision
                 != current.conversation_bindings.revision.saturating_add(1)
         {
-            return Err("conversation Push after-state has an invalid revision".to_string());
+            return Err("conversation Push after-state has an invalid version".to_string());
         }
         self.sync_config_after.validate()?;
         self.bindings_after.validate(
@@ -244,7 +244,7 @@ impl LockedConversationPull<'_> {
         if config.revision != current.config.revision.saturating_add(1)
             || bindings.revision != current.conversation_bindings.revision.saturating_add(1)
         {
-            return Err("conversation Pull after-state has an invalid revision".to_string());
+            return Err("conversation Pull after-state has an invalid version".to_string());
         }
         config.validate()?;
         bindings.validate(
@@ -926,7 +926,7 @@ impl LocalStateRepository {
         let current = self.load_config_unlocked()?;
         if config.revision != current.revision {
             return Err(format!(
-                "project-sync config changed (expected revision {}, current {})",
+                "project-sync config changed (expected version {}, current {})",
                 config.revision, current.revision
             ));
         }
@@ -1185,7 +1185,7 @@ impl LocalStateRepository {
             .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
         if project.revision != expected_project_revision {
             return Err(format!(
-                "project changed (expected revision {}, current {})",
+                "project changed (expected version {}, current {})",
                 expected_project_revision, project.revision
             ));
         }
@@ -1298,7 +1298,7 @@ impl LocalStateRepository {
         let mut config = self.load_config_unlocked()?;
         if config.revision != expected_config_revision {
             return Err(format!(
-                "storage configuration changed (expected revision {}, current {})",
+                "storage configuration changed (expected version {}, current {})",
                 expected_config_revision, config.revision
             ));
         }
@@ -1458,14 +1458,14 @@ impl LocalStateRepository {
             Some(existing) => {
                 if draft.revision != existing.revision {
                     return Err(format!(
-                        "setup draft changed (expected revision {}, current {})",
+                        "setup draft changed (expected version {}, current {})",
                         draft.revision, existing.revision
                     ));
                 }
             }
             None => {
                 if draft.revision != 0 {
-                    return Err("new setup draft must start at revision 0".to_string());
+                    return Err("new setup draft must start at version 0".to_string());
                 }
                 let (existing, _) = self.list_documents::<ProjectSetupDraft>(
                     &self.root.join("project_drafts"),
@@ -1643,7 +1643,7 @@ impl LocalStateRepository {
                     }
                     if draft.revision != existing.revision {
                         return Err(format!(
-                            "storage draft changed (expected revision {}, current {})",
+                            "storage draft changed (expected version {}, current {})",
                             draft.revision, existing.revision
                         ));
                     }
@@ -1651,7 +1651,7 @@ impl LocalStateRepository {
                 None => {
                     draft.validate_source(&config)?;
                     if draft.revision != 0 {
-                        return Err("new storage draft must start at revision 0".to_string());
+                        return Err("new storage draft must start at version 0".to_string());
                     }
                     let existing = self.count_storage_setup_drafts_unlocked()?;
                     if existing >= MAX_STORAGE_SETUP_DRAFTS {
@@ -3212,7 +3212,7 @@ mod tests {
             assert!(batch
                 .commit(config, bindings, |_| Ok(()))
                 .unwrap_err()
-                .contains("revision"));
+                .contains("version"));
             assert_eq!(batch.current().unwrap().config.revision, 1);
             assert_eq!(fs::read(repo.config_path()).unwrap(), before);
         }
@@ -3286,7 +3286,7 @@ mod tests {
                 .recv_timeout(Duration::from_secs(5))
                 .unwrap()
                 .unwrap_err()
-                .contains("expected revision 0, current 1"));
+                .contains("expected version 0, current 1"));
         });
     }
 
@@ -4814,7 +4814,7 @@ mod tests {
         assert!(repo
             .save_storage_setup_draft(not_new)
             .unwrap_err()
-            .contains("must start at revision 0"));
+            .contains("must start at version 0"));
     }
 
     #[test]

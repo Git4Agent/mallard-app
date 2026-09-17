@@ -542,7 +542,7 @@ function reposHtml() {
     <div class="sync-storage-repository-list">${REPOS.map((r) => `<div class="sync-storage-repository-item"><div class="sync-storage-repository-row">
       <span class="sync-storage-repository-icon">${icon(r.git ? "git-folder" : "folder", 14)}</span>
       <strong class="sync-storage-repository-name">${esc(r.name)}</strong>
-      <span class="sync-storage-repository-chips"><span class="sync-storage-repo-chip"><span>Revision</span><b>${r.revision}</b></span><span class="sync-storage-repo-chip"><span>Updated</span><b>${esc(r.updated)}</b></span></span>
+      <span class="sync-storage-repository-chips"><span class="sync-storage-repo-chip"><span>Version</span><b>${r.revision}</b></span><span class="sync-storage-repo-chip"><span>Updated</span><b>${esc(r.updated)}</b></span></span>
       <button type="button" class="sync-history-commit-toggle" aria-expanded="false" aria-label="Show details for ${esc(r.name)}">${icon("chevron-down", 12)}</button>
     </div></div>`).join("")}</div>
   </section>`;

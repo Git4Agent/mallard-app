@@ -605,8 +605,8 @@ test("stored-only rows lead the scope page in their own plain section", () => {
   // heading shape, the same cards, no counts, no fold, no new CSS. A row
   // missing on both sides stays in the capability's section: "not in the
   // storage" would be the wrong heading for it.
-  assert.match(page, /const cloudRows = rows\.filter\(\(row\) => !row\.local_present && row\.remote_present\)/);
-  assert.match(page, /const localRows = rows\.filter\(\(row\) => row\.local_present \|\| !row\.remote_present\)/);
+  assert.match(page, /const cloudRows = matchingRows\.filter\(\(row\) => !row\.local_present && row\.remote_present\)/);
+  assert.match(page, /const localRows = matchingRows\.filter\(\(row\) => row\.local_present \|\| !row\.remote_present\)/);
   assert.match(
     page,
     /Only in <span className="sync-history-storage-name">\{storageName \?\? "storage"\}<\/span>[\s\S]*<h2><Icon name=\{glyph\.icon\} size=\{14\} \/>\{scope\.label\}<\/h2>/,
@@ -851,15 +851,15 @@ test("Push review shows only local-outstanding rows, whatever their capability",
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
 
   assert.match(page, /const selectableRows = pushPlan\.rows\.filter\(\(row\) => row\.row\.selectable\);/);
-  assert.match(page, /const visibleRows = selectableRows;/);
+  assert.match(page, /const visibleRows = selectableRows\.filter/);
   assert.doesNotMatch(page, /row\.row\.selectable \|\| row\.row\.relation === "matching"/);
   assert.match(page, /total=\{selectableRows\.length\}/);
-  assert.match(page, /onRecommended=\{\(\) => setPushSelected\(new Set\(selectableRows\.map/);
+  assert.match(page, /onRecommended=\{\(\) => setPushSelected\(\(current\) => replaceSearchSelection\(current, matchingIds/);
   assert.match(page, /\{visibleRows\.map\(\(planRow\) => \{/);
   assert.match(page, /selectable=\{planRow\.row\.selectable\}/);
   assert.match(page, /onToggle=\{planRow\.row\.selectable \? \(\) => setPushSelected/);
   assert.match(page, /acks=\{planRow\.row\.selectable && pushSelected\.has\(resourceId\)/);
-  assert.match(page, /\{selectableRows\.length === 0 && \(/);
+  assert.match(page, /\{!searchActive && selectableRows\.length === 0 && \(/);
   // The list page still draws every row — now through the shared renderer
   // that feeds both of its sections.
   assert.match(page, /\{cloudRows\.map\(renderRow\)\}[\s\S]*\{localRows\.map\(renderRow\)\}/);
@@ -1111,4 +1111,17 @@ test("the shared skill root belongs to the default Codex home only", () => {
   // stays in the provider descriptor.
   assert.match(profiles, /default_profile_directory/);
   assert.doesNotMatch(profiles, /"\.codex"|"\.claude"/);
+});
+
+
+test("search bulk selection retains hidden choices and does not select ineligible matches", async () => {
+  const { replaceSearchSelection } = await import("../../src/components/sync-review/nameSearch");
+  const selected = new Set(["hidden", "matching-old"]);
+  const matchingIds = ["matching-old", "matching-safe", "matching-blocked"];
+  const recommended = new Set(["matching-safe", "outside-safe"]);
+  const next = replaceSearchSelection(selected, matchingIds, recommended);
+  assert.deepEqual([...next].sort(), ["hidden", "matching-safe"]);
+  assert.deepEqual([...selected].sort(), ["hidden", "matching-old"]);
+  assert.deepEqual([...replaceSearchSelection(next, matchingIds)], ["hidden"]);
+  assert.deepEqual([...replaceSearchSelection(next, [])].sort(), [...next].sort());
 });

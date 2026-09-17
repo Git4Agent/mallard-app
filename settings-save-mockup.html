@@ -258,7 +258,7 @@ const GROUPS = [
       copy: "One clock on every timestamp — session timelines, logs, and the catalog. Off follows the system locale." } ] },
   { id: "localData", icon: "drive", title: "Local data", rows: [
     { id: "reset", label: "Reset Mallard", kind: "verb-reset",
-      copyHtml: "Permanently deletes everything in <code>~/.mallard</code> — sync metadata, activity logs, and the backups of files Pull replaced — clears Mallard's saved preferences, then restarts as a fresh install. Cloud revisions and your project files are not touched." } ] },
+      copyHtml: "Permanently deletes everything in <code>~/.mallard</code> — sync metadata, activity logs, and the backups of files Pull replaced — clears Mallard's saved preferences, then restarts as a fresh install. Cloud versions and your project files are not touched." } ] },
 ];
 const ROWS = {};
 for (const g of GROUPS) for (const r of g.rows) { r.group = g.id; ROWS[r.id] = r; }

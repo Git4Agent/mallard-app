@@ -80,7 +80,7 @@ impl Error {
             Self::Limit => "Dropbox response or listing exceeds its safety limit.",
             Self::UploadLimit => "Dropbox uploads are limited to 150 MiB per object.",
             Self::Local => "The Dropbox staging file or setup journal could not be saved.",
-            Self::Cleanup => "Dropbox probe cleanup needs attention. Restore access and test again; an unknown revision needs manual cleanup.",
+            Self::Cleanup => "Dropbox probe cleanup needs attention. Restore access and test again; an unknown version needs manual cleanup.",
         }
     }
 }

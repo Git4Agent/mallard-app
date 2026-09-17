@@ -478,7 +478,7 @@ test("Pull reports 35 restored and 3 failed threads from Review selection IDs", 
   assert.deepEqual(outcome.stats, [
     { icon: "download", value: "35", label: "restored" },
     { icon: "octagon-x", value: "3", label: "failed" },
-    { icon: "git-branch", label: "Revision", value: "1", lead: true },
+    { icon: "git-branch", label: "Version", value: "1", lead: true },
   ]);
   assert.equal(outcome.rows.filter((row) => row.status === "synced").length, 35);
   assert.deepEqual(outcome.rows.filter((row) => row.status === "failed"), failedRows.map((row) => ({

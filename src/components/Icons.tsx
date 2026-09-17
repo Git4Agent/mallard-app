@@ -1,9 +1,7 @@
 import type { SVGProps } from "react";
 
-// Pixel geometry uses 24 px assets from HackerNoon's Pixel Icon Library and
-// Pixelarticons. The ChatGPT mark is a crisp-edge adaptation of its canonical
-// knot geometry. Semantic gaps follow the same construction; see
-// THIRD_PARTY_NOTICES.md.
+// Compact pixel geometry uses assets from HackerNoon and Pixelarticons.
+// Provider geometry remains vector artwork. See THIRD_PARTY_NOTICES.md.
 export type IconName =
   | "activity"
   | "alert-triangle"
@@ -58,9 +56,15 @@ export type IconName =
   | "trash"
   | "terminal"
   | "upload"
+  | "star"
+  | "star-filled"
   | "search"
   | "user"
   | "x";
+
+// Joint mock 2: the HackerNoon star pair shares one outer silhouette.
+const STAR_OUTER = "m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Z";
+const STAR_OUTLINE = STAR_OUTER + "m4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z";
 
 interface IconProps extends SVGProps<SVGSVGElement> {
   name: IconName;
@@ -78,25 +82,20 @@ export function iconNameFromHint(hint: string | null | undefined, fallback: Icon
 }
 
 /**
- * Every mark below is drawn as whole cells on a 24-unit grid, and the SVG asks
- * for crispEdges — so a cell is never antialiased, it is *rounded*. A stem
- * therefore keeps one uniform width only when `size × devicePixelRatio ÷ 24` is
- * a whole number. On the Retina displays this app targets that means **12 or
- * 24**; at 13, 14, 17 or 18 the same shape comes out with some stems one device
- * pixel and others two, which is what reads as "not pixel art".
- *
- * 12 for inline and button icons, 24 for the large glyph on an empty or error
- * state. The `size = 14` default predates this and is still what most of the
- * app passes; new code should name 12 or 24 explicitly.
+ * Compact pixel shapes use the same 24-unit geometry as Mallard Cloud.
+ * At fractional scale, geometricPrecision keeps thin steps and open counters
+ * intact. At 24 px and its multiples the paths use crispEdges. Provider
+ * artwork always uses geometricPrecision. Sizes do not change control layout.
  */
 export default function Icon({ name, size = 14, ...props }: IconProps) {
   return (
     <svg
       aria-hidden="true"
       data-icon={name}
+      focusable="false"
       fill="none"
       height={size}
-      shapeRendering="crispEdges"
+      shapeRendering={name === "openai" || name === "claude-mark" || size % 24 !== 0 ? "geometricPrecision" : "crispEdges"}
       viewBox="0 0 24 24"
       width={size}
       {...props}
@@ -158,9 +157,8 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
         </g>
       )}
       {name === "copy" && (
-        <g className="icon-pixel-fill" fill="currentColor" stroke="none">
-          <path d="M8 8h13v13H8Zm1 1v11h11V9Z" />
-          <path d="M3 3h13v5h-1V4H4v11h4v1H3Z" />
+        <g className="icon-pixel-fill icon-pixelarticons" fill="currentColor" stroke="none">
+          <path d="M8 6h12v2H8zM4 2h12v2H4zm2 6h2v12H6zM2 4h2v12H2zm6 16h12v2H8zM20 8h2v12h-2zm-4-4h2v2h-2zM4 16h2v2H4z" />
         </g>
       )}
       {name === "computer" && (
@@ -192,10 +190,26 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           <path d="M11 7h2v2h-2ZM11 11h2v6h-2Z" />
         </g>
       )}
-      {name === "chevron-down" && <path className="icon-pixel-fill" fill="currentColor" stroke="none" d="M20 8v2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-4v-1H9v-1H8v-1H7v-1H6v-1H5v-1H4V8h2v1h1v1h1v1h1v1h1v1h4v-1h1v-1h1v-1h1V9h1V8h2Z" />}
-      {name === "chevron-left" && <path className="icon-pixel-fill" fill="currentColor" stroke="none" d="M16 4v2h-1v1h-1v1h-1v1h-1v1h-1v4h1v1h1v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v-1h-1v-1h-1v-1H9v-1H8v-4h1V9h1V8h1V7h1V6h1V5h1V4h2Z" />}
-      {name === "chevron-right" && <path className="icon-pixel-fill" fill="currentColor" stroke="none" d="M8 4h2v1h1v1h1v1h1v1h1v1h1v1h1v4h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H8v-2h1v-1h1v-1h1v-1h1v-1h1v-4h-1V9h-1V8h-1V7H9V6H8V4Z" />}
-      {name === "chevron-up" && <path className="icon-pixel-fill" fill="currentColor" stroke="none" d="M10 8h4v1h1v1h1v1h1v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v-1h-1v-1h-1v-1h-4v1H9v1H8v1H7v1H6v1H4v-2h1v-1h1v-1h1v-1h1v-1h1V9h1V8Z" />}
+      {name === "chevron-down" && (
+        <g className="icon-pixel-fill icon-pixelarticons" fill="currentColor" stroke="none">
+          <path d="M13 16h-2v-2h2v2Zm-2-2H9v-2h2v2Zm4 0h-2v-2h2v2Zm-6-2H7v-2h2v2Zm8 0h-2v-2h2v2ZM7 10H5V8h2v2Zm12 0h-2V8h2v2Z" />
+        </g>
+      )}
+      {name === "chevron-left" && (
+        <g className="icon-pixel-fill icon-pixelarticons" fill="currentColor" stroke="none">
+          <path d="M8 13v-2h2v2H8Zm2-2V9h2v2h-2Zm0 4v-2h2v2h-2Zm2-6V7h2v2h-2Zm0 8v-2h2v2h-2Zm2-10V5h2v2h-2Zm0 12v-2h2v2h-2Z" />
+        </g>
+      )}
+      {name === "chevron-right" && (
+        <g className="icon-pixel-fill icon-pixelarticons" fill="currentColor" stroke="none">
+          <path d="M16 13v-2h-2v2h2Zm-2-2V9h-2v2h2Zm0 4v-2h-2v2h2Zm-2-6V7h-2v2h2Zm0 8v-2h-2v2h2ZM10 7V5H8v2h2Zm0 12v-2H8v2h2Z" />
+        </g>
+      )}
+      {name === "chevron-up" && (
+        <g className="icon-pixel-fill icon-pixelarticons" fill="currentColor" stroke="none">
+          <path d="M13 8h-2v2h2V8Zm-2 2H9v2h2v-2Zm4 0h-2v2h2v-2Zm-6 2H7v2h2v-2Zm8 0h-2v2h2v-2ZM7 14H5v2h2v-2Zm12 0h-2v2h2v-2Z" />
+        </g>
+      )}
       {/* PLACEHOLDER for the Claude Code mark: an eight-ray tapered burst, rays
           converging at the centre and widening to the tip. The taper is what
           separates it from a generic asterisk and the part that still reads at
@@ -213,9 +227,8 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
         />
       )}
       {name === "clock" && (
-        <g className="icon-pixel-fill" fill="currentColor" stroke="none">
-          <path d="M22 9V7h-1V5h-1V4h-1V3h-2V2h-2V1H9v1H7v1H5v1H4v1H3v2H2v2H1v6h1v2h1v2h1v1h1v1h2v1h2v1h6v-1h2v-1h2v-1h1v-1h1v-2h1v-2h1V9h-1Zm-1 6h-1v2h-1v2h-2v1h-2v1H9v-1H7v-1H5v-2H4v-2H3V9h1V7h1V5h2V4h2V3h6v1h2v1h2v2h1v2h1v6Z" />
-          <path d="M16 15v1h-1v1h-1v-1h-1v-1h-1v-1h-1V5h2v8h1v1h1v1h1Z" />
+        <g className="icon-pixel-fill icon-pixelarticons" fill="currentColor" stroke="none">
+          <path d="M6 2h12v2H6zM2 6h2v12H2zm18 0h2v12h-2zm-2-2h2v2h-2zM4 4h2v2H4zm2 18h12v-2H6zm12-2h2v-2h-2zM4 20h2v-2H4zm7-14h2v7h-2zm2 7h2v2h-2zm2 2h2v2h-2z" />
         </g>
       )}
       {name === "lightbulb" && (
@@ -238,26 +251,20 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
         />
       )}
       {name === "link" && (
-        <g className="icon-pixel-fill" fill="currentColor" stroke="none">
-          <path d="M16 10h1v7h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H5v-1H4v-1H3v-1H2v-1H1v-5h1v-1h1v-1h1v-1h1v3H4v1H3v3h1v1h1v1h1v1h4v-1h1v-1h1v-1h1v-1h1v-1h1v-5h-1v-1h-1V9h1V8h1v1h1v1Z" />
-          <path d="M23 5v5h-1v1h-1v1h-1v1h-1v-3h1V9h1V6h-1V5h-1V4h-1V3h-4v1h-1v1h-1v1h-1v1h-1v1H9v5h1v1h1v1h-1v1H9v-1H8v-1H7V7h1V6h1V5h1V4h1V3h1V2h1V1h6v1h1v1h1v1h1v1h1Z" />
+        <g className="icon-pixel-fill icon-pixelarticons" fill="currentColor" stroke="none">
+          <path d="M4 6h7v2H4zm0 10h7v2H4zM2 8h2v8H2zm18-2h-7v2h7zm0 10h-7v2h7zm2-8h-2v8h2zM7 11h10v2H7z" />
         </g>
       )}
-      {/* The storage stays; the full-span diagonal cancels the relation. */}
+      {/* The separator cuts the link while the two ends remain visible. */}
       {name === "link-off" && (
-        <g className="icon-pixel-fill" fill="currentColor" stroke="none">
-          <path d="M16 10h1v7h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H5v-1H4v-1H3v-1H2v-1H1v-5h1v-1h1v-1h1v-1h1v3H4v1H3v3h1v1h1v1h1v1h4v-1h1v-1h1v-1h1v-1h1v-1h1v-5h-1v-1h-1V9h1V8h1v1h1v1Z" />
-          <path d="M23 5v5h-1v1h-1v1h-1v1h-1v-3h1V9h1V6h-1V5h-1V4h-1V3h-4v1h-1v1h-1v1h-1v1h-1v1H9v5h1v1h1v1h-1v1H9v-1H8v-1H7V7h1V6h1V5h1V4h1V3h1V2h1V1h6v1h1v1h1v1h1v1h1Z" />
-          <path d="M3 1h2v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1H9V9H8V8H7V7H6V6H5V5H4V4H3V3H2V2h1V1Z" />
+        <g className="icon-pixel-fill icon-pixelarticons" fill="currentColor" stroke="none">
+          <path d="M4 6h5v2H4zm11 0h5v2h-5zm0 10h5v2h-5zM4 16h5v2H4zm16-8h2v8h-2zM2 8h2v8H2zm9-4h2v16h-2z" />
         </g>
       )}
       {name === "lock" && (
-        <path
-          className="icon-pixel-fill"
-          fill="currentColor"
-          stroke="none"
-          d="M21 12v-1h-3V5h-1V3h-1V2h-2V1h-4v1H8v1H7v2H6v6H3v1H2v10h1v1h18v-1h1V12h-1Zm-1 1v8H4v-8h16ZM9 5V4h1V3h4v1h1v1h1v6H8V5h1Z"
-        />
+        <g className="icon-pixel-fill icon-pixelarticons" fill="currentColor" stroke="none">
+          <path d="M5 8h14v2H5zm0 12h14v2H5zM3 10h2v10H3zm16 0h2v10h-2zM7 4h2v4H7zm2-2h6v2H9zm6 2h2v4h-2z" />
+        </g>
       )}
       {name === "message" && (
         <path
@@ -307,12 +314,10 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
         </g>
       )}
       {name === "file" && (
-        <path
-          className="icon-pixel-fill"
-          fill="currentColor"
-          stroke="none"
-          d="M18 1v1h1v1h1v1h1v1h1v1h1v16h-1v1H5v-1H4V2h1V1h13Zm-1 2H6v18h15V8h-4V3Zm2 1v2h2V5h-1V4h-1Z"
-        />
+        <g className="icon-pixel-fill icon-pixelarticons" fill="currentColor" stroke="none">
+          <path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z" />
+          <path d="M12 8h6v2h-6z" />
+        </g>
       )}
       {name === "folder" && (
         <path
@@ -473,13 +478,13 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
       )}
       {/* A magnifier: a one-cell ring and a two-cell handle, hollow like the
           other marks. */}
+      {(name === "star" || name === "star-filled") && (
+        <path className="icon-pixel-fill" fill="currentColor" stroke="none" d={name === "star" ? STAR_OUTLINE : STAR_OUTER} />
+      )}
       {name === "search" && (
-        <path
-          className="icon-pixel-fill"
-          fill="currentColor"
-          stroke="none"
-          d="M8 2h2v1h-2ZM5 3h3v1h-3ZM10 3h3v1h-3ZM4 4h2v1h-2ZM12 4h2v1h-2ZM3 5h2v1h-2ZM13 5h2v1h-2ZM3 6h1v1h-1ZM14 6h1v1h-1ZM3 7h1v1h-1ZM14 7h1v1h-1ZM2 8h1v1h-1ZM15 8h1v1h-1ZM2 9h1v1h-1ZM15 9h1v1h-1ZM3 10h1v1h-1ZM14 10h1v1h-1ZM3 11h1v1h-1ZM14 11h1v1h-1ZM3 12h2v1h-2ZM13 12h2v1h-2ZM4 13h2v1h-2ZM12 13h2v1h-2ZM5 14h3v1h-3ZM10 14h3v1h-3ZM8 15h2v1h-2ZM15 15h2v1h-2ZM16 16h2v1h-2ZM17 17h2v1h-2ZM18 18h2v1h-2ZM19 19h2v1h-2ZM20 20h2v1h-2Z"
-        />
+        <g className="icon-pixel-fill icon-pixelarticons" fill="currentColor" stroke="none">
+          <path d="M22 22h-2v-2h2v2Zm-2-2h-2v-2h2v2Zm-6-2H6v-2h8v2Zm4 0h-2v-2h2v2ZM6 16H4v-2h2v2Zm10 0h-2v-2h2v2ZM4 14H2V6h2v8Zm14 0h-2V6h2v8ZM6 6H4V4h2v2Zm10 0h-2V4h2v2Zm-2-2H6V2h8v2Z" />
+        </g>
       )}
       {name === "settings" && (
         <path
@@ -518,18 +523,16 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
         />
       )}
       {name === "tool" && (
-        /* A cog: teeth at the cardinals, hollow hub. It matches its row
-           neighbours' 20×20 optical weight and is the only
-           round silhouette on the strip, so it is found by shape before it is
-           read. Drawn in-house on the 12-cell coarse grid and doubled, so
-           every stem is two cells wide; the sibling marks come from downloaded
-           sets, hence the distinct provenance class. */
-        <path
-          className="icon-pixel-fill icon-mallard-pixel"
-          fill="currentColor"
-          stroke="none"
-          d="M10 2h4v8h-4ZM6 6h4v12H6ZM14 6h4v12h-4ZM2 10h4v4H2ZM18 10h4v4h-4ZM10 14h4v8h-4Z"
-        />
+        <g className="icon-pixel-fill icon-pixelarticons" fill="currentColor" stroke="none" transform="translate(10.586 13.414) rotate(45) translate(-8 -12)">
+          <path d="M9 22H7v-2h2v2Z" />
+          <path d="M7 20H5v-8h2v8Z" />
+          <path d="M11 20H9v-8h2v8Z" />
+          <path d="M5 12H3v-2h2v2Z" />
+          <path d="M13 12h-2v-2h2v2Z" />
+          <path d="M3 10H1V4h2v6Z" />
+          <path d="M15 10h-2V4h2v6Z" />
+          <path d="M7 6h2V2h4v2h-2v4H5V4H3V2h4v4Z" />
+        </g>
       )}
       {name === "trash" && (
         <path
@@ -570,12 +573,9 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
         />
       )}
       {name === "x" && (
-        <path
-          className="icon-pixel-fill"
-          fill="currentColor"
-          stroke="none"
-          d="M14 13h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h-1v1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-1v-1h-2v1h-1v1H9v1H8v1H7v1H6v1H5v1H4v1H3v-1H2v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-2H9v-1H8V9H7V8H6V7H5V6H4V5H3V4H2V3h1V2h1v1h1v1h1v1h1v1h1v1h1v1h1v1h1v1h2V9h1V8h1V7h1V6h1V5h1V4h1V3h1V2h1v1h1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v2Z"
-        />
+        <g className="icon-pixel-fill icon-pixelarticons" fill="currentColor" stroke="none">
+          <path d="M7 19H5V17H7V19ZM19 19H17V17H19V19ZM9 15V17H7V15H9ZM17 17H15V15H17V17ZM11 15H9V13H11V15ZM15 15H13V13H15V15ZM13 13H11V11H13V13ZM11 11H9V9H11V11ZM15 11H13V9H15V11ZM9 9H7V7H9V9ZM17 9H15V7H17V9ZM7 7H5V5H7V7ZM19 7H17V5H19V7Z" />
+        </g>
       )}
     </svg>
   );

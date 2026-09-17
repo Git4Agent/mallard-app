@@ -137,6 +137,9 @@ function activeSecrets(
   presence: SecretPresence,
 ) {
   const managedId = descriptor.managed_secret_id;
+  // A provider whose only secret is the managed one (Mallard Cloud) has no
+  // manual alternative: the lane must produce it before the draft is ready.
+  if (descriptor.secrets.every((secret) => secret.secret_id === managedId)) return descriptor.secrets;
   return descriptor.secrets.filter((secret) => hasManagedCredentials(descriptor, presence)
     ? secret.secret_id === managedId
     : secret.secret_id !== managedId);
@@ -238,6 +241,17 @@ function HelpMark({ text, url }: { text: string; url?: string | null }) {
       ?
     </button>
   );
+}
+
+/** The lane row's glyph and label per direct-setup route. The Dropbox and
+ *  Mallard Cloud routes are browser sign-ins; Wrangler is a terminal. */
+export function setupRouteIcon(route: StorageProviderDescriptor["local_setup"]): "cloud" | "link" | "terminal" {
+  return route === "managed_cloud" ? "cloud" : route === "dropbox" ? "link" : "terminal";
+}
+export function setupRouteLabel(route: StorageProviderDescriptor["local_setup"], verb: "setup" | "sign-in"): string {
+  if (route === "managed_cloud") return `Mallard Cloud ${verb}`;
+  if (route === "dropbox") return `Dropbox ${verb}`;
+  return "Wrangler setup";
 }
 
 /** The name the descriptor's suggestion rule proposes for these settings,
@@ -573,13 +587,13 @@ export function StorageEditor({
 
       {wranglerLane && (showLanes || usingExisting) && (
         <div className="storage-setup-route-row agent r2-lane" role="note">
-          <Icon name={descriptor.local_setup === "dropbox" ? "link" : "terminal"} size={13} />
-          <span className="storage-setup-route-label">{descriptor.local_setup === "dropbox" ? "Dropbox setup" : "Wrangler setup"}</span>
+          <Icon name={setupRouteIcon(descriptor.local_setup)} size={13} />
+          <span className="storage-setup-route-label">{setupRouteLabel(descriptor.local_setup, "setup")}</span>
           {setupSlot}
         </div>
       )}
       {usingExisting && discoverySlot}
-      {(showLanes || usingExisting && wranglerLane) && !managed && (wranglerLane || !setupDone) && (wranglerLane || descriptor.manual_setup_hint || descriptor.setup_guide_url) && (
+      {(showLanes || usingExisting && wranglerLane) && !managed && (wranglerLane || !setupDone) && (wranglerLane && descriptor.fields.length > 0 || descriptor.manual_setup_hint || descriptor.setup_guide_url) && (
         <>
 
           <div className="storage-setup-route-row" role="note">
@@ -1069,8 +1083,8 @@ export function StorageReconnectBand({
     <div className="sync-storage-reconnect" role="region" aria-label={`Reconnect ${descriptor.display_name}`}>
       {setupSlot && (
         <div className="storage-setup-route-row agent r2-lane" role="note">
-          <Icon name={descriptor.local_setup === "dropbox" ? "link" : "terminal"} size={13} />
-          <span className="storage-setup-route-label">{descriptor.local_setup === "dropbox" ? "Dropbox sign-in" : "Wrangler setup"}</span>
+          <Icon name={setupRouteIcon(descriptor.local_setup)} size={13} />
+          <span className="storage-setup-route-label">{setupRouteLabel(descriptor.local_setup, "sign-in")}</span>
           {setupSlot}
         </div>
       )}

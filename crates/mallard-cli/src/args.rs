@@ -106,7 +106,7 @@ pub(crate) struct SetupStorageArgs {
     #[arg(long)]
     pub draft_id: String,
 
-    /// Draft revision copied from Mallard; concurrent form edits fail closed.
+    /// Draft version copied from Mallard; concurrent form edits fail closed.
     #[arg(long)]
     pub expected_revision: u64,
 

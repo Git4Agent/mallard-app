@@ -748,7 +748,7 @@ impl LibraryResourceManifest {
             ));
         }
         if self.revision == 0 || self.updated_at == 0 {
-            return Err("library manifest requires a revision and timestamp".to_string());
+            return Err("library manifest requires a version and timestamp".to_string());
         }
         self.captured_with.validate()?;
         self.published_by_origin.validate()?;
@@ -816,7 +816,7 @@ impl LibraryResourceHead {
             ));
         }
         if self.revision == 0 || self.updated_at == 0 {
-            return Err("library head requires a revision and timestamp".to_string());
+            return Err("library head requires a version and timestamp".to_string());
         }
         validate_sha256("library head manifest digest", &self.manifest_sha256)?;
         if self.manifest_key != library_manifest_relative_key(self.revision, &self.commit_id) {
@@ -869,7 +869,7 @@ pub struct LibraryHeadCoordinate {
 impl LibraryHeadCoordinate {
     pub fn validate(&self) -> Result<(), String> {
         if self.revision == 0 {
-            return Err("accepted library head requires a revision".to_string());
+            return Err("accepted library head requires a version".to_string());
         }
         validate_sha256("accepted library manifest", &self.manifest_sha256)?;
         validate_sha256(
@@ -1005,7 +1005,7 @@ impl CatalogScope {
         self.coordinate().validate()?;
         if self.revision == 0 || self.created_at == 0 || self.created_at > self.updated_at {
             return Err(format!(
-                "catalog scope '{}' has invalid revision or timestamps",
+                "catalog scope '{}' has invalid version or timestamps",
                 self.scope_id
             ));
         }
@@ -1113,7 +1113,7 @@ impl CatalogScopeLink {
         }
         if self.revision == 0 || self.created_at == 0 || self.created_at > self.updated_at {
             return Err(format!(
-                "catalog scope link '{}' has invalid revision or timestamps",
+                "catalog scope link '{}' has invalid version or timestamps",
                 self.link_id
             ));
         }
@@ -2201,7 +2201,7 @@ impl CatalogScopePushPlan {
             return Err("catalog Push warning pins are inconsistent".to_string());
         }
         if self.link_revision == 0 || self.expires_at <= self.created_at {
-            return Err("catalog Push has an invalid revision or lifetime".to_string());
+            return Err("catalog Push has an invalid version or lifetime".to_string());
         }
         Ok(())
     }
@@ -2333,7 +2333,7 @@ impl CatalogScopePullPlan {
             }
         }
         if self.link_revision == 0 || self.expires_at <= self.created_at {
-            return Err("catalog Pull has an invalid revision or lifetime".to_string());
+            return Err("catalog Pull has an invalid version or lifetime".to_string());
         }
         Ok(())
     }

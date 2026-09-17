@@ -28,7 +28,7 @@ export interface SyncOutcomeStat {
   icon: IconName;
   value?: string;
   label: string;
-  /** Renders "Revision 6" rather than "6 revision". */
+  /** Renders "Version 6" rather than "6 version". */
   lead?: boolean;
 }
 
@@ -159,7 +159,7 @@ export function buildPushOutcome({
       ? [{ icon: "octagon-x" as const, value: String(failed.length), label: "not pushed" }]
       : []),
     ...(result.revision != null
-      ? [{ icon: "git-branch" as const, label: "Revision", value: String(result.revision), lead: true }]
+      ? [{ icon: "git-branch" as const, label: "Version", value: String(result.revision), lead: true }]
       : []),
   ];
 
@@ -303,7 +303,7 @@ export function buildPullOutcome({
         label: "failed",
       }]
       : []),
-    { icon: "git-branch", label: "Revision", value: String(plan.revision), lead: true },
+    { icon: "git-branch", label: "Version", value: String(plan.revision), lead: true },
   ];
 
   const actions: SyncOutcomeAction[] = irrecoverable

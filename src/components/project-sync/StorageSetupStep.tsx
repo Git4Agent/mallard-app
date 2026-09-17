@@ -1,5 +1,18 @@
 import { useEffect, useState, type ReactNode } from "react";
+import type { StorageSetupDraft } from "../../types";
 import Icon from "../Icons";
+
+/** What the workspace lends every setup lane's hook: the draft to run on,
+ *  and the seat for the draft the lane prepares. */
+export interface StorageSetupPort {
+  /** Something else holds the page: no run may start. */
+  blocked: () => boolean;
+  /** Pin the open draft for one run: a save, and whether it still stands. */
+  beginRun: () => { isCurrent: () => boolean; persist: () => Promise<StorageSetupDraft | null> };
+  onRunStarted: () => void;
+  /** Load and seat the prepared draft; false when the page moved on first. */
+  adoptPrepared: (saved: StorageSetupDraft, isCurrent: () => boolean) => Promise<boolean>;
+}
 
 /** Seconds left on a browser step, from the moment its page opened. */
 export function useCountdown(key: string | null, seconds: number): string {

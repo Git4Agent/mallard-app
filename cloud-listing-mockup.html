@@ -1,0 +1,843 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Mallard Cloud — listing directions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@400..800&amp;display=swap"/>
+<style>
+/* Palette and box grammar lifted verbatim from web/src/styles.css. */
+:root {
+--font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SFMono-Regular", "SF Mono", "Cascadia Mono", "Roboto Mono", "Liberation Mono", Menlo, Consolas, monospace;
+  --font-display: "Baloo 2", "Arial Rounded MT Bold", var(--font-sans);
+  --type-2xs: 0.625rem;
+  --type-xs: 0.6875rem;
+  --type-sm: 0.75rem;
+  --type-md: 0.8125rem;
+  --type-lg: 0.875rem;
+  --type-xl: 1.0625rem;
+  --type-2xl: 1.375rem;
+  --type-3xl: 1.625rem;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  --weight-heavy: 800;
+  --leading-flat: 1;
+  --leading-snug: 1.35;
+  --leading-prose: 1.5;
+  --box-border: 2px solid var(--accent);
+  --control-border: var(--border-strong);
+  --button-radius: 999px;
+  --r: 6px;
+  --r-sm: 4px;
+  --r-pill: 999px;
+  --retro-gutter: 8px;
+  --retro-panel-radius: 14px;
+  --retro-panel-radius-inner: 12px;
+  --button-disabled-opacity: 0.38;
+
+  /* Light palette (the desktop's `data-theme="light"`). */
+  --color-scheme: light;
+  --bg-0: #fefbf6;
+  --bg-1: #fdf9f4;
+  --bg-2: #faf3eb;
+  --bg-3: #f2e8dd;
+  --bg-4: #fffdf9;
+  --bg-hover: rgba(82, 58, 43, 0.045);
+  --bg-active: #f0e3d5;
+  --border: #d8cec4;
+  --border-mid: #aa998d;
+  --border-strong: #66574f;
+  --button-bg: #fdf8f1;
+  --button-bg-hover: #f5eadf;
+  --button-bg-active: #eee0d3;
+  --button-primary-bg: #8a6347;
+  --button-primary-hover: #7d5940;
+  --button-primary-text: #fffaf4;
+  --app-shell: #f6eee5;
+  --surface-card: #fcf7f0;
+  --surface-row: #fdf9f3;
+  --surface-row-hover: #faf2e9;
+  --surface-row-active: #f0e3d5;
+  --surface-subtle: rgba(82, 58, 43, 0.025);
+  --chip-bg: rgba(82, 58, 43, 0.065);
+  --chip-strong-bg: rgba(82, 58, 43, 0.12);
+  --loader-track: rgba(82, 58, 43, 0.18);
+  --danger-soft: rgba(205, 69, 49, 0.09);
+  --warning-soft: rgba(192, 124, 12, 0.1);
+  --info-soft: rgba(47, 136, 180, 0.09);
+  --success-soft: rgba(75, 150, 97, 0.09);
+  --accent-soft: rgba(82, 58, 43, 0.075);
+  --accent-contrast: #fffaf4;
+  --text-0: #1e1817;
+  --text-1: #3d332e;
+  --text-2: #6f6159;
+  --accent: #2a211d;
+  --green: #48905d;
+  --red: #d8523e;
+  --yellow: #d99609;
+  --blue: #2f88b4;
+  --purple: #6d529d;
+  --danger-text: #b53420;
+  --success-text: #397149;
+  --warning-text: #885e06;
+  --info-text: #256c90;
+  --focus-ring: var(--accent);
+  --shadow-card: 3px 3px 0 #b8a794;
+  --shadow-control: 2px 2px 0 #b8a794;
+}
+:root[data-theme="dark"] {
+--color-scheme: dark;
+  --bg-0: #15120f;
+  --bg-1: #191512;
+  --bg-2: #1e1a16;
+  --bg-3: #2c2722;
+  --bg-4: #171310;
+  --bg-hover: rgba(255, 238, 217, 0.065);
+  --bg-active: rgba(255, 238, 217, 0.11);
+  --border: #34302a;
+  --border-mid: #4a433b;
+  --border-strong: #867b6f;
+  --button-bg: #1d1915;
+  --button-bg-hover: #2b2521;
+  --button-bg-active: #39322c;
+  --button-primary-bg: #bf9169;
+  --button-primary-hover: #cfa27a;
+  --button-primary-text: #1b1612;
+  --app-shell: #0c0a08;
+  --surface-card: #1d1915;
+  --surface-row: #1a1613;
+  --surface-row-hover: #251f1b;
+  --surface-row-active: #2d2622;
+  --surface-subtle: rgba(255, 238, 217, 0.035);
+  --chip-bg: rgba(255, 238, 217, 0.08);
+  --chip-strong-bg: rgba(255, 238, 217, 0.13);
+  --loader-track: rgba(255, 238, 217, 0.2);
+  --danger-soft: rgba(244, 145, 127, 0.12);
+  --warning-soft: rgba(242, 195, 105, 0.12);
+  --info-soft: rgba(140, 207, 243, 0.12);
+  --success-soft: rgba(126, 212, 154, 0.12);
+  --accent-soft: rgba(240, 232, 213, 0.1);
+  --accent-contrast: #15120f;
+  --text-0: #f3ede1;
+  --text-1: #d3cbbc;
+  --text-2: #a79e90;
+  --accent: #f0e8d5;
+  --green: #7ed49a;
+  --red: #f4917f;
+  --yellow: #f2c369;
+  --blue: #8ccff3;
+  --purple: #cbb4f3;
+  --danger-text: var(--red);
+  --success-text: var(--green);
+  --warning-text: var(--yellow);
+  --info-text: var(--blue);
+  --shadow-card: 3px 3px 0 rgba(0, 0, 0, 0.5);
+  --shadow-control: 2px 2px 0 rgba(0, 0, 0, 0.5);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { background: var(--app-shell); color: var(--text-0); font-family: var(--font-sans); font-size: 14px; }
+.icon { display: block; fill: currentColor; flex: 0 0 auto; }
+.page { max-width: 1180px; margin: 0 auto; padding: 28px 24px 80px; }
+h1 { font-family: var(--font-display); font-size: var(--type-3xl); margin: 0 0 6px; }
+h2 { font-family: var(--font-display); font-size: var(--type-2xl); margin: 44px 0 2px; }
+h3 { font-family: var(--font-display); font-size: var(--type-xl); margin: 0; }
+.lede { color: var(--text-1); max-width: 78ch; line-height: 1.55; margin: 0 0 10px; }
+.sub { color: var(--text-2); margin: 0 0 14px; max-width: 82ch; line-height: 1.5; }
+.pros { margin: 0 0 14px; padding-left: 18px; color: var(--text-1); line-height: 1.6; max-width: 82ch; }
+.pros b { color: var(--text-0); }
+.board { border: var(--box-border); border-radius: var(--retro-panel-radius); background: var(--app-shell); box-shadow: var(--shadow-card); padding: 16px; }
+.note { margin: 14px 0 0; color: var(--text-2); font-size: var(--type-md); line-height: 1.5; }
+.list-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.list-bar .count { color: var(--text-2); font-size: var(--type-xs); font-family: var(--font-mono); }
+.list-bar-end { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.field { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 10px; border: 2px solid var(--control-border); border-radius: var(--r); background: var(--bg-4); color: var(--text-2); }
+.field .ph { width: 150px; font-size: var(--type-md); }
+.pill-select { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 12px; border: var(--box-border); border-radius: var(--button-radius); background: var(--button-bg); color: var(--text-1); box-shadow: var(--shadow-control); font-family: var(--font-display); font-size: var(--type-sm); font-weight: var(--weight-bold); }
+.badge { display: inline-flex; align-items: center; flex: 0 0 auto; padding: 0 7px; border: 1px solid var(--border-mid); border-radius: var(--r-pill); color: var(--text-2); font-family: var(--font-display); font-size: var(--type-2xs); font-weight: var(--weight-semibold); line-height: 17px; }
+.sep { font-style: normal; color: var(--border-mid); margin: 0 5px; }
+.marks { display: inline-flex; align-items: center; gap: 0; flex: 0 0 auto; }
+.provider-well { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 5px; color: var(--text-2); }
+.dim { color: var(--border-mid); }
+.star-mark, .gh-octo { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--text-2); }
+
+/* ---------- A: ledger cards (the shipped card plus a figures row) --------- */
+.gh-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--retro-gutter); }
+.gh-grid > li { display: flex; position: relative; }
+.gh-card { width: 100%; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 14px 16px 13px; border: var(--box-border); border-radius: var(--retro-panel-radius); background: var(--surface-row); box-shadow: var(--shadow-card); color: inherit; text-decoration: none; }
+.gh-title { display: flex; align-items: center; gap: 8px; min-width: 0; padding-right: 60px; }
+.gh-card.has-github .gh-title { padding-right: 88px; }
+.gh-title > .icon { color: var(--text-2); }
+.gh-title > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-0); font-family: var(--font-display); font-size: 16px; font-weight: var(--weight-bold); line-height: 1.3; }
+.gh-blurb { margin: 0; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: var(--text-1); font-size: 13px; line-height: 1.45; }
+/* The lesson of D2: fixed slots, so every figure sits under its neighbour's. */
+.figures { display: grid; grid-template-columns: 22px 42px 42px 1fr auto; align-items: center; gap: 0 6px; margin-top: auto; color: var(--text-2); font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.figures .slot { display: inline-flex; align-items: center; gap: 4px; }
+.figures b { color: var(--text-0); font-weight: 600; }
+.figures time { white-space: nowrap; }
+.avatar-xs { width: 18px; height: 18px; border-radius: 5px; border: 1px solid var(--border); object-fit: cover; }
+.gh-card-actions { position: absolute; top: 15px; right: 12px; display: inline-flex; align-items: center; gap: 2px; }
+
+/* ---------- B: register rows (GitHub's own list, full width) -------------- */
+.reg-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.reg-row { display: flex; align-items: flex-start; gap: 16px; padding: 16px 4px; border-bottom: 1px solid var(--border); }
+.reg-row:last-child { border-bottom: 0; }
+.reg-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.reg-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.reg-title .icon { color: var(--text-2); }
+.kind-glyph { display: inline-grid; place-items: center; flex: 0 0 auto; cursor: help; }
+.reg-title a { text-decoration: none; min-width: 0; }
+.reg-title strong { color: var(--link, var(--text-0)); font-family: var(--font-display); font-size: 17px; font-weight: var(--weight-bold); }
+.row-blurb { margin: 0; color: var(--text-1); font-size: 13.5px; line-height: 1.5; max-width: 92ch; }
+.reg-meta { display: flex; align-items: center; flex-wrap: wrap; color: var(--text-2); font-size: var(--type-md); }
+.reg-meta b { color: var(--text-1); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.reg-meta .kind { font-family: var(--font-display); font-weight: var(--weight-semibold); }
+.reg-meta .pusher { display: inline-flex; align-items: center; gap: 5px; }
+.reg-end { flex: 0 0 auto; }
+.btn.star-btn { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 11px; border: var(--box-border); border-radius: var(--button-radius); background: var(--button-bg); box-shadow: var(--shadow-control); color: var(--text-1); font-family: var(--font-display); font-size: var(--type-sm); font-weight: var(--weight-bold); }
+.btn.star-btn .n { padding-left: 8px; margin-left: 2px; border-left: 1px solid var(--border-mid); font-family: var(--font-mono); color: var(--text-2); }
+
+/* ---------- C: index rows (Hugging Face, dense, two across) --------------- */
+.idx-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.idx-card { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: var(--box-border); border-radius: var(--retro-panel-radius); background: var(--surface-row); box-shadow: var(--shadow-control); color: inherit; text-decoration: none; }
+.idx-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.idx-top > .icon { color: var(--text-2); }
+.idx-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-display); font-size: 14.5px; }
+.idx-name .owner { color: var(--text-2); font-weight: var(--weight-regular); }
+.idx-name strong { color: var(--text-0); font-weight: var(--weight-bold); }
+.idx-star { margin-left: auto; display: inline-flex; align-items: center; gap: 3px; color: var(--text-2); font-family: var(--font-mono); font-size: 11.5px; }
+.idx-blurb { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); font-size: 12.5px; }
+.idx-meta { margin-top: auto; display: grid; grid-template-columns: minmax(0, 1fr) 34px 34px auto auto; align-items: center; gap: 0 6px; color: var(--text-2); font-family: var(--font-mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.idx-meta .tag { font-family: var(--font-display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.idx-meta .slot { display: inline-flex; align-items: center; gap: 3px; }
+.idx-meta b { color: var(--text-0); font-weight: 600; }
+.idx-meta time { white-space: nowrap; }
+
+#theme-seg { display: inline-flex; gap: 2px; padding: 3px; border: var(--box-border); border-radius: var(--r-pill); background: var(--button-bg); margin-bottom: 20px; }
+#theme-seg button { border: 0; background: transparent; border-radius: var(--r-pill); padding: 4px 12px; font-family: var(--font-display); font-weight: var(--weight-bold); font-size: var(--type-sm); color: var(--text-2); cursor: pointer; }
+#theme-seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-contrast); }
+@media (max-width: 900px) { .gh-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .idx-grid { grid-template-columns: 1fr; } }
+@media (max-width: 620px) { .gh-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Three ways to read the list</h1>
+  <p class="lede">Twelve real repositories from the running service, with their real figures. Eight
+  are catalogs with no sessions, and only two carry a GitHub description &mdash; that lopsidedness is
+  the design problem, so every direction below is drawn with it rather than around it.</p>
+  <p class="sub">All three reuse the shipped palette and box grammar. The figures are the ones the
+  listing API already returns and the card currently throws away: <code>summary.conversations</code>,
+  <code>summary.files</code>, <code>summary.resources</code>.</p>
+  <div id="theme-seg">
+    <button data-theme-pick="light" aria-pressed="true">Light</button>
+    <button data-theme-pick="dark" aria-pressed="false">Dark</button>
+  </div>
+
+  <h2>A &mdash; Ledger cards</h2>
+  <p class="sub">The shipped card, with the figures row D2 recommended and never got. Three across,
+  nothing moves except the footer.</p>
+  <ul class="pros">
+    <li><b>Keeps</b> the grid, the description slot, and the density you already have.</li>
+    <li><b>Adds</b> two fixed figure slots, so sessions and files line up down the column.</li>
+    <li><b>Costs</b> the pusher's login &mdash; the avatar stays, the name goes, to buy the room.</li>
+  </ul>
+    <div class="board">
+      <div class="list-bar">
+        <h3>Repositories</h3><span class="count">12</span>
+        <div class="list-bar-end">
+          <span class="field"><svg class="icon icon-search" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M22 22h-2v-2h2v2Zm-2-2h-2v-2h2v2Zm-6-2H6v-2h8v2Zm4 0h-2v-2h2v2ZM6 16H4v-2h2v2Zm10 0h-2v-2h2v2ZM4 14H2V6h2v8Zm14 0h-2V6h2v8ZM6 6H4V4h2v2Zm10 0h-2V4h2v2Zm-2-2H6V2h8v2Z"/></svg><span class="ph">Find a repository</span></span>
+          <span class="pill-select">All types <svg class="icon icon-chevron-down" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M13 16h-2v-2h2v2Zm-2-2H9v-2h2v2Zm4 0h-2v-2h2v2Zm-6-2H7v-2h2v2Zm8 0h-2v-2h2v2ZM7 10H5V8h2v2Zm12 0h-2V8h2v2Z"/></svg></span>
+          <span class="pill-select">Newest <svg class="icon icon-chevron-down" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M13 16h-2v-2h2v2Zm-2-2H9v-2h2v2Zm4 0h-2v-2h2v2Zm-6-2H7v-2h2v2Zm8 0h-2v-2h2v2ZM7 10H5V8h2v2Zm12 0h-2V8h2v2Z"/></svg></span>
+        </div>
+      </div>
+      <ul class="gh-grid">
+      <li>
+        <a class="gh-card has-github" href="#">
+          <span class="gh-title"><svg class="icon icon-git-folder" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/><path d="M7 10h2v2H7ZM9 12h2v2H9ZM7 14h2v2H7ZM12 14h5v2h-5Z"/></svg><strong>tidewatch</strong></span>
+          <p class="gh-blurb">Tide tables and current predictions for the estuary.</p>
+          <span class="figures">
+            <img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt="" title="pushed by octocat"/>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><b>2</b></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>6</b></span>
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+        <span class="gh-card-actions"><span class="gh-octo"><svg class="icon icon-github" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="scale(1.5)" d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg></span><span class="star-mark"><svg class="icon icon-star" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg></span></span>
+      </li>
+      <li>
+        <a class="gh-card has-github" href="#">
+          <span class="gh-title"><svg class="icon icon-git-folder" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/><path d="M7 10h2v2H7ZM9 12h2v2H9ZM7 14h2v2H7ZM12 14h5v2h-5Z"/></svg><strong>ledger-api</strong></span>
+          <p class="gh-blurb">A double-entry ledger service with a small HTTP surface, deterministic replay, and no runtime dependencies beyond the standard library. Built for auditability first.</p>
+          <span class="figures">
+            <img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt="" title="pushed by octocat"/>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><b>1</b></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>4</b></span>
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+        <span class="gh-card-actions"><span class="gh-octo"><svg class="icon icon-github" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="scale(1.5)" d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg></span><span class="star-mark"><svg class="icon icon-star" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg></span></span>
+      </li>
+      <li>
+        <a class="gh-card" href="#">
+          <span class="gh-title"><svg class="icon icon-paw" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 2h4v4H6ZM14 2h4v4H14ZM2 8h4v4H2ZM18 8h4v4H18ZM8 12h8v8H8ZM4 14h4v4H4ZM16 14h4v4H16ZM6 18h2v2H6ZM16 18h2v2H16Z"/></svg><strong>Teal</strong></span>
+
+          <span class="figures">
+            <img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt="" title="pushed by octocat"/>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim" title="a catalog holds no sessions">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>1</b></span>
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+        <span class="gh-card-actions"><span class="star-mark"><svg class="icon icon-star" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg></span></span>
+      </li>
+      <li>
+        <a class="gh-card" href="#">
+          <span class="gh-title"><svg class="icon icon-puzzle" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M2 2h16v2H2ZM2 4h2v6H2ZM16 4h2v6H16ZM4 8h4v2H4ZM18 8h4v2H18ZM6 10h2v6H6ZM20 10h2v6H20ZM2 14h4v2H2ZM16 14h4v2H16ZM2 16h2v6H2ZM16 16h2v6H16ZM4 20h12v2H4Z"/></svg><strong>godot-tools</strong></span>
+
+          <span class="figures">
+            <img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt="" title="pushed by octocat"/>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim" title="a catalog holds no sessions">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><span class="dim">&ndash;</span></span>
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+        <span class="gh-card-actions"><span class="star-mark"><svg class="icon icon-star" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg></span></span>
+      </li>
+      <li>
+        <a class="gh-card" href="#">
+          <span class="gh-title"><svg class="icon icon-lightbulb" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M8 2h8v2H8ZM6 4h2v2H6ZM16 4h2v2H16ZM4 6h2v6H4ZM18 6h2v6H18ZM6 12h2v2H6ZM16 12h2v2H16ZM8 14h8v4H8ZM10 18h4v2H10Z"/></svg><strong>cargo-release-check</strong></span>
+
+          <span class="figures">
+            <img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt="" title="pushed by octocat"/>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim" title="a catalog holds no sessions">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>2</b></span>
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+        <span class="gh-card-actions"><span class="star-mark"><svg class="icon icon-star" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg></span></span>
+      </li>
+      <li>
+        <a class="gh-card" href="#">
+          <span class="gh-title"><svg class="icon icon-folder" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/></svg><strong>Birding-Log</strong></span>
+
+          <span class="figures">
+            <img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt="" title="pushed by octocat"/>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><b>2</b></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>6</b></span>
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+        <span class="gh-card-actions"><span class="star-mark"><svg class="icon icon-star" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg></span></span>
+      </li>
+      <li>
+        <a class="gh-card" href="#">
+          <span class="gh-title"><svg class="icon icon-paw" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 2h4v4H6ZM14 2h4v4H14ZM2 8h4v4H2ZM18 8h4v4H18ZM8 12h8v8H8ZM4 14h4v4H4ZM16 14h4v4H16ZM6 18h2v2H6ZM16 18h2v2H16Z"/></svg><strong>Pip</strong></span>
+
+          <span class="figures">
+            <img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt="" title="pushed by octocat"/>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim" title="a catalog holds no sessions">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>1</b></span>
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+        <span class="gh-card-actions"><span class="star-mark"><svg class="icon icon-star" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg></span></span>
+      </li>
+      <li>
+        <a class="gh-card" href="#">
+          <span class="gh-title"><svg class="icon icon-puzzle" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M2 2h16v2H2ZM2 4h2v6H2ZM16 4h2v6H16ZM4 8h4v2H4ZM18 8h4v2H18ZM6 10h2v6H6ZM20 10h2v6H20ZM2 14h4v2H2ZM16 14h4v2H16ZM2 16h2v6H2ZM16 16h2v6H16ZM4 20h12v2H4Z"/></svg><strong>pond-review</strong></span>
+
+          <span class="figures">
+            <img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt="" title="pushed by octocat"/>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim" title="a catalog holds no sessions">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><span class="dim">&ndash;</span></span>
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+        <span class="gh-card-actions"><span class="star-mark"><svg class="icon icon-star" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg></span></span>
+      </li>
+      <li>
+        <a class="gh-card" href="#">
+          <span class="gh-title"><svg class="icon icon-git-folder" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/><path d="M7 10h2v2H7ZM9 12h2v2H9ZM7 14h2v2H7ZM12 14h5v2h-5Z"/></svg><strong>HorrorGame</strong></span>
+
+          <span class="figures">
+            <img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt="" title="pushed by octocat"/>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><b>3</b></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>8</b></span>
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+        <span class="gh-card-actions"><span class="star-mark"><svg class="icon icon-star" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg></span></span>
+      </li>
+      <li>
+        <a class="gh-card" href="#">
+          <span class="gh-title"><svg class="icon icon-paw" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 2h4v4H6ZM14 2h4v4H14ZM2 8h4v4H2ZM18 8h4v4H18ZM8 12h8v8H8ZM4 14h4v4H4ZM16 14h4v4H16ZM6 18h2v2H6ZM16 18h2v2H16Z"/></svg><strong>Mossy</strong></span>
+
+          <span class="figures">
+            <img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt="" title="pushed by octocat"/>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim" title="a catalog holds no sessions">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>1</b></span>
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+        <span class="gh-card-actions"><span class="star-mark"><svg class="icon icon-star" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg></span></span>
+      </li>
+      <li>
+        <a class="gh-card" href="#">
+          <span class="gh-title"><svg class="icon icon-lightbulb" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M8 2h8v2H8ZM6 4h2v2H6ZM16 4h2v2H16ZM4 6h2v6H4ZM18 6h2v6H18ZM6 12h2v2H6ZM16 12h2v2H16ZM8 14h8v4H8ZM10 18h4v2H10Z"/></svg><strong>godot-scene-lint</strong></span>
+
+          <span class="figures">
+            <img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt="" title="pushed by octocat"/>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim" title="a catalog holds no sessions">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>2</b></span>
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+        <span class="gh-card-actions"><span class="star-mark"><svg class="icon icon-star" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg></span></span>
+      </li>
+      <li>
+        <a class="gh-card" href="#">
+          <span class="gh-title"><svg class="icon icon-lightbulb" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M8 2h8v2H8ZM6 4h2v2H6ZM16 4h2v2H16ZM4 6h2v6H4ZM18 6h2v6H18ZM6 12h2v2H6ZM16 12h2v2H16ZM8 14h8v4H8ZM10 18h4v2H10Z"/></svg><strong>release-notes</strong></span>
+
+          <span class="figures">
+            <img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt="" title="pushed by octocat"/>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim" title="a catalog holds no sessions">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>2</b></span>
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+        <span class="gh-card-actions"><span class="star-mark"><svg class="icon icon-star" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg></span></span>
+      </li>
+      </ul>
+      <p class="note">A catalog shows &ndash; for sessions rather than 0, so &quot;none possible&quot; never reads as &quot;none yet&quot;.</p>
+    </div>
+
+  <h2>B &mdash; Register rows</h2>
+  <p class="sub">What GitHub actually does, and what your screenshot shows: one full-width row per
+  repository, with the description given the room to be read.</p>
+  <ul class="pros">
+    <li><b>Keeps</b> the most room for a description &mdash; a full line of prose, not a clamped column.</li>
+    <li><b>Adds</b> a real Star button carrying its own count, as GitHub has.</li>
+    <li><b>Names the kind</b> only on hover; the glyph carries it, so the row never spells it out.</li>
+    <li><b>Says nothing else.</b> No counts. The row is the name, what it is for, who touched it and when.</li>
+    <li><b>Costs</b> density: eight rows fill the screen where twelve cards fit now.</li>
+  </ul>
+    <div class="board">
+      <div class="list-bar">
+        <h3>Repositories</h3><span class="count">12</span>
+        <div class="list-bar-end">
+          <span class="field"><svg class="icon icon-search" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M22 22h-2v-2h2v2Zm-2-2h-2v-2h2v2Zm-6-2H6v-2h8v2Zm4 0h-2v-2h2v2ZM6 16H4v-2h2v2Zm10 0h-2v-2h2v2ZM4 14H2V6h2v8Zm14 0h-2V6h2v8ZM6 6H4V4h2v2Zm10 0h-2V4h2v2Zm-2-2H6V2h8v2Z"/></svg><span class="ph">Find a repository</span></span>
+          <span class="pill-select">All types <svg class="icon icon-chevron-down" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M13 16h-2v-2h2v2Zm-2-2H9v-2h2v2Zm4 0h-2v-2h2v2Zm-6-2H7v-2h2v2Zm8 0h-2v-2h2v2ZM7 10H5V8h2v2Zm12 0h-2V8h2v2Z"/></svg></span>
+          <span class="pill-select">Newest <svg class="icon icon-chevron-down" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M13 16h-2v-2h2v2Zm-2-2H9v-2h2v2Zm4 0h-2v-2h2v2Zm-6-2H7v-2h2v2Zm8 0h-2v-2h2v2ZM7 10H5V8h2v2Zm12 0h-2V8h2v2Z"/></svg></span>
+        </div>
+      </div>
+      <ul class="reg-list">
+      <li class="reg-row">
+        <div class="reg-main">
+          <span class="reg-title"><span class="kind-glyph" title="Git project"><svg class="icon icon-git-folder" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/><path d="M7 10h2v2H7ZM9 12h2v2H9ZM7 14h2v2H7ZM12 14h5v2h-5Z"/></svg></span><a href="#"><strong>tidewatch</strong></a>
+            <span class="badge">Public</span><a class="gh-octo" href="#"><svg class="icon icon-github" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="scale(1.5)" d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg></a></span>
+          <p class="row-blurb">Tide tables and current predictions for the estuary.</p>
+          <span class="reg-meta">
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span><i class="sep">·</i>
+            <span class="pusher"><img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt=""/>octocat</span><i class="sep">·</i>
+            <span>Updated Sep 15, 2026</span>
+          </span>
+        </div>
+        <span class="reg-end"><span class="btn star-btn"><svg class="icon icon-star" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg> Star<b class="n">0</b></span></span>
+      </li>
+      <li class="reg-row">
+        <div class="reg-main">
+          <span class="reg-title"><span class="kind-glyph" title="Git project"><svg class="icon icon-git-folder" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/><path d="M7 10h2v2H7ZM9 12h2v2H9ZM7 14h2v2H7ZM12 14h5v2h-5Z"/></svg></span><a href="#"><strong>ledger-api</strong></a>
+            <span class="badge">Public</span><a class="gh-octo" href="#"><svg class="icon icon-github" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="scale(1.5)" d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg></a></span>
+          <p class="row-blurb">A double-entry ledger service with a small HTTP surface, deterministic replay, and no runtime dependencies beyond the standard library. Built for auditability first.</p>
+          <span class="reg-meta">
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span></span><i class="sep">·</i>
+            <span class="pusher"><img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt=""/>octocat</span><i class="sep">·</i>
+            <span>Updated Sep 15, 2026</span>
+          </span>
+        </div>
+        <span class="reg-end"><span class="btn star-btn"><svg class="icon icon-star" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg> Star<b class="n">0</b></span></span>
+      </li>
+      <li class="reg-row">
+        <div class="reg-main">
+          <span class="reg-title"><span class="kind-glyph" title="Desktop pet"><svg class="icon icon-paw" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 2h4v4H6ZM14 2h4v4H14ZM2 8h4v4H2ZM18 8h4v4H18ZM8 12h8v8H8ZM4 14h4v4H4ZM16 14h4v4H16ZM6 18h2v2H6ZM16 18h2v2H16Z"/></svg></span><a href="#"><strong>Teal</strong></a>
+            <span class="badge">Public</span></span>
+
+          <span class="reg-meta">
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span><i class="sep">·</i>
+            <span class="pusher"><img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt=""/>octocat</span><i class="sep">·</i>
+            <span>Updated Sep 15, 2026</span>
+          </span>
+        </div>
+        <span class="reg-end"><span class="btn star-btn"><svg class="icon icon-star" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg> Star<b class="n">0</b></span></span>
+      </li>
+      <li class="reg-row">
+        <div class="reg-main">
+          <span class="reg-title"><span class="kind-glyph" title="Plugin intent"><svg class="icon icon-puzzle" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M2 2h16v2H2ZM2 4h2v6H2ZM16 4h2v6H16ZM4 8h4v2H4ZM18 8h4v2H18ZM6 10h2v6H6ZM20 10h2v6H20ZM2 14h4v2H2ZM16 14h4v2H16ZM2 16h2v6H2ZM16 16h2v6H16ZM4 20h12v2H4Z"/></svg></span><a href="#"><strong>godot-tools</strong></a>
+            <span class="badge">Public</span></span>
+
+          <span class="reg-meta">
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span><i class="sep">·</i>
+            <span class="pusher"><img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt=""/>octocat</span><i class="sep">·</i>
+            <span>Updated Sep 15, 2026</span>
+          </span>
+        </div>
+        <span class="reg-end"><span class="btn star-btn"><svg class="icon icon-star" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg> Star<b class="n">0</b></span></span>
+      </li>
+      <li class="reg-row">
+        <div class="reg-main">
+          <span class="reg-title"><span class="kind-glyph" title="Skill"><svg class="icon icon-lightbulb" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M8 2h8v2H8ZM6 4h2v2H6ZM16 4h2v2H16ZM4 6h2v6H4ZM18 6h2v6H18ZM6 12h2v2H6ZM16 12h2v2H16ZM8 14h8v4H8ZM10 18h4v2H10Z"/></svg></span><a href="#"><strong>cargo-release-check</strong></a>
+            <span class="badge">Public</span></span>
+
+          <span class="reg-meta">
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span><i class="sep">·</i>
+            <span class="pusher"><img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt=""/>octocat</span><i class="sep">·</i>
+            <span>Updated Sep 15, 2026</span>
+          </span>
+        </div>
+        <span class="reg-end"><span class="btn star-btn"><svg class="icon icon-star" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg> Star<b class="n">0</b></span></span>
+      </li>
+      <li class="reg-row">
+        <div class="reg-main">
+          <span class="reg-title"><span class="kind-glyph" title="Project"><svg class="icon icon-folder" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/></svg></span><a href="#"><strong>Birding-Log</strong></a>
+            <span class="badge">Public</span></span>
+
+          <span class="reg-meta">
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span><i class="sep">·</i>
+            <span class="pusher"><img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt=""/>octocat</span><i class="sep">·</i>
+            <span>Updated Sep 15, 2026</span>
+          </span>
+        </div>
+        <span class="reg-end"><span class="btn star-btn"><svg class="icon icon-star" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg> Star<b class="n">0</b></span></span>
+      </li>
+      <li class="reg-row">
+        <div class="reg-main">
+          <span class="reg-title"><span class="kind-glyph" title="Desktop pet"><svg class="icon icon-paw" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 2h4v4H6ZM14 2h4v4H14ZM2 8h4v4H2ZM18 8h4v4H18ZM8 12h8v8H8ZM4 14h4v4H4ZM16 14h4v4H16ZM6 18h2v2H6ZM16 18h2v2H16Z"/></svg></span><a href="#"><strong>Pip</strong></a>
+            <span class="badge">Public</span></span>
+
+          <span class="reg-meta">
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span><i class="sep">·</i>
+            <span class="pusher"><img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt=""/>octocat</span><i class="sep">·</i>
+            <span>Updated Sep 15, 2026</span>
+          </span>
+        </div>
+        <span class="reg-end"><span class="btn star-btn"><svg class="icon icon-star" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg> Star<b class="n">0</b></span></span>
+      </li>
+      <li class="reg-row">
+        <div class="reg-main">
+          <span class="reg-title"><span class="kind-glyph" title="Plugin intent"><svg class="icon icon-puzzle" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M2 2h16v2H2ZM2 4h2v6H2ZM16 4h2v6H16ZM4 8h4v2H4ZM18 8h4v2H18ZM6 10h2v6H6ZM20 10h2v6H20ZM2 14h4v2H2ZM16 14h4v2H16ZM2 16h2v6H2ZM16 16h2v6H16ZM4 20h12v2H4Z"/></svg></span><a href="#"><strong>pond-review</strong></a>
+            <span class="badge">Public</span></span>
+
+          <span class="reg-meta">
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span></span><i class="sep">·</i>
+            <span class="pusher"><img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt=""/>octocat</span><i class="sep">·</i>
+            <span>Updated Sep 15, 2026</span>
+          </span>
+        </div>
+        <span class="reg-end"><span class="btn star-btn"><svg class="icon icon-star" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg> Star<b class="n">0</b></span></span>
+      </li>
+      <li class="reg-row">
+        <div class="reg-main">
+          <span class="reg-title"><span class="kind-glyph" title="Git project"><svg class="icon icon-git-folder" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/><path d="M7 10h2v2H7ZM9 12h2v2H9ZM7 14h2v2H7ZM12 14h5v2h-5Z"/></svg></span><a href="#"><strong>HorrorGame</strong></a>
+            <span class="badge">Public</span></span>
+
+          <span class="reg-meta">
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span><i class="sep">·</i>
+            <span class="pusher"><img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt=""/>octocat</span><i class="sep">·</i>
+            <span>Updated Sep 15, 2026</span>
+          </span>
+        </div>
+        <span class="reg-end"><span class="btn star-btn"><svg class="icon icon-star" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg> Star<b class="n">0</b></span></span>
+      </li>
+      <li class="reg-row">
+        <div class="reg-main">
+          <span class="reg-title"><span class="kind-glyph" title="Desktop pet"><svg class="icon icon-paw" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M6 2h4v4H6ZM14 2h4v4H14ZM2 8h4v4H2ZM18 8h4v4H18ZM8 12h8v8H8ZM4 14h4v4H4ZM16 14h4v4H16ZM6 18h2v2H6ZM16 18h2v2H16Z"/></svg></span><a href="#"><strong>Mossy</strong></a>
+            <span class="badge">Public</span></span>
+
+          <span class="reg-meta">
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span><i class="sep">·</i>
+            <span class="pusher"><img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt=""/>octocat</span><i class="sep">·</i>
+            <span>Updated Sep 15, 2026</span>
+          </span>
+        </div>
+        <span class="reg-end"><span class="btn star-btn"><svg class="icon icon-star" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg> Star<b class="n">0</b></span></span>
+      </li>
+      <li class="reg-row">
+        <div class="reg-main">
+          <span class="reg-title"><span class="kind-glyph" title="Skill"><svg class="icon icon-lightbulb" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M8 2h8v2H8ZM6 4h2v2H6ZM16 4h2v2H16ZM4 6h2v6H4ZM18 6h2v6H18ZM6 12h2v2H6ZM16 12h2v2H16ZM8 14h8v4H8ZM10 18h4v2H10Z"/></svg></span><a href="#"><strong>godot-scene-lint</strong></a>
+            <span class="badge">Public</span></span>
+
+          <span class="reg-meta">
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span><i class="sep">·</i>
+            <span class="pusher"><img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt=""/>octocat</span><i class="sep">·</i>
+            <span>Updated Sep 15, 2026</span>
+          </span>
+        </div>
+        <span class="reg-end"><span class="btn star-btn"><svg class="icon icon-star" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg> Star<b class="n">0</b></span></span>
+      </li>
+      <li class="reg-row">
+        <div class="reg-main">
+          <span class="reg-title"><span class="kind-glyph" title="Skill"><svg class="icon icon-lightbulb" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M8 2h8v2H8ZM6 4h2v2H6ZM16 4h2v2H16ZM4 6h2v6H4ZM18 6h2v6H18ZM6 12h2v2H6ZM16 12h2v2H16ZM8 14h8v4H8ZM10 18h4v2H10Z"/></svg></span><a href="#"><strong>release-notes</strong></a>
+            <span class="badge">Public</span></span>
+
+          <span class="reg-meta">
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span></span><i class="sep">·</i>
+            <span class="pusher"><img class="avatar-xs" src="https://avatars.githubusercontent.com/u/583231?v=4" alt=""/>octocat</span><i class="sep">·</i>
+            <span>Updated Sep 15, 2026</span>
+          </span>
+        </div>
+        <span class="reg-end"><span class="btn star-btn"><svg class="icon icon-star" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg> Star<b class="n">0</b></span></span>
+      </li>
+      </ul>
+      <p class="note">Every row carries the same four things, so nothing shifts between a project and a catalog.</p>
+    </div>
+
+  <h2>C &mdash; Index rows</h2>
+  <p class="sub">The Hugging Face answer: the address leads, the numbers carry the row, prose is
+  demoted to one line. Built to scan fifty, not to read twelve.</p>
+  <ul class="pros">
+    <li><b>Keeps</b> every repository visible at once; two across, four lines each.</li>
+    <li><b>Adds</b> the full <code>owner/name</code> address, as Hugging Face shows it.</li>
+    <li><b>Costs</b> the description &mdash; one clamped line where there is one, and nothing where there is not.</li>
+  </ul>
+    <div class="board">
+      <div class="list-bar">
+        <h3>Repositories</h3><span class="count">12</span>
+        <div class="list-bar-end">
+          <span class="field"><svg class="icon icon-search" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M22 22h-2v-2h2v2Zm-2-2h-2v-2h2v2Zm-6-2H6v-2h8v2Zm4 0h-2v-2h2v2ZM6 16H4v-2h2v2Zm10 0h-2v-2h2v2ZM4 14H2V6h2v8Zm14 0h-2V6h2v8ZM6 6H4V4h2v2Zm10 0h-2V4h2v2Zm-2-2H6V2h8v2Z"/></svg><span class="ph">Find a repository</span></span>
+          <span class="pill-select">All types <svg class="icon icon-chevron-down" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M13 16h-2v-2h2v2Zm-2-2H9v-2h2v2Zm4 0h-2v-2h2v2Zm-6-2H7v-2h2v2Zm8 0h-2v-2h2v2ZM7 10H5V8h2v2Zm12 0h-2V8h2v2Z"/></svg></span>
+          <span class="pill-select">Newest <svg class="icon icon-chevron-down" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="M13 16h-2v-2h2v2Zm-2-2H9v-2h2v2Zm4 0h-2v-2h2v2Zm-6-2H7v-2h2v2Zm8 0h-2v-2h2v2ZM7 10H5V8h2v2Zm12 0h-2V8h2v2Z"/></svg></span>
+        </div>
+      </div>
+      <ul class="idx-grid">
+      <li>
+        <a class="idx-card" href="#">
+          <span class="idx-top"><svg class="icon icon-git-folder" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/><path d="M7 10h2v2H7ZM9 12h2v2H9ZM7 14h2v2H7ZM12 14h5v2h-5Z"/></svg>
+            <span class="idx-name"><span class="owner">octocat/</span><strong>tidewatch</strong></span>
+            <span class="idx-star"><svg class="icon icon-star" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg>0</span></span>
+          <span class="idx-blurb">Tide tables and current predictions for the estuary.</span>
+          <span class="idx-meta">
+            <span class="tag">Git project</span>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><b>2</b></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>6</b></span>
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+      </li>
+      <li>
+        <a class="idx-card" href="#">
+          <span class="idx-top"><svg class="icon icon-git-folder" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/><path d="M7 10h2v2H7ZM9 12h2v2H9ZM7 14h2v2H7ZM12 14h5v2h-5Z"/></svg>
+            <span class="idx-name"><span class="owner">octocat/</span><strong>ledger-api</strong></span>
+            <span class="idx-star"><svg class="icon icon-star" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg>0</span></span>
+          <span class="idx-blurb">A double-entry ledger service with a small HTTP surface, deterministic replay, and no runtime dependencies beyond the standard library. Built for auditability first.</span>
+          <span class="idx-meta">
+            <span class="tag">Git project</span>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><b>1</b></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>4</b></span>
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+      </li>
+      <li>
+        <a class="idx-card" href="#">
+          <span class="idx-top"><svg class="icon icon-paw" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 2h4v4H6ZM14 2h4v4H14ZM2 8h4v4H2ZM18 8h4v4H18ZM8 12h8v8H8ZM4 14h4v4H4ZM16 14h4v4H16ZM6 18h2v2H6ZM16 18h2v2H16Z"/></svg>
+            <span class="idx-name"><span class="owner">octocat/</span><strong>Teal</strong></span>
+            <span class="idx-star"><svg class="icon icon-star" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg>0</span></span>
+
+          <span class="idx-meta">
+            <span class="tag">Desktop pet</span>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>1</b></span>
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+      </li>
+      <li>
+        <a class="idx-card" href="#">
+          <span class="idx-top"><svg class="icon icon-puzzle" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M2 2h16v2H2ZM2 4h2v6H2ZM16 4h2v6H16ZM4 8h4v2H4ZM18 8h4v2H18ZM6 10h2v6H6ZM20 10h2v6H20ZM2 14h4v2H2ZM16 14h4v2H16ZM2 16h2v6H2ZM16 16h2v6H16ZM4 20h12v2H4Z"/></svg>
+            <span class="idx-name"><span class="owner">octocat/</span><strong>godot-tools</strong></span>
+            <span class="idx-star"><svg class="icon icon-star" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg>0</span></span>
+
+          <span class="idx-meta">
+            <span class="tag">Plugin intent</span>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><span class="dim">&ndash;</span></span>
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+      </li>
+      <li>
+        <a class="idx-card" href="#">
+          <span class="idx-top"><svg class="icon icon-lightbulb" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M8 2h8v2H8ZM6 4h2v2H6ZM16 4h2v2H16ZM4 6h2v6H4ZM18 6h2v6H18ZM6 12h2v2H6ZM16 12h2v2H16ZM8 14h8v4H8ZM10 18h4v2H10Z"/></svg>
+            <span class="idx-name"><span class="owner">octocat/</span><strong>cargo-release-check</strong></span>
+            <span class="idx-star"><svg class="icon icon-star" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg>0</span></span>
+
+          <span class="idx-meta">
+            <span class="tag">Skill</span>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>2</b></span>
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+      </li>
+      <li>
+        <a class="idx-card" href="#">
+          <span class="idx-top"><svg class="icon icon-folder" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/></svg>
+            <span class="idx-name"><span class="owner">octocat/</span><strong>Birding-Log</strong></span>
+            <span class="idx-star"><svg class="icon icon-star" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg>0</span></span>
+
+          <span class="idx-meta">
+            <span class="tag">Project</span>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><b>2</b></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>6</b></span>
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+      </li>
+      <li>
+        <a class="idx-card" href="#">
+          <span class="idx-top"><svg class="icon icon-paw" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 2h4v4H6ZM14 2h4v4H14ZM2 8h4v4H2ZM18 8h4v4H18ZM8 12h8v8H8ZM4 14h4v4H4ZM16 14h4v4H16ZM6 18h2v2H6ZM16 18h2v2H16Z"/></svg>
+            <span class="idx-name"><span class="owner">octocat/</span><strong>Pip</strong></span>
+            <span class="idx-star"><svg class="icon icon-star" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg>0</span></span>
+
+          <span class="idx-meta">
+            <span class="tag">Desktop pet</span>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>1</b></span>
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+      </li>
+      <li>
+        <a class="idx-card" href="#">
+          <span class="idx-top"><svg class="icon icon-puzzle" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M2 2h16v2H2ZM2 4h2v6H2ZM16 4h2v6H16ZM4 8h4v2H4ZM18 8h4v2H18ZM6 10h2v6H6ZM20 10h2v6H20ZM2 14h4v2H2ZM16 14h4v2H16ZM2 16h2v6H2ZM16 16h2v6H16ZM4 20h12v2H4Z"/></svg>
+            <span class="idx-name"><span class="owner">octocat/</span><strong>pond-review</strong></span>
+            <span class="idx-star"><svg class="icon icon-star" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg>0</span></span>
+
+          <span class="idx-meta">
+            <span class="tag">Plugin intent</span>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><span class="dim">&ndash;</span></span>
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+      </li>
+      <li>
+        <a class="idx-card" href="#">
+          <span class="idx-top"><svg class="icon icon-git-folder" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/><path d="M7 10h2v2H7ZM9 12h2v2H9ZM7 14h2v2H7ZM12 14h5v2h-5Z"/></svg>
+            <span class="idx-name"><span class="owner">octocat/</span><strong>HorrorGame</strong></span>
+            <span class="idx-star"><svg class="icon icon-star" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg>0</span></span>
+
+          <span class="idx-meta">
+            <span class="tag">Git project</span>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><b>3</b></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>8</b></span>
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+      </li>
+      <li>
+        <a class="idx-card" href="#">
+          <span class="idx-top"><svg class="icon icon-paw" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 2h4v4H6ZM14 2h4v4H14ZM2 8h4v4H2ZM18 8h4v4H18ZM8 12h8v8H8ZM4 14h4v4H4ZM16 14h4v4H16ZM6 18h2v2H6ZM16 18h2v2H16Z"/></svg>
+            <span class="idx-name"><span class="owner">octocat/</span><strong>Mossy</strong></span>
+            <span class="idx-star"><svg class="icon icon-star" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg>0</span></span>
+
+          <span class="idx-meta">
+            <span class="tag">Desktop pet</span>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>1</b></span>
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+      </li>
+      <li>
+        <a class="idx-card" href="#">
+          <span class="idx-top"><svg class="icon icon-lightbulb" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M8 2h8v2H8ZM6 4h2v2H6ZM16 4h2v2H16ZM4 6h2v6H4ZM18 6h2v6H18ZM6 12h2v2H6ZM16 12h2v2H16ZM8 14h8v4H8ZM10 18h4v2H10Z"/></svg>
+            <span class="idx-name"><span class="owner">octocat/</span><strong>godot-scene-lint</strong></span>
+            <span class="idx-star"><svg class="icon icon-star" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg>0</span></span>
+
+          <span class="idx-meta">
+            <span class="tag">Skill</span>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>2</b></span>
+            <span class="marks"><span class="provider-well" title="codex"><svg class="icon icon-openai" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path transform="translate(1 1) scale(0.06875)" d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+      </li>
+      <li>
+        <a class="idx-card" href="#">
+          <span class="idx-top"><svg class="icon icon-lightbulb" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M8 2h8v2H8ZM6 4h2v2H6ZM16 4h2v2H16ZM4 6h2v6H4ZM18 6h2v6H18ZM6 12h2v2H6ZM16 12h2v2H16ZM8 14h8v4H8ZM10 18h4v2H10Z"/></svg>
+            <span class="idx-name"><span class="owner">octocat/</span><strong>release-notes</strong></span>
+            <span class="idx-star"><svg class="icon icon-star" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path d="m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Zm4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z"/></svg>0</span></span>
+
+          <span class="idx-meta">
+            <span class="tag">Skill</span>
+            <span class="slot" title="sessions"><svg class="icon icon-message" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M20 2H4v2h16ZM20 16H6v2h14ZM22 4h-2v12h2ZM4 4H2v18h2ZM6 18H4v2h2Z"/></svg><span class="dim">&ndash;</span></span>
+            <span class="slot" title="files"><svg class="icon icon-file" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M6 4H4v16h2zm10-2H4v2h12zm4 4h-2v14h2zm0 14H4v2h16zM16 4h2v2h-2zm-4 0h2v6h-2z"/><path d="M12 8h6v2h-6z"/></svg><b>2</b></span>
+            <span class="marks"><span class="provider-well" title="claude"><svg class="icon icon-claude-mark" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision"><path d="M12 12L10.1 1.5L13.9 1.5ZM12 12L18.08 3.23L20.77 5.92ZM12 12L22.5 10.1L22.5 13.9ZM12 12L20.77 18.08L18.08 20.77ZM12 12L13.9 22.5L10.1 22.5ZM12 12L5.92 20.77L3.23 18.08ZM12 12L1.5 13.9L1.5 10.1ZM12 12L3.23 5.92L5.92 3.23Z"/></svg></span></span>
+            <time>Sep 15, 2026</time>
+          </span>
+        </a>
+      </li>
+      </ul>
+      <p class="note">The right-hand slots are fixed width, so the figures form columns across both cards in a row.</p>
+    </div>
+
+  <h2>Where this landed</h2>
+  <p class="lede"><b>B, chosen, and kept quiet.</b> Two things left the row after the first pass:
+  the spelled-out kind, which the glyph already carries and its tooltip now names, and the session
+  and file counts. What remains is the name, the description, the providers, who pushed last, and
+  when &mdash; the things that tell one repository from another at a glance. Counts belong on the
+  repository page, where there is room to say what they count.</p>
+  <p class="sub">The open question B inherits: only two repositories in twelve carry a description
+  today, so most rows run a line short. Now that the counts are gone, the description is the row's
+  only distinguishing prose, which makes a second source for it worth more, not less &mdash;
+  <code>descriptor.description</code> already exists for desktop pets.</p>
+  <p class="sub"><b>One thing to decide before any of them:</b> D2's ledger also carried a size
+  figure (&ldquo;16.4 KiB&rdquo;). <code>committed_bytes</code> is only on the <em>Yours</em>
+  listing &mdash; the public, starred and profile listings do not return it. So either size is a
+  Yours-only column, or the service starts sending it. None of the three above use it.</p>
+</div>
+<script>
+(function () {
+  var root = document.documentElement;
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-theme-pick]");
+    if (!b) return;
+    root.dataset.theme = b.dataset.themePick;
+    Array.prototype.forEach.call(document.querySelectorAll("#theme-seg button"), function (x) {
+      x.setAttribute("aria-pressed", String(x === b));
+    });
+  });
+})();
+</script>
+</body>
+</html>

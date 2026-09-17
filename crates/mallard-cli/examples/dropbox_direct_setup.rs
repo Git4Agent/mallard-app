@@ -104,28 +104,34 @@ fn prepare_dropbox(
 #[allow(dead_code)]
 mod dropbox_browser_setup {
 use crate::error::CliError;
-use mallard_infrastructure::{dropbox_auth::AuthorizationRequest, dropbox_browser};
+use mallard_infrastructure::{
+    dropbox_auth::{AuthorizationRequest, CALLBACK_PORT, DROPBOX_CALLBACK},
+    loopback_browser,
+};
 use std::sync::atomic::AtomicBool;
 use zeroize::Zeroizing;
 
 pub(crate) fn authorize(request: &AuthorizationRequest) -> Result<Zeroizing<String>, CliError> {
-    dropbox_browser::authorize(
-        request,
+    loopback_browser::authorize(
+        &DROPBOX_CALLBACK,
+        &request.url,
+        &request.state,
+        CALLBACK_PORT,
         |url| open::that_detached(url.as_str()).map_err(|_| ()),
         &AtomicBool::new(false),
     ).map_err(|error| CliError::remote(error.code(), error.message()))
 }
 
     #[cfg(test)]
-    use std::{io::{Read, Write}, net::{TcpListener, TcpStream}, time::Duration};
+    use std::{io::{Read, Write}, net::TcpStream, time::Duration};
 
     #[cfg(test)]
     pub(super) fn mock_consent(
         request: &AuthorizationRequest,
         denied: bool,
     ) -> Result<Zeroizing<String>, CliError> {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = loopback_browser::LoopbackListener::bind(&DROPBOX_CALLBACK, 0).unwrap();
+        let address: std::net::SocketAddr = format!("127.0.0.1:{}", listener.port()).parse().unwrap();
         let result = if denied {
             "error=access_denied"
         } else {
@@ -149,7 +155,8 @@ pub(crate) fn authorize(request: &AuthorizationRequest) -> Result<Zeroizing<Stri
                 assert!(!response.contains("callback-code"));
                 assert!(response.contains("Cache-Control: no-store"));
             });
-            let result = mallard_infrastructure::dropbox_browser::receive(listener, request, |_| Ok(()), Duration::from_secs(5))
+            let result = listener
+                .receive(&DROPBOX_CALLBACK, &request.url, &request.state, |_| Ok(()), Duration::from_secs(5), &AtomicBool::new(false))
                 .map_err(|error| CliError::remote(error.code(), error.message()));
             response.join().unwrap();
             result

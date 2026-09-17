@@ -1,6 +1,8 @@
 import { Channel, invoke } from "../../ipc";
 import type {
   DropboxSetupMode, DropboxSetupLogin, DropboxSetupProgress,
+  ManagedCloudLink, ManagedCloudRepository, ManagedCloudRepositoryResolution,
+  ManagedCloudSetupLogin, ManagedCloudSetupMode, ManagedCloudSetupProgress,
   R2Account,
   R2Jurisdiction,
   R2SetupProgress,
@@ -261,6 +263,37 @@ export const projectSyncApi = {
     invoke<void>("prepare_dropbox_storage", { draftId, expectedRevision, sessionId, folderName, scanId, candidateId }),
   cancelDropboxSetup: (draftId: string, expectedRevision: number) =>
     invoke<void>("cancel_dropbox_setup", { draftId, expectedRevision }),
+
+  /** The Mallard Cloud sign-in: the link arrives on the channel, the
+   *  callback lands on a loopback port, the session stays in Rust. */
+  authorizeManagedCloudSetup: (draftId: string, expectedRevision: number, mode: ManagedCloudSetupMode, onProgress: (progress: ManagedCloudSetupProgress) => void) => {
+    const channel = new Channel<ManagedCloudSetupProgress>();
+    channel.onmessage = onProgress;
+    return invoke<ManagedCloudSetupLogin>("authorize_managed_cloud_setup", { draftId, expectedRevision, mode, onProgress: channel });
+  },
+  prepareManagedCloudStorage: (draftId: string, expectedRevision: number, sessionId: string) =>
+    invoke<void>("prepare_managed_cloud_storage", { draftId, expectedRevision, sessionId }),
+  cancelManagedCloudSetup: (draftId: string, expectedRevision: number) =>
+    invoke<void>("cancel_managed_cloud_setup", { draftId, expectedRevision }),
+  /** The website page and release state of a project on a Mallard Cloud
+   *  storage; null when the storage is not Mallard Cloud or nothing was
+   *  pushed yet. */
+  getManagedCloudLink: (localProjectId: string, storageId: string) =>
+    invoke<ManagedCloudLink | null>("get_managed_cloud_link", { localProjectId, storageId }),
+  requestManagedCloudRelease: (localProjectId: string, storageId: string, expectedRepositoryRevision: number) =>
+    invoke<ManagedCloudLink>("request_managed_cloud_release", { localProjectId, storageId, expectedRepositoryRevision }),
+  /** The project repositories the account belongs to on a Mallard Cloud
+   *  storage, each compared with the local project's Git remote. */
+  listManagedCloudRepositories: (storageId: string, localRepositoryFingerprint: string | null) =>
+    invoke<ManagedCloudRepository[]>("list_managed_cloud_repositories", { storageId, localRepositoryFingerprint }),
+  /** One pasted address resolved against a Mallard Cloud storage. */
+  resolveManagedCloudRepository: (storageId: string, address: string, localRepositoryFingerprint: string | null) =>
+    invoke<ManagedCloudRepositoryResolution>("resolve_managed_cloud_repository", { storageId, address, localRepositoryFingerprint }),
+  /** One invitation code entered on a Mallard Cloud storage: the account
+   *  joins the private repository it belongs to, which comes back the way
+   *  a resolved address does. */
+  acceptManagedCloudInvitation: (storageId: string, code: string, localRepositoryFingerprint: string | null) =>
+    invoke<ManagedCloudRepositoryResolution>("accept_managed_cloud_invitation", { storageId, code, localRepositoryFingerprint }),
 
   getHostIdentityStatus: () =>
     invoke<HostIdentityStatus>("get_host_identity_status"),

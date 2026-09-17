@@ -1,0 +1,316 @@
+<title>Mallard Cloud Home Directions</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@400..800&display=swap">
+<style>
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SFMono-Regular", "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  --font-display: "Baloo 2", "Arial Rounded MT Bold", var(--font-sans);
+  --shadow-card: 3px 3px 0 var(--shade); --shadow-control: 2px 2px 0 var(--shade);
+  --shade: #b8a794;
+  --box-border: 2px solid var(--accent);
+  --bg-0: #fefbf6; --bg-3: #f2e8dd; --bg-4: #fffdf9; --bg-hover: rgba(82, 58, 43, 0.045);
+  --border: #d8cec4; --border-mid: #aa998d; --border-strong: #66574f;
+  --button-bg: #fdf8f1; --button-primary-bg: #8a6347; --button-primary-text: #fffaf4;
+  --app-shell: #f6eee5; --surface-card: #fcf7f0; --surface-row: #fdf9f3; --surface-row-hover: #faf2e9; --surface-subtle: rgba(82, 58, 43, 0.025);
+  --chip-bg: rgba(82, 58, 43, 0.065); --chip-strong-bg: rgba(82, 58, 43, 0.12); --accent-soft: rgba(82, 58, 43, 0.075); --accent-contrast: #fffaf4;
+  --success-soft: rgba(75, 150, 97, 0.09);
+  --text-0: #1e1817; --text-1: #3d332e; --text-2: #6f6159; --accent: #2a211d;
+  --success-text: #397149; --warning-text: #885e06; --info-text: #256c90;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --shade: rgba(0, 0, 0, 0.5);
+    --bg-0: #15120f; --bg-3: #2c2722; --bg-4: #171310; --bg-hover: rgba(255, 238, 217, 0.065);
+    --border: #34302a; --border-mid: #4a433b; --border-strong: #867b6f;
+    --button-bg: #1d1915; --button-primary-bg: #bf9169; --button-primary-text: #1b1612;
+    --app-shell: #0c0a08; --surface-card: #1d1915; --surface-row: #1a1613; --surface-row-hover: #251f1b; --surface-subtle: rgba(255, 238, 217, 0.035);
+    --chip-bg: rgba(255, 238, 217, 0.08); --chip-strong-bg: rgba(255, 238, 217, 0.13); --accent-soft: rgba(240, 232, 213, 0.1); --accent-contrast: #15120f;
+    --success-soft: rgba(126, 212, 154, 0.12);
+    --text-0: #f3ede1; --text-1: #d3cbbc; --text-2: #a79e90; --accent: #f0e8d5;
+    --success-text: #7ed49a; --warning-text: #f2c369; --info-text: #8ccff3;
+  }
+}
+:root[data-theme="dark"] {
+  --shade: rgba(0, 0, 0, 0.5);
+  --bg-0: #15120f; --bg-3: #2c2722; --bg-4: #171310; --bg-hover: rgba(255, 238, 217, 0.065);
+  --border: #34302a; --border-mid: #4a433b; --border-strong: #867b6f;
+  --button-bg: #1d1915; --button-primary-bg: #bf9169; --button-primary-text: #1b1612;
+  --app-shell: #0c0a08; --surface-card: #1d1915; --surface-row: #1a1613; --surface-row-hover: #251f1b; --surface-subtle: rgba(255, 238, 217, 0.035);
+  --chip-bg: rgba(255, 238, 217, 0.08); --chip-strong-bg: rgba(255, 238, 217, 0.13); --accent-soft: rgba(240, 232, 213, 0.1); --accent-contrast: #15120f;
+  --success-soft: rgba(126, 212, 154, 0.12);
+  --text-0: #f3ede1; --text-1: #d3cbbc; --text-2: #a79e90; --accent: #f0e8d5;
+  --success-text: #7ed49a; --warning-text: #f2c369; --info-text: #8ccff3;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--app-shell); color: var(--text-0); font-family: var(--font-sans); font-size: 13px; line-height: 1.5; padding-inline: 16px; padding-block: 12px 72px; }
+a { color: inherit; text-decoration: none; }
+svg.i { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; flex: 0 0 auto; }
+.duck { width: 36px; height: 36px; fill: var(--accent); shape-rendering: crispEdges; flex: 0 0 auto; }
+time, .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+.spec { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 34px; }
+.spec-bar { position: sticky; top: 8px; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 8px 14px; border: var(--box-border); border-radius: 14px; background: var(--surface-card); box-shadow: var(--shadow-card); }
+.spec-title { font: 800 15px var(--font-display); margin-right: auto; display: inline-flex; align-items: center; gap: 8px; }
+.spec-title .duck { width: 26px; height: 26px; }
+.ctl { display: inline-flex; align-items: center; gap: 6px; }
+.ctl-label { font: 700 10.5px var(--font-display); letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); }
+.seg { display: inline-flex; gap: 2px; padding: 3px; border: var(--box-border); border-radius: 999px; background: var(--surface-card); }
+.seg button { height: 24px; padding: 0 11px; border: 0; border-radius: 999px; background: transparent; color: var(--text-2); font: 700 12px var(--font-display); cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-contrast); }
+.jump { display: inline-flex; gap: 4px; }
+.jump a { padding: 3px 10px; border-radius: 999px; font: 700 12px var(--font-display); color: var(--text-1); background: var(--chip-bg); }
+.intro { max-width: 70ch; color: var(--text-1); }
+.intro h1 { font: 800 26px/1.2 var(--font-display); margin: 0 0 6px; text-wrap: balance; color: var(--text-0); }
+.intro p { margin: 0 0 8px; }
+.direction { display: flex; flex-direction: column; gap: 10px; scroll-margin-top: 72px; }
+.direction h2 { font: 800 22px/1.2 var(--font-display); margin: 0; display: flex; align-items: baseline; gap: 10px; }
+.direction h2 .k { display: inline-grid; place-items: center; width: 30px; height: 30px; border: var(--box-border); border-radius: 9px; background: var(--accent); color: var(--accent-contrast); font-size: 15px; box-shadow: var(--shadow-control); }
+.direction h2 small { font: 600 13px var(--font-display); color: var(--text-2); }
+.lede { max-width: 70ch; margin: 0; color: var(--text-1); }
+.lede b { color: var(--text-0); }
+.pros { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px; list-style: none; margin: 0; padding: 0; font-size: 12px; color: var(--text-1); }
+.pros li { padding: 7px 10px; border: 1px solid var(--border-mid); border-radius: 9px; background: var(--surface-subtle); }
+.pros li b { color: var(--text-0); font-family: var(--font-display); }
+.pros li.con b { color: var(--warning-text); }
+.board-wrap { overflow-x: auto; padding: 12px 0 10px; }
+.board { position: relative; width: 1120px; border: 1px dashed var(--border-mid); border-radius: 18px; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.board-tag { position: absolute; top: -9px; left: 16px; padding: 0 8px; background: var(--app-shell); font: 700 10.5px var(--font-display); letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); }
+
+/* Shared grammar */
+.tile { background: var(--surface-card); border: var(--box-border); border-radius: 14px; box-shadow: var(--shadow-card); }
+.topbar { display: flex; align-items: center; gap: 18px; min-height: 52px; padding: 8px 14px; }
+.topbar .end { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.brand { display: inline-flex; align-items: center; gap: 8px; font: 800 17px var(--font-display); }
+.nav { display: flex; gap: 4px; }
+.nav a { padding: 4px 10px; border-radius: 999px; color: var(--text-2); font: 500 12px var(--font-display); }
+.nav a.on { background: var(--accent); color: var(--accent-contrast); font-weight: 700; }
+.theme { display: inline-flex; gap: 2px; padding: 2px; border: var(--box-border); border-radius: 999px; }
+.theme span { height: 20px; padding: 0 8px; border-radius: 999px; font: 700 11px/20px var(--font-display); color: var(--text-2); }
+.theme span.on { background: var(--accent); color: var(--accent-contrast); }
+.acct { font: 700 13px var(--font-display); }
+.ghost { color: var(--text-2); font: 500 12px var(--font-display); }
+.page { width: 1120px; max-width: 100%; margin: 0 auto; padding: 6px 0 8px; display: flex; flex-direction: column; gap: 8px; }
+.pill { display: inline-flex; align-items: center; gap: 4px; padding: 1px 9px; border-radius: 999px; background: var(--chip-bg); color: var(--text-1); font: 500 11px var(--font-display); white-space: nowrap; }
+.pill-ok { background: var(--success-soft); color: var(--success-text); }
+.pill-mine { background: var(--accent); color: var(--accent-contrast); font-weight: 700; }
+.avatar { display: inline-grid; place-items: center; width: 24px; height: 24px; border: 2px solid var(--accent); border-radius: 7px; background: var(--accent); color: var(--accent-contrast); font: 800 9px var(--font-display); flex: 0 0 auto; }
+.avatar.ss { background: var(--bg-3); color: var(--text-0); }
+.kind { color: var(--text-2); }
+.btn { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 12px; border: var(--box-border); border-radius: 999px; background: var(--button-bg); color: var(--text-1); box-shadow: var(--shadow-control); font: 700 12px var(--font-display); white-space: nowrap; }
+.btn-primary { background: var(--button-primary-bg); border-color: var(--button-primary-bg); color: var(--button-primary-text); }
+.input { display: inline-flex; align-items: center; gap: 8px; min-height: 30px; padding: 0 10px; border: 2px solid var(--border-strong); border-radius: 6px; background: var(--bg-4); color: var(--text-2); font-size: 13px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 10px; border: 1px solid var(--border-mid); border-radius: 999px; background: var(--surface-row); color: var(--text-1); font: 600 12px var(--font-display); }
+.chip.on { border-color: var(--accent); background: var(--accent-soft); color: var(--text-0); }
+.chip svg.i { width: 12px; height: 12px; color: var(--text-2); }
+
+/* Rows */
+.list-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.list-head h1 { margin: 0; font: 800 17px var(--font-display); }
+.list-head .count { color: var(--text-2); font: 12px var(--font-mono); }
+.list-head .end { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.tabs-line { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--border); }
+.tabs-line a { padding: 8px 12px 9px; margin-bottom: -1px; border-bottom: 2px solid transparent; color: var(--text-2); font: 600 13px var(--font-display); display: inline-flex; gap: 6px; align-items: center; }
+.tabs-line a.on { color: var(--text-0); border-bottom-color: var(--accent); }
+.tabs-line .n { padding: 0 6px; border-radius: 999px; background: var(--chip-bg); font: 700 10.5px var(--font-mono); color: var(--text-2); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 14px; border-bottom: 1px solid var(--border); align-items: center; }
+.chips .sp { flex: 1; }
+.rrow { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; grid-template-areas: "k t e" "k d e"; gap: 2px 12px; padding: 10px 14px; align-items: center; }
+.rrow + .rrow { border-top: 1px solid var(--border); }
+.rrow .kind { grid-area: k; align-self: center; }
+.rrow .t { grid-area: t; font: 700 15px var(--font-display); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rrow .d { grid-area: d; color: var(--text-1); font-size: 12px; }
+.rrow .end { grid-area: e; color: var(--text-2); font-size: 11.5px; display: flex; align-items: center; gap: 10px; }
+.rrow .end time { font-size: 11.5px; }
+.grp { display: flex; align-items: center; gap: 8px; padding: 8px 14px 4px; color: var(--text-2); font: 700 10.5px var(--font-display); letter-spacing: .08em; text-transform: uppercase; border-top: 1px solid var(--border); }
+.grp:first-of-type { border-top: 0; }
+.grp .n { font: 700 10.5px var(--font-mono); }
+
+/* B rail */
+.b-list { display: grid; grid-template-columns: 212px minmax(0, 1fr); gap: 8px; align-items: start; }
+.rail { padding: 12px 10px; display: flex; flex-direction: column; gap: 12px; }
+.rail h4 { margin: 0 0 4px; padding: 0 8px; font: 700 10.5px var(--font-display); letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); }
+.rail ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.rail li { display: flex; justify-content: space-between; padding: 4px 8px; border-radius: 6px; font-size: 12.5px; color: var(--text-1); }
+.rail li.on { background: var(--accent-soft); color: var(--text-0); font-weight: 600; }
+.rail li span { color: var(--text-2); font: 11px var(--font-mono); }
+
+/* C cards */
+.cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 12px 14px 14px; }
+.card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; padding: 10px 12px; border: 1px solid var(--border-mid); border-radius: 12px; background: var(--surface-row); align-items: start; }
+.card .t { font: 700 14.5px var(--font-display); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.card .d { color: var(--text-1); font-size: 12px; }
+.card .m { display: flex; gap: 10px; color: var(--text-2); font: 11px var(--font-mono); align-items: center; margin-top: 2px; }
+.card .av { grid-row: span 3; align-self: start; }
+.verdict { padding: 14px 18px; display: flex; flex-direction: column; gap: 6px; }
+.verdict h2 { margin: 0; font: 800 18px var(--font-display); }
+.verdict p { margin: 0; max-width: 78ch; color: var(--text-1); }
+.verdict b { color: var(--text-0); }
+@media (max-width: 640px) { .spec-bar { position: static; } }
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="duck" viewBox="0 0 20 20"><path d="M13 3h3v1h-3ZM12 4h5v2h-5ZM12 6h7v1h-7ZM12 7h3v3h-3ZM7 10h9v1h-9ZM2 11h15v1h-15ZM1 12h16v2h-16ZM2 14h15v1h-15ZM3 15h13v1h-13ZM5 16h10v1h-10Z"/></symbol>
+  <symbol id="chevd" viewBox="0 0 16 16"><path d="M3 6l5 5 5-5"/></symbol>
+  <symbol id="search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></symbol>
+  <symbol id="branch" viewBox="0 0 16 16"><circle cx="4" cy="3.5" r="1.8"/><circle cx="4" cy="12.5" r="1.8"/><circle cx="12" cy="5" r="1.8"/><path d="M4 5.3v5.4M12 6.8c0 3-8 2-8 4"/></symbol>
+  <symbol id="folder" viewBox="0 0 16 16"><path d="M1.5 4h5l1.5 1.5h6.5V13h-13z"/></symbol>
+  <symbol id="skill" viewBox="0 0 16 16"><path d="M4 1.5h5l3 3V14.5H4zM9 1.5v3h3M6 8h4M6 11h4"/></symbol>
+  <symbol id="pet" viewBox="0 0 16 16"><path d="M9.5 2.5h2.5v1.5h-.5v1h.5v1.5h-1.5v2h-3v1h-4v2h-1v-2h1v-1h4v-1h1.5v-2.5h.5z" fill="currentColor" stroke="none"/><path d="M2 11h11M3 13h9"/></symbol>
+  <symbol id="msg" viewBox="0 0 16 16"><path d="M2 3h12v8H6l-3 3v-3H2z"/></symbol>
+  <symbol id="file" viewBox="0 0 16 16"><path d="M4 1.5h5l3 3V14.5H4zM9 1.5v3h3"/></symbol>
+</svg>
+
+<div class="spec">
+  <header class="spec-bar" role="toolbar" aria-label="Specimen controls">
+    <span class="spec-title"><svg class="duck"><use href="#duck"/></svg> Mallard Cloud · home page</span>
+    <span class="ctl"><span class="ctl-label">Theme</span>
+      <span class="seg" id="theme-seg"><button type="button" data-theme-pick="light" aria-pressed="true">Light</button><button type="button" data-theme-pick="dark" aria-pressed="false">Dark</button></span></span>
+    <span class="jump"><a href="#a">A</a><a href="#b">B</a><a href="#c">C</a></span>
+  </header>
+
+  <div class="intro">
+    <h1>Three simpler home pages</h1>
+    <p>Signed in as Rika321, on the staging content. All three drop the sentence under the list and the footer notice; the disclosure stays where the architecture puts it, on the release page. They also cut the row clutter: the "public version 1" pill goes (it is the only version there is), "owner" goes (it is the default role), and the time of day goes from the date.</p>
+  </div>
+
+  <!-- ================================================================ A -->
+  <section class="direction" id="a">
+    <h2><span class="k">A</span> One list <small>GitHub's repositories page</small></h2>
+    <p class="lede">Everything in <b>one tile</b>: a tab strip for <b>All · Yours · Public</b>, a search box, and <b>dropdown chips</b> for class, provider, kind, and sort, exactly where GitHub puts Type / Language / Sort. Your repositories are marked in the shared list instead of living in a second panel; anonymous visitors see the same page minus the Yours tab.</p>
+    <ul class="pros">
+      <li><b>One thing to read.</b> No second panel, no rail; the page is a list.</li>
+      <li><b>Filters cost nothing until used.</b> Chips stay one line; a chip opens a small menu with counts.</li>
+      <li><b>Same page signed in or out.</b> The Yours tab is the only difference.</li>
+      <li class="con"><b>Counts are hidden.</b> Facet counts live inside the chip menus rather than on the page.</li>
+    </ul>
+    <div class="board-wrap"><div class="board"><span class="board-tag">A · signed in</span>
+      <div class="tile topbar">
+        <span class="brand"><svg class="duck"><use href="#duck"/></svg> Mallard Cloud</span>
+        <nav class="nav"><a class="on">Repositories</a><a>Invitations</a><a>Super Admin</a></nav>
+        <span class="end"><span class="theme"><span>Auto</span><span class="on">Light</span><span>Dark</span></span><span class="acct">Rika321</span><span class="ghost">Sign out</span></span>
+      </div>
+      <div class="page">
+        <div class="tile">
+          <nav class="tabs-line"><a class="on">All <span class="n">5</span></a><a>Yours <span class="n">4</span></a><a>Public <span class="n">5</span></a></nav>
+          <div class="chips">
+            <span class="input" style="width:260px"><svg class="i"><use href="#search"/></svg> Find a repository</span>
+            <span class="chip">Class <svg class="i"><use href="#chevd"/></svg></span>
+            <span class="chip">Provider <svg class="i"><use href="#chevd"/></svg></span>
+            <span class="chip">Kind <svg class="i"><use href="#chevd"/></svg></span>
+            <span class="sp"></span>
+            <span class="chip">Recently published <svg class="i"><use href="#chevd"/></svg></span>
+          </div>
+          <div class="rrow"><svg class="i kind"><use href="#branch"/></svg><div class="t">HorrorGame <span class="pill pill-ok">public</span> <span class="pill pill-mine">yours</span></div><div class="d">Git project · 3 sessions · 8 files · Claude, Codex</div><div class="end"><time>Sep 14, 2026</time><span class="avatar">RI</span></div></div>
+          <div class="rrow"><svg class="i kind"><use href="#pet"/></svg><div class="t">Mossy <span class="pill pill-ok">public</span> <span class="pill pill-mine">yours</span></div><div class="d">Desktop pet · Codex · 1 file</div><div class="end"><time>Sep 14, 2026</time><span class="avatar">RI</span></div></div>
+          <div class="rrow"><svg class="i kind"><use href="#skill"/></svg><div class="t">release-notes <span class="pill pill-ok">public</span> <span class="pill pill-mine">yours</span></div><div class="d">Skill · Claude · 2 files</div><div class="end"><time>Sep 14, 2026</time><span class="avatar">RI</span></div></div>
+          <div class="rrow"><svg class="i kind"><use href="#skill"/></svg><div class="t">godot-scene-lint <span class="pill pill-ok">public</span> <span class="pill pill-mine">yours</span></div><div class="d">Skill · Codex · 2 files</div><div class="end"><time>Sep 14, 2026</time><span class="avatar">RI</span></div></div>
+          <div class="rrow"><svg class="i kind"><use href="#folder"/></svg><div class="t">Staging smoke <span class="pill pill-ok">public</span></div><div class="d">Project · 1 session · 2 files · Codex</div><div class="end"><time>Sep 13, 2026</time><span class="avatar ss">SS</span></div></div>
+        </div>
+      </div>
+    </div></div>
+  </section>
+
+  <!-- ================================================================ B -->
+  <section class="direction" id="b">
+    <h2><span class="k">B</span> Rail, one list <small>Hugging Face's hub listing</small></h2>
+    <p class="lede">Keep the <b>facet rail</b> with its counts, but there is only <b>one list</b>: a <b>Scope</b> facet (All · Yours · Public) replaces the second panel, and yours are marked in place. The rail is where Hugging Face keeps Tasks, Libraries, and Licenses; it earns its width once the listing has dozens of items.</p>
+    <ul class="pros">
+      <li><b>Counts on the page.</b> You see that there are two Claude items before clicking.</li>
+      <li><b>Rail is the scope switch too.</b> One rail, one list, no tabs.</li>
+      <li><b>Scales.</b> Kinds and providers can grow without a chip row wrapping.</li>
+      <li class="con"><b>Rail is empty-ish today.</b> Five repositories do not need eleven facet rows; it fills as the catalog grows.</li>
+    </ul>
+    <div class="board-wrap"><div class="board"><span class="board-tag">B · signed in</span>
+      <div class="tile topbar">
+        <span class="brand"><svg class="duck"><use href="#duck"/></svg> Mallard Cloud</span>
+        <nav class="nav"><a class="on">Repositories</a><a>Invitations</a><a>Super Admin</a></nav>
+        <span class="end"><span class="theme"><span>Auto</span><span class="on">Light</span><span>Dark</span></span><span class="acct">Rika321</span><span class="ghost">Sign out</span></span>
+      </div>
+      <div class="page">
+        <div class="b-list">
+          <aside class="tile rail">
+            <div><h4>Scope</h4><ul><li class="on">All <span>5</span></li><li>Yours <span>4</span></li><li>Public <span>5</span></li></ul></div>
+            <div><h4>Class</h4><ul><li class="on">All <span>5</span></li><li>Projects <span>2</span></li><li>Catalog items <span>3</span></li></ul></div>
+            <div><h4>Provider</h4><ul><li class="on">All <span>5</span></li><li>Codex <span>4</span></li><li>Claude <span>2</span></li></ul></div>
+            <div><h4>Kind</h4><ul><li class="on">All <span>5</span></li><li>Skills <span>2</span></li><li>Desktop pets <span>1</span></li></ul></div>
+          </aside>
+          <div class="tile">
+            <div class="list-head"><h1>Repositories</h1><span class="count">5</span><span class="end"><span class="input" style="width:220px"><svg class="i"><use href="#search"/></svg> Filter by name</span><span class="chip">Recently published <svg class="i"><use href="#chevd"/></svg></span></span></div>
+            <div class="rrow"><svg class="i kind"><use href="#branch"/></svg><div class="t">HorrorGame <span class="pill pill-mine">yours</span></div><div class="d">Git project · 3 sessions · 8 files · Claude, Codex</div><div class="end"><time>Sep 14, 2026</time><span class="avatar">RI</span></div></div>
+            <div class="rrow"><svg class="i kind"><use href="#pet"/></svg><div class="t">Mossy <span class="pill pill-mine">yours</span></div><div class="d">Desktop pet · Codex · 1 file</div><div class="end"><time>Sep 14, 2026</time><span class="avatar">RI</span></div></div>
+            <div class="rrow"><svg class="i kind"><use href="#skill"/></svg><div class="t">release-notes <span class="pill pill-mine">yours</span></div><div class="d">Skill · Claude · 2 files</div><div class="end"><time>Sep 14, 2026</time><span class="avatar">RI</span></div></div>
+            <div class="rrow"><svg class="i kind"><use href="#skill"/></svg><div class="t">godot-scene-lint <span class="pill pill-mine">yours</span></div><div class="d">Skill · Codex · 2 files</div><div class="end"><time>Sep 14, 2026</time><span class="avatar">RI</span></div></div>
+            <div class="rrow"><svg class="i kind"><use href="#folder"/></svg><div class="t">Staging smoke</div><div class="d">Project · 1 session · 2 files · Codex</div><div class="end"><time>Sep 13, 2026</time><span class="avatar ss">SS</span></div></div>
+          </div>
+        </div>
+      </div>
+    </div></div>
+  </section>
+
+  <!-- ================================================================ C -->
+  <section class="direction" id="c">
+    <h2><span class="k">C</span> Cards <small>Hugging Face's model cards</small></h2>
+    <p class="lede">A <b>two-column grid of compact cards</b> under one chip row. Each card is name, kind, a one-line description, and a metric line; yours carry a mark. Hugging Face lists models this way because a grid shows twice as many items per screen as rows and reads as a catalog rather than a table.</p>
+    <ul class="pros">
+      <li><b>Densest.</b> Ten repositories fit above the fold.</li>
+      <li><b>Reads as a catalog.</b> Skills and pets sit naturally in cards.</li>
+      <li><b>No panels inside panels.</b> One tile, one grid.</li>
+      <li class="con"><b>Weaker scan for projects.</b> Session and file counts are easier to compare down a column of rows.</li>
+    </ul>
+    <div class="board-wrap"><div class="board"><span class="board-tag">C · signed in</span>
+      <div class="tile topbar">
+        <span class="brand"><svg class="duck"><use href="#duck"/></svg> Mallard Cloud</span>
+        <nav class="nav"><a class="on">Repositories</a><a>Invitations</a><a>Super Admin</a></nav>
+        <span class="end"><span class="theme"><span>Auto</span><span class="on">Light</span><span>Dark</span></span><span class="acct">Rika321</span><span class="ghost">Sign out</span></span>
+      </div>
+      <div class="page">
+        <div class="tile">
+          <div class="chips">
+            <span class="chip on">All</span><span class="chip">Yours</span><span class="chip">Public</span>
+            <span class="sp"></span>
+            <span class="input" style="width:220px"><svg class="i"><use href="#search"/></svg> Filter by name</span>
+            <span class="chip">Class <svg class="i"><use href="#chevd"/></svg></span>
+            <span class="chip">Provider <svg class="i"><use href="#chevd"/></svg></span>
+            <span class="chip">Kind <svg class="i"><use href="#chevd"/></svg></span>
+          </div>
+          <div class="cards">
+            <div class="card"><div class="t"><svg class="i kind"><use href="#branch"/></svg> HorrorGame <span class="pill pill-mine">yours</span></div><span class="avatar av">RI</span><div class="d">Git project · Claude, Codex</div><div class="m"><span><svg class="i"><use href="#msg"/></svg> 3 sessions</span><span><svg class="i"><use href="#file"/></svg> 8 files</span><time>Sep 14, 2026</time></div></div>
+            <div class="card"><div class="t"><svg class="i kind"><use href="#pet"/></svg> Mossy <span class="pill pill-mine">yours</span></div><span class="avatar av">RI</span><div class="d">Desktop pet · Codex</div><div class="m"><span><svg class="i"><use href="#file"/></svg> 1 file</span><time>Sep 14, 2026</time></div></div>
+            <div class="card"><div class="t"><svg class="i kind"><use href="#skill"/></svg> release-notes <span class="pill pill-mine">yours</span></div><span class="avatar av">RI</span><div class="d">Skill · Claude</div><div class="m"><span><svg class="i"><use href="#file"/></svg> 2 files</span><time>Sep 14, 2026</time></div></div>
+            <div class="card"><div class="t"><svg class="i kind"><use href="#skill"/></svg> godot-scene-lint <span class="pill pill-mine">yours</span></div><span class="avatar av">RI</span><div class="d">Skill · Codex</div><div class="m"><span><svg class="i"><use href="#file"/></svg> 2 files</span><time>Sep 14, 2026</time></div></div>
+            <div class="card"><div class="t"><svg class="i kind"><use href="#folder"/></svg> Staging smoke</div><span class="avatar av ss">SS</span><div class="d">Project · Codex</div><div class="m"><span><svg class="i"><use href="#msg"/></svg> 1 session</span><span><svg class="i"><use href="#file"/></svg> 2 files</span><time>Sep 13, 2026</time></div></div>
+          </div>
+        </div>
+      </div>
+    </div></div>
+  </section>
+
+  <section class="tile verdict">
+    <h2>Where I would land</h2>
+    <p><b>A.</b> The home page is a list of things you can open; one tile with All · Yours · Public and a chip row is the least a visitor has to understand, and it is the same page whether or not they are signed in. B is the right call once the catalog has enough items that facet counts guide people; that switch is a rail added to A, not a new page.</p>
+    <p>Row edits shared by all three: a kind glyph replaces the class pill, version pills go, "owner" goes, the date loses its time of day, and the pusher's avatar sits with the date.</p>
+  </section>
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var KEY = "mallard-cloud-home-spec";
+  var state = { theme: "light" };
+  try { Object.assign(state, JSON.parse(localStorage.getItem(KEY) || "{}")); } catch (e) {}
+  function apply() {
+    root.dataset.theme = state.theme;
+    Array.prototype.forEach.call(document.querySelectorAll("#theme-seg button"), function (b) { b.setAttribute("aria-pressed", String(b.dataset.themePick === state.theme)); });
+    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
+  }
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-theme-pick]");
+    if (!b) return;
+    state.theme = b.dataset.themePick;
+    apply();
+  });
+  apply();
+})();
+</script>

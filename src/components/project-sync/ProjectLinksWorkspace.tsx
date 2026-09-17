@@ -17,6 +17,7 @@ import type {
   CommitStorageDraftResult,
   LocalProjectSummary,
   ProjectBinding,
+  ManagedCloudLink,
   ProjectStorageLink,
   ProviderDescriptor,
   ProviderProfileSummary,
@@ -37,7 +38,7 @@ import type {
   ActiveProjectSubview,
   OpenSessionDetailRequest,
 } from "./session-detail/sessionDetailModel";
-import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
+import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup, type PathBarMenuItem } from "../sync-review/SyncPathBar";
 import ProviderMark from "../sync-review/ProviderMark";
 import ProjectPicker from "./ProjectPicker";
 import type { SessionHeaderModel } from "./session-detail/SessionDetailPage";
@@ -72,8 +73,12 @@ import { catalogPresentation, catalogStorageRepositoryViews } from "../storage-c
 import type { CatalogStorageRepositoryView } from "../storage-catalog/types";
 import { projectSyncApi } from "./api";
 import { StorageDraftSaveQueue } from "./storageDraftSaveQueue";
-import { R2SetupLane, useR2Setup, type R2SetupMode, type R2SetupPort } from "./R2Setup";
+import { R2SetupLane, useR2Setup, type R2SetupMode } from "./R2Setup";
 import { DropboxSetupLane, useDropboxSetup } from "./DropboxSetup";
+import { ManagedCloudSetupLane, useManagedCloudSetup } from "./ManagedCloudSetup";
+import { releaseChip } from "./managedCloudLink";
+import { openExternalUrl } from "./externalLink";
+import type { StorageSetupPort } from "./StorageSetupStep";
 import {
   compactProjectPath,
   formatRelativeTime,
@@ -353,7 +358,7 @@ export function StorageRepositoryRow({ bundle }: { bundle: RemoteBundleSummary }
         </span>
         <strong className="sync-storage-repository-name">{name}</strong>
         <span className="sync-storage-repository-chips">
-          <span className="sync-storage-repo-chip"><span>Revision</span><b>{bundle.revision ?? "—"}</b></span>
+          <span className="sync-storage-repo-chip"><span>Version</span><b>{bundle.revision ?? "—"}</b></span>
           <span className="sync-storage-repo-chip"><span>Updated</span><b>{formatRelativeTime(bundle.updated_at)}</b></span>
         </span>
         <button
@@ -399,7 +404,7 @@ export function CatalogStorageRepositoryRow({ repo }: { repo: CatalogStorageRepo
           <span className="sync-storage-repo-unreadable">Can’t be read</span>
         ) : (
           <span className="sync-storage-repository-chips">
-            <span className="sync-storage-repo-chip"><span>Revision</span><b>{repo.revision ?? "—"}</b></span>
+            <span className="sync-storage-repo-chip"><span>Version</span><b>{repo.revision ?? "—"}</b></span>
             <span className="sync-storage-repo-chip"><span>Updated</span><b>{formatRelativeTime(repo.updated_at ?? undefined)}</b></span>
           </span>
         )}
@@ -757,7 +762,7 @@ export default function ProjectLinksWorkspace({
      before every run, pinned by session and edit version — and the seat for
      the draft the helper prepares. */
   const r2Mode: R2SetupMode = !creatingStorage ? "reconnect" : storageSetupMode === "existing" ? "existing" : "create";
-  const setupPort: R2SetupPort = {
+  const setupPort: StorageSetupPort = {
       blocked: () => busy || !!runningAction,
       beginRun: () => {
         const session = draftSessionRef.current;
@@ -802,6 +807,12 @@ export default function ProjectLinksWorkspace({
     mode: r2Mode,
     port: setupPort,
   });
+  const managedCloud = useManagedCloudSetup({
+    enabled: !!storageSession && findStorageProvider(storageProviders, storageSession.draft.provider, storageSession.draft.config_version)?.local_setup === "managed_cloud",
+    draftId: storageSession?.draft.draft_id ?? null,
+    mode: r2Mode === "reconnect" ? "reconnect" : "create",
+    port: setupPort,
+  });
   const orderedRemoteBundles = [...(remoteBundles ?? [])].sort((left, right) => {
     return (right.updated_at ?? 0) - (left.updated_at ?? 0);
   });
@@ -811,7 +822,7 @@ export default function ProjectLinksWorkspace({
     return (right.updated_at ?? 0) - (left.updated_at ?? 0);
   });
   const run = async (key: string, action: () => Promise<void> | void) => {
-    if ((r2.isRunning() || dropbox.isRunning())) return;
+    if (r2.isRunning() || dropbox.isRunning() || managedCloud.isRunning()) return;
     setRunningAction(key);
     try {
       await action();
@@ -1002,7 +1013,7 @@ export default function ProjectLinksWorkspace({
   };
 
   const saveStorageDraftBeforeNavigation = async (): Promise<boolean> => {
-    if ((r2.isRunning() || dropbox.isRunning())) return false;
+    if (r2.isRunning() || dropbox.isRunning() || managedCloud.isRunning()) return false;
     const session = draftSessionRef.current;
     const current = storageSessionRef.current;
     if (!current) return true;
@@ -1256,6 +1267,69 @@ export default function ProjectLinksWorkspace({
   const workspaceActionPrefix = workspaceProject && workspaceStorage
     ? `${workspaceProject.local_project_id}:${workspaceStorage.storage_id}`
     : null;
+  /* The website bridge for a project on Mallard Cloud: the repository's page
+     and its release state, read from the service when the pair opens, when
+     the window comes back, and after every action ends. */
+  const managedCloudKey = workspaceStorage?.provider === "managed_cloud" ? workspaceActionPrefix : null;
+  const managedCloudProjectId = managedCloudKey ? workspaceProject?.local_project_id ?? null : null;
+  const managedCloudStorageId = managedCloudKey ? workspaceStorage?.storage_id ?? null : null;
+  const [managedCloudLink, setManagedCloudLink] = useState<{ key: string; link: ManagedCloudLink | null; error: string | null } | null>(null);
+  useEffect(() => {
+    if (!managedCloudKey || !managedCloudProjectId || !managedCloudStorageId || runningAction !== null) return undefined;
+    const projectId = managedCloudProjectId;
+    const storageId = managedCloudStorageId;
+    let live = true;
+    const load = () => {
+      projectSyncApi.getManagedCloudLink(projectId, storageId).then(
+        (link) => { if (live) setManagedCloudLink({ key: managedCloudKey, link, error: null }); },
+        (reason) => { if (live) setManagedCloudLink({ key: managedCloudKey, link: null, error: reason instanceof Error ? reason.message : String(reason) }); },
+      );
+    };
+    load();
+    window.addEventListener("focus", load);
+    return () => {
+      live = false;
+      window.removeEventListener("focus", load);
+    };
+  }, [managedCloudKey, managedCloudProjectId, managedCloudStorageId, runningAction]);
+  const currentManagedCloudLink = managedCloudLink?.key === workspaceActionPrefix
+    ? managedCloudLink.link
+    : null;
+  /* Opening the repository's page and asking for its release are verbs on
+     this project in this storage, so they live in the project crumb's menu.
+     The bar keeps only the release state: its action cluster never shrinks,
+     and at the 580px floor it has no room for a second group. */
+  const managedCloudMenuItems: PathBarMenuItem[] = [];
+  if (currentManagedCloudLink && managedCloudKey && managedCloudProjectId && managedCloudStorageId) {
+    const link = currentManagedCloudLink;
+    const linkKey = managedCloudKey;
+    const projectId = managedCloudProjectId;
+    const storageId = managedCloudStorageId;
+    managedCloudMenuItems.push({
+      id: "open-managed-cloud",
+      label: "Open on Mallard Cloud",
+      detail: `${link.owner_login}/${link.name}`,
+      detailIsPath: true,
+      icon: "external-link",
+      onSelect: () => void openExternalUrl(link.website_url),
+    });
+    if (link.can_request_release) {
+      managedCloudMenuItems.push({
+        id: "request-managed-cloud-release",
+        label: "Request public release",
+        icon: "upload",
+        disabled: busy || !!runningAction,
+        onSelect: () => void run(`release:${linkKey}`, async () => {
+          try {
+            const next = await projectSyncApi.requestManagedCloudRelease(projectId, storageId, link.repository_revision);
+            setManagedCloudLink({ key: linkKey, link: next, error: null });
+          } catch (reason) {
+            setManagedCloudLink({ key: linkKey, link, error: reason instanceof Error ? reason.message : String(reason) });
+          }
+        }),
+      });
+    }
+  }
   const workspaceReviewOpen = !!workspaceActionPrefix
     && inlineStorageReview?.projectId === workspaceProject?.local_project_id
     && inlineStorageReview?.storageId === workspaceStorage?.storage_id;
@@ -1665,7 +1739,7 @@ export default function ProjectLinksWorkspace({
        a fresh draft opens on the doors. A bucket or folder already created
        at the provider and any connected storage are kept. */
     const resetR2Setup = () => {
-      if (formLocked || (r2.isRunning() || dropbox.isRunning()) || !descriptor) return;
+      if (formLocked || r2.isRunning() || dropbox.isRunning() || managedCloud.isRunning() || !descriptor) return;
       void run(`reset-r2:${pageStorageId}`, async () => {
         const session = storageSessionRef.current;
         if (!session) return;
@@ -1689,6 +1763,7 @@ export default function ProjectLinksWorkspace({
       draftEditVersionRef.current += 1;
       r2.dismiss();
       dropbox.dismiss();
+      managedCloud.dismiss();
       setStorageTestVerified(false);
       setStorageDraftActionError(null);
       draftDirtyRef.current = true;
@@ -1717,6 +1792,9 @@ export default function ProjectLinksWorkspace({
               onStorageDraftsChanged?.();
             })}
             onReset={resetR2Setup} />
+      : storageSession && descriptor?.local_setup === "managed_cloud"
+        ? <ManagedCloudSetupLane flow={managedCloud} mode={r2Mode === "reconnect" ? "reconnect" : "create"} disabled={formLocked}
+            storages={storages} onOpenStorage={(id) => onOpenStorage(id)} onReset={resetR2Setup} />
         : undefined;
 
     return (
@@ -2100,6 +2178,7 @@ export default function ProjectLinksWorkspace({
               title: workspaceProfileTitle,
               onSelect: () => void onConfigureBinding(workspaceProject.local_project_id),
             },
+            ...managedCloudMenuItems,
             {
               id: "rename",
               label: "Rename project…",
@@ -2308,6 +2387,28 @@ export default function ProjectLinksWorkspace({
           <b>{attention}</b>
         </span>
       )}
+      {currentManagedCloudLink && (() => {
+        const link = currentManagedCloudLink;
+        const chip = releaseChip(link.release);
+        /* Connected to a public repository the account does not belong to:
+           anyone signed in pushes to it, and the Owner still decides what is
+           released. The chip says so, so a contributor knows their standing
+           before the Owner's review. */
+        const standing = link.role === null
+          ? " Contributor: you are not a collaborator of this repository, but it is public, so anyone signed in can push to it. The Owner decides what is released."
+          : "";
+        return (
+          <span
+            className={`sync-path-attention sync-path-cloud-status${chip.severity === "plain" ? "" : ` ${chip.severity}`}`}
+            tabIndex={0}
+            data-tooltip={`Mallard Cloud: ${chip.detail}${standing}`}
+            aria-label={`Mallard Cloud: ${chip.label}. ${chip.detail}${standing}`}
+          >
+            <Icon name="cloud" size={13} />
+            <b>{chip.label}</b>
+          </span>
+        );
+      })()}
       {viewRefresh && (
         <button
           type="button"
@@ -2435,6 +2536,9 @@ export default function ProjectLinksWorkspace({
   const workspaceNotices: NoticeItem[] = [];
   if (revealError) {
     workspaceNotices.push({ key: "reveal-failed", severity: "danger", message: revealError });
+  }
+  if (managedCloudLink?.key === workspaceActionPrefix && managedCloudLink.error) {
+    workspaceNotices.push({ key: "managed-cloud-link", severity: "warning", message: `Mallard Cloud: ${managedCloudLink.error}` });
   }
   const workspaceNoticeTiming: NoticeTiming = revealError
     ? { timing: "blocking" }
@@ -2806,7 +2910,7 @@ export default function ProjectLinksWorkspace({
                           key: "remote-replaced",
                           severity: "warning",
                           title: "Storage history changed",
-                          message: `${storage.name || "This storage"} holds a different sync history than this project last synced${activeNotice.baseRevision != null ? ` (revision ${activeNotice.baseRevision})` : ""}. Review & adopt pulls the new history; unlinking doesn't delete files.`,
+                          message: `${storage.name || "This storage"} holds a different sync history than this project last synced${activeNotice.baseRevision != null ? ` (version ${activeNotice.baseRevision})` : ""}. Review & adopt pulls the new history; unlinking doesn't delete files.`,
                           action: (
                             <div className="sync-sync-review-recovery-actions">
                               <button

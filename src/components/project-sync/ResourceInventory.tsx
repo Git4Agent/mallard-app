@@ -14,6 +14,7 @@ interface Props {
    * the rows are detail you open on purpose.
    */
   defaultCollapsed?: boolean;
+  forceExpanded?: boolean;
   onToggle: (resourceId: string) => void;
 }
 
@@ -119,6 +120,7 @@ function ResourceGroup({
   selectableResourceIds,
   disabled,
   defaultCollapsed,
+  forceExpanded,
   onToggle,
 }: {
   group: (typeof RESOURCE_GROUPS)[number];
@@ -127,9 +129,11 @@ function ResourceGroup({
   selectableResourceIds?: ReadonlySet<string>;
   disabled: boolean;
   defaultCollapsed: boolean;
+  forceExpanded: boolean;
   onToggle: (resourceId: string) => void;
 }) {
-  const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  const [folded, setCollapsed] = useState(defaultCollapsed);
+  const collapsed = folded && !forceExpanded;
   const selectableItems = items.filter((item) => (
     !item.blocked_reason
     && item.selectable
@@ -155,6 +159,7 @@ function ResourceGroup({
           aria-expanded={!collapsed}
           title={group.description}
           onClick={toggleCollapsed}
+          disabled={forceExpanded}
         >
           <span className="sync-resource-group-icon"><Icon name={CATEGORY_ICON[group.id]} size={16} /></span>
           <span className="sync-resource-group-copy">
@@ -212,6 +217,7 @@ export default function ResourceInventory({
   selectableResourceIds,
   disabled = false,
   defaultCollapsed = false,
+  forceExpanded = false,
   onToggle,
 }: Props) {
   const grouped = useMemo(() => {
@@ -245,6 +251,7 @@ export default function ResourceInventory({
             selectableResourceIds={selectableResourceIds}
             disabled={disabled}
             defaultCollapsed={defaultCollapsed}
+            forceExpanded={forceExpanded}
             onToggle={onToggle}
           />
         );

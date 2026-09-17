@@ -454,19 +454,19 @@ struct CommitRecord {
 /// managed to write the tag — acting flows (link, connect, pull) always
 /// re-verify against the live head.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-struct BundleTag {
-    schema_version: u32,
-    bundle_id: BundleId,
-    display_name: String,
-    kind: BundleKind,
-    revision: u64,
-    updated_at: u64,
-    resources: u64,
-    files: u64,
-    registration_only: bool,
-    providers: Vec<ProviderKey>,
+pub struct BundleTag {
+    pub schema_version: u32,
+    pub bundle_id: BundleId,
+    pub display_name: String,
+    pub kind: BundleKind,
+    pub revision: u64,
+    pub updated_at: u64,
+    pub resources: u64,
+    pub files: u64,
+    pub registration_only: bool,
+    pub providers: Vec<ProviderKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    repository_fingerprint: Option<String>,
+    pub repository_fingerprint: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

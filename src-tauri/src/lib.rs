@@ -122,6 +122,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(project_sync::r2_setup::R2SetupControl::default())
         .manage(project_sync::dropbox_setup::DropboxSetupControl::default())
+        .manage(project_sync::managed_cloud_setup::ManagedCloudSetupControl::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .menu(app_menu)
@@ -180,6 +181,14 @@ pub fn run() {
             project_sync::dropbox_setup::discover_dropbox_storage,
             project_sync::dropbox_setup::prepare_dropbox_storage,
             project_sync::dropbox_setup::cancel_dropbox_setup,
+            project_sync::managed_cloud_setup::authorize_managed_cloud_setup,
+            project_sync::managed_cloud_setup::prepare_managed_cloud_storage,
+            project_sync::managed_cloud_setup::cancel_managed_cloud_setup,
+            project_sync::managed_cloud_link::get_managed_cloud_link,
+            project_sync::managed_cloud_link::request_managed_cloud_release,
+            project_sync::managed_cloud_link::list_managed_cloud_repositories,
+            project_sync::managed_cloud_link::resolve_managed_cloud_repository,
+            project_sync::managed_cloud_link::accept_managed_cloud_invitation,
 
             project_sync::commands::cancel_r2_storage_setup,
             project_sync::commands::discover_r2_storage,

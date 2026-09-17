@@ -382,7 +382,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
     if (!stats) return;
     const approved = await confirm(
       deleteAll
-        ? "Delete all retained activity logs?\n\nMallard configuration, backups, local files, and cloud revisions will not be changed."
+        ? "Delete all retained activity logs?\n\nMallard configuration, backups, local files, and cloud versions will not be changed."
         : `Remove retained logs older than ${stats.policy.retention_days} days?\n\n${stats.file_count} log file${stats.file_count === 1 ? "" : "s"} (${formatBytes(stats.total_bytes)}) ${stats.file_count === 1 ? "is" : "are"} currently retained. Removed logs cannot be recovered.`,
       deleteAll
         ? { title: "Delete activity logs", kind: "warning", okLabel: "Delete logs", cancelLabel: "Cancel" }
@@ -429,7 +429,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
       ? ` (${formatBytes(localSummary.total_bytes)} across ${localSummary.file_count} file${localSummary.file_count === 1 ? "" : "s"}, including ${formatBytes(localSummary.backups_bytes)} of backups)`
       : "";
     const approved = await confirm(
-      `Permanently delete all of Mallard's local data and restart?\n\nEverything in ~/.mallard is deleted${sizeLine} — sync metadata, activity logs, and the only local backups of files Pull has replaced — and Mallard's settings return to their defaults. This cannot be undone.\n\nCloud revisions and your project files are not touched. Mallard will restart as a fresh install.`,
+      `Permanently delete all of Mallard's local data and restart?\n\nEverything in ~/.mallard is deleted${sizeLine} — sync metadata, activity logs, and the only local backups of files Pull has replaced — and Mallard's settings return to their defaults. This cannot be undone.\n\nCloud versions and your project files are not touched. Mallard will restart as a fresh install.`,
       { title: "Reset Mallard", kind: "warning", okLabel: "Reset Mallard", cancelLabel: "Cancel" },
     );
     if (!approved) return;
@@ -1002,7 +1002,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                 Permanently deletes everything in <code>~/.mallard</code> — sync
                 metadata, activity logs, and the backups of files Pull replaced —
                 clears Mallard's saved preferences, then restarts as a fresh
-                install. Cloud revisions and your project files are not touched.
+                install. Cloud versions and your project files are not touched.
               </SettingsRow>
             </div>
             <NoticeZone

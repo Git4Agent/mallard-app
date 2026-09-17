@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 pub const MAX_BUCKETS: usize = 256;
 const MAX_MARKER_DETAIL_CHARS: usize = 64;
 
-pub use crate::storage_core::MarkerState;
 use crate::storage_core::classify_storage_marker as classify_marker;
+pub use crate::storage_core::MarkerState;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -95,17 +95,18 @@ impl R2SetupClient {
             .header("cf-r2-jurisdiction", jurisdiction.as_str())
             .send()
             .await
-            .map_err(|_| SetupError::Rejected)?;
+            .map_err(|_| SetupError::Unavailable)?;
         let status = response.status().as_u16();
-        if matches!(status, 401 | 403) {
-            return Err(SetupError::Permission);
-        }
+        let read_error = super::response_error(status, &[]).unwrap_or(SetupError::Rejected);
         let mut bytes = Zeroizing::new(Vec::new());
-        while let Some(chunk) = response.chunk().await.map_err(|_| SetupError::Rejected)? {
+        while let Some(chunk) = response.chunk().await.map_err(|_| read_error)? {
             if bytes.len().saturating_add(chunk.len()) > limit {
-                return Err(SetupError::Rejected);
+                return Err(read_error);
             }
             bytes.extend_from_slice(&chunk);
+        }
+        if let Some(error) = super::response_error(status, &bytes) {
+            return Err(error);
         }
         Ok((status, bytes))
     }
@@ -193,6 +194,11 @@ impl R2SetupClient {
             let first_page = page == 0;
             let optional = jurisdiction != R2Jurisdiction::Default;
             let value: Value = match response {
+                Ok(Err(
+                    error @ (SetupError::R2NotEnabled
+                    | SetupError::Authentication
+                    | SetupError::RateLimited),
+                )) => return Err(error),
                 Ok(Ok((200, bytes))) => {
                     serde_json::from_slice(&bytes).map_err(|_| SetupError::Rejected)?
                 }

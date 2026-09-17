@@ -8,6 +8,7 @@
 
 pub mod dropbox;
 pub mod local;
+pub mod managed_cloud;
 pub mod r2;
 pub mod registry;
 #[cfg(any(test, feature = "test-support"))]

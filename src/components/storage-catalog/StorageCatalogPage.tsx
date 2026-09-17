@@ -14,6 +14,8 @@ import { focusMenuEdge, moveMenuFocus } from "../sync-review/menuKeyboard";
 import ProviderMark from "../sync-review/ProviderMark";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
+import NameSearchField from "../sync-review/NameSearchField";
+import { nameMatchesSearch, replaceSearchSelection } from "../sync-review/nameSearch";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { storageCatalogApi } from "./api";
 import {
@@ -276,7 +278,7 @@ function InfoMenu({ row, storageRevision, kindNoun }: { row: CatalogScopeRow; st
       value: !row.remote_present
         ? "Not stored yet"
         : [
-          storageRevision == null ? null : `Revision ${storageRevision}`,
+          storageRevision == null ? null : `Version ${storageRevision}`,
           row.remote_updated_at == null ? null : `updated ${formatFullDateTime(row.remote_updated_at)}`,
         ].filter(Boolean).join(" · ") || "In this storage",
     },
@@ -799,6 +801,9 @@ export default function StorageCatalogPage({
   const [page, setPage] = useState<CatalogScopeResources | null>(null);
   const [chosenStorageId, setChosenStorageId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "list" });
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchActive = searchQuery.trim().length > 0;
+  useEffect(() => { setSearchQuery(""); }, [scope.scope.scope_id, chosenStorageId, mode.kind]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
@@ -1526,7 +1531,11 @@ export default function StorageCatalogPage({
 
   if (mode.kind === "push" && pushPlan) {
     const selectableRows = pushPlan.rows.filter((row) => row.row.selectable);
-    const visibleRows = selectableRows;
+    const visibleRows = selectableRows.filter((row) => nameMatchesSearch(
+      rowByResource.get(row.row.resource_id)?.display_name ?? row.row.display_name, searchQuery,
+    ));
+    const matchingIds = visibleRows.map((row) => row.row.resource_id);
+    const matchingSelected = matchingIds.filter((id) => pushSelected.has(id)).length;
     const heldRows = pushPlan.rows.filter((row) => row.row.held_for_pull);
     return (
       <>
@@ -1539,18 +1548,23 @@ export default function StorageCatalogPage({
                 count={pushSelected.size}
                 total={selectableRows.length}
                 busy={busy}
-                recommendedTitle={`Use the recommended selection (${selectableRows.length})`}
-                recommendedAriaLabel={`Use recommended selection (${selectableRows.length})`}
-                recommendedDisabled={pushSelected.size === selectableRows.length}
-                onRecommended={() => setPushSelected(new Set(selectableRows.map((row) => row.row.resource_id)))}
-                clearDisabled={pushSelected.size === 0}
-                onClear={() => setPushSelected(new Set())}
+                recommendedTitle={`Use the recommended selection${searchActive ? " for matching names" : ""} (${visibleRows.length})`}
+                recommendedAriaLabel={`Use recommended selection${searchActive ? " for matching names" : ""} (${visibleRows.length})`}
+                recommendedDisabled={matchingSelected === visibleRows.length}
+                onRecommended={() => setPushSelected((current) => replaceSearchSelection(current, matchingIds, new Set(matchingIds)))}
+                searchActive={searchActive}
+                clearDisabled={matchingSelected === 0}
+                onClear={() => setPushSelected((current) => replaceSearchSelection(current, matchingIds))}
                 close={{ ariaLabel: "Close Push review", onClose: () => setMode({ kind: "list" }) }}
               />
             </header>
             <div className="sync-inline-action-content sync-sync-review-content">
               <div className="sync-inline-action-scroll sync-sync-review-scroll">
                 {notices}
+                <NameSearchField query={searchQuery} onChange={setSearchQuery} label={`Search ${plural}`}
+                  matches={visibleRows.length} total={selectableRows.length}
+                  hiddenSelected={pushSelected.size - matchingSelected} disabled={busy} />
+                {searchActive && visibleRows.length === 0 && <div className="sync-history-state">No matching {plural}.</div>}
                 {heldRows.length > 0 && (
                   <div className="sync-review-banners">
                     {/* The held rows are the pinned plan's own facts — on
@@ -1634,7 +1648,7 @@ export default function StorageCatalogPage({
                       />
                     );
                   })}
-                  {selectableRows.length === 0 && (
+                  {!searchActive && selectableRows.length === 0 && (
                     <div className="sync-pull-empty">
                       <Icon name="check-circle" size={16} />
                       <span>
@@ -1674,6 +1688,9 @@ export default function StorageCatalogPage({
 
   if (mode.kind === "pull" && pullPlan) {
     const reviewItems = pullReviewItems;
+    const visibleItems = reviewItems.filter((item) => nameMatchesSearch(rowForItem(item.item).display_name, searchQuery));
+    const matchingIds = visibleItems.map((item) => item.item.resource_id);
+    const matchingSelected = matchingIds.filter((id) => pullSelected.has(id)).length;
     const chosenLabel = (item: (typeof reviewItems)[number]) => {
       const actionId = pullChoice[item.item.resource_id];
       const action = item.item.actions.find((candidate) => candidate.action_id === actionId);
@@ -1697,26 +1714,34 @@ export default function StorageCatalogPage({
                 count={pullReviewSelectedCount}
                 total={reviewItems.length}
                 busy={busy}
-                recommendedTitle={`Use the recommended local actions (${reviewItems.length})`}
-                recommendedAriaLabel={`Use recommended selection (${reviewItems.length})`}
-                recommendedDisabled={busy}
+                recommendedTitle={`Use the recommended local actions${searchActive ? " for matching names" : ""} (${visibleItems.length})`}
+                recommendedAriaLabel={`Use recommended selection${searchActive ? " for matching names" : ""} (${visibleItems.length})`}
+                recommendedDisabled={busy || visibleItems.length === 0}
                 onRecommended={() => {
-                  setPullSelected(new Set(reviewItems
-                    .filter((item) => item.item.default_action_id)
-                    .map((item) => item.item.resource_id)));
-                  setPullChoice(Object.fromEntries(reviewItems
-                    .filter((item) => item.item.default_action_id)
-                    .map((item) => [item.item.resource_id, item.item.default_action_id as string])));
-                  setPullAcks(new Set());
+                  const defaults = visibleItems.filter((item) => item.item.default_action_id);
+                  setPullSelected((current) => replaceSearchSelection(current, matchingIds,
+                    new Set(defaults.map((item) => item.item.resource_id))));
+                  setPullChoice((current) => {
+                    const next = { ...current };
+                    matchingIds.forEach((id) => { delete next[id]; });
+                    defaults.forEach((item) => { next[item.item.resource_id] = item.item.default_action_id!; });
+                    return next;
+                  });
+                  setPullAcks((current) => replaceSearchSelection(current, matchingIds));
                 }}
-                clearDisabled={pullReviewSelectedCount === 0}
-                onClear={() => setPullSelected(new Set())}
+                searchActive={searchActive}
+                clearDisabled={matchingSelected === 0}
+                onClear={() => setPullSelected((current) => replaceSearchSelection(current, matchingIds))}
                 close={{ ariaLabel: "Close Pull review", onClose: () => setMode({ kind: "list" }) }}
               />
             </header>
             <div className="sync-inline-action-content sync-sync-review-content">
               <div className="sync-inline-action-scroll sync-sync-review-scroll">
                 {notices}
+                <NameSearchField query={searchQuery} onChange={setSearchQuery} label={`Search ${plural}`}
+                  matches={visibleItems.length} total={reviewItems.length}
+                  hiddenSelected={pullReviewSelectedCount - matchingSelected} disabled={busy} />
+                {searchActive && visibleItems.length === 0 && <div className="sync-history-state">No matching {plural}.</div>}
                 {/* One banner zone above the list, the way the project
                     reviews place plan-derived facts — never a zone per row. */}
                 {claimed.length > 0 && (
@@ -1741,7 +1766,7 @@ export default function StorageCatalogPage({
                   </div>
                 )}
                 <div className="sync-history-thread-list" ref={pullListRef}>
-                  {reviewItems.map((item) => {
+                  {visibleItems.map((item) => {
                     const resourceId = item.item.resource_id;
                     const row = rowForItem(item.item);
                     const included = pullSelected.has(resourceId);
@@ -1810,7 +1835,7 @@ export default function StorageCatalogPage({
                       />
                     );
                   })}
-                  {reviewItems.length === 0 && !busy && (
+                  {!searchActive && reviewItems.length === 0 && !busy && (
                     <div className="sync-pull-empty">
                       <Icon name="check-circle" size={16} />
                       <span>
@@ -1852,8 +1877,9 @@ export default function StorageCatalogPage({
      cannot say row by row, so it gets said by position. A row that is nowhere
      at all (a link whose content vanished on both sides) stays in the kind's
      own section — "not in the storage" would be the wrong heading for it. */
-  const cloudRows = rows.filter((row) => !row.local_present && row.remote_present);
-  const localRows = rows.filter((row) => row.local_present || !row.remote_present);
+  const matchingRows = rows.filter((row) => nameMatchesSearch(row.display_name, searchQuery));
+  const cloudRows = matchingRows.filter((row) => !row.local_present && row.remote_present);
+  const localRows = matchingRows.filter((row) => row.local_present || !row.remote_present);
 
   const renderRow = (row: CatalogScopeRow) => {
     const rowForkable = forkable && row.local_present && !!row.resource_id;
@@ -2008,6 +2034,9 @@ export default function StorageCatalogPage({
           </div>
         ) : (
           <section className="profile-links-section" aria-label={label}>
+            <NameSearchField query={searchQuery} onChange={setSearchQuery} label={`Search ${plural}`}
+              matches={matchingRows.length} total={rows.length} disabled={busy} />
+            {searchActive && matchingRows.length === 0 && <div className="sync-history-state">No matching {plural}.</div>}
             {/* Two plain sections, one list broken in two: the same heading
                 shape at the same weight, the same cards at the same rhythm.
                 No counts on either heading — every row already wears the same

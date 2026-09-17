@@ -20,6 +20,8 @@ import ProjectFileCommitImpact, {
 import ResourceInventory from "./ResourceInventory";
 import SyncReviewTabs from "../sync-review/SyncReviewTabs";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
+import NameSearchField from "../sync-review/NameSearchField";
+import { nameMatchesSearch, type NameSearchResults } from "../sync-review/nameSearch";
 import { type SyncReviewStep, historyStepLabel, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
 import { STORAGE_BLOCKING_STATES } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
@@ -132,7 +134,7 @@ export function pullRequiredCopy(
   // figures abbreviated to what support actually reads off a screenshot. The
   // footer button says what to do, so the sentence only has to say what is
   // there and what the review unlocks.
-  const detail = `Revision ${remoteRevision} · ${baseRevision != null ? `reviewed ${baseRevision}` : "never reviewed"}`;
+  const detail = `Version ${remoteRevision} · ${baseRevision != null ? `reviewed ${baseRevision}` : "never reviewed"}`;
   if (reason === "remote_advanced") {
     const one = changedConversationCount === 1;
     return {
@@ -568,6 +570,9 @@ export default function PushResourceWorkspace({
   onUnlinkStorage,
   onResetMetadata,
 }: Props) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<NameSearchResults | null>(null);
+  useEffect(() => { setSearchQuery(""); setSearchResults(null); }, [project?.local_project_id, storageId]);
   const steps = useMemo(() => syncReviewSteps(showProjectFiles), [showProjectFiles]);
   const [uncontrolledActiveStep, setUncontrolledActiveStep] = useState<SyncReviewStep>("history");
   const requestedActiveStep = controlledActiveStep ?? uncontrolledActiveStep;
@@ -797,7 +802,7 @@ export default function PushResourceWorkspace({
     commitSelection(next);
   };
   const useRecommendedForStep = () => {
-    const group = groupForStep(activeStep, visibleResources);
+    const group = searchGroup;
     const next = new Set(effectiveSelected);
     group.forEach((resource) => next.delete(resource.resource_id));
     group.forEach((resource) => {
@@ -806,7 +811,7 @@ export default function PushResourceWorkspace({
     commitSelection(next);
   };
   const clearStep = () => {
-    const group = groupForStep(activeStep, visibleResources);
+    const group = searchGroup;
     const next = new Set(effectiveSelected);
     group.forEach((resource) => {
       const projectEntry = projectContentInventory?.entries.find((entry) => (
@@ -842,8 +847,16 @@ export default function PushResourceWorkspace({
     warningDigest: entry.warning_digest,
   }));
   const currentGroup = groupForStep(activeStep, visibleResources);
-  const currentDefaults = currentGroup.filter((resource) => safeProjectDefaults.has(resource.resource_id));
-  const currentMatchesDefaults = currentGroup.every((resource) => (
+  const searchActive = activeStep === "history" && searchQuery.trim().length > 0;
+  const matchingConversations = visibleConversations.filter((resource) => nameMatchesSearch(resource.display_name, searchQuery));
+  const matchingIds = project && binding
+    ? (searchResults?.query === searchQuery ? searchResults.resourceIds : new Set<string>())
+    : new Set(matchingConversations.map((resource) => resource.resource_id));
+  const searchGroup = searchActive
+    ? currentGroup.filter((resource) => resource.category === "conversations" && matchingIds.has(resource.resource_id))
+    : currentGroup;
+  const currentDefaults = searchGroup.filter((resource) => safeProjectDefaults.has(resource.resource_id));
+  const currentMatchesDefaults = searchGroup.every((resource) => (
     effectiveSelected.has(resource.resource_id) === safeProjectDefaults.has(resource.resource_id)
   ));
   const recommendedCount = currentDefaults.length;
@@ -860,11 +873,12 @@ export default function PushResourceWorkspace({
           count={countSelected(currentGroup, effectiveSelected)}
           total={currentGroup.length}
           busy={busy}
-          recommendedTitle={`Use the recommended ${activeStep === "history" ? "session" : "project file"} selection (${recommendedCount})`}
-          recommendedAriaLabel={`Use recommended selection (${recommendedCount})`}
+          recommendedTitle={`Use the recommended ${searchActive ? "matching session" : activeStep === "history" ? "session" : "project file"} selection (${recommendedCount})`}
+          recommendedAriaLabel={`Use recommended selection${searchActive ? " for matching sessions" : ""} (${recommendedCount})`}
           recommendedDisabled={currentDefaults.length === 0 || currentMatchesDefaults}
           onRecommended={useRecommendedForStep}
-          clearDisabled={countSelected(currentGroup, effectiveSelected) === 0}
+          searchActive={searchActive}
+          clearDisabled={countSelected(searchGroup, effectiveSelected) === 0}
           onClear={clearStep}
           close={{ ariaLabel: "Close push review", onClose }}
         />
@@ -908,6 +922,9 @@ export default function PushResourceWorkspace({
                   activeStorageId={storageId}
                   activeStorageName={storageName}
                   selectionMode="push"
+                  searchQuery={searchQuery}
+                  onSearchQueryChange={setSearchQuery}
+                  onSearchResultsChange={setSearchResults}
                   selectedResourceIds={effectiveSelected}
                   selectableResourceIds={selectableConversationIds}
                   selectionDisabled={busy}
@@ -925,7 +942,15 @@ export default function PushResourceWorkspace({
                   comparisonOverride={threadComparison}
                 />
               ) : (
-                <ResourceInventory resources={visibleConversations} selected={effectiveSelected} selectableResourceIds={selectableConversationIds} disabled={busy} onToggle={toggleResource} />
+                <>
+                  <NameSearchField query={searchQuery} onChange={setSearchQuery} label="Search sessions"
+                    matches={matchingConversations.length} total={visibleConversations.length}
+                    hiddenSelected={countSelected(visibleConversations, effectiveSelected) - countSelected(matchingConversations, effectiveSelected)} />
+                  {searchActive && matchingConversations.length === 0 && <div className="sync-history-state">No matching sessions.</div>}
+                  {(!searchActive || matchingConversations.length > 0) && (
+                    <ResourceInventory resources={matchingConversations} selected={effectiveSelected} selectableResourceIds={selectableConversationIds} disabled={busy} forceExpanded={searchActive} onToggle={toggleResource} />
+                  )}
+                </>
               )}
               {/* No disclosure wrapper here: `other` is exactly the `tools`
                   category, so ResourceInventory renders one group whose own

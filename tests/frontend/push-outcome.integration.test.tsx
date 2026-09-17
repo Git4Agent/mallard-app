@@ -55,7 +55,7 @@ const threads = comparison([entry("good", "Good thread"), entry("torn", "Torn th
 test("a push outcome lists the thread the backend could not publish", () => {
   const result: ProjectOperationResult = {
     success: false,
-    message: "Published revision 2 — 1 session not pushed",
+    message: "Published version 2 — 1 session not pushed",
     revision: 2,
     resources_changed: 1,
     results: [
@@ -95,7 +95,7 @@ test("a push outcome lists the thread the backend could not publish", () => {
 test("a thread the apply-time review held for Pull offers the Pull review", () => {
   const result: ProjectOperationResult = {
     success: true,
-    message: "Published revision 3",
+    message: "Published version 3",
     revision: 3,
     resources_changed: 1,
     results: [
@@ -126,7 +126,7 @@ test("a thread the apply-time review held for Pull offers the Pull review", () =
 test("a push with nothing to report keeps its plain face", () => {
   const result: ProjectOperationResult = {
     success: true,
-    message: "Published revision 2",
+    message: "Published version 2",
     revision: 2,
     resources_changed: 2,
     results: [

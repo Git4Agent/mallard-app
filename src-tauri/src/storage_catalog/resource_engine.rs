@@ -86,7 +86,7 @@ pub fn verify_library_continuity(
             || observed.manifest_sha256 != accepted.manifest_sha256
             || observed.manifest_size != accepted.manifest_size)
     {
-        return Err("the accepted resource repository revision was replaced".to_string());
+        return Err("the accepted resource repository version was replaced".to_string());
     }
     Ok(())
 }

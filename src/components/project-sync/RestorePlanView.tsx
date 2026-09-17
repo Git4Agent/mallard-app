@@ -13,6 +13,8 @@ import ProjectFileCommitImpact, {
 } from "./ProjectFileCommitImpact";
 import SyncReviewTabs from "../sync-review/SyncReviewTabs";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
+import NameSearchField from "../sync-review/NameSearchField";
+import { nameMatchesSearch, type NameSearchResults } from "../sync-review/nameSearch";
 import { type SyncReviewStep, historyStepLabel, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
 import { providerLabel } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
@@ -223,6 +225,9 @@ export default function RestorePlanView({
   onResetMetadata,
   onPrimaryChange,
 }: Props) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<NameSearchResults | null>(null);
+  useEffect(() => { setSearchQuery(""); setSearchResults(null); }, [plan.plan_id]);
   const items = useMemo(() => buildPullReviewItems(plan), [plan]);
   const conversationItems = useMemo(
     () => items.filter((item) => itemKindLabel(item) === "Conversation"),
@@ -316,16 +321,25 @@ export default function RestorePlanView({
   const stepItems = activeStep === "project_files"
     ? projectContentItems
     : [...conversationItems, ...otherItems];
+  const searchActive = activeStep === "history" && searchQuery.trim().length > 0;
+  const matchingConversations = conversationItems.filter((item) => nameMatchesSearch(item.threadTitle || "Untitled thread", searchQuery));
+  const matchingIds = activityHistoryInUse
+    ? (searchResults?.query === searchQuery ? searchResults.resourceIds : new Set<string>())
+    : new Set(matchingConversations.map((item) => item.resourceId));
+  const searchStepItems = searchActive
+    ? conversationItems.filter((item) => matchingIds.has(item.resourceId))
+    : stepItems;
+  const pendingSearchItems = searchStepItems.filter((item) => restoreActionIds(item).length > 0);
   const pendingStepItems = stepItems.filter((item) => (
     restoreActionIds(item).length > 0
   ));
-  const pendingRecommendedCount = pendingStepItems.filter((item) => recommendedIds.has(item.resourceId)).length;
-  const stepMatchesRecommended = pendingStepItems.every((item) => (
+  const pendingRecommendedCount = pendingSearchItems.filter((item) => recommendedIds.has(item.resourceId)).length;
+  const stepMatchesRecommended = pendingSearchItems.every((item) => (
     selected.has(item.resourceId) === recommendedIds.has(item.resourceId)
   ));
   const useRecommended = () => setSelected((current) => {
     const next = new Set(current);
-    for (const item of stepItems) {
+    for (const item of searchStepItems) {
       next.delete(item.resourceId);
       if (recommendedIds.has(item.resourceId)) next.add(item.resourceId);
     }
@@ -333,7 +347,7 @@ export default function RestorePlanView({
   });
   const clearStep = () => setSelected((current) => {
     const next = new Set(current);
-    for (const item of stepItems) next.delete(item.resourceId);
+    for (const item of searchStepItems) next.delete(item.resourceId);
     return next;
   });
   const selectedIn = (chosen: PullReviewItem[]) => chosen.filter((item) => selected.has(item.resourceId)).length;
@@ -428,7 +442,7 @@ export default function RestorePlanView({
         <div className="sync-inline-action-heading">
           <div className="sync-sync-review-title">
             <h2 id="sync-pull-review-title">Pull review</h2>
-            <span className="sync-pull-review-meta">Revision {plan.revision}</span>
+            <span className="sync-pull-review-meta">Version {plan.revision}</span>
           </div>
         </div>
         {/* The recommend button's own count is a property of the plan, not of
@@ -437,11 +451,12 @@ export default function RestorePlanView({
           count={selectedIn(pendingStepItems)}
           total={pendingStepItems.length}
           busy={busy}
-          recommendedTitle={`Restore the recommended safe selection (${pendingRecommendedCount})`}
-          recommendedAriaLabel={`Use recommended selection (${pendingRecommendedCount})`}
-          recommendedDisabled={pendingStepItems.length === 0 || stepMatchesRecommended}
+          recommendedTitle={`Restore the recommended safe selection${searchActive ? " for matching sessions" : ""} (${pendingRecommendedCount})`}
+          recommendedAriaLabel={`Use recommended selection${searchActive ? " for matching sessions" : ""} (${pendingRecommendedCount})`}
+          recommendedDisabled={pendingSearchItems.length === 0 || stepMatchesRecommended}
           onRecommended={useRecommended}
-          clearDisabled={selectedIn(stepItems) === 0}
+          searchActive={searchActive}
+          clearDisabled={selectedIn(searchStepItems) === 0}
           onClear={clearStep}
           close={{ ariaLabel: `Close pull review for ${projectName}`, onClose: onBack }}
         />
@@ -473,6 +488,14 @@ export default function RestorePlanView({
           )}
           {activeStep === "history" && (
             <>
+              {!activityHistoryInUse && conversationItems.length > 0 && (
+                <>
+                  <NameSearchField query={searchQuery} onChange={setSearchQuery} label="Search sessions"
+                    matches={matchingConversations.length} total={conversationItems.length}
+                    hiddenSelected={selectedIn(conversationItems) - selectedIn(matchingConversations)} />
+                  {searchActive && matchingConversations.length === 0 && <div className="sync-history-state">No matching sessions.</div>}
+                </>
+              )}
               {conversationItems.length > 0 && project ? (
                 <ProjectActivityPage
                   project={project}
@@ -481,6 +504,9 @@ export default function RestorePlanView({
                   activeStorageId={plan.storage_id}
                   activeStorageName={storageName}
                   selectionMode="pull"
+                  searchQuery={searchQuery}
+                  onSearchQueryChange={setSearchQuery}
+                  onSearchResultsChange={setSearchResults}
                   selectedResourceIds={selected}
                   selectableResourceIds={conversationIds}
                   selectionDisabled={busy}
@@ -498,14 +524,14 @@ export default function RestorePlanView({
                 />
               ) : conversationItems.length > 0 ? (
                 <ItemList
-                  items={conversationItems}
+                  items={matchingConversations}
                   selected={selected}
                   phase={phase}
                   disabled={busy}
                   onToggle={toggle}
                 />
               ) : items.length === 0 && !supportLoading ? (
-                <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>Nothing to pull</strong><small>This project already matches the selected revision.</small></span></div>
+                <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>Nothing to pull</strong><small>This project already matches the selected version.</small></span></div>
               ) : (
                 <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No session changes</strong><small>Sessions already match this storage.</small></span></div>
               )}

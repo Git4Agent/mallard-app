@@ -85,6 +85,7 @@ pub struct StorageSecretDescriptor {
 pub enum StorageLocalSetup {
     Wrangler,
     Dropbox,
+    ManagedCloud,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

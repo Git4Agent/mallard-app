@@ -1702,10 +1702,10 @@ fn map_sessions_to_commits(
 /// The project's canonical GitHub URL, taken from `origin` when it exists and
 /// any other GitHub remote otherwise. Session detail reads this too, so a
 /// commit marker can offer the same link the activity list does.
-pub(crate) fn discover_github_repository_url(project_root: &Path) -> Option<String> {
+pub fn discover_github_repository_url(project_root: &Path) -> Option<String> {
     let output = git_output(
         project_root,
-        &["config", "--get-regexp", r"^remote\..*\.url$"],
+        &["config", "--local", "--get-regexp", r"^remote\..*\.url$"],
     )
     .ok()?;
     if !output.status.success() {

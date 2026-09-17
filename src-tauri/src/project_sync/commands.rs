@@ -1413,7 +1413,7 @@ pub async fn plan_bundle_restore(
                 "ok",
                 "pull.review_ready",
                 &format!(
-                    "✓  Pull review ready — revision {}, {} applicable actions ({} resources, {} conversations)",
+                    "✓  Pull review ready — version {}, {} applicable actions ({} resources, {} conversations)",
                     plan.revision,
                     applicable_actions,
                     ordinary_actions,
