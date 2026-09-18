@@ -599,3 +599,43 @@ more than that probe did.
   first publication wins, and the other history becomes an archive. Nothing is
   deleted, and Pull then Push recovers.
 - An incarnation id to print in diagnostics.
+
+## 11. Follow-up: Revision 3 of the design (no UID, the smaller cut)
+
+The owner chose to remove the storage UID (section 10) and to go with the
+smaller cut (section 6). The design was rewritten as Revision 3 on
+September 18, 2026. Earlier sections of this evaluation describe Revisions 1
+and 2 and are kept as the record of how the design got here.
+
+How the smaller cut was reconciled with the four earlier answers:
+
+| Earlier answer | In Revision 3 |
+| --- | --- |
+| Desktop first, cloud later | Unchanged. The smaller cut keeps the manifest shape, `_objects/<sha256>` and `commit-<hex>` ids, so the service's validator, the website's manifest parsing, views and the release flow stay valid. Stage 5 shrinks to: store the record with the upload, add `previous_commit_id` and `created_at_ms`, list a repository's records, and adapt the desktop bridge. Who arbitrates on Managed Cloud is left as an open stage-5 decision, with "the service keeps its commit guard" recommended |
+| The limit: list, then write | Unchanged, applied to the commit record through a new single-request `put_record` |
+| Refresh compares with the final publication | One listing of `repositories/_commits/<bundle_id>/`. The graph facts are in the record's name, which shared code builds and parses, as it builds every key today. Steps 4 and 5 yield the same `BundleSnapshot` as `inspect_optional` |
+| Forks use the publication version | `commit_id` is the identity and `revision` is the printed depth. Pins keep today's shape, `(revision, commit_id, manifest_sha256, manifest_size)`, because the smaller cut's point is that no persisted, IPC or TypeScript type changes. What changes is every comparison: identity and ancestry, never revision order. The link above a pinned base is verified with `previous_commit_id` plus `previous_manifest_sha256`, both already in the pin, so no record hash has to be pinned |
+
+Points specific to the smaller cut:
+
+- Project records move to one flat namespace, `repositories/_commits/<bundle_id>/`,
+  in the position `_tags/` holds today. One listing of it replaces the tag index
+  for bundle discovery without ever listing a payload key, and the tag's facts
+  move into the record as `summary`. Library records stay inside each
+  repository, because the Library never enumerates repositories.
+- `BundleHead` and `LibraryResourceHead` survive as in-memory views of the
+  selected record, so `snapshot.head.*` callers (27 in `service.rs`) are
+  untouched.
+- `ObjectStore` loses `compare_and_swap` only. `put_immutable` keeps its
+  signature and loses its no-overwrite promise, which is safe because every key
+  is content-addressed or contains a random `commit_id`. The existing stores may
+  keep their native no-overwrite mechanics.
+- The stores' listings must skip and report a name they cannot represent instead
+  of failing, because a stream listing is now on every refresh.
+- Clear stays in place and deletes records first.
+- Deferred, stated in design section 18: opaque locators, the snapshot envelope,
+  the payload table, `AppendStore`, and identifier-addressed providers.
+
+Still unanswered from section 4 of this evaluation: the legacy-rejection paths,
+deferring the archive UI, and the "same id, different bytes" blocked state.
+Revision 3 keeps the design's original position on each.

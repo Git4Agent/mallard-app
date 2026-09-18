@@ -1,7 +1,8 @@
 # Mallard Cloud comparison and Push plan
 
 Status: plan only. Implementation changes were reverted at the user's request.
-No implementation work is active.
+No implementation work is active. This revision uses the existing Cloud API
+response and limits implementation to the desktop.
 
 ## Required behavior
 
@@ -26,14 +27,14 @@ and reviewed changes. Do not carry old draft-only content into the replacement
 without review. Show draft-only content that will be removed. Keep published
 content unless an approved action changes it.
 
-## Behavior verified before this change
+## Current behavior
 
 The cloud service uses the same private snapshot replacement process for public
 and private repositories. Each committed upload creates a private publication,
 advances the private version, and retires the previous private publication.
 It does not change the published version. It invalidates open release requests.
 
-Before this change, the desktop carried previous session content forward for both
+The current desktop carries previous session content forward for both
 repository types. Thus, replacing the private snapshot pointer does not imply
 that all previous draft-only content is removed.
 
@@ -61,28 +62,41 @@ They do not verify the deployed service or the native desktop application.
 The fields below describe the proposed changes. Schema versions stay at 1.
 No new stored local fields or Cloud database columns are proposed.
 
-### 1. Cloud response: explicit comparison and write targets
+### 1. Reuse the existing repository-details response
 
-Replace the desktop head response's ambiguous `head` with:
+Use `ManagedCloudClient::get_repository(repository_id)`, which calls
+`GET /v1/repositories/{id}` and returns the existing `RepositorySummary`.
+Do not change the website, Cloud routes, or response contracts.
+Do not add `comparison_head` or `write_head` fields to the API.
 
-| Field | Purpose |
+Select the source in the desktop adapter from one repository-details response:
+
+| Existing field | Desktop use |
 | --- | --- |
-| `comparison_head` | Exact version used by status, inventory, and Pull |
-| `write_head` | Current private version that Push can replace; only return it to authorized callers |
-| `private_revision` | Existing private version used for the write conflict check |
-| `link` | Existing visibility, permissions, release state, and repository revision |
+| `visibility` | Select public or private comparison |
+| `public_head` | Comparison, inventory, Pull, and Push content source for a public repository |
+| `private_head` | Comparison and content source for a private repository; Push destination for both types |
+| `revision` | Existing repository revision for the write conflict check |
+| `private_revision` | Existing private version for the write conflict check |
+| `public_summary` / `private_summary` | Match inventory summaries to the selected source |
 
-Reuse the existing head fields: commit ID, manifest revision, manifest digest,
-manifest size, scope, and public or private version number. Keep manifest
-revision distinct from the public release number.
+The selected head already contains the commit ID, manifest revision, digest,
+size, and scope. Reuse these fields to fetch and verify the exact manifest.
+Keep manifest revision distinct from the public release number.
 
-The server must read the targets and repository revision consistently. A public
-comparison must not fall back to the private draft. A missing or unreadable
-published target must produce an explicit unavailable or absent result, as
-appropriate to the repository state.
+Use visibility, both heads, and revision values from the same response. Do not
+combine a cached public head with newer write revisions. A missing or unreadable
+public head must give an explicit absent or unavailable result. Do not use the
+private snapshot as a fallback for public comparison.
 
-Keep release inspection's access to private content. Do not change a shared
-read helper globally if that would change Owner or Admin review behavior.
+Keep the existing `/head` response unchanged. Its current request can remain
+for the toolbar's release status and permissions. Its writer-selected `head`
+must no longer select comparison or Pull content. Separate status reads must
+not replace the revision values captured with the selected content source.
+
+Reuse the existing client method and DTO. Add only the desktop logic needed
+to select the source and retain the existing write checks. Owner and Admin
+draft inspection continues to use the existing service behavior.
 
 ### 2. Local metadata: keep the existing fields
 
@@ -111,8 +125,10 @@ not need a new saved public-version counter or a separate public-version check.
 Use the snapshot's existing commit ID, manifest revision, digest, and size for
 content verification.
 
-Carry a temporary `managed_cloud_review_token` with the Push review. It contains
-the existing repository revision, private revision, and private commit ID.
+Carry the observed write values through the existing prepared-review path.
+If the desktop IPC needs a token, use one temporary `managed_cloud_review_token`
+with the existing repository revision, private revision, and private commit ID.
+Do not add a stored token or a new service-side counter.
 The verified snapshot and its head token carry the comparison content.
 Together they preserve:
 
@@ -149,8 +165,9 @@ comparison DTO. Use precise status details:
 - Public: “Matches published version.”
 - Private: “Matches latest private version.”
 
-Add a temporary `unpublished_changes` list to the Push review. Show content
-that differs from the published source and must be selected again to keep it.
+Reuse the existing review warnings and result components. Show unpublished
+content that must be selected again to keep it. Do not introduce a separate
+review data model or redesign the dialog for this change.
 
 Keep release state separate from session state. A successful upload may show an
 upload result, but must not overwrite the comparison result with synced rows.
@@ -159,41 +176,53 @@ upload result, but must not overwrite the comparison result with synced rows.
 
 - Local and portable schema version numbers: 1.
 - Portable bundle manifest format and session identity fields.
+- Cloud API endpoints, response fields, and website behavior.
 - Cloud database public/private publication pointers and version counters.
 - Release approval states and role requirements.
 - Credentials and local path data remain machine-local.
 
-The stored local JSON and portable manifest formats stay unchanged. The head
-API and temporary review DTO change directly. There is no migration, automatic
-backfill, old-contract reader, or legacy execution path.
+The stored local JSON, portable manifests, and Cloud API stay unchanged.
+Change the desktop comparison path directly. Add no migration, automatic
+backfill, compatibility branch, or legacy execution path.
 
-## Implementation sequence
+## Minimal implementation sequence
 
-1. Define the explicit targets in the cloud API. Update service fixtures and
-   the Rust client/stub together. Remove the old desktop head contract.
-2. Separate comparison, content construction, and write-conflict inputs in the
-   Cloud adapter and publication flow. Do not add a fallback to draft comparison.
-3. Keep existing local metadata; adjust checkpoint selection and atomic receipt persistence.
-   Public upload success must leave published comparison evidence intact.
-4. Apply the selected source to activity rows, remote inventory, Pull preview,
-   Pull apply, and refresh. Keep Owner/Admin draft inspection available.
-5. Make public Push replace the reviewed draft. Show draft-only removals in the
-   review. Preserve existing private-repository session retention behavior.
-6. Update frontend DTOs, status text, tests, and active documentation. Remove
-   superseded code in the same cutover.
+1. Reuse the existing repository-details call in the desktop Cloud adapter.
+   Select `public_head` for public repositories and `private_head` for private
+   repositories. Use the matching inventory summary.
+2. Use that selected snapshot for comparison, Pull, and Push content. Retain
+   `private_head`, `private_revision`, and `revision` from the same response
+   for the existing write conflict checks.
+3. Keep local metadata unchanged. A public upload must not replace published
+   comparison checkpoints. Reuse content verification after a release.
+4. Build public Push from published content plus reviewed changes. Reuse the
+   existing review warnings for draft replacement. Preserve private Push
+   retention and the existing approval checks.
+5. Adjust only the necessary status text and Push result. Add focused desktop
+   tests. Update the existing Cloud stub to test the current details response;
+   do not create a new service contract.
 
-Main desktop files: `src-tauri/src/project_sync/service.rs`,
-`crates/mallard-infrastructure/src/bundle_engine.rs`,
-`crates/mallard-infrastructure/src/managed_cloud/{client,store,stub}.rs`,
-`src/types.ts`, and the project-sync comparison/review components.
+Expected implementation scope:
 
-Main service files: repository head routes, upload routes, access/query helpers,
-and the corresponding tests under `cloudflare/managed-cloud`.
+- `crates/mallard-infrastructure/src/managed_cloud/store.rs`: source selection
+  and write conflict inputs.
+- `src-tauri/src/project_sync/service.rs`: comparison and publication flow.
+- `crates/mallard-infrastructure/src/bundle_engine.rs` and
+  `conversation_materialization.rs`: only the changes required for draft
+  replacement and preservation of published comparison evidence.
+- Existing review/status components and DTOs: only necessary temporary review
+  data and text changes.
+- Existing desktop unit, integration, and Cloud-stub tests.
+
+No Cloud service implementation, website UI, database, dependency, or version
+change is planned. Do not refactor unrelated storage or review code.
 
 ## Acceptance tests
 
 | Case | Required result |
 | --- | --- |
+| Existing repository-details response | Public/private selection works without a new API field |
+| Toolbar status read differs from the content read | Status does not replace the content source or its write revision values |
 | Public A, local B; Push B | Published A stays selected; B remains outstanding |
 | Approve and publish B | Local B becomes synced after verified refresh |
 | Public A, local A, draft B | Local A is synced with published A |
@@ -209,9 +238,10 @@ and the corresponding tests under `cloudflare/managed-cloud`.
 | Local bytes differ from portable encoding | Verified paired-tail comparison remains correct |
 | Codex/Claude child-session or export settings change | Status and Push decisions preserve existing safety checks |
 
-Run service type checks, build, and affected tests. Run desktop frontend build,
-frontend integration tests, and Rust library tests. Verify public and private
-flows in the complete Tauri application and capture screenshots.
+Run the desktop frontend build, frontend integration tests, and relevant Rust
+library tests. Cover the unchanged repository-details contract in the desktop
+Cloud stub. Verify public and private flows in the complete Tauri application.
+No service deployment is required by this plan.
 
 ## Cutover and scope
 

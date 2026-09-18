@@ -2942,6 +2942,15 @@ button.storage-found-group-head:hover { color: var(--text-1); background: var(--
   container: sync-pathbar / inline-size;
   position: relative;
   z-index: 6;
+  /* The z-index alone is not enough in the live WebKit view. The page below is
+     a rounded, scrollable overflow container, so WKWebView gives it its own
+     compositing layer; the bar is not promoted, and anything the bar hangs
+     past its own box — a chip's tooltip — is occluded by that layer, cut off
+     exactly at the page panel's border box. Promoting the bar puts both on the
+     layer tree, where the z-order holds. The bar and not the tooltip: the bar's
+     box lands on whole pixels, so its pixel type still rasterises crisp, while
+     the tooltip is a fractional `max-content` width and would not. */
+  transform: translateZ(0);
   width: 100%;
   min-height: 3.25rem;
   flex: 0 0 auto;
