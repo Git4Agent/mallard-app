@@ -498,6 +498,10 @@ pub struct BundleEngine<S> {
 }
 
 impl<S: ObjectStore> BundleEngine<S> {
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
     pub fn open(store: S, storage_id: StorageId) -> Result<Self, String> {
         Self::open_with_contracts(
             store,

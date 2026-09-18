@@ -29,7 +29,8 @@ import {
 import {
   applyPullReview,
   beginPullReview,
-  hasPendingRestoreMutations,
+  canAcceptPullMetadata,
+  acceptPullMetadata,
   type PullReviewApi,
 } from "../../src/components/project-sync/pullReviewFlow";
 
@@ -183,31 +184,6 @@ test("a replacement storage history offers unlinking without gating Pull", () =>
   const primary = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[\s\S]*?<\/button>/)?.[0] ?? "";
   assert.match(primary, /data-thread-status="cloud-outstanding"/);
   assert.doesNotMatch(primary, /data-icon="download"/);
-});
-
-test("only cloud-side or divergent conversation actions keep a Pull review open", () => {
-  const plan = (
-    rows: ConversationReviewRow[],
-  ): PullReview => ({
-    ...restorePlan,
-    actions: [],
-    conversation_review: rows,
-  });
-
-  const adopt = conversationRow("adopt_cloud_metadata", "selection-adopt");
-  assert.equal(hasPendingRestoreMutations(plan([
-    conversationRow("no_changes"),
-    adopt,
-    conversationRow("report_push_eligible"),
-    conversationRow("report_local_only"),
-  ])), false);
-  const materialize = conversationRow("materialize_cloud", "selection-materialize");
-  assert.equal(hasPendingRestoreMutations(plan(
-    [materialize],
-  )), true);
-  assert.equal(hasPendingRestoreMutations(plan([
-    conversationRow("blocked", null, "unknown_evidence"),
-  ])), false);
 });
 
 test("keep-both is one reviewed action with no second resolution payload", () => {
@@ -828,4 +804,64 @@ test("readiness failure preserves the successful Apply result", async () => {
     completedResourceIds: new Set(["codex:session:thread-a"]),
   });
   assert.deepEqual(displayed.actions, [{ kind: "recheck", label: "Recheck" }]);
+});
+
+
+test("automatic metadata acceptance excludes file changes and hidden blockers", () => {
+  const base: PullReview = { ...restorePlan, actions: [], conversation_review: [] };
+  assert.equal(canAcceptPullMetadata(base), true);
+  for (const action of ["no_changes", "adopt_cloud_metadata", "report_push_eligible", "report_local_only"] as const) {
+    assert.equal(canAcceptPullMetadata({ ...base, conversation_review: [conversationRow(action, "metadata-id")] }), true);
+  }
+  for (const action of ["materialize_cloud", "create_local"] as const) {
+    assert.equal(canAcceptPullMetadata({ ...base, conversation_review: [conversationRow(action, "write-id")] }), false);
+  }
+  for (const action of ["keep_both", "blocked", "not_found", "require_pull"] as const) {
+    assert.equal(canAcceptPullMetadata({ ...base, conversation_review: [conversationRow(action)] }), false);
+  }
+  assert.equal(canAcceptPullMetadata({ ...base, conversation_review: [conversationRow("adopt_cloud_metadata")] }), false);
+  assert.equal(canAcceptPullMetadata({ ...base, conversation_review: [conversationRow("no_changes", null, "busy")] }), false);
+  assert.equal(canAcceptPullMetadata({ ...base, conversation_review: [{ ...conversationRow("no_changes"), blocked_reason: "Missing profile" }] }), false);
+  assert.equal(canAcceptPullMetadata({ ...base, remote_continuity: { state: "replaced", base_revision: 1, remote_revision: 2 } }), false);
+  for (const kind of [
+    { kind: "write_file", logical_path: "state/provider/memory.md" },
+    { kind: "write_project_file", logical_path: "project/note.md", mode: 420, source_mtime: 1 },
+    { kind: "ensure_project_directory", logical_path: "project/notes", mode: 493, source_mtime: 1 },
+    { kind: "delete_project_file", logical_path: "project/note.md", last_sha256: "a".repeat(64) },
+    { kind: "delete_project_directory", logical_path: "project/notes" },
+    { kind: "merge_file", logical_path: "state/provider/memory.md" },
+  ] as const) {
+    assert.equal(canAcceptPullMetadata({ ...base, actions: [{ ...restorePlan.actions[0], kind }] }), false, kind.kind);
+  }
+  assert.equal(canAcceptPullMetadata({ ...base, actions: [{ ...restorePlan.actions[0], kind: { kind: "manual", message: "No safe target" } }] }), false);
+});
+
+test("automatic acceptance uses only metadata IDs from the exact checked plan", async () => {
+  const plan: PullReview = { ...restorePlan, actions: [], conversation_review: [
+    conversationRow("adopt_cloud_metadata", "accept-metadata"),
+    conversationRow("report_local_only"),
+    conversationRow("report_push_eligible"),
+  ] };
+  let calls = 0;
+  await acceptPullMetadata({ applyRestore: async (actual, ids) => {
+    calls += 1;
+    assert.equal(actual, plan, "retain the revision, digest, expiry and binding pins");
+    assert.deepEqual(ids, ["accept-metadata"]);
+    return result();
+  } }, plan);
+  assert.equal(calls, 1);
+  await acceptPullMetadata({ applyRestore: async (actual, ids) => {
+    assert.equal(actual.revision, plan.revision);
+    assert.deepEqual(ids, []);
+    return result();
+  } }, { ...plan, conversation_review: [] });
+  await assert.rejects(acceptPullMetadata({ applyRestore: async () => assert.fail("must not apply files") }, restorePlan), /Review the changes/);
+});
+
+test("automatic acceptance rejects stale pins and incomplete acknowledgement", async () => {
+  const plan: PullReview = { ...restorePlan, actions: [], conversation_review: [] };
+  await assert.rejects(acceptPullMetadata({ applyRestore: async () => { throw new Error("Plan expired"); } }, plan), /Plan expired/);
+  for (const update of [{ success: false }, { reviewed_base_advanced: false }, { reviewed_base_advanced: undefined }]) {
+    await assert.rejects(acceptPullMetadata({ applyRestore: async () => result({ ...update, message: "Check again" }) }, plan), /Check again/);
+  }
 });

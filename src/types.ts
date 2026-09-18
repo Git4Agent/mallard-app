@@ -276,6 +276,7 @@ export type ScopeContinuity =
   | { state: "replaced"; base_revision: number; remote_revision: number };
 
 export interface ProjectStorageLink {
+  managed_cloud_repository_id?: string | null;
   local_project_id: string;
   storage_id: string;
   bundle_id: string;
@@ -1605,6 +1606,7 @@ export interface ScopeSyncRow {
 }
 
 export interface ThreadSyncComparison {
+  managed_cloud_status?: ManagedCloudStatus | null;
   project_id: string;
   storage_id: string;
   storage_name: string;
@@ -1706,7 +1708,15 @@ export type ManagedCloudReleaseState =
   | { kind: "public" }
   | { kind: "snapshot_changed" }
   | { kind: "rejected"; reason?: string | null };
+export interface ManagedCloudStatus {
+  repository_id: string;
+  state: "ready" | "deleting" | "inaccessible" | "sign_in_required" | "unavailable";
+  link: ManagedCloudLink | null;
+  message: string | null;
+}
 export interface ManagedCloudLink {
+  visibility: "private" | "public";
+  can_pull: boolean;
   repository_id: string;
   /** `{origin}/{owner_login}/{name}`: the repository's page on the website. */
   website_url: string;
@@ -1772,4 +1782,4 @@ export type ProjectActivityRefreshEvent =
   | { stage: "activity"; activity: ProjectActivity }
   | { stage: "activity_error"; message: string }
   | { stage: "comparison"; comparison: ThreadSyncComparison }
-  | { stage: "comparison_error"; message: string };
+  | { stage: "comparison_error"; message: string; managed_cloud_status?: ManagedCloudStatus | null };

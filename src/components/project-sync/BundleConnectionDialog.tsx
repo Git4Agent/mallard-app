@@ -82,12 +82,12 @@ function ManagedCloudBody({
     && (existing.repository_fingerprint ?? null) !== localFingerprint
     && !existing.mismatch_acknowledged;
   const contributor = !!existing && chosen?.role === null;
-  const verb = selection?.kind === "new" ? "Create and connect" : "Connect and review Pull";
+  const verb = selection?.kind === "new" ? "Create and connect" : "Connect";
   const footerNote = selection?.kind === "new"
     ? "Creates the private repository shown above. The name is checked again when you connect."
     : contributor
-      ? "Public repository: anyone signed in can push. Pull reviews the latest push before anything changes locally"
-      : "Pull reviews the snapshot before anything changes locally";
+      ? "Anyone signed in can push. Connects and accepts matching data. File changes need review."
+      : "Connects and accepts matching data. File changes need review.";
   const connect = () => {
     if (!selection) return;
     if (selection.kind === "new") {
@@ -224,7 +224,7 @@ function BundleListBody({
   notices.push({
     key: "metadata-only",
     severity: "info",
-    message: "Connecting changes only Mallard metadata. It does not move or delete the checkout or provider profile.",
+    message: "Connects and accepts matching data. File changes need review.",
   });
 
   return (
@@ -319,7 +319,7 @@ function BundleListBody({
                 && projectFingerprint !== (selected.repository_fingerprint ?? null),
             })}
           >
-            {busy ? "Connecting…" : "Connect and review Pull"}
+            {busy ? "Connecting…" : "Connect"}
           </button>
         </div>
       </footer>

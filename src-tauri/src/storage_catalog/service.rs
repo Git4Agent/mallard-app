@@ -474,7 +474,6 @@ impl StorageCatalogService {
             &self.registry,
             &self.state,
             &self.catalog,
-            self.runner.as_ref(),
             scope_id,
             storage_id,
             &self.user_home,
@@ -514,7 +513,6 @@ impl StorageCatalogService {
             &self.registry,
             &self.state,
             &self.catalog,
-            self.runner.as_ref(),
             scope_id,
             storage_id,
             &self.user_home,
@@ -545,7 +543,6 @@ impl StorageCatalogService {
             &self.registry,
             &self.state,
             &self.catalog,
-            self.runner.as_ref(),
             scope_id,
             storage_id,
             &self.user_home,
@@ -561,7 +558,6 @@ impl StorageCatalogService {
             &self.registry,
             &self.state,
             &self.catalog,
-            self.runner.as_ref(),
             approval.plan_id,
             approval.selected_resource_ids,
             approval.acknowledged_warning_digests,
@@ -580,7 +576,6 @@ impl StorageCatalogService {
             &self.registry,
             &self.state,
             &self.catalog,
-            self.runner.as_ref(),
             scope_id,
             storage_id,
             requested_copy_names,
@@ -615,7 +610,6 @@ impl StorageCatalogService {
         prepare_fork_with_repositories(
             &self.registry,
             &self.catalog,
-            self.runner.as_ref(),
             scope_id,
             resource_id,
             requested_name,
@@ -1009,7 +1003,6 @@ fn resolve_scope_workspace(
     registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
-    runner: &dyn PluginProcessRunner,
     scope_id: &CatalogScopeId,
     requested_storage: Option<&StorageId>,
     user_home: &Path,
@@ -1024,8 +1017,8 @@ fn resolve_scope_workspace(
         user_home,
     )
     .map_err(|blocker| blocker.to_string())?;
-    let inventory = inventory_local(registry, &capability, &context, runner)
-        .map_err(|blocker| blocker.to_string())?;
+    let inventory =
+        inventory_local(registry, &capability, &context).map_err(|blocker| blocker.to_string())?;
 
     let links = catalog.load_scope_links()?;
     let config = state.load_config()?;
@@ -1111,14 +1104,12 @@ fn list_catalog_scope_resources_with_repositories(
     registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
-    runner: &dyn PluginProcessRunner,
     scope_id: &CatalogScopeId,
     storage_id: Option<&StorageId>,
     user_home: &Path,
 ) -> Result<CatalogScopeResourcesDto, String> {
-    let workspace = resolve_scope_workspace(
-        registry, state, catalog, runner, scope_id, storage_id, user_home,
-    )?;
+    let workspace =
+        resolve_scope_workspace(registry, state, catalog, scope_id, storage_id, user_home)?;
     let codec = workspace.capability.codec.as_ref();
     let remote = workspace.remote_map();
     let remote_updated: BTreeMap<&CatalogResourceId, u64> = workspace
@@ -1443,7 +1434,6 @@ fn link_catalog_scope_storage_with_repositories(
     registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
-    runner: &dyn PluginProcessRunner,
     scope_id: &CatalogScopeId,
     storage_id: &StorageId,
     user_home: &Path,
@@ -1454,7 +1444,6 @@ fn link_catalog_scope_storage_with_repositories(
         registry,
         state,
         catalog,
-        runner,
         scope_id,
         Some(storage_id),
         user_home,
@@ -1644,7 +1633,6 @@ fn prepare_push_with_repositories(
     registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
-    runner: &dyn PluginProcessRunner,
     scope_id: &CatalogScopeId,
     storage_id: &StorageId,
     user_home: &Path,
@@ -1654,7 +1642,6 @@ fn prepare_push_with_repositories(
         registry,
         state,
         catalog,
-        runner,
         scope_id,
         Some(storage_id),
         user_home,
@@ -1714,7 +1701,6 @@ fn apply_push_with_repositories(
     registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
-    runner: &dyn PluginProcessRunner,
     plan_id: CatalogPlanId,
     selected_resource_ids: Vec<CatalogResourceId>,
     acknowledged_warning_digests: Vec<String>,
@@ -1742,7 +1728,6 @@ fn apply_push_with_repositories(
         registry,
         state,
         catalog,
-        runner,
         &plan.scope_id,
         Some(&plan.storage_id),
         user_home,
@@ -1948,7 +1933,6 @@ fn prepare_pull_with_repositories(
     registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
-    runner: &dyn PluginProcessRunner,
     scope_id: &CatalogScopeId,
     storage_id: &StorageId,
     requested_copy_names: BTreeMap<CatalogResourceId, String>,
@@ -1959,7 +1943,6 @@ fn prepare_pull_with_repositories(
         registry,
         state,
         catalog,
-        runner,
         scope_id,
         Some(storage_id),
         user_home,
@@ -2023,7 +2006,6 @@ fn apply_pull_with_repositories(
         registry,
         state,
         catalog,
-        runner,
         &plan.scope_id,
         Some(&plan.storage_id),
         user_home,
@@ -2176,7 +2158,6 @@ fn apply_pull_with_repositories(
 fn prepare_fork_with_repositories(
     registry: &CatalogRegistry,
     catalog: &CatalogStateRepository,
-    runner: &dyn PluginProcessRunner,
     scope_id: &CatalogScopeId,
     resource_id: &CatalogResourceId,
     requested_name: &str,
@@ -2193,8 +2174,8 @@ fn prepare_fork_with_repositories(
         user_home,
     )
     .map_err(|blocker| blocker.to_string())?;
-    let inventory = inventory_local(registry, &capability, &context, runner)
-        .map_err(|blocker| blocker.to_string())?;
+    let inventory =
+        inventory_local(registry, &capability, &context).map_err(|blocker| blocker.to_string())?;
     let name_taken = name_taken_index(&inventory);
     let plan = build_resource_fork_plan(ScopeForkPlanInputs {
         scope: &scope,
@@ -2234,31 +2215,7 @@ mod tests {
     use mallard_domain::SyncConfig;
     use mallard_infrastructure::storage_providers::local::local_storage_config;
 
-    struct EmptyCodexRunner;
-
-    impl PluginProcessRunner for EmptyCodexRunner {
-        fn run(
-            &self,
-            provider: &ProviderKey,
-            _home: &Path,
-            argv: &[String],
-        ) -> Result<CmdOutput, String> {
-            assert_eq!(provider.as_str(), "codex");
-            let stdout = match argv.join(" ").as_str() {
-                "plugin marketplace list --json" => r#"{"marketplaces":[]}"#,
-                "plugin list --json" => r#"{"installed":[]}"#,
-                other => panic!("unexpected provider command: {other}"),
-            };
-            Ok(CmdOutput {
-                success: true,
-                stdout: stdout.to_string(),
-                stderr: String::new(),
-            })
-        }
-    }
-
-    /// Panics on any provider CLI invocation, so "this path does no inventory
-    /// work" is asserted by construction rather than by timing.
+    /// Any CLI invocation fails these file-based Library flows.
     struct PanicRunner;
 
     impl PluginProcessRunner for PanicRunner {
@@ -2268,7 +2225,7 @@ mod tests {
             _home: &Path,
             argv: &[String],
         ) -> Result<CmdOutput, String> {
-            panic!("provider inventory ran unexpectedly: {}", argv.join(" "));
+            panic!("provider command ran unexpectedly: {}", argv.join(" "));
         }
     }
 
@@ -2328,12 +2285,9 @@ mod tests {
         )
         .expect("write test skill");
 
-        let service = StorageCatalogService::from_home_dirs(
-            &machine_home,
-            &user_home,
-            Box::new(EmptyCodexRunner),
-        )
-        .expect("construct isolated service");
+        let service =
+            StorageCatalogService::from_home_dirs(&machine_home, &user_home, Box::new(PanicRunner))
+                .expect("construct isolated service");
         assert_eq!(service.capabilities().len(), 6);
         let profile = service
             .save_profile(provider("codex"), codex_home.to_string_lossy().to_string())
@@ -2373,13 +2327,13 @@ mod tests {
         assert!(StorageCatalogService::from_home_dirs(
             "relative-machine",
             "/absolute-user",
-            Box::new(EmptyCodexRunner),
+            Box::new(PanicRunner),
         )
         .is_err());
         assert!(StorageCatalogService::from_home_dirs(
             "/absolute-machine",
             "relative-user",
-            Box::new(EmptyCodexRunner),
+            Box::new(PanicRunner),
         )
         .is_err());
     }
@@ -2448,6 +2402,176 @@ mod tests {
             catalog,
             profile,
             storage,
+        }
+    }
+
+    fn write_plugin_fixture(home: &Path) {
+        fs::write(home.join("config.toml"), "[marketplaces.acme]\nsource_type=\"git\"\nsource=\"https://example.com/acme/market\"\n[plugins.\"tools@acme\"]\nenabled=true\n").unwrap();
+        let manifest = home.join("plugins/cache/acme/tools/1/.codex-plugin/plugin.json");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(manifest, r#"{"name":"tools","version":"1"}"#).unwrap();
+    }
+
+    struct LocalPluginInstaller {
+        write_state: bool,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl PluginProcessRunner for LocalPluginInstaller {
+        fn run(
+            &self,
+            provider: &ProviderKey,
+            home: &Path,
+            argv: &[String],
+        ) -> Result<CmdOutput, String> {
+            assert_eq!(provider.as_str(), "codex");
+            assert_eq!(argv, &["plugin", "add", "tools@acme"]);
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.write_state {
+                write_plugin_fixture(home);
+            }
+            Ok(CmdOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn plugin_file_flows_need_no_cli_and_install_success_requires_local_state() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for write_state in [false, true] {
+            let fixture = library_fixture();
+            let home = Path::new(&fixture.profile.configured_home);
+            write_plugin_fixture(home);
+            let service = StorageCatalogService::from_home_dirs(
+                &fixture.user_home,
+                &fixture.user_home,
+                Box::new(PanicRunner),
+            )
+            .unwrap();
+            let scope = service
+                .create_scope(
+                    provider("codex"),
+                    fixture.profile.profile_id.clone(),
+                    CatalogResourceKindKey::parse("plugin_install_intent").unwrap(),
+                    CatalogFormatKey::parse("mallard.plugin-install-intent").unwrap(),
+                    1,
+                )
+                .unwrap()
+                .scope
+                .scope_id;
+            let page = service.list_scope_resources(&scope, None).unwrap();
+            assert_eq!(page.rows.len(), 1);
+            assert!(page.rows[0].local_present);
+            let resource_id = page.rows[0].resource_id.clone().unwrap();
+            // Plugin intent has no directory to fork; refusal also needs no CLI.
+            assert!(service.prepare_fork(&scope, &resource_id, "copy").is_err());
+            service
+                .link_scope_storage(&scope, &fixture.storage.id)
+                .unwrap();
+            let push = service.prepare_push(&scope, &fixture.storage.id).unwrap();
+            assert_eq!(service.catalog.load_profiles().unwrap().schema, 1);
+            assert!(
+                service
+                    .apply_push(CatalogPushApproval {
+                        plan_id: push.plan_id,
+                        selected_resource_ids: vec![resource_id],
+                        acknowledged_warning_digests: push.warning_digests,
+                    })
+                    .unwrap()
+                    .published
+            );
+            let noop = service
+                .prepare_pull(&scope, &fixture.storage.id, BTreeMap::new())
+                .unwrap();
+            assert!(
+                service
+                    .apply_pull(CatalogPullApproval {
+                        plan_id: noop.plan_id,
+                        choices: BTreeMap::new(),
+                        destructive_acknowledged: Vec::new()
+                    })
+                    .unwrap()
+                    .remote_accepted
+            );
+
+            let target = sibling_machine(&fixture, "target-user", b"---\nname: review\n---\n");
+            let target_home = Path::new(&target.profile.configured_home);
+            fs::write(target_home.join("config.toml"), "[marketplaces.acme]\nsource_type=\"git\"\nsource=\"https://example.com/acme/market\"\n").unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let target_service = StorageCatalogService::from_home_dirs(
+                &target.user_home,
+                &target.user_home,
+                Box::new(LocalPluginInstaller {
+                    write_state,
+                    calls: calls.clone(),
+                }),
+            )
+            .unwrap();
+            let target_scope = target_service
+                .create_scope(
+                    provider("codex"),
+                    target.profile.profile_id.clone(),
+                    CatalogResourceKindKey::parse("plugin_install_intent").unwrap(),
+                    CatalogFormatKey::parse("mallard.plugin-install-intent").unwrap(),
+                    1,
+                )
+                .unwrap()
+                .scope
+                .scope_id;
+            target_service
+                .link_scope_storage(&target_scope, &fixture.storage.id)
+                .unwrap();
+            let pull = target_service
+                .prepare_pull(&target_scope, &fixture.storage.id, BTreeMap::new())
+                .unwrap();
+            let item = &pull.items[0].item;
+            let choices = BTreeMap::from([(
+                item.resource_id.clone(),
+                item.default_action_id.clone().unwrap(),
+            )]);
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                0,
+                "listing and review must not execute a CLI"
+            );
+            let outcome = target_service
+                .apply_pull(CatalogPullApproval {
+                    plan_id: pull.plan_id,
+                    choices,
+                    destructive_acknowledged: Vec::new(),
+                })
+                .unwrap();
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                1,
+                "only the install command can execute"
+            );
+            assert_eq!(
+                outcome.results[0].outcome,
+                if write_state {
+                    CatalogActionOutcome::Installed
+                } else {
+                    CatalogActionOutcome::Partial
+                }
+            );
+            assert_eq!(outcome.remote_accepted, write_state);
+            assert_eq!(
+                target_service
+                    .list_scope_resources(&target_scope, Some(&fixture.storage.id))
+                    .unwrap()
+                    .rows[0]
+                    .local_present,
+                write_state
+            );
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                1,
+                "post-install listing must not execute a CLI"
+            );
         }
     }
 
@@ -2525,7 +2649,6 @@ mod tests {
             &fixture.registry,
             &fixture.state,
             &fixture.catalog,
-            &EmptyCodexRunner,
             scope_id,
             storage_id,
             &fixture.user_home,
@@ -2543,7 +2666,6 @@ mod tests {
             &fixture.registry,
             &fixture.state,
             &fixture.catalog,
-            &EmptyCodexRunner,
             scope_id,
             storage_id,
             &fixture.user_home,
@@ -2561,7 +2683,6 @@ mod tests {
             &fixture.registry,
             &fixture.state,
             &fixture.catalog,
-            &EmptyCodexRunner,
             plan.plan_id.clone(),
             selected,
             plan.warning_digests.clone(),
@@ -2592,7 +2713,6 @@ mod tests {
             &fixture.registry,
             &fixture.state,
             &fixture.catalog,
-            &EmptyCodexRunner,
             scope_id,
             storage_id,
             &fixture.user_home,
@@ -2787,7 +2907,6 @@ mod tests {
             &fixture.registry,
             &fixture.state,
             &fixture.catalog,
-            &EmptyCodexRunner,
             &scope.scope_id,
             &fixture.storage.id,
             &fixture.user_home,
@@ -2799,7 +2918,6 @@ mod tests {
             &fixture.registry,
             &fixture.state,
             &fixture.catalog,
-            &EmptyCodexRunner,
             &scope.scope_id,
             &fixture.storage.id,
             &fixture.user_home,
@@ -2810,7 +2928,6 @@ mod tests {
         assert!(prepare_fork_with_repositories(
             &fixture.registry,
             &fixture.catalog,
-            &EmptyCodexRunner,
             &scope.scope_id,
             &CatalogResourceId::parse(format!("resource-{}", "a".repeat(64))).unwrap(),
             "copy",
@@ -3006,7 +3123,6 @@ mod tests {
             &fixture.registry,
             &fixture.state,
             &fixture.catalog,
-            &EmptyCodexRunner,
             &row.scope.scope_id,
             &fixture.storage.id,
             BTreeMap::new(),
@@ -3029,7 +3145,7 @@ mod tests {
             &fixture.registry,
             &fixture.state,
             &fixture.catalog,
-            &EmptyCodexRunner,
+            &PanicRunner,
             pull.plan_id.clone(),
             choices,
             Vec::new(),
@@ -3476,7 +3592,6 @@ mod tests {
             &fixture.registry,
             &fixture.state,
             &fixture.catalog,
-            &PanicRunner,
             &row.scope.scope_id,
             None,
             &fixture.user_home,
@@ -3506,7 +3621,6 @@ mod tests {
             &fixture.registry,
             &fixture.state,
             &fixture.catalog,
-            &PanicRunner,
             &sibling.scope.scope_id,
             None,
             &fixture.user_home,
@@ -3540,7 +3654,6 @@ mod tests {
             &fixture.registry,
             &fixture.state,
             &fixture.catalog,
-            &PanicRunner,
             &row.scope.scope_id,
             None,
             &fixture.user_home,

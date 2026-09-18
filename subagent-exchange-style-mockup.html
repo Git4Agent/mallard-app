@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en" data-theme="light" data-style="s1" data-sample="codex" data-scene="main">
+<head>
+<meta charset="utf-8">
+<title>Mallard — the exchange pane, four styles</title>
+<link rel="stylesheet" href="/src/App.css">
+<style>
+/* ═══ specimen chrome — not part of the app ═══ */
+html, body { height: auto; overflow: auto; }
+body { background: var(--retro-frame-gutter); padding: 18px 20px 80px; }
+.spec-bar { max-width: 1100px; margin: 0 auto 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.spec-title { font-family: var(--font-display); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-2); margin-right: auto; }
+.spec-btn { font-family: var(--font-display); font-size: 13px; font-weight: 700; color: var(--text-0); background: var(--button-bg); border: var(--box-border); border-radius: 999px; padding: 5px 13px; cursor: pointer; box-shadow: var(--shadow-card); }
+.spec-btn:active { transform: translate(1px,1px); box-shadow: none; }
+.spec-btn[aria-pressed="true"] { background: var(--button-primary-bg); color: var(--button-primary-text); }
+.spec-gap { width: 10px; }
+.spec-note { max-width: 1100px; margin: 0 auto 12px; color: var(--text-2); font-size: var(--type-sm); line-height: 1.55; }
+.spec-note b { color: var(--text-0); font-family: var(--font-display); }
+.spec-note i { color: var(--text-1); font-style: normal; }
+.spec-note p + p { margin-top: 4px; }
+.frame { max-width: 1100px; margin: 0 auto; background: var(--bg-0); border: var(--box-border); border-radius: var(--retro-panel-radius); box-shadow: var(--shadow-card); padding: 16px 20px 26px; }
+.session-detail-page { max-width: none; }
+svg.icon { width: 12px; height: 12px; flex: 0 0 auto; }
+.icon-pixel-fill { shape-rendering: crispEdges; }
+.session-detail-event-list { padding: 0; margin: 0; }
+.session-detail-tool-call > summary { list-style: none; }
+.session-detail-tool-call > summary::marker { content: ""; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Shared: the markup is identical in every style. Only these rules change,
+   so a pick is a CSS change and ports to the website's own skin unaltered.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.xc-pane { min-width: 0; display: grid; gap: 10px; }
+.xc-head { display: flex; align-items: flex-start; gap: 8px 14px; }
+.xc-facts { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.xc-verb { flex: 0 0 auto; min-height: 28px; padding: 0 12px; gap: 6px; font-size: var(--type-xs); }
+.xc-list { list-style: none; margin: 0; padding: 0; }
+.xc-kind { font-family: var(--font-display); font-size: var(--type-2xs); font-weight: var(--weight-bold); letter-spacing: .07em; text-transform: uppercase; }
+.xc-clock { font-family: var(--font-mono); font-size: var(--type-2xs); font-variant-numeric: tabular-nums; color: var(--text-3); }
+.xc-target { font-family: var(--font-mono); font-size: var(--type-2xs); color: var(--text-2); }
+.xc-text p { margin: 0; }
+.xc-text p + p { margin-top: 7px; }
+.xc-text ul { margin: 7px 0 0; padding-left: 18px; }
+.xc-note { margin: 0; color: var(--text-3); font-size: var(--type-xs); }
+
+/* The head band, restyled once for every new style: identity reads first in
+   the body face, the numbers follow in mono and a step down. The wall of
+   equal-weight bordered pills is what made the old band hard to scan. */
+[data-style]:not([data-style="now"]) .xc-facts > .id { color: var(--text-0); font-size: var(--type-sm); font-weight: var(--weight-semibold); }
+[data-style]:not([data-style="now"]) .xc-facts > .num { color: var(--text-2); font-family: var(--font-mono); font-size: var(--type-2xs); font-variant-numeric: tabular-nums; }
+[data-style]:not([data-style="now"]) .xc-facts > .sep { color: var(--text-3); }
+[data-style]:not([data-style="now"]) .xc-facts > .num > svg { color: var(--text-3); vertical-align: -1px; margin-right: 3px; }
+
+/* ── NOW · as drawn today (the reference) ─────────────────────────────── */
+[data-style="now"] .xc-pane { padding: 8px 9px 9px; border: var(--box-border); border-radius: 8px; background: var(--surface-subtle); }
+[data-style="now"] .xc-facts > span { display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 7px; border: 1px solid var(--border); border-radius: var(--r-pill); color: var(--text-1); font-family: var(--font-mono); font-size: var(--type-2xs); font-variant-numeric: tabular-nums; }
+[data-style="now"] .xc-facts > .sep { display: none; }
+[data-style="now"] .xc-list { display: grid; gap: 7px; }
+[data-style="now"] .xc-list > li { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 0 8px; align-items: start; position: relative; }
+[data-style="now"] .xc-list > li:not(:last-child)::before { content: ""; position: absolute; left: 7px; top: 18px; bottom: -7px; width: 1px; background: var(--border); }
+[data-style="now"] .xc-mark { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border: 1px solid var(--border-mid); border-radius: var(--r-pill); background: var(--bg-0); color: var(--text-2); font-family: var(--font-mono); font-size: 9px; line-height: 1; }
+[data-style="now"] .out .xc-mark { border-color: var(--session-detail-agent-edge); color: var(--session-detail-agent); }
+[data-style="now"] .end .xc-mark { border-color: var(--session-detail-amber); color: var(--session-detail-amber); }
+[data-style="now"] .xc-line { display: flex; align-items: baseline; gap: 8px; min-height: 16px; }
+[data-style="now"] .xc-kind { color: var(--text-1); }
+[data-style="now"] .xc-text { margin-top: 3px; max-height: 148px; overflow: auto; padding: 7px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-4); color: var(--text-1); font-size: var(--type-xs); line-height: 1.5; }
+[data-style="now"] .xc-note { margin-top: 2px; font-style: italic; font-size: var(--type-xs); color: var(--text-2); }
+
+/* ── S1 · Prose ───────────────────────────────────────────────────────────
+   One frame, not three. The pane keeps the border; the entries drop theirs
+   and are held together by a rule in the gutter — agent ink where the page
+   spoke, plain where the agent answered. The answer is the thing you came to
+   read, so it takes body size and the darkest ink in the pane. */
+[data-style="s1"] .xc-pane { padding: 9px 11px 11px; border: var(--box-border); border-radius: 8px; background: var(--surface-subtle); }
+[data-style="s1"] .xc-list { display: grid; gap: 11px; }
+[data-style="s1"] .xc-list > li { padding-left: 11px; border-left: 2px solid var(--border-mid); }
+[data-style="s1"] .xc-list > li.out { border-left-color: var(--session-detail-agent-edge); }
+[data-style="s1"] .xc-list > li.end { border-left-color: var(--session-detail-amber); }
+[data-style="s1"] .xc-mark { display: none; }
+[data-style="s1"] .xc-line { display: flex; align-items: baseline; gap: 8px; margin-bottom: 3px; }
+[data-style="s1"] .xc-kind { color: var(--text-2); }
+[data-style="s1"] .out .xc-kind { color: var(--session-detail-agent); }
+[data-style="s1"] .end .xc-kind { color: var(--session-detail-amber); }
+[data-style="s1"] .xc-text { max-height: 168px; overflow: auto; color: var(--text-0); font-size: var(--type-md); line-height: 1.55; }
+[data-style="s1"] .xc-note { font-size: var(--type-sm); }
+
+/* ── S2 · Ledger ──────────────────────────────────────────────────────────
+   No glyphs at all: a fixed left column states what and when, the right
+   column holds the words, and a hairline separates the turns. Reads like a
+   log — strongest when a run is long and you are scanning for one moment. */
+[data-style="s2"] .xc-pane { padding: 2px 0 0; }
+[data-style="s2"] .xc-head { padding: 0 2px 9px; border-bottom: 1px solid var(--border); }
+[data-style="s2"] .xc-list { display: grid; }
+[data-style="s2"] .xc-list > li { display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 1px 16px; align-content: start; padding: 9px 2px; border-bottom: 1px solid var(--border); }
+[data-style="s2"] .xc-list > li:last-child { border-bottom: 0; padding-bottom: 2px; }
+[data-style="s2"] .xc-mark { display: none; }
+/* The line's parts are placed one by one, so what and when stack in the left
+   column while the address the message went to stays with the words. */
+[data-style="s2"] .xc-line { display: contents; }
+[data-style="s2"] .xc-kind { grid-column: 1; grid-row: 1; color: var(--text-1); }
+[data-style="s2"] .out .xc-kind { color: var(--session-detail-agent); }
+[data-style="s2"] .end .xc-kind { color: var(--session-detail-amber); }
+[data-style="s2"] .xc-clock { grid-column: 1; grid-row: 2; }
+[data-style="s2"] .xc-target { grid-column: 2; grid-row: 1; }
+[data-style="s2"] .xc-text { grid-column: 2; max-height: 176px; overflow: auto; color: var(--text-0); font-size: var(--type-md); line-height: 1.55; }
+[data-style="s2"] .xc-note { grid-column: 2; }
+
+/* ── S3 · Sides ───────────────────────────────────────────────────────────
+   Direction from shape, not from a glyph: what the page sent stays flush
+   left as plain text, what the agent sent back sits in its own soft card,
+   inset. You can tell who is speaking with the labels covered. */
+[data-style="s3"] .xc-pane { padding: 9px 10px 11px; border: var(--box-border); border-radius: 8px; background: var(--surface-subtle); }
+[data-style="s3"] .xc-list { display: grid; gap: 9px; }
+[data-style="s3"] .xc-mark { display: none; }
+[data-style="s3"] .xc-line { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+[data-style="s3"] .xc-kind { color: var(--text-2); }
+[data-style="s3"] .out .xc-kind { color: var(--session-detail-agent); }
+[data-style="s3"] .end .xc-kind { color: var(--session-detail-amber); }
+[data-style="s3"] .out, [data-style="s3"] .end { padding-right: 34px; }
+[data-style="s3"] .out .xc-text, [data-style="s3"] .end .xc-text { color: var(--text-1); font-size: var(--type-md); line-height: 1.5; }
+[data-style="s3"] .back { margin-left: 22px; padding: 8px 10px 9px; border-radius: 8px; background: var(--bg-4); box-shadow: inset 0 0 0 1px var(--border); }
+[data-style="s3"] .back .xc-text { max-height: 176px; overflow: auto; color: var(--text-0); font-size: var(--type-md); line-height: 1.55; }
+[data-style="s3"] .xc-note { font-size: var(--type-sm); }
+
+/* ── S4 · Compact ─────────────────────────────────────────────────────────
+   For a talkative run: every turn that has no text is one line, stamp and
+   all, and only an answer takes a paragraph. A dozen exchanges still fit in
+   the pane without scrolling. */
+[data-style="s4"] .xc-pane { padding: 7px 9px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-subtle); }
+[data-style="s4"] .xc-head { padding-bottom: 7px; border-bottom: 1px solid var(--border); }
+[data-style="s4"] .xc-list { display: grid; gap: 5px; }
+[data-style="s4"] .xc-list > li { display: grid; grid-template-columns: 9px minmax(0, 1fr); gap: 0 7px; align-items: baseline; }
+[data-style="s4"] .xc-mark { color: var(--text-3); font-family: var(--font-mono); font-size: 10px; line-height: 1.4; }
+[data-style="s4"] .out .xc-mark { color: var(--session-detail-agent); }
+[data-style="s4"] .end .xc-mark { color: var(--session-detail-amber); }
+[data-style="s4"] .xc-line { display: inline; }
+[data-style="s4"] .xc-kind { color: var(--text-2); margin-right: 7px; }
+[data-style="s4"] .xc-clock { margin-right: 7px; }
+[data-style="s4"] .xc-note { display: inline; color: var(--text-2); font-size: var(--type-xs); }
+[data-style="s4"] .xc-text { margin-top: 2px; max-height: 132px; overflow: auto; color: var(--text-0); font-size: var(--type-sm); line-height: 1.5; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-user" viewBox="0 0 24 24"><path class="icon-pixel-fill" fill="currentColor" d="M9 2h6v2H9ZM9 10h6v2H9ZM15 4h2v6h-2ZM7 4h2v6H7ZM4 18h2v4H4ZM18 18h2v4h-2ZM8 14h8v2H8ZM6 16h2v2H6ZM16 16h2v2h-2Z"/></symbol>
+  <symbol id="i-fork" viewBox="0 0 24 24"><path class="icon-pixel-fill" fill="currentColor" d="M4 14h4v2H4ZM4 20h4v2H4ZM2 16h2v4H2ZM8 16h2v4H8ZM16 2h4v2h-4ZM16 8h4v2h-4ZM14 4h2v4h-2ZM20 4h2v4h-2ZM12 17h5v2h-5ZM17 12h2v5h-2ZM5 2h2v10H5Z"/></symbol>
+  <symbol id="i-chevr" viewBox="0 0 24 24"><path class="icon-pixel-fill" fill="currentColor" d="M8 4h2v1h1v1h1v1h1v1h1v1h1v1h1v4h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H8v-2h1v-1h1v-1h1v-1h1v-1h1v-4h-1V9h-1V8h-1V7H9V6H8V4Z"/></symbol>
+  <symbol id="i-chevd" viewBox="0 0 24 24"><path class="icon-pixel-fill" fill="currentColor" d="M20 8v2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-4v-1H9v-1H8v-1H7v-1H6v-1H5v-1H4V8h2v1h1v1h1v1h1v1h1v1h4v-1h1v-1h1v-1h1V9h1V8h2Z"/></symbol>
+  <symbol id="i-ext" viewBox="0 0 24 24"><path class="icon-pixel-fill" fill="currentColor" d="M2 6h8v2H2ZM2 6h2v16H2ZM2 20h18v2H2ZM18 12h2v10h-2ZM12 0h10v2H12ZM20 0h2v10h-2ZM18 2h2v2h-2ZM16 4h2v2h-2ZM14 6h2v2h-2ZM12 8h2v2h-2ZM10 10h2v2h-2Z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><g class="icon-pixel-fill" fill="currentColor"><path d="M22 9V7h-1V5h-1V4h-1V3h-2V2h-2V1H9v1H7v1H5v1H4v1H3v2H2v2H1v6h1v2h1v2h1v1h1v1h2v1h2v1h6v-1h2v-1h2v-1h1v-1h1v-2h1v-2h1V9h-1Zm-1 6h-1v2h-1v2h-2v1h-2v1H9v-1H7v-1H5v-2H4v-2H3V9h1V7h1V5h2V4h2V3h6v1h2v1h2v2h1v2h1v6Z"/><path d="M16 15v1h-1v1h-1v-1h-1v-1h-1v-1h-1V5h2v8h1v1h1v1h1Z"/></g></symbol>
+</defs></svg>
+
+<div class="spec-bar">
+  <span class="spec-title">The open pane · four styles</span>
+  <button class="spec-btn" data-style="now">Now</button>
+  <button class="spec-btn" data-style="s1">S1 · Prose</button>
+  <button class="spec-btn" data-style="s2">S2 · Ledger</button>
+  <button class="spec-btn" data-style="s3">S3 · Sides</button>
+  <button class="spec-btn" data-style="s4">S4 · Compact</button>
+  <span class="spec-gap"></span>
+  <button class="spec-btn" data-sample="claude">Claude</button>
+  <button class="spec-btn" data-sample="codex">Codex</button>
+  <span class="spec-gap"></span>
+  <button class="spec-btn" data-scene="main">One run</button>
+  <button class="spec-btn" data-scene="long">Talkative run</button>
+  <button class="spec-btn" id="theme">Dark</button>
+</div>
+<div class="spec-note" id="note"></div>
+
+<div class="frame"><div class="session-detail-page" id="page"></div></div>
+
+<script>
+const I = (id, s = 12) => `<svg class="icon" width="${s}" height="${s}" aria-hidden="true"><use href="#${id}"/></svg>`;
+const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+const mins = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+const len = (a, b) => { const d = mins(b) - mins(a); return d >= 60 ? `${Math.floor(d / 60)}h ${d % 60}m` : `${d}m`; };
+
+const KIND = {
+  brief:  { label: 'Brief',    cls: 'out',  glyph: '→' },
+  spawn:  { label: 'Spawned',  cls: 'out',  glyph: '→' },
+  sent:   { label: 'Sent',     cls: 'out',  glyph: '→' },
+  follow: { label: 'Follow-up', cls: 'out', glyph: '→' },
+  answer: { label: 'Answered', cls: 'back', glyph: '←' },
+  report: { label: 'Report',   cls: 'back', glyph: '←' },
+  cut:    { label: 'Interrupted', cls: 'end', glyph: '⨯' },
+};
+
+/* Synthetic fixtures only. No provider-session content or personal paths. */
+const SAMPLES = {
+  codex: {
+    note: '<b>Codex.</b> Every message the parent sent is an encrypted token, so three of these entries have no text and one does. That is the hardest case for the pane: a style that only looks good around a paragraph will look empty here.',
+    agent: { label: 'Goodall', task: '/root/audit_interaction', role: 'reviewer', type: 'explorer', mode: 'spawn', inherited: 'all turns', depth: 1, start: '07:02', end: '07:07', tokens: '1.2M', calls: null },
+    run: [
+      { k: 'spawn', t: '07:02', note: 'No brief is readable: the spawn message is encrypted, and the child started from all of this thread’s turns.' },
+      { k: 'sent', t: '07:06', target: '/root/audit_interaction', note: 'The message to the agent is encrypted; only the send and its clock are readable.' },
+      { k: 'answer', t: '07:07', text: 'Filter on the collider’s group and clear the prompt when the collider changes. Two lines, no new state.' },
+    ],
+    long: [
+      { k: 'spawn', t: '07:02', note: 'No brief is readable: the child started from all of this thread’s turns.' },
+      { k: 'answer', t: '07:05', text: 'The raycast collides with the world layer and the interactable layer, but the prompt checks only whether it is colliding.' },
+      { k: 'sent', t: '07:06', target: '/root/audit_interaction', note: 'Encrypted; only the send and its clock are readable.' },
+      { k: 'answer', t: '07:07', text: 'Filter on the collider’s group and clear the prompt when the collider changes.' },
+      { k: 'sent', t: '07:09', target: '/root/audit_interaction', note: 'Encrypted; only the send and its clock are readable.' },
+      { k: 'answer', t: '07:12', text: 'Done. The two lines sit beside the existing range check, and nothing else reads that flag.' },
+      { k: 'sent', t: '07:14', target: '/root/audit_interaction', note: 'Encrypted; only the send and its clock are readable.' },
+      { k: 'cut', t: '07:18' },
+      { k: 'answer', t: '07:19', text: 'Stopping here. The remaining bodies are named in my transcript.' },
+    ],
+  },
+  claude: {
+    note: '<b>Claude.</b> Here every entry has words: the brief the call carried, the follow-up with its own one-line summary, and the answer that closed the run. The style has to hold three paragraphs without turning the pane into a stack of boxes.',
+    agent: { label: 'Map the selection rule', role: 'Explore', model: 'claude-opus-5[1m]', mode: 'async', start: '09:14', end: '09:31', tokens: null, calls: null },
+    run: [
+      { k: 'brief', t: '09:14', text: 'Repository: the desktop app. Search breadth: very thorough.\n\nFind where the review pane decides which files start selected. I want the rule, the file and line, and the test that pins it.' },
+      { k: 'follow', t: '09:22', target: 'Hint: start from the selection bar', text: 'The bar is the thing that keeps the count, so the rule is more likely to live beside it than in the tab component.' },
+      { k: 'report', t: '09:31', text: 'The rule is one function, and the test that pins it is a table test over four shapes.\n\n- Everything reviewed on the last push starts selected.\n- A file the other side changed starts cleared, whatever its last state.\n- The count in the bar is derived, never stored.' },
+    ],
+    long: [
+      { k: 'brief', t: '09:14', text: 'Find where the review pane decides which files start selected. I want the rule, the file and line, and the test that pins it.' },
+      { k: 'follow', t: '09:22', target: 'Hint: start from the selection bar', text: 'The bar keeps the count, so the rule likely lives beside it.' },
+      { k: 'report', t: '09:26', text: 'Found it: one function, four shapes, one table test.' },
+      { k: 'follow', t: '09:28', target: 'Asked for the failing case', text: 'Which of the four shapes is the one the bug report hits?' },
+      { k: 'report', t: '09:31', text: 'The third: a file the other side changed while it was already selected. The rule clears it; the bar keeps counting it.' },
+      { k: 'follow', t: '09:33', target: 'Asked for the smallest fix' },
+      { k: 'report', t: '09:36', text: 'Derive the count from the same predicate the rule uses, and the two can no longer disagree.' },
+    ],
+  },
+};
+
+const NOTES = {
+  now: '<b>Now.</b> Three frames deep: the pane has a border, the chips have borders, every text has a border. The words you actually came to read are the smallest type in the pane, and the notes — which say what could <i>not</i> be read — carry almost the same weight as an answer.',
+  s1: '<b>S1 · Prose.</b> One frame. The entries lose their boxes and hang off a rule in the gutter — agent ink where the page spoke, amber where it was stopped. The answer takes body size and the darkest ink, so the thing worth reading is the thing you see first. The head band drops its pills: identity in the body face, numbers in mono, one step down.',
+  s2: '<b>S2 · Ledger.</b> No glyphs and no boxes: a fixed column states what and when, the words sit beside it, a hairline closes each turn. This is the one that scales — a run of ten still reads as a list of moments rather than a stack of cards.',
+  s3: '<b>S3 · Sides.</b> Direction from shape: what the page sent stays flush left as plain text, what the agent sent back sits in its own inset card. Cover the labels and you can still tell who spoke. Costs horizontal room, and an encrypted send is a left-hand line with nothing in it.',
+  s4: '<b>S4 · Compact.</b> A turn with no text is one line, stamp and all; only answers take a paragraph. Made for the talkative runs — try it against <i>Talkative run</i>, where the others start to scroll.',
+};
+
+function md(text) {
+  let out = '', para = [], list = false;
+  const flush = () => { if (para.length) { out += `<p>${esc(para.join(' '))}</p>`; para = []; } };
+  const close = () => { if (list) { out += '</ul>'; list = false; } };
+  for (const line of String(text).split('\n')) {
+    if (!line.trim()) { flush(); close(); }
+    else if (/^- /.test(line)) { flush(); if (!list) { out += '<ul>'; list = true; } out += `<li>${esc(line.slice(2))}</li>`; }
+    else { close(); para.push(line.trim()); }
+  }
+  flush(); close();
+  return out;
+}
+
+function facts(a) {
+  const id = [];
+  if (a.role) id.push(a.role);
+  if (a.type && a.type !== a.role) id.push(a.type);
+  if (a.model) id.push(a.model);
+  id.push(a.mode);
+  const nums = [];
+  if (a.inherited) nums.push(`inherited ${a.inherited}`);
+  if (a.depth) nums.push(`depth ${a.depth}`);
+  nums.push(`${I('i-clock')}${a.start} → ${a.end ?? '…'}${a.end ? ` · ${len(a.start, a.end)}` : ''}`);
+  if (a.calls != null) nums.push(`${a.calls} calls`);
+  if (a.tokens) nums.push(`${a.tokens} tokens billed`);
+  const parts = id.map((t) => `<span class="id">${t}</span>`)
+    .concat(nums.map((t) => `<span class="num">${t}</span>`));
+  return `<div class="xc-facts">${parts.join('<span class="sep">·</span>')}</div>`;
+}
+
+function entry(e) {
+  const kind = KIND[e.k];
+  const target = e.target ? `<span class="xc-target">${esc(e.target)}</span>` : '';
+  return `<li class="${kind.cls}">
+    <span class="xc-mark">${kind.glyph}</span>
+    <div class="xc-line"><span class="xc-kind">${kind.label}</span><span class="xc-clock">${e.t}</span>${target}</div>
+    ${e.text ? `<div class="xc-text">${md(e.text)}</div>` : ''}
+    ${e.note ? `<p class="xc-note">${e.note}</p>` : ''}
+  </li>`;
+}
+
+function render() {
+  const root = document.documentElement;
+  const sample = SAMPLES[root.dataset.sample];
+  const run = root.dataset.scene === 'long' ? sample.long : sample.run;
+  const a = sample.agent;
+  const talk = run.length;
+  document.getElementById('page').innerHTML = `
+    <div class="session-detail-layout"><div class="session-detail-timeline"><section class="session-detail-day">
+      <ol class="session-detail-event-list"><li class="session-detail-row-agent">
+        <article class="session-detail-event event-agent-call agent-completed">
+          <span class="session-detail-event-node" role="img" aria-label="Agent">${I('i-fork')}</span>
+          <div class="session-detail-event-body">
+            <details class="session-detail-tool-call session-detail-agent status-completed" open>
+              <summary>
+                <span class="session-detail-tool-name session-detail-agent-stamp">Agent</span>
+                <span class="session-detail-agent-label">${esc(a.label)}</span>
+                ${a.task ? `<span class="session-detail-agent-task">${a.task}</span>` : ''}
+                ${a.role ? `<span class="session-detail-agent-pill">${a.role}</span>` : ''}
+                <span class="session-detail-agent-pill mode">${a.mode}</span>
+                <span class="session-detail-agent-end">
+                  <span class="session-detail-agent-meta">
+                    ${talk > 2 ? `<span>${talk} exchanges</span>` : ''}
+                    <span class="session-detail-agent-length">${len(a.start, a.end)}</span>
+                  </span>
+                  <span class="session-detail-tool-chevron">${I('i-chevd')}</span>
+                </span>
+              </summary>
+              <div class="session-detail-tool-body">
+                <div class="xc-pane">
+                  <div class="xc-head">${facts(a)}<button type="button" class="btn xc-verb">${I('i-ext')}Open transcript</button></div>
+                  <ol class="xc-list">${run.map(entry).join('')}</ol>
+                </div>
+              </div>
+            </details>
+          </div>
+        </article>
+      </li></ol>
+    </section></div></div>`;
+  document.getElementById('note').innerHTML = `<p>${NOTES[root.dataset.style]}</p><p>${sample.note}</p>`;
+  for (const key of ['style', 'sample', 'scene']) {
+    document.querySelectorAll(`.spec-btn[data-${key}]`).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset[key] === root.dataset[key])));
+  }
+}
+for (const key of ['style', 'sample', 'scene']) {
+  document.querySelectorAll(`.spec-btn[data-${key}]`).forEach((b) => b.addEventListener('click', () => {
+    document.documentElement.dataset[key] = b.dataset[key];
+    render();
+  }));
+}
+document.getElementById('theme').addEventListener('click', (e) => {
+  const root = document.documentElement;
+  const dark = root.dataset.theme !== 'dark';
+  root.dataset.theme = dark ? 'dark' : 'light';
+  e.target.textContent = dark ? 'Light' : 'Dark';
+});
+new URLSearchParams(location.search).forEach((value, key) => {
+  if (['style', 'sample', 'scene', 'theme'].includes(key)) document.documentElement.dataset[key] = value;
+});
+render();
+</script>
+</body>
+</html>

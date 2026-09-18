@@ -3645,6 +3645,7 @@ mod tests {
                 &storage_root,
             ));
             config.links.push(ProjectStorageLink {
+                managed_cloud_repository_id: None,
                 local_project_id: local_project_id.clone(),
                 storage_id: storage_id.clone(),
                 bundle_id: project().bundle_id,
@@ -3797,6 +3798,7 @@ mod tests {
                 &temp.path().join("storage"),
             ));
             config.links.push(ProjectStorageLink {
+                managed_cloud_repository_id: None,
                 local_project_id: local_project_id.clone(),
                 storage_id: storage_id.clone(),
                 bundle_id: project().bundle_id,

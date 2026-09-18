@@ -7,14 +7,11 @@
 //! the registry and the [`CatalogProviderAdapter`] trait; it never branches
 //! on a provider key.
 //!
-//! Native contract evidence (verified against codex-cli 0.145.0 and Claude
-//! Code 2.1.220):
+//! Inventory uses provider-home files. Native mutation argv were verified
+//! against codex-cli 0.145.0 and Claude Code 2.1.220:
 //!
-//! - Codex inventory: `codex plugin marketplace list --json` returning
-//!   `{"marketplaces":[{name, marketplaceSource:{sourceType, source, ref?},
-//!   root?}]}` and `codex plugin list --json` returning
-//!   `{"installed":[{pluginId, marketplaceName, version, installed,
-//!   enabled}]}` under an explicit `CODEX_HOME`.
+//! - Codex inventory: bounded local config, install-marker, and manifest reads
+//!   under the selected `CODEX_HOME`. Inventory never launches a process.
 //! - Codex install/overwrite: `codex plugin marketplace add <SOURCE>` (a
 //!   Git URL or `owner/repo` shorthand), `codex plugin marketplace upgrade`
 //!   to refresh snapshots, then `codex plugin add PLUGIN@MARKETPLACE`. There
@@ -29,10 +26,9 @@
 //!   `claude plugin marketplace add <source> --scope user`. The `project`,
 //!   `local`, and `managed` scopes are never used.
 //!
-//! Anything outside this evidence fails through a typed
+//! Unsupported mutation contracts fail through a typed
 //! [`CatalogBlocker::NativeContractUnverified`] rather than guessed syntax.
 
-use serde::Deserialize;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -50,10 +46,10 @@ use super::plugin_intent::{
     PortablePluginSource,
 };
 use super::profiles::prospective_canonical;
+use super::provider_state::read_optional_json;
 use super::registry::CatalogRegistry;
 
 pub const MAX_CLI_BYTES: usize = 2 * 1024 * 1024;
-pub const MAX_PLUGIN_STATE_BYTES: u64 = 8 * 1024 * 1024;
 const PLUGIN_PROCESS_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Claude's synthetic marketplace for bare directories under
@@ -180,7 +176,7 @@ pub struct PluginObservation {
     pub namespace: String,
     pub plugin_id: String,
     pub installed: bool,
-    pub enabled: bool,
+    pub enabled: Option<bool>,
     pub observed_version: Option<String>,
     pub install_root: Option<PathBuf>,
 }
@@ -284,12 +280,8 @@ pub trait CatalogProviderAdapter: Send + Sync {
 
     fn launch_home_terminal(&self, home: &Path) -> Result<(), String>;
 
-    /// The native (provider-inventory) protocol: observe provider state.
-    fn discover_native(
-        &self,
-        home: &Path,
-        runner: &dyn PluginProcessRunner,
-    ) -> Result<ProviderInventory, CatalogBlocker>;
+    /// Read provider inventory from local files. This interface cannot run a CLI.
+    fn discover_local(&self, home: &Path) -> Result<ProviderInventory, CatalogBlocker>;
 
     /// Portable envelopes for every installed native resource in one
     /// inventory snapshot.
@@ -457,18 +449,6 @@ fn manual_install_blocker(provider_label: &str, plugin_id: &str) -> CatalogBlock
 
 pub struct CodexCatalogAdapter;
 
-#[derive(Deserialize, Default)]
-struct CodexMarketplaceListDocument {
-    #[serde(default)]
-    marketplaces: Vec<serde_json::Value>,
-}
-
-#[derive(Deserialize, Default)]
-struct CodexPluginListDocument {
-    #[serde(default)]
-    installed: Vec<serde_json::Value>,
-}
-
 impl CatalogProviderAdapter for CodexCatalogAdapter {
     fn descriptor(&self) -> CatalogProviderDescriptor {
         let key = codex::provider_key();
@@ -546,138 +526,9 @@ impl CatalogProviderAdapter for CodexCatalogAdapter {
         codex::actions::launch_codex_home_terminal(home)
     }
 
-    fn discover_native(
-        &self,
-        home: &Path,
-        runner: &dyn PluginProcessRunner,
-    ) -> Result<ProviderInventory, CatalogBlocker> {
-        let key = codex::provider_key();
-        let marketplace_argv = vec![
-            "plugin".to_string(),
-            "marketplace".to_string(),
-            "list".to_string(),
-            "--json".to_string(),
-        ];
-        let plugin_argv = vec![
-            "plugin".to_string(),
-            "list".to_string(),
-            "--json".to_string(),
-        ];
-        let marketplaces = runner
-            .run(&key, home, &marketplace_argv)
-            .map_err(|detail| CatalogBlocker::NativeContractUnverified {
-                provider: key.clone(),
-                operation: "plugin marketplace list".to_string(),
-                detail,
-            })?;
-        if !marketplaces.success {
-            return Err(CatalogBlocker::NativeContractUnverified {
-                provider: key,
-                operation: "plugin marketplace list".to_string(),
-                detail: redact(marketplaces.stderr.trim()),
-            });
-        }
-        let plugins = runner.run(&key, home, &plugin_argv).map_err(|detail| {
-            CatalogBlocker::NativeContractUnverified {
-                provider: key.clone(),
-                operation: "plugin list".to_string(),
-                detail,
-            }
-        })?;
-        if !plugins.success {
-            return Err(CatalogBlocker::NativeContractUnverified {
-                provider: key,
-                operation: "plugin list".to_string(),
-                detail: redact(plugins.stderr.trim()),
-            });
-        }
-        if marketplaces.stdout.len() > MAX_CLI_BYTES || plugins.stdout.len() > MAX_CLI_BYTES {
-            return Err(CatalogBlocker::InventoryFailed {
-                detail: "codex CLI output exceeds its size cap".to_string(),
-            });
-        }
-
-        let mut inventory = ProviderInventory::default();
-        let marketplace_document: CodexMarketplaceListDocument =
-            serde_json::from_str(&marketplaces.stdout).map_err(|error| {
-                CatalogBlocker::InventoryFailed {
-                    detail: format!("parse codex marketplace inventory: {}", error),
-                }
-            })?;
-        for entry in marketplace_document.marketplaces {
-            // Tolerant per-entry parsing: one odd marketplace must not hide
-            // the rest, but a skipped entry is reported.
-            let Some(name) = entry.get("name").and_then(|value| value.as_str()) else {
-                inventory
-                    .warnings
-                    .push("a Codex marketplace entry had no name and was skipped".to_string());
-                continue;
-            };
-            let source = entry.get("marketplaceSource");
-            inventory.marketplaces.push(MarketplaceObservation {
-                name: name.to_string(),
-                source_type: source
-                    .and_then(|value| value.get("sourceType"))
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                source: source
-                    .and_then(|value| value.get("source"))
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                git_ref: source
-                    .and_then(|value| value.get("ref"))
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-                root: entry
-                    .get("root")
-                    .and_then(|value| value.as_str())
-                    .map(PathBuf::from),
-            });
-        }
-        let plugin_document: CodexPluginListDocument = serde_json::from_str(&plugins.stdout)
-            .map_err(|error| CatalogBlocker::InventoryFailed {
-                detail: format!("parse codex plugin inventory: {}", error),
-            })?;
-        for entry in plugin_document.installed {
-            let (Some(plugin), Some(marketplace)) = (
-                entry.get("pluginId").and_then(|value| value.as_str()),
-                entry
-                    .get("marketplaceName")
-                    .and_then(|value| value.as_str()),
-            ) else {
-                inventory
-                    .warnings
-                    .push("a Codex plugin entry had no id and was skipped".to_string());
-                continue;
-            };
-            let installed = entry
-                .get("installed")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
-            if !installed {
-                // `--available` listings include uninstalled marketplace
-                // plugins; only user-installed entries are catalog resources.
-                continue;
-            }
-            inventory.plugins.push(PluginObservation {
-                provider: key.clone(),
-                namespace: marketplace.to_string(),
-                plugin_id: format!("{}@{}", plugin, marketplace),
-                installed,
-                enabled: entry
-                    .get("enabled")
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(true),
-                observed_version: entry
-                    .get("version")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-                install_root: None,
-            });
-        }
-        Ok(inventory)
+    fn discover_local(&self, home: &Path) -> Result<ProviderInventory, CatalogBlocker> {
+        super::codex_inventory::discover(home)
+            .map_err(|detail| CatalogBlocker::InventoryFailed { detail })
     }
 
     fn native_resources(&self, inventory: &ProviderInventory) -> Vec<CatalogResourceEnvelope> {
@@ -770,140 +621,6 @@ impl CatalogProviderAdapter for CodexCatalogAdapter {
 
 pub struct ClaudeCatalogAdapter;
 
-#[cfg(unix)]
-fn read_optional_state_file(home: &Path, components: &[&str]) -> Result<Option<Vec<u8>>, String> {
-    use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::fs::OpenOptionsExt;
-
-    if components.is_empty()
-        || components.iter().any(|component| {
-            component.is_empty()
-                || component.contains('/')
-                || *component == "."
-                || *component == ".."
-        })
-    {
-        return Err("invalid Claude state path".to_string());
-    }
-    let path = components
-        .iter()
-        .fold(home.to_path_buf(), |path, component| path.join(component));
-    let mut options = std::fs::OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    let mut directory = options
-        .open(home)
-        .map_err(|error| format!("open Claude home '{}': {}", home.display(), error))?;
-
-    for component in &components[..components.len() - 1] {
-        let component = CString::new(component.as_bytes())
-            .map_err(|_| "invalid Claude state path".to_string())?;
-        // SAFETY: `directory` owns a live directory fd and `component` is a
-        // NUL-terminated single path component.
-        let fd = unsafe {
-            libc::openat(
-                directory.as_raw_fd(),
-                component.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::NotFound {
-                return Ok(None);
-            }
-            return Err(format!(
-                "open Claude state parent '{}': {}",
-                path.display(),
-                error
-            ));
-        }
-        // SAFETY: a successful `openat` returns one new owned fd.
-        directory = unsafe { std::fs::File::from_raw_fd(fd) };
-    }
-
-    let leaf = CString::new(components.last().unwrap().as_bytes())
-        .map_err(|_| "invalid Claude state path".to_string())?;
-    // SAFETY: `directory` owns a live directory fd and `leaf` is a
-    // NUL-terminated single path component.
-    let fd = unsafe {
-        libc::openat(
-            directory.as_raw_fd(),
-            leaf.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-        )
-    };
-    if fd < 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::NotFound {
-            return Ok(None);
-        }
-        return Err(format!("open Claude state '{}': {}", path.display(), error));
-    }
-    // SAFETY: a successful `openat` returns one new owned fd.
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("inspect Claude state '{}': {}", path.display(), error))?;
-    if !metadata.is_file() {
-        return Err(format!("'{}' is not a regular file", path.display()));
-    }
-    if metadata.len() > MAX_PLUGIN_STATE_BYTES {
-        return Err(format!("'{}' exceeds its read limit", path.display()));
-    }
-    let mut bytes = Vec::new();
-    (&file)
-        .take(MAX_PLUGIN_STATE_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("read Claude state '{}': {}", path.display(), error))?;
-    let after = file
-        .metadata()
-        .map_err(|error| format!("inspect Claude state '{}': {}", path.display(), error))?;
-    if bytes.len() as u64 > MAX_PLUGIN_STATE_BYTES
-        || bytes.len() as u64 != metadata.len()
-        || after.len() != metadata.len()
-    {
-        return Err(format!("'{}' exceeds its read limit", path.display()));
-    }
-    Ok(Some(bytes))
-}
-
-#[cfg(not(unix))]
-fn read_optional_state_file(home: &Path, components: &[&str]) -> Result<Option<Vec<u8>>, String> {
-    let mut path = home.to_path_buf();
-    for (index, component) in components.iter().enumerate() {
-        path.push(component);
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(format!("inspect '{}': {}", path.display(), error)),
-        };
-        if metadata.file_type().is_symlink() || (index + 1 < components.len() && !metadata.is_dir())
-        {
-            return Err(format!("unsafe Claude state path '{}'", path.display()));
-        }
-    }
-    super::codec::read_file_no_follow(&path, "Claude state", MAX_PLUGIN_STATE_BYTES)
-        .map(|(bytes, _)| Some(bytes))
-}
-
-fn read_optional_json(
-    home: &Path,
-    components: &[&str],
-) -> Result<Option<serde_json::Value>, String> {
-    let Some(bytes) = read_optional_state_file(home, components)? else {
-        return Ok(None);
-    };
-    let path = components
-        .iter()
-        .fold(home.to_path_buf(), |path, component| path.join(component));
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|error| format!("parse '{}': {}", path.display(), error))
-}
-
 fn claude_source_location(source: &serde_json::Value) -> Option<String> {
     source
         .get("repo")
@@ -961,11 +678,7 @@ impl CatalogProviderAdapter for ClaudeCatalogAdapter {
         claude::actions::launch_claude_home_terminal(home)
     }
 
-    fn discover_native(
-        &self,
-        home: &Path,
-        _runner: &dyn PluginProcessRunner,
-    ) -> Result<ProviderInventory, CatalogBlocker> {
+    fn discover_local(&self, home: &Path) -> Result<ProviderInventory, CatalogBlocker> {
         let key = claude::provider_key();
         let into_blocker = |detail: String| CatalogBlocker::InventoryFailed { detail };
         let settings = read_optional_json(home, &["settings.json"])
@@ -1055,7 +768,7 @@ impl CatalogProviderAdapter for ClaudeCatalogAdapter {
                     namespace,
                     plugin_id: plugin_id.clone(),
                     installed: present,
-                    enabled,
+                    enabled: Some(enabled),
                     observed_version: version,
                     install_root,
                 });
@@ -1155,49 +868,8 @@ impl CatalogProviderAdapter for ClaudeCatalogAdapter {
 
 /// A stub runner for tests: canned outputs per argv.
 #[cfg(test)]
-pub struct StubRunner {
-    pub responses: std::collections::BTreeMap<String, CmdOutput>,
-}
-
-#[cfg(test)]
-impl StubRunner {
-    pub fn new(entries: Vec<(&str, CmdOutput)>) -> Self {
-        Self {
-            responses: entries
-                .into_iter()
-                .map(|(key, output)| (key.to_string(), output))
-                .collect(),
-        }
-    }
-}
-
-#[cfg(test)]
-impl PluginProcessRunner for StubRunner {
-    fn run(
-        &self,
-        _provider: &ProviderKey,
-        _home: &Path,
-        argv: &[String],
-    ) -> Result<CmdOutput, String> {
-        let key = argv.join(" ");
-        self.responses
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| format!("unexpected native invocation: {}", key))
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ok(stdout: &str) -> CmdOutput {
-        CmdOutput {
-            success: true,
-            stdout: stdout.to_string(),
-            stderr: String::new(),
-        }
-    }
 
     fn intent(provider: &str, git: Option<&str>) -> CatalogResourceEnvelope {
         PluginInstallIntent {
@@ -1225,24 +897,14 @@ mod tests {
     }
 
     #[test]
-    fn codex_inventory_parses_the_frozen_json_shapes() {
-        let runner = StubRunner::new(vec![
-            (
-                "plugin marketplace list --json",
-                ok(
-                    r#"{"marketplaces":[{"name":"acme","marketplaceSource":{"sourceType":"git","source":"https://example.com/acme/market"},"root":"/tmp/mp/acme"}]}"#,
-                ),
-            ),
-            (
-                "plugin list --json",
-                ok(
-                    r#"{"installed":[{"pluginId":"tools","marketplaceName":"acme","version":"1.2.0","installed":true,"enabled":true},{"pluginId":"ghost","marketplaceName":"acme","installed":false}]}"#,
-                ),
-            ),
-        ]);
-        let inventory = CodexCatalogAdapter
-            .discover_native(Path::new("/tmp/codex"), &runner)
-            .unwrap();
+    fn codex_inventory_reads_local_state_into_portable_intent() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        std::fs::write(home.join("config.toml"), "[plugins.\"tools@acme\"]\nenabled=true\n[marketplaces.acme]\nsource_type=\"git\"\nsource=\"https://example.com/acme/market\"\n").unwrap();
+        let manifest = home.join("plugins/cache/acme/tools/1.2.0/.codex-plugin/plugin.json");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(manifest, r#"{"name":"tools","version":"1.2.0"}"#).unwrap();
+        let inventory = CodexCatalogAdapter.discover_local(home).unwrap();
         assert_eq!(inventory.marketplaces.len(), 1);
         assert_eq!(inventory.plugins.len(), 1);
         let resources = CodexCatalogAdapter.native_resources(&inventory);
@@ -1266,7 +928,7 @@ mod tests {
             .is_some());
         assert_eq!(
             inventory.ownership_roots(),
-            vec![PathBuf::from("/tmp/mp/acme")]
+            vec![home.join("plugins/cache/acme/tools")]
         );
     }
 
@@ -1425,20 +1087,7 @@ mod tests {
         )
         .unwrap();
 
-        struct NeverRunner;
-        impl PluginProcessRunner for NeverRunner {
-            fn run(
-                &self,
-                _provider: &ProviderKey,
-                _home: &Path,
-                _argv: &[String],
-            ) -> Result<CmdOutput, String> {
-                panic!("claude inventory must not launch a process");
-            }
-        }
-        let inventory = ClaudeCatalogAdapter
-            .discover_native(home, &NeverRunner)
-            .unwrap();
+        let inventory = ClaudeCatalogAdapter.discover_local(home).unwrap();
         // Project-scoped entries are excluded before resource construction.
         let ids: Vec<&str> = inventory
             .plugins
@@ -1448,7 +1097,11 @@ mod tests {
         assert_eq!(ids, vec!["draft@skills-dir", "tools@acme"]);
         let tools = inventory.observation("tools@acme").unwrap();
         assert!(tools.installed);
-        assert!(!tools.enabled, "local disablement is observed, not changed");
+        assert_eq!(
+            tools.enabled,
+            Some(false),
+            "local disablement is observed, not changed"
+        );
 
         // skills-dir entries are never portable marketplace intent.
         let resources = ClaudeCatalogAdapter.native_resources(&inventory);
@@ -1466,7 +1119,7 @@ mod tests {
             namespace: "secrets".to_string(),
             plugin_id: "vault@secrets".to_string(),
             installed: true,
-            enabled: true,
+            enabled: Some(true),
             observed_version: None,
             install_root: None,
         };
@@ -1498,21 +1151,7 @@ mod tests {
         .unwrap();
         symlink(&outside, home.join("plugins")).unwrap();
 
-        struct NeverRunner;
-        impl PluginProcessRunner for NeverRunner {
-            fn run(
-                &self,
-                _provider: &ProviderKey,
-                _home: &Path,
-                _argv: &[String],
-            ) -> Result<CmdOutput, String> {
-                panic!("Claude inventory must not launch a process");
-            }
-        }
-
-        assert!(ClaudeCatalogAdapter
-            .discover_native(&home, &NeverRunner)
-            .is_err());
+        assert!(ClaudeCatalogAdapter.discover_local(&home).is_err());
     }
 
     #[test]

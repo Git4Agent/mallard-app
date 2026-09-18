@@ -3,6 +3,7 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import type { ActivityLogPolicy, ActivityLogStats, AppSettings, LocalStateSummary } from "../../types";
 import Icon from "../Icons";
+import SettingsSectionIcon from "./SettingsSectionIcon";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import { clockOptions } from "../../clock";
 import { formatBytes } from "../../format";
@@ -83,8 +84,8 @@ type SettingKey = LocalKey | TuningKey | PolicyKey;
 const SETTING_LABELS: Record<SettingKey, string> = {
   theme: "Theme",
   credential_redaction_enabled: "Credential redaction",
-  push_codex_children: "Push Codex children",
-  push_claude_children: "Push Claude children",
+  push_codex_children: "Push Codex subagents",
+  push_claude_children: "Push Claude subagents",
   openLogsOnSync: "Open Logs on Push and Pull",
   refreshOnFocus: "Refresh on window focus",
   conversation_file_limit_bytes: "Thread size limit",
@@ -581,7 +582,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
 
           <section className="sync-settings-group" aria-labelledby="settings-appearance">
             <h2 className="settings-section-title" id="settings-appearance">
-              <Icon name="sun" size={12} /> Appearance
+              <SettingsSectionIcon name="appearance" /> Appearance
             </h2>
             <div className="sync-settings-card">
               <SettingsRow
@@ -609,14 +610,14 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   </div>
                 )}
               >
-                System follows macOS. Light and dark share one warm palette.
+                System uses your macOS theme.
               </SettingsRow>
             </div>
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-privacy">
             <h2 className="settings-section-title" id="settings-privacy">
-              <Icon name="lock" size={12} /> Privacy
+              <SettingsSectionIcon name="privacy" /> Privacy
             </h2>
             <div className="sync-settings-card">
               <SettingsRow
@@ -635,10 +636,9 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   />
                 )}
               >
-                On replaces detected credentials in exported sessions and provider state.
-                Off can export API keys, tokens, and passwords. Applies to this machine.
-                Changing this re-uploads every synced session on your next Push. Copies already
-                pushed with redaction off stay readable in the storage’s history.
+                Hide detected credentials in exports from this machine. Off can expose secrets.
+                Changes re-upload all synced sessions on the next Push.
+                Earlier unredacted copies remain readable in storage history.
               </SettingsRow>
             </div>
             {tuningSection === "privacy" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
@@ -646,11 +646,11 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
 
           <section className="sync-settings-group" aria-labelledby="settings-sync">
             <h2 className="settings-section-title" id="settings-sync">
-              <Icon name="git-compare-arrows" size={12} /> Sync
+              <SettingsSectionIcon name="sync" /> Sync
             </h2>
             <div className="sync-settings-card">
               <SettingsRow
-                label="Push Codex children"
+                label="Push Codex subagents"
                 setting="push_codex_children"
                 receipt={receiptFor("push_codex_children")}
                 control={
@@ -661,15 +661,15 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                     checked={shownTuning?.push_codex_children ?? true}
                     disabled={tuningLoading || tuningBusy || !tuning}
                     onChange={(event) => void applyTuning({ push_codex_children: event.target.checked })}
-                    aria-label="Push Codex children"
+                    aria-label="Push Codex subagents"
                   />
                 }
               >
-                Include child conversations in Push. Pull restores the files stored in the cloud.
-                Changing this re-uploads every synced Codex session on your next Push.
+                Include subagent conversations in Push. Changes re-upload all synced Codex sessions
+                on the next Push. Pull uses the stored files.
               </SettingsRow>
               <SettingsRow
-                label="Push Claude children"
+                label="Push Claude subagents"
                 setting="push_claude_children"
                 receipt={receiptFor("push_claude_children")}
                 control={
@@ -680,12 +680,12 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                     checked={shownTuning?.push_claude_children ?? true}
                     disabled={tuningLoading || tuningBusy || !tuning}
                     onChange={(event) => void applyTuning({ push_claude_children: event.target.checked })}
-                    aria-label="Push Claude children"
+                    aria-label="Push Claude subagents"
                   />
                 }
               >
-                Include child conversations in Push. Pull restores the files stored in the cloud.
-                Changing this re-uploads every synced Claude session on your next Push.
+                Include subagent conversations in Push. Changes re-upload all synced Claude sessions
+                on the next Push. Pull uses the stored files.
               </SettingsRow>
               <SettingsRow
                 label="Open Logs on Push and Pull"
@@ -700,8 +700,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   />
                 )}
               >
-                Pop the Logs drawer whenever a transfer starts, so pushes and pulls
-                narrate themselves.
+                Open Logs when Push or Pull starts.
               </SettingsRow>
               <SettingsRow
                 label="Refresh on window focus"
@@ -716,8 +715,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   />
                 )}
               >
-                Coming back to Mallard after a few seconds away re-reads every project
-                and storage.
+                Refresh all projects and storage when you return after a few seconds away.
               </SettingsRow>
             </div>
             {tuningSection === "sync" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
@@ -725,7 +723,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
 
           <section className="sync-settings-group" aria-labelledby="settings-performance">
             <h2 className="settings-section-title" id="settings-performance">
-              <Icon name="tool" size={12} /> Performance
+              <SettingsSectionIcon name="performance" /> Performance
             </h2>
             <div className="sync-settings-card">
               <SettingsRow
@@ -752,8 +750,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   </div>
                 )}
               >
-                The biggest session transcript Mallard will read. Threads over the
-                cap are skipped by compare, Push, and Pull.
+                Skip transcripts above this limit in compare, Push, and Pull.
               </SettingsRow>
               <SettingsRow
                 label="Preview size limit"
@@ -783,9 +780,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   </div>
                 )}
               >
-                How much of one long message or tool call the session timeline
-                shows. Longer content is trimmed in the view only; transcripts are
-                never cut.
+                Limit message and tool call previews. Full transcripts stay unchanged.
               </SettingsRow>
               <SettingsRow
                 label="Comparison workers"
@@ -811,8 +806,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   </div>
                 )}
               >
-                Worker threads that scan and compare local sessions. Capped by this
-                machine's cores; the default suits most disks.
+                Parallel session comparisons, limited by CPU cores.
               </SettingsRow>
               <SettingsRow
                 label="Cloud transfers"
@@ -838,8 +832,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   </div>
                 )}
               >
-                Objects moved in parallel during Push and Pull. Lower it on slow or
-                metered connections.
+                Parallel Push and Pull transfers. Use fewer on slow or metered connections.
               </SettingsRow>
             </div>
             {tuningSection === "performance" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
@@ -847,7 +840,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
 
           <section className="sync-settings-group" aria-labelledby="settings-logs">
             <h2 className="settings-section-title" id="settings-logs">
-              <Icon name="activity" size={12} /> Logs
+              <SettingsSectionIcon name="logs" /> Logs
             </h2>
             <div className="sync-settings-card">
               <SettingsRow
@@ -870,7 +863,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   </div>
                 )}
               >
-                Events older than this are pruned automatically.
+                Automatically delete older events.
               </SettingsRow>
               <SettingsRow
                 label="Size cap"
@@ -896,7 +889,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   </div>
                 )}
               >
-                Oldest files go first when the log folder outgrows the cap.
+                Delete the oldest log files when this limit is exceeded.
               </SettingsRow>
               <SettingsRow
                 label="Log files"
@@ -934,8 +927,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   </>
                 )}
               >
-                Removes events older than the retention window. Sync state, backups,
-                and cloud data are never touched.
+                Delete expired log events. Keep sync state, backups, and cloud data.
               </SettingsRow>
             </div>
             <NoticeZone
@@ -947,7 +939,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
 
           <section className="sync-settings-group" aria-labelledby="settings-display">
             <h2 className="settings-section-title" id="settings-display">
-              <Icon name="clock" size={12} /> Display
+              <SettingsSectionIcon name="display" /> Display
             </h2>
             <div className="sync-settings-card">
               <SettingsRow
@@ -963,15 +955,14 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   />
                 )}
               >
-                One clock on every timestamp — session timelines, logs, and the
-                catalog. Off follows the system locale.
+                Use 24-hour time throughout Mallard. Off uses the system locale.
               </SettingsRow>
             </div>
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-local-data">
             <h2 className="settings-section-title" id="settings-local-data">
-              <Icon name="drive" size={12} /> Local data
+              <SettingsSectionIcon name="local-data" /> Local data
             </h2>
             <div className="sync-settings-card">
               <SettingsRow
@@ -999,10 +990,9 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   </>
                 )}
               >
-                Permanently deletes everything in <code>~/.mallard</code> — sync
-                metadata, activity logs, and the backups of files Pull replaced —
-                clears Mallard's saved preferences, then restarts as a fresh
-                install. Cloud versions and your project files are not touched.
+                Permanently delete <code>~/.mallard</code>, including sync metadata, logs,
+                and Pull backups. Clear preferences and restart. Keep cloud versions
+                and project files.
               </SettingsRow>
             </div>
             <NoticeZone

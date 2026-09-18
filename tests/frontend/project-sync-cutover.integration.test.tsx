@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import StartupLoadingScreen from "../../src/components/project-sync/StartupLoadingScreen";
@@ -8,6 +9,7 @@ import {
   repositoryFingerprintsRequireAcknowledgement,
 } from "../../src/components/project-sync/model";
 import { expandHomePath } from "../../src/profilePath";
+import { acceptPullMetadata, beginPullReview, canAcceptPullMetadata } from "../../src/components/project-sync/pullReviewFlow";
 import { PROJECT_SYNC_SCHEMA } from "../../src/types";
 import {
   profilePathHint,
@@ -506,8 +508,13 @@ test("path bar menus keep one home per scope", () => {
   assert.match(workspace, /label: `Unlink from \$\{projectLabel\(workspaceProject\)\}…`/);
   assert.match(workspace, /icon: "link-off" as const/);
   assert.match(workspace, /disabledReason: workspaceAvailableStorages\.length === 0/);
-  assert.match(workspace, /current === workspaceProject\.local_project_id\s*\? null\s*: workspaceProject\.local_project_id/);
-  assert.match(workspace, /className="storage-link-picker-heading"[\s\S]*aria-label="Cancel linking storage"[\s\S]*onClick=\{\(\) => setLinkingProjectId\(null\)\}/);
+  // Link storage… opens the chooser outright; the old toggle belonged to an
+  // in-card band that could be left open behind you.
+  assert.match(workspace, /onSelect: \(\) => setLinkingProjectId\(workspaceProject\.local_project_id\)/);
+  // The crumb's Link storage… opens the chooser dialog; the in-card band that
+  // used to answer it is gone, not aliased.
+  assert.match(workspace, /<StorageLinkDialog[\s\S]*onCancel=\{\(\) => setLinkingProjectId\(null\)\}/);
+  assert.doesNotMatch(workspace, /storage-link-picker/);
   assert.doesNotMatch(workspace, /checked: storage\.id === workspaceStorage\.id/);
   assert.doesNotMatch(workspace, /label: "Unlink storage"/);
 
@@ -753,4 +760,118 @@ test("the empty storage slot is named, not marked as a fault", () => {
   // its own answer. A badge on the safe choice is a fault marker with no
   // fault behind it.
   assert.match(band, /storageSection\?\.state === "blocked" \? sectionBadge\(storageSection\) : null/);
+});
+
+
+test("Connect includes metadata review in one click and preserves explicit file review", async () => {
+  const source = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const planStart = source.indexOf("  const planRestore = async (");
+  const planEnd = source.indexOf("\n  /** Finished-sync", planStart);
+  const connectStart = source.indexOf("  const connectStorageBundle = async (");
+  const connectEnd = source.indexOf("\n  const keepPendingBundle = async", connectStart);
+  assert.ok(planStart >= 0 && planEnd > planStart && connectStart >= 0 && connectEnd > connectStart);
+  const { transformSync } = createRequire(`${process.cwd()}/package.json`)("esbuild") as typeof import("esbuild");
+  const handler = transformSync(source.slice(planStart, planEnd) + source.slice(connectStart, connectEnd), { loader: "ts" }).code;
+
+  for (const scenario of ["matching", "adopt", "changes", "blocked", "stale", "read-failed", "host-changed", "no-binding"] as const) {
+    const project = { local_project_id: "project-fixture", bundle_id: "bundle-fixture" };
+    const binding = scenario === "no-binding" ? null : { ...project, state: "active" };
+    const plan = {
+      revision: 3,
+      actions: scenario === "changes" ? [{ kind: { kind: "write_file" } }] : [],
+      conversation_review: scenario === "adopt" ? [{ action: "adopt_cloud_metadata", action_id: "metadata-id" }]
+        : scenario === "blocked" ? [{ action: "blocked", blocker: "busy" }] : [],
+    };
+    const calls: string[] = [];
+    const errors: string[] = [];
+    const epoch = { current: 1 };
+    const restoreRequest = { current: 0 };
+    const config = { links: [] };
+    let busy = false;
+    let closed = false;
+    let shownPlan: unknown = null;
+    let notice: { projectId: string; storageId: string } | null = { projectId: project.local_project_id, storageId: "storage-fixture" };
+    const inFlight = { current: false };
+    const context = {
+      registrations: [project], connectionInFlight: inFlight, hostWorkflowEpoch: epoch, restoreRequest,
+      activityOpenRef: { current: false }, configRef: { current: config },
+      setActivityOpen: () => undefined,
+      setBusy: (value: boolean) => { busy = value; },
+      setError: (error: string | null) => { if (error) errors.push(error); },
+      setRestoreError: () => undefined, setFetchProgress: () => undefined, setPullApplyPhase: () => undefined,
+      setReviewSupportLoading: () => undefined, setRestoreBinding: () => undefined, setRestoreProjectName: () => undefined,
+      setRestorePlan: (value: unknown) => { shownPlan = value; },
+      setStorageNotice: (update: (current: typeof notice) => typeof notice) => { notice = update(notice); },
+      setPendingBundleConnection: (value: unknown) => { assert.equal(value, null); closed = true; calls.push("close"); },
+      setActiveProjectId: () => undefined, setActiveStorageByProject: () => undefined,
+      loadShell: async () => ({ nextConfig: config, hostIdentityReady: true }),
+      loadProjectData: async () => { calls.push("refresh"); },
+      setHistoryRefreshEpoch: (update: (current: number) => number) => {
+        assert.equal(update(5), 6);
+        calls.push("refresh-comparison");
+      },
+      projectLabel: () => "Fixture",
+      notify: () => { calls.push("notify"); },
+      errorMessage: (reason: unknown) => String(reason), storageFailureMessage: (_storage: string, reason: unknown) => String(reason),
+      beginPullReview, canAcceptPullMetadata, acceptPullMetadata,
+      projectSyncApi: {
+        connectProjectToRemoteBundle: async (request: unknown) => {
+          calls.push("connect");
+          assert.deepEqual(request, {
+            local_project_id: project.local_project_id, storage_id: "storage-fixture", bundle_id: project.bundle_id,
+            expected_bundle_id: project.bundle_id, pinned: true, allow_repository_mismatch: false,
+          });
+          return { project, binding };
+        },
+        planRestore: async () => {
+          calls.push("plan");
+          assert.equal(busy, true);
+          if (scenario === "read-failed") throw new Error("Storage unavailable");
+          return plan;
+        },
+        getRestoreReadiness: async () => ({ state: "ready", issues: [] }),
+        applyRestore: async (actual: unknown, ids: string[]) => {
+          assert.equal(busy, true);
+          calls.push("accept");
+          assert.equal(actual, plan, "use the exact checked plan");
+          assert.deepEqual(ids, scenario === "adopt" ? ["metadata-id"] : []);
+          if (scenario === "stale") throw new Error("Plan expired");
+          if (scenario === "host-changed") { epoch.current += 1; restoreRequest.current += 1; }
+          return { success: true, reviewed_base_advanced: true };
+        },
+      },
+    };
+    const run = new Function("context", `const { ${Object.keys(context).join(", ")} } = context; ${handler}; return connectStorageBundle("project-fixture", "storage-fixture", "bundle-fixture");`);
+    await run(context);
+    assert.equal(inFlight.current, false);
+    if (scenario !== "host-changed") assert.equal(busy, false);
+    if (scenario === "matching" || scenario === "adopt") {
+      assert.deepEqual(calls, ["connect", "refresh", "plan", "accept", "refresh", "refresh-comparison", "notify", "close"]);
+      assert.equal(closed, true);
+      assert.equal(shownPlan, null, "no second confirmation or Pull review");
+      assert.equal(notice, null, "clear the obsolete storage warning");
+      assert.deepEqual(errors, []);
+    } else if (scenario === "changes" || scenario === "blocked") {
+      assert.equal(calls.includes("accept"), false);
+      assert.equal(closed, true);
+      assert.equal(shownPlan, plan, "open the existing explicit review");
+      assert.deepEqual(errors, []);
+    } else if (scenario === "host-changed") {
+      assert.equal(closed, false);
+      assert.deepEqual(calls, ["connect", "refresh", "plan", "accept"]);
+    } else {
+      assert.equal(closed, false, "keep failures visible in the chooser");
+      assert.equal(errors.length, 1);
+      assert.ok(notice, "a failed operation must not hide the warning");
+    }
+  }
+});
+
+test("the connection flow has no separate Finish step or persisted schema change", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const dialog = readFileSync("src/components/project-sync/BundleConnectionDialog.tsx", "utf8");
+  assert.doesNotMatch(workspace + dialog, /ConnectionCheckBody|continueConnection|retryConnectionCheck|Finish connection|requireReview/);
+  assert.match(dialog, /"Connect"/);
+  assert.match(workspace, /await connectStorageBundle\(projectId, storageId, project\.bundle_id\)/, "same-bundle local storage links use the same connection flow");
+  assert.equal(PROJECT_SYNC_SCHEMA, 1);
 });

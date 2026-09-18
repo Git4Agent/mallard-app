@@ -199,6 +199,10 @@ pub enum DeleteOutcome {
 
 /// The narrow transport contract required by both storage protocols.
 pub trait ObjectStore: Send + Sync {
+    fn managed_cloud(&self) -> Option<&crate::managed_cloud::ManagedObjectStore> {
+        None
+    }
+
     fn get_metadata(
         &self,
         key: &ObjectKey,

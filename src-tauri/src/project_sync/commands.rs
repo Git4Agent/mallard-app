@@ -686,7 +686,7 @@ pub async fn refresh_project_activity(
             &mut |event| {
                 match &event {
                     ProjectActivityRefreshEvent::ActivityError { message }
-                    | ProjectActivityRefreshEvent::ComparisonError { message } => {
+                    | ProjectActivityRefreshEvent::ComparisonError { message, .. } => {
                         phase_log.emit(&phase_app, "warning", "history.refresh_warning", message)
                     }
                     _ => {}

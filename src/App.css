@@ -29,7 +29,7 @@ summary {
 
 /* Every checkbox and radio, not just the few that named it: unset, these fall
    through to the OS accent, which paints system blue — the only cool colour on
-   a sepia page. */
+   a honey page. */
 input[type="checkbox"],
 input[type="radio"] {
   accent-color: var(--accent);
@@ -590,7 +590,7 @@ summary:focus-visible {
   gap: 6px;
   border: var(--box-border);
   border-radius: var(--r-pill);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
   background: var(--bg-0);
   cursor: pointer;
   list-style: none;
@@ -679,7 +679,7 @@ summary:focus-visible {
   gap: 5px;
   border: var(--box-border);
   border-radius: var(--r-pill);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
   color: var(--text-3);
   background: var(--bg-0);
   font-family: var(--font);
@@ -1506,6 +1506,10 @@ summary:focus-visible {
   backdrop-filter: blur(8px);
 }
 .sync-binding-dialog { width: min(720px, 100vw - 72px); }
+/* A destination chooser asks one question off a short list, so it takes the
+   narrowest measure of the three sheets. */
+.sync-storage-link-dialog { width: min(520px, 100vw - 72px); }
+.sync-storage-link-dialog .sync-modal-body { padding: 14px 18px 18px; }
 .sync-modal-header {
   padding: 18px 20px 15px;
   display: flex;
@@ -2091,7 +2095,7 @@ summary:focus-visible {
 .sync-storage-card > header .danger { margin-left: auto; color: var(--danger-text); }
 /* A closed choice in the pill grammar: one ink-edged pill under the cast
    shadow, the chosen segment filled like an active row. */
-.sync-segmented { display: flex; padding: 2px; border: var(--box-border); border-radius: var(--r-pill); background: var(--button-bg); box-shadow: var(--shadow-card); }
+.sync-segmented { display: flex; padding: 2px; border: var(--box-border); border-radius: var(--r-pill); background: var(--button-bg); box-shadow: var(--shadow-control); }
 .sync-segmented button { height: 26px; padding: 0 10px; border: 0; color: var(--text-2); background: transparent; font: inherit; font-family: var(--font-display); font-size: var(--type-2xs); font-weight: var(--weight-medium); cursor: pointer; }
 .sync-storage-card > .sync-folder-field { margin: 12px 14px; }
 .sync-storage-card > header .sync-segmented { margin-left: auto; }
@@ -2483,7 +2487,7 @@ button.storage-found-group-head:hover { color: var(--text-1); background: var(--
   border: var(--box-border);
   border-radius: var(--r-pill);
   background: var(--button-bg);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
 }
 .storage-setup-agent-split > .btn {
   border: 0;
@@ -2920,20 +2924,6 @@ button.storage-found-group-head:hover { color: var(--text-1); background: var(--
   box-shadow: none;
 }
 
-.project-storage-card-footer {
-  padding: 10px 12px 12px;
-  border-top: 1px solid var(--border);
-  background: var(--surface-subtle);
-}
-
-/* On a settled project the card holds nothing but this footer, and its rule
-   would land 1px under the card frame as a doubled hairline. It parts the
-   footer from what precedes it, so with nothing above it there is nothing to
-   part. (ProjectLinksWorkspace drops the empty storage list so this matches.) */
-.project-storage-card-footer:first-child {
-  border-top: 0;
-}
-
 /* ---------------------------------------------------------------------------
    Workspace path bar
    ---------------------------------------------------------------------------
@@ -3233,7 +3223,7 @@ span.sync-path-crumb {
   border-radius: var(--r-pill);
   color: var(--text-2);
   background: var(--button-bg);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
   cursor: pointer;
 }
 
@@ -3244,7 +3234,7 @@ span.sync-path-crumb {
 
 .sync-path-more:active:not(:disabled) {
   box-shadow: none;
-  transform: translate(1px, 1px);
+  transform: translate(2px, 2px);
 }
 
 .sync-path-more:disabled {
@@ -3276,7 +3266,7 @@ span.sync-path-crumb {
   border-radius: var(--button-radius);
   color: var(--text-0);
   background: var(--button-bg);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
   font: inherit;
   font-weight: var(--weight-bold);
   cursor: pointer;
@@ -3289,7 +3279,7 @@ span.sync-path-crumb {
 
 .sync-path-sync:active:not(:disabled) {
   box-shadow: none;
-  transform: translate(1px, 1px);
+  transform: translate(2px, 2px);
 }
 
 .sync-path-sync:disabled {
@@ -3602,7 +3592,7 @@ span.sync-path-crumb {
   padding: 5px 9px;
   /* Transparent at the lifted current row's width, so the two line up. */
   border: 2px solid transparent;
-  border-radius: 10px;
+  border-radius: 12px;
   color: var(--text-1);
   background: transparent;
   font: inherit;
@@ -3673,9 +3663,9 @@ span.sync-path-crumb {
   margin-bottom: 4px;
   padding: 6px 9px;
   border: var(--box-border);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--surface-row-active);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
 }
 .sync-path-menu-current > svg {
   flex: 0 0 auto;
@@ -3700,7 +3690,7 @@ span.sync-path-crumb {
   border: var(--box-border);
   border-radius: var(--r-pill);
   background: var(--bg-1);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
   color: var(--text-0);
   font: inherit;
   font-size: var(--type-sm);
@@ -3755,7 +3745,7 @@ span.sync-path-crumb {
   border-radius: var(--r-pill);
   background: var(--button-bg);
   color: var(--text-1);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
   font: inherit;
   cursor: pointer;
 }
@@ -3777,7 +3767,7 @@ span.sync-path-crumb {
 .sync-path-menu-verb:active:not([aria-disabled="true"]),
 .sync-path-menu-tail:active:not([aria-disabled="true"]) {
   box-shadow: none;
-  transform: translate(1px, 1px);
+  transform: translate(2px, 2px);
 }
 .sync-path-menu-verb.danger {
   color: var(--danger-text);
@@ -4124,7 +4114,7 @@ span.sync-path-crumb {
 
 .landing-picker-card:active:not(:disabled) {
   box-shadow: none;
-  transform: translate(1px, 1px);
+  transform: translate(4px, 4px);
 }
 
 .landing-picker-card-title {
@@ -4134,9 +4124,21 @@ span.sync-path-crumb {
   gap: 9px;
 }
 
+/* The card's kind glyph stands on a tile in the box grammar: the shipped
+   icon at 20px, padded into a 44px box. A kind with a hue takes its tile
+   colour below; a storage's cloud or drive keeps the plain paper tile. */
 .landing-picker-card-title > svg {
   flex: 0 0 auto;
-  color: var(--text-2);
+  box-sizing: content-box;
+  width: 20px;
+  height: 20px;
+  padding: 10px;
+  margin-right: 4px;
+  border: var(--box-border);
+  border-radius: 12px;
+  background: var(--bg-3);
+  box-shadow: var(--shadow-control);
+  color: var(--text-0);
 }
 
 .landing-picker-card-title > strong {
@@ -4144,8 +4146,8 @@ span.sync-path-crumb {
   overflow: hidden;
   color: var(--text-0);
   font-family: var(--font-display);
-  font-size: var(--type-lg);
-  font-weight: var(--weight-bold);
+  font-size: var(--type-xl);
+  font-weight: var(--weight-heavy);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -4419,7 +4421,7 @@ span.sync-path-crumb {
   padding: 0;
   border: var(--box-border);
   border-radius: var(--r-pill);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
   background: transparent;
   color: var(--text-2);
   font: inherit;
@@ -4535,7 +4537,7 @@ span.sync-path-crumb {
 /* The commit bar closes the draft's column the way the project setup page's
    footer closes its own: the page's verb sits under the fields it commits,
    parted from them by the same hairline that separates the bands above. */
-/* The 2px right and bottom pad is the buttons' hard shadow (--shadow-card
+/* The 2px right and bottom pad is the buttons' hard shadow (--shadow-control
    offsets). Without it the shadow hangs outside the footer's box, and when a
    provider switch moves the footer up, WebKit repaints the old box but not
    the overhang: two stray shadow slivers stayed where R2's buttons had been. */
@@ -4807,6 +4809,52 @@ span.sync-path-crumb {
   white-space: nowrap;
 }
 
+/* A path identifies by its shape, so it keeps the mono face the rest of the
+   app gives paths; any other fact is prose and stays in the clean face. */
+.sync-storage-index-copy small.path {
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+}
+
+/* The rows of the link chooser, in one box: the row's own hairline then reads
+   as a divider between choices rather than an underline under each. */
+.sync-storage-link-list {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius-inner);
+  background: var(--surface-row);
+  box-shadow: var(--shadow-control);
+}
+
+.sync-storage-link-list > li {
+  display: block;
+}
+
+.sync-storage-link-list .sync-storage-index-row {
+  background: transparent;
+}
+
+.sync-storage-link-list .sync-storage-index-row:hover:not(:disabled) {
+  background: var(--surface-row-hover);
+}
+
+/* The provider glyph on paper: the box grammar at row scale, so a storage
+   wears the same tile here that it wears on its own card. */
+.sync-storage-link-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 2px solid var(--ink-line);
+  border-radius: 8px;
+  background: var(--bg-3);
+  color: var(--text-0);
+}
+
 /* Glyph and word, not glyph alone: a storage in trouble reads as such without
    the amber. Both children sit on one line with air between them. */
 .sync-storage-index-warning {
@@ -4824,57 +4872,6 @@ span.sync-path-crumb {
 @keyframes storage-link-reveal {
   from { opacity: 0; transform: translateY(-4px); }
   to { opacity: 1; transform: translateY(0); }
-}
-
-/* The picker is storage-card footer content. The card owns its frame. */
-.storage-link-picker-heading {
-  min-height: 30px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 7px;
-  color: var(--text-2);
-  font-size: var(--type-xs);
-}
-
-.storage-link-picker-heading .sync-history-icon-action {
-  margin-left: auto;
-}
-
-.storage-link-picker {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-  animation: storage-link-reveal 160ms ease-out both;
-}
-
-.storage-link-picker button {
-  min-height: 36px;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 12px;
-  border: var(--box-border);
-  border-radius: var(--button-radius);
-  background: var(--button-bg);
-  box-shadow: var(--shadow-card);
-  color: var(--text-0);
-  font: inherit;
-  font-size: var(--type-sm);
-  cursor: pointer;
-}
-
-.storage-link-picker button:hover {
-  background: var(--button-bg-hover);
-}
-
-.storage-link-picker button svg:last-child {
-  color: var(--text-2);
-}
-
-.storage-link-picker button:disabled {
-  opacity: 0.65;
-  cursor: default;
 }
 
 .profile-links-empty {
@@ -4906,7 +4903,10 @@ span.sync-path-crumb {
   color: var(--text-0);
 }
 
-.sync-settings-group > .settings-section-title > svg { color: var(--text-1); }
+.sync-settings-group > .settings-section-title > .settings-section-icon {
+  flex: 0 0 20px;
+  color: currentColor;
+}
 
 .sync-settings-card {
   border: var(--box-border);
@@ -4999,7 +4999,7 @@ span.sync-path-crumb {
   border: var(--box-border);
   border-radius: var(--button-radius);
   background: var(--button-bg);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
 }
 
 .sync-settings-segment > button {
@@ -6587,7 +6587,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   border: var(--box-border);
   border-radius: var(--button-radius);
   background: var(--button-bg);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
   color: var(--text-1);
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease;
@@ -6600,7 +6600,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-history-rail-step:active:not(:disabled) {
   background: var(--button-bg-active);
   box-shadow: none;
-  transform: translate(1px, 1px);
+  transform: translate(2px, 2px);
 }
 
 .sync-history-rail-step:focus-visible {
@@ -7288,6 +7288,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 /* Lineage numbers for support: kept out of the leading sentence and set a step
    down, so a screenshot still carries them without the banner leading on them. */
 .sync-sync-review-pull-detail {
+  display: block;
   margin-top: 2px;
   color: var(--text-3);
 }
@@ -7422,7 +7423,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   padding: 0 14px;
   border: var(--box-border);
   border-radius: var(--r-pill);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
   color: var(--text-0);
   background: var(--bg-1);
   outline: none;
@@ -7698,7 +7699,7 @@ button.catalog-row-action {
   padding: 2px 4px 2px 6px;
   border: var(--box-border);
   border-radius: var(--r-pill);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
   background: var(--button-bg);
   cursor: pointer;
 }
@@ -7925,21 +7926,21 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   margin: 0 auto;
   color: var(--text-0);
   /* Two signal hues do not survive as text on light paper: --yellow measures
-     2.45:1 and --blue 3.84:1, against the 4.5:1 a sentence needs. Mixing the
+     2.39:1 and --blue 3.74:1, against the 4.5:1 a sentence needs. Mixing the
      body colour in clears the bar without leaving the family, and on the dark
      palette — where both already passed — it only adds headroom. The rails and
      borders keep the pure hue, where 3:1 is the bar. The shares are set
      against the darkest paper the page prints these inks on — an expanded
-     tool row's --surface-row-active (#f0e3d5), where the 9px uppercase tool
-     name sits — not against the page: shares tuned to the page (60/85/85)
-     measured 4.18, 3.94 and 4.01 there. These hold 4.9, 4.8 and 4.6. */
+     tool row's --surface-row-active, where the 9px uppercase tool name
+     sits — not against the page, which would pass shares that fail there.
+     These hold 4.6, 4.7 and 4.6, and css-hygiene measures them. */
   --session-detail-amber: color-mix(in srgb, var(--yellow) 52%, var(--text-0));
   --session-detail-link: color-mix(in srgb, var(--blue) 72%, var(--text-0));
   --session-detail-you: color-mix(in srgb, var(--red) 75%, var(--text-0));
   /* The agent ink is the tool column's `other` purple — a delegation is the
      one call that is not a file, a shell, or a read — and its edge is the
      step note's. A live run prints in green mixed the same way, for the same
-     reason: --green alone measures 3.6:1 on the row paper. */
+     reason: --green alone measures 3.8:1 on the row paper. */
   --session-detail-agent: color-mix(in srgb, var(--purple) 85%, var(--text-0));
   --session-detail-agent-edge: color-mix(in srgb, var(--purple) 60%, var(--accent));
   --session-detail-live: color-mix(in srgb, var(--green) 58%, var(--text-0));
@@ -9208,15 +9209,33 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --leading-prose: 1.5;
 
   /* The boundary of anything the user operates — inputs, selects, drawn
-     checkboxes — must clear 3:1 (WCAG 1.4.11). Only --border-strong does;
-     --border and --border-mid stay for dividers, where quietness is the
-     point. Resolves per-theme through --border-strong. */
-  --control-border: var(--border-strong);
+     checkboxes — must clear 3:1 (WCAG 1.4.11). It takes the theme's ink
+     line, which does with room; --border and --border-mid stay for
+     dividers, where quietness is the point. */
+  --control-border: var(--ink-line);
 
   /* Boxes — tiles, cards, buttons, popovers — draw their edge in the theme's
-     own ink: the chunky 2px line is the box grammar itself, not a divider.
-     Dividers inside a box keep the quiet --border family. */
-  --box-border: 2px solid var(--accent);
+     ink line and cast a hard offset shadow in its shadow ink: the chunky 2px
+     line and the cut shadow are the box grammar itself, not a divider. A
+     tile or popover casts 4px and a modal 6px; a control casts 2px, and
+     pressing one sinks it into its shadow. Dividers inside a box keep the
+     quiet --border family. */
+  --box-border: 2px solid var(--ink-line);
+  --shadow-card: 4px 4px 0 var(--ink-shadow);
+  --shadow-popover: 4px 4px 0 var(--ink-shadow);
+  --shadow-overlay: 6px 6px 0 var(--ink-shadow);
+  --shadow-control: 2px 2px 0 var(--ink-shadow);
+
+  /* A kind wears its own hue: the glyph a project, skill, plugin, or pet
+     already has stands on a tile tinted with it — blue Git project, green
+     project, yellow skill, purple plugin, red pet, as on the website. The
+     fill is the hue washed into the row it sits on; the glyph's ink is set
+     per theme. */
+  --tile-blue: color-mix(in srgb, var(--blue) 28%, var(--surface-row));
+  --tile-green: color-mix(in srgb, var(--green) 28%, var(--surface-row));
+  --tile-yellow: color-mix(in srgb, var(--yellow) 32%, var(--surface-row));
+  --tile-red: color-mix(in srgb, var(--red) 26%, var(--surface-row));
+  --tile-purple: color-mix(in srgb, var(--purple) 28%, var(--surface-row));
 
   /* Theme-invariant tokens. This file is the palette's single source of truth. */
   --button-disabled-opacity: 0.38;
@@ -9245,84 +9264,79 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --thread-status-unavailable: var(--text-2);
 }
 
-/* Both palettes ride one warm axis. Light is cream paper over sepia browns;
-   dark is the same paper at night: every neutral keeps the sepia cast, text
-   and accent go lamplight cream, and the shadow ink is plain black, never
-   blue. Signal hues match the light set. The dark set follows the Material
+/* Honey & Espresso, the Mallard Cloud website's palette. Light is cream paper
+   printed in espresso ink with a honey highlight; dark is espresso paper
+   with cream ink and the same honey. Signal hues are shared with the website
+   and tuned per theme to the bars below. The dark set follows the Material
    dark-theme rules: no true black anywhere (the gutter is the darkest thing
    and it is warm), elevation is expressed as lighter surfaces — card, row,
    hover, active each a step up — rather than by shadow alone, text sits at
    high/medium emphasis rather than raw white, and the signal hues are
    desaturated a notch so they do not vibrate on the dark ground. Bars held:
-   text ≥4.5:1, non-text ≥3:1 (WCAG 2.2), primary text ≥15.8:1 on the darkest
-   surface (Material), and every signal ink ≥4.5:1 on the active row. */
+   text ≥4.5:1, non-text ≥3:1 (WCAG 2.2), and every signal ink ≥4.5:1 on the
+   active row. css-hygiene measures all of them. */
 :root,
 :root[data-theme="dark"] {
   --color-scheme: dark;
-  --bg-0: #15120f;
-  --bg-1: #191512;
-  --bg-2: #1e1a16;
-  --bg-3: #2c2722;
-  --bg-4: #171310;
-  --bg-hover: rgba(255, 238, 217, 0.065);
-  --bg-active: rgba(255, 238, 217, 0.11);
-  --border: #34302a;
-  --border-mid: #4a433b;
-  /* 4.5:1 on the paper, so a control's edge clears the 3:1 floor with room. */
-  --border-strong: #867b6f;
-  --button-bg: #1d1915;
-  --button-bg-hover: #2b2521;
-  --button-bg-active: #39322c;
-  --button-border: #7a6f63;
-  /* A caramel fill off the palette's own sepia axis — the light theme's brown
-     lifted to sit on dark paper, so the two themes stay mirror images at
-     6.2:1 of background separation from a plain button. That is what keeps
-     "Push" from being mistaken for the "Cancel" beside it; a quiet
-     border-only treatment measured 1.38:1, at the threshold of visibility.
-     Hover moves AWAY from the paper in both themes — the fill sits close
-     enough to its label's contrast floor that moving toward the paper would
-     take the label under 4.5:1. Not var(--primary): that ink still marks the
-     checked checkbox and the text selection, which stay at full contrast. */
-  --button-primary-bg: #bf9169;
-  --button-primary-hover: #cfa27a;
-  --button-primary-border: #bf9169;
+  --bg-0: #211c14;
+  --bg-1: #2d261b;
+  --bg-2: #332b1e;
+  --bg-3: #403522;
+  --bg-4: #282218;
+  --bg-hover: rgba(251, 243, 221, 0.065);
+  --bg-active: #4b3c20;
+  --border: #8b7b59;
+  --border-mid: #998765;
+  /* 5.9:1 on the paper, so a control's edge clears the 3:1 floor with room. */
+  --border-strong: #a99670;
+  --button-bg: #2d261b;
+  --button-bg-hover: #3c3221;
+  --button-bg-active: #4b3c20;
+  --button-border: #a99670;
+  /* The honey fill is the same in both themes and always carries espresso
+     ink (7.9:1). Hover lifts toward the ink's opposite so the label only
+     gains contrast. Not var(--primary): that ink still marks the checked
+     checkbox and the text selection, which stay at full contrast. */
+  --button-primary-bg: #e9b949;
+  --button-primary-hover: #f2c866;
+  --button-primary-border: #a99670;
   /* Keep button ink separate because --primary-text is also used as a
      background. */
-  --button-primary-text: #1b1612;
+  --button-primary-text: #33271b;
   --button-radius: 999px;
-  --app-shell: #0c0a08;
-  --surface-card: #1d1915;
-  --surface-row: #1a1613;
-  --surface-row-hover: #251f1b;
-  --surface-row-active: #2d2622;
-  --surface-popover: #26211c;
-  --surface-footer: #19150f;
-  --surface-subtle: rgba(255, 238, 217, 0.035);
-  --surface-subtle-hover: rgba(255, 238, 217, 0.06);
-  --surface-overlay: rgba(23, 20, 18, 0.97);
+  --app-shell: #211c14;
+  --surface-card: #2d261b;
+  --surface-row: #2d261b;
+  --surface-row-hover: #372e20;
+  --surface-row-active: #4b3c20;
+  --surface-popover: #332b1e;
+  --surface-footer: #282218;
+  --surface-subtle: rgba(251, 243, 221, 0.035);
+  --surface-subtle-hover: rgba(251, 243, 221, 0.06);
+  --surface-overlay: rgba(33, 28, 20, 0.97);
   --surface-muted: rgba(0, 0, 0, 0.24);
   --surface-raised: var(--surface-card);
-  --chip-bg: rgba(255, 238, 217, 0.08);
-  --chip-strong-bg: rgba(255, 238, 217, 0.13);
-  --loader-track: rgba(255, 238, 217, 0.2);
+  --chip-bg: rgba(251, 243, 221, 0.08);
+  --chip-strong-bg: rgba(251, 243, 221, 0.13);
+  --loader-track: rgba(251, 243, 221, 0.2);
   --danger-soft: rgba(244, 145, 127, 0.12);
   --warning-soft: rgba(242, 195, 105, 0.12);
   --info-soft: rgba(140, 207, 243, 0.12);
   --success-soft: rgba(126, 212, 154, 0.12);
-  --accent-soft: rgba(240, 232, 213, 0.1);
-  --accent-contrast: #15120f;
-  --switch-off: #5c534a;
-  --switch-thumb: #f6f2df;
-  --editor-active-line: rgba(255, 238, 217, 0.055);
+  --accent-soft: rgba(233, 185, 73, 0.14);
+  --accent-contrast: #211c14;
+  --switch-off: #6b5c40;
+  --switch-thumb: #fbf3dd;
+  --editor-active-line: rgba(251, 243, 221, 0.055);
   /* High, medium, and low emphasis of the same cream — never raw white. */
-  --text-0: #f3ede1;
-  --text-1: #d3cbbc;
-  --text-2: #a79e90;
+  --text-0: #fbf3dd;
+  --text-1: #e3d6b9;
+  --text-2: #c8b998;
   --text-3: var(--text-2);
-  --accent: #f0e8d5;
-  --accent-glow: rgba(240, 232, 213, 0.15);
-  --primary: #f0e8d5;
-  --primary-text: #1b1612;
+  --accent: #fbf3dd;
+  --accent-glow: rgba(233, 185, 73, 0.18);
+  --primary: #fbf3dd;
+  --primary-text: #211c14;
   /* Desaturated a notch from the light set's hues (Material's 200-tone
      rule): a saturated signal on dark paper vibrates, and these still clear
      4.5:1 as prose on every surface down to the active row. */
@@ -9341,20 +9355,27 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --warning-text: var(--yellow);
   --info-text: var(--blue);
   /* The two status badges with no token of their own. `synced` is a cooler,
-     more saturated green than --green so the two stay apart for a protanope,
-     lifted to 7.0:1 on a hovered row; `local` is VS Code's shipped
-     gitDecoration.modified dark value, lifted a step for the same reason. */
+     more saturated green than --green so the two stay apart for a protanope;
+     `local` is VS Code's shipped gitDecoration.modified dark value, lifted a
+     step for the same reason. */
   --thread-status-synced: #4dbf7e;
   --thread-status-local: #e6c896;
-  --focus-ring: var(--accent);
+  --focus-ring: #e9b949;
+  /* On espresso paper the ink line is the light edge and the cast shadow the
+     dark one. The line is the tan control edge (5.9:1 on the paper) rather
+     than the cream text, so an outline stays quieter than the words inside
+     it; the shadow is a warm near-black a step below the gutter. */
+  --ink-line: var(--border-strong);
+  --ink-shadow: #0f0c08;
+  /* A tile's glyph is the cream ink on every hue, 6.1:1 or more. */
+  --tile-blue-ink: var(--text-0);
+  --tile-green-ink: var(--text-0);
+  --tile-yellow-ink: var(--text-0);
+  --tile-red-ink: var(--text-0);
+  --tile-purple-ink: var(--text-0);
   --r: 6px;
   --r-sm: 4px;
   --r-pill: 999px;
-  /* Plain black at half strength: on a warm ground a tinted shadow reads as
-     a smear, and the cast edge is what separates tiles from the gutter. */
-  --shadow-card: 2px 2px 0 rgba(0, 0, 0, 0.5);
-  --shadow-overlay: 3px 3px 0 rgba(0, 0, 0, 0.5);
-  --shadow-popover: 3px 3px 0 rgba(0, 0, 0, 0.5);
   /* Shell frame: every region is a rounded tile floating on a gutter, so
      horizontal and vertical separators meet in rounded corners instead of
      square T-joints. The gutter is what lets each tile's 2px ink edge and
@@ -9362,106 +9383,98 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
      take a wider seam than stacked tiles, which sit closer. */
   --retro-gutter: 8px;
   --retro-gutter-x: 8px;
-  --retro-panel-radius: 14px;
-  --retro-panel-radius-inner: 13px;
+  --retro-panel-radius: 18px;
+  --retro-panel-radius-inner: 14px;
   /* The chevron-down glyph from Icons.tsx, as a mask so it paints in
      currentColor. Lets a control that cannot hold an <svg> child — a native
      select — still draw the same arrow every other control in the app uses. */
   --retro-chevron-down: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M13%2016h-2v-2h2v2Zm-2-2H9v-2h2v2Zm4%200h-2v-2h2v2Zm-6-2H7v-2h2v2Zm8%200h-2v-2h2v2ZM7%2010H5V8h2v2Zm12%200h-2V8h2v2Z%22%2F%3E%3C%2Fsvg%3E");
   /* The darkest surface, and still warm: Material's rule against true
      black keeps the tiles' shadows readable on it. */
-  --retro-frame-gutter: #0c0a08;
-  --retro-grid: rgba(255, 238, 217, 0.02);
+  --retro-frame-gutter: #211c14;
+  --retro-grid: rgba(251, 243, 221, 0.02);
 }
 
 :root[data-theme="light"] {
   --color-scheme: light;
-  --bg-0: #fefbf6;
-  --bg-1: #fdf9f4;
-  --bg-2: #faf3eb;
-  --bg-3: #f2e8dd;
-  --bg-4: #fffdf9;
-  --bg-hover: rgba(82, 58, 43, 0.045);
-  --bg-active: #f0e3d5;
-  --border: #d8cec4;
-  --border-mid: #aa998d;
-  --border-strong: #66574f;
-  --button-bg: #fdf8f1;
-  --button-bg-hover: #f5eadf;
-  --button-bg-active: #eee0d3;
-  --button-border: #9d8b7f;
-  /* Same construction as the dark theme: a caramel fill off the palette's own
-     sepia axis, carrying 5.0:1 of background separation from a plain button.
-     This is as light as the fill can go while the cream label holds 4.5:1
-     (5.11:1 here); anything
-     lighter has to flip the label to dark ink. Hover therefore DARKENS rather
-     than lifting — lifting would spend the last of that margin. Not
-     var(--primary): that ink still marks the checked checkbox and the text
-     selection, which stay at full contrast. */
-  --button-primary-bg: #8a6347;
-  --button-primary-hover: #7d5940;
-  --button-primary-border: #8a6347;
-  --button-primary-text: #fffaf4;
-  --app-shell: #f6eee5;
-  --surface-card: #fcf7f0;
-  --surface-row: #fdf9f3;
-  --surface-row-hover: #faf2e9;
-  --surface-row-active: #f0e3d5;
-  --surface-popover: #fffaf4;
-  --surface-footer: #faf3eb;
-  --surface-subtle: rgba(82, 58, 43, 0.025);
-  --surface-subtle-hover: rgba(82, 58, 43, 0.055);
-  --surface-overlay: rgba(254, 251, 246, 0.97);
-  --surface-muted: rgba(82, 58, 43, 0.045);
+  --bg-0: #fff8e8;
+  --bg-1: #fffdf7;
+  --bg-2: #faf1dc;
+  --bg-3: #f2e4c3;
+  --bg-4: #fffdf7;
+  --bg-hover: rgba(51, 39, 27, 0.045);
+  /* The selected row is honey paper. It stays this pale because every
+     signal ink and the session-detail mixes are printed on it at 4.5:1; the
+     selection is carried by the row's ink edge, not by the fill alone. */
+  --bg-active: #f8e9bf;
+  --border: #decfaf;
+  --border-mid: #b6a17a;
+  --border-strong: #9a825f;
+  --button-bg: #fffdf7;
+  --button-bg-hover: #f8edcf;
+  --button-bg-active: #f2e0b4;
+  --button-border: #33271b;
+  /* Same honey fill and espresso ink as the dark theme. On cream the fill
+     sits close to the paper in lightness, so the button's espresso edge is
+     what separates "Push" from the "Cancel" beside it; hover darkens the
+     honey, which the label (6.6:1) can afford. */
+  --button-primary-bg: #e9b949;
+  --button-primary-hover: #dba735;
+  --button-primary-border: #33271b;
+  --button-primary-text: #33271b;
+  --app-shell: #fff8e8;
+  --surface-card: #fffdf7;
+  --surface-row: #fffdf7;
+  --surface-row-hover: #fcf4e2;
+  --surface-row-active: #f8e9bf;
+  --surface-popover: #fffdf7;
+  --surface-footer: #faf1dc;
+  --surface-subtle: rgba(51, 39, 27, 0.025);
+  --surface-subtle-hover: rgba(51, 39, 27, 0.055);
+  --surface-overlay: rgba(255, 248, 232, 0.97);
+  --surface-muted: rgba(51, 39, 27, 0.045);
   --surface-raised: var(--surface-card);
-  --chip-bg: rgba(82, 58, 43, 0.065);
-  --chip-strong-bg: rgba(82, 58, 43, 0.12);
-  --loader-track: rgba(82, 58, 43, 0.18);
+  --chip-bg: rgba(51, 39, 27, 0.065);
+  --chip-strong-bg: rgba(51, 39, 27, 0.12);
+  --loader-track: rgba(51, 39, 27, 0.18);
   --danger-soft: rgba(205, 69, 49, 0.09);
   --warning-soft: rgba(192, 124, 12, 0.1);
   --info-soft: rgba(47, 136, 180, 0.09);
   --success-soft: rgba(75, 150, 97, 0.09);
-  --accent-soft: rgba(82, 58, 43, 0.075);
-  --accent-contrast: #fffaf4;
+  --accent-soft: rgba(233, 185, 73, 0.16);
+  --accent-contrast: #fffdf7;
   /* The track is the ground the thumb is read against, and thumb position IS
      the off/on state, so the track carries the 3:1 non-text floor rather than
-     the quiet role its name suggests: #ad9e92 held the thumb at 2.50:1. This
-     holds it at 3.85 and still reads as plainly unfilled beside the checked
-     track's --accent, 3.94:1 away. Dark needs no such move at 6.69:1. */
-  --switch-off: #8d7c70;
-  --switch-thumb: #fffaf4;
-  --editor-active-line: rgba(82, 58, 43, 0.045);
-  --text-0: #1e1817;
-  --text-1: #3d332e;
-  --text-2: #6f6159;
+     the quiet role its name suggests: it holds the thumb at 3.6:1. */
+  --switch-off: #9a825f;
+  --switch-thumb: #fffdf7;
+  --editor-active-line: rgba(51, 39, 27, 0.045);
+  --text-0: #33271b;
+  --text-1: #4c3d2c;
+  /* The quietest copy still clears 4.5:1 on the pressed button, the
+     darkest paper it lands on. */
+  --text-2: #725f48;
   --text-3: var(--text-2);
-  --accent: #2a211d;
-  --accent-glow: rgba(82, 58, 43, 0.12);
-  --primary: #2a211d;
-  --primary-text: #fffaf4;
-  /* A step down from #4b9661, which cleared the page at 3.5:1 but measured
-     2.85 on the active row — under the 3:1 a success glyph needs, and the
-     outcome notice and pull rows both print one there. */
+  --accent: #33271b;
+  --accent-glow: rgba(233, 185, 73, 0.2);
+  --primary: #33271b;
+  --primary-text: #fffdf7;
   --green: #48905d;
   --red: #d8523e;
-  /* This palette's red reads 3.9:1 against the paper — enough for a glyph,
-     short of the 4.5:1 an error sentence needs. The ink below is two steps
-     darker and indistinguishable at a glance: one step (#be3824) cleared the
-     page, the hovered row and its own notice fill, and measured 4.4:1 on the
-     active row — the darkest paper an error sentence or a conflict badge is
-     printed on. This one holds 4.8:1 there. The dark palette's red already
-     clears the bar, so only this block overrides the default. */
+  /* The raw red reads 3.3:1 on the active row — enough for a glyph, short
+     of the 4.5:1 an error sentence needs. The ink below holds 5.0:1 there.
+     The dark palette's red already clears the bar, so only this block
+     overrides the default. */
   --danger-text: #b53420;
   --yellow: #d99609;
   --amber: var(--yellow);
   --blue: #2f88b4;
   /* The divergent badge prints this bare on the row it marks, so it is held
-     to the same floor: 5.0:1 on the active row, where #765ba7 sat at 4.35. */
+     to the same floor: 5.2:1 on the active row. */
   --purple: #6d529d;
-  /* Same treatment for the other three signal hues: the raw inks measure
-     3.6:1 (green), 2.4:1 (amber), and 3.8:1 (blue) against this paper — short
-     of the 4.5:1 a sentence needs, so each keeps a prose variant that holds
-     ≥4.5:1 on every paper surface down to --surface-row-active (#f0e3d5).
+  /* Same treatment for the other three signal hues: the raw inks are short
+     of the 4.5:1 a sentence needs on cream, so each keeps a prose variant
+     that holds ≥4.5:1 on every paper surface down to --surface-row-active.
      The 3:1 non-text floor is a separate bar, and it is not true that a raw
      ink always clears it: amber clears it on no surface this app paints, so
      nothing prints a bare var(--yellow) glyph — the warning mark uses
@@ -9470,23 +9483,28 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --success-text: #397149;
   --warning-text: #885e06;
   --info-text: #256c90;
-  /* Light counterparts. The dark green cannot follow it here: #31ae6b measures
-     2.56:1 on this paper, which on a 1px badge rim is not a dim icon but an
-     absent one. It keeps its hue (148°) and spends saturation instead of
-     lightness — on cream "bright" has to mean saturated, because lightness is
-     exactly what contrast is paying for. VS Code's shipped
+  /* Light counterparts. The dark green cannot follow it here: #31ae6b is
+     too light on this paper, which on a 1px badge rim is not a dim icon but
+     an absent one. It keeps its hue (148°) and spends saturation instead of
+     lightness — on cream "bright" has to mean saturated, because lightness
+     is exactly what contrast is paying for. VS Code's shipped
      gitDecoration.modified light value below, unaltered. */
   --thread-status-synced: #006b32;
   --thread-status-local: #895503;
-  --focus-ring: var(--accent);
-  /* The offset shadow is drawn in a solid warm grey-brown, not a translucent
-     wash: a hard cast edge is part of the box grammar, and on cream paper a
-     7% tint read as a smudge rather than a piece of cut shadow. */
-  --shadow-card: 2px 2px 0 #6f6057;
-  --shadow-overlay: 3px 3px 0 #6f6057;
-  --shadow-popover: 3px 3px 0 #6f6057;
-  --retro-frame-gutter: #dfd1c4;
-  --retro-grid: rgba(82, 58, 43, 0.012);
+  --focus-ring: #805b15;
+  /* Cream paper is printed in espresso: the ink line and the cast shadow
+     are both the text ink, a hard cut rather than a translucent wash. */
+  --ink-line: var(--text-0);
+  --ink-shadow: var(--text-0);
+  /* On cream a tile's glyph is a deep shade of its own hue, 3.5:1 or more
+     on the fill. */
+  --tile-blue-ink: color-mix(in srgb, var(--blue) 70%, var(--text-0));
+  --tile-green-ink: color-mix(in srgb, var(--green) 70%, var(--text-0));
+  --tile-yellow-ink: color-mix(in srgb, var(--yellow) 60%, var(--text-0));
+  --tile-red-ink: color-mix(in srgb, var(--red) 70%, var(--text-0));
+  --tile-purple-ink: color-mix(in srgb, var(--purple) 70%, var(--text-0));
+  --retro-frame-gutter: #f4e7c8;
+  --retro-grid: rgba(51, 39, 27, 0.012);
 }
 
 /* Pixel type only stays square if glyphs land on whole pixels: fractional
@@ -9784,7 +9802,7 @@ summary {
 .btn {
   border-radius: var(--button-radius);
   background: var(--button-bg);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
   font-size: var(--type-sm);
   font-weight: var(--weight-bold);
   line-height: var(--leading-flat);
@@ -9802,7 +9820,7 @@ summary {
 /* Pressing sinks the button into its own shadow. */
 .btn:active:not(:disabled) {
   box-shadow: none;
-  transform: translate(1px, 1px);
+  transform: translate(2px, 2px);
 }
 
 .btn.btn-ghost {
@@ -10010,7 +10028,7 @@ summary {
 .sidebar-root-tab {
   height: 40px;
   border: 2px solid transparent;
-  border-radius: 11px;
+  border-radius: 12px;
   color: var(--text-2);
 }
 
@@ -10029,7 +10047,7 @@ summary {
 .sidebar-root-tab.active {
   border-color: var(--accent);
   background: var(--surface-row-active);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
   color: var(--text-0);
 }
 
@@ -10086,13 +10104,13 @@ summary {
   border: 1px solid var(--accent);
   border-radius: 8px;
   background: var(--button-bg);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
 }
 
 .sidebar-section-action:active:not(:disabled),
 .sidebar-add-action:active:not(:disabled) {
   box-shadow: none;
-  transform: translate(1px, 1px);
+  transform: translate(2px, 2px);
 }
 
 .sidebar-rail-list {
@@ -10106,7 +10124,7 @@ summary {
   /* Transparent at the box grammar's own width, so the active ink edge swaps
      in without a layout jump. */
   border: 2px solid transparent;
-  border-radius: 10px;
+  border-radius: 12px;
 }
 
 .sidebar-profile-item:hover {
@@ -10117,7 +10135,7 @@ summary {
 .sidebar-profile-item.active {
   border-color: var(--accent);
   background: var(--surface-row-active);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
 }
 
 .sidebar-profile-main {
@@ -10138,6 +10156,44 @@ summary {
 .sidebar-profile-main > svg {
   width: 19px;
   height: 19px;
+}
+
+/* The row's kind glyph on a small tile, the landing card's in miniature. */
+.sidebar-profile-main > svg:first-child {
+  box-sizing: content-box;
+  width: 14px;
+  height: 14px;
+  padding: 3px;
+  border: var(--box-border);
+  border-radius: 7px;
+  background: var(--bg-3);
+  color: var(--text-0);
+}
+
+/* The kinds with a hue, on the landing cards and the rail alike. */
+:is(.landing-picker-card-title, .sidebar-profile-main) > svg:first-child[data-icon="folder"] {
+  background: var(--tile-green);
+  color: var(--tile-green-ink);
+}
+
+:is(.landing-picker-card-title, .sidebar-profile-main) > svg:first-child[data-icon="git-folder"] {
+  background: var(--tile-blue);
+  color: var(--tile-blue-ink);
+}
+
+:is(.landing-picker-card-title, .sidebar-profile-main) > svg:first-child[data-icon="lightbulb"] {
+  background: var(--tile-yellow);
+  color: var(--tile-yellow-ink);
+}
+
+:is(.landing-picker-card-title, .sidebar-profile-main) > svg:first-child[data-icon="puzzle"] {
+  background: var(--tile-purple);
+  color: var(--tile-purple-ink);
+}
+
+:is(.landing-picker-card-title, .sidebar-profile-main) > svg:first-child:is([data-icon="paw"], [data-icon="cat"]) {
+  background: var(--tile-red);
+  color: var(--tile-red-ink);
 }
 
 .sidebar-profile-actions button {
@@ -10220,7 +10276,7 @@ summary {
   border: var(--box-border);
   border-radius: var(--r-pill);
   background: var(--button-bg);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
   color: var(--accent);
 }
 
@@ -10419,7 +10475,7 @@ summary {
   gap: 5px;
   border-radius: var(--r-pill);
   color: var(--text-0);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
 }
 
 /* The data-moving verbs read at the button weight; the display-face list
@@ -10467,13 +10523,13 @@ summary {
   border: var(--box-border);
   border-radius: var(--r-pill);
   background: var(--button-bg);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
   color: var(--accent);
 }
 
 .sync-path-icon-action:active:not(:disabled) {
   box-shadow: none;
-  transform: translate(1px, 1px);
+  transform: translate(2px, 2px);
 }
 
 /* The Mallard Cloud release state: the one Cloud fact the bar carries. Its
@@ -10485,7 +10541,7 @@ summary {
   padding-inline: 9px;
   border-color: var(--accent);
   color: var(--text-0);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
 }
 
 /* The label is data ("Waiting for Super Admin"), so it is capped rather than
@@ -11505,7 +11561,7 @@ summary {
   transition: color 120ms ease;
 }
 
-/* A one-pixel press reads as
+/* A two-pixel press reads as
    tactile on a full-size button with a label, but an icon-only button has no
    text to anchor the eye, so the glyph just jogs against whatever sits beside
    it. Every icon-only clicker keeps the colour feedback and drops the
@@ -12017,7 +12073,7 @@ summary {
   border-radius: var(--r-pill);
   background: var(--bg-0);
   color: var(--text-1);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-control);
 }
 
 .sync-app .log-drawer .log-filter-control select {

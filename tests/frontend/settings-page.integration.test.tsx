@@ -57,7 +57,7 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   const switches = html.match(/role="switch"[^>]*class="sync-settings-switch"[^>]*checked=""/g) ?? [];
   assert.equal(switches.length, 6);
   for (const provider of ["Codex", "Claude"]) {
-    assert.match(html, new RegExp(`<input[^>]*role="switch"[^>]*disabled=""[^>]*aria-label="Push ${provider} children"[^>]*checked=""`));
+    assert.match(html, new RegExp(`<input[^>]*role="switch"[^>]*disabled=""[^>]*aria-label="Push ${provider} subagents"[^>]*checked=""`));
   }
 
   // Redaction is disabled until saved settings load.
@@ -100,9 +100,8 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   assert.doesNotMatch(html, /<button[^>]*class="btn btn-ghost danger"[^>]*disabled[^>]*>Reset Mallard</);
   assert.match(html, /class="sync-settings-readout"[^>]*>…</);
   // The row copy names the irreversible parts: backups and preferences.
-  assert.match(html, /backups of files Pull replaced/);
-  // React escapes the apostrophe (&#x27;) in static markup.
-  assert.match(html, /clears Mallard(&#x27;|['’])s saved preferences/);
+  assert.match(html, /Pull backups/);
+  assert.match(html, /Clear preferences and restart/);
 });
 
 test("preferences default on, live under the mallard.* keys, and notify", () => {
@@ -213,7 +212,7 @@ test("every export-shaping setting says that changing it re-uploads synced sessi
   // every synced session, and revisions are immutable, so copies pushed with
   // redaction off remain readable in the storage's history.
   const source = readFileSync("src/components/project-sync/SettingsPage.tsx", "utf8");
-  assert.match(source, /Off can export API keys, tokens, and passwords\. Applies to this machine\.\s*Changing this re-uploads every synced session on your next Push\. Copies already\s*pushed with redaction off stay readable in the storage’s history\./);
-  assert.match(source, /Changing this re-uploads every synced Codex session on your next Push\./);
-  assert.match(source, /Changing this re-uploads every synced Claude session on your next Push\./);
+  assert.match(source, /Hide detected credentials in exports from this machine\. Off can expose secrets\.\s*Changes re-upload all synced sessions on the next Push\.\s*Earlier unredacted copies remain readable in storage history\./);
+  assert.match(source, /Changes re-upload all synced Codex sessions\s*on the next Push\. Pull uses the stored files\./);
+  assert.match(source, /Changes re-upload all synced Claude sessions\s*on the next Push\. Pull uses the stored files\./);
 });

@@ -134,7 +134,7 @@ export function pullRequiredCopy(
   // figures abbreviated to what support actually reads off a screenshot. The
   // footer button says what to do, so the sentence only has to say what is
   // there and what the review unlocks.
-  const detail = `Version ${remoteRevision} · ${baseRevision != null ? `reviewed ${baseRevision}` : "never reviewed"}`;
+  const detail = `Version ${remoteRevision} · ${baseRevision != null ? `reviewed ${baseRevision}` : "review required"}`;
   if (reason === "remote_advanced") {
     const one = changedConversationCount === 1;
     return {
@@ -147,8 +147,8 @@ export function pullRequiredCopy(
   }
   if (reason === "remote_without_base") {
     return {
-      title: "Storage has unreviewed data",
-      body: `${storage} holds data never reviewed on this computer.`,
+      title: "Storage review required",
+      body: `Review the existing data in ${storage} before pushing from this connection.`,
       detail,
     };
   }

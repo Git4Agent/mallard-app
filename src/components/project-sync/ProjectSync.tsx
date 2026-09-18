@@ -103,7 +103,8 @@ import { projectSyncApi } from "./api";
 import {
   applyPullReview,
   beginPullReview,
-  hasPendingRestoreMutations,
+  canAcceptPullMetadata,
+  acceptPullMetadata,
   type PullApplyPhase,
   type PullReviewSelection,
 } from "./pullReviewFlow";
@@ -403,6 +404,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [pullReviewPrimary, setPullReviewPrimary] = useState<PullReviewPrimary | null>(null);
   const [reviewSupportLoading, setReviewSupportLoading] = useState(false);
   const pullApplyInFlight = useRef(false);
+  const connectionInFlight = useRef(false);
   const restoreRequest = useRef(0);
   const shellRequest = useRef(0);
   /* A project switch supersedes the load in flight. The workflow epoch alone
@@ -1718,7 +1720,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         if (leftMatches !== rightMatches) return leftMatches ? -1 : 1;
         return (right.updated_at ?? 0) - (left.updated_at ?? 0);
       });
-      if (bundles.some((bundle) => bundle.bundle_id === project.bundle_id) || bundles.length === 0) {
+      if (bundles.some((bundle) => bundle.bundle_id === project.bundle_id)) {
+        await connectStorageBundle(projectId, storageId, project.bundle_id);
+        return;
+      }
+      if (bundles.length === 0) {
         await saveStorageLink(projectId, storageId, workflowEpoch);
         return;
       }
@@ -2211,6 +2217,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     targetBinding: ProjectBinding,
     displayName: string,
   ) => {
+    const workflowEpoch = hostWorkflowEpoch.current;
     const requestId = ++restoreRequest.current;
     // Pull review owns the workspace. Keep the activity drawer from covering
     // its approval controls; logs remain available from the sidebar.
@@ -2231,24 +2238,20 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       const request = { storageId, bundleId, binding: targetBinding };
       const review = await beginPullReview(projectSyncApi, request);
       if (restoreRequest.current !== requestId) return null;
-      // Nothing to review means the storage only moved its revision: one
-      // empty apply acknowledges it right here, no review to click through.
-      // A replaced history is never adopted silently — that plan still opens.
-      if (
-        !hasPendingRestoreMutations(review.restorePlan)
-        && review.restorePlan.remote_continuity?.state !== "replaced"
-      ) {
-        const finalization = await projectSyncApi.applyRestore(review.restorePlan, []);
+      // Matching content needs only pinned local metadata acceptance. File
+      // changes, blocked rows and replaced history keep the explicit review.
+      if (canAcceptPullMetadata(review.restorePlan)) {
+        await acceptPullMetadata(projectSyncApi, review.restorePlan);
         if (restoreRequest.current !== requestId) return null;
-        if (
-          !finalization.success
-          || finalization.reviewed_base_advanced === false
-        ) {
-          throw new Error("Nothing to pull, but the reviewed baseline could not be advanced.");
-        }
         setReviewSupportLoading(false);
         setRestoreBinding(null);
-        notify(`${displayName} is up to date (version ${review.restorePlan.revision}).`);
+        setStorageNotice((current) => (
+          current?.projectId === targetBinding.local_project_id && current.storageId === storageId ? null : current
+        ));
+        await loadProjectData(targetBinding.local_project_id, configRef.current, storageId, workflowEpoch);
+        if (restoreRequest.current !== requestId) return null;
+        setHistoryRefreshEpoch((epoch) => epoch + 1);
+        notify(`Storage reviewed for ${displayName} — files unchanged.`);
         return null;
       }
       setRestorePlan(review.restorePlan);
@@ -2484,6 +2487,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     bundleId: string,
     allowRepositoryMismatch = false,
   ) => {
+    if (connectionInFlight.current) return;
     const workflowEpoch = hostWorkflowEpoch.current;
     const project = registrations.find((candidate) => (
       candidate.local_project_id === projectId
@@ -2492,7 +2496,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       setError("The selected local project no longer exists.");
       return;
     }
-    if (project.bundle_id === bundleId) return;
+    connectionInFlight.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -2505,7 +2509,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         allow_repository_mismatch: allowRepositoryMismatch,
       });
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      setPendingBundleConnection(null);
       const { nextConfig, hostIdentityReady } = await loadShell();
       if (!hostIdentityReady || hostWorkflowEpoch.current !== workflowEpoch) return;
       setActiveProjectId(projectId);
@@ -2515,19 +2518,17 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       }));
       await loadProjectData(projectId, nextConfig, storageId, workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      if (!connected.binding) {
-        notify("Repo connected — set folder and profile before Pull.");
-        return;
+      if (!connected.binding || connected.binding.state !== "active") {
+        throw new Error("Link saved. Set the project folder and provider profile to continue.");
       }
-      await planRestore(
-        storageId,
-        bundleId,
-        connected.binding,
-        projectLabel(connected.project),
-      );
+      const failure = await planRestore(storageId, bundleId, connected.binding, projectLabel(connected.project));
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
+      if (failure) throw new Error(failure);
+      setPendingBundleConnection(null);
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
+      connectionInFlight.current = false;
       if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };

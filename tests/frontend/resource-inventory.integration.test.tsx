@@ -616,9 +616,9 @@ test("the pull-required sentence counts the conversations a Pull would bring", (
 
 test("an unreviewed storage and a changed binding each get their own plain sentence", () => {
   const unreviewed = pullRequiredCopy("remote_without_base", "R2 storage 1", 6, undefined);
-  assert.equal(unreviewed.title, "Storage has unreviewed data");
-  assert.equal(unreviewed.body, "R2 storage 1 holds data never reviewed on this computer.");
-  assert.equal(unreviewed.detail, "Version 6 · never reviewed");
+  assert.equal(unreviewed.title, "Storage review required");
+  assert.equal(unreviewed.body, "Review the existing data in R2 storage 1 before pushing from this connection.");
+  assert.equal(unreviewed.detail, "Version 6 · review required");
 
   const rebound = pullRequiredCopy("binding_changed", null, 6, 5);
   assert.equal(rebound.title, "Project changed since last sync");

@@ -2228,10 +2228,12 @@ test("Mallard Cloud release chips name each state and only a rejection reads as 
   assert.match(releaseChip({ kind: "rejected", reason: "Not yet" }).detail, /Not yet/);
   assert.equal(releaseChip({ kind: "private" }).severity, "plain");
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
-  assert.match(workspace, /projectSyncApi\.getManagedCloudLink\(projectId, storageId\)/);
+  assert.doesNotMatch(workspace, /getManagedCloudLink/);
+  assert.match(workspace, /activityHeader\.managedCloudStatus/);
+  assert.match(workspace, /managedCloudRepositoryId \? workspaceActionPrefix : null/);
   assert.match(workspace, /label: "Open on Mallard Cloud"[^]*?openExternalUrl\(link\.website_url\)/);
   assert.match(workspace, /if \(link\.can_request_release\) \{[^]*?requestManagedCloudRelease\(/);
   assert.match(workspace, /\.\.\.managedCloudMenuItems,/);
   assert.doesNotMatch(workspace, /sync-path-cloud-controls/);
-  assert.match(workspace, /window\.addEventListener\("focus", load\)/);
+  assert.match(workspace, /window\.addEventListener\("focus", refresh\)/);
 });

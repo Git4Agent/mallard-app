@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type {
   GitBranchSummary,
+  ManagedCloudStatus,
   LocalProjectSummary,
   NoticeSeverity,
   OlderActivity,
@@ -44,6 +45,9 @@ import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/Thre
  * the page hands the bar a model plus the handlers that drive it.
  */
 export interface ActivityHeaderModel {
+  projectId: string;
+  storageId: string | null;
+  managedCloudStatus: ManagedCloudStatus | null;
   branches: GitBranchSummary[];
   selectedBranch: string;
   onSelectBranch: (branch: string) => void;
@@ -61,6 +65,7 @@ interface SessionSearchProps {
 }
 
 interface PageProps extends SessionSearchProps {
+  comparisonErrorHandled?: boolean;
   project: LocalProjectSummary;
   binding: ProjectBinding | null;
   refreshEpoch: number;
@@ -98,6 +103,7 @@ interface PageProps extends SessionSearchProps {
 }
 
 interface ContentProps extends SessionSearchProps {
+  comparisonErrorHandled?: boolean;
   project: LocalProjectSummary;
   binding: ProjectBinding | null;
   activity: ProjectActivity | null;
@@ -1596,7 +1602,7 @@ export function ProjectChatHistoryContent({
   project, binding, activity, loading, loadingMore, actionError, loadError, onRetryLoad, actionBusyResourceId, actionBusyActionId = null, onShowLess, canShowLess,
   onLoadMore,
   onSessionAction, onOpenSessionDetail, comparison = null,
-  comparisonLoading = false, comparisonError = null, activeStorageName = null,
+  comparisonLoading = false, comparisonError = null, comparisonErrorHandled = false, activeStorageName = null,
   selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
   selectionDisabled = false, onToggleResource, onReviewPull, onUnlinkStorage,
   onChooseAgentProfile,
@@ -1855,7 +1861,7 @@ export function ProjectChatHistoryContent({
   }
   /* A whole-comparison failure belongs in the shared notice zone, separate
      from provider-scoped failures. */
-  if (comparisonError) {
+  if (comparisonError && !comparisonErrorHandled) {
     notices.push({
       key: "comparison-failed",
       severity: "warning",
@@ -2230,6 +2236,7 @@ function mergePages(previous: ProjectActivity | null, next: ProjectActivity): Pr
 }
 
 export default function ProjectActivityPage({
+  comparisonErrorHandled = false,
   project,
   binding,
   refreshEpoch,
@@ -2260,6 +2267,7 @@ export default function ProjectActivityPage({
   const [comparison, setComparison] = useState<ThreadSyncComparison | null>(null);
   const [comparisonLoading, setComparisonLoading] = useState(false);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
+  const [managedCloudStatus, setManagedCloudStatus] = useState<ManagedCloudStatus | null>(null);
   const [branch, setBranch] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -2302,6 +2310,7 @@ export default function ProjectActivityPage({
     if (comparisonOverride !== undefined || activeStorageId === null) {
       comparisonRequestRef.current += 1;
       setComparison(comparisonOverride ?? null);
+      setManagedCloudStatus(comparisonOverride?.managed_cloud_status ?? null);
       setComparisonLoading(false);
       setComparisonError(null);
       await load(null, requestedBranch);
@@ -2340,10 +2349,12 @@ export default function ProjectActivityPage({
           if (comparisonRequestId !== comparisonRequestRef.current) return;
           if (event.stage === "comparison") {
             setComparison(event.comparison);
+            setManagedCloudStatus(event.comparison.managed_cloud_status ?? null);
             setComparisonError(null);
           } else {
             setComparison(null);
             setComparisonError(event.message);
+            setManagedCloudStatus(event.managed_cloud_status ?? null);
           }
           setComparisonLoading(false);
         }
@@ -2353,6 +2364,7 @@ export default function ProjectActivityPage({
       if (comparisonRequestId === comparisonRequestRef.current) {
         setComparison(null);
         setComparisonError(errorMessage(reason));
+        setManagedCloudStatus(null);
       }
     } finally {
       if (requestId === requestRef.current) setLoading(false);
@@ -2365,7 +2377,7 @@ export default function ProjectActivityPage({
     // and loading flags set carried the previous project's failure banner onto
     // the next one, and a switch made mid-flight stranded the spinners on
     // because their owning request had already been superseded.
-    setPages([]); setBranch(null); setComparison(null);
+    setPages([]); setBranch(null); setComparison(null); setManagedCloudStatus(null);
     setLoadError(null); setComparisonError(null); setActionError(null);
     setLoading(false); setComparisonLoading(false); setLoadingMore(false);
     void loadWorkspace(null);
@@ -2432,6 +2444,9 @@ export default function ProjectActivityPage({
     [comparison, activeStorageName],
   );
   const headerModel = useMemo<ActivityHeaderModel>(() => ({
+    projectId: project.local_project_id,
+    storageId: activeStorageId,
+    managedCloudStatus,
     // A project with no repository has no branches to offer; the bar simply
     // draws no chip, and the counts and refresh still stand.
     branches: activity?.git?.branches ?? [],
@@ -2446,6 +2461,9 @@ export default function ProjectActivityPage({
     activity?.git?.selected_branch,
     changeBranch,
     headerCounts,
+    project.local_project_id,
+    activeStorageId,
+    managedCloudStatus,
     comparisonError,
     loading,
     comparisonLoading,
@@ -2471,5 +2489,5 @@ export default function ProjectActivityPage({
       setActionBusyActionId(null);
     }
   };
-  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} />;
+  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} />;
 }

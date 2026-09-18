@@ -1,7 +1,8 @@
 # Managed Cloud: open push on public repositories, one invitation code per private repository
 
 Status: implemented 2026-09-16 (service, website, desktop, documents; see
-section 7 for what differs from the plan). Section numbers refer to
+section 7 for what differs from the plan, and section 8 for the 2026-09-17
+change that keeps the code readable). Section numbers refer to
 `CLOUDFLARE_R2_MANAGED_CLOUD_ARCHITECTURE.md`; the connect-by-address
 work this builds on is `DESIGN_MANAGED_CLOUD_CONNECT_BY_ADDRESS.md`.
 
@@ -291,3 +292,32 @@ Tests: 62 service cases (new `test/contributors.test.ts`,
 desktop frontend integration cases, and the Rust stub-backed tests in
 `managed_cloud_link.rs` (an address resolves for a stranger with
 `can_push`; a code joins and selects) all pass.
+
+## 8. The code stays readable (2026-09-17)
+
+Decided after the round-three mock (`mallard-app/cloud-invite-reread-mockup.html`):
+the Owner and Admins read a standing code again instead of seeing it once, and
+the code need not be stored hashed. This supersedes the hash and "shown once"
+in section 2.2 and the freshly-issued-code bullet in section 7.
+
+- **Schema** (`0001_init.sql`, in place): `invite_code_hash` becomes
+  `invite_code TEXT UNIQUE`, holding the normalized code (20 characters, no
+  separators, so formatting cannot defeat `UNIQUE`); the three-column
+  `CHECK` follows. `ids.ts` gains `formatInvitationCode`; answers carry the
+  grouped form. Accept looks the normalized input up directly.
+- **Who reads it.** `GET …/members` adds `invitation.code` for the Owner and
+  Admins only, the roles that could rotate it anyway. A Member and a Super
+  Admin who does not collaborate still see who set it and when, without
+  the code.
+- **Website.** The Members tab shows a share card: a head line (`Active ·
+  set by … · date`, Rotate, Revoke), the code in a field with Copy, and
+  where Members enter it; on a phone, Copy drops under the code. With no
+  code, one line and Create code. The page still holds one piece of state
+  across the remount: the code a rotation just issued, which adds a "New
+  code. The old one stopped working" note.
+- **Trade-off.** Anyone who can read the database (an operator, a backup)
+  can read a standing code. A code only admits Members to its one
+  repository, and rotating still ends it at once.
+- **Existing rows.** A code set before this change was stored hashed and
+  cannot be shown; it is cleared when the column is renamed, and the Owner
+  or an Admin creates a new one.

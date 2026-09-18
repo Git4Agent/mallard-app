@@ -198,7 +198,8 @@ test("the connect dialog for a Mallard Cloud storage takes an address, empty acc
   assert.match(html, /Look up an address, join with a code, or select a row/);
   assert.doesNotMatch(html, /Current local repo/, "no bundle id in the context line");
   assert.doesNotMatch(html, /Create separate repo/);
-  assert.match(html, /Connect and review Pull/);
+  assert.match(html, />Connect<\/button>/);
+  assert.doesNotMatch(html, /Finish connection|Check connection/);
 
   const missing = renderToStaticMarkup(
     <BundleConnectionDialog

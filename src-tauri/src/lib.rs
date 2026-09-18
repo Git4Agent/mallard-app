@@ -184,7 +184,6 @@ pub fn run() {
             project_sync::managed_cloud_setup::authorize_managed_cloud_setup,
             project_sync::managed_cloud_setup::prepare_managed_cloud_storage,
             project_sync::managed_cloud_setup::cancel_managed_cloud_setup,
-            project_sync::managed_cloud_link::get_managed_cloud_link,
             project_sync::managed_cloud_link::request_managed_cloud_release,
             project_sync::managed_cloud_link::list_managed_cloud_repositories,
             project_sync::managed_cloud_link::resolve_managed_cloud_repository,

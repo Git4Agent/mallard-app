@@ -13,7 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::adapters::{PluginProcessRunner, ProviderInventory, ResolvedCatalogTarget};
+use super::adapters::{ProviderInventory, ResolvedCatalogTarget};
 use super::codec::CapturedResource;
 use super::domain::{
     warning_digest, CatalogBlocker, CatalogResourceEnvelope, CatalogResourceId,
@@ -432,15 +432,14 @@ fn report_duplicate_names(context: &ResolvedCatalogContext, inventory: &mut Cata
 }
 
 /// Run one ownership-ordered inventory over the resolved context for one
-/// capability. Native state is observed first when the capability captures
+/// capability. Local provider state is read first when the capability captures
 /// through the provider or when a directory root excludes provider-owned
-/// children, so ownership exists before classification; a capability that
-/// needs neither never launches a provider process.
+/// children, so ownership exists before classification. No inventory path can
+/// launch a provider process.
 pub fn inventory_local(
     registry: &CatalogRegistry,
     capability: &Arc<CatalogCapability>,
     context: &ResolvedCatalogContext,
-    runner: &dyn PluginProcessRunner,
 ) -> Result<CatalogLocalInventory, CatalogBlocker> {
     let targets = context.targets_for(capability);
     let mut inventory = CatalogLocalInventory::empty();
@@ -452,7 +451,7 @@ pub fn inventory_local(
     if needs_native {
         let native = capability
             .adapter
-            .discover_native(&context.profile.canonical_home, runner)?;
+            .discover_local(&context.profile.canonical_home)?;
         inventory.warnings.extend(native.warnings.iter().cloned());
         ownership_roots = native
             .ownership_roots()
@@ -497,7 +496,6 @@ pub fn inventory_local(
 
 #[cfg(test)]
 mod tests {
-    use super::super::adapters::{CmdOutput, PluginProcessRunner};
     use super::super::codex_pet::fixtures::webp_atlas;
     use super::super::domain::{
         CatalogCoordinate, CatalogProfilesDocument, CatalogProviderConfig, LocalCatalogProfile,
@@ -506,40 +504,6 @@ mod tests {
     use super::super::profiles::resolve_profile_context;
     use super::super::registry::test_support;
     use super::*;
-
-    pub struct EmptyRunner;
-    impl PluginProcessRunner for EmptyRunner {
-        fn run(
-            &self,
-            provider: &ProviderKey,
-            _home: &Path,
-            argv: &[String],
-        ) -> Result<CmdOutput, String> {
-            assert_eq!(provider.as_str(), "codex");
-            let stdout = if argv.contains(&"marketplace".to_string()) {
-                r#"{"marketplaces":[]}"#
-            } else {
-                r#"{"installed":[]}"#
-            };
-            Ok(CmdOutput {
-                success: true,
-                stdout: stdout.to_string(),
-                stderr: String::new(),
-            })
-        }
-    }
-
-    struct PanicRunner;
-    impl PluginProcessRunner for PanicRunner {
-        fn run(
-            &self,
-            _provider: &ProviderKey,
-            _home: &Path,
-            _argv: &[String],
-        ) -> Result<CmdOutput, String> {
-            panic!("this inventory must not launch provider CLIs");
-        }
-    }
 
     fn write(path: &Path, bytes: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -659,8 +623,7 @@ mod tests {
             write(&temp.path().join(lookalike), b"---\nname: hidden\n---\n");
         }
 
-        let inventory =
-            inventory_local(&registry, &skills(&registry), &context, &EmptyRunner).unwrap();
+        let inventory = inventory_local(&registry, &skills(&registry), &context).unwrap();
         // Equal names across the two Codex roots stay two resources.
         assert_eq!(
             roots_of(&inventory),
@@ -711,7 +674,7 @@ mod tests {
         );
 
         // A pets inventory never launches provider CLIs.
-        let v1 = inventory_local(&registry, &pets(&registry, 1), &context, &PanicRunner).unwrap();
+        let v1 = inventory_local(&registry, &pets(&registry, 1), &context).unwrap();
         assert_eq!(
             roots_of(&v1),
             vec![("provider-home".to_string(), "duck".to_string())]
@@ -721,7 +684,7 @@ mod tests {
         assert_eq!(sibling.capability.descriptor.format_version, 2);
         assert!(v1.native.is_none());
 
-        let v2 = inventory_local(&registry, &pets(&registry, 2), &context, &PanicRunner).unwrap();
+        let v2 = inventory_local(&registry, &pets(&registry, 2), &context).unwrap();
         assert_eq!(
             roots_of(&v2),
             vec![("provider-home".to_string(), "drake".to_string())]
@@ -750,8 +713,7 @@ mod tests {
             b"---\nname: review\n---\n",
         );
         // "Review" vs declared "review" collide case-folded in one root.
-        let inventory =
-            inventory_local(&registry, &skills(&registry), &context, &EmptyRunner).unwrap();
+        let inventory = inventory_local(&registry, &skills(&registry), &context).unwrap();
         assert!(inventory.resources.is_empty());
         assert_eq!(inventory.blocked.len(), 2);
         assert!(inventory
@@ -781,8 +743,7 @@ mod tests {
             codex_home.join("skills/link"),
         )
         .unwrap();
-        let inventory =
-            inventory_local(&registry, &skills(&registry), &context, &EmptyRunner).unwrap();
+        let inventory = inventory_local(&registry, &skills(&registry), &context).unwrap();
         assert_eq!(inventory.resources.len(), 1);
         let reasons: Vec<&str> = inventory
             .blocked
@@ -798,32 +759,6 @@ mod tests {
 
     #[test]
     fn a_skills_inventory_excludes_plugin_owned_directories() {
-        struct OwningRunner {
-            owned_root: PathBuf,
-        }
-        impl PluginProcessRunner for OwningRunner {
-            fn run(
-                &self,
-                provider: &ProviderKey,
-                _home: &Path,
-                argv: &[String],
-            ) -> Result<CmdOutput, String> {
-                assert_eq!(provider.as_str(), "codex");
-                let stdout = if argv.contains(&"marketplace".to_string()) {
-                    format!(
-                        r#"{{"marketplaces":[{{"name":"acme","marketplaceSource":{{"sourceType":"git","source":"https://example.com/acme.git"}},"root":"{}"}}]}}"#,
-                        self.owned_root.display()
-                    )
-                } else {
-                    r#"{"installed":[]}"#.to_string()
-                };
-                Ok(CmdOutput {
-                    success: true,
-                    stdout,
-                    stderr: String::new(),
-                })
-            }
-        }
         let temp = tempfile::tempdir().unwrap();
         let (registry, context) = codex_context(&temp);
         let codex_home = context.profile.canonical_home.clone();
@@ -835,15 +770,15 @@ mod tests {
             &codex_home.join("skills/independent/SKILL.md"),
             b"---\nname: independent\n---\n",
         );
-        let inventory = inventory_local(
-            &registry,
-            &skills(&registry),
-            &context,
-            &OwningRunner {
-                owned_root: codex_home.join("skills/owned"),
-            },
-        )
-        .unwrap();
+        write(
+            &codex_home.join("config.toml"),
+            format!(
+                "[marketplaces.acme]\nsource_type=\"local\"\nsource={}\n",
+                serde_json::to_string(&codex_home.join("skills/owned")).unwrap()
+            )
+            .as_bytes(),
+        );
+        let inventory = inventory_local(&registry, &skills(&registry), &context).unwrap();
         assert_eq!(
             roots_of(&inventory),
             vec![("provider-home".to_string(), "independent".to_string())]
@@ -852,26 +787,6 @@ mod tests {
 
     #[test]
     fn native_inventories_record_provider_resources_without_directories() {
-        struct InstalledRunner;
-        impl PluginProcessRunner for InstalledRunner {
-            fn run(
-                &self,
-                _provider: &ProviderKey,
-                _home: &Path,
-                argv: &[String],
-            ) -> Result<CmdOutput, String> {
-                let stdout = if argv.contains(&"marketplace".to_string()) {
-                    r#"{"marketplaces":[{"name":"acme","marketplaceSource":{"sourceType":"git","source":"https://example.com/acme/market"}}]}"#
-                } else {
-                    r#"{"installed":[{"pluginId":"tools","marketplaceName":"acme","installed":true,"enabled":true}]}"#
-                };
-                Ok(CmdOutput {
-                    success: true,
-                    stdout: stdout.to_string(),
-                    stderr: String::new(),
-                })
-            }
-        }
         let temp = tempfile::tempdir().unwrap();
         let (registry, context) = codex_context(&temp);
         let plugins = registry
@@ -882,7 +797,18 @@ mod tests {
                 1,
             ))
             .unwrap();
-        let inventory = inventory_local(&registry, &plugins, &context, &InstalledRunner).unwrap();
+        write(
+            &context.profile.canonical_home.join("config.toml"),
+            b"[plugins.\"tools@acme\"]\nenabled=true\n",
+        );
+        write(
+            &context
+                .profile
+                .canonical_home
+                .join("plugins/cache/acme/tools/1/.codex-plugin/plugin.json"),
+            br#"{"name":"tools","version":"1"}"#,
+        );
+        let inventory = inventory_local(&registry, &plugins, &context).unwrap();
         assert_eq!(inventory.resources.len(), 1);
         let record = inventory.resources.values().next().unwrap();
         assert!(record.target_path.is_none());
@@ -904,7 +830,7 @@ mod tests {
         let capability = registry
             .require_capability(&test_support::coordinate())
             .unwrap();
-        let inventory = inventory_local(&registry, &capability, &context, &PanicRunner).unwrap();
+        let inventory = inventory_local(&registry, &capability, &context).unwrap();
         assert_eq!(inventory.resources.len(), 1);
         let record = inventory.resources.values().next().unwrap();
         assert_eq!(

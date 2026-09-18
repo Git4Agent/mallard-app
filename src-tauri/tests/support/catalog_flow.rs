@@ -1,6 +1,6 @@
 //! Reusable two-replica Library exercise shared by the deterministic and live
-//! integration tests. All provider discovery is injected; storage and local
-//! materialization use the production implementations.
+//! integration tests. Provider inventory, storage, and local
+//! materialization use the production implementations. CLI execution is forbidden.
 //!
 //! The scope is the sync object: each replica links its scope to the shared
 //! storage once, every push and pull is one review over rows, and all
@@ -65,7 +65,6 @@ pub struct CatalogFlowReport {
     /// Final head revisions of the coordinate repositories, sorted ascending.
     pub kind_repository_revisions: Vec<u64>,
     pub native_provider_process_calls: usize,
-    pub injected_inventory_calls: usize,
 }
 
 #[derive(Clone)]
@@ -150,12 +149,11 @@ enum ExactTreeEntrySnapshot {
 
 type ExactTreeSnapshot = BTreeMap<String, ExactTreeEntrySnapshot>;
 
-struct EmptyCodexRunner {
-    expected_home: PathBuf,
+struct RejectProviderRunner {
     calls: Arc<AtomicUsize>,
 }
 
-impl PluginProcessRunner for EmptyCodexRunner {
+impl PluginProcessRunner for RejectProviderRunner {
     fn run(
         &self,
         provider: &ProviderKey,
@@ -163,30 +161,12 @@ impl PluginProcessRunner for EmptyCodexRunner {
         argv: &[String],
     ) -> Result<CmdOutput, String> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        if provider != &codex() {
-            return Err(format!(
-                "unexpected provider process: {}",
-                provider.as_str()
-            ));
-        }
-        if home != self.expected_home {
-            return Err("provider discovery escaped its selected Codex home".to_string());
-        }
-        let stdout = match argv
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .as_slice()
-        {
-            ["plugin", "marketplace", "list", "--json"] => r#"{"marketplaces":[]}"#,
-            ["plugin", "list", "--json"] => r#"{"installed":[]}"#,
-            _ => return Err(format!("unexpected provider command: {}", argv.join(" "))),
-        };
-        Ok(CmdOutput {
-            success: true,
-            stdout: stdout.to_string(),
-            stderr: String::new(),
-        })
+        panic!(
+            "Library file flow invoked {} at {}: {}",
+            provider.as_str(),
+            home.display(),
+            argv.join(" ")
+        );
     }
 }
 
@@ -226,10 +206,7 @@ fn create_replica(
     let service = StorageCatalogService::from_home_dirs(
         machine_home.to_path_buf(),
         user_home.to_path_buf(),
-        Box::new(EmptyCodexRunner {
-            expected_home: canonical_codex_home.clone(),
-            calls,
-        }),
+        Box::new(RejectProviderRunner { calls }),
     )
     .expect("open isolated Library service");
     let profile = service
@@ -1886,16 +1863,16 @@ fn run_catalog_flow_inner(
     );
 
     let skills = run_skill_flow(&a, &b, &inputs.storage.id, reset_storage_mid_flow);
-    let injected_inventory_calls = calls.load(Ordering::Relaxed);
-    assert!(
-        injected_inventory_calls > 0,
-        "skill ownership was not checked through the injected runner"
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "skills flow invoked a provider CLI"
     );
     let (pets_v1, pets_v2) = run_pet_flow(&a, &b, &inputs.storage.id);
     assert_eq!(
         calls.load(Ordering::Relaxed),
-        injected_inventory_calls,
-        "pet inventory unexpectedly launched the provider ownership runner"
+        0,
+        "pets flow invoked a provider CLI"
     );
     assert_eq!(skills.resource_ids.len(), 4);
     assert_eq!(pets_v1.resource_ids.len(), 2);
@@ -1959,9 +1936,6 @@ fn run_catalog_flow_inner(
     CatalogFlowReport {
         repository_count,
         kind_repository_revisions,
-        // The injected runner returns bounded fixture JSON; no native Codex
-        // process and no model request is launched by this flow.
-        native_provider_process_calls: 0,
-        injected_inventory_calls,
+        native_provider_process_calls: calls.load(Ordering::Relaxed),
     }
 }

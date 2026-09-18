@@ -974,7 +974,7 @@ fn execute_native_action(
     let adapter = capability.adapter.as_ref();
     let _target_lock = repository.acquire_target_lock(home)?;
     let current = adapter
-        .discover_native(home, runner)
+        .discover_local(home)
         .map_err(|blocker| blocker.to_string())?;
     let current_digest = adapter.native_state(resource, &current)?;
     expectation_matches(&action.expected_target_state, current_digest.as_deref())?;
@@ -1031,7 +1031,7 @@ fn execute_native_action(
     // a different intent installed is partial, never success. Presence and
     // intent are read from one snapshot.
     let after = adapter
-        .discover_native(home, runner)
+        .discover_local(home)
         .map_err(|blocker| blocker.to_string())?;
     let display_name = capability
         .codec
@@ -1619,18 +1619,7 @@ mod tests {
         ) -> Result<CmdOutput, String> {
             assert_eq!(provider.as_str(), "codex");
             self.calls.lock().unwrap().push(argv.to_vec());
-            let stdout = match argv.join(" ").as_str() {
-                "plugin marketplace list --json" => {
-                    r#"{"marketplaces":[{"name":"acme","marketplaceSource":{"sourceType":"git","source":"https://example.com/acme/repository-b","ref":"release"}}]}"#
-                }
-                "plugin list --json" => r#"{"installed":[]}"#,
-                command => return Err(format!("unexpected native invocation: {command}")),
-            };
-            Ok(CmdOutput {
-                success: true,
-                stdout: stdout.to_string(),
-                stderr: String::new(),
-            })
+            Err("unexpected native mutation".to_string())
         }
     }
 
@@ -1702,6 +1691,7 @@ mod tests {
             incoming_content_sha256: resource.content_sha256.clone(),
         };
         action.validate().unwrap();
+        std::fs::write(home.join("config.toml"), "[marketplaces.acme]\nsource_type=\"git\"\nsource=\"https://example.com/acme/repository-b\"\nref=\"release\"\n").unwrap();
         let runner = ChangedMarketplaceRunner::default();
 
         let error = execute_native_action(
@@ -1722,7 +1712,7 @@ mod tests {
         let calls = runner.calls();
         assert_eq!(
             calls.iter().map(|argv| argv.join(" ")).collect::<Vec<_>>(),
-            vec!["plugin marketplace list --json", "plugin list --json"]
+            Vec::<String>::new()
         );
         assert!(repository.load_operations().unwrap().operations.is_empty());
         assert!(repository

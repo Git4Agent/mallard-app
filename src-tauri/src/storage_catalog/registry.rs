@@ -459,8 +459,7 @@ pub(crate) mod test_support {
     use serde::{Deserialize, Serialize};
 
     use super::super::adapters::{
-        CatalogProviderAdapter, CatalogProviderDescriptor, PluginProcessRunner, ProviderInventory,
-        ResolvedCatalogTarget,
+        CatalogProviderAdapter, CatalogProviderDescriptor, ProviderInventory, ResolvedCatalogTarget,
     };
     use super::super::codec::{
         content_warnings, read_directory_tree, CapturedResource, CatalogFormatCodec, TreeLimits,
@@ -522,11 +521,7 @@ pub(crate) mod test_support {
             Err("the test provider has no terminal launcher".to_string())
         }
 
-        fn discover_native(
-            &self,
-            _home: &Path,
-            _runner: &dyn PluginProcessRunner,
-        ) -> Result<ProviderInventory, CatalogBlocker> {
+        fn discover_local(&self, _home: &Path) -> Result<ProviderInventory, CatalogBlocker> {
             Ok(ProviderInventory::default())
         }
 

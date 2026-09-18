@@ -859,6 +859,44 @@ fn route(
         }
         let manages = matches!(role.as_deref(), Some("owner") | Some("admin"));
         match (method, rest) {
+            (&Method::GET, ["head"]) => {
+                let head = repository
+                    .private_head
+                    .as_ref()
+                    .map(|p| head_body(&repository, p, &state.users));
+                let request = repository.release_requests.last();
+                let release = if repository
+                    .private_head
+                    .as_ref()
+                    .is_none_or(|p| p.summary["registration_only"] == true)
+                {
+                    json!({"kind": "not_pushed"})
+                } else if let Some(request) = request.filter(|r| {
+                    r["state"] == "pending_owner" || r["state"] == "pending_super_admin"
+                }) {
+                    if request["state"] == "pending_super_admin" {
+                        json!({"kind": "waiting_super_admin"})
+                    } else {
+                        json!({"kind": "waiting_owner", "requested_by": request["requested_by"]})
+                    }
+                } else if released {
+                    json!({"kind": "public"})
+                } else {
+                    json!({"kind": "private"})
+                };
+                let can_request = matches!(
+                    release["kind"].as_str(),
+                    Some("private" | "snapshot_changed" | "rejected")
+                );
+                return json(
+                    StatusCode::OK,
+                    json!({"repository_id": repository.id, "head": head, "link": {
+                        "repository_id": repository.id, "owner_login": state.users[&repository.owner_id].login,
+                        "name": repository.name, "visibility": repository.visibility, "release": release,
+                        "repository_revision": repository.revision, "role": role, "can_pull": true, "can_push": true, "can_request_release": can_request
+                    }}),
+                );
+            }
             (&Method::GET, []) => {
                 return json(StatusCode::OK, summary(state, &repository, role.as_deref(), true))
             }

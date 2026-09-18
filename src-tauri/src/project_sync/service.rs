@@ -751,6 +751,9 @@ pub struct ThreadSyncCounts {
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct ThreadSyncComparison {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub managed_cloud_status:
+        Option<mallard_infrastructure::managed_cloud::client::ManagedCloudStatus>,
     pub project_id: LocalProjectId,
     pub storage_id: StorageId,
     pub storage_name: String,
@@ -1409,10 +1412,21 @@ pub(super) fn get_project_activity_with_repository(
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "stage", rename_all = "snake_case")]
 pub enum ProjectActivityRefreshEvent {
-    Activity { activity: ProjectActivity },
-    ActivityError { message: String },
-    Comparison { comparison: ThreadSyncComparison },
-    ComparisonError { message: String },
+    Activity {
+        activity: ProjectActivity,
+    },
+    ActivityError {
+        message: String,
+    },
+    Comparison {
+        comparison: ThreadSyncComparison,
+    },
+    ComparisonError {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        managed_cloud_status:
+            Option<mallard_infrastructure::managed_cloud::client::ManagedCloudStatus>,
+    },
 }
 
 pub(super) fn refresh_project_activity_with_progress(
@@ -1460,7 +1474,14 @@ pub(super) fn refresh_project_activity_with_progress(
                 on_phase,
             ) {
                 Ok(comparison) => on_event(ProjectActivityRefreshEvent::Comparison { comparison })?,
-                Err(message) => on_event(ProjectActivityRefreshEvent::ComparisonError { message })?,
+                Err(message) => on_event(ProjectActivityRefreshEvent::ComparisonError {
+                    managed_cloud_status: cloud_status_for(
+                        &state.config,
+                        local_project_id,
+                        storage_id,
+                    ),
+                    message,
+                })?,
             }
         }
         Err(message) => {
@@ -1471,7 +1492,10 @@ pub(super) fn refresh_project_activity_with_progress(
                     storage_id, message
                 )],
             )?;
-            on_event(ProjectActivityRefreshEvent::ComparisonError { message })?;
+            on_event(ProjectActivityRefreshEvent::ComparisonError {
+                managed_cloud_status: cloud_status_for(&state.config, local_project_id, storage_id),
+                message,
+            })?;
         }
     }
     mallard_infrastructure::sync_metrics::log_operation_delta("refresh", &metrics_before);
@@ -1721,7 +1745,7 @@ pub(super) fn remove_project_link_with_repository(
     storage_id: &StorageId,
 ) -> Result<bool, String> {
     let _host_operation = repository.acquire_host_operation()?;
-    repository.mutate_config(|config| {
+    let removed = repository.mutate_config(|config| {
         let before = config.links.len();
         config.links.retain(|link| {
             &link.local_project_id != local_project_id || &link.storage_id != storage_id
@@ -1729,7 +1753,22 @@ pub(super) fn remove_project_link_with_repository(
         // Scope bases live on the link itself and are removed with it.
         let removed = before != config.links.len();
         Ok(removed)
-    })
+    })?;
+    if removed {
+        if let Some(storage) = repository
+            .load_config()?
+            .storages
+            .iter()
+            .find(|storage| &storage.id == storage_id)
+        {
+            if storage.provider
+                == mallard_infrastructure::storage_providers::managed_cloud::provider_key()
+            {
+                ConfiguredObjectStore::forget(storage_id);
+            }
+        }
+    }
+    Ok(removed)
 }
 
 pub(super) fn format_mb(bytes: u64) -> String {
@@ -7419,6 +7458,10 @@ fn build_thread_sync_comparison(
         .map(|candidate| discovery.capture_bytes_of(&candidate.resource_id))
         .fold(0_u64, u64::saturating_add);
     Ok(ThreadSyncComparison {
+        managed_cloud_status: link
+            .managed_cloud_repository_id
+            .as_ref()
+            .and_then(|_| engine.store().managed_cloud()?.status(&link.bundle_id)),
         project_id: local_project_id.clone(),
         storage_id: storage_id.clone(),
         storage_name,
@@ -13891,6 +13934,16 @@ fn storage_engine_from_state(
         .cloned()
         .ok_or_else(|| format!("unknown storage '{}'", storage_id))?;
     validate_config_storage_isolation(repository, config, &machine.bindings, &machine.profiles)?;
+    let store = ConfiguredObjectStore::shared(&storage)?;
+    if let Some(cloud) = store.managed_cloud() {
+        for link in config
+            .links
+            .iter()
+            .filter(|link| link.storage_id == *storage_id)
+        {
+            cloud.set_pin(&link.bundle_id, link.managed_cloud_repository_id.as_deref())?;
+        }
+    }
     let engine = engine_for_storage_config(&storage)?;
     Ok((storage, engine))
 }
@@ -14086,6 +14139,32 @@ fn deduplicated_local_alias(
     }
 }
 
+fn cloud_link_id(storage: &StorageConfig, bundle: &BundleId) -> Result<Option<String>, String> {
+    let store = ConfiguredObjectStore::shared(storage)?;
+    store
+        .managed_cloud()
+        .map(|cloud| cloud.resolve_repository(bundle))
+        .transpose()
+}
+
+fn cloud_status_for(
+    config: &SyncConfig,
+    project_id: &LocalProjectId,
+    storage_id: &StorageId,
+) -> Option<mallard_infrastructure::managed_cloud::client::ManagedCloudStatus> {
+    let link = config
+        .links
+        .iter()
+        .find(|link| &link.local_project_id == project_id && &link.storage_id == storage_id)?;
+    link.managed_cloud_repository_id.as_ref()?;
+    let storage = config
+        .storages
+        .iter()
+        .find(|storage| &storage.id == storage_id)?;
+    let store = ConfiguredObjectStore::shared(storage).ok()?;
+    store.managed_cloud()?.status(&link.bundle_id)
+}
+
 pub(super) fn save_project_link_with_repository(
     repository: &LocalStateRepository,
     request: SaveProjectLinkRequest,
@@ -14096,7 +14175,7 @@ pub(super) fn save_project_link_with_repository(
     // first push. Re-saving an existing link changes only user intent and
     // publishes nothing; a project with no active binding has no replica to
     // stamp the claim with and stays discoverable through sibling detection.
-    {
+    let managed_cloud_repository_id = {
         let config = repository.load_config()?;
         let project = config
             .project(&request.local_project_id)
@@ -14118,9 +14197,21 @@ pub(super) fn save_project_link_with_repository(
                 .active_for(&request.local_project_id)
             {
                 publish_registration_claim(repository, &storage, &project, &binding.replica_id)?;
+                cloud_link_id(&storage, &project.bundle_id)?
+            } else {
+                None
             }
+        } else {
+            config
+                .links
+                .iter()
+                .find(|link| {
+                    link.local_project_id == request.local_project_id
+                        && link.storage_id == request.storage_id
+                })
+                .and_then(|link| link.managed_cloud_repository_id.clone())
         }
-    }
+    };
     repository.mutate_config(|config| {
         let bundle_id = config
             .project(&request.local_project_id)
@@ -14144,6 +14235,7 @@ pub(super) fn save_project_link_with_repository(
             return Ok(existing.clone());
         }
         let link = ProjectStorageLink {
+            managed_cloud_repository_id: managed_cloud_repository_id.clone(),
             local_project_id: request.local_project_id.clone(),
             storage_id: request.storage_id.clone(),
             bundle_id,
@@ -14268,6 +14360,12 @@ fn connect_project_to_remote_bundle_guarded(
     }
     let remote_recipe = machine_local_recipe_from_manifest(&remote.manifest)?;
     let new_bundle_id = request.bundle_id.clone();
+    let storage = config
+        .storages
+        .iter()
+        .find(|storage| storage.id == request.storage_id)
+        .ok_or("Storage is unavailable")?;
+    let managed_cloud_repository_id = cloud_link_id(storage, &new_bundle_id)?;
     repository.mutate_project_bundle(&request.local_project_id, config.revision, |config| {
         let project = config
             .projects
@@ -14292,6 +14390,7 @@ fn connect_project_to_remote_bundle_guarded(
             .filter(|link| link.local_project_id == request.local_project_id)
         {
             link.bundle_id = new_bundle_id.clone();
+            link.managed_cloud_repository_id = managed_cloud_repository_id.clone();
             link.recipe = None;
             link.pinned = request.pinned;
         }
@@ -14300,6 +14399,7 @@ fn connect_project_to_remote_bundle_guarded(
                 && link.storage_id == request.storage_id
         }) {
             config.links.push(ProjectStorageLink {
+                managed_cloud_repository_id: managed_cloud_repository_id.clone(),
                 local_project_id: request.local_project_id.clone(),
                 storage_id: request.storage_id.clone(),
                 bundle_id: new_bundle_id.clone(),
@@ -15344,6 +15444,7 @@ fn build_setup_transaction(
     let links = resolved_storage
         .as_ref()
         .map(|resolved| ProjectStorageLink {
+            managed_cloud_repository_id: None,
             local_project_id: local_project_id.clone(),
             storage_id: resolved.id.clone(),
             bundle_id: bundle_id.clone(),
@@ -15696,7 +15797,7 @@ pub(super) fn finalize_project_setup_with_repository(
     }
 
     let result = (|| {
-        let transaction = build_setup_transaction(repository, &draft)?;
+        let mut transaction = build_setup_transaction(repository, &draft)?;
         // Registration claim before any local record exists (D1): a storage
         // that cannot be written fails Finish with nothing to recover, and
         // an adopted existing repo already has a head so the claim no-ops.
@@ -15714,6 +15815,15 @@ pub(super) fn finalize_project_setup_with_repository(
                 &transaction.project,
                 &transaction.replica_id,
             )?;
+        }
+        for link in &mut transaction.links {
+            let config = repository.load_config()?;
+            let storage = config
+                .storages
+                .iter()
+                .find(|storage| storage.id == link.storage_id)
+                .ok_or("Storage is unavailable")?;
+            link.managed_cloud_repository_id = cloud_link_id(storage, &link.bundle_id)?;
         }
         repository.save_setup_transaction(&transaction)?;
         apply_setup_transaction(repository, &transaction).map(|()| transaction)
@@ -16140,6 +16250,7 @@ mod tests {
 
     fn continuity_link(bases: Vec<ScopeBase>) -> ProjectStorageLink {
         ProjectStorageLink {
+            managed_cloud_repository_id: None,
             local_project_id: LocalProjectId::parse("project-a").unwrap(),
             storage_id: StorageId::parse("storage-a").unwrap(),
             bundle_id: BundleId::parse("0123456789abcdef0123456789abcdef").unwrap(),

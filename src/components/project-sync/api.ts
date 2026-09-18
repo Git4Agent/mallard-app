@@ -118,6 +118,8 @@ export function createActivityRefresh(
       // An error replaces its result, and a recovered result replaces its error.
       if (event.stage === "activity") events.delete("activity_error");
       if (event.stage === "activity_error") events.delete("activity");
+      if (event.stage === "comparison") events.delete("comparison_error");
+      if (event.stage === "comparison_error") events.delete("comparison");
       events.set(event.stage, event);
       listeners.forEach((listener) => listener(event));
     })).finally(() => { pending.delete(key); });
@@ -278,8 +280,6 @@ export const projectSyncApi = {
   /** The website page and release state of a project on a Mallard Cloud
    *  storage; null when the storage is not Mallard Cloud or nothing was
    *  pushed yet. */
-  getManagedCloudLink: (localProjectId: string, storageId: string) =>
-    invoke<ManagedCloudLink | null>("get_managed_cloud_link", { localProjectId, storageId }),
   requestManagedCloudRelease: (localProjectId: string, storageId: string, expectedRepositoryRevision: number) =>
     invoke<ManagedCloudLink>("request_managed_cloud_release", { localProjectId, storageId, expectedRepositoryRevision }),
   /** The project repositories the account belongs to on a Mallard Cloud

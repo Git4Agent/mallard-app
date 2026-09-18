@@ -336,6 +336,10 @@ fn shared_stores() -> Result<std::sync::MutexGuard<'static, SharedStoreTable>, S
 }
 
 impl ConfiguredObjectStore {
+    pub fn managed_cloud(&self) -> Option<&crate::managed_cloud::ManagedObjectStore> {
+        self.inner.managed_cloud()
+    }
+
     /// The process-shared store for `config`, opened through the production
     /// registry. The Mallard storage marker is verified exactly once, when
     /// the entry is created; two concurrent first opens produce one marker

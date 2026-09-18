@@ -464,8 +464,8 @@ test("thread status badges use the outlined Default 24px pixel family", () => {
       filled: true,
     },
     pending: {
-      light: "#6f6159",
-      dark: "#a79e90",
+      light: "#725f48",
+      dark: "#c8b998",
       glyph: "M11 7h2v5h4v2h-6Z",
     },
     conflict: {
@@ -475,8 +475,8 @@ test("thread status badges use the outlined Default 24px pixel family", () => {
       filled: true,
     },
     unavailable: {
-      light: "#6f6159",
-      dark: "#a79e90",
+      light: "#725f48",
+      dark: "#c8b998",
       glyph: "M7 11h10v3h-10Z",
     },
     // The three neutrals say "no verdict yet", so they take --text-3 rather
@@ -1047,11 +1047,11 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
   assert.match(chevrons, /transition: color 120ms ease;/);
   assert.doesNotMatch(chevrons, /transition:[^;]*\btransform\b/);
 
-  // A full-size button shifts one pixel while held. On the timeline's
-  // 22-26px icon buttons that reads as the icon jogging against its
-  // neighbours on every click, so they keep the colour feedback and drop the
-  // displacement. Full-size buttons still get the press.
-  assert.match(css, /\.btn:active:not\(:disabled\)\s*\{[^}]*transform: translate\(1px, 1px\);/s);
+  // A full-size button sinks two pixels, the depth of its shadow, while held.
+  // On the timeline's 22-26px icon buttons that reads as the icon jogging
+  // against its neighbours on every click, so they keep the colour feedback
+  // and drop the displacement. Full-size buttons still get the press.
+  assert.match(css, /\.btn:active:not\(:disabled\)\s*\{[^}]*transform: translate\(2px, 2px\);/s);
   const pressExempt = css.match(/\.sync-history-thread-actions \.sync-history-launch-action:active[\s\S]*?\{[^}]*\}/)?.[0] ?? "";
   assert.match(pressExempt, /transform: none;/);
   for (const selector of [
@@ -3346,4 +3346,25 @@ test("review search does not reintroduce a hidden activity row through its compa
   assert.match(matched, /aria-label="Sessions without an activity row"/);
   assert.doesNotMatch(matched, /Add Git history mapping/);
   assert.equal(props.selectedResourceIds.size, 2);
+});
+
+
+test("a shared comparison replays recovered Cloud status without its earlier error", async () => {
+  let emit!: (event: ProjectActivityRefreshEvent) => void;
+  let finish!: () => void;
+  const refresh = createActivityRefresh(async (_request, onEvent) => {
+    emit = onEvent;
+    await new Promise<void>((resolve) => { finish = resolve; });
+  });
+  const request = { localProjectId: "project-cloud", storageId: "storage-cloud", branch: null, windowDays: 30, bindingRevision: 1, refreshEpoch: 0 };
+  const pending = refresh(request, () => {});
+  await Promise.resolve();
+  emit({ stage: "comparison_error", message: "Access lost", managed_cloud_status: { repository_id: "repo_fixture", state: "inaccessible", link: null, message: "Access lost" } });
+  const recovered = { stage: "comparison", comparison: { project_id: "project-cloud" } } as ProjectActivityRefreshEvent;
+  emit(recovered);
+  const replayed: ProjectActivityRefreshEvent[] = [];
+  assert.equal(refresh(request, (event) => replayed.push(event)), pending);
+  assert.deepEqual(replayed, [recovered]);
+  finish();
+  await pending;
 });

@@ -1,0 +1,727 @@
+<!doctype html>
+<!-- Specimen: the "Choose a storage destination" picker on the project page.
+     Before + four directions, each rendered at 1, 2 and 5 available storages.
+     Every fact on a row already exists on StorageSummary (name, provider_label,
+     icon, summary[], connection.state) or on projectLinks. No new IPC.
+     Reused shipped grammars: .sync-path-menu.switcher (A),
+     .sync-storage-index-row (B and D), .landing-picker-card (C),
+     .sync-modal (D). -->
+<html lang="en" data-theme="light" data-dir="before" data-n="1" data-linked="off">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mallard — Link storage picker: directions</title>
+<link rel="stylesheet" href="/src/App.css">
+<style>
+/* ═══ specimen chrome — not part of the app ═══ */
+html, body { height: auto; overflow: auto; }
+body { background: var(--bg-0); padding: 18px 20px 80px; color: var(--text-1); font-family: var(--font-sans); }
+[hidden] { display: none !important; }
+.spec-wrap { max-width: 1060px; margin: 0 auto; }
+.spec-head { margin: 0 0 4px; font-family: var(--font-display); font-size: 20px; font-weight: 800; color: var(--text-0); }
+.spec-lede { margin: 0 0 14px; color: var(--text-2); font-size: var(--type-sm); line-height: 1.55; max-width: 82ch; }
+.spec-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0 0 10px; }
+.spec-title { font-family: var(--font-display); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); min-width: 78px; }
+.spec-btn { font-family: var(--font-display); font-size: 13px; font-weight: 700; color: var(--text-0); background: var(--button-bg); border: var(--box-border); border-radius: 999px; padding: 4px 12px; cursor: pointer; box-shadow: var(--shadow-control); }
+.spec-btn:active { transform: translate(1px,1px); box-shadow: none; }
+.spec-btn[aria-pressed="true"] { background: var(--button-primary-bg); color: var(--button-primary-text); }
+.spec-gap { width: 14px; }
+.spec-caption { margin: 8px 0 0; min-height: 18px; color: var(--text-2); font-family: var(--font-mono); font-size: var(--type-2xs); }
+
+/* The stage stands in for the project page's content column: the width at
+   which the shipped band's void is visible. The real column is wider still. */
+.spec-stage { padding: 18px 20px 26px; border: 1px dashed var(--border-mid); border-radius: var(--retro-panel-radius); background: var(--app-shell, var(--bg-0)); }
+.spec-stage-label { margin: 0 0 10px; color: var(--text-3); font-family: var(--font-mono); font-size: var(--type-2xs); letter-spacing: .04em; }
+
+.spec-note { margin: 14px 0 0; padding: 10px 14px; border: 1px dashed var(--border-mid); border-radius: 10px; color: var(--text-2); font-size: var(--type-sm); line-height: 1.55; }
+.spec-note b { color: var(--text-0); font-family: var(--font-display); }
+.spec-note code { font-family: var(--font-mono); font-size: .92em; color: var(--text-1); }
+
+.spec-panel { margin: 26px 0 0; padding: 16px 20px 18px; background: var(--bg-1); border: var(--box-border); border-radius: var(--retro-panel-radius); box-shadow: var(--shadow-card); color: var(--text-1); font-size: var(--type-sm); line-height: 1.55; }
+.spec-panel h2 { margin: 0 0 8px; font-family: var(--font-display); font-size: 17px; font-weight: 800; color: var(--text-0); }
+.spec-panel h3 { margin: 20px 0 6px; font-family: var(--font-display); font-size: 14px; font-weight: 800; color: var(--text-0); }
+.spec-panel p { margin: 0 0 8px; }
+.spec-panel ul { margin: 4px 0 0 18px; padding: 0; }
+.spec-panel li + li { margin-top: 5px; }
+.spec-panel b { color: var(--text-0); }
+.spec-panel code { font-family: var(--font-mono); font-size: .92em; color: var(--text-1); }
+.spec-table { width: 100%; border-collapse: collapse; margin: 6px 0 4px; font-size: var(--type-xs); }
+.spec-table th, .spec-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.spec-table th { font-family: var(--font-display); font-weight: 700; color: var(--text-0); }
+.spec-table tr.rec td { background: var(--success-soft); }
+
+/* ═══ specimen-local rules: what each direction would need in App.css ═══
+   Prefixed `sl-` so nothing here is mistaken for shipped grammar. */
+
+/* B — the band's own measure. A destination list is a column of choices, not
+   a bar: capping it keeps the rows, the heading and the dismiss in one reach
+   instead of flinging the ✕ to the far edge of a 1600px card. */
+.sl-band { max-width: 560px; }
+/* C's measure is its content's: exactly as many columns as there are cards,
+   capped at three. The head inherits it, so Cancel still lands near the
+   choices instead of at the card's far edge. */
+.sl-band.wide { max-width: calc(var(--cols) * 272px + (var(--cols) - 1) * 12px); }
+.sl-band-head { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; }
+.sl-band-head h3 { margin: 0; font-family: var(--font-display); font-size: var(--type-lg); font-weight: var(--weight-bold); color: var(--text-0); }
+.sl-band-count { color: var(--text-3); font-family: var(--font-mono); font-size: var(--type-2xs); font-variant-numeric: tabular-nums; }
+.sl-band-head .sl-verb { margin-left: auto; }
+.sl-verb { min-height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 0 9px; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--text-2); font: inherit; font-size: var(--type-xs); cursor: pointer; }
+.sl-verb:hover { background: var(--bg-hover); color: var(--text-0); }
+.sl-verb > svg { flex: 0 0 auto; }
+
+/* The rows sit in one box so the shipped row's hairline reads as a divider
+   rather than a floating underline. */
+.sl-rowbox { margin: 0; padding: 0; list-style: none; overflow: hidden; border: var(--box-border); border-radius: var(--retro-panel-radius-inner); background: var(--surface-row); box-shadow: var(--shadow-control); }
+.sl-rowbox > li { display: block; }
+.sl-rowbox .sync-storage-index-row { background: transparent; }
+.sl-rowbox .sync-storage-index-row:hover:not(:disabled) { background: var(--surface-row-hover); }
+/* The mark tile: the provider glyph on paper, the box grammar at row scale. */
+.sl-mark { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border: 2px solid var(--ink-line); border-radius: 8px; background: var(--bg-3); color: var(--text-0); }
+.sl-state { display: inline-flex; align-items: center; gap: 4px; font-size: var(--type-2xs); color: var(--text-3); white-space: nowrap; }
+.sl-state.ok { color: var(--success-text); }
+.sl-state.warn { color: var(--warning-text); }
+.sl-linked { color: var(--text-3); font-size: var(--type-2xs); white-space: nowrap; }
+
+/* C — a destination card is a fixed-width object, never a stretched one.
+   `.landing-picker-grid` is auto-fill/1fr, which at n=1 stretches one card
+   across the whole card width and makes the void worse than Before. */
+.sl-grid { grid-template-columns: repeat(var(--cols), minmax(0, 272px)); justify-content: start; max-width: 100%; }
+.sl-grid .landing-picker-card { padding: 11px 13px 11px; gap: 4px; }
+.sl-grid .landing-picker-card-title > svg { width: 16px; height: 16px; padding: 7px; border-radius: 10px; margin-right: 2px; }
+.sl-grid .landing-picker-card-title > strong { font-size: var(--type-lg); }
+.sl-grid .landing-picker-card-location { font-family: var(--font-mono); font-size: var(--type-2xs); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sl-grid .landing-picker-card[aria-disabled="true"] { opacity: .55; cursor: default; box-shadow: none; }
+
+/* D — the app's shipped modal, at destination scale. `.sync-modal` is
+   min(1040px, …) for review sheets; a picker takes a narrower measure, the
+   same way `.sync-binding-dialog` already narrows it to 720px. */
+.sl-link-dialog { width: min(520px, 100vw - 72px); }
+.sl-link-dialog .sync-modal-body { padding: 14px 18px 18px; }
+.sl-link-dialog .sync-modal-footer > span { font-family: var(--font-mono); font-size: var(--type-2xs); }
+/* Specimen only: a real dialog would be `showModal()` + `::backdrop`, which
+   would swallow the toggle bar above. Here the scrim is drawn over the stage
+   so the directions stay switchable. */
+.sl-modal-stage { position: relative; min-height: 430px; }
+/* The shipped `.sync-modal::backdrop` is `backdrop-filter: blur(8px)` with no
+   colour at all — a tinted scrim off `--text-0` would be cream in dark mode
+   and lighten the page instead of dimming it. Same treatment here. */
+.sl-scrim { position: absolute; inset: 0; border-radius: var(--retro-panel-radius); backdrop-filter: blur(8px); }
+.sl-link-dialog[open] { position: absolute; top: 46px; left: 50%; transform: translateX(-50%); margin: 0; z-index: 2; }
+
+/* A — the menu hangs off the trigger it was opened from. `.project-storage-card`
+   clips (overflow: hidden), so the menu cannot live inside it: it is portalled
+   and placed against the trigger's rect, exactly as the app's TopLayer already
+   does for the session debug popover. */
+.sl-anchor { position: relative; display: inline-flex; align-items: center; gap: 2px; }
+.sl-menu { position: fixed; top: 0; left: 0; width: 320px; max-height: none; }
+.sl-menu .sync-path-menu-scroll { max-height: 238px; }
+</style>
+</head>
+<body>
+<div class="spec-wrap">
+  <h1 class="spec-head">Link storage — four directions on "which destination?"</h1>
+  <p class="spec-lede">
+    The shipped picker is a full-bleed band holding wrap-flow pills. With one
+    available storage — the normal case, since everything already linked is
+    filtered out — the band is ~95% empty, the pill carries no fact you could
+    choose on, and the dismiss ✕ sits a screen-width away from it. Below:
+    the band as it ships, then four directions. Switch the storage count
+    first; <b>n = 1</b> is the case that decides this.
+  </p>
+
+  <div class="spec-bar">
+    <span class="spec-title">Direction</span>
+    <button class="spec-btn" data-set="dir" data-val="before" aria-pressed="true">Before</button>
+    <button class="spec-btn" data-set="dir" data-val="a" aria-pressed="false">A · Anchored menu</button>
+    <button class="spec-btn" data-set="dir" data-val="b" aria-pressed="false">B · Fact rows</button>
+    <button class="spec-btn" data-set="dir" data-val="c" aria-pressed="false">C · Card grid</button>
+    <button class="spec-btn" data-set="dir" data-val="d" aria-pressed="false">D · Modal dialog</button>
+  </div>
+  <div class="spec-bar">
+    <span class="spec-title">Storages</span>
+    <button class="spec-btn" data-set="n" data-val="1" aria-pressed="true">1</button>
+    <button class="spec-btn" data-set="n" data-val="2" aria-pressed="false">2</button>
+    <button class="spec-btn" data-set="n" data-val="5" aria-pressed="false">5</button>
+    <span class="spec-gap"></span>
+    <span class="spec-title">Linked shown</span>
+    <button class="spec-btn" data-set="linked" data-val="off" aria-pressed="true">Off</button>
+    <button class="spec-btn" data-set="linked" data-val="on" aria-pressed="false">On</button>
+    <span class="spec-gap"></span>
+    <span class="spec-title">Theme</span>
+    <button class="spec-btn" data-set="theme" data-val="light" aria-pressed="true">Light</button>
+    <button class="spec-btn" data-set="theme" data-val="dark" aria-pressed="false">Dark</button>
+  </div>
+
+  <div class="spec-stage sync-project-workspace-page">
+    <p class="spec-stage-label">project page · content column · HorrorGame</p>
+    <div class="profile-links-list sync-combined-settings-panel" id="stage-flow">
+      <article class="profile-link-card sync-project-link-card">
+        <div class="profile-link-connections">
+          <section class="project-storage-card project-storage-card-non-git" id="stage-card" aria-label="HorrorGame storage">
+            <!-- filled by script -->
+          </section>
+        </div>
+      </article>
+    </div>
+  </div>
+  <p class="spec-caption" id="caption"></p>
+
+  <div class="spec-note" id="dirnote"></div>
+
+  <div class="spec-panel">
+    <h2>What is wrong, by the book</h2>
+    <p>
+      Findings are against the shipped band at <code>ProjectLinksWorkspace.tsx:3048–3080</code>
+      and <code>App.css:4842–4890</code>. Two things it already gets right, and which every
+      direction keeps: the trigger carries <code>aria-expanded</code> / <code>aria-controls</code>,
+      and focus rings come from the app's own <code>:focus-visible</code> rules.
+    </p>
+    <table class="spec-table">
+      <thead>
+        <tr><th style="width:26%">Standard</th><th style="width:37%">What it asks for</th><th>Where the band fails</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>WCAG 2.1 <b>1.3.1</b> Info and Relationships (A)</td>
+          <td>Grouping conveyed visually is conveyed in the markup.</td>
+          <td>A set of sibling <code>&lt;button&gt;</code>s in a bare <code>&lt;div&gt;</code>. Not a list, no group, no owner.</td>
+        </tr>
+        <tr>
+          <td>WCAG 2.1 <b>2.4.6</b> Headings and Labels (AA)</td>
+          <td>Groups get descriptive headings.</td>
+          <td>"Choose a storage destination" is a <code>&lt;span&gt;</code>. Nothing labels the group; a screen reader reaches the pills with no context.</td>
+        </tr>
+        <tr>
+          <td>WCAG 2.1 <b>2.4.3</b> Focus Order (A)</td>
+          <td>Focus follows meaning when content appears and disappears.</td>
+          <td>Opening does not move focus into the band; ✕ destroys the focused subtree with no return contract, dropping focus to <code>&lt;body&gt;</code>.</td>
+        </tr>
+        <tr>
+          <td>WCAG 2.1 <b>2.5.8</b> Target Size, Minimum (AA)</td>
+          <td>24 × 24 CSS px.</td>
+          <td>Pills are 36px tall — fine. The dismiss <code>.sync-history-icon-action</code> is fine too; its <i>distance</i> is the problem, not its size.</td>
+        </tr>
+        <tr>
+          <td>WAI-ARIA APG — <b>Menu</b> pattern</td>
+          <td>A list of immediate commands is a menu hung off its trigger.</td>
+          <td>A destination list rendered as free-floating pills matches no pattern; the app already ships the right one (<code>.sync-path-menu.switcher</code>).</td>
+        </tr>
+        <tr>
+          <td>Apple HIG (macOS) — <b>Pop-up buttons</b></td>
+          <td>Choosing one of a few appears near the control that opens it.</td>
+          <td>The trigger is in the section head; the choices appear in a band at the card's foot, far below.</td>
+        </tr>
+        <tr>
+          <td>Nielsen <b>#6</b> Recognition rather than recall</td>
+          <td>Show what you need to choose with.</td>
+          <td>The pill shows a name and a cloud. Two R2 buckets, or two Dropbox folders, are indistinguishable.</td>
+        </tr>
+        <tr>
+          <td>Nielsen <b>#8</b> Aesthetic and minimalist design</td>
+          <td>Every unit of screen competes with the rest.</td>
+          <td>A full-width band for one 160px pill. The empty 1400px is the loudest thing on the page.</td>
+        </tr>
+        <tr>
+          <td>Fitts's law</td>
+          <td>Pointer cost rises with distance.</td>
+          <td>Choice at the left edge, dismiss at the right edge of the same 52px row — the two most likely next clicks are maximally far apart.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>What is <i>not</i> wrong</h3>
+    <p>
+      The pills are not a broken listbox. Clicking links immediately and the act
+      is reversible, so <code>&lt;ul&gt;&nbsp;&gt;&nbsp;&lt;li&gt;&nbsp;&gt;&nbsp;&lt;button&gt;</code>
+      is the correct shape — APG's Listbox and Radio Group patterns are for
+      select-then-submit, and adding a confirm step here would be friction on a
+      reversible action. No direction below introduces one.
+    </p>
+
+    <h3>One hard constraint on the facts</h3>
+    <p>
+      A row may only carry what <code>StorageSummary</code> already holds:
+      <code>name</code>, <code>provider_label</code>, <code>icon</code>,
+      <code>summary[]</code>, <code>connection?</code>, plus <code>projectLinks</code>
+      for "already linked". The identifier line is <code>summary[0]</code>, which
+      is the provider's own first fact — Bucket for R2, Folder for Dropbox and
+      local, Account for Managed Cloud. Nothing here scans, counts sessions, or
+      reads sizes, per <code>LandingPicker</code>'s house rule.
+    </p>
+    <p>
+      <b>Note on the state column:</b> <code>connection</code> is runtime-only and
+      absent until this process has made a request to that storage, so on a cold
+      launch most rows have <i>no</i> state at all. That is why none of the
+      directions lean on it as the differentiator — it is a bonus column, and the
+      identifier line does the real work.
+    </p>
+
+    <h3>The directions</h3>
+    <table class="spec-table">
+      <thead>
+        <tr><th style="width:16%">Direction</th><th style="width:30%">Shape</th><th style="width:27%">Reuses</th><th>Cost / risk</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><b>A · Anchored menu</b></td>
+          <td>The band is deleted. The Link icon button opens the app's switcher menu: one-line targets, name + identifier, Add storage as the footer verb.</td>
+          <td><code>.sync-path-menu.switcher</code>, <code>-item</code>, <code>-copy</code>, <code>-foot</code>, <code>-verb</code>, <code>-tail</code>, <code>-search</code> — all shipped, plus <code>menuKeyboard.ts</code> for arrows only (see Appwise below: Escape and focus-return are <i>not</i> shared).</td>
+          <td>Lowest in CSS (~0 new rules), highest in behaviour code: the Escape / outside-click / focus-return contract is duplicated in two components already, so A either adds a third copy or forces that refactor first. Removes a whole layout region and the void with it, and answers the HIG proximity point directly. Risk: a menu is transient — nothing on the page says a destination can be added, which matters on the empty project.</td>
+        </tr>
+        <tr>
+          <td><b>B · Fact rows</b></td>
+          <td>The band stays but takes a measure (560px): real <code>&lt;h3&gt;</code> + count + Add verb + Cancel, then a boxed column of rows — mark, name, identifier, state, chevron.</td>
+          <td><code>.sync-storage-index-row</code> / <code>-copy</code> / <code>-warning</code> / <code>-open</code>, the Storages index grammar.</td>
+          <td>Medium. ~7 new rules (<code>.sl-band*</code>, <code>.sl-rowbox</code>, <code>.sl-mark</code>, <code>.sl-state</code>). Keeps the picker persistent and scannable; the same row grammar then appears in two places, which is a feature. Risk: still a mode inside the card.</td>
+        </tr>
+        <tr class="rec">
+          <td><b>D · Modal dialog</b> <i>(recommended)</i></td>
+          <td>A real <code>&lt;dialog&gt;</code> over a scrim: eyebrow + title + purpose line, B's rows in the body, Add storage and Cancel in the footer.</td>
+          <td><code>.sync-modal</code> / <code>-header</code> / <code>-body</code> / <code>-footer</code>, <code>.sync-eyebrow</code>, and B's row grammar — the sheet the repo chooser and the binding editor already use.</td>
+          <td>Low-to-medium: one width rule (<code>.sl-link-dialog</code>), like <code>.sync-binding-dialog</code>'s existing 720px. Buys the whole APG Modal Dialog contract from the platform — focus in, Esc out, focus restored, backdrop inert — instead of hand-rolling 2.4.3. Risk: it halts the page for a one-click, reversible choice, which HIG reserves for a decision the user must settle before continuing. Grows well if linking ever asks a second question (which branch, which profile).</td>
+        </tr>
+        <tr>
+          <td><b>C · Card grid</b></td>
+          <td>Same head as B, then one fixed-width card per destination in the Projects/Catalog landing grammar.</td>
+          <td><code>.landing-picker-card</code> and its title/location/detail parts.</td>
+          <td>Highest. The grid must be re-capped (<code>minmax(248px, 300px)</code> + <code>justify-content: start</code>) — the shipped <code>1fr</code> stretches a lone card across the full width and makes n=1 <i>worse</i> than Before. Weightiest treatment for the smallest decision. Best only if this list is expected to grow past ~6.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Appwise: does each direction fit what the app already does?</h3>
+    <p>
+      Checked against the shipped code, not against taste. The question that
+      decides it is not CSS — it is which direction inherits a behaviour
+      contract the app already keeps, and which one adds a fresh copy of it.
+    </p>
+    <table class="spec-table">
+      <thead>
+        <tr><th style="width:14%">Direction</th><th style="width:43%">Precedent in the app</th><th>Verdict</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><b>A</b></td>
+          <td>
+            <code>.sync-path-menu</code> has exactly two consumers:
+            <code>SyncPathBar.tsx</code> and <code>StorageCatalogPage.tsx</code>.
+            The keyboard half is shared (<code>menuKeyboard.ts</code>) — but
+            Escape, outside-click and focus-return are <b>not</b>: each consumer
+            hand-rolls its own listener pair
+            (<code>SyncPathBar.tsx:433–454</code>, <code>StorageCatalogPage.tsx:977–997</code>),
+            down to the same copy-pasted comment.
+          </td>
+          <td>
+            <b>Compatible, but adds the third copy.</b> A is the cheapest in CSS
+            and the most expensive in behaviour code — unless the contract is
+            first lifted into a shared hook, which is a refactor of two live
+            surfaces, not a mockup. <code>menuKeyboard.ts</code> covers arrows
+            only; it does <i>not</i> hand focus back, so A does not get 2.4.3 free.
+          </td>
+        </tr>
+        <tr>
+          <td><b>B</b></td>
+          <td>
+            <code>.sync-storage-index-row</code> is the Storages index row — the
+            same object (a storage) in the same shape. Nothing else in the app
+            renders a transient chooser as an in-card band, though.
+          </td>
+          <td><b>Compatible.</b> Right grammar for the object; the band itself has no precedent, so it invents one small pattern.</td>
+        </tr>
+        <tr>
+          <td><b>C</b></td>
+          <td>
+            <code>.landing-picker-card</code> is used by three <i>landings</i> —
+            Projects, Catalog, Storages — each a full page where the card is the
+            door to a destination.
+          </td>
+          <td>
+            <b>Mismatch.</b> It borrows a page-level grammar for a transient
+            in-card mode, so the picker reads as heavy as a landing page. Also
+            the only direction that needs a shipped rule worked around
+            (<code>.landing-picker-grid</code>'s <code>1fr</code>).
+          </td>
+        </tr>
+        <tr>
+          <td><b>D</b></td>
+          <td>
+            <code>BundleConnectionDialog.tsx:38–42</code> and
+            <code>ProjectBindingEditor.tsx:90–94</code> both open a native
+            <code>&lt;dialog&gt;</code> with <code>showModal()</code>, carrying
+            the same comment: <i>supplies focus trap, Escape, inert</i>.
+            <code>ProjectBindingEditor</code> opens from this very page, from the
+            same card head ("Set up project").
+          </td>
+          <td>
+            <b>Strongest fit.</b> Zero new contract code — the platform supplies
+            what A would hand-roll. And the app already answers the neighbouring
+            question, <i>"which remote repo is this project?"</i>, with a modal
+            list; answering <i>"which storage?"</i> the same way is the
+            consistent move rather than a new one.
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      One thing D should <b>not</b> copy from <code>BundleConnectionDialog</code>:
+      its <code>role="radiogroup"</code> + confirm button. That shape is right for
+      an identity decision that must be committed. Linking a storage is one click
+      and reversible, so D keeps one-click rows — the same reason none of the
+      directions add a confirm step.
+    </p>
+
+    <h3>Implementation path, per direction</h3>
+    <p>All four start by deleting the same thing: the picker block at
+      <code>ProjectLinksWorkspace.tsx:3048–3080</code> and the
+      <code>.storage-link-picker*</code> rules at <code>App.css:4842–4890</code>
+      (the <code>storage-link-reveal</code> keyframe goes with them).</p>
+    <ul>
+      <li>
+        <b>A</b> — lift the Escape / outside-click / focus-return pair out of
+        <code>SyncPathBar</code> and <code>StorageCatalogPage</code> into one hook
+        beside <code>menuKeyboard.ts</code> and adopt it in all three call sites;
+        mount the menu through <code>TopLayer</code>, because
+        <code>.project-storage-card</code> is <code>overflow: hidden</code> and
+        would clip it. New CSS: one width override.
+      </li>
+      <li>
+        <b>B</b> — add <code>.sl-band*</code>, <code>.sl-rowbox</code>,
+        <code>.sl-mark</code>, <code>.sl-state</code> beside
+        <code>.sync-storage-index-row</code> at <code>App.css:4769</code>. On open,
+        focus the first row; on Cancel, hand focus back to the trigger — the one
+        piece this direction must write itself.
+      </li>
+      <li>
+        <b>C</b> — as B, plus the <code>--cols</code> cap as a <i>sibling</i>
+        class. Do not edit <code>.landing-picker-grid</code> in place: Projects,
+        Catalog and Storages all depend on its <code>1fr</code> behaviour.
+      </li>
+      <li>
+        <b>D</b> — a <code>&lt;StorageLinkDialog&gt;</code> modelled on
+        <code>BundleConnectionDialog</code>: <code>useRef&lt;HTMLDialogElement&gt;</code>
+        + <code>showModal()</code> on mount, <code>.sync-modal</code> header /
+        body / footer, B's <code>.sl-rowbox</code> rows in the body. New CSS: one
+        width rule next to <code>.sync-binding-dialog</code> at
+        <code>App.css:1508</code>. Nothing else — Escape, focus trap, focus
+        return and the inert backdrop come from the platform.
+      </li>
+    </ul>
+    <p>
+      B's rows are the shared part: <b>D is B's list inside the app's own sheet</b>,
+      so building B first and lifting it into a dialog later costs nothing twice.
+      That is the cheapest hedge if the choice is not obvious.
+    </p>
+
+    <h3>Two behaviour changes, offered separately</h3>
+    <p>
+      Both are independent of A/B/C — take either with any direction. Toggle
+      "Linked shown" above to see the first.
+    </p>
+    <ul>
+      <li>
+        <b>Show already-linked storages, inert.</b> Today <code>availableStorages</code>
+        filters them out, so the list shrinks as you link and at n=0 the picker
+        cannot open at all. Showing them greyed with "Linked" answers Nielsen #6
+        and explains the shrinking list. The data is already in hand
+        (<code>projectLinks</code>) — no new call.
+      </li>
+      <li>
+        <b>Stop the label swap.</b> The same button reads "Link storage" with
+        candidates and "Add storage" without — one control, two verbs, decided by
+        state the user cannot see. Put <i>Add storage</i> in the picker's own head
+        (or the menu's footer, in A) and let the trigger keep one name, the way
+        the Catalog and Storages landings already do.
+      </li>
+    </ul>
+  </div>
+</div>
+
+<script>
+/* ── icons: the shipped 24-unit pixel shapes, lifted from src/components/Icons.tsx ── */
+const P = {
+  cloud: '<path fill="currentColor" d="M22 12v-1h-2V9h-1V8h-1V7h-3v1h-1V6h-1V5H8v1H7v1H6v1H5v3H2v1H1v5h1v1h1v1h2v1h14v-1h2v-1h1v-1h1v-5h-1Zm0 4h-1v1h-1v1h-2v1H6v-1H4v-1H3v-1H2v-3h1v-1h3V9h1V8h1V7h1V6h3v1h1v2h3V8h1v1h1v1h1v2h2v1h1v3Z"/>',
+  drive: '<path fill="currentColor" d="M3 2h18v2H3ZM3 7h18v2H3ZM1 4h2v3H1ZM21 4h2v3h-2ZM19 9h2v11h-2ZM3 9h2v11H3ZM5 20h14v2H5ZM9 11h6v2H9Z"/>',
+  folder: '<path fill="currentColor" d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"/>',
+  link: '<path fill="currentColor" d="M4 6h7v2H4zm0 10h7v2H4zM2 8h2v8H2zm18-2h-7v2h7zm0 10h-7v2h7zm2-8h-2v8h2zM7 11h10v2H7z"/>',
+  plus: '<path fill="currentColor" d="M13 11h7v2h-7v7h-2v-7H4v-2h7V4h2v7Z"/>',
+  x: '<path fill="currentColor" d="M7 19H5V17H7V19ZM19 19H17V17H19V19ZM9 15V17H7V15H9ZM17 17H15V15H17V17ZM11 15H9V13H11V15ZM15 15H13V13H15V15ZM13 13H11V11H13V13ZM11 11H9V9H11V11ZM15 11H13V9H15V11ZM9 9H7V7H9V9ZM17 9H15V7H17V9ZM7 7H5V5H7V7ZM19 7H17V5H19V7Z"/>',
+  chevron: '<path fill="currentColor" d="M16 13v-2h-2v2h2Zm-2-2V9h-2v2h2Zm0 4v-2h-2v2h2Zm-2-6V7h-2v2h2Zm0 8v-2h-2v2h2ZM10 7V5H8v2h2Zm0 12v-2H8v2h2Z"/>',
+  check: '<path fill="currentColor" d="M19 9v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-2v-1H9v-1H8v-1H7v-1H6v-1h1v-1h1v1h1v1h1v1h2v-1h1v-1h1v-1h1v-1h1V9h1V8h1v1h1Z"/>',
+  alert: '<g fill="currentColor"><path d="M14 11v3h-1v3h-2v-3h-1v-3h4Z"/><path d="M11 18h2v2h-2Z"/><path d="M22 20v-2h-1v-2h-1v-2h-1v-2h-1v-2h-1V8h-1V6h-1V4h-1V2h-1V1h-2v1h-1v2H9v2H8v2H7v2H6v2H5v2H4v2H3v2H2v2H1v2h1v1h20v-1h1v-2h-1ZM3 21v-1h1v-2h1v-2h1v-2h1v-2h1v-2h1V8h1V6h1V4h2v2h1v2h1v2h1v2h1v2h1v2h1v2h1v2h1v1H3Z"/></g>',
+  storage: '<path fill="currentColor" d="M6 7h4v2H6zm0 8h4v2H6zM2 5h2v14H2zm18 0h2v14h-2zM4 19h16v2H4zM4 3h16v2H4zm0 8h16v2H4z"/>',
+};
+const icon = (n, s = 14) =>
+  `<svg aria-hidden="true" focusable="false" fill="none" width="${s}" height="${s}" viewBox="0 0 24 24" shape-rendering="${s % 24 ? 'geometricPrecision' : 'crispEdges'}">${P[n]}</svg>`;
+
+/* ── model: what a StorageSummary actually carries ──
+   `identifier` is summary[0] — the provider's own first fact.
+   `state` is connection?.state, and is undefined until this process has
+   talked to that storage, which is why most rows have none. */
+const ALL = [
+  { id: 'cloud',   name: 'Mallard Cloud',  icon: 'cloud',  provider: 'Managed Cloud', identifier: 'quhe1996 · mallard.cloud', state: 'connected' },
+  { id: 'dbx',     name: 'Team Dropbox',   icon: 'cloud',  provider: 'Dropbox',       identifier: 'Apps/Mallard',             state: 'reconnect' },
+  { id: 'backup',  name: 'Backup drive',   icon: 'drive',  provider: 'Local folder',  identifier: '/Volumes/Backup/mallard' },
+  { id: 'r2alt',   name: 'R2 mallard-eu',  icon: 'cloud',  provider: 'Cloudflare R2', identifier: 'mallard-eu-2024' },
+  { id: 'mirror',  name: 'Desk mirror',    icon: 'drive',  provider: 'Local folder',  identifier: '~/Mallard/mirror' },
+];
+/* Already linked to this project — the one in the path bar. Filtered out of
+   `availableStorages` today; shown inert when "Linked shown" is On. */
+const LINKED = { id: 'r2', name: 'R2 mallard-rika', icon: 'cloud', provider: 'Cloudflare R2', identifier: 'mallard-rika', state: 'connected', linked: true };
+
+const STATE = {
+  connected: { cls: 'ok',   ic: 'check', label: 'Connected' },
+  reconnect: { cls: 'warn', ic: 'alert', label: 'Reconnect' },
+};
+
+const root = document.documentElement;
+const card = document.getElementById('stage-card');
+const caption = document.getElementById('caption');
+const dirnote = document.getElementById('dirnote');
+
+const NOTES = {
+  before: '<b>Before.</b> One pill in a full-bleed band. Nothing on the pill tells two R2 buckets apart, and the dismiss ✕ is at the opposite edge from the only thing you can click. Raise the count to 5 and the band still spends its whole width on a wrap row.',
+  a: '<b>A · Anchored menu.</b> No band at all — the choices appear under the control that asked for them (Apple HIG), in the app\'s own switcher grammar. Add storage is the footer verb, so the trigger stops changing its name. At n=5 the list scrolls and gains the shipped filter field; at n=1 it is a small menu instead of an empty region.',
+  b: '<b>B · Fact rows.</b> The band keeps its place but takes a measure. A real <code>&lt;h3&gt;</code> owns the group, the count is stated, Add and Cancel sit at the head — so the dismiss is next to the choices, not a screen away. Rows are the Storages index grammar: mark, name, identifier, state.',
+  c: '<b>C · Card grid.</b> The Projects/Catalog landing card, at destination scale. Note the grid had to be re-capped: the shipped <code>minmax(280px, 1fr)</code> stretches a lone card to the full width, which at n=1 is worse than Before. The heaviest treatment for a one-click choice — worth it only if this list will grow.',
+  d: '<b>D · Modal dialog.</b> The app\'s own <code>.sync-modal</code>, narrowed to 520px, holding B\'s rows. A real <code>&lt;dialog&gt;.showModal()</code> brings the whole APG Modal Dialog contract for free — focus moves in, Esc closes, focus returns to the trigger, the rest of the page is inert — which is the a11y answer the band cannot give without hand-rolling it. Cost: it stops the page, and linking a storage is a small, reversible act. Best if this grows into a step that asks more than one question.',
+};
+
+function list() {
+  const n = Number(root.dataset.n);
+  const items = ALL.slice(0, n);
+  return root.dataset.linked === 'on' ? [LINKED, ...items] : items;
+}
+
+function heading(active) {
+  return `
+  <div class="sync-history-section-heading">
+    <h2>${icon('link', 14)}Storage</h2>
+    <span class="project-storage-heading-actions">
+      <span class="sync-history-heading-count" title="1 linked storage location">${icon('cloud', 12)}1</span>
+      <span class="sl-anchor">
+        <button type="button" class="sync-history-icon-action${active ? ' active' : ''}"${root.dataset.dir === 'd' ? '' : ` aria-expanded="${active}" aria-controls="link-picker"`} title="Link storage" aria-label="Link storage">${icon('link', 14)}</button>
+        ${root.dataset.dir === 'a' || root.dataset.dir === 'd' ? '' : `<button type="button" class="sync-history-icon-action" title="Add storage" aria-label="Add storage">${icon('plus', 14)}</button>`}
+      </span>
+    </span>
+  </div>`;
+}
+
+/* ── A — the shipped switcher menu, hung off the Link trigger ── */
+function menu() {
+  const items = list();
+  const filter = items.length > 4
+    ? '<input class="sync-path-menu-search" type="search" placeholder="Filter storages…" aria-label="Filter storages">'
+    : '';
+  return `
+  <div class="sync-path-menu switcher end sl-menu" id="link-picker" role="menu" aria-label="Link storage">
+    <p class="sync-path-menu-label" style="margin:0">Link storage</p>
+    ${filter}
+    <div class="sync-path-menu-scroll">
+      ${items.map((s) => {
+        const st = s.state ? STATE[s.state] : null;
+        return `
+      <button type="button" class="sync-path-menu-item" role="menuitem" ${s.linked ? 'aria-disabled="true"' : ''}>
+        ${icon(s.icon, 15)}
+        <span class="sync-path-menu-copy">
+          <span>${s.name}</span>
+          <small>${s.identifier}</small>
+        </span>
+        ${s.linked ? `<span class="sync-path-menu-check">${icon('check', 13)}</span>`
+          : st && st.cls === 'warn' ? `<span class="sl-state warn" style="margin-left:auto">${icon('alert', 11)}${st.label}</span>` : ''}
+      </button>`;
+      }).join('')}
+    </div>
+    <div class="sync-path-menu-foot">
+      <button type="button" class="sync-path-menu-tail" role="menuitem">${icon('plus', 13)}Add storage</button>
+    </div>
+  </div>`;
+}
+
+/* ── Before — as shipped ── */
+function before() {
+  return `
+  ${heading(true)}
+  <div id="link-picker" class="project-storage-card-footer">
+    <div class="storage-link-picker-heading">
+      <span>Choose a storage destination</span>
+      <button type="button" class="sync-history-icon-action" title="Cancel linking storage" aria-label="Cancel linking storage">${icon('x', 13)}</button>
+    </div>
+    <div class="storage-link-picker">
+      ${list().map((s) => `
+      <button type="button"${s.linked ? ' disabled' : ''}>${icon(s.icon, 15)}${s.name}${icon('chevron', 13)}</button>`).join('')}
+    </div>
+  </div>`;
+}
+
+function bandHead(items) {
+  const linked = items.filter((s) => s.linked).length;
+  const count = `${items.length - linked} available${linked ? ` · ${linked} linked` : ''}`;
+  return `
+  <div class="sl-band-head">
+    <h3 id="link-picker-title">Link a storage</h3>
+    <span class="sl-band-count">${count}</span>
+    <button type="button" class="sl-verb">${icon('plus', 12)}Add storage</button>
+    <button type="button" class="sl-verb">${icon('x', 12)}Cancel</button>
+  </div>`;
+}
+
+/* ── B — fact rows in the Storages index grammar ── */
+function rows() {
+  const items = list();
+  return `
+  ${heading(true)}
+  <div id="link-picker" class="project-storage-card-footer">
+    <div class="sl-band" role="group" aria-labelledby="link-picker-title">
+      ${bandHead(items)}
+      ${rowList(items)}
+    </div>
+  </div>`;
+}
+
+/* ── C — the landing card, re-capped ── */
+function cards() {
+  const items = list();
+  return `
+  ${heading(true)}
+  <div id="link-picker" class="project-storage-card-footer">
+    <div class="sl-band wide" style="--cols:${Math.min(items.length, 3)}" role="group" aria-labelledby="link-picker-title">
+      ${bandHead(items)}
+      <ul class="landing-picker-grid sl-grid">
+        ${items.map((s) => {
+          const st = s.state ? STATE[s.state] : null;
+          return `
+        <li>
+          <button type="button" class="landing-picker-card"${s.linked ? ' aria-disabled="true"' : ''} aria-label="Link ${s.name}">
+            <span class="landing-picker-card-title">
+              ${icon(s.icon, 16)}
+              <strong>${s.name}</strong>
+              ${s.linked ? `<span class="landing-picker-card-marks">${icon('check', 13)}</span>` : ''}
+            </span>
+            <span class="landing-picker-card-location">${s.identifier}</span>
+            <span class="sl-state ${s.linked ? '' : st ? st.cls : ''}">${
+              s.linked ? 'Already linked'
+                : st ? `${icon(st.ic, 11)}${st.label} · ${s.provider}` : s.provider}</span>
+          </button>
+        </li>`;
+        }).join('')}
+      </ul>
+    </div>
+  </div>`;
+}
+
+/* ── D — the shipped modal, at destination scale ── */
+function rowList(items) {
+  return `
+  <ul class="sl-rowbox">
+    ${items.map((s) => {
+      const st = s.state ? STATE[s.state] : null;
+      return `
+    <li>
+      <button type="button" class="sync-storage-index-row"${s.linked ? ' disabled' : ''} aria-label="Link ${s.name}">
+        <span class="sl-mark">${icon(s.icon, 13)}</span>
+        <span class="sync-storage-index-copy">
+          <strong>${s.name}</strong>
+          <small>${s.provider} · ${s.identifier}</small>
+        </span>
+        ${s.linked ? '<span class="sl-linked">Linked</span>'
+          : st ? `<span class="sl-state ${st.cls}">${icon(st.ic, 11)}${st.label}</span>` : '<span></span>'}
+        <span></span>
+        <span class="sync-storage-index-open">${icon(s.linked ? 'check' : 'chevron', 12)}</span>
+      </button>
+    </li>`;
+    }).join('')}
+  </ul>`;
+}
+
+function dialog() {
+  const items = list();
+  const linked = items.filter((s) => s.linked).length;
+  return `
+  <div class="sl-scrim"></div>
+  <dialog open class="sync-modal sl-link-dialog" aria-labelledby="link-dialog-title">
+    <header class="sync-modal-header">
+      <div>
+        <span class="sync-eyebrow">HorrorGame</span>
+        <h1 id="link-dialog-title">Link a storage</h1>
+        <p>Where this project's sessions are pushed and pulled. You can link more than one.</p>
+      </div>
+      <button type="button" class="btn btn-ghost" aria-label="Close">${icon('x', 13)}</button>
+    </header>
+    <div class="sync-modal-body">
+      ${rowList(items)}
+    </div>
+    <footer class="sync-modal-footer">
+      <span>${items.length - linked} available${linked ? ` · ${linked} linked` : ''}</span>
+      <div>
+        <button type="button" class="btn btn-ghost">${icon('plus', 13)}Add storage</button>
+        <button type="button" class="btn">Cancel</button>
+      </div>
+    </footer>
+  </dialog>`;
+}
+
+/* The portal: `.project-storage-card` clips, so A's menu is mounted at body
+   level and placed against the trigger — the app's TopLayer contract. */
+let portal = null;
+const stage = document.querySelector('.spec-stage');
+function mountMenu() {
+  portal?.remove();
+  portal = null;
+  stage.style.paddingBottom = '';
+  if (root.dataset.dir !== 'a') return;
+  const trigger = card.querySelector('.sl-anchor .sync-history-icon-action');
+  if (!trigger) return;
+  const host = document.createElement('div');
+  host.innerHTML = menu();
+  portal = host.firstElementChild;
+  document.body.appendChild(portal);
+  const r = trigger.getBoundingClientRect();
+  portal.style.top = `${Math.round(r.bottom + 6)}px`;
+  portal.style.left = `${Math.round(r.right - portal.offsetWidth)}px`;
+  /* Reserve the menu's height in the stage so it never covers the write-up. */
+  stage.style.paddingBottom = `${portal.offsetHeight + 34}px`;
+}
+
+let sheet = null;
+function mountDialog() {
+  sheet?.remove();
+  sheet = null;
+  stage.style.minHeight = '';
+  stage.classList.toggle('sl-modal-stage', root.dataset.dir === 'd');
+  if (root.dataset.dir !== 'd') return;
+  sheet = document.createElement('div');
+  sheet.style.display = 'contents';
+  sheet.innerHTML = dialog();
+  stage.appendChild(sheet);
+  /* Keep the whole sheet inside the stage so the scrim covers it and the
+     write-up below is never overlapped. */
+  const box = sheet.querySelector('dialog');
+  stage.style.minHeight = `${box.offsetHeight + 46 + 26}px`;
+}
+
+function render() {
+  const d = root.dataset.dir;
+  card.innerHTML = d === 'a' || d === 'd' ? heading(d === 'a') : d === 'b' ? rows() : d === 'c' ? cards() : before();
+  mountMenu();
+  mountDialog();
+  const names = { before: 'Before — shipped band', a: 'A — anchored menu', b: 'B — fact rows', c: 'C — card grid', d: 'D — modal dialog' };
+  caption.textContent = `${names[d]} · n=${list().length} · linked ${root.dataset.linked}`;
+  dirnote.innerHTML = NOTES[d];
+}
+window.addEventListener('scroll', () => { if (portal) mountMenu(); }, { passive: true });
+window.addEventListener('resize', () => { if (portal) mountMenu(); });
+
+document.querySelectorAll('.spec-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const set = btn.dataset.set;
+    root.dataset[set === 'theme' ? 'theme' : set] = btn.dataset.val;
+    document.querySelectorAll(`.spec-btn[data-set="${set}"]`).forEach((b) => {
+      b.setAttribute('aria-pressed', String(b === btn));
+    });
+    render();
+  });
+});
+render();
+</script>
+</body>
+</html>

@@ -52,6 +52,14 @@ the user chooses the exact format to operate on. Skill discovery is limited to
 only), and `<CLAUDE_CONFIG_DIR>/skills`; project-local skill directories are
 not scanned.
 
+Library inventory reads local provider files. Listing Skills or Plugins,
+linking storage, Push, Pull review, and skill Pull/Fork do not require a
+provider executable. Codex plugin presence uses local config or remote-install
+markers plus cached manifests; cache-only packages are not listed as installed.
+Remote plugin enablement remains unknown when it is absent from local config.
+Plugin installation or overwrite still runs the provider CLI after approval,
+with local state checked before and after execution. Schemas remain version 1.
+
 Library resources use a clean cutover: there is no backward compatibility,
 migration, legacy execution path, or parallel storage-wide catalog.
 
@@ -800,6 +808,12 @@ Install dependencies and run the explicitly gated target with:
 npm install
 MALLARD_RUN_LIVE_CLAUDE_AIMOCK_E2E=1 npm run test:live-claude-aimock-e2e
 ```
+
+Before the scenario starts, a native watcher preflight appends to a temporary
+file and requires a change event within five seconds. If events are unavailable,
+the test stops with a prerequisite error. On macOS, run it from a normal terminal
+outside the outer sandbox. Watch registration alone does not prove event delivery.
+The preflight starts no Claude model turns or mock server.
 
 The current native-format gate requires exactly Claude Code `2.1.266`,
 `@copilotkit/aimock` `1.39.0`, Node.js 20.15.0 or newer, and the mock model

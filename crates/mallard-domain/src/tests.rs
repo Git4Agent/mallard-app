@@ -342,6 +342,7 @@ fn machine_local_recipes_reject_portable_conversation_identities() {
         storages: vec![sample_storage()],
         projects: vec![project.clone()],
         links: vec![ProjectStorageLink {
+            managed_cloud_repository_id: None,
             local_project_id: project.local_project_id,
             storage_id: StorageId::parse("personal").unwrap(),
             bundle_id: project.bundle_id,
@@ -462,6 +463,7 @@ fn config_rejects_split_bundle_identity_and_duplicate_cells() {
         storages: vec![sample_storage()],
         projects: vec![project.clone()],
         links: vec![ProjectStorageLink {
+            managed_cloud_repository_id: None,
             local_project_id: project.local_project_id.clone(),
             storage_id: StorageId::parse("personal").unwrap(),
             bundle_id: BundleId::parse("11111111111111111111111111111111").unwrap(),
@@ -503,6 +505,7 @@ fn link_scope_bases_are_keyed_by_their_own_scope() {
         storages: vec![sample_storage()],
         projects: vec![project.clone()],
         links: vec![ProjectStorageLink {
+            managed_cloud_repository_id: None,
             local_project_id: project.local_project_id.clone(),
             storage_id: StorageId::parse("personal").unwrap(),
             bundle_id: bundle_id(),
@@ -2408,6 +2411,7 @@ fn conversation_checkpoints_validate_layout_witness_and_mapping() {
         storages: vec![sample_storage()],
         projects: vec![project.clone()],
         links: vec![ProjectStorageLink {
+            managed_cloud_repository_id: None,
             local_project_id: project.local_project_id.clone(),
             storage_id: StorageId::parse("personal").unwrap(),
             bundle_id: bundle_id(),
@@ -3120,6 +3124,7 @@ fn reshaped_documents_reject_unknown_and_retired_keys() {
     // A link without the checkpoint map fails closed.
     let project = sample_project();
     let link = ProjectStorageLink {
+        managed_cloud_repository_id: None,
         local_project_id: project.local_project_id.clone(),
         storage_id: StorageId::parse("personal").unwrap(),
         bundle_id: bundle_id(),
@@ -3475,4 +3480,26 @@ fn child_wire_stamp_is_required_and_off_rejects_children() {
         thread.wire_children = ConversationWireChildren::On;
         thread.validate().unwrap();
     }
+}
+
+#[test]
+fn cloud_repository_id_is_optional_and_omitted_when_absent() {
+    let value = serde_json::json!({
+        "local_project_id": "project-optional-cloud", "storage_id": "storage-cloud",
+        "bundle_id": "a".repeat(32), "scope_bases": {}, "conversation_checkpoints": {},
+        "pinned": true, "created_at": 1
+    });
+    let mut link: ProjectStorageLink = serde_json::from_value(value).unwrap();
+    assert!(link.managed_cloud_repository_id.is_none());
+    assert!(serde_json::to_value(&link)
+        .unwrap()
+        .get("managed_cloud_repository_id")
+        .is_none());
+    link.managed_cloud_repository_id = Some("repo_exact".into());
+    let encoded = serde_json::to_value(&link).unwrap();
+    assert_eq!(encoded["managed_cloud_repository_id"], "repo_exact");
+    assert_eq!(
+        serde_json::from_value::<ProjectStorageLink>(encoded).unwrap(),
+        link
+    );
 }

@@ -7,7 +7,7 @@
 //! | Engine key | Behaviour |
 //! | --- | --- |
 //! | `.mallard/_storage.json` | synthesized marker |
-//! | `_head.json` read | by-bundle head; etag is the commit id |
+//! | `_head.json` read | exact repository head when pinned, otherwise by bundle; etag is the commit id |
 //! | `_manifests/{rev}-{commit}.json` read | streamed manifest, digest checked |
 //! | `_objects/{sha}` read | streamed object, digest checked |
 //! | `_objects/{sha}` write | staged in memory |
@@ -133,6 +133,9 @@ struct Inner {
     account_id: String,
     /// Bundle → repository id, learned from heads, listings, and creates.
     repositories: Mutex<BTreeMap<BundleId, String>>,
+    /// Exact repository destinations from link metadata.
+    pinned: Mutex<BTreeMap<BundleId, String>>,
+    statuses: Mutex<BTreeMap<BundleId, super::client::ManagedCloudStatus>>,
     /// Objects written before their manifest, per bundle.
     staged: Mutex<BTreeMap<BundleId, BTreeMap<String, Bytes>>>,
     pending: Mutex<BTreeMap<BundleId, PendingUpload>>,
@@ -152,6 +155,8 @@ impl ManagedObjectStore {
                 runtime,
                 account_id,
                 repositories: Mutex::new(BTreeMap::new()),
+                pinned: Mutex::new(BTreeMap::new()),
+                statuses: Mutex::new(BTreeMap::new()),
                 staged: Mutex::new(BTreeMap::new()),
                 pending: Mutex::new(BTreeMap::new()),
                 listing: Mutex::new(None),
@@ -159,6 +164,59 @@ impl ManagedObjectStore {
         }
     }
 
+    pub fn set_pin(&self, bundle: &BundleId, id: Option<&str>) -> Result<(), String> {
+        if let Some(id) = id {
+            if id.is_empty()
+                || id.len() > 128
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+            {
+                return Err("Invalid Mallard Cloud repository ID.".to_string());
+            }
+            let previous = Self::lock(&self.inner.pinned)?.insert(bundle.clone(), id.to_owned());
+            if previous.as_deref() != Some(id) {
+                Self::lock(&self.inner.statuses)?.remove(bundle);
+            }
+            self.remember(bundle, id)
+        } else {
+            if Self::lock(&self.inner.pinned)?.remove(bundle).is_some() {
+                Self::lock(&self.inner.repositories)?.remove(bundle);
+            }
+            Self::lock(&self.inner.statuses)?.remove(bundle);
+            Ok(())
+        }
+    }
+    pub fn status(&self, bundle: &BundleId) -> Option<super::client::ManagedCloudStatus> {
+        let repository_id = Self::lock(&self.inner.pinned).ok()?.get(bundle)?.clone();
+        if let Some(health) = self
+            .inner
+            .client
+            .health()
+            .filter(|health| health.suspends())
+        {
+            return Some(super::client::ManagedCloudStatus {
+                repository_id,
+                state: if health.state == crate::storage_core::ConnectionState::PermissionDenied {
+                    super::client::ManagedCloudStatusState::Inaccessible
+                } else {
+                    super::client::ManagedCloudStatusState::SignInRequired
+                },
+                link: None,
+                message: Some(health.describe()),
+            });
+        }
+        Self::lock(&self.inner.statuses).ok()?.get(bundle).cloned()
+    }
+    pub fn resolve_repository(&self, bundle: &BundleId) -> Result<String, String> {
+        self.inner
+            .runtime
+            .block_on(self.repository_for(bundle))?
+            .ok_or_else(|| {
+                "Cloud repository is unavailable. Complete project setup before linking."
+                    .to_string()
+            })
+    }
     pub fn client(&self) -> &ManagedCloudClient {
         &self.inner.client
     }
@@ -177,6 +235,9 @@ impl ManagedObjectStore {
     /// The repository id for a bundle, from the table or the service.
     /// `None` when the account knows no repository for the bundle.
     async fn repository_for(&self, bundle_id: &BundleId) -> Result<Option<String>, String> {
+        if let Some(id) = Self::lock(&self.inner.pinned)?.get(bundle_id).cloned() {
+            return Ok(Some(id));
+        }
         if let Some(id) = Self::lock(&self.inner.repositories)?
             .get(bundle_id)
             .cloned()
@@ -246,11 +307,37 @@ impl ManagedObjectStore {
     }
 
     async fn head_bytes(&self, bundle_id: &BundleId) -> Result<Option<StoredMetadata>, String> {
-        let Some(answer) = self.inner.client.head_by_bundle(bundle_id.as_str()).await? else {
-            return Ok(None);
+        let pinned = Self::lock(&self.inner.pinned)?.get(bundle_id).cloned();
+        let head = if let Some(id) = pinned {
+            match self.inner.client.repository_head(&id).await {
+                Ok(answer) => {
+                    Self::lock(&self.inner.statuses)?.insert(
+                        bundle_id.clone(),
+                        super::client::ManagedCloudStatus {
+                            repository_id: id.clone(),
+                            state: super::client::ManagedCloudStatusState::Ready,
+                            link: Some(answer.link),
+                            message: None,
+                        },
+                    );
+                    answer.head
+                }
+                Err(error) => {
+                    let status = super::client::ManagedCloudStatus::failed(&id, &error);
+                    let message = status.message.clone().unwrap_or_else(|| error.message());
+                    Self::lock(&self.inner.statuses)?.insert(bundle_id.clone(), status);
+                    return Err(message);
+                }
+            }
+        } else {
+            // No Cloud status checks when the optional repository ID is absent.
+            let Some(answer) = self.inner.client.head_by_bundle(bundle_id.as_str()).await? else {
+                return Ok(None);
+            };
+            self.remember(bundle_id, &answer.repository_id)?;
+            answer.head
         };
-        self.remember(bundle_id, &answer.repository_id)?;
-        let Some(head) = answer.head else {
+        let Some(head) = head else {
             return Ok(None);
         };
         if head.bundle_id.as_deref() != Some(bundle_id.as_str()) || head.kind != "project" {
@@ -667,6 +754,10 @@ impl ManagedObjectStore {
 }
 
 impl ObjectStore for ManagedObjectStore {
+    fn managed_cloud(&self) -> Option<&ManagedObjectStore> {
+        Some(self)
+    }
+
     fn connection_health(&self) -> Option<ConnectionHealth> {
         self.inner.client.health()
     }
@@ -936,6 +1027,117 @@ mod stub_tests {
 
     fn engine(store: ManagedObjectStore) -> BundleEngine<ManagedObjectStore> {
         BundleEngine::open(store, StorageId::parse("storage-cloud").unwrap()).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pinned_status_uses_one_head_read_and_never_recreates_a_missing_repository() {
+        let stub = StubManagedCloud::start().await;
+        let (store, _) = store(&stub, "status-owner").await;
+        tokio::task::spawn_blocking({
+            let store = store.clone();
+            move || {
+                engine(store)
+                    .publish_registration(&identity(91), &origin(), 100)
+                    .unwrap()
+            }
+        })
+        .await
+        .unwrap();
+        let id = stub
+            .state
+            .lock()
+            .unwrap()
+            .repository_for_bundle(bundle(91).as_str())
+            .unwrap()
+            .id
+            .clone();
+        store.set_pin(&bundle(91), Some(&id)).unwrap();
+        stub.state.lock().unwrap().log.clear();
+        assert!(store.head_bytes(&bundle(91)).await.unwrap().is_some());
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, format!("/v1/repositories/{id}/head"));
+        let observed = store.status(&bundle(91)).unwrap();
+        assert_eq!(
+            observed.state,
+            super::super::client::ManagedCloudStatusState::Ready
+        );
+        assert_eq!(
+            observed.link.unwrap().release,
+            super::super::client::ReleaseState::NotPushed
+        );
+        stub.state.lock().unwrap().repositories.remove(&id);
+        assert!(store
+            .head_bytes(&bundle(91))
+            .await
+            .unwrap_err()
+            .contains("deleted or you no longer have access"));
+        assert_eq!(
+            store.status(&bundle(91)).unwrap().state,
+            super::super::client::ManagedCloudStatusState::Inaccessible
+        );
+        assert_eq!(
+            store.repository_for(&bundle(91)).await.unwrap().as_deref(),
+            Some(id.as_str())
+        );
+        assert!(!stub
+            .requests()
+            .iter()
+            .any(|request| request.method == "POST"));
+        // Removing optional metadata disables the new status path, even with a warm store.
+        store.set_pin(&bundle(91), None).unwrap();
+        assert!(store.status(&bundle(91)).is_none());
+        stub.state.lock().unwrap().log.clear();
+        assert!(store.head_bytes(&bundle(91)).await.unwrap().is_none());
+        assert!(stub.requests()[0].path.contains("/by-bundle/"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pinned_status_detects_privacy_access_loss_and_recovers() {
+        let stub = StubManagedCloud::start().await;
+        let (owner, _) = store(&stub, "private-owner").await;
+        let (contributor, _) = store(&stub, "contributor").await;
+        tokio::task::spawn_blocking({
+            let owner = owner.clone();
+            move || {
+                engine(owner)
+                    .publish_registration(&identity(92), &origin(), 100)
+                    .unwrap()
+            }
+        })
+        .await
+        .unwrap();
+        let id = stub
+            .state
+            .lock()
+            .unwrap()
+            .repository_for_bundle(bundle(92).as_str())
+            .unwrap()
+            .id
+            .clone();
+        stub.state.lock().unwrap().release(&id, None);
+        owner.set_pin(&bundle(92), Some(&id)).unwrap();
+        contributor.set_pin(&bundle(92), Some(&id)).unwrap();
+        contributor.head_bytes(&bundle(92)).await.unwrap();
+        stub.state
+            .lock()
+            .unwrap()
+            .repositories
+            .get_mut(&id)
+            .unwrap()
+            .visibility = "private".into();
+        assert!(contributor.head_bytes(&bundle(92)).await.is_err());
+        owner.head_bytes(&bundle(92)).await.unwrap();
+        assert_eq!(
+            owner.status(&bundle(92)).unwrap().link.unwrap().visibility,
+            "private"
+        );
+        stub.state.lock().unwrap().release(&id, None);
+        contributor.head_bytes(&bundle(92)).await.unwrap();
+        assert_eq!(
+            contributor.status(&bundle(92)).unwrap().state,
+            super::super::client::ManagedCloudStatusState::Ready
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

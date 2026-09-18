@@ -7064,7 +7064,6 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     assert_eq!(catalog_report.repository_count, 3);
     assert_eq!(catalog_report.kind_repository_revisions, vec![5, 5, 10]);
     assert_eq!(catalog_report.native_provider_process_calls, 0);
-    assert!(catalog_report.injected_inventory_calls > 0);
     let project_after_library = redacted(
         service1.inspect_bundle(&storage_id, &bundle_id),
         "cannot inspect project bundle after Library flow",

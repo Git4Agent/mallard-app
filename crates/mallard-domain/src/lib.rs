@@ -1084,6 +1084,9 @@ impl LocalProjectRegistration {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectStorageLink {
+    /// Exact Mallard Cloud destination. When absent, Cloud status checks are disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_cloud_repository_id: Option<String>,
     pub local_project_id: LocalProjectId,
     pub storage_id: StorageId,
     /// Must equal the registration's bundle ID.  Keeping it explicit makes

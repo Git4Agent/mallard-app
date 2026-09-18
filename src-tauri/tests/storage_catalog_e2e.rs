@@ -68,7 +68,6 @@ fn skills_and_codex_pets_round_trip_update_and_preserve_divergence() {
     assert_eq!(report.repository_count, 3);
     assert_eq!(report.kind_repository_revisions, vec![5, 5, 7]);
     assert_eq!(report.native_provider_process_calls, 0);
-    assert!(report.injected_inventory_calls > 0);
     assert_eq!(
         std::fs::read(codex_home_a.join("auth.json")).expect("read fake myconf1 auth"),
         auth_a

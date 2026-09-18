@@ -17,7 +17,7 @@ import type {
   CommitStorageDraftResult,
   LocalProjectSummary,
   ProjectBinding,
-  ManagedCloudLink,
+  ManagedCloudStatus,
   ProjectStorageLink,
   ProviderDescriptor,
   ProviderProfileSummary,
@@ -45,6 +45,7 @@ import type { SessionHeaderModel } from "./session-detail/SessionDetailPage";
 import type { PullRequiredCopy } from "./PushResourceWorkspace";
 import SyncOutcomeNotice from "./SyncOutcomeNotice";
 import SiblingRepoNotice from "./SiblingRepoNotice";
+import StorageLinkDialog from "./StorageLinkDialog";
 import { isIrrecoverableSyncError } from "./syncError";
 import type { SyncOutcome, SyncOutcomeAction } from "./syncOutcome";
 import {
@@ -1270,31 +1271,31 @@ export default function ProjectLinksWorkspace({
   /* The website bridge for a project on Mallard Cloud: the repository's page
      and its release state, read from the service when the pair opens, when
      the window comes back, and after every action ends. */
-  const managedCloudKey = workspaceStorage?.provider === "managed_cloud" ? workspaceActionPrefix : null;
+  const managedCloudRepositoryId = workspaceLinks.find((link) => link.storage_id === workspaceStorage?.storage_id)?.managed_cloud_repository_id;
+  const managedCloudKey = workspaceStorage?.provider === "managed_cloud" && managedCloudRepositoryId ? workspaceActionPrefix : null;
   const managedCloudProjectId = managedCloudKey ? workspaceProject?.local_project_id ?? null : null;
   const managedCloudStorageId = managedCloudKey ? workspaceStorage?.storage_id ?? null : null;
-  const [managedCloudLink, setManagedCloudLink] = useState<{ key: string; link: ManagedCloudLink | null; error: string | null } | null>(null);
+  const [cloudObservation, setCloudObservation] = useState<{ key: string; status: ManagedCloudStatus } | null>(null);
+  const [cloudActionError, setCloudActionError] = useState<{ key: string; message: string } | null>(null);
   useEffect(() => {
-    if (!managedCloudKey || !managedCloudProjectId || !managedCloudStorageId || runningAction !== null) return undefined;
-    const projectId = managedCloudProjectId;
-    const storageId = managedCloudStorageId;
-    let live = true;
-    const load = () => {
-      projectSyncApi.getManagedCloudLink(projectId, storageId).then(
-        (link) => { if (live) setManagedCloudLink({ key: managedCloudKey, link, error: null }); },
-        (reason) => { if (live) setManagedCloudLink({ key: managedCloudKey, link: null, error: reason instanceof Error ? reason.message : String(reason) }); },
-      );
-    };
-    load();
-    window.addEventListener("focus", load);
-    return () => {
-      live = false;
-      window.removeEventListener("focus", load);
-    };
-  }, [managedCloudKey, managedCloudProjectId, managedCloudStorageId, runningAction]);
-  const currentManagedCloudLink = managedCloudLink?.key === workspaceActionPrefix
-    ? managedCloudLink.link
-    : null;
+    if (managedCloudKey && activityHeader?.projectId === managedCloudProjectId && activityHeader?.storageId === managedCloudStorageId && activityHeader.managedCloudStatus && activityHeader.managedCloudStatus.repository_id === managedCloudRepositoryId) {
+      setCloudObservation({ key: managedCloudKey, status: activityHeader.managedCloudStatus });
+    }
+  }, [managedCloudKey, managedCloudProjectId, managedCloudStorageId, activityHeader?.projectId, activityHeader?.storageId, activityHeader?.managedCloudStatus, managedCloudRepositoryId]);
+  const cloudStatus: ManagedCloudStatus | null = managedCloudKey && activityHeader?.projectId === managedCloudProjectId && activityHeader?.storageId === managedCloudStorageId && activityHeader.comparisonError
+    ? { repository_id: managedCloudRepositoryId!, state: activityHeader.managedCloudStatus?.state === "ready" ? "unavailable" : activityHeader.managedCloudStatus?.state ?? "unavailable", link: null, message: activityHeader.comparisonError }
+    : managedCloudKey && cloudObservation?.key === managedCloudKey && cloudObservation.status.repository_id === managedCloudRepositoryId ? cloudObservation.status : null;
+  const currentManagedCloudLink = cloudStatus?.state === "ready" ? cloudStatus.link : null;
+  const cloudSyncBlocked = !!managedCloudKey && cloudStatus !== null && cloudStatus.state !== "ready";
+  const cloudRefreshRef = useRef(activityHeader?.onRefresh);
+  cloudRefreshRef.current = activityHeader?.projectId === managedCloudProjectId && activityHeader?.storageId === managedCloudStorageId ? activityHeader.onRefresh : undefined;
+  useEffect(() => {
+    if (!managedCloudKey || runningAction !== null) return;
+    const refresh = () => cloudRefreshRef.current?.();
+    // Initial selection is loaded by the activity page. Focus and completed actions reuse that read.
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [managedCloudKey, runningAction]);
   /* Opening the repository's page and asking for its release are verbs on
      this project in this storage, so they live in the project crumb's menu.
      The bar keeps only the release state: its action cluster never shrinks,
@@ -1322,9 +1323,12 @@ export default function ProjectLinksWorkspace({
         onSelect: () => void run(`release:${linkKey}`, async () => {
           try {
             const next = await projectSyncApi.requestManagedCloudRelease(projectId, storageId, link.repository_revision);
-            setManagedCloudLink({ key: linkKey, link: next, error: null });
+            setCloudObservation({ key: linkKey, status: { repository_id: next.repository_id, state: "ready", link: next, message: null } });
+            setCloudActionError(null);
+            cloudRefreshRef.current?.();
           } catch (reason) {
-            setManagedCloudLink({ key: linkKey, link, error: reason instanceof Error ? reason.message : String(reason) });
+            setCloudActionError({ key: linkKey, message: reason instanceof Error ? reason.message : String(reason) });
+            cloudRefreshRef.current?.();
           }
         }),
       });
@@ -2092,13 +2096,9 @@ export default function ProjectLinksWorkspace({
               disabledReason: workspaceAvailableStorages.length === 0
                 ? "Everything you've added is already linked"
                 : undefined,
-              onSelect: () => {
-                setLinkingProjectId((current) => (
-                  current === workspaceProject.local_project_id
-                    ? null
-                    : workspaceProject.local_project_id
-                ));
-              },
+              // Opens the chooser. Not a toggle: the menu closes on select, so
+              // a second visit to this row can only mean "open it again".
+              onSelect: () => setLinkingProjectId(workspaceProject.local_project_id),
             },
             {
               id: "add-storage",
@@ -2394,7 +2394,7 @@ export default function ProjectLinksWorkspace({
            anyone signed in pushes to it, and the Owner still decides what is
            released. The chip says so, so a contributor knows their standing
            before the Owner's review. */
-        const standing = link.role === null
+        const standing = link.role === null && link.visibility === "public" && link.can_push
           ? " Contributor: you are not a collaborator of this repository, but it is public, so anyone signed in can push to it. The Owner decides what is released."
           : "";
         return (
@@ -2434,6 +2434,8 @@ export default function ProjectLinksWorkspace({
         disabled={busy
           || !!runningAction
           || workspaceStorageUnavailable
+          || cloudSyncBlocked
+          || (currentManagedCloudLink !== null && !currentManagedCloudLink.can_pull)
           || (workspaceBindingActive && !workspaceCanRestore)
           || storageActionLockedForReview(workspaceReviewKind, "pull")
           || (workspacePullReviewOpen && inlineStorageReview?.continueDisabled)}
@@ -2490,6 +2492,8 @@ export default function ProjectLinksWorkspace({
         disabled={busy
           || !!runningAction
           || workspaceStorageUnavailable
+          || cloudSyncBlocked
+          || (currentManagedCloudLink !== null && !currentManagedCloudLink.can_push)
           || !workspaceCanSync
           || storageActionLockedForReview(workspaceReviewKind, "push")
           || (workspacePushReviewOpen && inlineStorageReview?.continueDisabled)}
@@ -2537,8 +2541,16 @@ export default function ProjectLinksWorkspace({
   if (revealError) {
     workspaceNotices.push({ key: "reveal-failed", severity: "danger", message: revealError });
   }
-  if (managedCloudLink?.key === workspaceActionPrefix && managedCloudLink.error) {
-    workspaceNotices.push({ key: "managed-cloud-link", severity: "warning", message: `Mallard Cloud: ${managedCloudLink.error}` });
+  if (managedCloudKey && cloudStatus && cloudStatus.state !== "ready") {
+    workspaceNotices.push({
+      key: "managed-cloud-status", severity: "warning",
+      title: cloudStatus.state === "deleting" ? "Being deleted" : cloudStatus.state === "sign_in_required" ? "Sign-in required" : cloudStatus.state === "inaccessible" ? "Repository unavailable" : "Status unavailable",
+      message: cloudStatus.message ?? "Could not check Mallard Cloud.",
+      action: <button type="button" className="btn btn-ghost" disabled={activityHeader?.refreshing} onClick={() => cloudStatus.state === "sign_in_required" && managedCloudStorageId ? onOpenStorage(managedCloudStorageId) : cloudRefreshRef.current?.()}>{cloudStatus.state === "sign_in_required" ? "Storage settings" : "Retry"}</button>,
+    });
+  }
+  if (cloudActionError?.key === workspaceActionPrefix) {
+    workspaceNotices.push({ key: "managed-cloud-action", severity: "warning", message: cloudActionError.message });
   }
   const workspaceNoticeTiming: NoticeTiming = revealError
     ? { timing: "blocking" }
@@ -2680,25 +2692,19 @@ export default function ProjectLinksWorkspace({
               const selectedStorage = linkedStorages.find((storage) => (
                 project.local_project_id === activeProjectId && storage.storage_id === activeStorageId
               )) ?? linkedStorages[0] ?? null;
-              const availableStorages = storages.filter((storage) => (
-                storage.available && !projectLinks.some((link) => link.storage_id === storage.storage_id)
-              ));
               const projectBinding = bindingByProject.get(project.local_project_id);
               const bindingActive = projectBinding?.state === "active";
               const renderStorageConnectionActions = () => (
                 <>
-                  {availableStorages.length > 0 && (
+                  {workspaceAvailableStorages.length > 0 && (
                     <button
                       type="button"
-                      className={`sync-history-icon-action${linkingProjectId === project.local_project_id ? " active" : ""}`}
+                      className="sync-history-icon-action"
                       disabled={busy || !!inlineStorageReview}
-                      aria-expanded={linkingProjectId === project.local_project_id}
-                      aria-controls={`storage-link-picker-${project.local_project_id}`}
                       title="Link storage"
                       aria-label="Link storage"
-                      onClick={() => {
-                                    setLinkingProjectId((current) => current === project.local_project_id ? null : project.local_project_id);
-                      }}
+                      aria-haspopup="dialog"
+                      onClick={() => setLinkingProjectId(project.local_project_id)}
                     >
                       <Icon name="link" size={14} />
                     </button>
@@ -2764,8 +2770,7 @@ export default function ProjectLinksWorkspace({
                     && inlineStorageReview.storageId === selectedStorage.storage_id));
               const storageGroupEmpty = !!selectedStorage
                 && projectLinks.length > 0
-                && !storageBlockShown
-                && linkingProjectId !== project.local_project_id;
+                && !storageBlockShown;
               if (storageGroupEmpty) return null;
 
               return (
@@ -2787,23 +2792,18 @@ export default function ProjectLinksWorkspace({
                           type="button"
                           className="btn"
                           disabled={busy || !!inlineStorageReview}
-                          aria-expanded={availableStorages.length > 0
-                            ? linkingProjectId === project.local_project_id
-                            : undefined}
-                          aria-controls={availableStorages.length > 0
-                            ? `storage-link-picker-${project.local_project_id}`
-                            : undefined}
+                          aria-haspopup={workspaceAvailableStorages.length > 0 ? "dialog" : undefined}
                           onClick={() => {
-                            if (availableStorages.length === 0) {
+                            if (workspaceAvailableStorages.length === 0) {
                               setLinkingProjectId(null);
                               onAddStorage();
                               return;
                             }
-                            setLinkingProjectId((current) => current === project.local_project_id ? null : project.local_project_id);
+                            setLinkingProjectId(project.local_project_id);
                           }}
                         >
-                          <Icon name={availableStorages.length > 0 ? "link" : "plus"} size={13} />
-                          {availableStorages.length > 0 ? "Link storage" : "Add storage"}
+                          <Icon name={workspaceAvailableStorages.length > 0 ? "link" : "plus"} size={13} />
+                          {workspaceAvailableStorages.length > 0 ? "Link storage" : "Add storage"}
                         </button>
                       </div>
                     )}
@@ -3030,43 +3030,6 @@ export default function ProjectLinksWorkspace({
                     </div>
                     )}
 
-                    {linkingProjectId === project.local_project_id && (
-                      <div
-                        id={`storage-link-picker-${project.local_project_id}`}
-                        className="project-storage-card-footer"
-                      >
-                        <div className="storage-link-picker-heading">
-                          <span>Choose a storage destination</span>
-                          <button
-                            type="button"
-                            className="sync-history-icon-action"
-                            disabled={busy}
-                            title="Cancel linking storage"
-                            aria-label="Cancel linking storage"
-                            onClick={() => setLinkingProjectId(null)}
-                          >
-                            <Icon name="x" size={13} />
-                          </button>
-                        </div>
-                        <div className="storage-link-picker">
-                          {availableStorages.map((storage) => (
-                            <button
-                              key={storage.storage_id}
-                              type="button"
-                              disabled={busy}
-                              onClick={() => void run(`link:${project.local_project_id}:${storage.storage_id}`, async () => {
-                                await onLinkStorage(project.local_project_id, storage.storage_id);
-                                setLinkingProjectId(null);
-                              })}
-                            >
-                              <Icon name={iconNameFromHint(storage.icon, "drive")} size={15} />
-                              {storage.name || "(unnamed)"}
-                              <Icon name="chevron-right" size={13} />
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    )}
                     </section>
                   </div>
 
@@ -3172,6 +3135,7 @@ export default function ProjectLinksWorkspace({
               />
             ) : (
               <ProjectActivityPage
+                comparisonErrorHandled={!!managedCloudKey}
                 project={activeProject}
                 binding={activeBindingByProject.get(activeProject.local_project_id) ?? null}
                 refreshEpoch={historyRefreshEpoch}
@@ -3226,6 +3190,32 @@ export default function ProjectLinksWorkspace({
       )}
 
     </main>
+
+    {/* Page level, not inside the storage card: the card returns null once the
+        project is settled, and the chooser must outlive it. A modal <dialog>
+        is promoted to the top layer, so where it sits in the tree only decides
+        what unmounts it. */}
+    {workspaceProject
+      && linkingProjectId === workspaceProject.local_project_id
+      && workspaceAvailableStorages.length > 0 && (
+      <StorageLinkDialog
+        projectName={projectLabel(workspaceProject)}
+        storages={workspaceAvailableStorages}
+        busy={busy || !!runningAction}
+        onLink={(storageId) => void run(
+          `link:${workspaceProject.local_project_id}:${storageId}`,
+          async () => {
+            await onLinkStorage(workspaceProject.local_project_id, storageId);
+            setLinkingProjectId(null);
+          },
+        )}
+        onAddStorage={() => {
+          setLinkingProjectId(null);
+          onAddStorage();
+        }}
+        onCancel={() => setLinkingProjectId(null)}
+      />
+    )}
     </>
   );
 }

@@ -14,6 +14,9 @@
 //! gated so neither can contact an account or inspect a real Claude profile
 //! by default.
 
+#[path = "support/native_watcher.rs"]
+mod native_watcher;
+
 use mallard_domain::{
     ActionId, BundleId, CloudThreadId, ConversationMaterializationState, ConversationReviewAction,
     DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection, LocalConversationBinding,
@@ -3930,6 +3933,9 @@ fn live_claude_aimock_setup_push_pull_divergence() {
     if std::env::var(LIVE_TEST_GATE).ok().as_deref() != Some("1") {
         return;
     }
+
+    native_watcher::require_native_watcher_events()
+        .expect("Claude AIMock E2E watcher preflight failed");
 
     let root = tempfile::tempdir().expect("create isolated Claude live-test root");
     let process_home = root.path().join("process-home");

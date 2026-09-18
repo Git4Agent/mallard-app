@@ -2219,6 +2219,7 @@ mod tests {
                         updated_at: 1,
                     });
                 config.links.push(mallard_domain::ProjectStorageLink {
+                    managed_cloud_repository_id: None,
                     local_project_id: project_id.clone(),
                     storage_id: storage_id.clone(),
                     bundle_id: mallard_domain::BundleId::parse("0123456789abcdef0123456789abcdef")

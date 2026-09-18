@@ -7,53 +7,11 @@
 use super::service::repository;
 use mallard_domain::{sha256_hex, LocalProjectId, StorageId};
 use mallard_infrastructure::managed_cloud::address::{parse_repository_address, AddressError};
-use mallard_infrastructure::managed_cloud::client::{
-    ManagedCloudClient, RecentReleaseRequest, RepositorySummary,
-};
+use mallard_infrastructure::managed_cloud::client::{ManagedCloudClient, RepositorySummary};
 use mallard_infrastructure::storage_providers::managed_cloud::{client_for, provider_key};
 use serde::Serialize;
 
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ReleaseState {
-    /// Registered, nothing pushed yet.
-    NotPushed,
-    /// A private snapshot nobody has asked to release.
-    Private,
-    WaitingOwner {
-        requested_by: String,
-    },
-    WaitingSuperAdmin,
-    /// The public version is the current private snapshot.
-    Public,
-    /// A newer private snapshot was pushed since the last release.
-    SnapshotChanged,
-    /// The latest request on this snapshot was turned down.
-    Rejected {
-        reason: Option<String>,
-    },
-}
-
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-pub struct ManagedCloudLink {
-    pub repository_id: String,
-    /// `{origin}/{owner_login}/{name}`: the repository's page on the website.
-    pub website_url: String,
-    pub owner_login: String,
-    pub name: String,
-    pub release: ReleaseState,
-    /// The revision a release request must name.
-    pub repository_revision: u64,
-    /// Whether Request public release is offered: a private snapshot with
-    /// no open request that is not already public.
-    pub can_request_release: bool,
-    /// The account's membership role; `None` for a public repository the
-    /// account does not belong to, where it still pushes as a contributor.
-    pub role: Option<String>,
-    /// Section 4.3: whether Push is accepted: a collaborator, or anyone
-    /// signed in on a public repository.
-    pub can_push: bool,
-}
+use mallard_infrastructure::managed_cloud::client::ManagedCloudLink;
 
 /// How a cloud repository's Git remote compares with the local project's.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -329,77 +287,9 @@ pub async fn accept_managed_cloud_invitation(
     accept_repository_invitation(&client, &origin, &code, local).await
 }
 
-/// Where the release stands, from the repository summary and the closed
-/// requests. A rejection counts only while the private head it judged is
-/// still the head.
-pub(crate) fn release_state(
-    summary: &RepositorySummary,
-    recent: &[RecentReleaseRequest],
-) -> ReleaseState {
-    let Some(private) = &summary.private_head else {
-        return ReleaseState::NotPushed;
-    };
-    if summary
-        .private_summary
-        .as_ref()
-        .is_some_and(|tag| tag.registration_only)
-    {
-        return ReleaseState::NotPushed;
-    }
-    if let Some(open) = &summary.open_release_request {
-        return match open.state.as_str() {
-            "pending_super_admin" => ReleaseState::WaitingSuperAdmin,
-            _ => ReleaseState::WaitingOwner {
-                requested_by: open.requested_by.clone(),
-            },
-        };
-    }
-    if let Some(public) = &summary.public_head {
-        return if public.commit_id == private.commit_id {
-            ReleaseState::Public
-        } else {
-            ReleaseState::SnapshotChanged
-        };
-    }
-    match recent.first() {
-        Some(last)
-            if last.state == "rejected" && last.closed_at.unwrap_or(0) >= private.updated_at =>
-        {
-            ReleaseState::Rejected {
-                reason: last.reason.clone(),
-            }
-        }
-        _ => ReleaseState::Private,
-    }
-}
-
-fn describe(
-    origin: &str,
-    summary: RepositorySummary,
-    recent: Vec<RecentReleaseRequest>,
-) -> ManagedCloudLink {
-    let release = release_state(&summary, &recent);
-    let website_url = format!("{origin}/{}/{}", summary.owner.github_login, summary.name);
-    ManagedCloudLink {
-        website_url,
-        repository_id: summary.id,
-        owner_login: summary.owner.github_login,
-        name: summary.name,
-        can_request_release: matches!(
-            release,
-            ReleaseState::Private | ReleaseState::SnapshotChanged | ReleaseState::Rejected { .. }
-        ),
-        release,
-        repository_revision: summary.revision,
-        role: summary.role,
-        can_push: summary.writer,
-    }
-}
-
 struct Target {
     client: ManagedCloudClient,
-    origin: String,
-    bundle_id: String,
+    repository_id: String,
 }
 
 fn target(
@@ -424,39 +314,14 @@ fn target(
     else {
         return Err("This project is not linked to the storage.".to_string());
     };
-    let (settings, client) = client_for(&storage.provider_config)?;
+    let (_, client) = client_for(&storage.provider_config)?;
     Ok(Some(Target {
         client,
-        origin: settings.service_origin,
-        bundle_id: link.bundle_id.as_str().to_owned(),
+        repository_id: link
+            .managed_cloud_repository_id
+            .clone()
+            .ok_or("Cloud link has no repository ID. Reconnect the repository.")?,
     }))
-}
-
-async fn load(target: &Target) -> Result<Option<ManagedCloudLink>, String> {
-    let Some(answer) = target.client.head_by_bundle(&target.bundle_id).await? else {
-        return Ok(None);
-    };
-    let summary = target.client.get_repository(&answer.repository_id).await?;
-    let recent = target
-        .client
-        .list_release_requests(&answer.repository_id)
-        .await
-        .unwrap_or_default();
-    Ok(Some(describe(&target.origin, summary, recent)))
-}
-
-/// The website page and release state of one project on one Mallard
-/// Cloud storage. `None` when the storage is not Mallard Cloud or the
-/// project has no repository there yet.
-#[tauri::command]
-pub async fn get_managed_cloud_link(
-    local_project_id: LocalProjectId,
-    storage_id: StorageId,
-) -> Result<Option<ManagedCloudLink>, String> {
-    let Some(target) = target(&local_project_id, &storage_id)? else {
-        return Ok(None);
-    };
-    load(&target).await
 }
 
 /// Ask the Owner (and then Super Admin) to make the current private
@@ -470,16 +335,15 @@ pub async fn request_managed_cloud_release(
     let Some(target) = target(&local_project_id, &storage_id)? else {
         return Err("This storage is not Mallard Cloud.".to_string());
     };
-    let Some(answer) = target.client.head_by_bundle(&target.bundle_id).await? else {
-        return Err("This project has no repository on Mallard Cloud yet. Push first.".to_string());
-    };
     target
         .client
-        .create_release_request(&answer.repository_id, expected_repository_revision)
+        .create_release_request(&target.repository_id, expected_repository_revision)
         .await?;
-    load(&target)
+    Ok(target
+        .client
+        .repository_head(&target.repository_id)
         .await?
-        .ok_or_else(|| "The repository disappeared while requesting the release.".to_string())
+        .link)
 }
 
 #[cfg(test)]
@@ -507,82 +371,6 @@ mod tests {
             "open_release_request": open.map(|state| serde_json::json!({"id": "rel_1", "state": state, "requested_by": "user_2", "created_at": 600})),
         }))
         .unwrap()
-    }
-
-    fn rejected(closed_at: u64) -> RecentReleaseRequest {
-        RecentReleaseRequest {
-            id: "rel_0".into(),
-            state: "rejected".into(),
-            reason: Some("Not yet".into()),
-            created_at: closed_at - 10,
-            closed_at: Some(closed_at),
-        }
-    }
-
-    #[test]
-    fn release_state_reads_the_summary_and_a_current_rejection_only() {
-        assert_eq!(
-            release_state(&summary(None, None, true), &[]),
-            ReleaseState::NotPushed
-        );
-        assert_eq!(
-            release_state(&summary(None, None, false), &[]),
-            ReleaseState::Private
-        );
-        assert_eq!(
-            release_state(&summary(Some("pending_owner"), None, false), &[]),
-            ReleaseState::WaitingOwner {
-                requested_by: "user_2".into()
-            }
-        );
-        assert_eq!(
-            release_state(&summary(Some("pending_super_admin"), None, false), &[]),
-            ReleaseState::WaitingSuperAdmin
-        );
-        assert_eq!(
-            release_state(&summary(None, Some("commit-aaaaaaaa"), false), &[]),
-            ReleaseState::Public
-        );
-        assert_eq!(
-            release_state(&summary(None, Some("commit-00000000"), false), &[]),
-            ReleaseState::SnapshotChanged
-        );
-        assert_eq!(
-            release_state(&summary(None, None, false), &[rejected(700)]),
-            ReleaseState::Rejected {
-                reason: Some("Not yet".into())
-            }
-        );
-        // A rejection older than the current head no longer applies.
-        assert_eq!(
-            release_state(&summary(None, None, false), &[rejected(400)]),
-            ReleaseState::Private
-        );
-        let link = describe("https://mallard-ai.com", summary(None, None, false), vec![]);
-        assert_eq!(link.website_url, "https://mallard-ai.com/octocat/Project");
-        assert_eq!(link.role, None, "the fixture carries no role");
-        assert!(link.can_push, "a writer pushes whatever the role");
-        assert_eq!(
-            (link.owner_login.as_str(), link.name.as_str()),
-            ("octocat", "Project")
-        );
-        assert!(link.can_request_release);
-        assert!(
-            !describe(
-                "https://mallard-ai.com",
-                summary(Some("pending_owner"), None, false),
-                vec![]
-            )
-            .can_request_release
-        );
-        assert!(
-            !describe(
-                "https://mallard-ai.com",
-                summary(None, Some("commit-aaaaaaaa"), false),
-                vec![]
-            )
-            .can_request_release
-        );
     }
 
     fn public_summary(github_url: Option<&str>) -> RepositorySummary {

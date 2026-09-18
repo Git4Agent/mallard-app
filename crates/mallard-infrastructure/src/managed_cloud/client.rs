@@ -401,24 +401,6 @@ pub struct ReleaseRequest {
     pub state: String,
 }
 
-/// One closed request from `GET …/release-requests` (`recent`).
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct RecentReleaseRequest {
-    pub id: String,
-    pub state: String,
-    #[serde(default)]
-    pub reason: Option<String>,
-    pub created_at: u64,
-    #[serde(default)]
-    pub closed_at: Option<u64>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct ReleaseRequestList {
-    #[serde(default)]
-    recent: Vec<RecentReleaseRequest>,
-}
-
 /// What a streamed manifest or object answered with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Downloaded {
@@ -856,21 +838,6 @@ impl ManagedCloudClient {
         Ok(())
     }
 
-    /// The closed requests, newest first. The open one is on the summary.
-    pub async fn list_release_requests(
-        &self,
-        repository_id: &str,
-    ) -> Result<Vec<RecentReleaseRequest>> {
-        let route = "v1/repositories/{id}/release-requests";
-        let request = self.request(
-            Method::GET,
-            route,
-            &format!("/v1/repositories/{repository_id}/release-requests"),
-        )?;
-        let list: ReleaseRequestList = self.json(route, true, request).await?;
-        Ok(list.recent)
-    }
-
     pub async fn create_release_request(
         &self,
         repository_id: &str,
@@ -995,5 +962,123 @@ mod tests {
         );
         assert_eq!(error.evidence().error_tag, Some("head_changed"));
         assert_eq!(idempotency_key().unwrap().len(), "idem-".len() + 24);
+    }
+}
+
+#[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReleaseState {
+    /// Registered, nothing pushed yet.
+    NotPushed,
+    /// A private snapshot nobody has asked to release.
+    Private,
+    WaitingOwner {
+        requested_by: String,
+    },
+    WaitingSuperAdmin,
+    /// The public version is the current private snapshot.
+    Public,
+    /// A newer private snapshot was pushed since the last release.
+    SnapshotChanged,
+    /// The latest request on this snapshot was turned down.
+    Rejected {
+        reason: Option<String>,
+    },
+}
+
+#[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedCloudLink {
+    pub visibility: String,
+    pub can_pull: bool,
+    pub repository_id: String,
+    /// `{origin}/{owner_login}/{name}`: the repository's page on the website.
+    #[serde(default)]
+    pub website_url: String,
+    pub owner_login: String,
+    pub name: String,
+    pub release: ReleaseState,
+    /// The revision a release request must name.
+    pub repository_revision: u64,
+    /// Whether Request public release is offered: a private snapshot with
+    /// no open request that is not already public.
+    pub can_request_release: bool,
+    /// The account's membership role; `None` for a public repository the
+    /// account does not belong to, where it still pushes as a contributor.
+    pub role: Option<String>,
+    /// Section 4.3: whether Push is accepted: a collaborator, or anyone
+    /// signed in on a public repository.
+    pub can_push: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedCloudStatusState {
+    Ready,
+    Deleting,
+    Inaccessible,
+    SignInRequired,
+    Unavailable,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedCloudStatus {
+    pub repository_id: String,
+    pub state: ManagedCloudStatusState,
+    pub link: Option<ManagedCloudLink>,
+    pub message: Option<String>,
+}
+impl ManagedCloudStatus {
+    pub fn failed(repository_id: &str, error: &Error) -> Self {
+        let state = if error.code == Some("repository_removed") {
+            ManagedCloudStatusState::Deleting
+        } else {
+            match error.kind {
+                ErrorKind::Auth => ManagedCloudStatusState::SignInRequired,
+                ErrorKind::NotFound | ErrorKind::Permission => {
+                    ManagedCloudStatusState::Inaccessible
+                }
+                _ => ManagedCloudStatusState::Unavailable,
+            }
+        };
+        let message = match state {
+            ManagedCloudStatusState::Deleting => "This repository is being deleted.".to_string(),
+            ManagedCloudStatusState::Inaccessible => {
+                "Repository unavailable. It was deleted or you no longer have access.".to_string()
+            }
+            _ => error.message(),
+        };
+        Self {
+            repository_id: repository_id.to_owned(),
+            state,
+            link: None,
+            message: Some(message),
+        }
+    }
+}
+#[derive(Deserialize)]
+pub struct RepositoryHead {
+    pub repository_id: String,
+    pub head: Option<HeadBody>,
+    pub link: ManagedCloudLink,
+}
+impl ManagedCloudClient {
+    pub async fn repository_head(&self, repository_id: &str) -> Result<RepositoryHead> {
+        let route = "v1/repositories/id/head";
+        let request = self.request(
+            Method::GET,
+            route,
+            &format!("/v1/repositories/{repository_id}/head"),
+        )?;
+        let mut answer: RepositoryHead = self.json(route, true, request).await?;
+        if answer.repository_id != repository_id || answer.link.repository_id != repository_id {
+            return Err(Error::of(ErrorKind::Limit, route));
+        }
+        answer.link.website_url = format!(
+            "{}/{}/{}",
+            self.origin(),
+            answer.link.owner_login,
+            answer.link.name
+        );
+        Ok(answer)
     }
 }

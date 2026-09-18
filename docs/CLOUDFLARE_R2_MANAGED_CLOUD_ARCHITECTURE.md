@@ -459,8 +459,8 @@ and `pushed_by` (section 8) is the only record of them.
 
 Creation makes the creator the sole Owner. The Owner or an Admin sets the
 repository's code on the website's Members tab and sends it by any channel;
-it is shown once, never expires, and stands until it is rotated (which
-closes the old code at once) or revoked. A recipient enters it on the
+it stays readable there for the Owner and Admins, never expires, and stands
+until it is rotated (which closes the old code at once) or revoked. A recipient enters it on the
 website or in the desktop's address picker. Entering it needs an active
 repository and fewer than 50 members; entering it again, or as an existing
 collaborator, changes nothing. Removing or demoting someone does not change
@@ -976,15 +976,16 @@ CREATE TABLE repositories (
   public_admitted_at     INTEGER, -- current Super Admin approval; null requires approval before publishing
   committed_bytes        INTEGER NOT NULL DEFAULT 0 CHECK (committed_bytes >= 0),
   star_count             INTEGER NOT NULL DEFAULT 0 CHECK (star_count >= 0),  -- migration 0002
-  -- The repository's one invitation code (section 4.3): sha256(pepper || code),
-  -- who set it, and when; rotating replaces it, revoking clears all three.
-  invite_code_hash       TEXT UNIQUE,
+  -- The repository's one invitation code (section 4.3), normalized (20 characters,
+  -- no separators) so the Owner and Admins can read it again; who set it, and when;
+  -- rotating replaces it, revoking clears all three.
+  invite_code            TEXT UNIQUE,
   invite_code_set_by     TEXT REFERENCES users(id),
   invite_code_set_at     INTEGER,
   created_by             TEXT NOT NULL REFERENCES users(id), -- the Owner; ownership never transfers, so this is the address namespace
   created_at             INTEGER NOT NULL,
   updated_at             INTEGER NOT NULL,
-  CHECK ((invite_code_hash IS NULL) = (invite_code_set_by IS NULL) AND (invite_code_hash IS NULL) = (invite_code_set_at IS NULL)),
+  CHECK ((invite_code IS NULL) = (invite_code_set_by IS NULL) AND (invite_code IS NULL) = (invite_code_set_at IS NULL)),
   CHECK (
     (class = 'git_project'     AND bundle_id IS NOT NULL AND repository_fingerprint IS NOT NULL AND catalog_resource_id IS NULL) OR
     (class = 'non_git_project' AND bundle_id IS NOT NULL AND repository_fingerprint IS NULL     AND catalog_resource_id IS NULL) OR
@@ -1396,12 +1397,12 @@ row cannot be joined.
 | Method | Route | Purpose |
 | --- | --- | --- |
 | `POST` | `/v1/repositories` | Create; body below |
-| `GET`, `PATCH` | `/v1/repositories/{id}` | Summary with `owner`, `name`, both heads, revisions, role, usage, open request; rename `{name, expected_repository_revision}` (strict; the address moves, nothing redirects) |
+| `GET`, `PATCH` | `/v1/repositories/{id}` | Summary with `owner`, `name`, both heads, revisions, role, usage, `star_count`, `member_count`, open request; rename `{name, expected_repository_revision}` (strict; the address moves, nothing redirects) |
 | `POST` | `/v1/repositories/{id}/visibility` | `{visibility: "private", expected_repository_revision}` |
 | `PUT`, `DELETE` | `/v1/repositories/{id}/star` | Star or unstar (section 4.8); idempotent, no Idempotency-Key; → `{repository_id, starred, star_count}` |
-| `GET` | `/v1/repositories/{id}/members` | Collaborators and Super Admin; `invitation: {set_by, set_by_login, set_at} \| null` says whether a code stands, never the code |
+| `GET` | `/v1/repositories/{id}/members` | Collaborators and Super Admin; `invitation: {code?, set_by, set_by_login, set_at} \| null` says whether a code stands; `code` only for the Owner and Admins |
 | `PATCH`, `DELETE` | `/v1/repositories/{id}/members/{user_id}` | Change role; remove; a non-Owner deletes their own row to leave |
-| `PUT` | `/v1/repositories/{id}/invitation` | Owner or Admin; `{expected_repository_revision}` → `{code, set_by, set_by_login, set_at, repository_revision}`; creates or rotates the repository's one code, returned once |
+| `PUT` | `/v1/repositories/{id}/invitation` | Owner or Admin; `{expected_repository_revision}` → `{code, set_by, set_by_login, set_at, repository_revision}`; creates or rotates the repository's one code |
 | `DELETE` | `/v1/repositories/{id}/invitation` | Owner or Admin; `expected_repository_revision` in the body or query → `{ok, repository_revision}` |
 | `POST` | `/v1/invitations/accept` | `{code}` → repository summary; joins as Member, idempotent, no Idempotency-Key |
 

@@ -5,7 +5,6 @@ import type {
   RestoreResult,
 } from "../../types";
 import { errorMessage } from "../../storageError";
-import { buildPullReviewItems, restoreActionIds } from "./pullReviewModel";
 
 export interface PullReviewApi {
   planRestore: (storageId: string, bundleId: string, binding: ProjectBinding) => Promise<PullReview>;
@@ -49,9 +48,37 @@ export interface PullReviewApplyResult {
   error: string | null;
 }
 
-/** A review opens only when it contains storage-side or divergent work. */
-export function hasPendingRestoreMutations(plan: PullReview): boolean {
-  return buildPullReviewItems(plan).some((item) => restoreActionIds(item).length > 0);
+/** Inspect the complete plan, including rows hidden from the file review. */
+export function canAcceptPullMetadata(plan: PullReview): boolean {
+  if (plan.actions.length > 0) return false;
+  if (["replaced", "unknown", "remote_missing"].includes(plan.remote_continuity?.state ?? "")) return false;
+  return plan.conversation_review.every((row) => {
+    if (row.blocker || row.blocked_reason) return false;
+    switch (row.action) {
+      case "adopt_cloud_metadata":
+        return !!row.action_id;
+      case "no_changes":
+      case "report_push_eligible":
+      case "report_local_only":
+        return true;
+      default:
+        return false;
+    }
+  });
+}
+
+/** Link and Pull accept matching data without changing files or publishing a version. */
+export async function acceptPullMetadata(api: PullReviewApplyApi, plan: PullReview): Promise<void> {
+  if (!canAcceptPullMetadata(plan)) {
+    throw new Error("Review the changes before accepting this storage version.");
+  }
+  const metadataIds = plan.conversation_review.flatMap((row) => (
+    row.action === "adopt_cloud_metadata" && row.action_id ? [row.action_id] : []
+  ));
+  const result = await api.applyRestore(plan, metadataIds);
+  if (!result.success || result.reviewed_base_advanced !== true) {
+    throw new Error(result.message || "The storage version could not be accepted. Try again.");
+  }
 }
 
 /**
@@ -78,8 +105,7 @@ export function assertPullPlansAligned(
  * The apply is always sent, even for an empty selection: the backend writes
  * receipts and advances the reviewed recipe base from the plan, which is the
  * acknowledge-only Pull that unblocks Push when the storage is ahead and the
- * user takes none of its changes. `hasPendingRestoreMutations` remains the
- * single predicate for callers deciding whether a review is worth showing.
+ * user takes none of its changes.
  */
 export async function applyPullReview(
   api: PullReviewApplyApi,
