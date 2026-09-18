@@ -161,6 +161,18 @@ pub(super) fn discover(
                     continue;
                 }
             };
+            #[cfg(unix)]
+            if directory == "file-history" {
+                use std::os::unix::fs::MetadataExt;
+
+                // Shared snapshots are excluded; other failures still go
+                // through the normal sidecar validation below.
+                if std::fs::symlink_metadata(entry.path())
+                    .is_ok_and(|meta| meta.is_file() && meta.nlink() > 1)
+                {
+                    continue;
+                }
+            }
             discovery.sidecars.push(DiscoveredSidecar {
                 session_id,
                 sidecar_kind: directory.to_string(),
@@ -219,6 +231,60 @@ pub(super) fn discover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_linked_file_history_is_excluded_without_blocking_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("claude");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        let bucket = home
+            .join("projects")
+            .join(encode_claude_project_path(project.to_str().unwrap()));
+        std::fs::create_dir_all(&bucket).unwrap();
+        for session_id in ["session-a", "session-b"] {
+            std::fs::write(bucket.join(format!("{session_id}.jsonl")), b"{}\n").unwrap();
+            std::fs::create_dir_all(home.join("file-history").join(session_id)).unwrap();
+        }
+        let shared = home.join("file-history/session-a/shared@v1");
+        std::fs::write(&shared, b"shared snapshot").unwrap();
+        std::fs::hard_link(&shared, home.join("file-history/session-b/shared@v1")).unwrap();
+        let ordinary = home.join("file-history/session-a/ordinary@v1");
+        std::fs::write(&ordinary, b"ordinary snapshot").unwrap();
+
+        let discovery = discover(
+            &SessionDiscoveryContext {
+                provider_home: &home,
+                project_root: &project,
+            },
+            |path| {
+                Ok(crate::providers::traits::SessionFileMetadata {
+                    session_id: path.file_stem().unwrap().to_str().unwrap().to_string(),
+                    authorized_home: project.clone(),
+                    is_internal_subagent: false,
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(discovery.sessions.len(), 2);
+        assert!(discovery
+            .sessions
+            .iter()
+            .all(|s| s.blocked_reason.is_none()));
+        assert!(discovery.warnings.is_empty());
+        assert_eq!(discovery.sidecars.len(), 1);
+        let sidecar = &discovery.sidecars[0];
+        assert_eq!(sidecar.session_id, "session-a");
+        assert_eq!(sidecar.sidecar_kind, "file-history");
+        assert_eq!(
+            sidecar.physical_path,
+            std::fs::canonicalize(ordinary).unwrap()
+        );
+        assert!(sidecar.blocked_reason.is_none());
+    }
 
     #[test]
     fn file_history_uses_an_exact_first_path_component() {
