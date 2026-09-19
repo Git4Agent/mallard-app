@@ -77,7 +77,7 @@ import { StorageDraftSaveQueue } from "./storageDraftSaveQueue";
 import { R2SetupLane, useR2Setup, type R2SetupMode } from "./R2Setup";
 import { DropboxSetupLane, useDropboxSetup } from "./DropboxSetup";
 import { ManagedCloudSetupLane, useManagedCloudSetup } from "./ManagedCloudSetup";
-import { releaseChip } from "./managedCloudLink";
+import { cloudStatusChip, cloudVersionUrl, releaseChip } from "./managedCloudLink";
 import { openExternalUrl } from "./externalLink";
 import type { StorageSetupPort } from "./StorageSetupStep";
 import {
@@ -1308,12 +1308,20 @@ export default function ProjectLinksWorkspace({
     const storageId = managedCloudStorageId;
     managedCloudMenuItems.push({
       id: "open-managed-cloud",
-      label: "Open on Mallard Cloud",
+      label: "View draft",
       detail: `${link.owner_login}/${link.name}`,
       detailIsPath: true,
       icon: "external-link",
-      onSelect: () => void openExternalUrl(link.website_url),
+      onSelect: () => void openExternalUrl(cloudVersionUrl(link, "private")),
     });
+    if (link.visibility === "public") {
+      managedCloudMenuItems.push({
+        id: "view-published-cloud",
+        label: "View published version",
+        icon: "external-link",
+        onSelect: () => void openExternalUrl(cloudVersionUrl(link, "public")),
+      });
+    }
     if (link.can_request_release) {
       managedCloudMenuItems.push({
         id: "request-managed-cloud-release",
@@ -1322,8 +1330,9 @@ export default function ProjectLinksWorkspace({
         disabled: busy || !!runningAction,
         onSelect: () => void run(`release:${linkKey}`, async () => {
           try {
+            projectSyncApi.invalidateProjectActivity(projectId, storageId);
             const next = await projectSyncApi.requestManagedCloudRelease(projectId, storageId, link.repository_revision);
-            setCloudObservation({ key: linkKey, status: { repository_id: next.repository_id, state: "ready", link: next, message: null } });
+            setCloudObservation({ key: linkKey, status: { repository_id: next.repository_id, state: "ready", link: next, publication: next.repository_revision === link.repository_revision ? cloudStatus?.publication : null, message: null } });
             setCloudActionError(null);
             cloudRefreshRef.current?.();
           } catch (reason) {
@@ -2389,7 +2398,7 @@ export default function ProjectLinksWorkspace({
       )}
       {currentManagedCloudLink && (() => {
         const link = currentManagedCloudLink;
-        const chip = releaseChip(link.release);
+        const chip = cloudStatusChip(link, cloudStatus?.publication);
         /* Connected to a public repository the account does not belong to:
            anyone signed in pushes to it, and the Owner still decides what is
            released. The chip says so, so a contributor knows their standing
@@ -2405,7 +2414,7 @@ export default function ProjectLinksWorkspace({
             aria-label={`Mallard Cloud: ${chip.label}. ${chip.detail}${standing}`}
           >
             <Icon name="cloud" size={13} />
-            <b>{chip.label}</b>
+            <b>{releaseChip(link.release).label}</b>
           </span>
         );
       })()}

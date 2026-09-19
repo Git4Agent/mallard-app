@@ -3368,3 +3368,41 @@ test("a shared comparison replays recovered Cloud status without its earlier err
   finish();
   await pending;
 });
+
+
+test("a refresh after a release discards older events and keeps the newer refresh shared", async () => {
+  const runs: Array<{ emit: (event: ProjectActivityRefreshEvent) => void; finish: () => void }> = [];
+  const refresh = createActivityRefresh(async (_request, emit) => {
+    await new Promise<void>((finish) => { runs.push({ emit, finish }); });
+  });
+  const request = { localProjectId: "cloud-project", storageId: "cloud-storage", branch: null, windowDays: 30, bindingRevision: 1, refreshEpoch: 0 };
+  const seen: ProjectActivityRefreshEvent[] = [];
+  const old = refresh(request, (event) => seen.push(event));
+  await Promise.resolve();
+  refresh.invalidate(request.localProjectId, request.storageId);
+  const fresh = refresh(request, (event) => seen.push(event));
+  await Promise.resolve();
+  assert.equal(runs.length, 2);
+  const stale = { stage: "comparison", comparison: { project_id: "old-rejection" } } as ProjectActivityRefreshEvent;
+  const pending = { stage: "comparison", comparison: { project_id: "new-pending" } } as ProjectActivityRefreshEvent;
+  runs[0].emit(stale);
+  assert.deepEqual(seen, []);
+  runs[0].finish();
+  await old;
+  assert.equal(refresh(request, () => {}), fresh);
+  runs[1].emit(pending);
+  assert.deepEqual(seen, [pending]);
+  runs[1].finish();
+  await fresh;
+});
+
+test("draft sync labels do not describe unpublished content as local only", () => {
+  const synced = { state: "synced", status_detail: "Synced to the Cloud draft.", push_decision: { action: "no_changes", selectable: false } } as Parameters<typeof sessionSyncPresentation>[0];
+  assert.equal(sessionSyncPresentation(synced, "Mallard Cloud").status, "synced");
+  assert.equal(sessionSyncPresentation(synced, "Mallard Cloud").label, "Synced to the Cloud draft.");
+  const missing = { ...synced, state: "local_only", status_detail: "Not in the Cloud draft. Push to save it there." } as Parameters<typeof sessionSyncPresentation>[0];
+  assert.match(sessionSyncPresentation(missing, "Mallard Cloud").label, /^Not in the Cloud draft/);
+  assert.doesNotMatch(sessionSyncPresentation(missing, "Mallard Cloud").label, /Only on this computer/);
+  const settingsChanged = { ...synced, push_decision: { action: "publish", selectable: true } } as Parameters<typeof sessionSyncPresentation>[0];
+  assert.equal(sessionSyncPresentation(settingsChanged, "Mallard Cloud").status, "local-outstanding");
+});

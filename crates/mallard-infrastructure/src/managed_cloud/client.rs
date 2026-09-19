@@ -1020,11 +1020,86 @@ pub enum ManagedCloudStatusState {
     Unavailable,
 }
 
+/// Computed for the current observation only. Never stored in sync metadata.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PublicationStatus {
+    pub state: PublicationState,
+    pub private_revision: Option<u64>,
+    pub public_revision: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationState {
+    NoDraft,
+    NotPublic,
+    MatchesPublished,
+    UnpublishedDraft,
+    Unavailable,
+}
+
+impl PublicationStatus {
+    fn unavailable() -> Self {
+        Self {
+            state: PublicationState::Unavailable,
+            private_revision: None,
+            public_revision: None,
+        }
+    }
+
+    /// Do not combine heads observed at different repository revisions.
+    fn observe(summary: &RepositorySummary, answer: &RepositoryHead) -> Option<Self> {
+        let expected = match answer.head.as_ref().map(|head| head.scope.as_str()) {
+            Some("private") => summary.private_head.as_ref(),
+            Some("public") => summary.public_head.as_ref(),
+            None if summary.private_head.is_none() => None,
+            _ => return None,
+        };
+        if summary.id != answer.repository_id
+            || summary.revision != answer.link.repository_revision
+            || summary.visibility != answer.link.visibility
+            || summary.writer != answer.link.can_push
+            || expected != answer.head.as_ref()
+        {
+            return None;
+        }
+        let has_draft = summary.private_head.is_some()
+            && !summary
+                .private_summary
+                .as_ref()
+                .is_some_and(|tag| tag.registration_only);
+        let live = summary.visibility == "public" && summary.public_head.is_some();
+        let state = if !has_draft {
+            PublicationState::NoDraft
+        } else if !live {
+            PublicationState::NotPublic
+        } else if summary.private_head.as_ref().unwrap().commit_id
+            == summary.public_head.as_ref().unwrap().commit_id
+        {
+            if summary.private_head.as_ref().unwrap().manifest_sha256
+                != summary.public_head.as_ref().unwrap().manifest_sha256
+            {
+                return None;
+            }
+            PublicationState::MatchesPublished
+        } else {
+            PublicationState::UnpublishedDraft
+        };
+        Some(Self {
+            state,
+            private_revision: has_draft.then_some(summary.private_revision),
+            public_revision: live.then_some(summary.public_revision),
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ManagedCloudStatus {
     pub repository_id: String,
     pub state: ManagedCloudStatusState,
     pub link: Option<ManagedCloudLink>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publication: Option<PublicationStatus>,
     pub message: Option<String>,
 }
 impl ManagedCloudStatus {
@@ -1051,6 +1126,7 @@ impl ManagedCloudStatus {
             repository_id: repository_id.to_owned(),
             state,
             link: None,
+            publication: None,
             message: Some(message),
         }
     }
@@ -1062,6 +1138,36 @@ pub struct RepositoryHead {
     pub link: ManagedCloudLink,
 }
 impl ManagedCloudClient {
+    /// The draft head remains authoritative for sync. Details are supplemental;
+    /// a failed details read cannot turn an existing draft into missing content.
+    pub async fn repository_status(
+        &self,
+        repository_id: &str,
+    ) -> Result<(Option<HeadBody>, ManagedCloudStatus)> {
+        let summary = self.get_repository(repository_id).await.ok();
+        let mut answer = self.repository_head(repository_id).await?;
+        let mut publication = summary
+            .as_ref()
+            .and_then(|value| PublicationStatus::observe(value, &answer));
+        if summary.is_some() && publication.is_none() {
+            // One bounded recheck when a Push or release crossed the reads.
+            answer = self.repository_head(repository_id).await?;
+            publication = summary
+                .as_ref()
+                .and_then(|value| PublicationStatus::observe(value, &answer));
+        }
+        Ok((
+            answer.head,
+            ManagedCloudStatus {
+                repository_id: repository_id.to_owned(),
+                state: ManagedCloudStatusState::Ready,
+                link: Some(answer.link),
+                publication: Some(publication.unwrap_or_else(PublicationStatus::unavailable)),
+                message: None,
+            },
+        ))
+    }
+
     pub async fn repository_head(&self, repository_id: &str) -> Result<RepositoryHead> {
         let route = "v1/repositories/id/head";
         let request = self.request(
@@ -1080,5 +1186,80 @@ impl ManagedCloudClient {
             answer.link.name
         );
         Ok(answer)
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn observation() -> (RepositorySummary, RepositoryHead) {
+        let head = json!({"scope":"private", "revision":4, "commit_id":"commit-draft", "manifest_sha256":"a".repeat(64), "manifest_size":10, "updated_at":5, "kind":"project", "bundle_id":"b".repeat(32)});
+        let mut public = head.clone();
+        public["scope"] = json!("public");
+        public["commit_id"] = json!("commit-public");
+        let summary = serde_json::from_value(json!({"id":"repo_one", "owner":{"user_id":"user_one", "github_login":"owner"}, "name":"Project", "repository_class":"git_project", "revision":7, "state":"active", "visibility":"public", "private_revision":4, "public_revision":2, "writer":true, "private_head":head, "public_head":public})).unwrap();
+        let answer = serde_json::from_value(json!({"repository_id":"repo_one", "head":head, "link":{"repository_id":"repo_one", "visibility":"public", "can_pull":true, "owner_login":"owner", "name":"Project", "release":{"kind":"rejected", "reason":"Revise it"}, "repository_revision":7, "can_request_release":true, "role":"owner", "can_push":true}})).unwrap();
+        (summary, answer)
+    }
+
+    #[test]
+    fn review_changes_never_change_the_draft_or_its_publication_relation() {
+        let (summary, mut answer) = observation();
+        let draft = answer.head.clone();
+        for release in [
+            ReleaseState::Rejected {
+                reason: Some("Revise it".into()),
+            },
+            ReleaseState::SnapshotChanged,
+            ReleaseState::WaitingOwner {
+                requested_by: "user_one".into(),
+            },
+            ReleaseState::WaitingSuperAdmin,
+        ] {
+            answer.link.release = release;
+            assert_eq!(
+                PublicationStatus::observe(&summary, &answer),
+                Some(PublicationStatus {
+                    state: PublicationState::UnpublishedDraft,
+                    private_revision: Some(4),
+                    public_revision: Some(2),
+                })
+            );
+            assert_eq!(answer.head, draft);
+        }
+    }
+
+    #[test]
+    fn publishing_hiding_and_registration_have_distinct_display_states() {
+        let (mut summary, mut answer) = observation();
+        summary.public_head.as_mut().unwrap().commit_id = "commit-draft".into();
+        assert_eq!(
+            PublicationStatus::observe(&summary, &answer).unwrap().state,
+            PublicationState::MatchesPublished
+        );
+        summary.visibility = "private".into();
+        answer.link.visibility = "private".into();
+        let hidden = PublicationStatus::observe(&summary, &answer).unwrap();
+        assert_eq!(hidden.state, PublicationState::NotPublic);
+        assert_eq!(hidden.public_revision, None);
+        summary.private_summary = Some(serde_json::from_value(json!({"display_name":"Project", "kind":"project", "revision":4, "updated_at":5, "resources":0, "files":0, "registration_only":true})).unwrap());
+        let empty = PublicationStatus::observe(&summary, &answer).unwrap();
+        assert_eq!(empty.state, PublicationState::NoDraft);
+        assert_eq!(empty.private_revision, None);
+    }
+
+    #[test]
+    fn mismatched_observations_cannot_claim_a_publication_relation() {
+        let (summary, mut answer) = observation();
+        answer.head.as_mut().unwrap().commit_id = "commit-moved".into();
+        assert!(PublicationStatus::observe(&summary, &answer).is_none());
+        let (summary, mut answer) = observation();
+        answer.link.repository_revision += 1;
+        assert!(PublicationStatus::observe(&summary, &answer).is_none());
+        let (summary, mut answer) = observation();
+        answer.repository_id = "repo_other".into();
+        assert!(PublicationStatus::observe(&summary, &answer).is_none());
     }
 }

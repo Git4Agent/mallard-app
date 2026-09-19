@@ -103,8 +103,9 @@ export function createActivityRefresh(
     events: Map<ProjectActivityRefreshEvent["stage"], ProjectActivityRefreshEvent>;
     listeners: Set<(event: ProjectActivityRefreshEvent) => void>;
     promise: Promise<void>;
+    request: ActivityRefreshRequest;
   }>();
-  return (request: ActivityRefreshRequest, onEvent: (event: ProjectActivityRefreshEvent) => void) => {
+  const refresh = (request: ActivityRefreshRequest, onEvent: (event: ProjectActivityRefreshEvent) => void) => {
     const key = JSON.stringify(request);
     const existing = pending.get(key);
     if (existing) {
@@ -122,10 +123,22 @@ export function createActivityRefresh(
       if (event.stage === "comparison_error") events.delete("comparison");
       events.set(event.stage, event);
       listeners.forEach((listener) => listener(event));
-    })).finally(() => { pending.delete(key); });
-    pending.set(key, { events, listeners, promise });
+    })).finally(() => {
+      if (pending.get(key)?.promise === promise) pending.delete(key);
+    });
+    pending.set(key, { events, listeners, promise, request });
     return promise;
   };
+  return Object.assign(refresh, {
+    invalidate(localProjectId: string, storageId: string | null) {
+      for (const [key, entry] of pending) {
+        if (entry.request.localProjectId === localProjectId && entry.request.storageId === storageId) {
+          entry.listeners.clear();
+          pending.delete(key);
+        }
+      }
+    },
+  });
 }
 
 const refreshProjectActivity = createActivityRefresh((request, onEvent) => {
@@ -146,6 +159,7 @@ function r2ProgressChannel(onProgress?: (progress: R2SetupProgress) => void): Ch
 }
 
 export const projectSyncApi = {
+  invalidateProjectActivity: refreshProjectActivity.invalidate,
   queryActivityLogs: (query: ActivityLogQuery) =>
     invoke<ActivityLogPage>("query_activity_logs", { query }),
 

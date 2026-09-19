@@ -123,6 +123,8 @@ pub struct StubState {
     next: u64,
     /// The next commit answers `head_changed` regardless of the head.
     pub fail_next_commit: bool,
+    /// Fail only the supplemental repository-details read.
+    pub fail_next_summary: bool,
 }
 
 impl StubState {
@@ -858,6 +860,10 @@ fn route(
             return error("not_found", "not visible");
         }
         let manages = matches!(role.as_deref(), Some("owner") | Some("admin"));
+        if method == Method::GET && rest.is_empty() && std::mem::take(&mut state.fail_next_summary)
+        {
+            return error("temporarily_unavailable", "details unavailable");
+        }
         match (method, rest) {
             (&Method::GET, ["head"]) => {
                 let head = repository

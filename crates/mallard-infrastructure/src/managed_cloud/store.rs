@@ -136,6 +136,8 @@ struct Inner {
     /// Exact repository destinations from link metadata.
     pinned: Mutex<BTreeMap<BundleId, String>>,
     statuses: Mutex<BTreeMap<BundleId, super::client::ManagedCloudStatus>>,
+    // Keep a superseded refresh from overwriting the next status observation.
+    status_read: tokio::sync::Mutex<()>,
     /// Objects written before their manifest, per bundle.
     staged: Mutex<BTreeMap<BundleId, BTreeMap<String, Bytes>>>,
     pending: Mutex<BTreeMap<BundleId, PendingUpload>>,
@@ -157,6 +159,7 @@ impl ManagedObjectStore {
                 repositories: Mutex::new(BTreeMap::new()),
                 pinned: Mutex::new(BTreeMap::new()),
                 statuses: Mutex::new(BTreeMap::new()),
+                status_read: tokio::sync::Mutex::new(()),
                 staged: Mutex::new(BTreeMap::new()),
                 pending: Mutex::new(BTreeMap::new()),
                 listing: Mutex::new(None),
@@ -203,6 +206,7 @@ impl ManagedObjectStore {
                     super::client::ManagedCloudStatusState::SignInRequired
                 },
                 link: None,
+                publication: None,
                 message: Some(health.describe()),
             });
         }
@@ -307,20 +311,13 @@ impl ManagedObjectStore {
     }
 
     async fn head_bytes(&self, bundle_id: &BundleId) -> Result<Option<StoredMetadata>, String> {
+        let _status_read = self.inner.status_read.lock().await;
         let pinned = Self::lock(&self.inner.pinned)?.get(bundle_id).cloned();
         let head = if let Some(id) = pinned {
-            match self.inner.client.repository_head(&id).await {
-                Ok(answer) => {
-                    Self::lock(&self.inner.statuses)?.insert(
-                        bundle_id.clone(),
-                        super::client::ManagedCloudStatus {
-                            repository_id: id.clone(),
-                            state: super::client::ManagedCloudStatusState::Ready,
-                            link: Some(answer.link),
-                            message: None,
-                        },
-                    );
-                    answer.head
+            match self.inner.client.repository_status(&id).await {
+                Ok((head, status)) => {
+                    Self::lock(&self.inner.statuses)?.insert(bundle_id.clone(), status);
+                    head
                 }
                 Err(error) => {
                     let status = super::client::ManagedCloudStatus::failed(&id, &error);
@@ -1030,7 +1027,7 @@ mod stub_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pinned_status_uses_one_head_read_and_never_recreates_a_missing_repository() {
+    async fn pinned_status_shares_one_details_read_and_never_recreates_a_missing_repository() {
         let stub = StubManagedCloud::start().await;
         let (store, _) = store(&stub, "status-owner").await;
         tokio::task::spawn_blocking({
@@ -1055,8 +1052,9 @@ mod stub_tests {
         stub.state.lock().unwrap().log.clear();
         assert!(store.head_bytes(&bundle(91)).await.unwrap().is_some());
         let requests = stub.requests();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].path, format!("/v1/repositories/{id}/head"));
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].path, format!("/v1/repositories/{id}"));
+        assert_eq!(requests[1].path, format!("/v1/repositories/{id}/head"));
         let observed = store.status(&bundle(91)).unwrap();
         assert_eq!(
             observed.state,
@@ -1065,6 +1063,35 @@ mod stub_tests {
         assert_eq!(
             observed.link.unwrap().release,
             super::super::client::ReleaseState::NotPushed
+        );
+        stub.state.lock().unwrap().log.clear();
+        let bundle_id = bundle(91);
+        let (first, second) =
+            tokio::join!(store.head_bytes(&bundle_id), store.head_bytes(&bundle_id));
+        assert!(first.unwrap().is_some());
+        assert!(second.unwrap().is_some());
+        assert_eq!(
+            stub.requests()
+                .iter()
+                .map(|request| request.path.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                format!("/v1/repositories/{id}"),
+                format!("/v1/repositories/{id}/head"),
+                format!("/v1/repositories/{id}"),
+                format!("/v1/repositories/{id}/head"),
+            ]
+        );
+        stub.state.lock().unwrap().fail_next_summary = true;
+        assert!(store.head_bytes(&bundle(91)).await.unwrap().is_some());
+        let partial = store.status(&bundle(91)).unwrap();
+        assert_eq!(
+            partial.state,
+            super::super::client::ManagedCloudStatusState::Ready
+        );
+        assert_eq!(
+            partial.publication.unwrap().state,
+            super::super::client::PublicationState::Unavailable
         );
         stub.state.lock().unwrap().repositories.remove(&id);
         assert!(store

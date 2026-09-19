@@ -1708,10 +1708,16 @@ export type ManagedCloudReleaseState =
   | { kind: "public" }
   | { kind: "snapshot_changed" }
   | { kind: "rejected"; reason?: string | null };
+export interface ManagedCloudPublicationStatus {
+  state: "no_draft" | "not_public" | "matches_published" | "unpublished_draft" | "unavailable";
+  private_revision: number | null;
+  public_revision: number | null;
+}
 export interface ManagedCloudStatus {
   repository_id: string;
   state: "ready" | "deleting" | "inaccessible" | "sign_in_required" | "unavailable";
   link: ManagedCloudLink | null;
+  publication?: ManagedCloudPublicationStatus | null;
   message: string | null;
 }
 export interface ManagedCloudLink {

@@ -2210,9 +2210,9 @@ test("Mallard Cloud review names the account and the service, and reconnect ends
 // The website bridge: one chip in the path bar for the release state; Open on
 // Mallard Cloud and Request public release (only when a request would be
 // accepted) in the project crumb's menu.
-import { releaseChip } from "../../src/components/project-sync/managedCloudLink";
+import { cloudStatusChip, cloudVersionUrl, releaseChip } from "../../src/components/project-sync/managedCloudLink";
 test("Mallard Cloud release chips name each state and only a rejection reads as danger", () => {
-  assert.deepEqual(releaseChip({ kind: "public" }).label, "Public");
+  assert.deepEqual(releaseChip({ kind: "public" }).label, "Published");
   assert.deepEqual(releaseChip({ kind: "waiting_owner", requested_by: "user_2" }), {
     label: "Pending approval",
     severity: "plain",
@@ -2223,7 +2223,7 @@ test("Mallard Cloud release chips name each state and only a rejection reads as 
     severity: "plain",
     detail: "Public release awaits Admin approval.",
   });
-  assert.equal(releaseChip({ kind: "snapshot_changed" }).severity, "warning");
+  assert.equal(releaseChip({ kind: "snapshot_changed" }).severity, "plain");
   assert.equal(releaseChip({ kind: "rejected", reason: "Not yet" }).severity, "danger");
   assert.match(releaseChip({ kind: "rejected", reason: "Not yet" }).detail, /Not yet/);
   assert.equal(releaseChip({ kind: "private" }).severity, "plain");
@@ -2231,9 +2231,32 @@ test("Mallard Cloud release chips name each state and only a rejection reads as 
   assert.doesNotMatch(workspace, /getManagedCloudLink/);
   assert.match(workspace, /activityHeader\.managedCloudStatus/);
   assert.match(workspace, /managedCloudRepositoryId \? workspaceActionPrefix : null/);
-  assert.match(workspace, /label: "Open on Mallard Cloud"[^]*?openExternalUrl\(link\.website_url\)/);
+  assert.match(workspace, /label: "View draft"[^]*?cloudVersionUrl\(link, "private"\)/);
+  assert.match(workspace, /label: "View published version"[^]*?cloudVersionUrl\(link, "public"\)/);
   assert.match(workspace, /if \(link\.can_request_release\) \{[^]*?requestManagedCloudRelease\(/);
   assert.match(workspace, /\.\.\.managedCloudMenuItems,/);
   assert.doesNotMatch(workspace, /sync-path-cloud-controls/);
   assert.match(workspace, /window\.addEventListener\("focus", refresh\)/);
+});
+
+
+test("Cloud status separates a saved draft, public visibility, and the current review", () => {
+  const link = {
+    repository_id: "repo_one", visibility: "public" as const, can_pull: true, can_push: true,
+    website_url: "https://mallard-ai.com/owner/project", owner_login: "owner", name: "project",
+    repository_revision: 7, can_request_release: true, role: "owner" as const,
+    release: { kind: "rejected" as const, reason: "Revise B" },
+  };
+  const publication = { state: "unpublished_draft" as const, private_revision: 4, public_revision: 2 };
+  const rejected = cloudStatusChip(link, publication);
+  assert.equal(rejected.label, "Public version 2 · Unpublished draft · Rejected");
+  assert.match(rejected.detail, /Revise B/);
+  const pushed = cloudStatusChip({ ...link, release: { kind: "snapshot_changed" } }, publication);
+  assert.match(pushed.label, /Unpublished draft · Not requested/);
+  const pending = cloudStatusChip({ ...link, release: { kind: "waiting_owner", requested_by: "user_one" } }, publication);
+  assert.equal(pending.label, "Public version 2 · Unpublished draft · Pending approval");
+  assert.doesNotMatch(pending.detail, /Revise B|rejected/);
+  assert.match(cloudStatusChip(link).label, /Public · Publication status unavailable · Rejected/);
+  assert.equal(cloudVersionUrl(link, "private"), "https://mallard-ai.com/owner/project?version=private");
+  assert.equal(cloudVersionUrl(link, "public"), "https://mallard-ai.com/owner/project?version=public");
 });

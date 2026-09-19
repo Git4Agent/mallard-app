@@ -7457,6 +7457,27 @@ fn build_thread_sync_comparison(
         })
         .map(|candidate| discovery.capture_bytes_of(&candidate.resource_id))
         .fold(0_u64, u64::saturating_add);
+    if link.managed_cloud_repository_id.is_some() {
+        for entry in &mut review.entries {
+            if entry.status_detail.is_none() {
+                entry.status_detail = match entry.state {
+                    ThreadSyncState::Synced => Some("Synced to the Cloud draft."),
+                    ThreadSyncState::LocalOnly => {
+                        Some("Not in the Cloud draft. Push to save it there.")
+                    }
+                    ThreadSyncState::LocalAhead => {
+                        Some("Changes to push. Push to update the Cloud draft.")
+                    }
+                    ThreadSyncState::StorageOnly => {
+                        Some("In the Cloud draft. Pull to download it here.")
+                    }
+                    ThreadSyncState::StorageAhead => Some("Changes to pull from the Cloud draft."),
+                    _ => None,
+                }
+                .map(str::to_owned);
+            }
+        }
+    }
     Ok(ThreadSyncComparison {
         managed_cloud_status: link
             .managed_cloud_repository_id

@@ -639,3 +639,96 @@ Points specific to the smaller cut:
 Still unanswered from section 4 of this evaluation: the legacy-rejection paths,
 deferring the archive UI, and the "same id, different bytes" blocked state.
 Revision 3 keeps the design's original position on each.
+
+## 12. Follow-up: the clean plan (September 19, 2026)
+
+The owner answered the last three open points, and the design was rewritten as
+one implementation plan with no revision history or rejected alternatives in
+it. Code locations moved to a pointer table at its end.
+
+| Answer | In the plan |
+| --- | --- |
+| Remove the legacy-rejection paths | No detection, message, conversion or test for data written by an older build. The marker's `format` constant still changes to `mallard-append-storage`, because it is part of the new format and costs one constant; nothing else knows an older format existed |
+| Defer the archive UI; keep the loser's content | Unselected publications stay in the storage and nothing lists, restores or counts them. The selector returns the mainline only; there are no role enums. The existing `Replaced` flow (Pull and review, then Push) is the recovery. The user-visible change is three notices in existing surfaces: `RemoteChanged`, stored-but-not-current, and outcome unknown |
+| Name records `<id>-<sha256>` | A record's name contains the SHA-256 of its bytes, and a parent is named by that same token. The same `commit_id` with different bytes is two publications, ranked by `(created_at_ms, commit_id, record_sha256)`, so no state blocks a stream. Names are self-certifying, and the ancestor walk is hash-linked without reading a record, so `previous_manifest_sha256` from Revision 3 became `previous_record_sha256` and the "link above the base" read disappeared. A name is at most 223 bytes |
+
+One ordering fix made while writing the work plan: `managed_cloud` is
+unregistered in the bundle-engine step, not the store step, because its bridge
+commits on the head write that stops happening there.
+
+## 13. Follow-up: the cost of `previous_record_sha256` (September 19, 2026)
+
+Asked whether the parent digest hurts performance. It does not: the value comes
+from the parent's name in a listing the Push already made, so it costs no request
+and no read. Measured with quick scripts on this machine; the listing sizes are
+estimates from representative entries, and no live provider was called.
+
+| Item | Result |
+| --- | --- |
+| SHA-256 of a record for its own name | 0.66 microseconds at 1 KB, 22 microseconds at the 64 KiB cap |
+| Name length | 223 bytes with the parent digest, 158 without |
+| Listing growth from the parent digest | +65 bytes per record on S3/R2, +195 on Dropbox, whose JSON repeats the name three times |
+| A full 1,000-record listing | S3/R2 486 KB instead of 421 KB (about 10 ms at 50 Mbps); Dropbox 1,137 KB instead of 942 KB (about 31 ms). A stream of 100 records pays 1 to 3 ms |
+
+The digest stays in the name: every parent link stays exact, and the saving
+would be a few milliseconds.
+
+Two larger listing costs turned up. The owner adopted the first only:
+
+1. **Adopted.** The local store's `list` reads and hashes every listed file to
+   fill an ETag: 41.8 ms for 1,000 one-kilobyte records, against 1.2 ms for names
+   alone. The plan now has `list_keys`, a keys-only listing that every record
+   listing uses. Its default forwards to `list`, which is free on S3/R2 and
+   Dropbox, and the local store overrides it to open no listed file. Storage
+   clear keeps `list`, because it deletes exactly the ETag it listed.
+2. **Not adopted.** Dropbox responses are uncompressed, because `reqwest` is
+   built without its `gzip` feature. On 1,000 realistic names gzip would shrink a
+   listing from 1,137 KB to 131 KB. It needs one live check that `list_folder`
+   honours `Accept-Encoding`.
+
+## 14. Follow-up: one listing against one head read (September 19, 2026)
+
+Measured from this machine on September 19, 2026. The S3 figures are against a
+public AWS bucket (`noaa-goes16`), anonymous, one reused connection, requests
+interleaved, median of eight. R2 and Dropbox were not measured, because that
+needs the owner's credentials.
+
+| Store | 1 small read | List 10 | List 100 | List 1,000 |
+| --- | --- | --- | --- | --- |
+| AWS S3, public bucket | 101 ms (300-byte range GET) | 93 ms (3.6 KB) | 99 ms (32 KB) | 142 ms (314 KB), worst 401 ms |
+| Local folder, names only (Python) | 0.05 ms | 0.05 ms | 0.15 ms | 1.3 ms; 13.8 ms at 10,000 |
+| Dropbox | not measured; the app's logs give 0.27 s for the head read and 0.3 to 0.8 s per request | one request | one request, about 114 KB | one request, about 1.1 MB |
+
+- Up to a few hundred records a listing costs the same as a head read: both are
+  one round trip, and the round trip dominates.
+- At 1,000 records the listing is about 1.4 times a head read on S3. The plan's
+  entries are about 486 bytes against 314 in that bucket, so expect about 1.6
+  times. Every further 1,000 records adds one sequential request.
+- Request price: a listing is an R2 Class A operation and a read is Class B,
+  12.5 times dearer per call. At 300 refreshes a day that is about 4 cents a
+  month, inside R2's free allowance.
+
+What this means for refresh under the plan:
+
+| Refresh | Against today |
+| --- | --- |
+| Nothing changed | The same up to a few hundred records; about 1.5 times at 1,000; one more request per further 1,000 |
+| Remote ahead of this replica's base | Cheaper: today's extra uncached probe read on every refresh is gone |
+| A new remote publication, or the first refresh after launch | One request dearer: listing, record, manifest instead of head, manifest. About +0.1 s on an S3-like store and +0.3 to 0.8 s on Dropbox, from the logged per-request times |
+| After this computer's own Push | No reads: the record and manifest it just wrote are in memory |
+
+A way to win the extra request back, not adopted: read the record and the
+manifest in one parallel round. The manifest's key follows from the record's
+name, and its digest would be checked when the record arrives, which needs a
+staged read that verifies after the transfer instead of during it.
+
+## 15. Correction: the Library does not rebase at apply (September 19, 2026)
+
+The plan's Push gate row read "every writable scope (or reviewed Library entry)
+still has this replica's base digest", which implied that a Library Push rebases
+onto a newer publication at apply. It does not today: `observed_matches` requires
+the head at apply to equal the reviewed head and otherwise returns "the storage
+head changed after review" (`src-tauri/src/storage_catalog/service.rs:1685-1697`,
+`:1744-1751`). Its "observed set plus reviewed upserts" merge is therefore always
+against the reviewed publication. The plan now says so: the scope gate is for
+projects only, and the Library keeps its stricter rule.

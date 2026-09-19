@@ -520,16 +520,16 @@ export function sessionSyncPresentation(
       return { status: "synced", className: "synced", label: entry.status_detail ?? `Up to date here and in ${storageName}.` };
     case "local_only":
       if (entry.push_decision?.action === "blocked") return blocked("push");
-      return { status: "local-outstanding", className: "local", label: `Only on this computer. Push to save it in ${storageName}.` };
+      return { status: "local-outstanding", className: "local", label: entry.status_detail ?? `Only on this computer. Push to save it in ${storageName}.` };
     case "local_ahead":
       if (entry.push_decision?.action === "blocked") return blocked("push");
-      return { status: "local-outstanding", className: "local", label: `Newer on this computer. Push to update ${storageName}.` };
+      return { status: "local-outstanding", className: "local", label: entry.status_detail ?? `Newer on this computer. Push to update ${storageName}.` };
     case "storage_only":
       if (entry.pull_decision?.action === "blocked") return blocked("pull");
-      return { status: "cloud-outstanding", className: "storage", label: `Only in ${storageName}. Pull to download it here.` };
+      return { status: "cloud-outstanding", className: "storage", label: entry.status_detail ?? `Only in ${storageName}. Pull to download it here.` };
     case "storage_ahead":
       if (entry.pull_decision?.action === "blocked") return blocked("pull");
-      return { status: "cloud-outstanding", className: "storage", label: `Newer in ${storageName}. Pull to update this computer.` };
+      return { status: "cloud-outstanding", className: "storage", label: entry.status_detail ?? `Newer in ${storageName}. Pull to update this computer.` };
     case "diverged":
       return { status: "divergent", className: "diverged", label: `Changed here and in ${storageName}. Review before syncing.` };
     case "unavailable":
@@ -2433,8 +2433,10 @@ export default function ProjectActivityPage({
     void latest.current.load(null, nextBranch);
   }, []);
   const refreshActivity = useCallback(() => {
+    // An explicit refresh must not replay a request started before a mutation.
+    projectSyncApi.invalidateProjectActivity(project.local_project_id, activeStorageId);
     void latest.current.loadWorkspace(latest.current.branch);
-  }, []);
+  }, [project.local_project_id, activeStorageId]);
 
   const headerCounts = useMemo(
     () => activityHeaderCounts(
