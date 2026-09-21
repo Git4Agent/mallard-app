@@ -349,10 +349,25 @@ pub struct LocalStateRepository {
     root: PathBuf,
 }
 
+/// The current user's home directory. On Unix `dirs` reads `HOME`; on
+/// Windows it asks the known-folder API and ignores `USERPROFILE`, so an
+/// explicit `USERPROFILE` is honoured first there to keep the same override
+/// semantics for tests and restricted environments.
+pub fn user_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+        let profile = PathBuf::from(profile);
+        if profile.is_absolute() {
+            return Some(profile);
+        }
+    }
+    dirs::home_dir()
+}
+
 impl LocalStateRepository {
     /// Resolve the machine-global metadata directory from the user's home.
     pub fn from_user_home() -> Result<Self, String> {
-        let home = dirs::home_dir().ok_or_else(|| "cannot find home directory".to_string())?;
+        let home = user_home_dir().ok_or_else(|| "cannot find home directory".to_string())?;
         Self::from_home_dir(home)
     }
 

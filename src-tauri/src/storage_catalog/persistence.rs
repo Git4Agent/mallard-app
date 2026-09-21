@@ -57,7 +57,7 @@ pub struct CatalogStorageDataClearResult {
 
 impl CatalogStateRepository {
     pub fn from_user_home() -> Result<Self, String> {
-        let home = dirs::home_dir().ok_or("could not resolve the user home directory")?;
+        let home = mallard_infrastructure::persistence::user_home_dir().ok_or("could not resolve the user home directory")?;
         Self::from_home_dir(home)
     }
 

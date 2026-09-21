@@ -430,7 +430,7 @@ fn relaunch_mac_app(
 /// pinned-environment launch path is chosen — the safe direction.
 #[cfg(any(target_os = "macos", windows))]
 fn is_default_codex_home(codex_home: &Path) -> bool {
-    let Some(default_home) = dirs::home_dir().map(|home| home.join(".codex")) else {
+    let Some(default_home) = crate::persistence::user_home_dir().map(|home| home.join(".codex")) else {
         return false;
     };
     if codex_home == default_home {
@@ -460,7 +460,7 @@ fn find_installed_mac_app(specification: SupportedMacApp) -> Option<InstalledMac
 #[cfg(target_os = "macos")]
 fn mac_app_candidate_paths(bundle_name: &str) -> Vec<PathBuf> {
     let mut paths = vec![PathBuf::from("/Applications").join(bundle_name)];
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = crate::persistence::user_home_dir() {
         paths.push(home.join("Applications").join(bundle_name));
     }
     paths

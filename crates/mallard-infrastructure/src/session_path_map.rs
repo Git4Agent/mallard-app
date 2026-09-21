@@ -67,7 +67,7 @@ pub(crate) fn is_wire_atom(text: &str) -> bool {
 /// on Unix (so tests that set it keep working) and `USERPROFILE` on
 /// Windows, where `HOME` is normally unset.
 pub fn home_dir_text() -> Option<String> {
-    dirs::home_dir().map(|home| home.to_string_lossy().into_owned())
+    crate::persistence::user_home_dir().map(|home| home.to_string_lossy().into_owned())
 }
 
 pub fn path_map_marker() -> Value {

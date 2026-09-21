@@ -1892,7 +1892,7 @@ fn provider_default_directory(provider: &ProviderKey) -> Option<String> {
 
 fn suggested_profile_name(provider: &ProviderKey, path: &Path) -> String {
     let default_directory = provider_default_directory(provider);
-    let default = dirs::home_dir()
+    let default = mallard_infrastructure::persistence::user_home_dir()
         .zip(default_directory.as_ref())
         .map(|(home, directory)| home.join(directory));
     if default.as_ref().is_some_and(|default| {
@@ -2062,7 +2062,7 @@ pub(crate) fn create_provider_profile_with_repository(
 /// default home directory for. Registration-driven: a new provider needs no
 /// change here.
 fn ensure_default_provider_profiles(repository: &LocalStateRepository) -> Result<(), String> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = mallard_infrastructure::persistence::user_home_dir() else {
         return Ok(());
     };
     for descriptor in provider_registry().descriptors() {
