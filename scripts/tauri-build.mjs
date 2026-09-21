@@ -146,18 +146,55 @@ function withPackagedCliConfig(buildArgs) {
   ];
 }
 
+// Tauri notarizes and staples Mallard.app but not the disk image around it.
+// Notarizing the DMG as well lets Gatekeeper accept the download itself.
+function notarizationCredentials() {
+  const keyId = process.env.APPLE_API_KEY;
+  const issuer = process.env.APPLE_API_ISSUER;
+  const keyPath = process.env.APPLE_API_KEY_PATH;
+  if (!keyId && !issuer && !keyPath) return undefined;
+  if (!keyId || !issuer || !keyPath) {
+    throw new Error("APPLE_API_KEY, APPLE_API_ISSUER, and APPLE_API_KEY_PATH must be set together.");
+  }
+  if (!existsSync(keyPath)) throw new Error(`Expected the App Store Connect API key at ${keyPath}.`);
+  return { keyId, issuer, keyPath };
+}
+
+async function notarizeDmg(dmgPath, { keyId, issuer, keyPath }) {
+  const submission = await capture("xcrun", [
+    "notarytool", "submit", dmgPath,
+    "--key", keyPath, "--key-id", keyId, "--issuer", issuer,
+    "--wait", "--output-format", "json",
+  ]);
+  const status = JSON.parse(submission).status;
+  if (status !== "Accepted") {
+    throw new Error(`Notarization of ${dmgPath} finished with status ${status}.`);
+  }
+  await runChecked("xcrun", ["stapler", "staple", dmgPath]);
+}
+
 await stageCliBinary(args);
 await runChecked(process.execPath, [tauriCliScript, ...withPackagedCliConfig(args)]);
 
-if (process.env.MALLARD_VERIFY_MACOS_BUNDLE === "1") {
-  if (process.platform !== "darwin") {
-    throw new Error("MALLARD_VERIFY_MACOS_BUNDLE is only supported on macOS release runners.");
-  }
-  if (args[0] !== "build") {
-    throw new Error("MALLARD_VERIFY_MACOS_BUNDLE requires the Tauri build command.");
-  }
+const requireTrusted = process.env.MALLARD_REQUIRE_TRUSTED_MACOS === "1";
+const verifyBundle = process.env.MALLARD_VERIFY_MACOS_BUNDLE === "1";
+const macosBuild = process.platform === "darwin" && args[0] === "build";
+if ((requireTrusted || verifyBundle) && !macosBuild) {
+  throw new Error("MALLARD_REQUIRE_TRUSTED_MACOS and MALLARD_VERIFY_MACOS_BUNDLE need a Tauri build on macOS.");
+}
 
+const credentials = macosBuild ? notarizationCredentials() : undefined;
+if (requireTrusted && !credentials) {
+  throw new Error("MALLARD_REQUIRE_TRUSTED_MACOS needs App Store Connect API credentials.");
+}
+
+if (credentials || verifyBundle) {
   const dmgPath = await macosDmgPath(args);
   if (!existsSync(dmgPath)) throw new Error(`Expected macOS DMG at ${dmgPath}.`);
-  await runChecked(process.execPath, [resolve("scripts", "verify-macos-bundle.mjs"), dmgPath]);
+
+  if (credentials) await notarizeDmg(dmgPath, credentials);
+
+  if (verifyBundle) {
+    await runChecked(process.execPath, [resolve("scripts", "verify-macos-bundle.mjs"), dmgPath]);
+  }
 }

@@ -68,9 +68,10 @@ migration, legacy execution path, or parallel storage-wide catalog.
 ### 1. Install Mallard
 
 The fastest path is the packaged Apple Silicon DMG from the
-[v0.1.2 release](https://github.com/Git4Agent/mallard/releases/tag/v0.1.2).
-The app is ad-hoc signed and unnotarized, so macOS may require you to approve
-it under **System Settings → Privacy & Security** before the first launch.
+[latest release](https://github.com/Git4Agent/mallard-app/releases/latest).
+The app is Developer ID signed and notarized, so it opens without a security
+override. The first **Open in Terminal** or Codex App refresh asks for
+Automation permission; allow it.
 
 You will also need Git and a local Codex profile. The default profile is
 normally stored at `~/.codex`.

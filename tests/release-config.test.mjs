@@ -5,7 +5,7 @@ import test from "node:test";
 const projectUrl = new URL("../", import.meta.url);
 const read = (path) => readFile(new URL(path, projectUrl), "utf8");
 
-test("release version is 0.1.2 in every source", async () => {
+test("release version is 0.1.3 in every source", async () => {
   const [tauriConfigSource, workspaceCargoSource, cargoSource, packageSource, packageLockSource] = await Promise.all([
     read("src-tauri/tauri.conf.json"),
     read("Cargo.toml"),
@@ -17,12 +17,12 @@ test("release version is 0.1.2 in every source", async () => {
   const packageConfig = JSON.parse(packageSource);
   const packageLock = JSON.parse(packageLockSource);
 
-  assert.equal(tauriConfig.version, "0.1.2");
-  assert.match(workspaceCargoSource, /^version = "0\.1\.2"$/m);
+  assert.equal(tauriConfig.version, "0.1.3");
+  assert.match(workspaceCargoSource, /^version = "0\.1\.3"$/m);
   assert.match(cargoSource, /^version\.workspace = true$/m);
-  assert.equal(packageConfig.version, "0.1.2");
-  assert.equal(packageLock.version, "0.1.2");
-  assert.equal(packageLock.packages[""].version, "0.1.2");
+  assert.equal(packageConfig.version, "0.1.3");
+  assert.equal(packageLock.version, "0.1.3");
+  assert.equal(packageLock.packages[""].version, "0.1.3");
 });
 
 test("application contains no automatic updater", async () => {
@@ -150,6 +150,8 @@ test("desktop release builds verified Apple Silicon and Windows artifacts", asyn
     tauriBuildScript,
     macosVerifier,
     windowsVerifier,
+    entitlements,
+    infoPlist,
   ] = await Promise.all([
     read("src-tauri/tauri.conf.json"),
     read(".github/workflows/release.yml"),
@@ -158,6 +160,8 @@ test("desktop release builds verified Apple Silicon and Windows artifacts", asyn
     read("scripts/tauri-build.mjs"),
     read("scripts/verify-macos-bundle.mjs"),
     read("scripts/verify-windows-bundle.ps1"),
+    read("src-tauri/Entitlements.plist"),
+    read("src-tauri/Info.plist"),
   ]);
   const tauriConfig = JSON.parse(tauriConfigSource);
   const packageConfig = JSON.parse(packageSource);
@@ -165,7 +169,18 @@ test("desktop release builds verified Apple Silicon and Windows artifacts", asyn
   const windowsJobIndex = workflow.indexOf("  publish_windows:");
   const windowsJob = workflow.slice(windowsJobIndex);
 
-  assert.deepEqual(tauriConfig.bundle.macOS, { signingIdentity: "-" });
+  // Local builds without the certificate stay ad-hoc; CI overrides the
+  // identity through APPLE_SIGNING_IDENTITY, which the Tauri CLI reads first.
+  assert.deepEqual(tauriConfig.bundle.macOS, {
+    signingIdentity: "-",
+    hardenedRuntime: true,
+    entitlements: "Entitlements.plist",
+    minimumSystemVersion: "12.0",
+  });
+  // osascript Apple Events (Open in Terminal, Codex App refresh) are refused
+  // under the hardened runtime without this entitlement.
+  assert.match(entitlements, /<key>com\.apple\.security\.automation\.apple-events<\/key>\s*<true\/>/);
+  assert.match(infoPlist, /<key>NSAppleEventsUsageDescription<\/key>\s*<string>[^<]+<\/string>/);
   assert.equal(tauriConfig.bundle.windows?.nsis?.installMode, "currentUser");
   assert.ok(macosJobIndex >= 0, "macOS release job is present");
   assert.ok(windowsJobIndex > macosJobIndex, "Windows release job follows the macOS job");
@@ -188,13 +203,51 @@ test("desktop release builds verified Apple Silicon and Windows artifacts", asyn
   assert.doesNotMatch(windowsJob, /--clobber/);
   assert.match(workflow, /releaseDraft: true/);
   assert.match(workflow, /MALLARD_VERIFY_MACOS_BUNDLE: "1"/);
+  assert.match(workflow, /MALLARD_REQUIRE_TRUSTED_MACOS: "1"/);
   assert.match(workflow, /run: npm run test:cli/);
+  for (const secret of [
+    "APPLE_CERTIFICATE",
+    "APPLE_CERTIFICATE_PASSWORD",
+    "APPLE_SIGNING_IDENTITY",
+    "APPLE_TEAM_ID",
+    "APPLE_API_KEY",
+    "APPLE_API_ISSUER",
+    "APPLE_API_KEY_CONTENT",
+  ]) {
+    assert.match(workflow, new RegExp(`${secret}: \\$\\{\\{ secrets\\.${secret} \\}\\}`));
+  }
+  assert.match(workflow, /key_path="\$RUNNER_TEMP\/AuthKey\.p8"/);
+  assert.match(workflow, /APPLE_API_KEY_PATH=\$key_path" >> "\$GITHUB_ENV"/);
+  assert.doesNotMatch(workflow, /echo[^\n]*APPLE_(CERTIFICATE|API_KEY_CONTENT)\b/);
+  // Manual dispatch is a dry run that never creates or touches a release.
+  assert.match(workflow, /^  workflow_dispatch:$/m);
+  const dispatchSteps = workflow.split(/\n      - name: /).filter((step) => step.includes("workflow_dispatch"));
+  assert.ok(dispatchSteps.length >= 2, "dry-run steps exist");
+  for (const step of dispatchSteps) {
+    assert.doesNotMatch(step, /tagName|releaseDraft|gh release/);
+  }
+  assert.match(workflow, /uses: actions\/upload-artifact@v4/);
   assert.doesNotMatch(
     workflow,
-    /TAURI_SIGNING|WINDOWS_CERTIFICATE|certificateThumbprint|signtool|uploadUpdater|updaterJson|APPLE_[A-Z_]+/i,
+    /TAURI_SIGNING|WINDOWS_CERTIFICATE|certificateThumbprint|signtool|uploadUpdater|updaterJson|APPLE_ID\b|APPLE_PASSWORD/i,
   );
   assert.equal(packageConfig.scripts.tauri, "node scripts/tauri-build.mjs");
   assert.match(tauriBuildScript, /verify-macos-bundle\.mjs/);
+  // Tauri notarizes the .app; the wrapper notarizes and staples the DMG too.
+  assert.match(tauriBuildScript, /"notarytool", "submit", dmgPath/);
+  assert.match(tauriBuildScript, /status !== "Accepted"/);
+  assert.match(tauriBuildScript, /"stapler", "staple", dmgPath/);
+  assert.match(tauriBuildScript, /requireTrusted && !credentials/);
+  assert.match(macosVerifier, /MALLARD_REQUIRE_TRUSTED_MACOS/);
+  assert.match(macosVerifier, /Authority=Developer ID Application:/);
+  assert.match(macosVerifier, /flags=0x\[0-9a-f\]\+\\\(\.\*runtime/);
+  assert.match(macosVerifier, /com\.apple\.security\.automation\.apple-events/);
+  assert.match(macosVerifier, /"spctl", \["--assess", "--type", "execute", "--verbose=4", appPath\]/);
+  assert.match(macosVerifier, /source=Notarized Developer ID/);
+  assert.match(macosVerifier, /"--type", "open", "--context", "context:primary-signature"/);
+  assert.match(macosVerifier, /"stapler", "validate", appPath/);
+  assert.match(macosVerifier, /"stapler", "validate", dmgPath/);
+  assert.match(macosVerifier, /if \(requireTrusted\) await verifyTrustedApp\(installedApp\)/);
   assert.match(macosVerifier, /"hdiutil", \["verify", dmgPath\]/);
   assert.match(macosVerifier, /"hdiutil", \["attach", "-nobrowse", "-readonly"/);
   assert.match(macosVerifier, /join\(mountPath, "Mallard\.app"\)/);
@@ -257,6 +310,11 @@ test("desktop release builds verified Apple Silicon and Windows artifacts", asyn
   assert.match(releaseGuide, /verify-windows-bundle\.ps1/);
   assert.match(releaseGuide, /`\/NS` flag/);
   assert.match(releaseGuide, /current-user uninstall\s+registry entry to be gone/i);
-  assert.match(releaseGuide, /Privacy & Security/i);
+  assert.match(releaseGuide, /Developer ID Application/);
+  assert.match(releaseGuide, /notariz/i);
+  assert.match(releaseGuide, /APPLE_API_KEY_CONTENT/);
+  assert.match(releaseGuide, /MALLARD_REQUIRE_TRUSTED_MACOS=1/);
+  assert.match(releaseGuide, /workflow_dispatch|Run workflow/);
+  assert.doesNotMatch(releaseGuide, /Open Anyway/i);
   assert.doesNotMatch(releaseGuide, /updater|TAURI_SIGNING|latest\.json/i);
 });

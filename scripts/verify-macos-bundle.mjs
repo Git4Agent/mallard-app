@@ -25,6 +25,50 @@ function capture(command, args) {
   });
 }
 
+// Trusted mode requires a Developer ID signature, notarization, and a stapled
+// ticket on the application and the disk image.
+const requireTrusted = process.env.MALLARD_REQUIRE_TRUSTED_MACOS === "1";
+
+async function verifyDeveloperIdSignature(path) {
+  const { stderr } = await capture("codesign", ["-dvv", path]);
+  if (!/^Authority=Developer ID Application:/m.test(stderr)) {
+    throw new Error(`${basename(path)} is not signed with a Developer ID Application certificate.`);
+  }
+  const teamId = process.env.APPLE_TEAM_ID;
+  if (teamId && !stderr.includes(`TeamIdentifier=${teamId}`)) {
+    throw new Error(`${basename(path)} is not signed by team ${teamId}.`);
+  }
+  if (!/^CodeDirectory .*flags=0x[0-9a-f]+\(.*runtime.*\)/m.test(stderr)) {
+    throw new Error(`${basename(path)} was not signed with the hardened runtime.`);
+  }
+}
+
+async function verifyTrustedApp(appPath) {
+  await verifyDeveloperIdSignature(appPath);
+  await verifyDeveloperIdSignature(join(appPath, "Contents", "MacOS", "mallard-cli"));
+
+  const { stdout: entitlements } = await capture("codesign", ["-d", "--entitlements", "-", "--xml", appPath]);
+  if (!entitlements.includes("com.apple.security.automation.apple-events")) {
+    throw new Error("Mallard.app is missing the Apple Events automation entitlement.");
+  }
+
+  const { stderr: assessment } = await capture("spctl", ["--assess", "--type", "execute", "--verbose=4", appPath]);
+  if (!/: accepted$/m.test(assessment) || !/source=Notarized Developer ID/.test(assessment)) {
+    throw new Error(`Gatekeeper did not accept Mallard.app as a notarized Developer ID application:\n${assessment}`);
+  }
+  await run("xcrun", ["stapler", "validate", appPath]);
+}
+
+async function verifyTrustedDmg(dmgPath) {
+  const { stderr: assessment } = await capture("spctl", [
+    "--assess", "--type", "open", "--context", "context:primary-signature", "--verbose=4", dmgPath,
+  ]);
+  if (!/: accepted$/m.test(assessment)) {
+    throw new Error(`Gatekeeper did not accept the DMG as notarized:\n${assessment}`);
+  }
+  await run("xcrun", ["stapler", "validate", dmgPath]);
+}
+
 async function verifyCliHelp(cliPath) {
   const { stdout, stderr } = await capture(cliPath, ["--help"]);
   const output = `${stdout}\n${stderr}`;
@@ -40,6 +84,7 @@ export async function verifyMacosBundle(dmgPath) {
 
   await access(dmgPath, constants.R_OK);
   await run("hdiutil", ["verify", dmgPath]);
+  if (requireTrusted) await verifyTrustedDmg(dmgPath);
 
   const mountPath = await mkdtemp(join(tmpdir(), "mallard-release-dmg-"));
   const installPath = await mkdtemp(join(tmpdir(), "mallard-release-cli-"));
@@ -55,6 +100,7 @@ export async function verifyMacosBundle(dmgPath) {
 
     await run("codesign", ["--verify", "--deep", "--strict", "--verbose=4", appPath]);
     await run("codesign", ["--verify", "--strict", "--verbose=4", cliPath]);
+    if (requireTrusted) await verifyTrustedApp(appPath);
     await verifyCliHelp(cliPath);
 
     const installedApp = join(installPath, "Mallard.app");
@@ -66,6 +112,7 @@ export async function verifyMacosBundle(dmgPath) {
     await access(installedCli, constants.R_OK | constants.X_OK);
     await run("codesign", ["--verify", "--deep", "--strict", "--verbose=4", installedApp]);
     await run("codesign", ["--verify", "--strict", "--verbose=4", installedCli]);
+    if (requireTrusted) await verifyTrustedApp(installedApp);
     await verifyCliHelp(installedCli);
   } finally {
     if (mounted) await run("hdiutil", ["detach", mountPath]);

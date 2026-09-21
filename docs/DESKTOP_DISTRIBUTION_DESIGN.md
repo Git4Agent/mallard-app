@@ -1,6 +1,9 @@
 # Desktop Distribution Design
 
-Status: Implemented in code; production launch gates remain
+Status: Historical. Distribution, signing, and release-pipeline planning
+now lives in [`PLAN_TRUSTED_DESKTOP_RELEASES.md`](./PLAN_TRUSTED_DESKTOP_RELEASES.md).
+Section 9 is out of date: the application deliberately ships without an
+automatic updater, and `tests/release-config.test.mjs` enforces that.
 Date: 2026-07-19
 Application: Mallard (Tauri 2)
 
