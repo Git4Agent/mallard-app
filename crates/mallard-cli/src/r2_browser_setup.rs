@@ -617,7 +617,7 @@ fn bind_reusable_listener(address: SocketAddr) -> std::io::Result<TcpListener> {
     #[cfg(unix)]
     socket.set_reuse_address(true)?;
     #[cfg(windows)]
-    socket.set_exclusive_address_use(true)?;
+    mallard_infrastructure::loopback_browser::set_exclusive_address_use(&socket)?;
     socket.bind(&address.into())?;
     socket.listen(128)?;
     Ok(socket.into())

@@ -188,9 +188,10 @@ fn bind(address: SocketAddr) -> std::io::Result<TcpListener> {
 
 /// `SO_EXCLUSIVEADDRUSE` keeps another process from binding the callback
 /// port underneath us, even one that sets `SO_REUSEADDR`. `socket2` has no
-/// setter for it, so the option is applied directly.
+/// setter for it, so the option is applied directly. Shared with the CLI's
+/// own callback listener.
 #[cfg(windows)]
-fn set_exclusive_address_use(socket: &Socket) -> std::io::Result<()> {
+pub fn set_exclusive_address_use(socket: &Socket) -> std::io::Result<()> {
     use std::os::windows::io::AsRawSocket;
     use windows_sys::Win32::Networking::WinSock::{
         setsockopt, SOCKET_ERROR, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
